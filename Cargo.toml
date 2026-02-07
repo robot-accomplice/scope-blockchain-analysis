@@ -1,0 +1,75 @@
+[package]
+name = "bcc"
+version = "0.1.0"
+edition = "2024"
+description = "Blockchain Crawler CLI - A production-grade tool for blockchain data analysis, portfolio tracking, and transaction investigation"
+license = "MIT"
+readme = "README.md"
+keywords = ["blockchain", "ethereum", "cli", "analysis", "crypto"]
+categories = ["command-line-utilities", "cryptography::cryptocurrencies"]
+
+[lib]
+name = "bcc"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bcc"
+path = "src/main.rs"
+
+[dependencies]
+# CLI framework
+clap = { version = "4.0", features = ["derive", "cargo"] }
+
+# Async runtime
+tokio = { version = "1.0", features = ["full"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+serde_json = "1.0"
+
+# HTTP client
+reqwest = { version = "0.11", features = ["json"] }
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Logging and tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utilities
+dirs = "5.0"
+async-trait = "0.1"
+bs58 = "0.5"
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# ASCII chart rendering
+textplots = "0.8"
+
+# URL encoding for API queries
+urlencoding = "2.1"
+
+# Interactive REPL
+rustyline = "14"
+
+# Terminal UI for live monitor
+ratatui = "0.29"
+crossterm = "0.28"
+
+[dev-dependencies]
+# Async test utilities
+tokio-test = "0.4"
+
+# Temporary files for testing
+tempfile = "3.10"
+
+# HTTP mocking
+mockito = "1.2"
+
+# CLI testing
+assert_cmd = "2.0"
+predicates = "3.0"

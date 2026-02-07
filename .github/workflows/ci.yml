@@ -1,0 +1,238 @@
+# =============================================================================
+# BCC - Blockchain Crawler CLI
+# Continuous Integration Workflow
+# =============================================================================
+#
+# This workflow runs on every push and pull request to ensure code quality.
+# It uses a modular job structure for clear visibility into each step.
+#
+# Jobs:
+#   1. check      - Fast syntax and type checking
+#   2. format     - Code formatting verification  
+#   3. lint       - Clippy lints and warnings
+#   4. test       - Unit and integration tests (nextest for speed)
+#   5. docs       - Documentation build verification
+#   6. coverage   - Code coverage reporting (optional, on main branch)
+#
+# =============================================================================
+
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+# Cancel in-progress runs for the same branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ===========================================================================
+  # Job 1: Fast Compilation Check
+  # ===========================================================================
+  # Runs `cargo check` to quickly verify the code compiles without errors.
+  # This is faster than a full build and catches most issues early.
+  # ===========================================================================
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run cargo check
+        run: cargo check --all-targets --all-features
+
+  # ===========================================================================
+  # Job 2: Code Formatting
+  # ===========================================================================
+  # Verifies that all code is formatted according to rustfmt standards.
+  # Fails if any files would be changed by `cargo fmt`.
+  # ===========================================================================
+  format:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check code formatting
+        run: cargo fmt --all -- --check
+
+  # ===========================================================================
+  # Job 3: Clippy Lints
+  # ===========================================================================
+  # Runs Clippy with strict settings to catch common mistakes and 
+  # enforce best practices. Treats all warnings as errors.
+  # ===========================================================================
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    needs: [check]  # Only run if check passes
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run Clippy lints
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  # ===========================================================================
+  # Job 4: Tests (using nextest for speed)
+  # ===========================================================================
+  # Runs all unit tests, integration tests, and doc tests.
+  # Uses cargo-nextest for parallel test execution and better output.
+  # ===========================================================================
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    needs: [check]  # Only run if check passes
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Run unit and integration tests
+        run: cargo nextest run --all-features --profile ci
+
+      - name: Run doc tests
+        # nextest doesn't support doctests yet, so run them separately
+        run: cargo test --doc --all-features
+
+  # ===========================================================================
+  # Job 5: Documentation Build
+  # ===========================================================================
+  # Builds documentation and verifies all doc comments are valid.
+  # Catches broken intra-doc links and missing documentation.
+  # ===========================================================================
+  docs:
+    name: Docs
+    runs-on: ubuntu-latest
+    needs: [check]  # Only run if check passes
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build documentation
+        run: cargo doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  # ===========================================================================
+  # Job 6: Code Coverage (main branch only)
+  # ===========================================================================
+  # Generates code coverage report using cargo-tarpaulin.
+  # Only runs on main branch pushes to avoid slowing down PR checks.
+  # ===========================================================================
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    needs: [test]  # Only run after tests pass
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin
+
+      - name: Generate coverage report
+        run: cargo tarpaulin --out Xml --all-features
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: cobertura.xml
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  # ===========================================================================
+  # Job 7: Build Release Binary
+  # ===========================================================================
+  # Builds the release binary to verify it compiles with optimizations.
+  # This catches issues that only appear in release mode.
+  # ===========================================================================
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: [check, lint, test]  # Only run after quality checks pass
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Verify binary runs
+        run: ./target/release/bca --version
+
+  # ===========================================================================
+  # Job 8: Security Audit
+  # ===========================================================================
+  # Checks dependencies for known security vulnerabilities.
+  # Uses cargo-audit to scan against the RustSec Advisory Database.
+  # ===========================================================================
+  security:
+    name: Security
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+
+      - name: Run security audit
+        run: cargo audit
