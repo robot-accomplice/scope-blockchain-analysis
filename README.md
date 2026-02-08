@@ -1,6 +1,7 @@
 # Scope Blockchain Analysis
 
 [![CI](https://github.com/robot-accomplice/scope-blockchain-analysis/actions/workflows/ci.yml/badge.svg)](https://github.com/robot-accomplice/scope-blockchain-analysis/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/robot-accomplice/scope-blockchain-analysis/branch/main/graph/badge.svg)](https://codecov.io/gh/robot-accomplice/scope-blockchain-analysis)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org/)
 
