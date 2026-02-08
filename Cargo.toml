@@ -1,5 +1,5 @@
 [package]
-name = "scope"
+name = "scope-bca"
 version = "0.2.1"
 edition = "2024"
 authors = ["Jon Machen <jon@palmusd.com>"]

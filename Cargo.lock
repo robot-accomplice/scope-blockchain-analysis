@@ -2127,7 +2127,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "scope"
+name = "scope-bca"
 version = "0.2.1"
 dependencies = [
  "anyhow",
