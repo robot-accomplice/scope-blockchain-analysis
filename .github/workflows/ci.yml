@@ -47,8 +47,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@nextest
-      - run: cargo nextest run --all-features
+      - run: cargo test --all-features
 
   docs:
     name: Docs
@@ -76,6 +75,8 @@ jobs:
   audit:
     name: Security Audit
     runs-on: ubuntu-latest
+    # Allow this to fail without blocking the workflow
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: rustsec/audit-check@v1

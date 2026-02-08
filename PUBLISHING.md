@@ -139,3 +139,52 @@ Update `Cargo.toml`:
 ```toml
 name = "new-name"
 ```
+
+## Code Coverage Setup
+
+BCC uses Codecov for coverage reporting. Target: **80%+ coverage** before publishing.
+
+### Setup Steps
+
+1. **Sign up for Codecov**: https://about.codecov.io/
+2. **Add repository**: Connect `robot-accomplice/bcc` GitHub repo
+3. **Get token**: Copy the repository upload token
+4. **Add GitHub Secret**:
+   - Go to: https://github.com/robot-accomplice/bcc/settings/secrets/actions
+   - Add secret: `CODECOV_TOKEN` with your token value
+
+### Coverage Badge
+
+Add to README.md after setup:
+```markdown
+[![codecov](https://codecov.io/gh/robot-accomplice/bcc/branch/main/graph/badge.svg)](https://codecov.io/gh/robot-accomplice/bcc)
+```
+
+### Running Coverage Locally
+
+```bash
+# Install tarpaulin
+cargo install cargo-tarpaulin
+
+# Generate coverage report
+cargo tarpaulin --out html
+
+# View report
+open tarpaulin-report.html
+```
+
+### Coverage Requirements
+
+Before publishing to crates.io:
+- [ ] Overall coverage ≥ 80%
+- [ ] Critical modules (compliance, chains) ≥ 75%
+- [ ] No uncovered critical paths
+- [ ] All new code has tests
+
+### Improving Coverage
+
+Focus areas for test additions:
+1. **Compliance module** - Risk scoring, pattern detection
+2. **CLI commands** - Error handling, edge cases
+3. **Chain clients** - Mock API responses
+4. **Display formatting** - All output formats

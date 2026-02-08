@@ -281,10 +281,29 @@ release:
     # Create and push tag
     echo ""
     echo "Step 6/7: Creating and pushing git tag..."
-    git tag -a "v$NEW_VERSION" -m "Release version $NEW_VERSION"
+    
+    # Check if tag already exists
+    if git rev-parse "v$NEW_VERSION" >/dev/null 2>&1; then
+        echo "⚠️  Tag v$NEW_VERSION already exists locally"
+        read -p "Delete and recreate? (y/N): " RECREATE
+        if [ "$RECREATE" = "y" ] || [ "$RECREATE" = "Y" ]; then
+            git tag -d "v$NEW_VERSION"
+            git tag "v$NEW_VERSION"
+        fi
+    else
+        git tag "v$NEW_VERSION"
+    fi
+    
+    # Check if tag exists on remote
+    if git ls-remote --tags origin "refs/tags/v$NEW_VERSION" | grep -q "v$NEW_VERSION"; then
+        echo "⚠️  Tag v$NEW_VERSION already exists on remote"
+        echo "   Skipping tag push"
+    else
+        git push origin "v$NEW_VERSION"
+        echo "✓ Tag v$NEW_VERSION pushed to GitHub"
+    fi
+    
     git push origin main
-    git push origin "v$NEW_VERSION"
-    echo "✓ Tag v$NEW_VERSION pushed to GitHub"
     
     echo ""
     echo "═══════════════════════════════════════════════════════════════════"
