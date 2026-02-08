@@ -66,8 +66,8 @@ urlencoding = "2.1"
 rustyline = "14"
 
 # Terminal UI for live monitor
-ratatui = "0.29"
-crossterm = "0.28"
+ratatui = "0.30"
+crossterm = "0.29"
 sha2 = "0.10.9"
 
 [dev-dependencies]

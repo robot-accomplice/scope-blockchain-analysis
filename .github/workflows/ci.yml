@@ -75,10 +75,10 @@ jobs:
   audit:
     name: Security Audit
     runs-on: ubuntu-latest
-    # Allow this to fail without blocking the workflow
-    continue-on-error: true
+    permissions:
+      issues: write
     steps:
       - uses: actions/checkout@v4
-      - uses: rustsec/audit-check@v1
+      - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
