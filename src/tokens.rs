@@ -325,4 +325,150 @@ mod tests {
         let list = aliases.list();
         assert_eq!(list.len(), 3);
     }
+
+    #[test]
+    fn test_get_chains_for_alias() {
+        let mut aliases = TokenAliases::default();
+        aliases.add("USDC", "ethereum", "0x1...", "USD Coin");
+        aliases.add("USDC", "polygon", "0x2...", "USD Coin");
+
+        let chains = aliases.get_chains_for_alias("USDC");
+        assert_eq!(chains.len(), 2);
+        assert!(chains.contains(&"ethereum"));
+        assert!(chains.contains(&"polygon"));
+    }
+
+    #[test]
+    fn test_get_chains_for_missing_alias() {
+        let aliases = TokenAliases::default();
+        let chains = aliases.get_chains_for_alias("NONEXISTENT");
+        assert!(chains.is_empty());
+    }
+
+    #[test]
+    fn test_is_address_solana() {
+        // Valid Solana address (base58, 32-44 chars, decodes to 32 bytes)
+        assert!(TokenAliases::is_address(
+            "DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy"
+        ));
+        // System program address
+        assert!(TokenAliases::is_address(
+            "11111111111111111111111111111111"
+        ));
+    }
+
+    #[test]
+    fn test_is_address_tron() {
+        // Valid Tron address (starts with T, 34 chars)
+        assert!(TokenAliases::is_address(
+            "TDqSquXBgUCLYvYC4XZgrprLK589dkhSCf"
+        ));
+        assert!(TokenAliases::is_address(
+            "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
+        ));
+    }
+
+    #[test]
+    fn test_is_address_edge_cases() {
+        assert!(!TokenAliases::is_address("")); // Empty
+        assert!(!TokenAliases::is_address("0x")); // Incomplete EVM prefix
+        assert!(!TokenAliases::is_address("T123")); // Too short for Tron
+        assert!(!TokenAliases::is_address("hello world")); // Random text
+    }
+
+    #[test]
+    fn test_remove_specific_chain() {
+        let mut aliases = TokenAliases::default();
+        aliases.add("USDC", "ethereum", "0x1...", "USD Coin");
+        aliases.add("USDC", "polygon", "0x2...", "USD Coin");
+
+        // Remove only polygon
+        aliases.remove("USDC", Some("polygon"));
+        assert!(aliases.get("USDC", Some("polygon")).is_none());
+        assert!(aliases.get("USDC", Some("ethereum")).is_some());
+    }
+
+    #[test]
+    fn test_remove_last_chain_cleans_up() {
+        let mut aliases = TokenAliases::default();
+        aliases.add("USDC", "ethereum", "0x1...", "USD Coin");
+
+        // Removing the only chain should clean up the alias entirely
+        aliases.remove("USDC", Some("ethereum"));
+        assert!(aliases.get("USDC", None).is_none());
+        let chains = aliases.get_chains_for_alias("USDC");
+        assert!(chains.is_empty());
+    }
+
+    #[test]
+    fn test_remove_cleans_recent() {
+        let mut aliases = TokenAliases::default();
+        aliases.add("USDC", "ethereum", "0x1...", "USD Coin");
+        assert_eq!(aliases.recent().len(), 1);
+
+        aliases.remove("USDC", None);
+        assert!(aliases.recent().is_empty());
+    }
+
+    #[test]
+    fn test_add_updates_existing() {
+        let mut aliases = TokenAliases::default();
+        aliases.add("USDC", "ethereum", "0x1...", "USD Coin");
+        aliases.add("USDC", "ethereum", "0x2...", "USD Coin V2");
+
+        let info = aliases.get("USDC", Some("ethereum")).unwrap();
+        assert_eq!(info.address, "0x2...");
+        assert_eq!(info.name, "USD Coin V2");
+    }
+
+    #[test]
+    fn test_recent_truncation() {
+        let mut aliases = TokenAliases::default();
+        // Add 25 tokens, recent should be capped at 20
+        for i in 0..25 {
+            aliases.add(&format!("T{}", i), "ethereum", &format!("0x{}...", i), &format!("Token {}", i));
+        }
+        assert_eq!(aliases.recent().len(), 20);
+        // The most recent should be T24
+        assert_eq!(aliases.recent()[0].symbol, "T24");
+    }
+
+    #[test]
+    fn test_case_insensitive_operations() {
+        let mut aliases = TokenAliases::default();
+        aliases.add("usdc", "Ethereum", "0x1...", "USD Coin");
+
+        // Alias stored uppercase, chain stored lowercase
+        let info = aliases.get("USDC", Some("ethereum")).unwrap();
+        assert_eq!(info.symbol, "USDC");
+        assert_eq!(info.chain, "ethereum");
+    }
+
+    #[test]
+    fn test_token_info_has_last_used() {
+        let mut aliases = TokenAliases::default();
+        aliases.add("USDC", "ethereum", "0x1...", "USD Coin");
+        let info = aliases.get("USDC", Some("ethereum")).unwrap();
+        assert!(info.last_used.is_some());
+    }
+
+    #[test]
+    fn test_save_and_load_roundtrip() {
+        let mut aliases = TokenAliases::default();
+        aliases.add("SAVE_TEST", "ethereum", "0xsave...", "Save Test Token");
+
+        // save() writes to the standard location which should be writable in test env
+        let result = aliases.save();
+        assert!(result.is_ok());
+
+        // Load it back
+        let loaded = TokenAliases::load();
+        let info = loaded.get("SAVE_TEST", Some("ethereum"));
+        assert!(info.is_some());
+        assert_eq!(info.unwrap().address, "0xsave...");
+
+        // Cleanup: remove the test entry and save again
+        aliases.remove("SAVE_TEST", None);
+        let _ = aliases.save();
+    }
 }

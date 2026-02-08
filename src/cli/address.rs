@@ -18,7 +18,7 @@
 //! ```
 
 use crate::chains::{
-    EthereumClient, SolanaClient, TronClient, validate_solana_address, validate_tron_address,
+    ChainClient, ChainClientFactory, validate_solana_address, validate_tron_address,
 };
 use crate::config::{Config, OutputFormat};
 use crate::error::Result;
@@ -158,7 +158,11 @@ pub struct TokenBalance {
 ///
 /// Returns `BccError::InvalidAddress` if the address format is invalid.
 /// Returns `BccError::Request` if API calls fail.
-pub async fn run(mut args: AddressArgs, config: &Config) -> Result<()> {
+pub async fn run(
+    mut args: AddressArgs,
+    config: &Config,
+    clients: &dyn ChainClientFactory,
+) -> Result<()> {
     // Auto-infer chain if using default and address format is recognizable
     if args.chain == "ethereum"
         && let Some(inferred) = crate::chains::infer_chain_from_address(&args.address)
@@ -180,15 +184,8 @@ pub async fn run(mut args: AddressArgs, config: &Config) -> Result<()> {
 
     println!("Analyzing address on {}...", args.chain);
 
-    let chain_lower = args.chain.to_lowercase();
-    let report = match chain_lower.as_str() {
-        "solana" | "sol" => analyze_solana_address(&args, config).await?,
-        "tron" | "trx" => analyze_tron_address(&args, config).await?,
-        _ => {
-            // EVM chains
-            analyze_evm_address(&args, config).await?
-        }
-    };
+    let client = clients.create_chain_client(&args.chain)?;
+    let report = analyze_address(&args, client.as_ref()).await?;
 
     // Output based on format
     let format = args.format.unwrap_or(config.output.format);
@@ -197,10 +194,8 @@ pub async fn run(mut args: AddressArgs, config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Analyzes an EVM-compatible address.
-async fn analyze_evm_address(args: &AddressArgs, config: &Config) -> Result<AddressReport> {
-    let client = EthereumClient::for_chain(&args.chain, &config.chains)?;
-
+/// Analyzes an address using a unified chain client.
+async fn analyze_address(args: &AddressArgs, client: &dyn ChainClient) -> Result<AddressReport> {
     // Fetch balance
     let mut chain_balance = client.get_balance(&args.address).await?;
     client.enrich_balance_usd(&mut chain_balance).await;
@@ -239,74 +234,19 @@ async fn analyze_evm_address(args: &AddressArgs, config: &Config) -> Result<Addr
     // Transaction count is the number we fetched (or 0)
     let transaction_count = transactions.as_ref().map(|t| t.len() as u64).unwrap_or(0);
 
-    Ok(AddressReport {
-        address: args.address.clone(),
-        chain: args.chain.clone(),
-        balance,
-        transaction_count,
-        transactions,
-        tokens: if args.include_tokens {
-            Some(vec![])
-        } else {
-            None
-        },
-    })
-}
-
-/// Analyzes a Solana address.
-async fn analyze_solana_address(args: &AddressArgs, config: &Config) -> Result<AddressReport> {
-    let client = SolanaClient::new(&config.chains)?;
-
-    // Fetch balance
-    let mut chain_balance = client.get_balance(&args.address).await?;
-    client.enrich_balance_usd(&mut chain_balance).await;
-
-    let balance = Balance {
-        raw: chain_balance.raw.clone(),
-        formatted: chain_balance.formatted.clone(),
-        usd: chain_balance.usd_value,
-    };
-
-    // Fetch transactions if requested
-    let transactions = if args.include_txs {
-        match client.get_transactions(&args.address, args.limit).await {
-            Ok(txs) => Some(
-                txs.into_iter()
-                    .map(|tx| TransactionSummary {
-                        hash: tx.hash,
-                        block_number: tx.block_number.unwrap_or(0),
-                        timestamp: tx.timestamp.unwrap_or(0),
-                        from: tx.from,
-                        to: tx.to,
-                        value: tx.value,
-                        status: tx.status.unwrap_or(true),
-                    })
-                    .collect(),
-            ),
-            Err(e) => {
-                tracing::warn!("Failed to fetch transactions: {}", e);
-                Some(vec![])
-            }
-        }
-    } else {
-        None
-    };
-
-    let transaction_count = transactions.as_ref().map(|t| t.len() as u64).unwrap_or(0);
-
-    // Fetch SPL token balances if requested
+    // Fetch token balances if requested
     let tokens = if args.include_tokens {
         match client.get_token_balances(&args.address).await {
             Ok(token_bals) => Some(
                 token_bals
                     .into_iter()
                     .map(|tb| TokenBalance {
-                        contract_address: tb.mint.clone(),
-                        symbol: tb.symbol.unwrap_or_else(|| tb.mint[..8].to_string()),
-                        name: tb.name.unwrap_or_else(|| "SPL Token".to_string()),
-                        decimals: tb.decimals,
-                        balance: tb.raw_amount,
-                        formatted_balance: format!("{:.6}", tb.ui_amount),
+                        contract_address: tb.token.contract_address,
+                        symbol: tb.token.symbol,
+                        name: tb.token.name,
+                        decimals: tb.token.decimals,
+                        balance: tb.balance,
+                        formatted_balance: tb.formatted_balance,
                     })
                     .collect(),
             ),
@@ -326,61 +266,6 @@ async fn analyze_solana_address(args: &AddressArgs, config: &Config) -> Result<A
         transaction_count,
         transactions,
         tokens,
-    })
-}
-
-/// Analyzes a Tron address.
-async fn analyze_tron_address(args: &AddressArgs, config: &Config) -> Result<AddressReport> {
-    let client = TronClient::new(&config.chains)?;
-
-    // Fetch balance
-    let mut chain_balance = client.get_balance(&args.address).await?;
-    client.enrich_balance_usd(&mut chain_balance).await;
-
-    let balance = Balance {
-        raw: chain_balance.raw.clone(),
-        formatted: chain_balance.formatted.clone(),
-        usd: chain_balance.usd_value,
-    };
-
-    // Fetch transactions if requested
-    let transactions = if args.include_txs {
-        match client.get_transactions(&args.address, args.limit).await {
-            Ok(txs) => Some(
-                txs.into_iter()
-                    .map(|tx| TransactionSummary {
-                        hash: tx.hash,
-                        block_number: tx.block_number.unwrap_or(0),
-                        timestamp: tx.timestamp.unwrap_or(0),
-                        from: tx.from,
-                        to: tx.to,
-                        value: tx.value,
-                        status: tx.status.unwrap_or(true),
-                    })
-                    .collect(),
-            ),
-            Err(e) => {
-                tracing::warn!("Failed to fetch transactions: {}", e);
-                Some(vec![])
-            }
-        }
-    } else {
-        None
-    };
-
-    let transaction_count = transactions.as_ref().map(|t| t.len() as u64).unwrap_or(0);
-
-    Ok(AddressReport {
-        address: args.address.clone(),
-        chain: args.chain.clone(),
-        balance,
-        transaction_count,
-        transactions,
-        tokens: if args.include_tokens {
-            Some(vec![])
-        } else {
-            None
-        },
     })
 }
 
@@ -695,5 +580,216 @@ mod tests {
         assert!(json.contains("USDC"));
         assert!(json.contains("USD Coin"));
         assert!(json.contains("\"decimals\":6"));
+    }
+
+    // ========================================================================
+    // Output formatting tests
+    // ========================================================================
+
+    fn make_test_report() -> AddressReport {
+        AddressReport {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: "ethereum".to_string(),
+            balance: Balance {
+                raw: "1000000000000000000".to_string(),
+                formatted: "1.0 ETH".to_string(),
+                usd: Some(3500.0),
+            },
+            transaction_count: 42,
+            transactions: Some(vec![TransactionSummary {
+                hash: "0xabc".to_string(),
+                block_number: 12345,
+                timestamp: 1700000000,
+                from: "0xfrom".to_string(),
+                to: Some("0xto".to_string()),
+                value: "1.0".to_string(),
+                status: true,
+            }]),
+            tokens: Some(vec![TokenBalance {
+                contract_address: "0xusdc".to_string(),
+                symbol: "USDC".to_string(),
+                name: "USD Coin".to_string(),
+                decimals: 6,
+                balance: "1000000".to_string(),
+                formatted_balance: "1.0".to_string(),
+            }]),
+        }
+    }
+
+    #[test]
+    fn test_output_report_json() {
+        let report = make_test_report();
+        let result = output_report(&report, OutputFormat::Json);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_report_csv() {
+        let report = make_test_report();
+        let result = output_report(&report, OutputFormat::Csv);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_report_table() {
+        let report = make_test_report();
+        let result = output_report(&report, OutputFormat::Table);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_report_table_no_usd() {
+        let mut report = make_test_report();
+        report.balance.usd = None;
+        let result = output_report(&report, OutputFormat::Table);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_report_table_no_tokens() {
+        let mut report = make_test_report();
+        report.tokens = None;
+        let result = output_report(&report, OutputFormat::Table);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_report_table_empty_tokens() {
+        let mut report = make_test_report();
+        report.tokens = Some(vec![]);
+        let result = output_report(&report, OutputFormat::Table);
+        assert!(result.is_ok());
+    }
+
+    // ========================================================================
+    // End-to-end tests using MockClientFactory
+    // ========================================================================
+
+    use crate::chains::mocks::{MockChainClient, MockClientFactory};
+
+    fn mock_factory() -> MockClientFactory {
+        MockClientFactory::new()
+    }
+
+    #[tokio::test]
+    async fn test_run_ethereum_address() {
+        let config = Config::default();
+        let factory = mock_factory();
+        let args = AddressArgs {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: "ethereum".to_string(),
+            format: Some(OutputFormat::Json),
+            include_txs: false,
+            include_tokens: false,
+            limit: 10,
+        };
+        let result = super::run(args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_with_transactions() {
+        let config = Config::default();
+        let mut factory = mock_factory();
+        factory.mock_client.transactions = vec![factory.mock_client.transaction.clone()];
+        let args = AddressArgs {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: "ethereum".to_string(),
+            format: Some(OutputFormat::Json),
+            include_txs: true,
+            include_tokens: false,
+            limit: 10,
+        };
+        let result = super::run(args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_with_tokens() {
+        let config = Config::default();
+        let mut factory = mock_factory();
+        factory.mock_client.token_balances = vec![crate::chains::TokenBalance {
+            token: crate::chains::Token {
+                contract_address: "0xusdc".to_string(),
+                symbol: "USDC".to_string(),
+                name: "USD Coin".to_string(),
+                decimals: 6,
+            },
+            balance: "1000000".to_string(),
+            formatted_balance: "1.0".to_string(),
+            usd_value: Some(1.0),
+        }];
+        let args = AddressArgs {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: "ethereum".to_string(),
+            format: Some(OutputFormat::Table),
+            include_txs: false,
+            include_tokens: true,
+            limit: 10,
+        };
+        let result = super::run(args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_auto_detect_solana() {
+        let config = Config::default();
+        let mut factory = mock_factory();
+        factory.mock_client = MockChainClient::new("solana", "SOL");
+        let args = AddressArgs {
+            // This is a Solana address format
+            address: "DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy".to_string(),
+            chain: "ethereum".to_string(), // Will be auto-detected
+            format: Some(OutputFormat::Json),
+            include_txs: false,
+            include_tokens: false,
+            limit: 10,
+        };
+        let result = super::run(args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_csv_format() {
+        let config = Config::default();
+        let factory = mock_factory();
+        let args = AddressArgs {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: "ethereum".to_string(),
+            format: Some(OutputFormat::Csv),
+            include_txs: false,
+            include_tokens: false,
+            limit: 10,
+        };
+        let result = super::run(args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_all_features() {
+        let config = Config::default();
+        let mut factory = mock_factory();
+        factory.mock_client.transactions = vec![factory.mock_client.transaction.clone()];
+        factory.mock_client.token_balances = vec![crate::chains::TokenBalance {
+            token: crate::chains::Token {
+                contract_address: "0xtoken".to_string(),
+                symbol: "TEST".to_string(),
+                name: "Test Token".to_string(),
+                decimals: 18,
+            },
+            balance: "1000000000000000000".to_string(),
+            formatted_balance: "1.0".to_string(),
+            usd_value: None,
+        }];
+        let args = AddressArgs {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: "ethereum".to_string(),
+            format: Some(OutputFormat::Table),
+            include_txs: true,
+            include_tokens: true,
+            limit: 50,
+        };
+        let result = super::run(args, &config, &factory).await;
+        assert!(result.is_ok());
     }
 }

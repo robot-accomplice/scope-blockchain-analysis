@@ -91,7 +91,7 @@ pub mod ethereum;
 pub mod solana;
 pub mod tron;
 
-pub use dex::{DexClient, TokenSearchResult};
+pub use dex::{DexClient, DexDataSource, TokenSearchResult};
 pub use ethereum::{ApiType, EthereumClient};
 pub use solana::{SolanaClient, validate_solana_address, validate_solana_signature};
 pub use tron::{TronClient, validate_tron_address, validate_tron_tx_hash};
@@ -104,6 +104,19 @@ use serde::{Deserialize, Serialize};
 ///
 /// All chain-specific clients must implement this trait to provide
 /// a consistent interface for blockchain interactions.
+///
+/// ## Core Methods
+///
+/// Every implementation must provide: `chain_name`, `native_token_symbol`,
+/// `get_balance`, `get_transaction`, `get_transactions`, `get_block_number`,
+/// `enrich_balance_usd`, and `get_token_balances`.
+///
+/// ## Token Explorer Methods
+///
+/// The token-explorer methods (`get_token_info`, `get_token_holders`,
+/// `get_token_holder_count`) have default implementations that return
+/// "not supported" errors or empty results. Only chains with block-explorer
+/// support for these endpoints (currently EVM chains) need to override them.
 #[async_trait]
 pub trait ChainClient: Send + Sync {
     /// Returns the name of the blockchain network.
@@ -122,6 +135,13 @@ pub trait ChainClient: Send + Sync {
     ///
     /// Returns a [`Balance`] containing the balance in multiple formats.
     async fn get_balance(&self, address: &str) -> Result<Balance>;
+
+    /// Enriches a balance with USD valuation via DexScreener.
+    ///
+    /// # Arguments
+    ///
+    /// * `balance` - The balance to enrich with a USD value
+    async fn enrich_balance_usd(&self, balance: &mut Balance);
 
     /// Fetches transaction details by hash.
     ///
@@ -148,6 +168,88 @@ pub trait ChainClient: Send + Sync {
 
     /// Fetches the current block number.
     async fn get_block_number(&self) -> Result<u64>;
+
+    /// Fetches token balances for an address.
+    ///
+    /// Returns a unified [`TokenBalance`] list regardless of chain
+    /// (ERC-20, SPL, TRC-20 all map to the same type).
+    async fn get_token_balances(&self, address: &str) -> Result<Vec<TokenBalance>>;
+
+    /// Fetches token information for a contract address.
+    ///
+    /// Default implementation returns "not supported" error.
+    /// Override in chain clients that support token info lookups.
+    async fn get_token_info(&self, _address: &str) -> Result<Token> {
+        Err(crate::error::BccError::Chain(
+            "Token info lookup not supported on this chain".to_string(),
+        ))
+    }
+
+    /// Fetches top token holders for a contract address.
+    ///
+    /// Default implementation returns an empty vector.
+    /// Override in chain clients that support holder lookups.
+    async fn get_token_holders(&self, _address: &str, _limit: u32) -> Result<Vec<TokenHolder>> {
+        Ok(Vec::new())
+    }
+
+    /// Fetches total token holder count for a contract address.
+    ///
+    /// Default implementation returns 0.
+    /// Override in chain clients that support holder count lookups.
+    async fn get_token_holder_count(&self, _address: &str) -> Result<u64> {
+        Ok(0)
+    }
+}
+
+/// Factory trait for creating chain clients and DEX data sources.
+///
+/// Bundles both chain and DEX client creation so CLI functions
+/// only need one injected dependency instead of two.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use bcc::chains::{ChainClientFactory, DefaultClientFactory};
+/// use bcc::Config;
+///
+/// let config = Config::default();
+/// let factory = DefaultClientFactory { chains_config: config.chains.clone() };
+/// let client = factory.create_chain_client("ethereum").unwrap();
+/// ```
+pub trait ChainClientFactory: Send + Sync {
+    /// Creates a chain client for the given blockchain network.
+    ///
+    /// # Arguments
+    ///
+    /// * `chain` - The chain name (e.g., "ethereum", "solana", "tron")
+    fn create_chain_client(&self, chain: &str) -> Result<Box<dyn ChainClient>>;
+
+    /// Creates a DEX data source client.
+    fn create_dex_client(&self) -> Box<dyn DexDataSource>;
+}
+
+/// Default factory that creates real chain clients from configuration.
+pub struct DefaultClientFactory {
+    /// Chain configuration containing API keys and endpoints.
+    pub chains_config: crate::config::ChainsConfig,
+}
+
+impl ChainClientFactory for DefaultClientFactory {
+    fn create_chain_client(&self, chain: &str) -> Result<Box<dyn ChainClient>> {
+        match chain.to_lowercase().as_str() {
+            "solana" | "sol" => Ok(Box::new(SolanaClient::new(&self.chains_config)?)),
+            "tron" | "trx" => Ok(Box::new(TronClient::new(&self.chains_config)?)),
+            _ => Ok(Box::new(EthereumClient::for_chain(
+                chain,
+                &self.chains_config,
+            )?)),
+        }
+    }
+
+    fn create_dex_client(&self) -> Box<dyn DexDataSource> {
+        Box::new(DexClient::new())
+    }
 }
 
 /// Balance representation with multiple formats.
@@ -892,5 +994,420 @@ mod tests {
             ),
             None
         );
+    }
+
+    // ============================================================================
+    // DefaultClientFactory Tests
+    // ============================================================================
+
+    #[test]
+    fn test_default_client_factory_create_dex_client() {
+        let config = crate::config::ChainsConfig::default();
+        let factory = DefaultClientFactory {
+            chains_config: config,
+        };
+        let dex = factory.create_dex_client();
+        // Just verify it returns without panicking - the client is a Box<dyn DexDataSource>
+        let _ = format!("{:?}", std::mem::size_of_val(&dex));
+    }
+
+    #[test]
+    fn test_default_client_factory_create_ethereum_client() {
+        let config = crate::config::ChainsConfig::default();
+        let factory = DefaultClientFactory {
+            chains_config: config,
+        };
+        // ethereum, polygon, etc use EthereumClient::for_chain
+        let client = factory.create_chain_client("ethereum");
+        assert!(client.is_ok());
+        assert_eq!(client.unwrap().chain_name(), "ethereum");
+    }
+
+    #[test]
+    fn test_default_client_factory_create_polygon_client() {
+        let config = crate::config::ChainsConfig::default();
+        let factory = DefaultClientFactory {
+            chains_config: config,
+        };
+        let client = factory.create_chain_client("polygon");
+        assert!(client.is_ok());
+        assert_eq!(client.unwrap().chain_name(), "polygon");
+    }
+
+    #[test]
+    fn test_default_client_factory_create_solana_client() {
+        let config = crate::config::ChainsConfig::default();
+        let factory = DefaultClientFactory {
+            chains_config: config,
+        };
+        let client = factory.create_chain_client("solana");
+        assert!(client.is_ok());
+        assert_eq!(client.unwrap().chain_name(), "solana");
+    }
+
+    #[test]
+    fn test_default_client_factory_create_sol_alias() {
+        let config = crate::config::ChainsConfig::default();
+        let factory = DefaultClientFactory {
+            chains_config: config,
+        };
+        let client = factory.create_chain_client("sol");
+        assert!(client.is_ok());
+        assert_eq!(client.unwrap().chain_name(), "solana");
+    }
+
+    #[test]
+    fn test_default_client_factory_create_tron_client() {
+        let config = crate::config::ChainsConfig::default();
+        let factory = DefaultClientFactory {
+            chains_config: config,
+        };
+        let client = factory.create_chain_client("tron");
+        assert!(client.is_ok());
+        assert_eq!(client.unwrap().chain_name(), "tron");
+    }
+
+    #[test]
+    fn test_default_client_factory_create_trx_alias() {
+        let config = crate::config::ChainsConfig::default();
+        let factory = DefaultClientFactory {
+            chains_config: config,
+        };
+        let client = factory.create_chain_client("trx");
+        assert!(client.is_ok());
+        assert_eq!(client.unwrap().chain_name(), "tron");
+    }
+
+    // ============================================================================
+    // ChainClient trait default method tests
+    // ============================================================================
+
+    #[tokio::test]
+    async fn test_chain_client_default_get_token_info() {
+        use super::mocks::MockChainClient;
+        // Create a client without token_info set (None)
+        let client = MockChainClient::new("ethereum", "ETH");
+        let result = client.get_token_info("0xsometoken").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_chain_client_default_get_token_holders() {
+        use super::mocks::MockChainClient;
+        let client = MockChainClient::new("ethereum", "ETH");
+        let holders = client.get_token_holders("0xsometoken", 10).await.unwrap();
+        assert!(holders.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_chain_client_default_get_token_holder_count() {
+        use super::mocks::MockChainClient;
+        let client = MockChainClient::new("ethereum", "ETH");
+        let count = client.get_token_holder_count("0xsometoken").await.unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_mock_client_factory_creates_chain_client() {
+        use super::mocks::MockClientFactory;
+        let factory = MockClientFactory::new();
+        let client = factory.create_chain_client("anything").unwrap();
+        assert_eq!(client.chain_name(), "ethereum"); // defaults to ethereum mock
+    }
+
+    #[tokio::test]
+    async fn test_mock_client_factory_creates_dex_client() {
+        use super::mocks::MockClientFactory;
+        let factory = MockClientFactory::new();
+        let dex = factory.create_dex_client();
+        let price = dex.get_token_price("ethereum", "0xtest").await;
+        assert_eq!(price, Some(1.0));
+    }
+
+    #[tokio::test]
+    async fn test_mock_chain_client_balance() {
+        use super::mocks::MockChainClient;
+        let client = MockChainClient::new("ethereum", "ETH");
+        let balance = client.get_balance("0xtest").await.unwrap();
+        assert_eq!(balance.formatted, "1.0");
+        assert_eq!(balance.symbol, "ETH");
+        assert_eq!(balance.usd_value, Some(2500.0));
+    }
+
+    #[tokio::test]
+    async fn test_mock_chain_client_transaction() {
+        use super::mocks::MockChainClient;
+        let client = MockChainClient::new("ethereum", "ETH");
+        let tx = client.get_transaction("0xanyhash").await.unwrap();
+        assert_eq!(tx.hash, "0xmocktx");
+        assert_eq!(tx.nonce, 42);
+    }
+
+    #[tokio::test]
+    async fn test_mock_chain_client_block_number() {
+        use super::mocks::MockChainClient;
+        let client = MockChainClient::new("ethereum", "ETH");
+        let block = client.get_block_number().await.unwrap();
+        assert_eq!(block, 12345678);
+    }
+
+    #[tokio::test]
+    async fn test_mock_dex_source_data() {
+        use super::mocks::MockDexSource;
+        let dex = MockDexSource::new();
+        let data = dex.get_token_data("ethereum", "0xtest").await.unwrap();
+        assert_eq!(data.symbol, "MOCK");
+        assert_eq!(data.price_usd, 1.0);
+    }
+
+    #[tokio::test]
+    async fn test_mock_dex_source_search() {
+        use super::mocks::MockDexSource;
+        let dex = MockDexSource::new();
+        let results = dex.search_tokens("test", None).await.unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_mock_dex_source_native_price() {
+        use super::mocks::MockDexSource;
+        let dex = MockDexSource::new();
+        let price = dex.get_native_token_price("ethereum").await;
+        assert_eq!(price, Some(2500.0));
+    }
+}
+
+// ============================================================================
+// Mock Test Utilities
+// ============================================================================
+
+/// Test helper module providing mock implementations of chain client traits.
+///
+/// These mocks are available across all test modules in the crate for
+/// end-to-end testing of CLI `run()` functions without network calls.
+#[cfg(test)]
+pub mod mocks {
+    use super::*;
+    use crate::chains::dex::{DexDataSource, DexTokenData, TokenSearchResult};
+    use async_trait::async_trait;
+
+    /// Mock chain client with configurable responses.
+    #[derive(Debug, Clone)]
+    pub struct MockChainClient {
+        pub chain: String,
+        pub symbol: String,
+        pub balance: Balance,
+        pub transaction: Transaction,
+        pub transactions: Vec<Transaction>,
+        pub token_balances: Vec<TokenBalance>,
+        pub block_number: u64,
+        pub token_info: Option<Token>,
+        pub token_holders: Vec<TokenHolder>,
+        pub token_holder_count: u64,
+    }
+
+    impl MockChainClient {
+        /// Creates a mock client with sensible default test data.
+        pub fn new(chain: &str, symbol: &str) -> Self {
+            Self {
+                chain: chain.to_string(),
+                symbol: symbol.to_string(),
+                balance: Balance {
+                    raw: "1000000000000000000".to_string(),
+                    formatted: "1.0".to_string(),
+                    decimals: 18,
+                    symbol: symbol.to_string(),
+                    usd_value: Some(2500.0),
+                },
+                transaction: Transaction {
+                    hash: "0xmocktx".to_string(),
+                    block_number: Some(12345678),
+                    timestamp: Some(1700000000),
+                    from: "0xfrom".to_string(),
+                    to: Some("0xto".to_string()),
+                    value: "1.0".to_string(),
+                    gas_limit: 21000,
+                    gas_used: Some(21000),
+                    gas_price: "20000000000".to_string(),
+                    nonce: 42,
+                    input: "0x".to_string(),
+                    status: Some(true),
+                },
+                transactions: vec![],
+                token_balances: vec![],
+                block_number: 12345678,
+                token_info: None,
+                token_holders: vec![],
+                token_holder_count: 0,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ChainClient for MockChainClient {
+        fn chain_name(&self) -> &str {
+            &self.chain
+        }
+
+        fn native_token_symbol(&self) -> &str {
+            &self.symbol
+        }
+
+        async fn get_balance(&self, _address: &str) -> Result<Balance> {
+            Ok(self.balance.clone())
+        }
+
+        async fn enrich_balance_usd(&self, _balance: &mut Balance) {
+            // Mock: no-op, balance already has usd_value set
+        }
+
+        async fn get_transaction(&self, _hash: &str) -> Result<Transaction> {
+            Ok(self.transaction.clone())
+        }
+
+        async fn get_transactions(&self, _address: &str, _limit: u32) -> Result<Vec<Transaction>> {
+            Ok(self.transactions.clone())
+        }
+
+        async fn get_block_number(&self) -> Result<u64> {
+            Ok(self.block_number)
+        }
+
+        async fn get_token_balances(&self, _address: &str) -> Result<Vec<TokenBalance>> {
+            Ok(self.token_balances.clone())
+        }
+
+        async fn get_token_info(&self, _address: &str) -> Result<Token> {
+            match &self.token_info {
+                Some(t) => Ok(t.clone()),
+                None => Err(crate::error::BccError::Chain(
+                    "Token info not available".to_string(),
+                )),
+            }
+        }
+
+        async fn get_token_holders(&self, _address: &str, _limit: u32) -> Result<Vec<TokenHolder>> {
+            Ok(self.token_holders.clone())
+        }
+
+        async fn get_token_holder_count(&self, _address: &str) -> Result<u64> {
+            Ok(self.token_holder_count)
+        }
+    }
+
+    /// Mock DEX data source with configurable responses.
+    #[derive(Debug, Clone)]
+    pub struct MockDexSource {
+        pub token_price: Option<f64>,
+        pub native_price: Option<f64>,
+        pub token_data: Option<DexTokenData>,
+        pub search_results: Vec<TokenSearchResult>,
+    }
+
+    impl Default for MockDexSource {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl MockDexSource {
+        /// Creates a mock DEX source with default test data.
+        pub fn new() -> Self {
+            Self {
+                token_price: Some(1.0),
+                native_price: Some(2500.0),
+                token_data: Some(DexTokenData {
+                    address: "0xmocktoken".to_string(),
+                    symbol: "MOCK".to_string(),
+                    name: "Mock Token".to_string(),
+                    price_usd: 1.0,
+                    price_change_24h: 5.0,
+                    price_change_6h: 2.0,
+                    price_change_1h: 0.5,
+                    price_change_5m: 0.1,
+                    volume_24h: 1_000_000.0,
+                    volume_6h: 250_000.0,
+                    volume_1h: 50_000.0,
+                    liquidity_usd: 5_000_000.0,
+                    market_cap: Some(100_000_000.0),
+                    fdv: Some(200_000_000.0),
+                    pairs: vec![],
+                    price_history: vec![],
+                    volume_history: vec![],
+                    total_buys_24h: 500,
+                    total_sells_24h: 450,
+                    total_buys_6h: 120,
+                    total_sells_6h: 110,
+                    total_buys_1h: 20,
+                    total_sells_1h: 18,
+                    earliest_pair_created_at: Some(1690000000),
+                    image_url: None,
+                    websites: vec![],
+                    socials: vec![],
+                    dexscreener_url: None,
+                }),
+                search_results: vec![],
+            }
+        }
+    }
+
+    #[async_trait]
+    impl DexDataSource for MockDexSource {
+        async fn get_token_price(&self, _chain: &str, _address: &str) -> Option<f64> {
+            self.token_price
+        }
+
+        async fn get_native_token_price(&self, _chain: &str) -> Option<f64> {
+            self.native_price
+        }
+
+        async fn get_token_data(&self, _chain: &str, _address: &str) -> Result<DexTokenData> {
+            match &self.token_data {
+                Some(data) => Ok(data.clone()),
+                None => Err(crate::error::BccError::NotFound(
+                    "No DEX data found".to_string(),
+                )),
+            }
+        }
+
+        async fn search_tokens(
+            &self,
+            _query: &str,
+            _chain: Option<&str>,
+        ) -> Result<Vec<TokenSearchResult>> {
+            Ok(self.search_results.clone())
+        }
+    }
+
+    /// Mock client factory that returns pre-configured mock clients.
+    pub struct MockClientFactory {
+        pub mock_client: MockChainClient,
+        pub mock_dex: MockDexSource,
+    }
+
+    impl Default for MockClientFactory {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl MockClientFactory {
+        /// Creates a factory with default mock data for Ethereum.
+        pub fn new() -> Self {
+            Self {
+                mock_client: MockChainClient::new("ethereum", "ETH"),
+                mock_dex: MockDexSource::new(),
+            }
+        }
+    }
+
+    impl ChainClientFactory for MockClientFactory {
+        fn create_chain_client(&self, _chain: &str) -> Result<Box<dyn ChainClient>> {
+            Ok(Box::new(self.mock_client.clone()))
+        }
+
+        fn create_dex_client(&self) -> Box<dyn DexDataSource> {
+            Box::new(self.mock_dex.clone())
+        }
     }
 }

@@ -214,13 +214,15 @@ release:
         exit 1
     fi
     
-    # Add new version section after Unreleased
-    sed -i '' "/## \[Unreleased\]/a\\
-\\
-## [$NEW_VERSION] - $TODAY" CHANGELOG.md
+    # Add new version section after Unreleased using awk (avoids sed backslash issues)
+    awk -v ver="$NEW_VERSION" -v dt="$TODAY" '{print} /^## \[Unreleased\]/ {print ""; print "## [" ver "] - " dt}' CHANGELOG.md > CHANGELOG.tmp && mv CHANGELOG.tmp CHANGELOG.md
     
     # Update comparison links at bottom
-    sed -i '' "s#\[Unreleased\]: https://github.com/robot-accomplice/bcc/compare/v$CURRENT_VERSION...HEAD#[Unreleased]: https://github.com/robot-accomplice/bcc/compare/v$NEW_VERSION...HEAD\n[$NEW_VERSION]: https://github.com/robot-accomplice/bcc/compare/v$CURRENT_VERSION...v$NEW_VERSION#" CHANGELOG.md
+    OLD_LINK="[Unreleased]: https://github.com/robot-accomplice/bcc/compare/v$CURRENT_VERSION...HEAD"
+    NEW_LINK="[Unreleased]: https://github.com/robot-accomplice/bcc/compare/v$NEW_VERSION...HEAD"
+    VER_LINK="[$NEW_VERSION]: https://github.com/robot-accomplice/bcc/compare/v$CURRENT_VERSION...v$NEW_VERSION"
+    sed -i '' "s#$OLD_LINK#$NEW_LINK#" CHANGELOG.md
+    echo "$VER_LINK" >> CHANGELOG.md
     
     echo "✓ CHANGELOG.md updated"
     

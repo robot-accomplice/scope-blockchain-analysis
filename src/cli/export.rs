@@ -16,7 +16,7 @@
 //! bca export --portfolio --output portfolio.json
 //! ```
 
-use crate::chains::{EthereumClient, SolanaClient, TronClient, infer_chain_from_address};
+use crate::chains::{ChainClientFactory, infer_chain_from_address};
 use crate::config::{Config, OutputFormat};
 use crate::error::{BccError, Result};
 use clap::Args;
@@ -92,7 +92,11 @@ pub struct ExportReport {
 ///
 /// Returns [`BccError::Export`] if the export operation fails.
 /// Returns [`BccError::Io`] if file operations fail.
-pub async fn run(args: ExportArgs, config: &Config) -> Result<()> {
+pub async fn run(
+    args: ExportArgs,
+    config: &Config,
+    clients: &dyn ChainClientFactory,
+) -> Result<()> {
     // Determine format from argument or file extension
     let format = args.format.unwrap_or_else(|| detect_format(&args.output));
 
@@ -105,7 +109,7 @@ pub async fn run(args: ExportArgs, config: &Config) -> Result<()> {
     if args.portfolio {
         export_portfolio(&args, format, config).await
     } else if let Some(ref address) = args.address {
-        export_address(address, &args, format, config).await
+        export_address(address, &args, format, clients).await
     } else {
         Err(BccError::Export(
             "Must specify either --address or --portfolio".to_string(),
@@ -178,7 +182,7 @@ async fn export_address(
     address: &str,
     args: &ExportArgs,
     format: OutputFormat,
-    config: &Config,
+    clients: &dyn ChainClientFactory,
 ) -> Result<()> {
     // Auto-detect chain if default
     let chain = if args.chain == "ethereum" {
@@ -198,20 +202,8 @@ async fn export_address(
     println!("Fetching transactions for {} on {}...", address, chain);
 
     // Fetch real transaction history
-    let chain_txs = match chain.as_str() {
-        "solana" | "sol" => {
-            let client = SolanaClient::new(&config.chains)?;
-            client.get_transactions(address, args.limit).await?
-        }
-        "tron" | "trx" => {
-            let client = TronClient::new(&config.chains)?;
-            client.get_transactions(address, args.limit).await?
-        }
-        _ => {
-            let client = EthereumClient::for_chain(&chain, &config.chains)?;
-            client.get_transactions(address, args.limit).await?
-        }
-    };
+    let client = clients.create_chain_client(&chain)?;
+    let chain_txs = client.get_transactions(address, args.limit).await?;
 
     // Apply date filtering if --from / --to are provided
     let from_ts = args.from.as_deref().and_then(parse_date_to_ts);
@@ -630,5 +622,208 @@ mod tests {
         assert!(content.contains("address,label,chain,tags,added_at"));
         assert!(content.contains("Test Wallet"));
         assert!(content.contains("personal"));
+    }
+
+    // ========================================================================
+    // Date parsing and pure function tests
+    // ========================================================================
+
+    #[test]
+    fn test_parse_date_to_ts_valid() {
+        let ts = parse_date_to_ts("2024-01-01");
+        assert!(ts.is_some());
+        let ts = ts.unwrap();
+        // Jan 1, 2024 00:00:00 UTC should be around 1704067200
+        assert!(ts > 1700000000 && ts < 1710000000);
+    }
+
+    #[test]
+    fn test_parse_date_to_ts_epoch() {
+        let ts = parse_date_to_ts("1970-01-01");
+        assert_eq!(ts, Some(0));
+    }
+
+    #[test]
+    fn test_parse_date_to_ts_invalid_format() {
+        assert!(parse_date_to_ts("not-a-date").is_none());
+        assert!(parse_date_to_ts("2024/01/01").is_none());
+        assert!(parse_date_to_ts("2024-01").is_none());
+        assert!(parse_date_to_ts("").is_none());
+    }
+
+    #[test]
+    fn test_parse_date_to_ts_invalid_values() {
+        assert!(parse_date_to_ts("2024-13-01").is_none()); // Month > 12
+        assert!(parse_date_to_ts("2024-00-01").is_none()); // Month 0
+        assert!(parse_date_to_ts("2024-01-00").is_none()); // Day 0
+        assert!(parse_date_to_ts("2024-01-32").is_none()); // Day > 31
+    }
+
+    #[test]
+    fn test_days_since_epoch_basic() {
+        // Jan 1, 1970 should be day 0
+        let days = days_since_epoch(1970, 1, 1);
+        assert_eq!(days, Some(0));
+    }
+
+    #[test]
+    fn test_days_since_epoch_known_date() {
+        // 2000-01-01 is day 10957
+        let days = days_since_epoch(2000, 1, 1);
+        assert_eq!(days, Some(10957));
+    }
+
+    #[test]
+    fn test_days_since_epoch_invalid_month() {
+        assert!(days_since_epoch(2024, 13, 1).is_none());
+        assert!(days_since_epoch(2024, 0, 1).is_none());
+    }
+
+    #[test]
+    fn test_days_since_epoch_invalid_day() {
+        assert!(days_since_epoch(2024, 1, 0).is_none());
+        assert!(days_since_epoch(2024, 1, 32).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_export_portfolio_table_error() {
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = temp_dir.path().to_path_buf();
+        let output_path = temp_dir.path().join("output.txt");
+
+        // Create empty portfolio
+        use crate::cli::portfolio::Portfolio;
+        let portfolio = Portfolio { addresses: vec![] };
+        portfolio.save(&data_dir).unwrap();
+
+        let config = Config {
+            portfolio: crate::config::PortfolioConfig {
+                data_dir: Some(data_dir),
+            },
+            ..Default::default()
+        };
+
+        let args = ExportArgs {
+            address: None,
+            portfolio: true,
+            output: output_path,
+            format: Some(OutputFormat::Table),
+            chain: "ethereum".to_string(),
+            from: None,
+            to: None,
+            limit: 1000,
+        };
+
+        let result = export_portfolio(&args, OutputFormat::Table, &config).await;
+        assert!(result.is_err()); // Table format not supported for export
+    }
+
+    #[tokio::test]
+    async fn test_run_no_source_error() {
+        let config = Config::default();
+        let args = ExportArgs {
+            address: None,
+            portfolio: false,
+            output: PathBuf::from("output.json"),
+            format: None,
+            chain: "ethereum".to_string(),
+            from: None,
+            to: None,
+            limit: 1000,
+        };
+
+        let factory = crate::chains::DefaultClientFactory {
+            chains_config: crate::config::ChainsConfig::default(),
+        };
+        let result = run(args, &config, &factory).await;
+        assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // End-to-end tests using MockClientFactory
+    // ========================================================================
+
+    use crate::chains::mocks::{MockChainClient, MockClientFactory};
+
+    fn mock_factory() -> MockClientFactory {
+        let mut factory = MockClientFactory::new();
+        factory.mock_client = MockChainClient::new("ethereum", "ETH");
+        factory.mock_client.transactions = vec![crate::chains::Transaction {
+            hash: "0xexport1".to_string(),
+            block_number: Some(100),
+            timestamp: Some(1700000000),
+            from: "0xfrom".to_string(),
+            to: Some("0xto".to_string()),
+            value: "1.0".to_string(),
+            gas_limit: 21000,
+            gas_used: Some(21000),
+            gas_price: "20000000000".to_string(),
+            nonce: 0,
+            input: "0x".to_string(),
+            status: Some(true),
+        }];
+        factory
+    }
+
+    #[tokio::test]
+    async fn test_run_export_address_json() {
+        let config = Config::default();
+        let factory = mock_factory();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let args = ExportArgs {
+            address: Some("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string()),
+            portfolio: false,
+            output: tmp.path().to_path_buf(),
+            format: Some(OutputFormat::Json),
+            chain: "ethereum".to_string(),
+            from: None,
+            to: None,
+            limit: 100,
+        };
+        let result = run(args, &config, &factory).await;
+        assert!(result.is_ok());
+        // Verify file was written
+        let content = std::fs::read_to_string(tmp.path()).unwrap();
+        assert!(content.contains("0xexport1"));
+    }
+
+    #[tokio::test]
+    async fn test_run_export_address_csv() {
+        let config = Config::default();
+        let factory = mock_factory();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let args = ExportArgs {
+            address: Some("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string()),
+            portfolio: false,
+            output: tmp.path().to_path_buf(),
+            format: Some(OutputFormat::Csv),
+            chain: "ethereum".to_string(),
+            from: None,
+            to: None,
+            limit: 100,
+        };
+        let result = run(args, &config, &factory).await;
+        assert!(result.is_ok());
+        let content = std::fs::read_to_string(tmp.path()).unwrap();
+        assert!(content.contains("hash,block,timestamp"));
+    }
+
+    #[tokio::test]
+    async fn test_run_export_with_date_filter() {
+        let config = Config::default();
+        let factory = mock_factory();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let args = ExportArgs {
+            address: Some("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string()),
+            portfolio: false,
+            output: tmp.path().to_path_buf(),
+            format: Some(OutputFormat::Json),
+            chain: "ethereum".to_string(),
+            from: Some("2023-01-01".to_string()),
+            to: Some("2025-12-31".to_string()),
+            limit: 100,
+        };
+        let result = run(args, &config, &factory).await;
+        assert!(result.is_ok());
     }
 }

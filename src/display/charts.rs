@@ -461,4 +461,34 @@ mod tests {
         let result = render_analytics_dashboard(&prices, &volumes, &holders, "TEST", "ethereum");
         assert!(result.contains("Token Analytics: TEST on ethereum"));
     }
+
+    #[test]
+    fn test_price_chart_multiday_range() {
+        // Time range > 24h to trigger the "Xd ago" branch
+        let prices: Vec<PricePoint> = (0..50)
+            .map(|i| PricePoint {
+                timestamp: i * 7200, // every 2 hours, spanning ~4 days
+                price: 1.0 + (i as f64) * 0.01,
+            })
+            .collect();
+        let chart = render_price_chart(&prices, 60, 15);
+        assert!(chart.contains("d ago -> now"));
+    }
+
+    #[test]
+    fn test_holder_distribution_with_10_holders() {
+        // >= 10 holders triggers concentration summary
+        let holders: Vec<TokenHolder> = (1..=12)
+            .map(|i| TokenHolder {
+                address: format!("0x{:040}", i),
+                balance: format!("{}", 1000 - i * 50),
+                formatted_balance: format!("{}K", (1000 - i * 50) / 1000),
+                percentage: 10.0 - (i as f64) * 0.5,
+                rank: i as u32,
+            })
+            .collect();
+        let chart = render_holder_distribution(&holders);
+        assert!(chart.contains("Top 10 control:"));
+        assert!(chart.contains("% of supply"));
+    }
 }

@@ -42,6 +42,7 @@
 
 use crate::chains::{DexPair, PricePoint, VolumePoint};
 use crate::error::{BccError, Result};
+use async_trait::async_trait;
 use reqwest::Client;
 use serde::Deserialize;
 use std::time::Duration;
@@ -49,10 +50,33 @@ use std::time::Duration;
 /// DexScreener API base URL.
 const DEXSCREENER_API_BASE: &str = "https://api.dexscreener.com";
 
+/// Trait for DEX data providers (prices, token data, search).
+///
+/// Abstracts the DexScreener API to enable dependency injection and testing.
+#[async_trait]
+pub trait DexDataSource: Send + Sync {
+    /// Fetches the price for a specific token on a chain.
+    async fn get_token_price(&self, chain: &str, address: &str) -> Option<f64>;
+
+    /// Fetches the native token price for a chain (e.g., ETH for ethereum).
+    async fn get_native_token_price(&self, chain: &str) -> Option<f64>;
+
+    /// Fetches comprehensive token data including pairs, volume, liquidity.
+    async fn get_token_data(&self, chain: &str, address: &str) -> Result<DexTokenData>;
+
+    /// Searches for tokens by query string with optional chain filter.
+    async fn search_tokens(
+        &self,
+        query: &str,
+        chain: Option<&str>,
+    ) -> Result<Vec<TokenSearchResult>>;
+}
+
 /// Client for fetching DEX aggregator data.
 #[derive(Debug, Clone)]
 pub struct DexClient {
     http: Client,
+    base_url: String,
 }
 
 /// Response from DexScreener token endpoint.
@@ -325,7 +349,19 @@ impl DexClient {
             .build()
             .expect("Failed to build HTTP client");
 
-        Self { http }
+        Self {
+            http,
+            base_url: DEXSCREENER_API_BASE.to_string(),
+        }
+    }
+
+    /// Creates a new DEX client with a custom base URL (for testing).
+    #[cfg(test)]
+    fn with_base_url(base_url: &str) -> Self {
+        Self {
+            http: Client::new(),
+            base_url: base_url.to_string(),
+        }
     }
 
     /// Maps chain names to DexScreener chain IDs.
@@ -347,10 +383,7 @@ impl DexClient {
     ///
     /// Returns `None` if the token is not found or has no price data.
     pub async fn get_token_price(&self, chain: &str, token_address: &str) -> Option<f64> {
-        let url = format!(
-            "{}/latest/dex/tokens/{}",
-            DEXSCREENER_API_BASE, token_address
-        );
+        let url = format!("{}/latest/dex/tokens/{}", self.base_url, token_address);
 
         let response = self.http.get(&url).send().await.ok()?;
         let dex_response: DexScreenerTokenResponse = response.json().await.ok()?;
@@ -396,10 +429,7 @@ impl DexClient {
     ///
     /// Returns aggregated token data from all DEX pairs.
     pub async fn get_token_data(&self, chain: &str, token_address: &str) -> Result<DexTokenData> {
-        let url = format!(
-            "{}/latest/dex/tokens/{}",
-            DEXSCREENER_API_BASE, token_address
-        );
+        let url = format!("{}/latest/dex/tokens/{}", self.base_url, token_address);
 
         tracing::debug!(url = %url, "Fetching token data from DexScreener");
 
@@ -658,7 +688,7 @@ impl DexClient {
     ) -> Result<Vec<TokenSearchResult>> {
         let url = format!(
             "{}/latest/dex/search?q={}",
-            DEXSCREENER_API_BASE,
+            self.base_url,
             urlencoding::encode(query)
         );
 
@@ -914,6 +944,54 @@ impl Default for DexClient {
 }
 
 // ============================================================================
+// DexDataSource Trait Implementation
+// ============================================================================
+
+#[async_trait]
+impl DexDataSource for DexClient {
+    async fn get_token_price(&self, chain: &str, address: &str) -> Option<f64> {
+        self.get_token_price(chain, address).await
+    }
+
+    async fn get_native_token_price(&self, chain: &str) -> Option<f64> {
+        self.get_native_token_price(chain).await
+    }
+
+    async fn get_token_data(&self, chain: &str, address: &str) -> Result<DexTokenData> {
+        self.get_token_data(chain, address).await
+    }
+
+    async fn search_tokens(
+        &self,
+        query: &str,
+        chain: Option<&str>,
+    ) -> Result<Vec<TokenSearchResult>> {
+        self.search_tokens(query, chain).await
+    }
+}
+
+/// Builds a full DexScreener token response JSON string for testing.
+#[cfg(test)]
+fn build_test_pair_json(chain_id: &str, base_symbol: &str, base_addr: &str, price: &str) -> String {
+    format!(
+        r#"{{
+        "chainId":"{}","dexId":"uniswap","pairAddress":"0xpair",
+        "baseToken":{{"address":"{}","name":"{}","symbol":"{}"}},
+        "quoteToken":{{"address":"0xquote","name":"USDC","symbol":"USDC"}},
+        "priceUsd":"{}",
+        "priceChange":{{"h24":5.2,"h6":2.1,"h1":0.5,"m5":0.1}},
+        "volume":{{"h24":1000000,"h6":250000,"h1":50000,"m5":5000}},
+        "liquidity":{{"usd":500000,"base":100,"quote":500000}},
+        "fdv":10000000,"marketCap":8000000,
+        "txns":{{"h24":{{"buys":100,"sells":80}},"h6":{{"buys":20,"sells":15}},"h1":{{"buys":5,"sells":3}}}},
+        "pairCreatedAt":1690000000000,
+        "url":"https://dexscreener.com/ethereum/0xpair"
+    }}"#,
+        chain_id, base_addr, base_symbol, base_symbol, price
+    )
+}
+
+// ============================================================================
 // Unit Tests
 // ============================================================================
 
@@ -989,5 +1067,277 @@ mod tests {
         assert!(history.len() > 2);
         // Check midpoint was added
         assert!(history.iter().any(|p| p.timestamp == 50));
+    }
+
+    // ========================================================================
+    // HTTP mocking tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_get_token_data_success() {
+        let mut server = mockito::Server::new_async().await;
+        let pair = build_test_pair_json("ethereum", "WETH", "0xtoken", "2500.50");
+        let body = format!(r#"{{"pairs":[{}]}}"#, pair);
+        let _mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"/latest/dex/tokens/.*".to_string()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&body)
+            .create_async()
+            .await;
+
+        let client = DexClient::with_base_url(&server.url());
+        let data = client.get_token_data("ethereum", "0xtoken").await.unwrap();
+        assert_eq!(data.symbol, "WETH");
+        assert!((data.price_usd - 2500.50).abs() < 0.01);
+        assert!(data.volume_24h > 0.0);
+        assert!(data.liquidity_usd > 0.0);
+        assert_eq!(data.pairs.len(), 1);
+        assert!(data.total_buys_24h > 0);
+        assert!(data.total_sells_24h > 0);
+        assert!(!data.price_history.is_empty());
+        assert!(!data.volume_history.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_token_data_no_pairs() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"/latest/dex/tokens/.*".to_string()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"pairs":[]}"#)
+            .create_async()
+            .await;
+
+        let client = DexClient::with_base_url(&server.url());
+        let result = client.get_token_data("ethereum", "0xunknown").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("No DEX pairs"));
+    }
+
+    #[tokio::test]
+    async fn test_get_token_data_api_error() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"/latest/dex/tokens/.*".to_string()),
+            )
+            .with_status(500)
+            .create_async()
+            .await;
+
+        let client = DexClient::with_base_url(&server.url());
+        let result = client.get_token_data("ethereum", "0xtoken").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_token_data_fallback_to_all_pairs() {
+        // When no chain-specific pairs found, should use all pairs
+        let mut server = mockito::Server::new_async().await;
+        let pair = build_test_pair_json("bsc", "TOKEN", "0xtoken", "1.00");
+        let body = format!(r#"{{"pairs":[{}]}}"#, pair);
+        let _mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"/latest/dex/tokens/.*".to_string()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&body)
+            .create_async()
+            .await;
+
+        let client = DexClient::with_base_url(&server.url());
+        // Request for ethereum but pair is on bsc → should still get data
+        let data = client.get_token_data("ethereum", "0xtoken").await.unwrap();
+        assert_eq!(data.symbol, "TOKEN");
+    }
+
+    #[tokio::test]
+    async fn test_get_token_data_multiple_pairs() {
+        let mut server = mockito::Server::new_async().await;
+        let pair1 = build_test_pair_json("ethereum", "WETH", "0xtoken", "2500.00");
+        let pair2 = build_test_pair_json("ethereum", "WETH", "0xtoken", "2501.00");
+        let body = format!(r#"{{"pairs":[{},{}]}}"#, pair1, pair2);
+        let _mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"/latest/dex/tokens/.*".to_string()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&body)
+            .create_async()
+            .await;
+
+        let client = DexClient::with_base_url(&server.url());
+        let data = client.get_token_data("ethereum", "0xtoken").await.unwrap();
+        assert_eq!(data.pairs.len(), 2);
+        // Price should be liquidity-weighted average
+        assert!(data.price_usd > 2499.0 && data.price_usd < 2502.0);
+    }
+
+    #[tokio::test]
+    async fn test_get_token_price() {
+        let mut server = mockito::Server::new_async().await;
+        let pair = build_test_pair_json("ethereum", "WETH", "0xtoken", "2500.50");
+        let body = format!(r#"{{"pairs":[{}]}}"#, pair);
+        let _mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"/latest/dex/tokens/.*".to_string()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&body)
+            .create_async()
+            .await;
+
+        let client = DexClient::with_base_url(&server.url());
+        let price = client.get_token_price("ethereum", "0xtoken").await;
+        assert!(price.is_some());
+        assert!((price.unwrap() - 2500.50).abs() < 0.01);
+    }
+
+    #[tokio::test]
+    async fn test_get_token_price_not_found() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"/latest/dex/tokens/.*".to_string()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"pairs":null}"#)
+            .create_async()
+            .await;
+
+        let client = DexClient::with_base_url(&server.url());
+        let price = client.get_token_price("ethereum", "0xunknown").await;
+        assert!(price.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_search_tokens_success() {
+        let mut server = mockito::Server::new_async().await;
+        let pair = build_test_pair_json("ethereum", "USDC", "0xusdc", "1.00");
+        let body = format!(r#"{{"pairs":[{}]}}"#, pair);
+        let _mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"/latest/dex/search.*".to_string()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&body)
+            .create_async()
+            .await;
+
+        let client = DexClient::with_base_url(&server.url());
+        let results = client.search_tokens("USDC", None).await.unwrap();
+        assert!(!results.is_empty());
+        assert_eq!(results[0].symbol, "USDC");
+    }
+
+    #[tokio::test]
+    async fn test_search_tokens_with_chain_filter() {
+        let mut server = mockito::Server::new_async().await;
+        let pair_eth = build_test_pair_json("ethereum", "USDC", "0xusdc_eth", "1.00");
+        let pair_bsc = build_test_pair_json("bsc", "USDC", "0xusdc_bsc", "1.00");
+        let body = format!(r#"{{"pairs":[{},{}]}}"#, pair_eth, pair_bsc);
+        let _mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"/latest/dex/search.*".to_string()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&body)
+            .create_async()
+            .await;
+
+        let client = DexClient::with_base_url(&server.url());
+        let results = client
+            .search_tokens("USDC", Some("ethereum"))
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].chain, "ethereum");
+    }
+
+    #[tokio::test]
+    async fn test_search_tokens_empty() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"/latest/dex/search.*".to_string()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"pairs":[]}"#)
+            .create_async()
+            .await;
+
+        let client = DexClient::with_base_url(&server.url());
+        let results = client.search_tokens("XYZNONEXIST", None).await.unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_search_tokens_api_error() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"/latest/dex/search.*".to_string()),
+            )
+            .with_status(429)
+            .create_async()
+            .await;
+
+        let client = DexClient::with_base_url(&server.url());
+        let result = client.search_tokens("USDC", None).await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_generate_price_history() {
+        let pair_json = r#"{
+            "chainId":"ethereum","dexId":"uniswap","pairAddress":"0xpair",
+            "baseToken":{"address":"0xtoken","name":"Token","symbol":"TKN"},
+            "quoteToken":{"address":"0xquote","name":"USDC","symbol":"USDC"},
+            "priceUsd":"100.0",
+            "priceChange":{"h24":10.0,"h6":5.0,"h1":1.0,"m5":0.5}
+        }"#;
+        let pair: DexScreenerPair = serde_json::from_str(pair_json).unwrap();
+        let history = DexClient::generate_price_history(100.0, &pair, 1700000000);
+        assert!(!history.is_empty());
+        // Last point should be current price
+        assert!(history.iter().any(|p| (p.price - 100.0).abs() < 0.001));
+    }
+
+    #[test]
+    fn test_chain_mapping_all_variants() {
+        // Test all known chains
+        assert_eq!(DexClient::map_chain_to_dexscreener("eth"), "ethereum");
+        assert_eq!(DexClient::map_chain_to_dexscreener("matic"), "polygon");
+        assert_eq!(DexClient::map_chain_to_dexscreener("arb"), "arbitrum");
+        assert_eq!(DexClient::map_chain_to_dexscreener("op"), "optimism");
+        assert_eq!(DexClient::map_chain_to_dexscreener("base"), "base");
+        assert_eq!(DexClient::map_chain_to_dexscreener("bnb"), "bsc");
+        assert_eq!(DexClient::map_chain_to_dexscreener("sol"), "solana");
+        assert_eq!(DexClient::map_chain_to_dexscreener("avax"), "avalanche");
+        assert_eq!(DexClient::map_chain_to_dexscreener("unknown"), "unknown");
     }
 }

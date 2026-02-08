@@ -507,6 +507,42 @@ chains:
     }
 
     #[test]
+    fn test_config_path_returns_some() {
+        let path = Config::config_path();
+        // Should return Some on systems with a home dir
+        assert!(path.is_some());
+        assert!(path.unwrap().to_string_lossy().contains("bcc"));
+    }
+
+    #[test]
+    fn test_config_debug() {
+        let config = Config::default();
+        let debug = format!("{:?}", config);
+        assert!(debug.contains("Config"));
+        assert!(debug.contains("ChainsConfig"));
+    }
+
+    #[test]
+    fn test_output_config_default() {
+        let output = OutputConfig::default();
+        assert_eq!(output.format, OutputFormat::Table);
+        assert!(output.color);
+    }
+
+    #[test]
+    fn test_config_serialization_roundtrip() {
+        let mut config = Config::default();
+        config.chains.api_keys.insert("etherscan".to_string(), "test_key".to_string());
+        config.output.format = OutputFormat::Json;
+        config.output.color = false;
+        config.portfolio.data_dir = Some(PathBuf::from("/custom"));
+
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        let deserialized: Config = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(config, deserialized);
+    }
+
+    #[test]
     fn test_chains_config_with_multiple_api_keys() {
         let mut api_keys = HashMap::new();
         api_keys.insert("etherscan".into(), "key1".into());
@@ -521,5 +557,53 @@ chains:
 
         assert_eq!(chains.api_keys.len(), 3);
         assert!(chains.api_keys.contains_key("etherscan"));
+    }
+
+    #[test]
+    fn test_load_via_bcc_config_env_var() {
+        let yaml = r#"
+chains:
+  ethereum_rpc: "https://env-test.example.com"
+output:
+  format: csv
+"#;
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(yaml.as_bytes()).unwrap();
+
+        let path_str = file.path().to_string_lossy().to_string();
+        unsafe { std::env::set_var("BCC_CONFIG", &path_str) };
+
+        // Load with None path — should pick up the env var
+        let config = Config::load(None).unwrap();
+        assert_eq!(
+            config.chains.ethereum_rpc,
+            Some("https://env-test.example.com".into())
+        );
+        assert_eq!(config.output.format, OutputFormat::Csv);
+
+        unsafe { std::env::remove_var("BCC_CONFIG") };
+    }
+
+    #[test]
+    fn test_output_format_default() {
+        let fmt = OutputFormat::default();
+        assert_eq!(fmt, OutputFormat::Table);
+    }
+
+    #[test]
+    fn test_portfolio_config_default() {
+        let port = PortfolioConfig::default();
+        assert!(port.data_dir.is_none());
+    }
+
+    #[test]
+    fn test_chains_config_default() {
+        let chains = ChainsConfig::default();
+        assert!(chains.ethereum_rpc.is_none());
+        assert!(chains.bsc_rpc.is_none());
+        assert!(chains.aegis_rpc.is_none());
+        assert!(chains.solana_rpc.is_none());
+        assert!(chains.tron_api.is_none());
+        assert!(chains.api_keys.is_empty());
     }
 }

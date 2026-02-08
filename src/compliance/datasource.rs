@@ -82,7 +82,10 @@ impl BlockchainDataClient {
     ) -> anyhow::Result<Vec<EtherscanTransaction>> {
         match chain {
             "ethereum" | "mainnet" => self.get_etherscan_transactions(address).await,
-            _ => anyhow::bail!("Chain '{}' not yet supported for transaction fetching", chain),
+            _ => anyhow::bail!(
+                "Chain '{}' not yet supported for transaction fetching",
+                chain
+            ),
         }
     }
 
@@ -97,10 +100,7 @@ impl BlockchainDataClient {
             self.sources.etherscan_key()
         );
 
-        let response = self.http_client
-            .get(&url)
-            .send()
-            .await?;
+        let response = self.http_client.get(&url).send().await?;
 
         let data: EtherscanResponse<Vec<EtherscanTransaction>> = response.json().await?;
 
@@ -122,10 +122,7 @@ impl BlockchainDataClient {
             self.sources.etherscan_key()
         );
 
-        let response = self.http_client
-            .get(&url)
-            .send()
-            .await?;
+        let response = self.http_client.get(&url).send().await?;
 
         let data: EtherscanResponse<Vec<EtherscanTransaction>> = response.json().await?;
 
@@ -143,10 +140,7 @@ impl BlockchainDataClient {
             self.sources.etherscan_key()
         );
 
-        let response = self.http_client
-            .get(&url)
-            .send()
-            .await?;
+        let response = self.http_client.get(&url).send().await?;
 
         let data: EtherscanResponse<Vec<EtherscanTransaction>> = response.json().await?;
 
@@ -171,10 +165,7 @@ impl BlockchainDataClient {
             self.sources.etherscan_key()
         );
 
-        let _response = self.http_client
-            .get(&url)
-            .send()
-            .await?;
+        let _response = self.http_client.get(&url).send().await?;
 
         // For now, return basic trace
         // Full implementation would recursively follow outputs
@@ -225,7 +216,7 @@ pub fn analyze_patterns(transactions: &[EtherscanTransaction]) -> PatternAnalysi
         .iter()
         .filter_map(|tx| tx.timestamp.parse::<u64>().ok())
         .collect();
-    
+
     if timestamps.len() >= 2 {
         let min_ts = *timestamps.iter().min().unwrap();
         let max_ts = *timestamps.iter().max().unwrap();
@@ -244,26 +235,33 @@ pub fn analyze_patterns(transactions: &[EtherscanTransaction]) -> PatternAnalysi
         })
         .collect();
 
-    let structuring_count = amounts.iter().filter(|&&amt| {
-        // Check if amount is just under a round number (e.g., 0.99, 1.99, etc.)
-        let fractional = amt.fract();
-        fractional > 0.9 && fractional < 1.0
-    }).count();
+    let structuring_count = amounts
+        .iter()
+        .filter(|&&amt| {
+            // Check if amount is just under a round number (e.g., 0.99, 1.99, etc.)
+            let fractional = amt.fract();
+            fractional > 0.9 && fractional < 1.0
+        })
+        .count();
 
     analysis.structuring_detected = structuring_count > amounts.len() / 3;
 
     // Round numbers (indicates automation)
-    let round_count = amounts.iter().filter(|&&amt| {
-        amt.fract() == 0.0 || amt.fract() < 0.01
-    }).count();
+    let round_count = amounts
+        .iter()
+        .filter(|&&amt| amt.fract() == 0.0 || amt.fract() < 0.01)
+        .count();
 
     analysis.round_number_pattern = round_count > amounts.len() / 2;
 
     // Time analysis (unusual hours)
-    let unusual_hour_count = timestamps.iter().filter(|&&ts| {
-        let hour = (ts % 86400) / 3600;
-        hour < 6 || hour > 23
-    }).count();
+    let unusual_hour_count = timestamps
+        .iter()
+        .filter(|&&ts| {
+            let hour = (ts % 86400) / 3600;
+            !(6..=23).contains(&hour)
+        })
+        .count();
 
     analysis.unusual_hours = unusual_hour_count;
 
@@ -348,7 +346,7 @@ mod tests {
             create_test_tx("1609459300", "0.95"),
             create_test_tx("1609459400", "0.98"),
         ];
-        
+
         let analysis = analyze_patterns(&txs);
         assert!(analysis.structuring_detected);
     }
@@ -361,7 +359,7 @@ mod tests {
             create_test_tx("1609459300", "2.0"),
             create_test_tx("1609459400", "5.0"),
         ];
-        
+
         let analysis = analyze_patterns(&txs);
         assert!(analysis.round_number_pattern);
     }
@@ -371,26 +369,24 @@ mod tests {
         // Transaction at 3 AM (unusual hour)
         // 1609459200 = 2021-01-01 00:00:00 UTC
         // 1609470000 = 2021-01-01 03:00:00 UTC
-        let txs = vec![
-            EtherscanTransaction {
-                block_number: "1".to_string(),
-                timestamp: "1609470000".to_string(),
-                hash: "0x1".to_string(),
-                from: "0xa".to_string(),
-                to: "0xb".to_string(),
-                value: "1000000000000000000".to_string(),
-                gas: "21000".to_string(),
-                gas_price: "20000000000".to_string(),
-                is_error: "0".to_string(),
-                txreceipt_status: "1".to_string(),
-                input: "0x".to_string(),
-                contract_address: "".to_string(),
-                cumulative_gas_used: "21000".to_string(),
-                gas_used: "21000".to_string(),
-                confirmations: "100".to_string(),
-            },
-        ];
-        
+        let txs = vec![EtherscanTransaction {
+            block_number: "1".to_string(),
+            timestamp: "1609470000".to_string(),
+            hash: "0x1".to_string(),
+            from: "0xa".to_string(),
+            to: "0xb".to_string(),
+            value: "1000000000000000000".to_string(),
+            gas: "21000".to_string(),
+            gas_price: "20000000000".to_string(),
+            is_error: "0".to_string(),
+            txreceipt_status: "1".to_string(),
+            input: "0x".to_string(),
+            contract_address: "".to_string(),
+            cumulative_gas_used: "21000".to_string(),
+            gas_used: "21000".to_string(),
+            confirmations: "100".to_string(),
+        }];
+
         let analysis = analyze_patterns(&txs);
         assert!(analysis.unusual_hours > 0);
     }
@@ -406,7 +402,7 @@ mod tests {
         // Many transactions spread over multiple days
         let mut txs = Vec::new();
         let base_time = 1609459200u64; // 2021-01-01 00:00:00 UTC
-        
+
         for i in 0..100 {
             // Spread over 2 days (every ~30 minutes)
             txs.push(EtherscanTransaction {
@@ -427,7 +423,7 @@ mod tests {
                 confirmations: "100".to_string(),
             });
         }
-        
+
         let analysis = analyze_patterns(&txs);
         // 100 transactions over 2 days = 50 tx/day
         assert!(analysis.velocity_score > 40.0); // High velocity
@@ -436,26 +432,24 @@ mod tests {
 
     #[test]
     fn test_pattern_analysis_failed_transactions() {
-        let txs = vec![
-            EtherscanTransaction {
-                block_number: "1".to_string(),
-                timestamp: "1609459200".to_string(),
-                hash: "0x1".to_string(),
-                from: "0xa".to_string(),
-                to: "0xb".to_string(),
-                value: "1000000000000000000".to_string(),
-                gas: "21000".to_string(),
-                gas_price: "20000000000".to_string(),
-                is_error: "1".to_string(), // Failed transaction
-                txreceipt_status: "0".to_string(),
-                input: "0x".to_string(),
-                contract_address: "".to_string(),
-                cumulative_gas_used: "21000".to_string(),
-                gas_used: "21000".to_string(),
-                confirmations: "100".to_string(),
-            },
-        ];
-        
+        let txs = vec![EtherscanTransaction {
+            block_number: "1".to_string(),
+            timestamp: "1609459200".to_string(),
+            hash: "0x1".to_string(),
+            from: "0xa".to_string(),
+            to: "0xb".to_string(),
+            value: "1000000000000000000".to_string(),
+            gas: "21000".to_string(),
+            gas_price: "20000000000".to_string(),
+            is_error: "1".to_string(), // Failed transaction
+            txreceipt_status: "0".to_string(),
+            input: "0x".to_string(),
+            contract_address: "".to_string(),
+            cumulative_gas_used: "21000".to_string(),
+            gas_used: "21000".to_string(),
+            confirmations: "100".to_string(),
+        }];
+
         let analysis = analyze_patterns(&txs);
         assert_eq!(analysis.total_transactions, 1);
     }
@@ -480,5 +474,133 @@ mod tests {
             gas_used: "21000".to_string(),
             confirmations: "100".to_string(),
         }
+    }
+
+    #[test]
+    fn test_data_sources_clone() {
+        let sources = DataSources::new("key1".to_string());
+        let cloned = sources.clone();
+        assert_eq!(cloned.etherscan_key(), "key1");
+    }
+
+    #[test]
+    fn test_data_sources_debug() {
+        let sources = DataSources::new("secret_key".to_string());
+        let debug = format!("{:?}", sources);
+        assert!(debug.contains("DataSources"));
+    }
+
+    #[test]
+    fn test_blockchain_data_client_creation() {
+        let sources = DataSources::new("test_key".to_string());
+        let client = BlockchainDataClient::new(sources);
+        let debug = format!("{:?}", client);
+        assert!(debug.contains("BlockchainDataClient"));
+        assert!(debug.contains("<reqwest::Client>"));
+    }
+
+    #[test]
+    fn test_etherscan_response_deserialization() {
+        let json = r#"{"status":"1","message":"OK","result":null}"#;
+        let response: EtherscanResponse<Vec<EtherscanTransaction>> =
+            serde_json::from_str(json).unwrap();
+        assert_eq!(response.status, "1");
+        assert_eq!(response.message, "OK");
+        assert!(response.result.is_none());
+    }
+
+    #[test]
+    fn test_etherscan_response_with_result() {
+        let json = r#"{"status":"1","message":"OK","result":[]}"#;
+        let response: EtherscanResponse<Vec<EtherscanTransaction>> =
+            serde_json::from_str(json).unwrap();
+        assert_eq!(response.status, "1");
+        assert!(response.result.is_some());
+        assert!(response.result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_transaction_trace_creation() {
+        let trace = TransactionTrace {
+            root_hash: "0xabc".to_string(),
+            hops: vec![
+                TraceHop {
+                    depth: 0,
+                    address: "0x111".to_string(),
+                    amount: "1.5".to_string(),
+                    timestamp: 1700000000,
+                },
+                TraceHop {
+                    depth: 1,
+                    address: "0x222".to_string(),
+                    amount: "0.8".to_string(),
+                    timestamp: 1700003600,
+                },
+            ],
+        };
+        assert_eq!(trace.root_hash, "0xabc");
+        assert_eq!(trace.hops.len(), 2);
+        assert_eq!(trace.hops[0].depth, 0);
+        assert_eq!(trace.hops[1].address, "0x222");
+    }
+
+    #[test]
+    fn test_trace_hop_debug_and_clone() {
+        let hop = TraceHop {
+            depth: 2,
+            address: "0x333".to_string(),
+            amount: "3.14".to_string(),
+            timestamp: 1700000000,
+        };
+        let cloned = hop.clone();
+        assert_eq!(cloned.depth, 2);
+        let debug = format!("{:?}", hop);
+        assert!(debug.contains("TraceHop"));
+    }
+
+    #[test]
+    fn test_pattern_analysis_debug_and_clone() {
+        let analysis = analyze_patterns(&[]);
+        let cloned = analysis.clone();
+        assert_eq!(cloned.total_transactions, 0);
+        let debug = format!("{:?}", analysis);
+        assert!(debug.contains("PatternAnalysis"));
+    }
+
+    #[test]
+    fn test_pattern_analysis_mixed_patterns() {
+        // Mix of round numbers and non-round: 2 out of 5 rounds = not over half
+        let txs = vec![
+            create_test_tx("1609459200", "1.0"),   // round
+            create_test_tx("1609459300", "2.345"),  // not round
+            create_test_tx("1609459400", "5.0"),    // round
+            create_test_tx("1609459500", "0.123"),  // not round
+            create_test_tx("1609459600", "7.891"),  // not round
+        ];
+        let analysis = analyze_patterns(&txs);
+        assert!(!analysis.round_number_pattern); // 2 out of 5 is not > half
+    }
+
+    #[test]
+    fn test_pattern_analysis_all_unusual_hours() {
+        // All transactions at 2 AM UTC (timestamp % 86400 / 3600 = 2)
+        // 1609459200 = 2021-01-01 00:00:00 UTC
+        // + 7200 = 2021-01-01 02:00:00 UTC
+        let txs = vec![
+            create_test_tx("1609466400", "1.0"), // 02:00 UTC
+            create_test_tx("1609470000", "2.0"), // 03:00 UTC
+            create_test_tx("1609473600", "3.0"), // 04:00 UTC
+        ];
+        let analysis = analyze_patterns(&txs);
+        assert_eq!(analysis.unusual_hours, 3);
+    }
+
+    #[test]
+    fn test_etherscan_transaction_clone_and_debug() {
+        let tx = create_test_tx("1609459200", "1.0");
+        let cloned = tx.clone();
+        assert_eq!(cloned.hash, "0x1");
+        let debug = format!("{:?}", tx);
+        assert!(debug.contains("EtherscanTransaction"));
     }
 }

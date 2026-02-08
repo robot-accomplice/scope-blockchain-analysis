@@ -19,7 +19,8 @@
 //! - Key metrics panel (price, liquidity, market cap, 24h volume)
 //! - Keyboard controls: Q=quit, R=refresh, P=pause
 
-use crate::chains::dex::{DexClient, DexTokenData};
+use crate::chains::ChainClientFactory;
+use crate::chains::dex::{DexClient, DexDataSource, DexTokenData};
 use crate::config::Config;
 use crate::error::{BccError, Result};
 use crossterm::{
@@ -1782,7 +1783,12 @@ fn format_usd(n: f64) -> String {
 }
 
 /// Entry point for the monitor command from interactive mode.
-pub async fn run(token: Option<String>, ctx: &SessionContext, config: &Config) -> Result<()> {
+pub async fn run(
+    token: Option<String>,
+    ctx: &SessionContext,
+    config: &Config,
+    clients: &dyn ChainClientFactory,
+) -> Result<()> {
     let token_input = match token {
         Some(t) => t,
         None => {
@@ -1796,10 +1802,11 @@ pub async fn run(token: Option<String>, ctx: &SessionContext, config: &Config) -
     println!("Fetching initial data...");
 
     // Resolve token address
-    let token_address = resolve_token_address(&token_input, &ctx.chain, config).await?;
+    let dex_client = clients.create_dex_client();
+    let token_address =
+        resolve_token_address(&token_input, &ctx.chain, config, dex_client.as_ref()).await?;
 
     // Fetch initial data
-    let dex_client = DexClient::new();
     let initial_data = dex_client
         .get_token_data(&ctx.chain, &token_address)
         .await?;
@@ -1826,7 +1833,12 @@ pub async fn run(token: Option<String>, ctx: &SessionContext, config: &Config) -
 }
 
 /// Resolves a token input (address or symbol) to an address.
-async fn resolve_token_address(input: &str, chain: &str, _config: &Config) -> Result<String> {
+async fn resolve_token_address(
+    input: &str,
+    chain: &str,
+    _config: &Config,
+    dex_client: &dyn DexDataSource,
+) -> Result<String> {
     // Check if it's already an address
     if input.starts_with("0x") && input.len() == 42 {
         return Ok(input.to_string());
@@ -1839,7 +1851,6 @@ async fn resolve_token_address(input: &str, chain: &str, _config: &Config) -> Re
     }
 
     // Search by name/symbol
-    let dex_client = DexClient::new();
     let results = dex_client.search_tokens(input, Some(chain)).await?;
 
     if results.is_empty() {
@@ -2187,5 +2198,581 @@ mod tests {
 
         // Cleanup
         let _ = std::fs::remove_file(path);
+    }
+
+    // ========================================================================
+    // Price formatting tests
+    // ========================================================================
+
+    #[test]
+    fn test_format_price_usd_high() {
+        let formatted = format_price_usd(2500.50);
+        assert!(formatted.starts_with("$2500.50"));
+    }
+
+    #[test]
+    fn test_format_price_usd_stablecoin() {
+        let formatted = format_price_usd(1.0001);
+        assert!(formatted.contains("1.000100"));
+        assert!(is_stablecoin_price(1.0001));
+    }
+
+    #[test]
+    fn test_format_price_usd_medium() {
+        let formatted = format_price_usd(5.1234);
+        assert!(formatted.starts_with("$5.1234"));
+    }
+
+    #[test]
+    fn test_format_price_usd_small() {
+        let formatted = format_price_usd(0.05);
+        assert!(formatted.starts_with("$0.0500"));
+    }
+
+    #[test]
+    fn test_format_price_usd_micro() {
+        let formatted = format_price_usd(0.001);
+        assert!(formatted.starts_with("$0.0010"));
+    }
+
+    #[test]
+    fn test_format_price_usd_nano() {
+        let formatted = format_price_usd(0.00001);
+        assert!(formatted.contains("0.0000100"));
+    }
+
+    #[test]
+    fn test_is_stablecoin_price() {
+        assert!(is_stablecoin_price(1.0));
+        assert!(is_stablecoin_price(0.999));
+        assert!(is_stablecoin_price(1.001));
+        assert!(is_stablecoin_price(0.95));
+        assert!(is_stablecoin_price(1.05));
+        assert!(!is_stablecoin_price(0.94));
+        assert!(!is_stablecoin_price(1.06));
+        assert!(!is_stablecoin_price(100.0));
+    }
+
+    // ========================================================================
+    // OHLC candle tests
+    // ========================================================================
+
+    #[test]
+    fn test_ohlc_candle_new() {
+        let candle = OhlcCandle::new(1000.0, 50.0);
+        assert_eq!(candle.open, 50.0);
+        assert_eq!(candle.high, 50.0);
+        assert_eq!(candle.low, 50.0);
+        assert_eq!(candle.close, 50.0);
+        assert!(candle.is_bullish);
+    }
+
+    #[test]
+    fn test_ohlc_candle_update() {
+        let mut candle = OhlcCandle::new(1000.0, 50.0);
+        candle.update(55.0);
+        assert_eq!(candle.high, 55.0);
+        assert_eq!(candle.close, 55.0);
+        assert!(candle.is_bullish);
+
+        candle.update(45.0);
+        assert_eq!(candle.low, 45.0);
+        assert_eq!(candle.close, 45.0);
+        assert!(!candle.is_bullish); // close < open
+    }
+
+    #[test]
+    fn test_get_ohlc_candles() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        // Add several data points
+        for i in 0..20 {
+            let mut data = token_data.clone();
+            data.price_usd = 1.0 + (i as f64 * 0.01);
+            state.update(&data);
+        }
+        let candles = state.get_ohlc_candles();
+        // Should have some candles
+        assert!(!candles.is_empty());
+    }
+
+    // ========================================================================
+    // ChartMode tests
+    // ========================================================================
+
+    #[test]
+    fn test_chart_mode_cycle() {
+        let mode = ChartMode::Line;
+        assert_eq!(mode.next(), ChartMode::Candlestick);
+        assert_eq!(ChartMode::Candlestick.next(), ChartMode::Line);
+    }
+
+    #[test]
+    fn test_chart_mode_label() {
+        assert_eq!(ChartMode::Line.label(), "Line");
+        assert_eq!(ChartMode::Candlestick.label(), "Candle");
+    }
+
+    // ========================================================================
+    // TUI rendering tests (headless TestBackend)
+    // ========================================================================
+
+    use ratatui::backend::TestBackend;
+
+    fn create_test_terminal() -> Terminal<TestBackend> {
+        let backend = TestBackend::new(120, 40);
+        Terminal::new(backend).unwrap()
+    }
+
+    fn create_populated_state() -> MonitorState {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        // Add real data points so charts have content
+        for i in 0..30 {
+            let mut data = token_data.clone();
+            data.price_usd = 1.0 + (i as f64 * 0.01);
+            data.volume_24h = 1_000_000.0 + (i as f64 * 10_000.0);
+            state.update(&data);
+        }
+        state
+    }
+
+    #[test]
+    fn test_render_header_no_panic() {
+        let mut terminal = create_test_terminal();
+        let state = create_populated_state();
+        terminal
+            .draw(|f| render_header(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_price_chart_no_panic() {
+        let mut terminal = create_test_terminal();
+        let state = create_populated_state();
+        terminal
+            .draw(|f| render_price_chart(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_price_chart_line_mode() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        state.chart_mode = ChartMode::Line;
+        terminal
+            .draw(|f| render_price_chart(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_candlestick_chart_no_panic() {
+        let mut terminal = create_test_terminal();
+        let state = create_populated_state();
+        terminal
+            .draw(|f| render_candlestick_chart(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_candlestick_chart_empty() {
+        let mut terminal = create_test_terminal();
+        let token_data = create_test_token_data();
+        let state = MonitorState::new(&token_data, "ethereum");
+        terminal
+            .draw(|f| render_candlestick_chart(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_volume_chart_no_panic() {
+        let mut terminal = create_test_terminal();
+        let state = create_populated_state();
+        terminal
+            .draw(|f| render_volume_chart(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_volume_chart_empty() {
+        let mut terminal = create_test_terminal();
+        let token_data = create_test_token_data();
+        let state = MonitorState::new(&token_data, "ethereum");
+        terminal
+            .draw(|f| render_volume_chart(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_buy_sell_gauge_no_panic() {
+        let mut terminal = create_test_terminal();
+        let state = create_populated_state();
+        terminal
+            .draw(|f| render_buy_sell_gauge(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_buy_sell_gauge_balanced() {
+        let mut terminal = create_test_terminal();
+        let mut token_data = create_test_token_data();
+        token_data.total_buys_24h = 100;
+        token_data.total_sells_24h = 100;
+        let state = MonitorState::new(&token_data, "ethereum");
+        terminal
+            .draw(|f| render_buy_sell_gauge(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_metrics_panel_no_panic() {
+        let mut terminal = create_test_terminal();
+        let state = create_populated_state();
+        terminal
+            .draw(|f| render_metrics_panel(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_metrics_panel_no_market_cap() {
+        let mut terminal = create_test_terminal();
+        let mut token_data = create_test_token_data();
+        token_data.market_cap = None;
+        token_data.fdv = None;
+        let state = MonitorState::new(&token_data, "ethereum");
+        terminal
+            .draw(|f| render_metrics_panel(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_footer_no_panic() {
+        let mut terminal = create_test_terminal();
+        let state = create_populated_state();
+        terminal
+            .draw(|f| render_footer(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_footer_paused() {
+        let mut terminal = create_test_terminal();
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        state.paused = true;
+        terminal
+            .draw(|f| render_footer(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_all_components() {
+        // Exercise the full draw_ui layout path
+        let mut terminal = create_test_terminal();
+        let state = create_populated_state();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(3),
+                        Constraint::Min(10),
+                        Constraint::Length(5),
+                        Constraint::Length(3),
+                        Constraint::Length(3),
+                    ])
+                    .split(area);
+                render_header(f, chunks[0], &state);
+                render_price_chart(f, chunks[1], &state);
+                render_volume_chart(f, chunks[2], &state);
+                render_buy_sell_gauge(f, chunks[3], &state);
+                render_footer(f, chunks[4], &state);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_candlestick_mode() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        state.chart_mode = ChartMode::Candlestick;
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(3), Constraint::Min(10)])
+                    .split(area);
+                render_header(f, chunks[0], &state);
+                render_candlestick_chart(f, chunks[1], &state);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_with_different_time_periods() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+
+        for period in [
+            TimePeriod::Min15,
+            TimePeriod::Hour1,
+            TimePeriod::Hour6,
+            TimePeriod::Hour24,
+        ] {
+            state.time_period = period;
+            terminal
+                .draw(|f| render_price_chart(f, f.area(), &state))
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn test_render_metrics_with_stablecoin() {
+        let mut terminal = create_test_terminal();
+        let mut token_data = create_test_token_data();
+        token_data.price_usd = 0.999;
+        token_data.symbol = "USDC".to_string();
+        let state = MonitorState::new(&token_data, "ethereum");
+        terminal
+            .draw(|f| render_metrics_panel(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_header_with_negative_change() {
+        let mut terminal = create_test_terminal();
+        let mut token_data = create_test_token_data();
+        token_data.price_change_24h = -15.5;
+        token_data.price_change_1h = -2.3;
+        let state = MonitorState::new(&token_data, "ethereum");
+        terminal
+            .draw(|f| render_header(f, f.area(), &state))
+            .unwrap();
+    }
+
+    // ========================================================================
+    // MonitorState method tests
+    // ========================================================================
+
+    #[test]
+    fn test_toggle_chart_mode_roundtrip() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        assert_eq!(state.chart_mode, ChartMode::Line);
+        state.toggle_chart_mode();
+        assert_eq!(state.chart_mode, ChartMode::Candlestick);
+        state.toggle_chart_mode();
+        assert_eq!(state.chart_mode, ChartMode::Line);
+    }
+
+    #[test]
+    fn test_cycle_all_time_periods() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        assert_eq!(state.time_period, TimePeriod::Hour1);
+        state.cycle_time_period();
+        assert_eq!(state.time_period, TimePeriod::Hour6);
+        state.cycle_time_period();
+        assert_eq!(state.time_period, TimePeriod::Hour24);
+        state.cycle_time_period();
+        assert_eq!(state.time_period, TimePeriod::Min15);
+        state.cycle_time_period();
+        assert_eq!(state.time_period, TimePeriod::Hour1);
+    }
+
+    #[test]
+    fn test_set_specific_time_period() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        state.set_time_period(TimePeriod::Hour24);
+        assert_eq!(state.time_period, TimePeriod::Hour24);
+    }
+
+    #[test]
+    fn test_pause_resume_roundtrip() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        assert!(!state.paused);
+        state.toggle_pause();
+        assert!(state.paused);
+        state.toggle_pause();
+        assert!(!state.paused);
+    }
+
+    #[test]
+    fn test_force_refresh_unpauses() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        state.paused = true;
+        state.force_refresh();
+        assert!(!state.paused);
+        assert!(state.should_refresh());
+    }
+
+    #[test]
+    fn test_refresh_rate_adjust() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        assert_eq!(state.refresh_rate_secs(), 5);
+
+        state.slower_refresh();
+        assert_eq!(state.refresh_rate_secs(), 10);
+
+        state.faster_refresh();
+        assert_eq!(state.refresh_rate_secs(), 5);
+    }
+
+    #[test]
+    fn test_faster_refresh_clamped_min() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        for _ in 0..10 {
+            state.faster_refresh();
+        }
+        assert!(state.refresh_rate_secs() >= 1);
+    }
+
+    #[test]
+    fn test_slower_refresh_clamped_max() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        for _ in 0..20 {
+            state.slower_refresh();
+        }
+        assert!(state.refresh_rate_secs() <= 60);
+    }
+
+    #[test]
+    fn test_buy_ratio_balanced() {
+        let mut token_data = create_test_token_data();
+        token_data.total_buys_24h = 100;
+        token_data.total_sells_24h = 100;
+        let state = MonitorState::new(&token_data, "ethereum");
+        assert!((state.buy_ratio() - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_buy_ratio_no_trades() {
+        let mut token_data = create_test_token_data();
+        token_data.total_buys_24h = 0;
+        token_data.total_sells_24h = 0;
+        let state = MonitorState::new(&token_data, "ethereum");
+        assert!((state.buy_ratio() - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_data_stats_initial() {
+        let token_data = create_test_token_data();
+        let state = MonitorState::new(&token_data, "ethereum");
+        let (synthetic, real) = state.data_stats();
+        assert!(synthetic > 0 || real == 0);
+    }
+
+    #[test]
+    fn test_memory_usage_nonzero() {
+        let token_data = create_test_token_data();
+        let state = MonitorState::new(&token_data, "ethereum");
+        let usage = state.memory_usage();
+        assert!(usage > 0);
+    }
+
+    #[test]
+    fn test_price_data_for_period() {
+        let token_data = create_test_token_data();
+        let state = MonitorState::new(&token_data, "ethereum");
+        let (data, is_real) = state.get_price_data_for_period();
+        assert_eq!(data.len(), is_real.len());
+    }
+
+    #[test]
+    fn test_volume_data_for_period() {
+        let token_data = create_test_token_data();
+        let state = MonitorState::new(&token_data, "ethereum");
+        let (data, is_real) = state.get_volume_data_for_period();
+        assert_eq!(data.len(), is_real.len());
+    }
+
+    #[test]
+    fn test_ohlc_candles_generation() {
+        let token_data = create_test_token_data();
+        let state = MonitorState::new(&token_data, "ethereum");
+        let candles = state.get_ohlc_candles();
+        for candle in &candles {
+            assert!(candle.high >= candle.low);
+        }
+    }
+
+    #[test]
+    fn test_state_update_with_new_data() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        let initial_count = state.real_data_count;
+
+        let mut updated_data = create_test_token_data();
+        updated_data.price_usd = 2.0;
+        updated_data.volume_24h = 2_000_000.0;
+
+        state.update(&updated_data);
+        assert_eq!(state.current_price, 2.0);
+        assert_eq!(state.real_data_count, initial_count + 1);
+        assert!(state.error_message.is_none());
+    }
+
+    #[test]
+    fn test_cache_roundtrip_save_load() {
+        let token_data = create_test_token_data();
+        let state = MonitorState::new(&token_data, "ethereum");
+
+        state.save_cache();
+
+        let cache_path = MonitorState::cache_path(&token_data.address, "ethereum");
+        assert!(cache_path.exists());
+
+        let cached = MonitorState::load_cache(&token_data.address, "ethereum");
+        assert!(cached.is_some());
+
+        let _ = std::fs::remove_file(cache_path);
+    }
+
+    #[test]
+    fn test_should_refresh_when_paused() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        assert!(!state.should_refresh());
+        state.paused = true;
+        assert!(!state.should_refresh());
+    }
+
+    #[test]
+    fn test_ohlc_candle_lifecycle() {
+        let mut candle = OhlcCandle::new(1700000000.0, 100.0);
+        assert_eq!(candle.open, 100.0);
+        assert!(candle.is_bullish);
+        candle.update(110.0);
+        assert_eq!(candle.high, 110.0);
+        assert!(candle.is_bullish);
+        candle.update(90.0);
+        assert_eq!(candle.low, 90.0);
+        assert!(!candle.is_bullish);
+    }
+
+    #[test]
+    fn test_time_period_display_impl() {
+        assert_eq!(format!("{}", TimePeriod::Min15), "15m");
+        assert_eq!(format!("{}", TimePeriod::Hour24), "24h");
+    }
+
+    #[test]
+    fn test_log_messages_accumulate() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        // Trigger actions that log
+        state.toggle_pause();
+        state.toggle_pause();
+        state.cycle_time_period();
+        state.toggle_chart_mode();
+        assert!(!state.log_messages.is_empty());
     }
 }

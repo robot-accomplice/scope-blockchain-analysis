@@ -25,7 +25,7 @@
 //! ```
 
 use crate::chains::{
-    DexClient, DexPair, EthereumClient, Token, TokenAnalytics, TokenHolder, TokenSearchResult,
+    ChainClientFactory, DexClient, DexPair, Token, TokenAnalytics, TokenHolder, TokenSearchResult,
     infer_chain_from_address,
 };
 use crate::config::{Config, OutputFormat};
@@ -308,7 +308,11 @@ fn prompt_save_alias() -> bool {
 ///
 /// Fetches comprehensive token analytics and displays them with ASCII charts
 /// or generates a markdown report.
-pub async fn run(args: CrawlArgs, config: &Config) -> Result<()> {
+pub async fn run(
+    args: CrawlArgs,
+    _config: &Config,
+    clients: &dyn ChainClientFactory,
+) -> Result<()> {
     // Load token aliases
     let mut aliases = TokenAliases::load();
 
@@ -329,7 +333,7 @@ pub async fn run(args: CrawlArgs, config: &Config) -> Result<()> {
 
     // Fetch token analytics from multiple sources
     let mut analytics =
-        fetch_token_analytics(&resolved.address, &resolved.chain, &args, config).await?;
+        fetch_token_analytics(&resolved.address, &resolved.chain, &args, clients).await?;
 
     // If we have alias info and the fetched token info is unknown, use alias info
     if (analytics.token.symbol == "UNKNOWN" || analytics.token.name == "Unknown Token")
@@ -368,10 +372,10 @@ async fn fetch_token_analytics(
     token_address: &str,
     chain: &str,
     args: &CrawlArgs,
-    config: &Config,
+    clients: &dyn ChainClientFactory,
 ) -> Result<TokenAnalytics> {
-    // Initialize clients
-    let dex_client = DexClient::new();
+    // Initialize DEX client via factory
+    let dex_client = clients.create_dex_client();
 
     // Try to fetch DEX data (price, volume, liquidity)
     println!("  Fetching DEX data...");
@@ -381,12 +385,12 @@ async fn fetch_token_analytics(
     match dex_result {
         Ok(dex_data) => {
             // We have DEX data - proceed with full analytics
-            fetch_analytics_with_dex(token_address, chain, args, config, dex_data).await
+            fetch_analytics_with_dex(token_address, chain, args, clients, dex_data).await
         }
         Err(BccError::NotFound(_)) => {
             // No DEX data - fall back to block explorer only
             println!("  No DEX data found, fetching from block explorer...");
-            fetch_analytics_from_explorer(token_address, chain, args, config).await
+            fetch_analytics_from_explorer(token_address, chain, args, clients).await
         }
         Err(e) => Err(e),
     }
@@ -397,12 +401,12 @@ async fn fetch_analytics_with_dex(
     token_address: &str,
     chain: &str,
     args: &CrawlArgs,
-    config: &Config,
+    clients: &dyn ChainClientFactory,
     dex_data: crate::chains::dex::DexTokenData,
 ) -> Result<TokenAnalytics> {
     // Fetch holder data from block explorer (if available)
     println!("  Fetching holder data...");
-    let holders = fetch_holders(token_address, chain, args.holders_limit, config).await?;
+    let holders = fetch_holders(token_address, chain, args.holders_limit, clients).await?;
 
     // Get token info
     let token = Token {
@@ -510,7 +514,7 @@ async fn fetch_analytics_from_explorer(
     token_address: &str,
     chain: &str,
     args: &CrawlArgs,
-    config: &Config,
+    clients: &dyn ChainClientFactory,
 ) -> Result<TokenAnalytics> {
     // Only EVM chains support block explorer data
     let is_evm = matches!(
@@ -525,8 +529,8 @@ async fn fetch_analytics_from_explorer(
         )));
     }
 
-    // Create block explorer client
-    let client = EthereumClient::for_chain(chain, &config.chains)?;
+    // Create chain client via factory
+    let client = clients.create_chain_client(chain)?;
 
     // Fetch token info
     println!("  Fetching token info...");
@@ -546,7 +550,7 @@ async fn fetch_analytics_from_explorer(
 
     // Fetch holder data
     println!("  Fetching holder data...");
-    let holders = fetch_holders(token_address, chain, args.holders_limit, config).await?;
+    let holders = fetch_holders(token_address, chain, args.holders_limit, clients).await?;
 
     // Fetch holder count
     println!("  Fetching holder count...");
@@ -622,12 +626,12 @@ async fn fetch_holders(
     token_address: &str,
     chain: &str,
     limit: u32,
-    config: &Config,
+    clients: &dyn ChainClientFactory,
 ) -> Result<Vec<TokenHolder>> {
     // Only EVM chains support holder data via block explorers
     match chain {
         "ethereum" | "polygon" | "arbitrum" | "optimism" | "base" | "bsc" => {
-            let client = EthereumClient::for_chain(chain, &config.chains)?;
+            let client = clients.create_chain_client(chain)?;
             match client.get_token_holders(token_address, limit).await {
                 Ok(holders) => Ok(holders),
                 Err(e) => {
@@ -925,5 +929,637 @@ mod tests {
         assert_eq!(cli.crawl.holders_limit, 10);
         assert!(!cli.crawl.no_charts);
         assert!(cli.crawl.report.is_none());
+    }
+
+    // ========================================================================
+    // format_large_number edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_format_large_number_zero() {
+        assert_eq!(format_large_number(0.0), "0.00");
+    }
+
+    #[test]
+    fn test_format_large_number_small() {
+        assert_eq!(format_large_number(0.12), "0.12");
+    }
+
+    #[test]
+    fn test_format_large_number_boundary_k() {
+        assert_eq!(format_large_number(999.99), "999.99");
+        assert_eq!(format_large_number(1000.0), "1.00K");
+    }
+
+    #[test]
+    fn test_format_large_number_boundary_m() {
+        assert_eq!(format_large_number(999_999.0), "1000.00K");
+        assert_eq!(format_large_number(1_000_000.0), "1.00M");
+    }
+
+    #[test]
+    fn test_format_large_number_boundary_b() {
+        assert_eq!(format_large_number(999_999_999.0), "1000.00M");
+        assert_eq!(format_large_number(1_000_000_000.0), "1.00B");
+    }
+
+    #[test]
+    fn test_format_large_number_very_large() {
+        let result = format_large_number(1_500_000_000_000.0);
+        assert!(result.contains("B"));
+    }
+
+    // ========================================================================
+    // Period tests
+    // ========================================================================
+
+    #[test]
+    fn test_period_seconds_all() {
+        assert_eq!(Period::Hour1.as_seconds(), 3600);
+        assert_eq!(Period::Hour24.as_seconds(), 86400);
+        assert_eq!(Period::Day7.as_seconds(), 604800);
+        assert_eq!(Period::Day30.as_seconds(), 2592000);
+    }
+
+    #[test]
+    fn test_period_labels_all() {
+        assert_eq!(Period::Hour1.label(), "1 Hour");
+        assert_eq!(Period::Hour24.label(), "24 Hours");
+        assert_eq!(Period::Day7.label(), "7 Days");
+        assert_eq!(Period::Day30.label(), "30 Days");
+    }
+
+    // ========================================================================
+    // Output formatting tests
+    // ========================================================================
+
+    use crate::chains::{DexPair, PricePoint, Token, TokenAnalytics, TokenHolder, TokenSocial};
+
+    fn make_test_analytics(with_dex: bool) -> TokenAnalytics {
+        TokenAnalytics {
+            token: Token {
+                contract_address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+                symbol: "USDC".to_string(),
+                name: "USD Coin".to_string(),
+                decimals: 6,
+            },
+            chain: "ethereum".to_string(),
+            holders: vec![
+                TokenHolder {
+                    address: "0x1234567890abcdef1234567890abcdef12345678".to_string(),
+                    balance: "1000000000000".to_string(),
+                    formatted_balance: "1,000,000".to_string(),
+                    percentage: 12.5,
+                    rank: 1,
+                },
+                TokenHolder {
+                    address: "0xabcdef1234567890abcdef1234567890abcdef12".to_string(),
+                    balance: "500000000000".to_string(),
+                    formatted_balance: "500,000".to_string(),
+                    percentage: 6.25,
+                    rank: 2,
+                },
+            ],
+            total_holders: 150_000,
+            volume_24h: if with_dex { 5_000_000.0 } else { 0.0 },
+            volume_7d: if with_dex { 25_000_000.0 } else { 0.0 },
+            price_usd: if with_dex { 0.9999 } else { 0.0 },
+            price_change_24h: if with_dex { -0.01 } else { 0.0 },
+            price_change_7d: if with_dex { 0.02 } else { 0.0 },
+            liquidity_usd: if with_dex { 100_000_000.0 } else { 0.0 },
+            market_cap: if with_dex {
+                Some(30_000_000_000.0)
+            } else {
+                None
+            },
+            fdv: if with_dex {
+                Some(30_000_000_000.0)
+            } else {
+                None
+            },
+            total_supply: Some("30000000000".to_string()),
+            circulating_supply: Some("28000000000".to_string()),
+            price_history: vec![
+                PricePoint {
+                    timestamp: 1700000000,
+                    price: 0.9998,
+                },
+                PricePoint {
+                    timestamp: 1700003600,
+                    price: 0.9999,
+                },
+            ],
+            volume_history: vec![],
+            holder_history: vec![],
+            dex_pairs: if with_dex {
+                vec![DexPair {
+                    dex_name: "Uniswap V3".to_string(),
+                    pair_address: "0xpair".to_string(),
+                    base_token: "USDC".to_string(),
+                    quote_token: "WETH".to_string(),
+                    price_usd: 0.9999,
+                    volume_24h: 5_000_000.0,
+                    liquidity_usd: 50_000_000.0,
+                    price_change_24h: -0.01,
+                    buys_24h: 1000,
+                    sells_24h: 900,
+                    buys_6h: 300,
+                    sells_6h: 250,
+                    buys_1h: 50,
+                    sells_1h: 45,
+                    pair_created_at: Some(1600000000),
+                    url: Some("https://dexscreener.com/ethereum/0xpair".to_string()),
+                }]
+            } else {
+                vec![]
+            },
+            fetched_at: 1700003600,
+            top_10_concentration: Some(35.5),
+            top_50_concentration: Some(55.0),
+            top_100_concentration: Some(65.0),
+            price_change_6h: 0.01,
+            price_change_1h: -0.005,
+            total_buys_24h: 1000,
+            total_sells_24h: 900,
+            total_buys_6h: 300,
+            total_sells_6h: 250,
+            total_buys_1h: 50,
+            total_sells_1h: 45,
+            token_age_hours: Some(25000.0),
+            image_url: None,
+            websites: vec!["https://www.centre.io/usdc".to_string()],
+            socials: vec![TokenSocial {
+                platform: "twitter".to_string(),
+                url: "https://twitter.com/circle".to_string(),
+            }],
+            dexscreener_url: Some("https://dexscreener.com/ethereum/0xpair".to_string()),
+        }
+    }
+
+    fn make_test_crawl_args() -> CrawlArgs {
+        CrawlArgs {
+            token: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+            chain: "ethereum".to_string(),
+            period: Period::Hour24,
+            holders_limit: 10,
+            format: OutputFormat::Table,
+            no_charts: true,
+            report: None,
+            yes: false,
+            save: false,
+        }
+    }
+
+    #[test]
+    fn test_output_table_with_dex_data() {
+        let analytics = make_test_analytics(true);
+        let args = make_test_crawl_args();
+        let result = output_table(&analytics, &args);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_table_explorer_only() {
+        let analytics = make_test_analytics(false);
+        let args = make_test_crawl_args();
+        let result = output_table(&analytics, &args);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_table_no_holders() {
+        let mut analytics = make_test_analytics(false);
+        analytics.holders = vec![];
+        analytics.total_holders = 0;
+        analytics.top_10_concentration = None;
+        analytics.top_50_concentration = None;
+        let args = make_test_crawl_args();
+        let result = output_table(&analytics, &args);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_csv() {
+        let analytics = make_test_analytics(true);
+        let result = output_csv(&analytics);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_csv_no_market_cap() {
+        let mut analytics = make_test_analytics(true);
+        analytics.market_cap = None;
+        analytics.fdv = None;
+        analytics.top_10_concentration = None;
+        let result = output_csv(&analytics);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_csv_no_holders() {
+        let mut analytics = make_test_analytics(true);
+        analytics.holders = vec![];
+        let result = output_csv(&analytics);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_table_with_dex_no_charts() {
+        let analytics = make_test_analytics(true);
+        let mut args = make_test_crawl_args();
+        args.no_charts = true;
+        let result = output_table_with_dex(&analytics, &args);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_table_with_dex_no_market_cap() {
+        let mut analytics = make_test_analytics(true);
+        analytics.market_cap = None;
+        analytics.fdv = None;
+        analytics.top_10_concentration = None;
+        let args = make_test_crawl_args();
+        let result = output_table_with_dex(&analytics, &args);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_table_explorer_with_concentration() {
+        let mut analytics = make_test_analytics(false);
+        analytics.top_10_concentration = Some(40.0);
+        analytics.top_50_concentration = Some(60.0);
+        let result = output_table_explorer_only(&analytics);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_table_explorer_no_supply() {
+        let mut analytics = make_test_analytics(false);
+        analytics.total_supply = None;
+        let result = output_table_explorer_only(&analytics);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_table_with_dex_multiple_pairs() {
+        let mut analytics = make_test_analytics(true);
+        for i in 0..8 {
+            analytics.dex_pairs.push(DexPair {
+                dex_name: format!("DEX {}", i),
+                pair_address: format!("0xpair{}", i),
+                base_token: "USDC".to_string(),
+                quote_token: "WETH".to_string(),
+                price_usd: 0.9999,
+                volume_24h: 1_000_000.0 - (i as f64 * 100_000.0),
+                liquidity_usd: 10_000_000.0 - (i as f64 * 1_000_000.0),
+                price_change_24h: 0.0,
+                buys_24h: 100,
+                sells_24h: 90,
+                buys_6h: 30,
+                sells_6h: 25,
+                buys_1h: 5,
+                sells_1h: 4,
+                pair_created_at: None,
+                url: None,
+            });
+        }
+        let args = make_test_crawl_args();
+        // Should only show top 5
+        let result = output_table_with_dex(&analytics, &args);
+        assert!(result.is_ok());
+    }
+
+    // ========================================================================
+    // CrawlArgs CLI parsing tests
+    // ========================================================================
+
+    #[test]
+    fn test_crawl_args_with_report() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct TestCli {
+            #[command(flatten)]
+            crawl: CrawlArgs,
+        }
+
+        let cli = TestCli::try_parse_from([
+            "test",
+            "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+            "--report",
+            "output.md",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            cli.crawl.report,
+            Some(std::path::PathBuf::from("output.md"))
+        );
+    }
+
+    #[test]
+    fn test_crawl_args_with_chain_and_period() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct TestCli {
+            #[command(flatten)]
+            crawl: CrawlArgs,
+        }
+
+        let cli = TestCli::try_parse_from([
+            "test",
+            "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+            "--chain",
+            "polygon",
+            "--period",
+            "7d",
+            "--no-charts",
+            "--yes",
+            "--save",
+        ])
+        .unwrap();
+
+        assert_eq!(cli.crawl.chain, "polygon");
+        assert!(matches!(cli.crawl.period, Period::Day7));
+        assert!(cli.crawl.no_charts);
+        assert!(cli.crawl.yes);
+        assert!(cli.crawl.save);
+    }
+
+    #[test]
+    fn test_crawl_args_all_periods() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct TestCli {
+            #[command(flatten)]
+            crawl: CrawlArgs,
+        }
+
+        for (period_str, expected) in [
+            ("1h", Period::Hour1),
+            ("24h", Period::Hour24),
+            ("7d", Period::Day7),
+            ("30d", Period::Day30),
+        ] {
+            let cli = TestCli::try_parse_from(["test", "token", "--period", period_str]).unwrap();
+            assert_eq!(cli.crawl.period.as_seconds(), expected.as_seconds());
+        }
+    }
+
+    // ========================================================================
+    // JSON serialization test for TokenAnalytics
+    // ========================================================================
+
+    #[test]
+    fn test_analytics_json_serialization() {
+        let analytics = make_test_analytics(true);
+        let json = serde_json::to_string(&analytics).unwrap();
+        assert!(json.contains("USDC"));
+        assert!(json.contains("USD Coin"));
+        assert!(json.contains("ethereum"));
+        assert!(json.contains("0.9999"));
+    }
+
+    #[test]
+    fn test_analytics_json_no_optional_fields() {
+        let mut analytics = make_test_analytics(false);
+        analytics.market_cap = None;
+        analytics.fdv = None;
+        analytics.total_supply = None;
+        analytics.top_10_concentration = None;
+        analytics.top_50_concentration = None;
+        analytics.top_100_concentration = None;
+        analytics.token_age_hours = None;
+        analytics.dexscreener_url = None;
+        let json = serde_json::to_string(&analytics).unwrap();
+        assert!(!json.contains("market_cap"));
+        assert!(!json.contains("fdv"));
+    }
+
+    // ========================================================================
+    // End-to-end tests using MockClientFactory
+    // ========================================================================
+
+    use crate::chains::mocks::{MockClientFactory, MockDexSource};
+
+    fn mock_factory_for_crawl() -> MockClientFactory {
+        let mut factory = MockClientFactory::new();
+        // Provide complete DexTokenData so crawl succeeds
+        factory.mock_dex = MockDexSource::new();
+        factory
+    }
+
+    #[tokio::test]
+    async fn test_run_crawl_json_output() {
+        let config = Config::default();
+        let factory = mock_factory_for_crawl();
+        let args = CrawlArgs {
+            token: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+            chain: "ethereum".to_string(),
+            period: Period::Hour24,
+            holders_limit: 5,
+            format: OutputFormat::Json,
+            no_charts: true,
+            report: None,
+            yes: true,
+            save: false,
+        };
+        let result = super::run(args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_crawl_table_output() {
+        let config = Config::default();
+        let factory = mock_factory_for_crawl();
+        let args = CrawlArgs {
+            token: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+            chain: "ethereum".to_string(),
+            period: Period::Hour24,
+            holders_limit: 5,
+            format: OutputFormat::Table,
+            no_charts: true,
+            report: None,
+            yes: true,
+            save: false,
+        };
+        let result = super::run(args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_crawl_csv_output() {
+        let config = Config::default();
+        let factory = mock_factory_for_crawl();
+        let args = CrawlArgs {
+            token: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+            chain: "ethereum".to_string(),
+            period: Period::Hour24,
+            holders_limit: 5,
+            format: OutputFormat::Csv,
+            no_charts: true,
+            report: None,
+            yes: true,
+            save: false,
+        };
+        let result = super::run(args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_crawl_no_dex_data_evm() {
+        let config = Config::default();
+        let mut factory = MockClientFactory::new();
+        factory.mock_dex.token_data = None; // No DEX data → falls back to explorer
+        factory.mock_client.token_info = Some(Token {
+            contract_address: "0xtoken".to_string(),
+            symbol: "TEST".to_string(),
+            name: "Test Token".to_string(),
+            decimals: 18,
+        });
+        let args = CrawlArgs {
+            token: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+            chain: "ethereum".to_string(),
+            period: Period::Hour24,
+            holders_limit: 5,
+            format: OutputFormat::Json,
+            no_charts: true,
+            report: None,
+            yes: true,
+            save: false,
+        };
+        let result = super::run(args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_crawl_table_no_charts() {
+        let config = Config::default();
+        let factory = mock_factory_for_crawl();
+        let args = CrawlArgs {
+            token: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+            chain: "ethereum".to_string(),
+            period: Period::Hour24,
+            holders_limit: 5,
+            format: OutputFormat::Table,
+            no_charts: true,
+            report: None,
+            yes: true,
+            save: false,
+        };
+        let result = super::run(args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_crawl_with_charts() {
+        let config = Config::default();
+        let factory = mock_factory_for_crawl();
+        let args = CrawlArgs {
+            token: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+            chain: "ethereum".to_string(),
+            period: Period::Hour1,
+            holders_limit: 5,
+            format: OutputFormat::Table,
+            no_charts: false, // Charts enabled
+            report: None,
+            yes: true,
+            save: false,
+        };
+        let result = super::run(args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_crawl_day7_period() {
+        let config = Config::default();
+        let factory = mock_factory_for_crawl();
+        let args = CrawlArgs {
+            token: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+            chain: "ethereum".to_string(),
+            period: Period::Day7,
+            holders_limit: 5,
+            format: OutputFormat::Table,
+            no_charts: true,
+            report: None,
+            yes: true,
+            save: false,
+        };
+        let result = super::run(args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_crawl_day30_period() {
+        let config = Config::default();
+        let factory = mock_factory_for_crawl();
+        let args = CrawlArgs {
+            token: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+            chain: "ethereum".to_string(),
+            period: Period::Day30,
+            holders_limit: 5,
+            format: OutputFormat::Table,
+            no_charts: true,
+            report: None,
+            yes: true,
+            save: false,
+        };
+        let result = super::run(args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_table_with_dex_with_charts() {
+        let analytics = make_test_analytics(true);
+        let mut args = make_test_crawl_args();
+        args.no_charts = false; // Enable charts
+        let result = output_table_with_dex(&analytics, &args);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_table_explorer_short_addresses() {
+        let mut analytics = make_test_analytics(false);
+        analytics.holders = vec![TokenHolder {
+            address: "0xshort".to_string(), // Short address
+            balance: "100".to_string(),
+            formatted_balance: "100".to_string(),
+            percentage: 1.0,
+            rank: 1,
+        }];
+        let result = output_table_explorer_only(&analytics);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_csv_with_all_fields() {
+        let analytics = make_test_analytics(true);
+        let result = output_csv(&analytics);
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_crawl_with_report() {
+        let config = Config::default();
+        let factory = mock_factory_for_crawl();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let args = CrawlArgs {
+            token: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+            chain: "ethereum".to_string(),
+            period: Period::Hour24,
+            holders_limit: 5,
+            format: OutputFormat::Table,
+            no_charts: true,
+            report: Some(tmp.path().to_path_buf()),
+            yes: true,
+            save: false,
+        };
+        let result = super::run(args, &config, &factory).await;
+        assert!(result.is_ok());
+        // Report file should exist and contain markdown
+        let content = std::fs::read_to_string(tmp.path()).unwrap();
+        assert!(content.contains("Token Analysis Report"));
     }
 }

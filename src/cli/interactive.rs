@@ -16,6 +16,7 @@
 //! # Uses solana chain automatically
 //! ```
 
+use crate::chains::ChainClientFactory;
 use crate::config::{Config, OutputFormat};
 use crate::error::Result;
 use clap::Args;
@@ -138,7 +139,11 @@ impl SessionContext {
 }
 
 /// Runs the interactive REPL.
-pub async fn run(args: InteractiveArgs, config: &Config) -> Result<()> {
+pub async fn run(
+    args: InteractiveArgs,
+    config: &Config,
+    clients: &dyn ChainClientFactory,
+) -> Result<()> {
     // Show banner unless disabled
     if !args.no_banner {
         let banner = include_str!("../../assets/banner.txt");
@@ -181,7 +186,7 @@ pub async fn run(args: InteractiveArgs, config: &Config) -> Result<()> {
                 let _ = rl.add_history_entry(line);
 
                 // Parse and execute command
-                match execute_input(line, &mut context, config).await {
+                match execute_input(line, &mut context, config, clients).await {
                     Ok(should_exit) => {
                         if should_exit {
                             break;
@@ -225,7 +230,12 @@ pub async fn run(args: InteractiveArgs, config: &Config) -> Result<()> {
 }
 
 /// Executes a single input line. Returns Ok(true) if should exit.
-async fn execute_input(input: &str, context: &mut SessionContext, config: &Config) -> Result<bool> {
+async fn execute_input(
+    input: &str,
+    context: &mut SessionContext,
+    config: &Config,
+    clients: &dyn ChainClientFactory,
+) -> Result<bool> {
     let parts: Vec<&str> = input.split_whitespace().collect();
     if parts.is_empty() {
         return Ok(false);
@@ -421,7 +431,7 @@ async fn execute_input(input: &str, context: &mut SessionContext, config: &Confi
             context.last_address = Some(addr);
 
             // Execute
-            address::run(address_args, config).await?;
+            address::run(address_args, config, clients).await?;
         }
 
         // Transaction command
@@ -487,7 +497,7 @@ async fn execute_input(input: &str, context: &mut SessionContext, config: &Confi
             context.last_tx = Some(hash);
 
             // Execute
-            tx::run(tx_args, config).await?;
+            tx::run(tx_args, config, clients).await?;
         }
 
         // Crawl command for token analytics
@@ -574,14 +584,14 @@ async fn execute_input(input: &str, context: &mut SessionContext, config: &Confi
                 save: false, // Will prompt if alias should be saved
             };
 
-            crawl::run(crawl_args, config).await?;
+            crawl::run(crawl_args, config, clients).await?;
         }
 
         // Portfolio command (pass through to existing)
         "portfolio" | "port" => {
             // Build portfolio args from remaining input
             let portfolio_input = args.join(" ");
-            execute_portfolio(&portfolio_input, context, config).await?;
+            execute_portfolio(&portfolio_input, context, config, clients).await?;
         }
 
         // Token alias management
@@ -611,7 +621,7 @@ async fn execute_input(input: &str, context: &mut SessionContext, config: &Confi
         // Live monitor command
         "monitor" | "mon" => {
             let token = args.first().map(|s| s.to_string());
-            monitor::run(token, context, config).await?;
+            monitor::run(token, context, config, clients).await?;
         }
 
         // Unknown command
@@ -751,7 +761,12 @@ async fn execute_tokens_command(args: &[&str]) -> Result<()> {
 }
 
 /// Execute portfolio subcommand
-async fn execute_portfolio(input: &str, context: &SessionContext, config: &Config) -> Result<()> {
+async fn execute_portfolio(
+    input: &str,
+    context: &SessionContext,
+    config: &Config,
+    clients: &dyn ChainClientFactory,
+) -> Result<()> {
     let parts: Vec<&str> = input.split_whitespace().collect();
     if parts.is_empty() {
         eprintln!("Portfolio subcommand required: add, remove, list, summary");
@@ -853,7 +868,7 @@ async fn execute_portfolio(input: &str, context: &SessionContext, config: &Confi
         }
     };
 
-    portfolio::run(portfolio_args, config).await
+    portfolio::run(portfolio_args, config, clients).await
 }
 
 /// Print help message for interactive mode.
@@ -964,5 +979,970 @@ mod tests {
     fn test_interactive_args_default() {
         let args = InteractiveArgs { no_banner: false };
         assert!(!args.no_banner);
+    }
+
+    // ========================================================================
+    // SessionContext serialization/deserialization
+    // ========================================================================
+
+    #[test]
+    fn test_session_context_serialization() {
+        let ctx = SessionContext {
+            chain: "polygon".to_string(),
+            chain_explicit: true,
+            format: OutputFormat::Json,
+            last_address: Some("0xabc".to_string()),
+            last_tx: Some("0xdef".to_string()),
+            include_tokens: true,
+            include_txs: true,
+            trace: true,
+            decode: true,
+            limit: 50,
+        };
+
+        let yaml = serde_yaml::to_string(&ctx).unwrap();
+        let deserialized: SessionContext = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(deserialized.chain, "polygon");
+        assert!(deserialized.chain_explicit);
+        assert_eq!(deserialized.format, OutputFormat::Json);
+        assert_eq!(deserialized.last_address.as_deref(), Some("0xabc"));
+        assert_eq!(deserialized.last_tx.as_deref(), Some("0xdef"));
+        assert!(deserialized.include_tokens);
+        assert!(deserialized.include_txs);
+        assert!(deserialized.trace);
+        assert!(deserialized.decode);
+        assert_eq!(deserialized.limit, 50);
+    }
+
+    #[test]
+    fn test_session_context_display_with_address_and_tx() {
+        let ctx = SessionContext {
+            chain_explicit: true,
+            last_address: Some("0x1234".to_string()),
+            last_tx: Some("0xabcd".to_string()),
+            ..Default::default()
+        };
+        let display = format!("{}", ctx);
+        assert!(display.contains("0x1234"));
+        assert!(display.contains("0xabcd"));
+        // chain_explicit → no "(auto)" suffix
+        assert!(!display.contains("(auto)"));
+    }
+
+    #[test]
+    fn test_session_context_display_auto_chain() {
+        let ctx = SessionContext::default();
+        let display = format!("{}", ctx);
+        assert!(display.contains("(auto)"));
+    }
+
+    // ========================================================================
+    // execute_input tests for context-modifying commands
+    // ========================================================================
+
+    fn test_config() -> Config {
+        Config::default()
+    }
+
+    fn test_factory() -> crate::chains::DefaultClientFactory {
+        crate::chains::DefaultClientFactory {
+            chains_config: crate::config::ChainsConfig::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_exit_commands() {
+        let config = test_config();
+        for cmd in &["exit", "quit", "q", ".exit", ".quit"] {
+            let mut ctx = SessionContext::default();
+            let result = execute_input(cmd, &mut ctx, &config, &test_factory())
+                .await
+                .unwrap();
+            assert!(result, "'{cmd}' should return true (exit)");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_help_command() {
+        let config = test_config();
+        let mut ctx = SessionContext::default();
+        let result = execute_input("help", &mut ctx, &config, &test_factory())
+            .await
+            .unwrap();
+        assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn test_context_command() {
+        let config = test_config();
+        let mut ctx = SessionContext::default();
+        let result = execute_input("ctx", &mut ctx, &config, &test_factory())
+            .await
+            .unwrap();
+        assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn test_clear_command() {
+        let config = test_config();
+        let mut ctx = SessionContext {
+            chain: "polygon".to_string(),
+            include_tokens: true,
+            limit: 42,
+            ..Default::default()
+        };
+
+        let result = execute_input("clear", &mut ctx, &config, &test_factory())
+            .await
+            .unwrap();
+        assert!(!result);
+        assert_eq!(ctx.chain, "ethereum");
+        assert!(!ctx.include_tokens);
+        assert_eq!(ctx.limit, 100);
+    }
+
+    #[tokio::test]
+    async fn test_chain_set_valid() {
+        let config = test_config();
+        let mut ctx = SessionContext::default();
+
+        execute_input("chain polygon", &mut ctx, &config, &test_factory())
+            .await
+            .unwrap();
+        assert_eq!(ctx.chain, "polygon");
+        assert!(ctx.chain_explicit);
+    }
+
+    #[tokio::test]
+    async fn test_chain_set_solana() {
+        let config = test_config();
+        let mut ctx = SessionContext::default();
+
+        execute_input("chain solana", &mut ctx, &config, &test_factory())
+            .await
+            .unwrap();
+        assert_eq!(ctx.chain, "solana");
+        assert!(ctx.chain_explicit);
+    }
+
+    #[tokio::test]
+    async fn test_chain_auto() {
+        let config = test_config();
+        let mut ctx = SessionContext {
+            chain: "polygon".to_string(),
+            chain_explicit: true,
+            ..Default::default()
+        };
+
+        execute_input("chain auto", &mut ctx, &config, &test_factory())
+            .await
+            .unwrap();
+        assert_eq!(ctx.chain, "ethereum");
+        assert!(!ctx.chain_explicit);
+    }
+
+    #[tokio::test]
+    async fn test_chain_invalid() {
+        let config = test_config();
+        let mut ctx = SessionContext::default();
+        // Invalid chain should not change context
+        execute_input("chain foobar", &mut ctx, &config, &test_factory())
+            .await
+            .unwrap();
+        assert_eq!(ctx.chain, "ethereum");
+        assert!(!ctx.chain_explicit);
+    }
+
+    #[tokio::test]
+    async fn test_chain_show() {
+        let config = test_config();
+        let mut ctx = SessionContext::default();
+        // No arg → just prints current chain, doesn't change anything
+        let result = execute_input("chain", &mut ctx, &config, &test_factory())
+            .await
+            .unwrap();
+        assert!(!result);
+        assert_eq!(ctx.chain, "ethereum");
+    }
+
+    #[tokio::test]
+    async fn test_format_set_json() {
+        let config = test_config();
+        let mut ctx = SessionContext::default();
+        execute_input("format json", &mut ctx, &config, &test_factory())
+            .await
+            .unwrap();
+        assert_eq!(ctx.format, OutputFormat::Json);
+    }
+
+    #[tokio::test]
+    async fn test_format_set_csv() {
+        let config = test_config();
+        let mut ctx = SessionContext::default();
+        execute_input("format csv", &mut ctx, &config, &test_factory())
+            .await
+            .unwrap();
+        assert_eq!(ctx.format, OutputFormat::Csv);
+    }
+
+    #[tokio::test]
+    async fn test_format_set_table() {
+        let config = test_config();
+        let mut ctx = SessionContext {
+            format: OutputFormat::Json,
+            ..Default::default()
+        };
+        execute_input("format table", &mut ctx, &config, &test_factory())
+            .await
+            .unwrap();
+        assert_eq!(ctx.format, OutputFormat::Table);
+    }
+
+    #[tokio::test]
+    async fn test_format_invalid() {
+        let config = test_config();
+        let mut ctx = SessionContext::default();
+        execute_input("format xml", &mut ctx, &config, &test_factory())
+            .await
+            .unwrap();
+        // Should remain unchanged
+        assert_eq!(ctx.format, OutputFormat::Table);
+    }
+
+    #[tokio::test]
+    async fn test_format_show() {
+        let config = test_config();
+        let mut ctx = SessionContext::default();
+        let result = execute_input("format", &mut ctx, &config, &test_factory())
+            .await
+            .unwrap();
+        assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn test_toggle_tokens() {
+        let config = test_config();
+        let mut ctx = SessionContext::default();
+        assert!(!ctx.include_tokens);
+
+        execute_input("+tokens", &mut ctx, &config, &test_factory())
+            .await
+            .unwrap();
+        assert!(ctx.include_tokens);
+
+        execute_input("+tokens", &mut ctx, &config, &test_factory())
+            .await
+            .unwrap();
+        assert!(!ctx.include_tokens);
+    }
+
+    #[tokio::test]
+    async fn test_toggle_txs() {
+        let config = test_config();
+        let mut ctx = SessionContext::default();
+        assert!(!ctx.include_txs);
+
+        execute_input("+txs", &mut ctx, &config, &test_factory())
+            .await
+            .unwrap();
+        assert!(ctx.include_txs);
+
+        execute_input("+txs", &mut ctx, &config, &test_factory())
+            .await
+            .unwrap();
+        assert!(!ctx.include_txs);
+    }
+
+    #[tokio::test]
+    async fn test_toggle_trace() {
+        let config = test_config();
+        let mut ctx = SessionContext::default();
+        assert!(!ctx.trace);
+
+        execute_input("trace", &mut ctx, &config, &test_factory())
+            .await
+            .unwrap();
+        assert!(ctx.trace);
+
+        execute_input("trace", &mut ctx, &config, &test_factory())
+            .await
+            .unwrap();
+        assert!(!ctx.trace);
+    }
+
+    #[tokio::test]
+    async fn test_toggle_decode() {
+        let config = test_config();
+        let mut ctx = SessionContext::default();
+        assert!(!ctx.decode);
+
+        execute_input("decode", &mut ctx, &config, &test_factory())
+            .await
+            .unwrap();
+        assert!(ctx.decode);
+
+        execute_input("decode", &mut ctx, &config, &test_factory())
+            .await
+            .unwrap();
+        assert!(!ctx.decode);
+    }
+
+    #[tokio::test]
+    async fn test_limit_set_valid() {
+        let config = test_config();
+        let mut ctx = SessionContext::default();
+        execute_input("limit 50", &mut ctx, &config, &test_factory())
+            .await
+            .unwrap();
+        assert_eq!(ctx.limit, 50);
+    }
+
+    #[tokio::test]
+    async fn test_limit_set_invalid() {
+        let config = test_config();
+        let mut ctx = SessionContext::default();
+        execute_input("limit abc", &mut ctx, &config, &test_factory())
+            .await
+            .unwrap();
+        // Should remain unchanged
+        assert_eq!(ctx.limit, 100);
+    }
+
+    #[tokio::test]
+    async fn test_limit_show() {
+        let config = test_config();
+        let mut ctx = SessionContext::default();
+        let result = execute_input("limit", &mut ctx, &config, &test_factory())
+            .await
+            .unwrap();
+        assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn test_unknown_command() {
+        let config = test_config();
+        let mut ctx = SessionContext::default();
+        let result = execute_input("foobar", &mut ctx, &config, &test_factory())
+            .await
+            .unwrap();
+        assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn test_empty_input() {
+        let config = test_config();
+        let mut ctx = SessionContext::default();
+        let result = execute_input("", &mut ctx, &config, &test_factory())
+            .await
+            .unwrap();
+        assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn test_address_no_arg_no_last() {
+        let config = test_config();
+        let mut ctx = SessionContext::default();
+        // address with no arg and no last_address → prints error, returns Ok(false)
+        let result = execute_input("address", &mut ctx, &config, &test_factory())
+            .await
+            .unwrap();
+        assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn test_tx_no_arg_no_last() {
+        let config = test_config();
+        let mut ctx = SessionContext::default();
+        // tx with no arg and no last_tx → prints error, returns Ok(false)
+        let result = execute_input("tx", &mut ctx, &config, &test_factory())
+            .await
+            .unwrap();
+        assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn test_crawl_no_arg() {
+        let config = test_config();
+        let mut ctx = SessionContext::default();
+        // crawl with no arg → prints usage, returns Ok(false)
+        let result = execute_input("crawl", &mut ctx, &config, &test_factory())
+            .await
+            .unwrap();
+        assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_context_commands() {
+        let config = test_config();
+        let mut ctx = SessionContext::default();
+
+        // Set chain, format, toggle flags, set limit
+        execute_input("chain polygon", &mut ctx, &config, &test_factory())
+            .await
+            .unwrap();
+        execute_input("format json", &mut ctx, &config, &test_factory())
+            .await
+            .unwrap();
+        execute_input("+tokens", &mut ctx, &config, &test_factory())
+            .await
+            .unwrap();
+        execute_input("trace", &mut ctx, &config, &test_factory())
+            .await
+            .unwrap();
+        execute_input("limit 25", &mut ctx, &config, &test_factory())
+            .await
+            .unwrap();
+
+        assert_eq!(ctx.chain, "polygon");
+        assert_eq!(ctx.format, OutputFormat::Json);
+        assert!(ctx.include_tokens);
+        assert!(ctx.trace);
+        assert_eq!(ctx.limit, 25);
+
+        // Clear resets everything
+        execute_input("clear", &mut ctx, &config, &test_factory())
+            .await
+            .unwrap();
+        assert_eq!(ctx.chain, "ethereum");
+        assert!(!ctx.include_tokens);
+        assert!(!ctx.trace);
+        assert_eq!(ctx.limit, 100);
+    }
+
+    #[tokio::test]
+    async fn test_dot_prefix_commands() {
+        let config = test_config();
+        let mut ctx = SessionContext::default();
+
+        // Dot-prefixed variants
+        let result = execute_input(".help", &mut ctx, &config, &test_factory())
+            .await
+            .unwrap();
+        assert!(!result);
+
+        execute_input(".chain polygon", &mut ctx, &config, &test_factory())
+            .await
+            .unwrap();
+        assert_eq!(ctx.chain, "polygon");
+
+        execute_input(".format json", &mut ctx, &config, &test_factory())
+            .await
+            .unwrap();
+        assert_eq!(ctx.format, OutputFormat::Json);
+
+        execute_input(".trace", &mut ctx, &config, &test_factory())
+            .await
+            .unwrap();
+        assert!(ctx.trace);
+
+        execute_input(".decode", &mut ctx, &config, &test_factory())
+            .await
+            .unwrap();
+        assert!(ctx.decode);
+    }
+
+    #[tokio::test]
+    async fn test_all_valid_chains() {
+        let config = test_config();
+        let valid_chains = [
+            "ethereum", "polygon", "arbitrum", "optimism", "base", "bsc", "aegis", "solana", "tron",
+        ];
+        for chain in valid_chains {
+            let mut ctx = SessionContext::default();
+            execute_input(
+                &format!("chain {}", chain),
+                &mut ctx,
+                &config,
+                &test_factory(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(ctx.chain, chain);
+            assert!(ctx.chain_explicit);
+        }
+    }
+
+    // ========================================================================
+    // Command dispatch tests (with MockClientFactory)
+    // ========================================================================
+
+    use crate::chains::mocks::MockClientFactory;
+
+    fn mock_factory() -> MockClientFactory {
+        let mut factory = MockClientFactory::new();
+        factory.mock_client.transactions = vec![factory.mock_client.transaction.clone()];
+        factory.mock_client.token_balances = vec![crate::chains::TokenBalance {
+            token: crate::chains::Token {
+                contract_address: "0xtoken".to_string(),
+                symbol: "TEST".to_string(),
+                name: "Test Token".to_string(),
+                decimals: 18,
+            },
+            balance: "1000".to_string(),
+            formatted_balance: "0.001".to_string(),
+            usd_value: None,
+        }];
+        factory
+    }
+
+    #[tokio::test]
+    async fn test_address_command_with_args() {
+        let config = test_config();
+        let factory = mock_factory();
+        let mut ctx = SessionContext::default();
+        let result = execute_input(
+            "address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
+            &mut ctx,
+            &config,
+            &factory,
+        )
+        .await;
+        assert!(result.is_ok());
+        assert!(!result.unwrap());
+        assert_eq!(
+            ctx.last_address,
+            Some("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_address_command_with_chain_override() {
+        let config = test_config();
+        let factory = mock_factory();
+        let mut ctx = SessionContext::default();
+        let result = execute_input(
+            "address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --chain=polygon",
+            &mut ctx,
+            &config,
+            &factory,
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_address_command_with_tokens_flag() {
+        let config = test_config();
+        let factory = mock_factory();
+        let mut ctx = SessionContext::default();
+        let result = execute_input(
+            "address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --tokens",
+            &mut ctx,
+            &config,
+            &factory,
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_address_command_with_txs_flag() {
+        let config = test_config();
+        let factory = mock_factory();
+        let mut ctx = SessionContext::default();
+        let result = execute_input(
+            "address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --txs",
+            &mut ctx,
+            &config,
+            &factory,
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_address_reuses_last_address() {
+        let config = test_config();
+        let factory = mock_factory();
+        let mut ctx = SessionContext {
+            last_address: Some("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string()),
+            ..Default::default()
+        };
+        let result = execute_input("address", &mut ctx, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_address_auto_detects_solana() {
+        let config = test_config();
+        let factory = mock_factory();
+        let mut ctx = SessionContext::default();
+        // Solana address format
+        let result = execute_input(
+            "address DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy",
+            &mut ctx,
+            &config,
+            &factory,
+        )
+        .await;
+        assert!(result.is_ok());
+        // Chain should be auto-detected
+        assert_eq!(ctx.chain, "solana");
+    }
+
+    #[tokio::test]
+    async fn test_tx_command_with_args() {
+        let config = test_config();
+        let factory = mock_factory();
+        let mut ctx = SessionContext::default();
+        let result = execute_input(
+            "tx 0xabc123def456789012345678901234567890123456789012345678901234abcd",
+            &mut ctx,
+            &config,
+            &factory,
+        )
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(
+            ctx.last_tx,
+            Some("0xabc123def456789012345678901234567890123456789012345678901234abcd".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tx_command_with_trace_decode() {
+        let config = test_config();
+        let factory = mock_factory();
+        let mut ctx = SessionContext::default();
+        let result = execute_input(
+            "tx 0xabc123def456789012345678901234567890123456789012345678901234abcd --trace --decode",
+            &mut ctx,
+            &config,
+            &factory,
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_tx_command_with_chain_override() {
+        let config = test_config();
+        let factory = mock_factory();
+        let mut ctx = SessionContext::default();
+        let result = execute_input(
+            "tx 0xabc123def456789012345678901234567890123456789012345678901234abcd --chain=polygon",
+            &mut ctx,
+            &config,
+            &factory,
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_tx_reuses_last_tx() {
+        let config = test_config();
+        let factory = mock_factory();
+        let mut ctx = SessionContext {
+            last_tx: Some(
+                "0xabc123def456789012345678901234567890123456789012345678901234abcd".to_string(),
+            ),
+            ..Default::default()
+        };
+        let result = execute_input("tx", &mut ctx, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_tx_auto_detects_tron() {
+        let config = test_config();
+        let factory = mock_factory();
+        let mut ctx = SessionContext::default();
+        let result = execute_input(
+            "tx abc123def456789012345678901234567890123456789012345678901234abcd",
+            &mut ctx,
+            &config,
+            &factory,
+        )
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(ctx.chain, "tron");
+    }
+
+    #[tokio::test]
+    async fn test_crawl_command_with_args() {
+        let config = test_config();
+        let factory = mock_factory();
+        let mut ctx = SessionContext::default();
+        let result = execute_input(
+            "crawl 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --no-charts",
+            &mut ctx,
+            &config,
+            &factory,
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_crawl_command_with_period() {
+        let config = test_config();
+        let factory = mock_factory();
+        let mut ctx = SessionContext::default();
+        let result = execute_input(
+            "crawl 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --period=7d --no-charts",
+            &mut ctx,
+            &config,
+            &factory,
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_crawl_command_with_chain_flag() {
+        let config = test_config();
+        let factory = mock_factory();
+        let mut ctx = SessionContext::default();
+        let result = execute_input(
+            "crawl 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --chain polygon --no-charts",
+            &mut ctx,
+            &config,
+            &factory,
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_crawl_command_with_period_flag() {
+        let config = test_config();
+        let factory = mock_factory();
+        let mut ctx = SessionContext::default();
+        let result = execute_input(
+            "crawl 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --period 1h --no-charts",
+            &mut ctx,
+            &config,
+            &factory,
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_crawl_command_with_report() {
+        let config = test_config();
+        let factory = mock_factory();
+        let mut ctx = SessionContext::default();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let result = execute_input(
+            &format!(
+                "crawl 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --report {} --no-charts",
+                tmp.path().display()
+            ),
+            &mut ctx,
+            &config,
+            &factory,
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_portfolio_list_command() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            portfolio: crate::config::PortfolioConfig {
+                data_dir: Some(tmp_dir.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+        let factory = mock_factory();
+        let mut ctx = SessionContext::default();
+        let result = execute_input("portfolio list", &mut ctx, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_portfolio_add_command() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            portfolio: crate::config::PortfolioConfig {
+                data_dir: Some(tmp_dir.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+        let factory = mock_factory();
+        let mut ctx = SessionContext::default();
+        let result = execute_input(
+            "portfolio add 0xtest --label mytest",
+            &mut ctx,
+            &config,
+            &factory,
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_portfolio_summary_command() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            portfolio: crate::config::PortfolioConfig {
+                data_dir: Some(tmp_dir.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+        let factory = mock_factory();
+        let mut ctx = SessionContext::default();
+        // Add first
+        execute_input(
+            "portfolio add 0xtest",
+            &mut ctx,
+            &config,
+            &factory,
+        )
+        .await
+        .unwrap();
+        // Then summary
+        let result = execute_input("portfolio summary", &mut ctx, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_portfolio_remove_command() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            portfolio: crate::config::PortfolioConfig {
+                data_dir: Some(tmp_dir.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+        let factory = mock_factory();
+        let mut ctx = SessionContext::default();
+        let result = execute_input("portfolio remove 0xtest", &mut ctx, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_portfolio_no_subcommand() {
+        let config = test_config();
+        let factory = mock_factory();
+        let mut ctx = SessionContext::default();
+        let result = execute_input("portfolio", &mut ctx, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_portfolio_unknown_subcommand() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            portfolio: crate::config::PortfolioConfig {
+                data_dir: Some(tmp_dir.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+        let factory = mock_factory();
+        let mut ctx = SessionContext::default();
+        let result = execute_input("portfolio foobar", &mut ctx, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_tokens_command_list() {
+        let config = test_config();
+        let factory = mock_factory();
+        let mut ctx = SessionContext::default();
+        let result = execute_input("tokens list", &mut ctx, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_tokens_command_no_args() {
+        let config = test_config();
+        let factory = mock_factory();
+        let mut ctx = SessionContext::default();
+        let result = execute_input("tokens", &mut ctx, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_tokens_command_recent() {
+        let config = test_config();
+        let factory = mock_factory();
+        let mut ctx = SessionContext::default();
+        let result = execute_input("tokens recent", &mut ctx, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_tokens_command_remove_no_args() {
+        let config = test_config();
+        let factory = mock_factory();
+        let mut ctx = SessionContext::default();
+        let result = execute_input("tokens remove", &mut ctx, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_tokens_command_add_no_args() {
+        let config = test_config();
+        let factory = mock_factory();
+        let mut ctx = SessionContext::default();
+        let result = execute_input("tokens add", &mut ctx, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_tokens_command_unknown() {
+        let config = test_config();
+        let factory = mock_factory();
+        let mut ctx = SessionContext::default();
+        let result = execute_input("tokens foobar", &mut ctx, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_setup_command_status() {
+        let config = test_config();
+        let factory = mock_factory();
+        let mut ctx = SessionContext::default();
+        let result = execute_input("setup --status", &mut ctx, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_transaction_alias() {
+        let config = test_config();
+        let factory = mock_factory();
+        let mut ctx = SessionContext::default();
+        let result = execute_input(
+            "transaction 0xabc123def456789012345678901234567890123456789012345678901234abcd",
+            &mut ctx,
+            &config,
+            &factory,
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_token_alias_for_crawl() {
+        let config = test_config();
+        let factory = mock_factory();
+        let mut ctx = SessionContext::default();
+        let result = execute_input(
+            "token 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --no-charts",
+            &mut ctx,
+            &config,
+            &factory,
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_port_alias_for_portfolio() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            portfolio: crate::config::PortfolioConfig {
+                data_dir: Some(tmp_dir.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+        let factory = mock_factory();
+        let mut ctx = SessionContext::default();
+        let result = execute_input("port list", &mut ctx, &config, &factory).await;
+        assert!(result.is_ok());
     }
 }

@@ -1604,4 +1604,652 @@ mod tests {
         assert!(report.contains("## Security Analysis"));
         assert!(report.contains("## Risk Score"));
     }
+
+    // ========================================================================
+    // Edge case tests
+    // ========================================================================
+
+    #[test]
+    fn test_generate_report_no_holders() {
+        let mut analytics = create_test_analytics();
+        analytics.holders = vec![];
+        analytics.total_holders = 0;
+        analytics.top_10_concentration = None;
+        analytics.top_50_concentration = None;
+        analytics.top_100_concentration = None;
+        let report = generate_report(&analytics);
+        assert!(report.contains("No holder data available"));
+    }
+
+    #[test]
+    fn test_generate_report_no_market_cap() {
+        let mut analytics = create_test_analytics();
+        analytics.market_cap = None;
+        analytics.fdv = None;
+        analytics.total_supply = None;
+        analytics.circulating_supply = None;
+        let report = generate_report(&analytics);
+        assert!(!report.contains("Market Cap | $"));
+        assert!(!report.contains("Fully Diluted Valuation | $"));
+    }
+
+    #[test]
+    fn test_generate_report_no_dex_pairs() {
+        let mut analytics = create_test_analytics();
+        analytics.dex_pairs = vec![];
+        analytics.liquidity_usd = 0.0;
+        let report = generate_report(&analytics);
+        // Should still generate without errors
+        assert!(report.contains("## Liquidity Analysis"));
+    }
+
+    #[test]
+    fn test_generate_report_no_social_no_website() {
+        let mut analytics = create_test_analytics();
+        analytics.socials = vec![];
+        analytics.websites = vec![];
+        analytics.image_url = None;
+        analytics.dexscreener_url = None;
+        let section = generate_token_info_section(&analytics);
+        assert!(section.contains("No additional token metadata available"));
+    }
+
+    #[test]
+    fn test_security_analysis_zero_transactions() {
+        let mut analytics = create_test_analytics();
+        analytics.total_buys_24h = 0;
+        analytics.total_sells_24h = 0;
+        analytics.total_buys_6h = 0;
+        analytics.total_sells_6h = 0;
+        analytics.total_buys_1h = 0;
+        analytics.total_sells_1h = 0;
+        let section = generate_security_analysis(&analytics);
+        assert!(section.contains("UNKNOWN") || section.contains("No transaction data"));
+    }
+
+    #[test]
+    fn test_security_analysis_only_buys() {
+        let mut analytics = create_test_analytics();
+        analytics.total_buys_24h = 100;
+        analytics.total_sells_24h = 0;
+        let section = generate_security_analysis(&analytics);
+        assert!(section.contains("Possible honeypot") || section.contains("HIGH"));
+    }
+
+    #[test]
+    fn test_security_analysis_token_age_very_new() {
+        let mut analytics = create_test_analytics();
+        analytics.token_age_hours = Some(6.0);
+        let section = generate_security_analysis(&analytics);
+        assert!(section.contains("Very new token") || section.contains("HIGH RISK"));
+    }
+
+    #[test]
+    fn test_security_analysis_token_age_unknown() {
+        let mut analytics = create_test_analytics();
+        analytics.token_age_hours = None;
+        let section = generate_security_analysis(&analytics);
+        assert!(section.contains("not available") || section.contains("UNKNOWN"));
+    }
+
+    #[test]
+    fn test_security_analysis_whale_risk_extreme() {
+        let mut analytics = create_test_analytics();
+        analytics.holders = vec![TokenHolder {
+            address: "0xwhale".to_string(),
+            balance: "9000000".to_string(),
+            formatted_balance: "9M".to_string(),
+            percentage: 60.0,
+            rank: 1,
+        }];
+        let section = generate_security_analysis(&analytics);
+        assert!(section.contains("HIGH") || section.contains("Extreme concentration"));
+    }
+
+    #[test]
+    fn test_security_analysis_no_holders() {
+        let mut analytics = create_test_analytics();
+        analytics.holders = vec![];
+        let section = generate_security_analysis(&analytics);
+        assert!(section.contains("Whale Risk"));
+        assert!(section.contains("UNKNOWN") || section.contains("not available"));
+    }
+
+    #[test]
+    fn test_risk_factors_high_risk_token() {
+        let mut analytics = create_test_analytics();
+        analytics.total_buys_24h = 1000;
+        analytics.total_sells_24h = 0; // Honeypot risk = 10
+        analytics.token_age_hours = Some(12.0); // Very new = 10
+        analytics.liquidity_usd = 5_000.0; // Very low = 10
+        analytics.holders = vec![TokenHolder {
+            address: "0x1".to_string(),
+            balance: "1000".to_string(),
+            formatted_balance: "1K".to_string(),
+            percentage: 80.0, // Very concentrated = 10
+            rank: 1,
+        }];
+        analytics.socials = vec![]; // No socials = 8
+        analytics.websites = vec![];
+
+        let factors = RiskFactors::from_analytics(&analytics);
+        assert_eq!(factors.honeypot, 10);
+        assert_eq!(factors.age, 10);
+        assert_eq!(factors.liquidity, 10);
+        assert_eq!(factors.concentration, 10);
+        assert_eq!(factors.social, 8);
+        assert!(factors.overall_score() >= 8);
+        assert!(factors.risk_level() == "HIGH" || factors.risk_level() == "CRITICAL");
+        assert!(factors.risk_emoji() == "🟠" || factors.risk_emoji() == "🔴");
+    }
+
+    #[test]
+    fn test_risk_factors_low_risk_token() {
+        let mut analytics = create_test_analytics();
+        analytics.total_buys_24h = 100;
+        analytics.total_sells_24h = 95; // Normal ratio
+        analytics.token_age_hours = Some(10_000.0); // Very established
+        analytics.liquidity_usd = 50_000_000.0; // Very high
+        analytics.holders = vec![TokenHolder {
+            address: "0x1".to_string(),
+            balance: "1000".to_string(),
+            formatted_balance: "1K".to_string(),
+            percentage: 3.0, // Well distributed
+            rank: 1,
+        }];
+        analytics.socials = vec![
+            TokenSocial {
+                platform: "twitter".to_string(),
+                url: "https://twitter.com/test".to_string(),
+            },
+            TokenSocial {
+                platform: "telegram".to_string(),
+                url: "https://t.me/test".to_string(),
+            },
+        ];
+        analytics.websites = vec!["https://example.com".to_string()];
+
+        let factors = RiskFactors::from_analytics(&analytics);
+        assert!(factors.overall_score() <= 3);
+        assert_eq!(factors.risk_level(), "LOW");
+        assert_eq!(factors.risk_emoji(), "🟢");
+    }
+
+    #[test]
+    fn test_risk_assessment_labels() {
+        assert_eq!(risk_assessment(0), "Low Risk");
+        assert_eq!(risk_assessment(1), "Low Risk");
+        assert_eq!(risk_assessment(3), "Moderate");
+        assert_eq!(risk_assessment(5), "Elevated");
+        assert_eq!(risk_assessment(7), "High Risk");
+        assert_eq!(risk_assessment(9), "Critical");
+        assert_eq!(risk_assessment(10), "Critical");
+    }
+
+    #[test]
+    fn test_format_usd_edge_cases() {
+        assert_eq!(format_usd(0.0), "$0.00");
+        assert_eq!(format_usd(0.50), "$0.50");
+        assert_eq!(format_usd(999.0), "$999.00");
+    }
+
+    #[test]
+    fn test_format_number_edge_cases() {
+        assert_eq!(format_number(0.0), "0");
+        assert_eq!(format_number(500.0), "500");
+        assert_eq!(format_number(1500.0), "2K");
+        assert_eq!(format_number(1_500_000.0), "1.50M");
+    }
+
+    #[test]
+    fn test_capitalize_edge_cases() {
+        assert_eq!(capitalize("a"), "A");
+        assert_eq!(capitalize("ABC"), "ABC");
+    }
+
+    #[test]
+    fn test_data_sources_different_chains() {
+        let chains = vec![
+            ("ethereum", "etherscan.io"),
+            ("polygon", "polygonscan.com"),
+            ("arbitrum", "arbiscan.io"),
+            ("optimism", "optimistic.etherscan.io"),
+            ("base", "basescan.org"),
+            ("bsc", "bscscan.com"),
+            ("solana", "solscan.io"),
+        ];
+
+        for (chain, expected_domain) in chains {
+            let mut analytics = create_test_analytics();
+            analytics.chain = chain.to_string();
+            let section = generate_data_sources(&analytics);
+            assert!(
+                section.contains(expected_domain),
+                "Chain {} should link to {}",
+                chain,
+                expected_domain
+            );
+        }
+    }
+
+    #[test]
+    fn test_buysell_chart_empty() {
+        let mut analytics = create_test_analytics();
+        analytics.total_buys_24h = 0;
+        analytics.total_sells_24h = 0;
+        let chart = generate_buysell_chart(&analytics);
+        assert!(chart.is_empty());
+    }
+
+    #[test]
+    fn test_txn_activity_chart_empty() {
+        let mut analytics = create_test_analytics();
+        analytics.total_buys_24h = 0;
+        analytics.total_sells_24h = 0;
+        analytics.total_buys_6h = 0;
+        analytics.total_sells_6h = 0;
+        analytics.total_buys_1h = 0;
+        analytics.total_sells_1h = 0;
+        let chart = generate_txn_activity_chart(&analytics);
+        assert!(chart.is_empty());
+    }
+
+    #[test]
+    fn test_volume_chart_empty() {
+        let analytics = create_test_analytics();
+        // analytics has empty volume_history by default
+        let chart = generate_volume_chart(&analytics);
+        assert!(chart.is_empty());
+    }
+
+    #[test]
+    fn test_liquidity_chart_single_pair() {
+        let analytics = create_test_analytics();
+        // Only 1 DEX pair → no chart generated
+        assert_eq!(analytics.dex_pairs.len(), 1);
+        let chart = generate_liquidity_chart(&analytics);
+        assert!(chart.is_empty());
+    }
+
+    #[test]
+    fn test_liquidity_chart_multiple_pairs() {
+        let mut analytics = create_test_analytics();
+        analytics.dex_pairs.push(DexPair {
+            dex_name: "SushiSwap".to_string(),
+            pair_address: "0x5678".to_string(),
+            base_token: "USDC".to_string(),
+            quote_token: "DAI".to_string(),
+            price_usd: 1.0,
+            volume_24h: 100_000.0,
+            liquidity_usd: 5_000_000.0,
+            price_change_24h: 0.0,
+            buys_24h: 50,
+            sells_24h: 50,
+            buys_6h: 10,
+            sells_6h: 10,
+            buys_1h: 2,
+            sells_1h: 2,
+            pair_created_at: None,
+            url: None,
+        });
+        let chart = generate_liquidity_chart(&analytics);
+        assert!(chart.contains("mermaid"));
+        assert!(chart.contains("Uniswap V3"));
+        assert!(chart.contains("SushiSwap"));
+    }
+
+    #[test]
+    fn test_concentration_chart_no_holders() {
+        let mut analytics = create_test_analytics();
+        analytics.holders = vec![];
+        analytics.top_10_concentration = Some(0.0);
+        let chart = generate_concentration_chart(&analytics);
+        assert!(chart.is_empty());
+    }
+
+    #[test]
+    fn test_concentration_analysis_ranges() {
+        // Very high concentration
+        let mut analytics = create_test_analytics();
+        analytics.top_10_concentration = Some(85.0);
+        let section = generate_concentration_analysis(&analytics);
+        assert!(section.contains("Very High Concentration"));
+
+        // High concentration
+        analytics.top_10_concentration = Some(55.0);
+        let section = generate_concentration_analysis(&analytics);
+        assert!(section.contains("High Concentration"));
+
+        // Low concentration
+        analytics.top_10_concentration = Some(15.0);
+        let section = generate_concentration_analysis(&analytics);
+        assert!(section.contains("Low Concentration"));
+    }
+
+    #[test]
+    fn test_risk_indicators_low_liquidity() {
+        let mut analytics = create_test_analytics();
+        analytics.liquidity_usd = 5_000.0;
+        let section = generate_risk_indicators(&analytics);
+        assert!(section.contains("Very low liquidity"));
+    }
+
+    #[test]
+    fn test_risk_indicators_high_volatility() {
+        let mut analytics = create_test_analytics();
+        analytics.price_change_24h = 25.0;
+        let section = generate_risk_indicators(&analytics);
+        assert!(section.contains("High price volatility"));
+    }
+
+    #[test]
+    fn test_risk_indicators_healthy_token() {
+        let mut analytics = create_test_analytics();
+        analytics.holders = vec![TokenHolder {
+            address: "0x1".to_string(),
+            balance: "100".to_string(),
+            formatted_balance: "100".to_string(),
+            percentage: 5.0,
+            rank: 1,
+        }];
+        analytics.liquidity_usd = 10_000_000.0;
+        analytics.volume_24h = 500_000.0;
+        analytics.price_change_24h = 2.0;
+        let section = generate_risk_indicators(&analytics);
+        assert!(section.contains("Reasonable distribution"));
+        assert!(section.contains("Good liquidity"));
+        assert!(section.contains("Active trading"));
+    }
+
+    #[test]
+    fn test_risk_indicators_empty() {
+        let mut analytics = create_test_analytics();
+        analytics.holders = vec![];
+        analytics.liquidity_usd = 500_000.0;
+        analytics.volume_24h = 50_000.0;
+        analytics.price_change_24h = 5.0;
+        let section = generate_risk_indicators(&analytics);
+        // With no holders, calculation uses empty iter → 0%, which is "reasonable"
+        assert!(section.contains("Reasonable distribution"));
+    }
+
+    #[test]
+    fn test_save_report() {
+        let tmp = std::env::temp_dir().join("bcc_test_report.md");
+        let result = save_report("# Test Report\n\nContent here.", &tmp);
+        assert!(result.is_ok());
+        let content = std::fs::read_to_string(&tmp).unwrap();
+        assert!(content.contains("# Test Report"));
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn test_save_report_invalid_path() {
+        let result = save_report("content", "/nonexistent/directory/report.md");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_volume_analysis_high_vol_to_liq() {
+        let mut analytics = create_test_analytics();
+        analytics.volume_24h = 100_000_000.0;
+        analytics.liquidity_usd = 10_000_000.0; // ratio = 10
+        let section = generate_volume_analysis(&analytics);
+        assert!(section.contains("unusual trading activity"));
+    }
+
+    #[test]
+    fn test_price_analysis_with_history() {
+        use crate::chains::PricePoint;
+        let mut analytics = create_test_analytics();
+        analytics.price_history = vec![
+            PricePoint {
+                timestamp: 1700000000,
+                price: 1.0,
+            },
+            PricePoint {
+                timestamp: 1700003600,
+                price: 1.5,
+            },
+            PricePoint {
+                timestamp: 1700007200,
+                price: 0.8,
+            },
+        ];
+        let section = generate_price_analysis(&analytics);
+        assert!(section.contains("Price Range"));
+        assert!(section.contains("High"));
+        assert!(section.contains("Low"));
+        assert!(section.contains("Average"));
+    }
+
+    #[test]
+    fn test_social_platform_icons() {
+        let mut analytics = create_test_analytics();
+        analytics.socials = vec![
+            TokenSocial {
+                platform: "twitter".to_string(),
+                url: "https://twitter.com/test".to_string(),
+            },
+            TokenSocial {
+                platform: "telegram".to_string(),
+                url: "https://t.me/test".to_string(),
+            },
+            TokenSocial {
+                platform: "discord".to_string(),
+                url: "https://discord.gg/test".to_string(),
+            },
+            TokenSocial {
+                platform: "github".to_string(),
+                url: "https://github.com/test".to_string(),
+            },
+            TokenSocial {
+                platform: "unknown".to_string(),
+                url: "https://example.com".to_string(),
+            },
+        ];
+        let section = generate_token_info_section(&analytics);
+        assert!(section.contains("🐦")); // twitter
+        assert!(section.contains("📱")); // telegram
+        assert!(section.contains("💬")); // discord
+        assert!(section.contains("💻")); // github
+        assert!(section.contains("🔗")); // unknown
+    }
+
+    #[test]
+    fn test_security_analysis_token_age_ranges() {
+        let mut analytics = create_test_analytics();
+
+        // Very new (< 24h)
+        analytics.token_age_hours = Some(6.0);
+        let section = generate_security_analysis(&analytics);
+        assert!(section.contains("HIGH RISK"));
+
+        // New (24-48h)
+        analytics.token_age_hours = Some(36.0);
+        let section = generate_security_analysis(&analytics);
+        assert!(section.contains("MEDIUM"));
+
+        // Relatively new (< 7d)
+        analytics.token_age_hours = Some(120.0);
+        let section = generate_security_analysis(&analytics);
+        assert!(section.contains("CAUTION"));
+
+        // Established (> 1 year)
+        analytics.token_age_hours = Some(10_000.0);
+        let section = generate_security_analysis(&analytics);
+        assert!(section.contains("ESTABLISHED"));
+    }
+
+    #[test]
+    fn test_price_history_chart_with_data() {
+        use crate::chains::PricePoint;
+        let mut analytics = create_test_analytics();
+        analytics.price_history = (0..20)
+            .map(|i| PricePoint {
+                timestamp: 1700000000 + i * 3600,
+                price: 1.0 + (i as f64) * 0.01,
+            })
+            .collect();
+        let chart = generate_price_history_chart(&analytics);
+        assert!(chart.contains("Price History"));
+        assert!(chart.contains("mermaid"));
+        assert!(chart.contains("xychart-beta"));
+        assert!(chart.contains("line ["));
+    }
+
+    #[test]
+    fn test_price_chart_with_changes_and_history() {
+        use crate::chains::PricePoint;
+        let mut analytics = create_test_analytics();
+        analytics.price_change_1h = 1.5;
+        analytics.price_change_6h = -2.3;
+        analytics.price_change_24h = 5.0;
+        analytics.price_change_7d = -10.0;
+        analytics.price_history = (0..5)
+            .map(|i| PricePoint {
+                timestamp: 1700000000 + i * 3600,
+                price: 1.0 + (i as f64) * 0.1,
+            })
+            .collect();
+        let chart = generate_price_chart(&analytics);
+        assert!(chart.contains("Price Changes by Period"));
+        assert!(chart.contains("Price History")); // Also includes history chart
+    }
+
+    #[test]
+    fn test_price_chart_zero_changes_with_history() {
+        use crate::chains::PricePoint;
+        let mut analytics = create_test_analytics();
+        analytics.price_change_1h = 0.0;
+        analytics.price_change_6h = 0.0;
+        analytics.price_change_24h = 0.0;
+        analytics.price_change_7d = 0.0;
+        analytics.price_history = vec![
+            PricePoint { timestamp: 1700000000, price: 1.0 },
+            PricePoint { timestamp: 1700003600, price: 1.5 },
+        ];
+        let chart = generate_price_chart(&analytics);
+        assert!(chart.contains("Price History")); // Falls back to history chart
+    }
+
+    #[test]
+    fn test_volume_chart_with_data() {
+        use crate::chains::VolumePoint;
+        let mut analytics = create_test_analytics();
+        analytics.volume_history = (0..10)
+            .map(|i| VolumePoint {
+                timestamp: 1700000000 + i * 3600,
+                volume: 100_000.0 + (i as f64) * 50_000.0,
+            })
+            .collect();
+        let chart = generate_volume_chart(&analytics);
+        assert!(chart.contains("Volume Chart"));
+        assert!(chart.contains("mermaid"));
+        assert!(chart.contains("bar ["));
+    }
+
+    #[test]
+    fn test_concentration_chart_three_segments() {
+        let mut analytics = create_test_analytics();
+        // Set top_10 = 30%, top_50 = 60% (difference > 5%), triggers 3-segment chart
+        analytics.top_10_concentration = Some(30.0);
+        analytics.top_50_concentration = Some(60.0);
+        let chart = generate_concentration_chart(&analytics);
+        assert!(chart.contains("Top 10"));
+        assert!(chart.contains("Rank 11-50"));
+        assert!(chart.contains("Others"));
+    }
+
+    #[test]
+    fn test_risk_indicators_very_low_liquidity() {
+        let mut analytics = create_test_analytics();
+        analytics.liquidity_usd = 5_000.0;
+        analytics.volume_24h = 500.0;
+        let section = generate_risk_indicators(&analytics);
+        assert!(section.contains("Very low liquidity"));
+        assert!(section.contains("Very low trading volume"));
+    }
+
+    #[test]
+    fn test_risk_indicators_moderate_liquidity() {
+        let mut analytics = create_test_analytics();
+        analytics.liquidity_usd = 50_000.0;
+        let section = generate_risk_indicators(&analytics);
+        assert!(section.contains("Low liquidity"));
+    }
+
+    #[test]
+    fn test_risk_indicators_extreme_concentration() {
+        let mut analytics = create_test_analytics();
+        analytics.holders = vec![TokenHolder {
+            address: "0xwhale".to_string(),
+            balance: "900000000".to_string(),
+            formatted_balance: "900M".to_string(),
+            percentage: 90.0,
+            rank: 1,
+        }];
+        let section = generate_risk_indicators(&analytics);
+        assert!(section.contains("Extreme whale concentration"));
+    }
+
+    #[test]
+    fn test_risk_indicators_no_data() {
+        let mut analytics = create_test_analytics();
+        analytics.holders = vec![];
+        analytics.liquidity_usd = 500_000.0; // between 100k and 1M, no risk or positive
+        analytics.volume_24h = 50_000.0; // between 1k and 100k, no risk or positive
+        analytics.price_change_24h = 5.0; // less than 20%, no risk
+        let section = generate_risk_indicators(&analytics);
+        // Should have insufficient data or at least no risk factors
+        assert!(section.contains("Risk Indicators"));
+    }
+
+    #[test]
+    fn test_holder_section_with_data() {
+        let analytics = create_test_analytics();
+        let section = generate_holder_section(&analytics);
+        assert!(section.contains("Top Holders"));
+        assert!(section.contains("0x55FE002e15bA7591a5E5Ce68a6D3c6E1593d3d8c")); // Full address
+        assert!(section.contains("12.50%"));
+    }
+
+    #[test]
+    fn test_risk_breakdown_chart() {
+        let analytics = create_test_analytics();
+        let section = generate_risk_score_section(&analytics);
+        assert!(section.contains("Risk Score"));
+        assert!(section.contains("Risk Factor Breakdown"));
+        assert!(section.contains("Honeypot"));
+        assert!(section.contains("Token Age"));
+    }
+
+    #[test]
+    fn test_data_sources_section() {
+        let analytics = create_test_analytics();
+        let section = generate_data_sources(&analytics);
+        assert!(section.contains("Data Sources"));
+        assert!(section.contains("ethereum"));
+    }
+
+    #[test]
+    fn test_volume_analysis_section() {
+        let analytics = create_test_analytics();
+        let section = generate_volume_analysis(&analytics);
+        assert!(section.contains("Volume Analysis"));
+    }
+
+    #[test]
+    fn test_liquidity_analysis_section() {
+        let analytics = create_test_analytics();
+        let section = generate_liquidity_analysis(&analytics);
+        assert!(section.contains("Liquidity Analysis"));
+    }
+
+    #[test]
+    fn test_format_number_large_values() {
+        assert_eq!(format_number(1_500_000_000.0), "1500.00M");
+        assert_eq!(format_number(500_000.0), "500K");
+        assert_eq!(format_number(42.0), "42");
+    }
 }

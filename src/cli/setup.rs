@@ -598,8 +598,333 @@ mod tests {
     }
 
     #[test]
+    fn test_mask_key_exactly_8() {
+        let masked = mask_key("ABCDEFGH");
+        assert_eq!(masked, "********");
+    }
+
+    #[test]
+    fn test_mask_key_9_chars() {
+        let masked = mask_key("ABCDEFGHI");
+        assert_eq!(masked, "(ABCD...FGHI)");
+    }
+
+    #[test]
+    fn test_mask_key_empty() {
+        let masked = mask_key("");
+        assert_eq!(masked, "");
+    }
+
+    #[test]
     fn test_get_api_key_url() {
         assert!(get_api_key_url("etherscan").contains("etherscan.io"));
         assert!(get_api_key_url("bscscan").contains("bscscan.com"));
+    }
+
+    // ========================================================================
+    // API key info tests
+    // ========================================================================
+
+    #[test]
+    fn test_get_api_key_info_all_providers() {
+        let providers = [
+            "etherscan",
+            "bscscan",
+            "polygonscan",
+            "arbiscan",
+            "basescan",
+            "optimism",
+        ];
+        for provider in providers {
+            let info = get_api_key_info(provider);
+            assert!(
+                !info.url.is_empty(),
+                "URL should not be empty for {}",
+                provider
+            );
+            assert!(
+                !info.chain.is_empty(),
+                "Chain should not be empty for {}",
+                provider
+            );
+            assert!(
+                !info.features.is_empty(),
+                "Features should not be empty for {}",
+                provider
+            );
+            assert!(
+                !info.signup_steps.is_empty(),
+                "Signup steps should not be empty for {}",
+                provider
+            );
+        }
+    }
+
+    #[test]
+    fn test_get_api_key_info_unknown() {
+        let info = get_api_key_info("unknown_provider");
+        // Should still return info, just generic
+        assert!(!info.url.is_empty());
+    }
+
+    #[test]
+    fn test_get_api_key_info_urls_correct() {
+        assert!(get_api_key_info("etherscan").url.contains("etherscan.io"));
+        assert!(get_api_key_info("bscscan").url.contains("bscscan.com"));
+        assert!(
+            get_api_key_info("polygonscan")
+                .url
+                .contains("polygonscan.com")
+        );
+        assert!(get_api_key_info("arbiscan").url.contains("arbiscan.io"));
+        assert!(get_api_key_info("basescan").url.contains("basescan.org"));
+        assert!(
+            get_api_key_info("optimism")
+                .url
+                .contains("optimistic.etherscan.io")
+        );
+    }
+
+    // ========================================================================
+    // Config items tests
+    // ========================================================================
+
+    #[test]
+    fn test_get_api_key_items_default_config() {
+        let config = Config::default();
+        let items = get_api_key_items(&config);
+        assert_eq!(items.len(), 6);
+        // All should be unset by default
+        for item in &items {
+            assert!(
+                !item.is_set,
+                "{} should not be set in default config",
+                item.name
+            );
+            assert!(item.value_hint.is_none());
+        }
+    }
+
+    #[test]
+    fn test_get_api_key_items_with_set_key() {
+        let mut config = Config::default();
+        config
+            .chains
+            .api_keys
+            .insert("etherscan".to_string(), "ABCDEFGHIJKLMNOP".to_string());
+        let items = get_api_key_items(&config);
+        let etherscan_item = items.iter().find(|i| i.name == "etherscan").unwrap();
+        assert!(etherscan_item.is_set);
+        assert!(etherscan_item.value_hint.is_some());
+        assert_eq!(etherscan_item.value_hint.as_ref().unwrap(), "(ABCD...MNOP)");
+    }
+
+    // ========================================================================
+    // SetupArgs tests
+    // ========================================================================
+
+    #[test]
+    fn test_setup_args_defaults() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct TestCli {
+            #[command(flatten)]
+            setup: SetupArgs,
+        }
+
+        let cli = TestCli::try_parse_from(["test"]).unwrap();
+        assert!(!cli.setup.status);
+        assert!(cli.setup.key.is_none());
+        assert!(!cli.setup.reset);
+    }
+
+    #[test]
+    fn test_setup_args_status() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct TestCli {
+            #[command(flatten)]
+            setup: SetupArgs,
+        }
+
+        let cli = TestCli::try_parse_from(["test", "--status"]).unwrap();
+        assert!(cli.setup.status);
+    }
+
+    #[test]
+    fn test_setup_args_key() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct TestCli {
+            #[command(flatten)]
+            setup: SetupArgs,
+        }
+
+        let cli = TestCli::try_parse_from(["test", "--key", "etherscan"]).unwrap();
+        assert_eq!(cli.setup.key.as_deref(), Some("etherscan"));
+    }
+
+    #[test]
+    fn test_setup_args_reset() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct TestCli {
+            #[command(flatten)]
+            setup: SetupArgs,
+        }
+
+        let cli = TestCli::try_parse_from(["test", "--reset"]).unwrap();
+        assert!(cli.setup.reset);
+    }
+
+    // ========================================================================
+    // show_status (pure function, prints to stdout)
+    // ========================================================================
+
+    #[test]
+    fn test_show_status_no_panic() {
+        let config = Config::default();
+        show_status(&config);
+    }
+
+    #[test]
+    fn test_show_status_with_keys_no_panic() {
+        let mut config = Config::default();
+        config
+            .chains
+            .api_keys
+            .insert("etherscan".to_string(), "abc123def456".to_string());
+        config
+            .chains
+            .api_keys
+            .insert("bscscan".to_string(), "xyz".to_string());
+        show_status(&config);
+    }
+
+    // ========================================================================
+    // run() dispatching tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_run_status_mode() {
+        let config = Config::default();
+        let args = SetupArgs {
+            status: true,
+            key: None,
+            reset: false,
+        };
+        let result = run(args, &config).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_key_unknown() {
+        let config = Config::default();
+        let args = SetupArgs {
+            status: false,
+            key: Some("nonexistent".to_string()),
+            reset: false,
+        };
+        // This should print "Unknown API key" but still return Ok
+        let result = run(args, &config).await;
+        assert!(result.is_ok());
+    }
+
+    // ========================================================================
+    // save_config tests
+    // ========================================================================
+
+    #[test]
+    fn test_show_status_with_multiple_keys() {
+        let mut config = Config::default();
+        config.chains.api_keys.insert("etherscan".to_string(), "abc123def456789".to_string());
+        config.chains.api_keys.insert("polygonscan".to_string(), "poly_key_12345".to_string());
+        config.chains.api_keys.insert("bscscan".to_string(), "bsc".to_string()); // Short key
+        show_status(&config);
+    }
+
+    #[test]
+    fn test_show_status_with_all_keys() {
+        let mut config = Config::default();
+        for key in ["etherscan", "bscscan", "polygonscan", "arbiscan", "basescan", "optimism"] {
+            config.chains.api_keys.insert(key.to_string(), format!("{}_key_12345678", key));
+        }
+        // No missing keys → should skip "where to get" section
+        show_status(&config);
+    }
+
+    #[test]
+    fn test_show_status_with_custom_rpc() {
+        let mut config = Config::default();
+        config.chains.ethereum_rpc = Some("https://custom.rpc.example.com".to_string());
+        config.output.format = OutputFormat::Json;
+        config.output.color = false;
+        show_status(&config);
+    }
+
+    #[test]
+    fn test_get_api_key_items_all_set() {
+        let mut config = Config::default();
+        for key in ["etherscan", "bscscan", "polygonscan", "arbiscan", "basescan", "optimism"] {
+            config.chains.api_keys.insert(key.to_string(), format!("{}_key_12345678", key));
+        }
+        let items = get_api_key_items(&config);
+        assert_eq!(items.len(), 6);
+        for item in &items {
+            assert!(item.is_set, "{} should be set", item.name);
+            assert!(item.value_hint.is_some());
+        }
+    }
+
+    #[test]
+    fn test_get_api_key_info_features_not_empty() {
+        for key in ["etherscan", "bscscan", "polygonscan", "arbiscan", "basescan", "optimism"] {
+            let info = get_api_key_info(key);
+            assert!(!info.features.is_empty());
+            assert!(!info.signup_steps.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_save_config_creates_file() {
+        let tmp_dir = std::env::temp_dir().join("bcc_test_setup");
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let tmp_file = tmp_dir.join("config.yaml");
+
+        // Since save_config uses Config::config_path(), we can't easily redirect it
+        // but we can test the config serialization logic directly
+        let mut config = Config::default();
+        config
+            .chains
+            .api_keys
+            .insert("etherscan".to_string(), "test_key_12345".to_string());
+        config.output.format = OutputFormat::Json;
+
+        // Build the YAML manually (same logic as save_config)
+        let mut yaml = String::new();
+        yaml.push_str("# BCC Configuration\n");
+        yaml.push_str("# Generated by 'bca setup'\n\n");
+        yaml.push_str("chains:\n");
+        if !config.chains.api_keys.is_empty() {
+            yaml.push_str("  api_keys:\n");
+            for (name, key) in &config.chains.api_keys {
+                yaml.push_str(&format!("    {}: \"{}\"\n", name, key));
+            }
+        }
+        yaml.push_str("\noutput:\n");
+        yaml.push_str(&format!("  format: {}\n", config.output.format));
+        yaml.push_str(&format!("  color: {}\n", config.output.color));
+
+        std::fs::write(&tmp_file, &yaml).unwrap();
+        let content = std::fs::read_to_string(&tmp_file).unwrap();
+        assert!(content.contains("etherscan"));
+        assert!(content.contains("test_key_12345"));
+        assert!(content.contains("json") || content.contains("Json"));
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 }

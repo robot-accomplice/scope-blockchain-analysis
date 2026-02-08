@@ -17,9 +17,7 @@
 //! bca tx 0xabc123... --trace
 //! ```
 
-use crate::chains::{
-    EthereumClient, SolanaClient, TronClient, validate_solana_signature, validate_tron_tx_hash,
-};
+use crate::chains::{ChainClientFactory, validate_solana_signature, validate_tron_tx_hash};
 use crate::config::{Config, OutputFormat};
 use crate::error::{BccError, Result};
 use clap::Args;
@@ -205,7 +203,11 @@ pub struct InternalTransaction {
 ///
 /// Returns [`BccError::InvalidHash`] if the transaction hash is invalid.
 /// Returns [`BccError::Request`] if API calls fail.
-pub async fn run(mut args: TxArgs, config: &Config) -> Result<()> {
+pub async fn run(
+    mut args: TxArgs,
+    config: &Config,
+    clients: &dyn ChainClientFactory,
+) -> Result<()> {
     // Auto-infer chain if using default and hash format is recognizable
     if args.chain == "ethereum"
         && let Some(inferred) = crate::chains::infer_chain_from_hash(&args.hash)
@@ -227,27 +229,14 @@ pub async fn run(mut args: TxArgs, config: &Config) -> Result<()> {
 
     println!("Analyzing transaction on {}...", args.chain);
 
-    let chain_lower = args.chain.to_lowercase();
-    let tx = match chain_lower.as_str() {
-        "solana" | "sol" => {
-            let client = SolanaClient::new(&config.chains)?;
-            client.get_transaction(&args.hash).await?
-        }
-        "tron" | "trx" => {
-            let client = TronClient::new(&config.chains)?;
-            client.get_transaction(&args.hash).await?
-        }
-        _ => {
-            // EVM chains
-            let client = EthereumClient::for_chain(&args.chain, &config.chains)?;
-            client.get_transaction(&args.hash).await?
-        }
-    };
+    let client = clients.create_chain_client(&args.chain)?;
+    let tx = client.get_transaction(&args.hash).await?;
 
     // Calculate transaction fee
     let gas_price_val: u128 = tx.gas_price.parse().unwrap_or(0);
     let gas_used_val = tx.gas_used.unwrap_or(0) as u128;
     let fee_wei = gas_price_val * gas_used_val;
+    let chain_lower = args.chain.to_lowercase();
     let fee_str = if chain_lower == "solana" || chain_lower == "sol" {
         // For Solana, gas_price already contains the fee in lamports
         let fee_sol = tx.gas_price.parse::<f64>().unwrap_or(0.0) / 1_000_000_000.0;
@@ -705,5 +694,197 @@ mod tests {
         assert!(json.contains("call"));
         assert!(json.contains("0xfrom"));
         assert!(json.contains("50000"));
+    }
+
+    // ========================================================================
+    // Output formatting tests
+    // ========================================================================
+
+    fn make_test_tx_report() -> TransactionReport {
+        TransactionReport {
+            hash: VALID_TX_HASH.to_string(),
+            chain: "ethereum".to_string(),
+            block: BlockInfo {
+                number: 12345678,
+                timestamp: 1700000000,
+                hash: "0xblock".to_string(),
+            },
+            transaction: TransactionDetails {
+                from: "0xfrom".to_string(),
+                to: Some("0xto".to_string()),
+                value: "1.0".to_string(),
+                nonce: 42,
+                transaction_index: 5,
+                status: true,
+                input: "0xa9059cbb0000000000".to_string(),
+            },
+            gas: GasInfo {
+                gas_limit: 100000,
+                gas_used: 21000,
+                gas_price: "20000000000".to_string(),
+                transaction_fee: "0.00042".to_string(),
+                effective_gas_price: None,
+            },
+            decoded_input: Some(DecodedInput {
+                function_signature: "transfer(address,uint256)".to_string(),
+                function_name: "transfer".to_string(),
+                parameters: vec![DecodedParameter {
+                    name: "to".to_string(),
+                    param_type: "address".to_string(),
+                    value: "0xrecipient".to_string(),
+                }],
+            }),
+            internal_transactions: Some(vec![InternalTransaction {
+                call_type: "call".to_string(),
+                from: "0xfrom".to_string(),
+                to: "0xto".to_string(),
+                value: "0.5".to_string(),
+                gas: 30000,
+                input: "0x".to_string(),
+                output: "0x".to_string(),
+            }]),
+        }
+    }
+
+    #[test]
+    fn test_output_report_json() {
+        let report = make_test_tx_report();
+        let result = output_report(&report, OutputFormat::Json);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_report_csv() {
+        let report = make_test_tx_report();
+        let result = output_report(&report, OutputFormat::Csv);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_report_table() {
+        let report = make_test_tx_report();
+        let result = output_report(&report, OutputFormat::Table);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_report_table_no_decoded() {
+        let mut report = make_test_tx_report();
+        report.decoded_input = None;
+        report.internal_transactions = None;
+        let result = output_report(&report, OutputFormat::Table);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_report_table_failed_tx() {
+        let mut report = make_test_tx_report();
+        report.transaction.status = false;
+        report.transaction.to = None; // Contract creation
+        let result = output_report(&report, OutputFormat::Table);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_report_table_empty_traces() {
+        let mut report = make_test_tx_report();
+        report.internal_transactions = Some(vec![]);
+        let result = output_report(&report, OutputFormat::Table);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_report_csv_no_to() {
+        let mut report = make_test_tx_report();
+        report.transaction.to = None;
+        let result = output_report(&report, OutputFormat::Csv);
+        assert!(result.is_ok());
+    }
+
+    // ========================================================================
+    // End-to-end tests using MockClientFactory
+    // ========================================================================
+
+    use crate::chains::mocks::MockClientFactory;
+
+    fn mock_factory() -> MockClientFactory {
+        MockClientFactory::new()
+    }
+
+    #[tokio::test]
+    async fn test_run_ethereum_tx() {
+        let config = Config::default();
+        let factory = mock_factory();
+        let args = TxArgs {
+            hash: "0xabc123def456789012345678901234567890123456789012345678901234abcd".to_string(),
+            chain: "ethereum".to_string(),
+            format: Some(OutputFormat::Json),
+            trace: false,
+            decode: false,
+        };
+        let result = super::run(args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_tx_with_decode() {
+        let config = Config::default();
+        let mut factory = mock_factory();
+        factory.mock_client.transaction.input = "0xa9059cbb000000000000000000000000".to_string();
+        let args = TxArgs {
+            hash: "0xabc123def456789012345678901234567890123456789012345678901234abcd".to_string(),
+            chain: "ethereum".to_string(),
+            format: Some(OutputFormat::Table),
+            trace: false,
+            decode: true,
+        };
+        let result = super::run(args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_tx_with_trace() {
+        let config = Config::default();
+        let factory = mock_factory();
+        let args = TxArgs {
+            hash: "0xabc123def456789012345678901234567890123456789012345678901234abcd".to_string(),
+            chain: "ethereum".to_string(),
+            format: Some(OutputFormat::Csv),
+            trace: true,
+            decode: false,
+        };
+        let result = super::run(args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_tx_invalid_hash() {
+        let config = Config::default();
+        let factory = mock_factory();
+        let args = TxArgs {
+            hash: "invalid".to_string(),
+            chain: "ethereum".to_string(),
+            format: Some(OutputFormat::Json),
+            trace: false,
+            decode: false,
+        };
+        let result = super::run(args, &config, &factory).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_run_tx_auto_detect_tron() {
+        let config = Config::default();
+        let factory = mock_factory();
+        let args = TxArgs {
+            // 64 hex chars = tron
+            hash: "abc123def456789012345678901234567890123456789012345678901234abcd".to_string(),
+            chain: "ethereum".to_string(), // Will be auto-detected to tron
+            format: Some(OutputFormat::Json),
+            trace: false,
+            decode: false,
+        };
+        let result = super::run(args, &config, &factory).await;
+        assert!(result.is_ok());
     }
 }

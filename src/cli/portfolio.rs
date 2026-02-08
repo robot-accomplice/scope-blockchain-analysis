@@ -19,7 +19,7 @@
 //! bca portfolio summary
 //! ```
 
-use crate::chains::{ethereum::EthereumClient, solana::SolanaClient, tron::TronClient};
+use crate::chains::ChainClientFactory;
 use crate::config::{Config, OutputFormat};
 use crate::error::{BccError, Result};
 use clap::{Args, Subcommand};
@@ -261,7 +261,11 @@ impl Portfolio {
 }
 
 /// Executes the portfolio command.
-pub async fn run(args: PortfolioArgs, config: &Config) -> Result<()> {
+pub async fn run(
+    args: PortfolioArgs,
+    config: &Config,
+    clients: &dyn ChainClientFactory,
+) -> Result<()> {
     let data_dir = config.data_dir();
     let format = args.format.unwrap_or(config.output.format);
 
@@ -270,7 +274,7 @@ pub async fn run(args: PortfolioArgs, config: &Config) -> Result<()> {
         PortfolioCommands::Remove(remove_args) => run_remove(remove_args, &data_dir).await,
         PortfolioCommands::List => run_list(&data_dir, format).await,
         PortfolioCommands::Summary(summary_args) => {
-            run_summary(summary_args, &data_dir, format, config).await
+            run_summary(summary_args, &data_dir, format, clients).await
         }
     }
 }
@@ -373,7 +377,7 @@ async fn run_summary(
     args: SummaryArgs,
     data_dir: &std::path::Path,
     format: OutputFormat,
-    config: &Config,
+    clients: &dyn ChainClientFactory,
 ) -> Result<()> {
     let portfolio = Portfolio::load(data_dir)?;
 
@@ -398,7 +402,7 @@ async fn run_summary(
         let (balance, tokens) = fetch_address_balance(
             &watched.address,
             &watched.chain,
-            config,
+            clients,
             args.include_tokens,
         )
         .await;
@@ -471,7 +475,12 @@ async fn run_summary(
 
                 // Show token balances
                 for token in &addr.tokens {
-                    let symbol = token.symbol.as_deref().unwrap_or(&token.mint[..8]);
+                    let mint_short = if token.mint.len() >= 8 {
+                        &token.mint[..8]
+                    } else {
+                        &token.mint
+                    };
+                    let symbol = token.symbol.as_deref().unwrap_or(mint_short);
                     println!("    └─ {} {}", token.balance, symbol);
                 }
             }
@@ -486,108 +495,32 @@ async fn run_summary(
     Ok(())
 }
 
-/// Fetches the balance for an address on the specified chain.
+/// Fetches the balance for an address on the specified chain using the factory.
 async fn fetch_address_balance(
     address: &str,
     chain: &str,
-    config: &Config,
-    include_tokens: bool,
+    clients: &dyn ChainClientFactory,
+    _include_tokens: bool,
 ) -> (String, Vec<TokenSummary>) {
-    let chain_lower = chain.to_lowercase();
-
-    match chain_lower.as_str() {
-        "solana" | "sol" => fetch_solana_balance(address, config, include_tokens).await,
-        "ethereum" | "eth" => fetch_ethereum_balance(address, config).await,
-        "tron" | "trx" => fetch_tron_balance(address, config).await,
-        _ => {
-            tracing::warn!(chain = %chain, "Unknown chain, cannot fetch balance");
-            ("Unknown chain".to_string(), vec![])
-        }
-    }
-}
-
-/// Fetches Solana balance and optionally SPL token balances.
-async fn fetch_solana_balance(
-    address: &str,
-    config: &Config,
-    include_tokens: bool,
-) -> (String, Vec<TokenSummary>) {
-    let client = match SolanaClient::new(&config.chains) {
+    let client = match clients.create_chain_client(chain) {
         Ok(c) => c,
         Err(e) => {
-            tracing::error!(error = %e, "Failed to create Solana client");
+            tracing::error!(error = %e, chain = %chain, "Failed to create chain client");
             return ("Error".to_string(), vec![]);
         }
     };
 
-    // Fetch native SOL balance
+    // Fetch native balance
     let native_balance = match client.get_balance(address).await {
         Ok(bal) => bal.formatted,
         Err(e) => {
-            tracing::error!(error = %e, address = %address, "Failed to fetch SOL balance");
+            tracing::error!(error = %e, address = %address, "Failed to fetch balance");
             "Error".to_string()
         }
     };
 
-    // Fetch SPL token balances if requested (or always for portfolio summary)
-    let tokens = if include_tokens {
-        match client.get_token_balances(address).await {
-            Ok(token_bals) => token_bals
-                .into_iter()
-                .map(|t| TokenSummary {
-                    mint: t.mint,
-                    balance: format!("{}", t.ui_amount),
-                    decimals: t.decimals,
-                    symbol: t.symbol,
-                })
-                .collect(),
-            Err(e) => {
-                tracing::error!(error = %e, address = %address, "Failed to fetch SPL token balances");
-                vec![]
-            }
-        }
-    } else {
-        // Always fetch tokens for portfolio - the flag is for verbose output
-        match client.get_token_balances(address).await {
-            Ok(token_bals) => token_bals
-                .into_iter()
-                .map(|t| TokenSummary {
-                    mint: t.mint,
-                    balance: format!("{}", t.ui_amount),
-                    decimals: t.decimals,
-                    symbol: t.symbol,
-                })
-                .collect(),
-            Err(e) => {
-                tracing::warn!(error = %e, "Could not fetch token balances");
-                vec![]
-            }
-        }
-    };
-
-    (native_balance, tokens)
-}
-
-/// Fetches Ethereum balance including ERC-20 tokens.
-async fn fetch_ethereum_balance(address: &str, config: &Config) -> (String, Vec<TokenSummary>) {
-    let client = match EthereumClient::new(&config.chains) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to create Ethereum client");
-            return ("Error".to_string(), vec![]);
-        }
-    };
-
-    let balance = match client.get_balance(address).await {
-        Ok(bal) => bal.formatted,
-        Err(e) => {
-            tracing::error!(error = %e, address = %address, "Failed to fetch ETH balance");
-            "Error".to_string()
-        }
-    };
-
-    // Fetch ERC-20 token balances
-    let tokens = match client.get_erc20_balances(address).await {
+    // Always fetch token balances for portfolio summary
+    let tokens = match client.get_token_balances(address).await {
         Ok(token_bals) => token_bals
             .into_iter()
             .map(|tb| TokenSummary {
@@ -598,56 +531,12 @@ async fn fetch_ethereum_balance(address: &str, config: &Config) -> (String, Vec<
             })
             .collect(),
         Err(e) => {
-            tracing::warn!(error = %e, "Could not fetch ERC-20 token balances");
+            tracing::warn!(error = %e, "Could not fetch token balances");
             vec![]
         }
     };
 
-    (balance, tokens)
-}
-
-/// Fetches Tron balance including TRC-20 tokens.
-async fn fetch_tron_balance(address: &str, config: &Config) -> (String, Vec<TokenSummary>) {
-    let client = match TronClient::new(&config.chains) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to create Tron client");
-            return ("Error".to_string(), vec![]);
-        }
-    };
-
-    let balance = match client.get_balance(address).await {
-        Ok(bal) => bal.formatted,
-        Err(e) => {
-            tracing::error!(error = %e, address = %address, "Failed to fetch TRX balance");
-            "Error".to_string()
-        }
-    };
-
-    // Fetch TRC-20 token balances
-    let tokens = match client.get_trc20_balances(address).await {
-        Ok(trc20_bals) => {
-            trc20_bals
-                .into_iter()
-                .map(|tb| {
-                    // TRC-20 balances from TronGrid don't include decimals/symbol metadata
-                    // We provide what we have; symbol resolution would require additional API calls
-                    TokenSummary {
-                        mint: tb.contract_address,
-                        balance: tb.raw_balance,
-                        decimals: 0, // Unknown without additional lookup
-                        symbol: None,
-                    }
-                })
-                .collect()
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "Could not fetch TRC-20 token balances");
-            vec![]
-        }
-    };
-
-    (balance, tokens)
+    (native_balance, tokens)
 }
 
 /// Returns the native token symbol for a chain.
@@ -914,5 +803,410 @@ mod tests {
         assert!(json.contains("10.5"));
         assert!(json.contains("ETH"));
         assert!(json.contains("35000"));
+    }
+
+    // ========================================================================
+    // Native symbol tests
+    // ========================================================================
+
+    #[test]
+    fn test_get_native_symbol_solana() {
+        assert_eq!(get_native_symbol("solana"), "SOL");
+        assert_eq!(get_native_symbol("sol"), "SOL");
+    }
+
+    #[test]
+    fn test_get_native_symbol_ethereum() {
+        assert_eq!(get_native_symbol("ethereum"), "ETH");
+        assert_eq!(get_native_symbol("eth"), "ETH");
+    }
+
+    #[test]
+    fn test_get_native_symbol_tron() {
+        assert_eq!(get_native_symbol("tron"), "TRX");
+        assert_eq!(get_native_symbol("trx"), "TRX");
+    }
+
+    #[test]
+    fn test_get_native_symbol_unknown() {
+        assert_eq!(get_native_symbol("bitcoin"), "???");
+        assert_eq!(get_native_symbol("unknown"), "???");
+    }
+
+    // ========================================================================
+    // End-to-end tests using MockClientFactory
+    // ========================================================================
+
+    use crate::chains::mocks::MockClientFactory;
+
+    fn mock_factory() -> MockClientFactory {
+        MockClientFactory::new()
+    }
+
+    #[tokio::test]
+    async fn test_run_portfolio_list_empty() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            portfolio: crate::config::PortfolioConfig {
+                data_dir: Some(tmp_dir.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+        let factory = mock_factory();
+        let args = PortfolioArgs {
+            command: PortfolioCommands::List,
+            format: Some(OutputFormat::Table),
+        };
+        let result = super::run(args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_portfolio_add_and_list() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            portfolio: crate::config::PortfolioConfig {
+                data_dir: Some(tmp_dir.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+        let factory = mock_factory();
+
+        // Add address
+        let add_args = PortfolioArgs {
+            command: PortfolioCommands::Add(AddArgs {
+                address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+                label: Some("Test Wallet".to_string()),
+                chain: "ethereum".to_string(),
+                tags: vec!["test".to_string()],
+            }),
+            format: Some(OutputFormat::Table),
+        };
+        let result = super::run(add_args, &config, &factory).await;
+        assert!(result.is_ok());
+
+        // List
+        let list_args = PortfolioArgs {
+            command: PortfolioCommands::List,
+            format: Some(OutputFormat::Json),
+        };
+        let result = super::run(list_args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_portfolio_summary_with_mock() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            portfolio: crate::config::PortfolioConfig {
+                data_dir: Some(tmp_dir.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+        let factory = mock_factory();
+
+        // Add address first
+        let add_args = PortfolioArgs {
+            command: PortfolioCommands::Add(AddArgs {
+                address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+                label: Some("Test".to_string()),
+                chain: "ethereum".to_string(),
+                tags: vec![],
+            }),
+            format: None,
+        };
+        super::run(add_args, &config, &factory).await.unwrap();
+
+        // Summary
+        let summary_args = PortfolioArgs {
+            command: PortfolioCommands::Summary(SummaryArgs {
+                chain: None,
+                tag: None,
+                include_tokens: false,
+            }),
+            format: Some(OutputFormat::Json),
+        };
+        let result = super::run(summary_args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_portfolio_remove() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            portfolio: crate::config::PortfolioConfig {
+                data_dir: Some(tmp_dir.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+        let factory = mock_factory();
+
+        // Add then remove
+        let add_args = PortfolioArgs {
+            command: PortfolioCommands::Add(AddArgs {
+                address: "0xtest".to_string(),
+                label: None,
+                chain: "ethereum".to_string(),
+                tags: vec![],
+            }),
+            format: None,
+        };
+        super::run(add_args, &config, &factory).await.unwrap();
+
+        let remove_args = PortfolioArgs {
+            command: PortfolioCommands::Remove(RemoveArgs {
+                address: "0xtest".to_string(),
+            }),
+            format: None,
+        };
+        let result = super::run(remove_args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_portfolio_summary_csv() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            portfolio: crate::config::PortfolioConfig {
+                data_dir: Some(tmp_dir.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+        let factory = mock_factory();
+
+        // Add address
+        let add_args = PortfolioArgs {
+            command: PortfolioCommands::Add(AddArgs {
+                address: "0xtest".to_string(),
+                label: Some("TestAddr".to_string()),
+                chain: "ethereum".to_string(),
+                tags: vec!["defi".to_string()],
+            }),
+            format: None,
+        };
+        super::run(add_args, &config, &factory).await.unwrap();
+
+        // CSV summary
+        let summary_args = PortfolioArgs {
+            command: PortfolioCommands::Summary(SummaryArgs {
+                chain: None,
+                tag: None,
+                include_tokens: false,
+            }),
+            format: Some(OutputFormat::Csv),
+        };
+        let result = super::run(summary_args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_portfolio_summary_table() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            portfolio: crate::config::PortfolioConfig {
+                data_dir: Some(tmp_dir.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+        let factory = mock_factory();
+
+        // Add address
+        let add_args = PortfolioArgs {
+            command: PortfolioCommands::Add(AddArgs {
+                address: "0xtest".to_string(),
+                label: Some("TestAddr".to_string()),
+                chain: "ethereum".to_string(),
+                tags: vec![],
+            }),
+            format: None,
+        };
+        super::run(add_args, &config, &factory).await.unwrap();
+
+        // Table summary
+        let summary_args = PortfolioArgs {
+            command: PortfolioCommands::Summary(SummaryArgs {
+                chain: None,
+                tag: None,
+                include_tokens: true,
+            }),
+            format: Some(OutputFormat::Table),
+        };
+        let result = super::run(summary_args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_portfolio_summary_with_chain_filter() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            portfolio: crate::config::PortfolioConfig {
+                data_dir: Some(tmp_dir.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+        let factory = mock_factory();
+
+        // Add addresses on different chains
+        let add_eth = PortfolioArgs {
+            command: PortfolioCommands::Add(AddArgs {
+                address: "0xeth".to_string(),
+                label: None,
+                chain: "ethereum".to_string(),
+                tags: vec![],
+            }),
+            format: None,
+        };
+        super::run(add_eth, &config, &factory).await.unwrap();
+
+        let add_poly = PortfolioArgs {
+            command: PortfolioCommands::Add(AddArgs {
+                address: "0xpoly".to_string(),
+                label: None,
+                chain: "polygon".to_string(),
+                tags: vec![],
+            }),
+            format: None,
+        };
+        super::run(add_poly, &config, &factory).await.unwrap();
+
+        // Filter by chain
+        let summary_args = PortfolioArgs {
+            command: PortfolioCommands::Summary(SummaryArgs {
+                chain: Some("ethereum".to_string()),
+                tag: None,
+                include_tokens: false,
+            }),
+            format: Some(OutputFormat::Json),
+        };
+        let result = super::run(summary_args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_portfolio_summary_with_tag_filter() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            portfolio: crate::config::PortfolioConfig {
+                data_dir: Some(tmp_dir.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+        let factory = mock_factory();
+
+        // Add addresses with tags
+        let add_args = PortfolioArgs {
+            command: PortfolioCommands::Add(AddArgs {
+                address: "0xdefi".to_string(),
+                label: None,
+                chain: "ethereum".to_string(),
+                tags: vec!["defi".to_string()],
+            }),
+            format: None,
+        };
+        super::run(add_args, &config, &factory).await.unwrap();
+
+        // Filter by tag
+        let summary_args = PortfolioArgs {
+            command: PortfolioCommands::Summary(SummaryArgs {
+                chain: None,
+                tag: Some("defi".to_string()),
+                include_tokens: false,
+            }),
+            format: Some(OutputFormat::Json),
+        };
+        let result = super::run(summary_args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_portfolio_summary_no_format() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            portfolio: crate::config::PortfolioConfig {
+                data_dir: Some(tmp_dir.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+        let factory = mock_factory();
+
+        let add_args = PortfolioArgs {
+            command: PortfolioCommands::Add(AddArgs {
+                address: "0xtest".to_string(),
+                label: None,
+                chain: "ethereum".to_string(),
+                tags: vec![],
+            }),
+            format: None,
+        };
+        super::run(add_args, &config, &factory).await.unwrap();
+
+        let summary_args = PortfolioArgs {
+            command: PortfolioCommands::Summary(SummaryArgs {
+                chain: None,
+                tag: None,
+                include_tokens: false,
+            }),
+            format: None, // Default format
+        };
+        let result = super::run(summary_args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_portfolio_summary_empty() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            portfolio: crate::config::PortfolioConfig {
+                data_dir: Some(tmp_dir.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+        let factory = mock_factory();
+
+        // Summary with no addresses added
+        let summary_args = PortfolioArgs {
+            command: PortfolioCommands::Summary(SummaryArgs {
+                chain: None,
+                tag: None,
+                include_tokens: false,
+            }),
+            format: Some(OutputFormat::Table),
+        };
+        let result = super::run(summary_args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_portfolio_add_with_tags() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            portfolio: crate::config::PortfolioConfig {
+                data_dir: Some(tmp_dir.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+        let factory = mock_factory();
+
+        let add_args = PortfolioArgs {
+            command: PortfolioCommands::Add(AddArgs {
+                address: "0xtagged".to_string(),
+                label: Some("Tagged".to_string()),
+                chain: "ethereum".to_string(),
+                tags: vec!["defi".to_string(), "whale".to_string()],
+            }),
+            format: None,
+        };
+        let result = super::run(add_args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_get_native_symbol_polygon() {
+        assert_eq!(get_native_symbol("polygon"), "???");
+    }
+
+    #[test]
+    fn test_get_native_symbol_bsc() {
+        assert_eq!(get_native_symbol("bsc"), "???");
     }
 }

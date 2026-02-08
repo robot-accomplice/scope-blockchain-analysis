@@ -19,6 +19,7 @@
 
 use anyhow::Result;
 use bcc::Config;
+use bcc::chains::DefaultClientFactory;
 use bcc::cli::{Cli, Commands};
 use clap::Parser;
 use std::io::{self, Write};
@@ -77,20 +78,41 @@ async fn main() -> Result<()> {
         return run_command(cli.command, &config).await;
     }
 
+    // Create the client factory for dependency injection
+    let factory = DefaultClientFactory {
+        chains_config: config.chains.clone(),
+    };
+
     // Dispatch to command handler
     let result = match cli.command {
-        Commands::Address(args) => bcc::cli::address::run(args, &config).await,
-        Commands::Tx(args) => bcc::cli::tx::run(args, &config).await,
-        Commands::Crawl(args) => bcc::cli::crawl::run(args, &config).await,
-        Commands::Portfolio(args) => bcc::cli::portfolio::run(args, &config).await,
-        Commands::Export(args) => bcc::cli::export::run(args, &config).await,
-        Commands::Interactive(args) => bcc::cli::interactive::run(args, &config).await,
+        Commands::Address(args) => bcc::cli::address::run(args, &config, &factory).await,
+        Commands::Tx(args) => bcc::cli::tx::run(args, &config, &factory).await,
+        Commands::Crawl(args) => bcc::cli::crawl::run(args, &config, &factory).await,
+        Commands::Portfolio(args) => bcc::cli::portfolio::run(args, &config, &factory).await,
+        Commands::Export(args) => bcc::cli::export::run(args, &config, &factory).await,
+        Commands::Interactive(args) => bcc::cli::interactive::run(args, &config, &factory).await,
         Commands::Setup(args) => bcc::cli::setup::run(args, &config).await,
         Commands::Compliance(compliance_cmd) => match compliance_cmd {
-            bcc::cli::compliance::ComplianceCommands::Risk(args) => bcc::cli::compliance::handle_risk(args).await.map_err(|e| bcc::error::BccError::Other(e.to_string())),
-            bcc::cli::compliance::ComplianceCommands::Trace(args) => bcc::cli::compliance::handle_trace(args).await.map_err(|e| bcc::error::BccError::Other(e.to_string())),
-            bcc::cli::compliance::ComplianceCommands::Analyze(args) => bcc::cli::compliance::handle_analyze(args).await.map_err(|e| bcc::error::BccError::Other(e.to_string())),
-            bcc::cli::compliance::ComplianceCommands::ComplianceReport(args) => bcc::cli::compliance::handle_compliance_report(args).await.map_err(|e| bcc::error::BccError::Other(e.to_string())),
+            bcc::cli::compliance::ComplianceCommands::Risk(args) => {
+                bcc::cli::compliance::handle_risk(args)
+                    .await
+                    .map_err(|e| bcc::error::BccError::Other(e.to_string()))
+            }
+            bcc::cli::compliance::ComplianceCommands::Trace(args) => {
+                bcc::cli::compliance::handle_trace(args)
+                    .await
+                    .map_err(|e| bcc::error::BccError::Other(e.to_string()))
+            }
+            bcc::cli::compliance::ComplianceCommands::Analyze(args) => {
+                bcc::cli::compliance::handle_analyze(args)
+                    .await
+                    .map_err(|e| bcc::error::BccError::Other(e.to_string()))
+            }
+            bcc::cli::compliance::ComplianceCommands::ComplianceReport(args) => {
+                bcc::cli::compliance::handle_compliance_report(args)
+                    .await
+                    .map_err(|e| bcc::error::BccError::Other(e.to_string()))
+            }
         },
     };
 
@@ -135,19 +157,38 @@ fn prompt_for_setup() -> bool {
 
 /// Runs a command with the given config.
 async fn run_command(command: Commands, config: &Config) -> Result<()> {
+    let factory = DefaultClientFactory {
+        chains_config: config.chains.clone(),
+    };
     let result = match command {
-        Commands::Address(args) => bcc::cli::address::run(args, config).await,
-        Commands::Tx(args) => bcc::cli::tx::run(args, config).await,
-        Commands::Crawl(args) => bcc::cli::crawl::run(args, config).await,
-        Commands::Portfolio(args) => bcc::cli::portfolio::run(args, config).await,
-        Commands::Export(args) => bcc::cli::export::run(args, config).await,
-        Commands::Interactive(args) => bcc::cli::interactive::run(args, config).await,
+        Commands::Address(args) => bcc::cli::address::run(args, config, &factory).await,
+        Commands::Tx(args) => bcc::cli::tx::run(args, config, &factory).await,
+        Commands::Crawl(args) => bcc::cli::crawl::run(args, config, &factory).await,
+        Commands::Portfolio(args) => bcc::cli::portfolio::run(args, config, &factory).await,
+        Commands::Export(args) => bcc::cli::export::run(args, config, &factory).await,
+        Commands::Interactive(args) => bcc::cli::interactive::run(args, config, &factory).await,
         Commands::Setup(args) => bcc::cli::setup::run(args, config).await,
         Commands::Compliance(compliance_cmd) => match compliance_cmd {
-            bcc::cli::compliance::ComplianceCommands::Risk(args) => bcc::cli::compliance::handle_risk(args).await.map_err(|e| bcc::error::BccError::Other(e.to_string())),
-            bcc::cli::compliance::ComplianceCommands::Trace(args) => bcc::cli::compliance::handle_trace(args).await.map_err(|e| bcc::error::BccError::Other(e.to_string())),
-            bcc::cli::compliance::ComplianceCommands::Analyze(args) => bcc::cli::compliance::handle_analyze(args).await.map_err(|e| bcc::error::BccError::Other(e.to_string())),
-            bcc::cli::compliance::ComplianceCommands::ComplianceReport(args) => bcc::cli::compliance::handle_compliance_report(args).await.map_err(|e| bcc::error::BccError::Other(e.to_string())),
+            bcc::cli::compliance::ComplianceCommands::Risk(args) => {
+                bcc::cli::compliance::handle_risk(args)
+                    .await
+                    .map_err(|e| bcc::error::BccError::Other(e.to_string()))
+            }
+            bcc::cli::compliance::ComplianceCommands::Trace(args) => {
+                bcc::cli::compliance::handle_trace(args)
+                    .await
+                    .map_err(|e| bcc::error::BccError::Other(e.to_string()))
+            }
+            bcc::cli::compliance::ComplianceCommands::Analyze(args) => {
+                bcc::cli::compliance::handle_analyze(args)
+                    .await
+                    .map_err(|e| bcc::error::BccError::Other(e.to_string()))
+            }
+            bcc::cli::compliance::ComplianceCommands::ComplianceReport(args) => {
+                bcc::cli::compliance::handle_compliance_report(args)
+                    .await
+                    .map_err(|e| bcc::error::BccError::Other(e.to_string()))
+            }
         },
     };
 
