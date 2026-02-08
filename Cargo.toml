@@ -1,6 +1,6 @@
 [package]
 name = "bcc"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 authors = ["Jon Machen <jon@palmusd.com>"]
 description = "Blockchain Crawler CLI - A production-grade tool for blockchain data analysis, portfolio tracking, and transaction investigation"
