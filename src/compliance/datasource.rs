@@ -286,13 +286,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_pattern_analysis_empty() {
-        let analysis = analyze_patterns(&[]);
-        assert_eq!(analysis.total_transactions, 0);
-        assert!(!analysis.structuring_detected);
-    }
-
-    #[test]
     fn test_pattern_analysis_velocity() {
         let txs = vec![
             EtherscanTransaction {
@@ -334,5 +327,158 @@ mod tests {
         let analysis = analyze_patterns(&txs);
         assert_eq!(analysis.total_transactions, 2);
         assert_eq!(analysis.velocity_score, 2.0); // 2 transactions over 1 day
+    }
+
+    #[test]
+    fn test_pattern_analysis_empty() {
+        let analysis = analyze_patterns(&[]);
+        assert_eq!(analysis.total_transactions, 0);
+        assert_eq!(analysis.velocity_score, 0.0);
+        assert!(!analysis.structuring_detected);
+        assert!(!analysis.round_number_pattern);
+        assert!(!analysis.time_clustering);
+        assert_eq!(analysis.unusual_hours, 0);
+    }
+
+    #[test]
+    fn test_pattern_analysis_structuring_detection() {
+        // Transactions just under 1 ETH (structuring pattern)
+        let txs = vec![
+            create_test_tx("1609459200", "0.99"),
+            create_test_tx("1609459300", "0.95"),
+            create_test_tx("1609459400", "0.98"),
+        ];
+        
+        let analysis = analyze_patterns(&txs);
+        assert!(analysis.structuring_detected);
+    }
+
+    #[test]
+    fn test_pattern_analysis_round_numbers() {
+        // Round number transactions
+        let txs = vec![
+            create_test_tx("1609459200", "1.0"),
+            create_test_tx("1609459300", "2.0"),
+            create_test_tx("1609459400", "5.0"),
+        ];
+        
+        let analysis = analyze_patterns(&txs);
+        assert!(analysis.round_number_pattern);
+    }
+
+    #[test]
+    fn test_pattern_analysis_unusual_hours() {
+        // Transaction at 3 AM (unusual hour)
+        // 1609459200 = 2021-01-01 00:00:00 UTC
+        // 1609470000 = 2021-01-01 03:00:00 UTC
+        let txs = vec![
+            EtherscanTransaction {
+                block_number: "1".to_string(),
+                timestamp: "1609470000".to_string(),
+                hash: "0x1".to_string(),
+                from: "0xa".to_string(),
+                to: "0xb".to_string(),
+                value: "1000000000000000000".to_string(),
+                gas: "21000".to_string(),
+                gas_price: "20000000000".to_string(),
+                is_error: "0".to_string(),
+                txreceipt_status: "1".to_string(),
+                input: "0x".to_string(),
+                contract_address: "".to_string(),
+                cumulative_gas_used: "21000".to_string(),
+                gas_used: "21000".to_string(),
+                confirmations: "100".to_string(),
+            },
+        ];
+        
+        let analysis = analyze_patterns(&txs);
+        assert!(analysis.unusual_hours > 0);
+    }
+
+    #[test]
+    fn test_data_sources_creation() {
+        let sources = DataSources::new("test_api_key".to_string());
+        assert_eq!(sources.etherscan_key(), "test_api_key");
+    }
+
+    #[test]
+    fn test_pattern_analysis_high_velocity() {
+        // Many transactions spread over multiple days
+        let mut txs = Vec::new();
+        let base_time = 1609459200u64; // 2021-01-01 00:00:00 UTC
+        
+        for i in 0..100 {
+            // Spread over 2 days (every ~30 minutes)
+            txs.push(EtherscanTransaction {
+                block_number: i.to_string(),
+                timestamp: (base_time + i * 1800).to_string(),
+                hash: format!("0x{}", i),
+                from: "0xa".to_string(),
+                to: "0xb".to_string(),
+                value: "1000000000000000000".to_string(),
+                gas: "21000".to_string(),
+                gas_price: "20000000000".to_string(),
+                is_error: "0".to_string(),
+                txreceipt_status: "1".to_string(),
+                input: "0x".to_string(),
+                contract_address: "".to_string(),
+                cumulative_gas_used: "21000".to_string(),
+                gas_used: "21000".to_string(),
+                confirmations: "100".to_string(),
+            });
+        }
+        
+        let analysis = analyze_patterns(&txs);
+        // 100 transactions over 2 days = 50 tx/day
+        assert!(analysis.velocity_score > 40.0); // High velocity
+        assert_eq!(analysis.total_transactions, 100);
+    }
+
+    #[test]
+    fn test_pattern_analysis_failed_transactions() {
+        let txs = vec![
+            EtherscanTransaction {
+                block_number: "1".to_string(),
+                timestamp: "1609459200".to_string(),
+                hash: "0x1".to_string(),
+                from: "0xa".to_string(),
+                to: "0xb".to_string(),
+                value: "1000000000000000000".to_string(),
+                gas: "21000".to_string(),
+                gas_price: "20000000000".to_string(),
+                is_error: "1".to_string(), // Failed transaction
+                txreceipt_status: "0".to_string(),
+                input: "0x".to_string(),
+                contract_address: "".to_string(),
+                cumulative_gas_used: "21000".to_string(),
+                gas_used: "21000".to_string(),
+                confirmations: "100".to_string(),
+            },
+        ];
+        
+        let analysis = analyze_patterns(&txs);
+        assert_eq!(analysis.total_transactions, 1);
+    }
+
+    // Helper function to create test transactions
+    fn create_test_tx(timestamp: &str, value_eth: &str) -> EtherscanTransaction {
+        let value_wei = (value_eth.parse::<f64>().unwrap() * 1e18) as u64;
+        EtherscanTransaction {
+            block_number: "1".to_string(),
+            timestamp: timestamp.to_string(),
+            hash: "0x1".to_string(),
+            from: "0xa".to_string(),
+            to: "0xb".to_string(),
+            value: value_wei.to_string(),
+            gas: "21000".to_string(),
+            gas_price: "20000000000".to_string(),
+            is_error: "0".to_string(),
+            txreceipt_status: "1".to_string(),
+            input: "0x".to_string(),
+            contract_address: "".to_string(),
+            cumulative_gas_used: "21000".to_string(),
+            gas_used: "21000".to_string(),
+            confirmations: "100".to_string(),
+        }
     }
 }

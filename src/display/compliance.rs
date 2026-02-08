@@ -139,3 +139,131 @@ fn format_risk_markdown(assessment: &RiskAssessment, detailed: bool) -> String {
 
     md
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compliance::risk::{RiskAssessment, RiskFactor, RiskCategory, RiskLevel};
+    use chrono::Utc;
+
+    fn create_test_assessment() -> RiskAssessment {
+        RiskAssessment {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: "ethereum".to_string(),
+            overall_score: 4.5,
+            risk_level: RiskLevel::Medium,
+            factors: vec![
+                RiskFactor {
+                    name: "Behavioral".to_string(),
+                    category: RiskCategory::Behavioral,
+                    score: 3.0,
+                    weight: 0.25,
+                    description: "Test behavioral".to_string(),
+                    evidence: vec!["Evidence 1".to_string()],
+                },
+                RiskFactor {
+                    name: "Association".to_string(),
+                    category: RiskCategory::Association,
+                    score: 6.0,
+                    weight: 0.30,
+                    description: "Test association".to_string(),
+                    evidence: vec!["Evidence 2".to_string()],
+                },
+            ],
+            assessed_at: Utc::now(),
+            recommendations: vec!["Monitor closely".to_string()],
+        }
+    }
+
+    #[test]
+    fn test_format_risk_report_table() {
+        let assessment = create_test_assessment();
+        let output = format_risk_report(&assessment, OutputFormat::Table, false);
+        assert!(output.contains("Risk Assessment Report"));
+        assert!(output.contains("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2"));
+        assert!(output.contains("ethereum"));
+    }
+
+    #[test]
+    fn test_format_risk_report_detailed() {
+        let assessment = create_test_assessment();
+        let output = format_risk_report(&assessment, OutputFormat::Table, true);
+        assert!(output.contains("Risk Factor Breakdown"));
+        assert!(output.contains("Behavioral"));
+        assert!(output.contains("Association"));
+    }
+
+    #[test]
+    fn test_format_risk_report_json() {
+        let assessment = create_test_assessment();
+        let output = format_risk_report(&assessment, OutputFormat::Json, false);
+        assert!(output.contains("address"));
+        assert!(output.contains("ethereum"));
+        assert!(output.contains("overall_score"));
+    }
+
+    #[test]
+    fn test_format_risk_report_yaml() {
+        let assessment = create_test_assessment();
+        let output = format_risk_report(&assessment, OutputFormat::Yaml, false);
+        assert!(output.contains("address:"));
+        assert!(output.contains("chain:"));
+    }
+
+    #[test]
+    fn test_format_risk_report_markdown() {
+        let assessment = create_test_assessment();
+        let output = format_risk_report(&assessment, OutputFormat::Markdown, true);
+        assert!(output.contains("# Risk Assessment Report"));
+        assert!(output.contains("## Risk Factor Breakdown"));
+        assert!(output.contains("## Recommendations"));
+    }
+
+    #[test]
+    fn test_format_low_risk() {
+        let mut assessment = create_test_assessment();
+        assessment.risk_level = RiskLevel::Low;
+        assessment.overall_score = 2.0;
+        
+        let output = format_risk_report(&assessment, OutputFormat::Table, false);
+        assert!(output.contains("🟢"));
+    }
+
+    #[test]
+    fn test_format_high_risk() {
+        let mut assessment = create_test_assessment();
+        assessment.risk_level = RiskLevel::High;
+        assessment.overall_score = 7.5;
+        
+        let output = format_risk_report(&assessment, OutputFormat::Table, false);
+        assert!(output.contains("🔴"));
+    }
+
+    #[test]
+    fn test_format_critical_risk() {
+        let mut assessment = create_test_assessment();
+        assessment.risk_level = RiskLevel::Critical;
+        assessment.overall_score = 9.0;
+        
+        let output = format_risk_report(&assessment, OutputFormat::Table, false);
+        assert!(output.contains("⚫"));
+    }
+
+    #[test]
+    fn test_empty_recommendations() {
+        let mut assessment = create_test_assessment();
+        assessment.recommendations = vec![];
+        
+        let output = format_risk_report(&assessment, OutputFormat::Table, false);
+        // Should not panic and should not contain recommendations section
+        assert!(output.contains("Risk Assessment Report"));
+    }
+
+    #[test]
+    fn test_markdown_no_detailed() {
+        let assessment = create_test_assessment();
+        let output = format_risk_report(&assessment, OutputFormat::Markdown, false);
+        // Should not contain detailed factor breakdown when detailed=false
+        assert!(!output.contains("## Risk Factor Breakdown"));
+    }
+}
