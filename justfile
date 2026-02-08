@@ -163,3 +163,141 @@ ci-test:
     @echo "═══════════════════════════════════════════════════════════════════"
     @echo "✓ All CI checks passed!"
     @echo "═══════════════════════════════════════════════════════════════════"
+
+# -----------------------------------------------------------------------------
+# Release
+# -----------------------------------------------------------------------------
+
+# Create a new release (interactive)
+release:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Get current version
+    CURRENT_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+    echo "Current version: $CURRENT_VERSION"
+    echo ""
+    
+    # Prompt for new version
+    read -p "Enter new version (e.g., 0.2.0): " NEW_VERSION
+    
+    if [ -z "$NEW_VERSION" ]; then
+        echo "Error: Version cannot be empty"
+        exit 1
+    fi
+    
+    # Validate version format (semver)
+    if ! echo "$NEW_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+        echo "Error: Version must be in semver format (X.Y.Z)"
+        exit 1
+    fi
+    
+    echo ""
+    echo "═══════════════════════════════════════════════════════════════════"
+    echo "Preparing release v$NEW_VERSION"
+    echo "═══════════════════════════════════════════════════════════════════"
+    echo ""
+    
+    # Update version in Cargo.toml
+    echo "Step 1/6: Updating Cargo.toml..."
+    sed -i '' "s/^version = \"$CURRENT_VERSION\"/version = \"$NEW_VERSION\"/" Cargo.toml
+    echo "✓ Cargo.toml updated"
+    
+    # Update CHANGELOG.md
+    echo ""
+    echo "Step 2/6: Updating CHANGELOG.md..."
+    TODAY=$(date +%Y-%m-%d)
+    
+    # Check if CHANGELOG has Unreleased section
+    if ! grep -q "## \[Unreleased\]" CHANGELOG.md; then
+        echo "Error: CHANGELOG.md missing [Unreleased] section"
+        exit 1
+    fi
+    
+    # Add new version section after Unreleased
+    sed -i '' "/## \[Unreleased\]/a\\
+\\
+## [$NEW_VERSION] - $TODAY" CHANGELOG.md
+    
+    # Update comparison links at bottom
+    sed -i '' "s#\[Unreleased\]: https://github.com/robot-accomplice/bcc/compare/v$CURRENT_VERSION...HEAD#[Unreleased]: https://github.com/robot-accomplice/bcc/compare/v$NEW_VERSION...HEAD\n[$NEW_VERSION]: https://github.com/robot-accomplice/bcc/compare/v$CURRENT_VERSION...v$NEW_VERSION#" CHANGELOG.md
+    
+    echo "✓ CHANGELOG.md updated"
+    
+    # Run tests to ensure everything works
+    echo ""
+    echo "Step 3/6: Running tests..."
+    cargo test --quiet
+    echo "✓ All tests passed"
+    
+    # Commit changes
+    echo ""
+    echo "Step 4/6: Committing version bump..."
+    git add Cargo.toml Cargo.lock CHANGELOG.md
+    git commit -m "Release v$NEW_VERSION"
+    echo "✓ Changes committed"
+    
+    # Create and push tag
+    echo ""
+    echo "Step 5/6: Creating and pushing git tag..."
+    git tag -a "v$NEW_VERSION" -m "Release version $NEW_VERSION"
+    git push origin main
+    git push origin "v$NEW_VERSION"
+    echo "✓ Tag v$NEW_VERSION pushed to GitHub"
+    
+    echo ""
+    echo "═══════════════════════════════════════════════════════════════════"
+    echo "✓ Release v$NEW_VERSION initiated!"
+    echo "═══════════════════════════════════════════════════════════════════"
+    echo ""
+    echo "GitHub Actions workflow is now building:"
+    echo "  - Linux x64 binary"
+    echo "  - Linux ARM64 binary"
+    echo "  - macOS x64 binary"
+    echo "  - macOS ARM64 binary"
+    echo ""
+    echo "Check progress at: https://github.com/robot-accomplice/bcc/actions"
+    echo ""
+    read -p "Wait for GitHub Actions to complete before publishing? (y/n): " WAIT
+    
+    if [ "$WAIT" = "y" ] || [ "$WAIT" = "Y" ]; then
+        echo ""
+        echo "Waiting for GitHub Actions..."
+        echo "(Press Ctrl+C to skip and publish manually later)"
+        echo ""
+        
+        # Poll for workflow completion (simplified)
+        sleep 5
+        echo "Workflow started. Check status:"
+        echo "https://github.com/robot-accomplice/bcc/actions"
+        echo ""
+        read -p "Press Enter when GitHub Actions workflow has completed..."
+    fi
+    
+    # Publish to crates.io
+    echo ""
+    echo "Step 6/6: Publishing to crates.io..."
+    echo ""
+    read -p "Publish v$NEW_VERSION to crates.io? (y/n): " PUBLISH
+    
+    if [ "$PUBLISH" = "y" ] || [ "$PUBLISH" = "Y" ]; then
+        cargo publish
+        echo ""
+        echo "═══════════════════════════════════════════════════════════════════"
+        echo "✓ v$NEW_VERSION published to crates.io!"
+        echo "═══════════════════════════════════════════════════════════════════"
+        echo ""
+        echo "Users can now install with: cargo install bcc"
+    else
+        echo ""
+        echo "Skipped publishing. To publish manually:"
+        echo "  cargo publish"
+    fi
+    
+    echo ""
+    echo "Next steps:"
+    echo "  1. Check the GitHub release: https://github.com/robot-accomplice/bcc/releases"
+    echo "  2. Verify binaries are attached"
+    echo "  3. Update release notes if needed"
+    echo ""
+    echo "Release complete!"
