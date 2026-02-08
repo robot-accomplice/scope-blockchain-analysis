@@ -156,8 +156,8 @@ pub struct TokenBalance {
 ///
 /// # Errors
 ///
-/// Returns `BccError::InvalidAddress` if the address format is invalid.
-/// Returns `BccError::Request` if API calls fail.
+/// Returns `ScopeError::InvalidAddress` if the address format is invalid.
+/// Returns `ScopeError::Request` if API calls fail.
 pub async fn run(
     mut args: AddressArgs,
     config: &Config,
@@ -275,20 +275,20 @@ fn validate_address(address: &str, chain: &str) -> Result<()> {
         // EVM-compatible chains use 0x-prefixed 40-char hex addresses
         "ethereum" | "polygon" | "arbitrum" | "optimism" | "base" | "bsc" | "aegis" => {
             if !address.starts_with("0x") {
-                return Err(crate::error::BccError::InvalidAddress(format!(
+                return Err(crate::error::ScopeError::InvalidAddress(format!(
                     "Address must start with '0x': {}",
                     address
                 )));
             }
             if address.len() != 42 {
-                return Err(crate::error::BccError::InvalidAddress(format!(
+                return Err(crate::error::ScopeError::InvalidAddress(format!(
                     "Address must be 42 characters (0x + 40 hex): {}",
                     address
                 )));
             }
             // Validate hex characters
             if !address[2..].chars().all(|c| c.is_ascii_hexdigit()) {
-                return Err(crate::error::BccError::InvalidAddress(format!(
+                return Err(crate::error::ScopeError::InvalidAddress(format!(
                     "Address contains invalid hex characters: {}",
                     address
                 )));
@@ -303,7 +303,7 @@ fn validate_address(address: &str, chain: &str) -> Result<()> {
             validate_tron_address(address)?;
         }
         _ => {
-            return Err(crate::error::BccError::Chain(format!(
+            return Err(crate::error::ScopeError::Chain(format!(
                 "Unsupported chain: {}. Supported: ethereum, polygon, arbitrum, optimism, base, bsc, aegis, solana, tron",
                 chain
             )));

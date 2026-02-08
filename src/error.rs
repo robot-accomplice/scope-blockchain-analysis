@@ -1,13 +1,13 @@
 //! # Error Handling Module
 //!
-//! This module defines the error types used throughout the BCC application.
-//! It provides a unified error type [`BccError`] that wraps all possible
+//! This module defines the error types used throughout the Scope application.
+//! It provides a unified error type [`ScopeError`] that wraps all possible
 //! error conditions, along with a convenient [`Result`] type alias.
 //!
 //! ## Error Hierarchy
 //!
 //! ```text
-//! BccError
+//! ScopeError
 //! ├── Config     - Configuration loading/parsing errors
 //! ├── Chain      - Blockchain client errors
 //! ├── Request    - HTTP/API request failures
@@ -20,11 +20,11 @@
 //! ## Usage
 //!
 //! ```rust
-//! use bcc::{BccError, Result};
+//! use scope::{ScopeError, Result};
 //!
 //! fn validate_address(addr: &str) -> Result<()> {
 //!     if !addr.starts_with("0x") || addr.len() != 42 {
-//!         return Err(BccError::InvalidAddress(addr.to_string()));
+//!         return Err(ScopeError::InvalidAddress(addr.to_string()));
 //!     }
 //!     Ok(())
 //! }
@@ -33,13 +33,13 @@
 use std::path::PathBuf;
 use thiserror::Error;
 
-/// The primary error type for the BCC application.
+/// The primary error type for the Scope application.
 ///
 /// This enum encompasses all error conditions that can occur during
 /// blockchain analysis operations. Each variant provides context-specific
 /// information to aid in debugging and user-friendly error messages.
 #[derive(Debug, Error)]
-pub enum BccError {
+pub enum ScopeError {
     /// Configuration file could not be loaded or parsed.
     ///
     /// This includes missing files, invalid YAML syntax, or schema violations.
@@ -143,21 +143,21 @@ pub enum ConfigError {
     },
 }
 
-/// A specialized [`Result`] type for BCC operations.
+/// A specialized [`Result`] type for Scope operations.
 ///
 /// This type alias reduces boilerplate by defaulting the error type
-/// to [`BccError`].
+/// to [`ScopeError`].
 ///
 /// # Examples
 ///
 /// ```rust
-/// use bcc::Result;
+/// use scope::Result;
 ///
 /// fn do_something() -> Result<String> {
 ///     Ok("success".to_string())
 /// }
 /// ```
-pub type Result<T> = std::result::Result<T, BccError>;
+pub type Result<T> = std::result::Result<T, ScopeError>;
 
 // ============================================================================
 // Unit Tests
@@ -169,25 +169,25 @@ mod tests {
 
     #[test]
     fn test_bca_error_display_invalid_address() {
-        let err = BccError::InvalidAddress("not-an-address".into());
+        let err = ScopeError::InvalidAddress("not-an-address".into());
         assert_eq!(err.to_string(), "Invalid address format: not-an-address");
     }
 
     #[test]
     fn test_bca_error_display_invalid_hash() {
-        let err = BccError::InvalidHash("bad-hash".into());
+        let err = ScopeError::InvalidHash("bad-hash".into());
         assert_eq!(err.to_string(), "Invalid transaction hash: bad-hash");
     }
 
     #[test]
     fn test_bca_error_display_chain() {
-        let err = BccError::Chain("connection refused".into());
+        let err = ScopeError::Chain("connection refused".into());
         assert_eq!(err.to_string(), "Chain client error: connection refused");
     }
 
     #[test]
     fn test_bca_error_display_export() {
-        let err = BccError::Export("failed to write CSV".into());
+        let err = ScopeError::Export("failed to write CSV".into());
         assert_eq!(err.to_string(), "Export failed: failed to write CSV");
     }
 
@@ -218,15 +218,15 @@ mod tests {
         let config_err = ConfigError::NotFound {
             path: PathBuf::from("/test"),
         };
-        let bca_err: BccError = config_err.into();
-        assert!(matches!(bca_err, BccError::Config(_)));
+        let bca_err: ScopeError = config_err.into();
+        assert!(matches!(bca_err, ScopeError::Config(_)));
     }
 
     #[test]
     fn test_bca_error_from_io_error() {
         let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
-        let bca_err: BccError = io_err.into();
-        assert!(matches!(bca_err, BccError::IoError(_)));
+        let bca_err: ScopeError = io_err.into();
+        assert!(matches!(bca_err, ScopeError::IoError(_)));
     }
 
     #[test]
@@ -240,14 +240,14 @@ mod tests {
     #[test]
     fn test_result_type_alias_err() {
         fn returns_err() -> Result<i32> {
-            Err(BccError::Chain("test error".into()))
+            Err(ScopeError::Chain("test error".into()))
         }
         assert!(returns_err().is_err());
     }
 
     #[test]
     fn test_error_debug_impl() {
-        let err = BccError::InvalidAddress("0x123".into());
+        let err = ScopeError::InvalidAddress("0x123".into());
         let debug_str = format!("{:?}", err);
         assert!(debug_str.contains("InvalidAddress"));
         assert!(debug_str.contains("0x123"));

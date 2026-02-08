@@ -6,12 +6,12 @@
 //!
 //! ## Storage Location
 //!
-//! Token aliases are stored in `~/.local/share/bcc/tokens.yaml`
+//! Token aliases are stored in `~/.local/share/scope/tokens.yaml`
 //!
 //! ## Usage
 //!
 //! ```rust,no_run
-//! use bcc::tokens::TokenAliases;
+//! use scope::tokens::TokenAliases;
 //!
 //! // Load existing aliases
 //! let mut aliases = TokenAliases::load();
@@ -28,7 +28,7 @@
 //! aliases.save().unwrap();
 //! ```
 
-use crate::error::{BccError, Result};
+use crate::error::{Result, ScopeError};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -69,7 +69,7 @@ pub struct TokenAliases {
 impl TokenAliases {
     /// Returns the path to the token aliases file.
     pub fn aliases_path() -> Option<PathBuf> {
-        dirs::data_dir().map(|p| p.join("bcc").join("tokens.yaml"))
+        dirs::data_dir().map(|p| p.join("scope").join("tokens.yaml"))
     }
 
     /// Loads token aliases from disk.
@@ -85,13 +85,13 @@ impl TokenAliases {
         if let Some(path) = Self::aliases_path() {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| {
-                    BccError::Io(format!("Failed to create token aliases directory: {}", e))
+                    ScopeError::Io(format!("Failed to create token aliases directory: {}", e))
                 })?;
             }
             let contents = serde_yaml::to_string(self)
-                .map_err(|e| BccError::Export(format!("Failed to serialize aliases: {}", e)))?;
+                .map_err(|e| ScopeError::Export(format!("Failed to serialize aliases: {}", e)))?;
             std::fs::write(&path, contents)
-                .map_err(|e| BccError::Io(format!("Failed to write token aliases: {}", e)))?;
+                .map_err(|e| ScopeError::Io(format!("Failed to write token aliases: {}", e)))?;
         }
         Ok(())
     }

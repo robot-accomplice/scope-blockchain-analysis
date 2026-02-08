@@ -19,11 +19,11 @@
 //! ## Usage
 //!
 //! ```rust,no_run
-//! use bcc::chains::EthereumClient;
-//! use bcc::config::ChainsConfig;
+//! use scope::chains::EthereumClient;
+//! use scope::config::ChainsConfig;
 //!
 //! #[tokio::main]
-//! async fn main() -> bcc::Result<()> {
+//! async fn main() -> scope::Result<()> {
 //!     let config = ChainsConfig::default();
 //!     let client = EthereumClient::new(&config)?;
 //!     
@@ -36,7 +36,7 @@
 
 use crate::chains::{Balance, ChainClient, Token, TokenBalance, TokenHolder, Transaction};
 use crate::config::ChainsConfig;
-use crate::error::{BccError, Result};
+use crate::error::{Result, ScopeError};
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::Deserialize;
@@ -201,8 +201,8 @@ impl EthereumClient {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use bcc::chains::EthereumClient;
-    /// use bcc::config::ChainsConfig;
+    /// use scope::chains::EthereumClient;
+    /// use scope::config::ChainsConfig;
     ///
     /// let config = ChainsConfig::default();
     /// let client = EthereumClient::new(&config).unwrap();
@@ -211,7 +211,7 @@ impl EthereumClient {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
-            .map_err(|e| BccError::Chain(format!("Failed to create HTTP client: {}", e)))?;
+            .map_err(|e| ScopeError::Chain(format!("Failed to create HTTP client: {}", e)))?;
 
         Ok(Self {
             client,
@@ -294,14 +294,14 @@ impl EthereumClient {
                 return Self::for_aegis(rpc_url, config);
             }
             _ => {
-                return Err(BccError::Chain(format!("Unsupported chain: {}", chain)));
+                return Err(ScopeError::Chain(format!("Unsupported chain: {}", chain)));
             }
         };
 
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
-            .map_err(|e| BccError::Chain(format!("Failed to create HTTP client: {}", e)))?;
+            .map_err(|e| ScopeError::Chain(format!("Failed to create HTTP client: {}", e)))?;
 
         Ok(Self {
             client,
@@ -328,7 +328,7 @@ impl EthereumClient {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
-            .map_err(|e| BccError::Chain(format!("Failed to create HTTP client: {}", e)))?;
+            .map_err(|e| ScopeError::Chain(format!("Failed to create HTTP client: {}", e)))?;
 
         Ok(Self {
             client,
@@ -383,8 +383,8 @@ impl EthereumClient {
     ///
     /// # Errors
     ///
-    /// Returns [`BccError::InvalidAddress`] if the address format is invalid.
-    /// Returns [`BccError::Request`] if the API request fails.
+    /// Returns [`ScopeError::InvalidAddress`] if the address format is invalid.
+    /// Returns [`ScopeError::Request`] if the API request fails.
     pub async fn get_balance(&self, address: &str) -> Result<Balance> {
         // Validate address
         validate_eth_address(address)?;
@@ -407,7 +407,10 @@ impl EthereumClient {
         let response: ApiResponse<String> = self.client.get(&url).send().await?.json().await?;
 
         if response.status != "1" {
-            return Err(BccError::Chain(format!("API error: {}", response.message)));
+            return Err(ScopeError::Chain(format!(
+                "API error: {}",
+                response.message
+            )));
         }
 
         self.parse_balance_wei(&response.result)
@@ -453,17 +456,17 @@ impl EthereumClient {
             .await?;
 
         if let Some(error) = response.error {
-            return Err(BccError::Chain(format!("RPC error: {}", error.message)));
+            return Err(ScopeError::Chain(format!("RPC error: {}", error.message)));
         }
 
         let result = response
             .result
-            .ok_or_else(|| BccError::Chain("Empty RPC response".to_string()))?;
+            .ok_or_else(|| ScopeError::Chain("Empty RPC response".to_string()))?;
 
         // Parse hex balance (e.g., "0x1234")
         let hex_balance = result.trim_start_matches("0x");
         let wei = u128::from_str_radix(hex_balance, 16)
-            .map_err(|_| BccError::Chain("Invalid balance hex response".to_string()))?;
+            .map_err(|_| ScopeError::Chain("Invalid balance hex response".to_string()))?;
 
         self.parse_balance_wei(&wei.to_string())
     }
@@ -472,7 +475,7 @@ impl EthereumClient {
     fn parse_balance_wei(&self, wei_str: &str) -> Result<Balance> {
         let wei: u128 = wei_str
             .parse()
-            .map_err(|_| BccError::Chain("Invalid balance response".to_string()))?;
+            .map_err(|_| ScopeError::Chain("Invalid balance response".to_string()))?;
 
         let eth = wei as f64 / 10_f64.powi(self.native_decimals as i32);
 
@@ -529,7 +532,7 @@ impl EthereumClient {
 
         let proxy_tx = tx_response
             .result
-            .ok_or_else(|| BccError::NotFound(format!("Transaction not found: {}", hash)))?;
+            .ok_or_else(|| ScopeError::NotFound(format!("Transaction not found: {}", hash)))?;
 
         // Fetch the receipt for gas_used and status
         let receipt_url = self.build_api_url(&format!(
@@ -642,7 +645,7 @@ impl EthereumClient {
 
         let proxy_tx = response
             .result
-            .ok_or_else(|| BccError::NotFound(format!("Transaction not found: {}", hash)))?;
+            .ok_or_else(|| ScopeError::NotFound(format!("Transaction not found: {}", hash)))?;
 
         // Also fetch receipt
         let receipt_request = RpcRequest {
@@ -738,13 +741,13 @@ impl EthereumClient {
 
         let block = response
             .result
-            .ok_or_else(|| BccError::Chain(format!("Block not found: {}", block_number)))?;
+            .ok_or_else(|| ScopeError::Chain(format!("Block not found: {}", block_number)))?;
 
         block
             .timestamp
             .as_deref()
             .and_then(|ts| u64::from_str_radix(ts.trim_start_matches("0x"), 16).ok())
-            .ok_or_else(|| BccError::Chain("Invalid block timestamp".to_string()))
+            .ok_or_else(|| ScopeError::Chain("Invalid block timestamp".to_string()))
     }
 
     /// Fetches recent transactions for an address.
@@ -771,7 +774,10 @@ impl EthereumClient {
             self.client.get(&url).send().await?.json().await?;
 
         if response.status != "1" && response.message != "No transactions found" {
-            return Err(BccError::Chain(format!("API error: {}", response.message)));
+            return Err(ScopeError::Chain(format!(
+                "API error: {}",
+                response.message
+            )));
         }
 
         let transactions = response
@@ -810,7 +816,7 @@ impl EthereumClient {
         // Parse hex block number
         let block_hex = response.result.trim_start_matches("0x");
         let block_number = u64::from_str_radix(block_hex, 16)
-            .map_err(|_| BccError::Chain("Invalid block number response".to_string()))?;
+            .map_err(|_| ScopeError::Chain("Invalid block number response".to_string()))?;
 
         Ok(block_number)
     }
@@ -1093,7 +1099,7 @@ impl EthereumClient {
 
         // Parse the response
         let api_response: ApiResponse<serde_json::Value> = serde_json::from_str(&response_text)
-            .map_err(|e| BccError::Api(format!("Failed to parse holder response: {}", e)))?;
+            .map_err(|e| ScopeError::Api(format!("Failed to parse holder response: {}", e)))?;
 
         if api_response.status != "1" {
             // Check for common error messages
@@ -1107,7 +1113,7 @@ impl EthereumClient {
                 );
                 return Ok(Vec::new());
             }
-            return Err(BccError::Api(format!(
+            return Err(ScopeError::Api(format!(
                 "API error: {}",
                 api_response.message
             )));
@@ -1115,7 +1121,7 @@ impl EthereumClient {
 
         // Parse the holder list
         let holders: Vec<TokenHolderItem> = serde_json::from_value(api_response.result)
-            .map_err(|e| BccError::Api(format!("Failed to parse holder list: {}", e)))?;
+            .map_err(|e| ScopeError::Api(format!("Failed to parse holder list: {}", e)))?;
 
         // Calculate total supply for percentage calculation
         let total_balance: f64 = holders
@@ -1232,19 +1238,19 @@ impl Default for EthereumClient {
 /// Validates an Ethereum address format.
 fn validate_eth_address(address: &str) -> Result<()> {
     if !address.starts_with("0x") {
-        return Err(BccError::InvalidAddress(format!(
+        return Err(ScopeError::InvalidAddress(format!(
             "Address must start with '0x': {}",
             address
         )));
     }
     if address.len() != 42 {
-        return Err(BccError::InvalidAddress(format!(
+        return Err(ScopeError::InvalidAddress(format!(
             "Address must be 42 characters: {}",
             address
         )));
     }
     if !address[2..].chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(BccError::InvalidAddress(format!(
+        return Err(ScopeError::InvalidAddress(format!(
             "Address contains invalid hex characters: {}",
             address
         )));
@@ -1255,19 +1261,19 @@ fn validate_eth_address(address: &str) -> Result<()> {
 /// Validates a transaction hash format.
 fn validate_tx_hash(hash: &str) -> Result<()> {
     if !hash.starts_with("0x") {
-        return Err(BccError::InvalidHash(format!(
+        return Err(ScopeError::InvalidHash(format!(
             "Hash must start with '0x': {}",
             hash
         )));
     }
     if hash.len() != 66 {
-        return Err(BccError::InvalidHash(format!(
+        return Err(ScopeError::InvalidHash(format!(
             "Hash must be 66 characters: {}",
             hash
         )));
     }
     if !hash[2..].chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(BccError::InvalidHash(format!(
+        return Err(ScopeError::InvalidHash(format!(
             "Hash contains invalid hex characters: {}",
             hash
         )));

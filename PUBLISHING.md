@@ -1,10 +1,10 @@
 # Publishing Guide
 
-This document describes how to publish BCC releases and the crate to crates.io.
+This document describes how to publish Scope releases and the crate to crates.io.
 
 ## Prerequisites
 
-- GitHub account with access to `robot-accomplice/bcc` repository
+- GitHub account with access to `robot-accomplice/bca` repository
 - crates.io account with publish permissions (for crate publishing)
 - `cargo` and `rust` installed locally
 
@@ -72,7 +72,7 @@ git push origin v0.2.0
 ### 4. Review GitHub Release
 
 The release workflow will create a draft release. Review it at:
-https://github.com/robot-accomplice/bcc/releases
+https://github.com/robot-accomplice/bca/releases
 
 - Edit release notes
 - Verify all binary assets are attached
@@ -105,8 +105,8 @@ And adding `CARGO_REGISTRY_TOKEN` to GitHub repository secrets.
 
 ## Post-Release
 
-- [ ] Verify crate is available: https://crates.io/crates/bcc
-- [ ] Verify installation works: `cargo install bcc`
+- [ ] Verify crate is available: https://crates.io/crates/scope
+- [ ] Verify installation works: `cargo install scope`
 - [ ] Update documentation if needed
 - [ ] Announce release (if applicable)
 
@@ -126,14 +126,14 @@ Common issues:
 ### Binary build fails
 
 Check the Actions logs at:
-https://github.com/robot-accomplice/bcc/actions
+https://github.com/robot-accomplice/bca/actions
 
 ### Crate name taken
 
-If `bcc` is already taken on crates.io, consider:
-- `blockchain-crawler`
-- `bcc-cli`
-- `blockchain-analysis`
+If `scope` is already taken on crates.io, consider:
+- `scope-blockchain`
+- `scope-analysis`
+- `blockchain-scope`
 
 Update `Cargo.toml`:
 ```toml
@@ -142,21 +142,21 @@ name = "new-name"
 
 ## Code Coverage Setup
 
-BCC uses Codecov for coverage reporting. Target: **80%+ coverage** before publishing.
+Scope uses Codecov for coverage reporting. Target: **80%+ coverage** before publishing.
 
 ### Setup Steps (OIDC - No Token Required)
 
-BCC uses **OIDC authentication** with Codecov — no static tokens needed.
+Scope uses **OIDC authentication** with Codecov — no static tokens needed.
 
 1. **Sign up for Codecov**: https://about.codecov.io/
-2. **Add repository**: Connect `robot-accomplice/bcc` GitHub repo
+2. **Add repository**: Connect `robot-accomplice/bca` GitHub repo
 3. **Enable OIDC**: Already configured in `.github/workflows/coverage.yml`
 4. **No secrets required** — OIDC handles authentication automatically
 
 ### Alternative: Token-Based (If OIDC Fails)
 
 If OIDC doesn't work:
-1. Get token from: https://app.codecov.io/gh/robot-accomplice/bcc/settings
+1. Get token from: https://app.codecov.io/gh/robot-accomplice/bca/settings
 2. Add GitHub Secret: `CODECOV_TOKEN`
 3. Edit workflow: Remove `use_oidc: true` and uncomment token line
 
@@ -164,7 +164,7 @@ If OIDC doesn't work:
 
 Add to README.md after setup:
 ```markdown
-[![codecov](https://codecov.io/gh/robot-accomplice/bcc/branch/main/graph/badge.svg)](https://codecov.io/gh/robot-accomplice/bcc)
+[![codecov](https://codecov.io/gh/robot-accomplice/bca/branch/main/graph/badge.svg)](https://codecov.io/gh/robot-accomplice/bca)
 ```
 
 ### Running Coverage Locally

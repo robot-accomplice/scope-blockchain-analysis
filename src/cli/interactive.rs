@@ -1,18 +1,18 @@
 //! # Interactive Mode
 //!
-//! This module implements an interactive REPL for the BCC CLI where
+//! This module implements an interactive REPL for the Scope CLI where
 //! context is preserved between commands. Users can set a chain once
 //! and subsequent commands will use it automatically.
 //!
 //! ## Usage
 //!
 //! ```bash
-//! bcc interactive
+//! scope interactive
 //!
-//! bcc> chain solana
+//! scope> chain solana
 //! Chain set to: solana
 //!
-//! bcc> address 7xKXtg...
+//! scope> address 7xKXtg...
 //! # Uses solana chain automatically
 //! ```
 
@@ -113,7 +113,7 @@ impl fmt::Display for SessionContext {
 impl SessionContext {
     /// Returns the path to the session context file.
     fn context_path() -> Option<PathBuf> {
-        dirs::data_dir().map(|p| p.join("bcc").join("session.yaml"))
+        dirs::data_dir().map(|p| p.join("scope").join("session.yaml"))
     }
 
     /// Loads session context from file, or returns default if not found.
@@ -131,7 +131,7 @@ impl SessionContext {
                 std::fs::create_dir_all(parent)?;
             }
             let contents = serde_yaml::to_string(self)
-                .map_err(|e| crate::error::BccError::Export(e.to_string()))?;
+                .map_err(|e| crate::error::ScopeError::Export(e.to_string()))?;
             std::fs::write(&path, contents)?;
         }
         Ok(())
@@ -150,7 +150,7 @@ pub async fn run(
         eprintln!("{}", banner);
     }
 
-    println!("Welcome to BCC Interactive Mode!");
+    println!("Welcome to Scope Interactive Mode!");
     println!("Type 'help' for available commands, 'exit' to quit.\n");
 
     // Load previous session context or start fresh
@@ -163,17 +163,17 @@ pub async fn run(
 
     // Create readline editor
     let mut rl = DefaultEditor::new().map_err(|e| {
-        crate::error::BccError::Chain(format!("Failed to initialize readline: {}", e))
+        crate::error::ScopeError::Chain(format!("Failed to initialize readline: {}", e))
     })?;
 
     // Try to load history
-    let history_path = dirs::data_dir().map(|p| p.join("bcc").join("history.txt"));
+    let history_path = dirs::data_dir().map(|p| p.join("scope").join("history.txt"));
     if let Some(ref path) = history_path {
         let _ = rl.load_history(path);
     }
 
     loop {
-        let prompt = format!("bcc:{}> ", context.chain);
+        let prompt = format!("scope:{}> ", context.chain);
 
         match rl.readline(&prompt) {
             Ok(input_line) => {
@@ -875,7 +875,7 @@ async fn execute_portfolio(
 fn print_help() {
     println!(
         r#"
-BCC Interactive Mode - Available Commands
+Scope Interactive Mode - Available Commands
 ==========================================
 
 Navigation & Control:

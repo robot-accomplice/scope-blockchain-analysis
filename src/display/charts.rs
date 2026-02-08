@@ -12,8 +12,8 @@
 //! ## Usage
 //!
 //! ```rust
-//! use bcc::display::charts::{render_price_chart, ChartConfig};
-//! use bcc::chains::PricePoint;
+//! use scope::display::charts::{render_price_chart, ChartConfig};
+//! use scope::chains::PricePoint;
 //!
 //! let history = vec![
 //!     PricePoint { timestamp: 0, price: 100.0 },

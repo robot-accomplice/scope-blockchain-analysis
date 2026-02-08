@@ -7,7 +7,7 @@
 //! ## Command Structure
 //!
 //! ```text
-//! bca [OPTIONS] <COMMAND>
+//! scope [OPTIONS] <COMMAND>
 //!
 //! Commands:
 //!   address      Analyze a blockchain address
@@ -46,15 +46,15 @@ pub use tx::TxArgs;
 
 /// Blockchain Analysis CLI - A tool for blockchain data analysis.
 ///
-/// BCC provides comprehensive blockchain analysis capabilities including
+/// Scope provides comprehensive blockchain analysis capabilities including
 /// address investigation, transaction decoding, portfolio tracking, and
 /// data export functionality.
 #[derive(Debug, Parser)]
 #[command(
-    name = "bcc",
+    name = "scope",
     version,
-    about = "Blockchain Analysis CLI - A tool for blockchain data analysis",
-    long_about = "BCC (Blockchain Crawler CLI) is a production-grade tool for \
+    about = "Scope Blockchain Analysis - A tool for blockchain data analysis",
+    long_about = "Scope Blockchain Analysis is a production-grade tool for \
                   blockchain data analysis, portfolio tracking, and transaction investigation.\n\n\
                   Use --help with any subcommand for detailed usage information."
 )]
@@ -65,7 +65,7 @@ pub struct Cli {
 
     /// Path to configuration file.
     ///
-    /// Overrides the default location (~/.config/bcc/config.yaml).
+    /// Overrides the default location (~/.config/scope/config.yaml).
     #[arg(long, global = true, value_name = "PATH")]
     pub config: Option<PathBuf>,
 
@@ -128,7 +128,7 @@ pub enum Commands {
     #[command(visible_alias = "shell")]
     Interactive(InteractiveArgs),
 
-    /// Configure BCC settings and API keys.
+    /// Configure Scope settings and API keys.
     ///
     /// Run the setup wizard to configure API keys and preferences,
     /// or use --status to view current configuration.
@@ -180,7 +180,7 @@ mod tests {
     #[test]
     fn test_cli_parse_address_command() {
         let cli = Cli::try_parse_from([
-            "bcc",
+            "scope",
             "address",
             "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
         ])
@@ -193,9 +193,12 @@ mod tests {
 
     #[test]
     fn test_cli_parse_address_alias() {
-        let cli =
-            Cli::try_parse_from(["bcc", "addr", "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2"])
-                .unwrap();
+        let cli = Cli::try_parse_from([
+            "scope",
+            "addr",
+            "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
+        ])
+        .unwrap();
 
         assert!(matches!(cli.command, Commands::Address(_)));
     }
@@ -203,7 +206,7 @@ mod tests {
     #[test]
     fn test_cli_parse_tx_command() {
         let cli = Cli::try_parse_from([
-            "bcc",
+            "scope",
             "tx",
             "0xabc123def456789012345678901234567890123456789012345678901234abcd",
         ])
@@ -215,7 +218,7 @@ mod tests {
     #[test]
     fn test_cli_parse_tx_alias() {
         let cli = Cli::try_parse_from([
-            "bcc",
+            "scope",
             "transaction",
             "0xabc123def456789012345678901234567890123456789012345678901234abcd",
         ])
@@ -226,7 +229,7 @@ mod tests {
 
     #[test]
     fn test_cli_parse_portfolio_command() {
-        let cli = Cli::try_parse_from(["bcc", "portfolio", "list"]).unwrap();
+        let cli = Cli::try_parse_from(["scope", "portfolio", "list"]).unwrap();
 
         assert!(matches!(cli.command, Commands::Portfolio(_)));
     }
@@ -234,7 +237,7 @@ mod tests {
     #[test]
     fn test_cli_parse_export_command() {
         let cli = Cli::try_parse_from([
-            "bcc",
+            "scope",
             "export",
             "--address",
             "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
@@ -248,21 +251,21 @@ mod tests {
 
     #[test]
     fn test_cli_parse_interactive_command() {
-        let cli = Cli::try_parse_from(["bcc", "interactive"]).unwrap();
+        let cli = Cli::try_parse_from(["scope", "interactive"]).unwrap();
 
         assert!(matches!(cli.command, Commands::Interactive(_)));
     }
 
     #[test]
     fn test_cli_parse_interactive_alias() {
-        let cli = Cli::try_parse_from(["bcc", "shell"]).unwrap();
+        let cli = Cli::try_parse_from(["scope", "shell"]).unwrap();
 
         assert!(matches!(cli.command, Commands::Interactive(_)));
     }
 
     #[test]
     fn test_cli_parse_interactive_no_banner() {
-        let cli = Cli::try_parse_from(["bcc", "interactive", "--no-banner"]).unwrap();
+        let cli = Cli::try_parse_from(["scope", "interactive", "--no-banner"]).unwrap();
 
         if let Commands::Interactive(args) = cli.command {
             assert!(args.no_banner);
@@ -274,7 +277,7 @@ mod tests {
     #[test]
     fn test_cli_verbose_flag_counting() {
         let cli = Cli::try_parse_from([
-            "bcc",
+            "scope",
             "-vvv",
             "address",
             "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
@@ -287,7 +290,7 @@ mod tests {
     #[test]
     fn test_cli_verbose_separate_flags() {
         let cli = Cli::try_parse_from([
-            "bcc",
+            "scope",
             "-v",
             "-v",
             "address",
@@ -301,7 +304,7 @@ mod tests {
     #[test]
     fn test_cli_global_config_option() {
         let cli = Cli::try_parse_from([
-            "bcc",
+            "scope",
             "--config",
             "/custom/path.yaml",
             "tx",
@@ -315,7 +318,7 @@ mod tests {
     #[test]
     fn test_cli_config_long_flag() {
         let cli = Cli::try_parse_from([
-            "bcc",
+            "scope",
             "--config",
             "/custom/config.yaml",
             "address",
@@ -329,7 +332,7 @@ mod tests {
     #[test]
     fn test_cli_no_color_flag() {
         let cli = Cli::try_parse_from([
-            "bcc",
+            "scope",
             "--no-color",
             "address",
             "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
@@ -341,20 +344,20 @@ mod tests {
 
     #[test]
     fn test_cli_missing_required_args_fails() {
-        let result = Cli::try_parse_from(["bcc", "address"]);
+        let result = Cli::try_parse_from(["scope", "address"]);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_cli_invalid_subcommand_fails() {
-        let result = Cli::try_parse_from(["bcc", "invalid"]);
+        let result = Cli::try_parse_from(["scope", "invalid"]);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_cli_log_level_default() {
         let cli = Cli::try_parse_from([
-            "bcc",
+            "scope",
             "address",
             "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
         ])
@@ -366,7 +369,7 @@ mod tests {
     #[test]
     fn test_cli_log_level_info() {
         let cli = Cli::try_parse_from([
-            "bcc",
+            "scope",
             "-v",
             "address",
             "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
@@ -379,7 +382,7 @@ mod tests {
     #[test]
     fn test_cli_log_level_debug() {
         let cli = Cli::try_parse_from([
-            "bcc",
+            "scope",
             "-vv",
             "address",
             "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
@@ -392,7 +395,7 @@ mod tests {
     #[test]
     fn test_cli_log_level_trace() {
         let cli = Cli::try_parse_from([
-            "bcc",
+            "scope",
             "-vvvv",
             "address",
             "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
@@ -405,7 +408,7 @@ mod tests {
     #[test]
     fn test_cli_debug_impl() {
         let cli = Cli::try_parse_from([
-            "bcc",
+            "scope",
             "address",
             "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
         ])

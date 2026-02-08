@@ -38,14 +38,14 @@ jobs:
         shell: bash
         run: |
           cd target/${{ matrix.target }}/release
-          tar czvf ../../../bcc-${{ matrix.suffix }}.tar.gz bcc
+          tar czvf ../../../scope-${{ matrix.suffix }}.tar.gz scope
           cd -
       
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bcc-${{ matrix.suffix }}
-          path: ./bcc-${{ matrix.suffix }}.tar.gz
+          name: scope-${{ matrix.suffix }}
+          path: ./scope-${{ matrix.suffix }}.tar.gz
 
   create-release:
     name: Create Release

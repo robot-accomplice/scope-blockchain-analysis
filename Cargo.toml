@@ -1,13 +1,13 @@
 [package]
-name = "bcc"
+name = "scope"
 version = "0.2.0"
 edition = "2024"
 authors = ["Jon Machen <jon@palmusd.com>"]
-description = "Blockchain Crawler CLI - A production-grade tool for blockchain data analysis, portfolio tracking, and transaction investigation"
+description = "Scope Blockchain Analysis - A production-grade tool for blockchain data analysis, portfolio tracking, and transaction investigation"
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/robot-accomplice/bcc"
-homepage = "https://github.com/robot-accomplice/bcc"
+repository = "https://github.com/robot-accomplice/bca"
+homepage = "https://github.com/robot-accomplice/bca"
 keywords = ["blockchain", "ethereum", "cli", "analysis", "crypto", "compliance"]
 categories = ["command-line-utilities", "cryptography::cryptocurrencies"]
 exclude = [
@@ -18,11 +18,11 @@ exclude = [
 ]
 
 [lib]
-name = "bcc"
+name = "scope"
 path = "src/lib.rs"
 
 [[bin]]
-name = "bcc"
+name = "scope"
 path = "src/main.rs"
 
 [dependencies]
@@ -38,7 +38,7 @@ serde_yaml = "0.9"
 serde_json = "1.0"
 
 # HTTP client
-reqwest = { version = "0.11", features = ["json"] }
+reqwest = { version = "0.12", features = ["json"] }
 
 # Error handling
 thiserror = "1.0"

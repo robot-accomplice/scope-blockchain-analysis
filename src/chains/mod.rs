@@ -38,11 +38,11 @@
 //! ### Ethereum/EVM Client
 //!
 //! ```rust,no_run
-//! use bcc::chains::{ChainClient, EthereumClient};
-//! use bcc::Config;
+//! use scope::chains::{ChainClient, EthereumClient};
+//! use scope::Config;
 //!
 //! #[tokio::main]
-//! async fn main() -> bcc::Result<()> {
+//! async fn main() -> scope::Result<()> {
 //!     let config = Config::load(None)?;
 //!     let client = EthereumClient::new(&config.chains)?;
 //!     
@@ -55,11 +55,11 @@
 //! ### Solana Client
 //!
 //! ```rust,no_run
-//! use bcc::chains::SolanaClient;
-//! use bcc::Config;
+//! use scope::chains::SolanaClient;
+//! use scope::Config;
 //!
 //! #[tokio::main]
-//! async fn main() -> bcc::Result<()> {
+//! async fn main() -> scope::Result<()> {
 //!     let config = Config::load(None)?;
 //!     let client = SolanaClient::new(&config.chains)?;
 //!     
@@ -72,11 +72,11 @@
 //! ### Tron Client
 //!
 //! ```rust,no_run
-//! use bcc::chains::TronClient;
-//! use bcc::Config;
+//! use scope::chains::TronClient;
+//! use scope::Config;
 //!
 //! #[tokio::main]
-//! async fn main() -> bcc::Result<()> {
+//! async fn main() -> scope::Result<()> {
 //!     let config = Config::load(None)?;
 //!     let client = TronClient::new(&config.chains)?;
 //!     
@@ -180,7 +180,7 @@ pub trait ChainClient: Send + Sync {
     /// Default implementation returns "not supported" error.
     /// Override in chain clients that support token info lookups.
     async fn get_token_info(&self, _address: &str) -> Result<Token> {
-        Err(crate::error::BccError::Chain(
+        Err(crate::error::ScopeError::Chain(
             "Token info lookup not supported on this chain".to_string(),
         ))
     }
@@ -210,8 +210,8 @@ pub trait ChainClient: Send + Sync {
 /// # Example
 ///
 /// ```rust,no_run
-/// use bcc::chains::{ChainClientFactory, DefaultClientFactory};
-/// use bcc::Config;
+/// use scope::chains::{ChainClientFactory, DefaultClientFactory};
+/// use scope::Config;
 ///
 /// let config = Config::default();
 /// let factory = DefaultClientFactory { chains_config: config.chains.clone() };
@@ -596,7 +596,7 @@ pub struct TokenSocial {
 /// # Examples
 ///
 /// ```
-/// use bcc::chains::infer_chain_from_address;
+/// use scope::chains::infer_chain_from_address;
 ///
 /// assert_eq!(infer_chain_from_address("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2"), Some("ethereum"));
 /// assert_eq!(infer_chain_from_address("TDqSquXBgUCLYvYC4XZgrprLK589dkhSCf"), Some("tron"));
@@ -643,7 +643,7 @@ pub fn infer_chain_from_address(address: &str) -> Option<&'static str> {
 /// # Examples
 ///
 /// ```
-/// use bcc::chains::infer_chain_from_hash;
+/// use scope::chains::infer_chain_from_hash;
 ///
 /// // EVM hash
 /// let evm_hash = "0xabc123def456789012345678901234567890123456789012345678901234abcd";
@@ -1280,7 +1280,7 @@ pub mod mocks {
         async fn get_token_info(&self, _address: &str) -> Result<Token> {
             match &self.token_info {
                 Some(t) => Ok(t.clone()),
-                None => Err(crate::error::BccError::Chain(
+                None => Err(crate::error::ScopeError::Chain(
                     "Token info not available".to_string(),
                 )),
             }
@@ -1364,7 +1364,7 @@ pub mod mocks {
         async fn get_token_data(&self, _chain: &str, _address: &str) -> Result<DexTokenData> {
             match &self.token_data {
                 Some(data) => Ok(data.clone()),
-                None => Err(crate::error::BccError::NotFound(
+                None => Err(crate::error::ScopeError::NotFound(
                     "No DEX data found".to_string(),
                 )),
             }

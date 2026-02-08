@@ -1,4 +1,4 @@
-//! # BCC - Blockchain Crawler CLI
+//! # Scope Blockchain Analysis
 //!
 //! A command-line tool and library for blockchain data analysis,
 //! portfolio tracking, and transaction investigation.
@@ -50,28 +50,28 @@
 //!
 //! ```bash
 //! # Analyze an address
-//! bca address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
+//! scope address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
 //!
 //! # Analyze a transaction
-//! bca tx 0xabc123...
+//! scope tx 0xabc123...
 //!
 //! # Manage portfolio
-//! bca portfolio add 0x742d... --label "Main Wallet"
-//! bca portfolio list
+//! scope portfolio add 0x742d... --label "Main Wallet"
+//! scope portfolio list
 //!
 //! # Export data
-//! bca export --address 0x742d... --output history.json
+//! scope export --address 0x742d... --output history.json
 //! ```
 //!
 //! ## Library Usage
 //!
-//! The BCC library can be used programmatically in your Rust applications:
+//! The Scope library can be used programmatically in your Rust applications:
 //!
 //! ```rust,no_run
-//! use bcc::{Config, chains::EthereumClient};
+//! use scope::{Config, chains::EthereumClient};
 //!
 //! #[tokio::main]
-//! async fn main() -> bcc::Result<()> {
+//! async fn main() -> scope::Result<()> {
 //!     // Load configuration
 //!     let config = Config::load(None)?;
 //!     
@@ -99,7 +99,7 @@
 //!
 //! ## Configuration
 //!
-//! BCC reads configuration from `~/.config/bcc/config.yaml`:
+//! Scope reads configuration from `~/.config/scope/config.yaml`:
 //!
 //! ```yaml
 //! chains:
@@ -124,21 +124,21 @@
 //!   color: true
 //!
 //! portfolio:
-//!   data_dir: "~/.local/share/bcc"
+//!   data_dir: "~/.local/share/scope"
 //! ```
 //!
 //! ## Error Handling
 //!
-//! All fallible operations return [`Result<T>`], which uses [`BccError`]
+//! All fallible operations return [`Result<T>`], which uses [`ScopeError`]
 //! as the error type. This provides detailed error context for debugging
 //! and user-friendly error messages.
 //!
 //! ```rust
-//! use bcc::{BccError, Result};
+//! use scope::{ScopeError, Result};
 //!
 //! fn validate_address(addr: &str) -> Result<()> {
 //!     if !addr.starts_with("0x") || addr.len() != 42 {
-//!         return Err(BccError::InvalidAddress(addr.to_string()));
+//!         return Err(ScopeError::InvalidAddress(addr.to_string()));
 //!     }
 //!     Ok(())
 //! }
@@ -155,7 +155,7 @@
 
 // Re-export commonly used types at crate root
 pub use config::Config;
-pub use error::{BccError, ConfigError, Result};
+pub use error::{ConfigError, Result, ScopeError};
 
 /// Blockchain client implementations.
 ///
@@ -166,7 +166,7 @@ pub mod chains;
 
 /// Command-line interface definitions.
 ///
-/// Contains argument structures and command handlers for the BCC CLI.
+/// Contains argument structures and command handlers for the Scope CLI.
 /// This module is primarily used by the binary crate but is exposed
 /// for programmatic CLI invocation. It provides the main `Cli` struct
 /// and `Commands` enum that define all available commands.
@@ -186,7 +186,7 @@ pub mod display;
 
 /// Error types and result aliases.
 ///
-/// Defines [`BccError`] for all error conditions and provides a
+/// Defines [`ScopeError`] for all error conditions and provides a
 /// convenient [`Result`] type alias.
 pub mod error;
 
@@ -210,8 +210,8 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// # Examples
 ///
 /// ```rust
-/// let version = bcc::version();
-/// println!("BCC version: {}", version);
+/// let version = scope::version();
+/// println!("Scope version: {}", version);
 /// ```
 pub fn version() -> &'static str {
     VERSION
@@ -248,7 +248,7 @@ mod tests {
     #[test]
     fn test_error_reexport() {
         // Verify error types are accessible from crate root
-        let err = BccError::InvalidAddress("test".to_string());
+        let err = ScopeError::InvalidAddress("test".to_string());
         assert!(err.to_string().contains("test"));
     }
 

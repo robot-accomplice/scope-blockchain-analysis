@@ -14,11 +14,11 @@
 //! ## Usage
 //!
 //! ```rust,no_run
-//! use bcc::chains::TronClient;
-//! use bcc::config::ChainsConfig;
+//! use scope::chains::TronClient;
+//! use scope::config::ChainsConfig;
 //!
 //! #[tokio::main]
-//! async fn main() -> bcc::Result<()> {
+//! async fn main() -> scope::Result<()> {
 //!     let config = ChainsConfig::default();
 //!     let client = TronClient::new(&config)?;
 //!     
@@ -30,7 +30,7 @@
 
 use crate::chains::{Balance, ChainClient, Token, Transaction};
 use crate::config::ChainsConfig;
-use crate::error::{BccError, Result};
+use crate::error::{Result, ScopeError};
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::Deserialize;
@@ -154,8 +154,8 @@ impl TronClient {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use bcc::chains::TronClient;
-    /// use bcc::config::ChainsConfig;
+    /// use scope::chains::TronClient;
+    /// use scope::config::ChainsConfig;
     ///
     /// let config = ChainsConfig::default();
     /// let client = TronClient::new(&config).unwrap();
@@ -164,7 +164,7 @@ impl TronClient {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
-            .map_err(|e| BccError::Chain(format!("Failed to create HTTP client: {}", e)))?;
+            .map_err(|e| ScopeError::Chain(format!("Failed to create HTTP client: {}", e)))?;
 
         let api_url = config
             .tron_api
@@ -214,8 +214,8 @@ impl TronClient {
     ///
     /// # Errors
     ///
-    /// Returns [`BccError::InvalidAddress`] if the address format is invalid.
-    /// Returns [`BccError::Request`] if the API request fails.
+    /// Returns [`ScopeError::InvalidAddress`] if the address format is invalid.
+    /// Returns [`ScopeError::Request`] if the API request fails.
     pub async fn get_balance(&self, address: &str) -> Result<Balance> {
         // Validate address
         validate_tron_address(address)?;
@@ -232,7 +232,7 @@ impl TronClient {
         let response: AccountResponse = request.send().await?.json().await?;
 
         if !response.success {
-            return Err(BccError::Chain(format!(
+            return Err(ScopeError::Chain(format!(
                 "TronGrid API error: {}",
                 response.error.unwrap_or_else(|| "Unknown error".into())
             )));
@@ -271,7 +271,7 @@ impl TronClient {
         let response: AccountResponse = request.send().await?.json().await?;
 
         if !response.success {
-            return Err(BccError::Chain(format!(
+            return Err(ScopeError::Chain(format!(
                 "TronGrid API error: {}",
                 response.error.unwrap_or_else(|| "Unknown error".into())
             )));
@@ -350,7 +350,7 @@ impl TronClient {
         let response: TransactionListResponse = request.send().await?.json().await?;
 
         if !response.success {
-            return Err(BccError::Chain(format!(
+            return Err(ScopeError::Chain(format!(
                 "TronGrid API error: {}",
                 response.error.unwrap_or_else(|| "Unknown error".into())
             )));
@@ -360,7 +360,7 @@ impl TronClient {
             .data
             .into_iter()
             .next()
-            .ok_or_else(|| BccError::Chain("Transaction not found".into()))?;
+            .ok_or_else(|| ScopeError::Chain("Transaction not found".into()))?;
 
         // Extract transfer details from contract
         let (from, to, value) = tx
@@ -428,7 +428,7 @@ impl TronClient {
         let response: TransactionListResponse = request.send().await?.json().await?;
 
         if !response.success {
-            return Err(BccError::Chain(format!(
+            return Err(ScopeError::Chain(format!(
                 "TronGrid API error: {}",
                 response.error.unwrap_or_else(|| "Unknown error".into())
             )));
@@ -504,7 +504,7 @@ impl TronClient {
             .block_header
             .and_then(|h| h.raw_data)
             .and_then(|d| d.number)
-            .ok_or_else(|| BccError::Chain("Invalid block response".into()))
+            .ok_or_else(|| ScopeError::Chain("Invalid block response".into()))
     }
 }
 
@@ -560,12 +560,12 @@ struct DexSearchPair {
 /// Returns `Ok(())` if valid, or an error describing the validation failure.
 pub fn validate_tron_address(address: &str) -> Result<()> {
     if address.is_empty() {
-        return Err(BccError::InvalidAddress("Address cannot be empty".into()));
+        return Err(ScopeError::InvalidAddress("Address cannot be empty".into()));
     }
 
     // Tron addresses start with 'T'
     if !address.starts_with('T') {
-        return Err(BccError::InvalidAddress(format!(
+        return Err(ScopeError::InvalidAddress(format!(
             "Tron address must start with 'T': {}",
             address
         )));
@@ -573,7 +573,7 @@ pub fn validate_tron_address(address: &str) -> Result<()> {
 
     // Tron addresses are 34 characters
     if address.len() != 34 {
-        return Err(BccError::InvalidAddress(format!(
+        return Err(ScopeError::InvalidAddress(format!(
             "Tron address must be 34 characters, got {}: {}",
             address.len(),
             address
@@ -585,7 +585,7 @@ pub fn validate_tron_address(address: &str) -> Result<()> {
         Ok(bytes) => {
             // Should decode to 25 bytes (1 prefix + 20 address + 4 checksum)
             if bytes.len() != 25 {
-                return Err(BccError::InvalidAddress(format!(
+                return Err(ScopeError::InvalidAddress(format!(
                     "Tron address must decode to 25 bytes, got {}: {}",
                     bytes.len(),
                     address
@@ -594,7 +594,7 @@ pub fn validate_tron_address(address: &str) -> Result<()> {
 
             // First byte should be 0x41 (Tron mainnet prefix)
             if bytes[0] != 0x41 {
-                return Err(BccError::InvalidAddress(format!(
+                return Err(ScopeError::InvalidAddress(format!(
                     "Invalid Tron address prefix: {}",
                     address
                 )));
@@ -608,14 +608,14 @@ pub fn validate_tron_address(address: &str) -> Result<()> {
             let actual_checksum = &bytes[21..25];
 
             if expected_checksum != actual_checksum {
-                return Err(BccError::InvalidAddress(format!(
+                return Err(ScopeError::InvalidAddress(format!(
                     "Invalid Tron address checksum: {}",
                     address
                 )));
             }
         }
         Err(e) => {
-            return Err(BccError::InvalidAddress(format!(
+            return Err(ScopeError::InvalidAddress(format!(
                 "Invalid base58 encoding: {}: {}",
                 e, address
             )));
@@ -638,12 +638,12 @@ pub fn validate_tron_address(address: &str) -> Result<()> {
 /// Returns `Ok(())` if valid, or an error describing the validation failure.
 pub fn validate_tron_tx_hash(hash: &str) -> Result<()> {
     if hash.is_empty() {
-        return Err(BccError::InvalidHash("Hash cannot be empty".into()));
+        return Err(ScopeError::InvalidHash("Hash cannot be empty".into()));
     }
 
     // Tron tx hashes are 64 hex characters (without 0x prefix)
     if hash.len() != 64 {
-        return Err(BccError::InvalidHash(format!(
+        return Err(ScopeError::InvalidHash(format!(
             "Tron transaction hash must be 64 characters, got {}: {}",
             hash.len(),
             hash
@@ -652,7 +652,7 @@ pub fn validate_tron_tx_hash(hash: &str) -> Result<()> {
 
     // Validate hex encoding
     if !hash.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(BccError::InvalidHash(format!(
+        return Err(ScopeError::InvalidHash(format!(
             "Tron hash contains invalid hex characters: {}",
             hash
         )));

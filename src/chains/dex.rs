@@ -21,10 +21,10 @@
 //! ## Usage
 //!
 //! ```rust,no_run
-//! use bcc::chains::DexClient;
+//! use scope::chains::DexClient;
 //!
 //! #[tokio::main]
-//! async fn main() -> bcc::Result<()> {
+//! async fn main() -> scope::Result<()> {
 //!     let client = DexClient::new();
 //!     
 //!     // Fetch token data by address
@@ -41,7 +41,7 @@
 //! ```
 
 use crate::chains::{DexPair, PricePoint, VolumePoint};
-use crate::error::{BccError, Result};
+use crate::error::{Result, ScopeError};
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::Deserialize;
@@ -438,10 +438,10 @@ impl DexClient {
             .get(&url)
             .send()
             .await
-            .map_err(|e| BccError::Network(e.to_string()))?;
+            .map_err(|e| ScopeError::Network(e.to_string()))?;
 
         if !response.status().is_success() {
-            return Err(BccError::Api(format!(
+            return Err(ScopeError::Api(format!(
                 "DexScreener API error: {}",
                 response.status()
             )));
@@ -450,12 +450,12 @@ impl DexClient {
         let data: DexScreenerTokenResponse = response
             .json()
             .await
-            .map_err(|e| BccError::Api(format!("Failed to parse DexScreener response: {}", e)))?;
+            .map_err(|e| ScopeError::Api(format!("Failed to parse DexScreener response: {}", e)))?;
 
         let pairs = data.pairs.unwrap_or_default();
 
         if pairs.is_empty() {
-            return Err(BccError::NotFound(format!(
+            return Err(ScopeError::NotFound(format!(
                 "No DEX pairs found for token {}",
                 token_address
             )));
@@ -699,10 +699,10 @@ impl DexClient {
             .get(&url)
             .send()
             .await
-            .map_err(|e| BccError::Network(e.to_string()))?;
+            .map_err(|e| ScopeError::Network(e.to_string()))?;
 
         if !response.status().is_success() {
-            return Err(BccError::Api(format!(
+            return Err(ScopeError::Api(format!(
                 "DexScreener search API error: {}",
                 response.status()
             )));
@@ -711,7 +711,7 @@ impl DexClient {
         let data: DexScreenerSearchResponse = response
             .json()
             .await
-            .map_err(|e| BccError::Api(format!("Failed to parse search response: {}", e)))?;
+            .map_err(|e| ScopeError::Api(format!("Failed to parse search response: {}", e)))?;
 
         let pairs = data.pairs.unwrap_or_default();
 

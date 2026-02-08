@@ -30,7 +30,7 @@ use crate::chains::{
 };
 use crate::config::{Config, OutputFormat};
 use crate::display::{charts, report};
-use crate::error::{BccError, Result};
+use crate::error::{Result, ScopeError};
 use crate::tokens::TokenAliases;
 use clap::Args;
 use std::io::{self, Write};
@@ -185,7 +185,7 @@ async fn resolve_token_input(
     let search_results = dex_client.search_tokens(input, chain_filter).await?;
 
     if search_results.is_empty() {
-        return Err(BccError::NotFound(format!(
+        return Err(ScopeError::NotFound(format!(
             "No tokens found matching '{}'. Try a different name or use the contract address.",
             input
         )));
@@ -267,20 +267,20 @@ fn select_token(results: &[TokenSearchResult], auto_select: bool) -> Result<&Tok
     print!("Select token (1-{}): ", results.len());
     io::stdout()
         .flush()
-        .map_err(|e| BccError::Io(e.to_string()))?;
+        .map_err(|e| ScopeError::Io(e.to_string()))?;
 
     let mut input = String::new();
     io::stdin()
         .read_line(&mut input)
-        .map_err(|e| BccError::Io(e.to_string()))?;
+        .map_err(|e| ScopeError::Io(e.to_string()))?;
 
     let selection: usize = input
         .trim()
         .parse()
-        .map_err(|_| BccError::Api("Invalid selection".to_string()))?;
+        .map_err(|_| ScopeError::Api("Invalid selection".to_string()))?;
 
     if selection < 1 || selection > results.len() {
-        return Err(BccError::Api(format!(
+        return Err(ScopeError::Api(format!(
             "Selection must be between 1 and {}",
             results.len()
         )));
@@ -387,7 +387,7 @@ async fn fetch_token_analytics(
             // We have DEX data - proceed with full analytics
             fetch_analytics_with_dex(token_address, chain, args, clients, dex_data).await
         }
-        Err(BccError::NotFound(_)) => {
+        Err(ScopeError::NotFound(_)) => {
             // No DEX data - fall back to block explorer only
             println!("  No DEX data found, fetching from block explorer...");
             fetch_analytics_from_explorer(token_address, chain, args, clients).await
@@ -523,7 +523,7 @@ async fn fetch_analytics_from_explorer(
     );
 
     if !is_evm {
-        return Err(BccError::NotFound(format!(
+        return Err(ScopeError::NotFound(format!(
             "No DEX data found for token {} on {} and block explorer fallback not supported for this chain",
             token_address, chain
         )));

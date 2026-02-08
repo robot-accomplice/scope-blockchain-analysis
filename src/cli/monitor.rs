@@ -7,8 +7,8 @@
 //!
 //! From interactive mode:
 //! ```text
-//! bcc> monitor USDC
-//! bcc> mon 0x1234...
+//! scope> monitor USDC
+//! scope> mon 0x1234...
 //! ```
 //!
 //! ## Features
@@ -22,7 +22,7 @@
 use crate::chains::ChainClientFactory;
 use crate::chains::dex::{DexClient, DexDataSource, DexTokenData};
 use crate::config::Config;
-use crate::error::{BccError, Result};
+use crate::error::{Result, ScopeError};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
     execute,
@@ -795,13 +795,13 @@ impl MonitorApp {
     pub fn new(initial_data: DexTokenData, chain: &str) -> Result<Self> {
         // Setup terminal
         enable_raw_mode()
-            .map_err(|e| BccError::Chain(format!("Failed to enable raw mode: {}", e)))?;
+            .map_err(|e| ScopeError::Chain(format!("Failed to enable raw mode: {}", e)))?;
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
-            .map_err(|e| BccError::Chain(format!("Failed to enter alternate screen: {}", e)))?;
+            .map_err(|e| ScopeError::Chain(format!("Failed to enter alternate screen: {}", e)))?;
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend)
-            .map_err(|e| BccError::Chain(format!("Failed to create terminal: {}", e)))?;
+            .map_err(|e| ScopeError::Chain(format!("Failed to create terminal: {}", e)))?;
 
         Ok(Self {
             terminal,
@@ -819,9 +819,9 @@ impl MonitorApp {
 
             // Handle events with timeout
             if crossterm::event::poll(Duration::from_millis(100))
-                .map_err(|e| BccError::Chain(format!("Event poll error: {}", e)))?
+                .map_err(|e| ScopeError::Chain(format!("Event poll error: {}", e)))?
                 && let Event::Key(key) = event::read()
-                    .map_err(|e| BccError::Chain(format!("Event read error: {}", e)))?
+                    .map_err(|e| ScopeError::Chain(format!("Event read error: {}", e)))?
             {
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => {
@@ -904,16 +904,16 @@ impl MonitorApp {
         self.state.save_cache();
 
         disable_raw_mode()
-            .map_err(|e| BccError::Chain(format!("Failed to disable raw mode: {}", e)))?;
+            .map_err(|e| ScopeError::Chain(format!("Failed to disable raw mode: {}", e)))?;
         execute!(
             self.terminal.backend_mut(),
             LeaveAlternateScreen,
             DisableMouseCapture
         )
-        .map_err(|e| BccError::Chain(format!("Failed to leave alternate screen: {}", e)))?;
+        .map_err(|e| ScopeError::Chain(format!("Failed to leave alternate screen: {}", e)))?;
         self.terminal
             .show_cursor()
-            .map_err(|e| BccError::Chain(format!("Failed to show cursor: {}", e)))?;
+            .map_err(|e| ScopeError::Chain(format!("Failed to show cursor: {}", e)))?;
         Ok(())
     }
 }
@@ -1792,7 +1792,7 @@ pub async fn run(
     let token_input = match token {
         Some(t) => t,
         None => {
-            return Err(BccError::Chain(
+            return Err(ScopeError::Chain(
                 "Token address or symbol required. Usage: monitor <token>".to_string(),
             ));
         }
@@ -1854,7 +1854,7 @@ async fn resolve_token_address(
     let results = dex_client.search_tokens(input, Some(chain)).await?;
 
     if results.is_empty() {
-        return Err(BccError::NotFound(format!(
+        return Err(ScopeError::NotFound(format!(
             "No token found matching '{}' on {}",
             input, chain
         )));

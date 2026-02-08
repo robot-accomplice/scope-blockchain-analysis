@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.2.0] - 2026-02-08
 
 ### Added
-- Initial release of BCC (Blockchain Crawler CLI)
+- Initial release of Scope Blockchain Analysis
 - Multi-chain support: Ethereum, Polygon, Arbitrum, Optimism, Base, BSC, Aegis, Solana, Tron
 - Address analysis with USD valuation via DexScreener
 - Transaction decoding and tracing
@@ -43,6 +43,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Configuration system with YAML support
 - Support for ERC-20, SPL, and TRC-20 tokens
 
-[Unreleased]: https://github.com/robot-accomplice/bcc/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/robot-accomplice/bcc/releases/tag/v0.1.0
-[0.2.0]: https://github.com/robot-accomplice/bcc/compare/v0.1.0...v0.2.0
+[Unreleased]: https://github.com/robot-accomplice/bca/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/robot-accomplice/bca/releases/tag/v0.1.0
+[0.2.0]: https://github.com/robot-accomplice/bca/compare/v0.1.0...v0.2.0

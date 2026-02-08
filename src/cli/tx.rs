@@ -19,7 +19,7 @@
 
 use crate::chains::{ChainClientFactory, validate_solana_signature, validate_tron_tx_hash};
 use crate::config::{Config, OutputFormat};
-use crate::error::{BccError, Result};
+use crate::error::{Result, ScopeError};
 use clap::Args;
 
 /// Arguments for the transaction analysis command.
@@ -201,8 +201,8 @@ pub struct InternalTransaction {
 ///
 /// # Errors
 ///
-/// Returns [`BccError::InvalidHash`] if the transaction hash is invalid.
-/// Returns [`BccError::Request`] if API calls fail.
+/// Returns [`ScopeError::InvalidHash`] if the transaction hash is invalid.
+/// Returns [`ScopeError::Request`] if API calls fail.
 pub async fn run(
     mut args: TxArgs,
     config: &Config,
@@ -306,19 +306,19 @@ fn validate_tx_hash(hash: &str, chain: &str) -> Result<()> {
         // EVM-compatible chains use 0x-prefixed 64-char hex hashes
         "ethereum" | "polygon" | "arbitrum" | "optimism" | "base" | "bsc" | "aegis" => {
             if !hash.starts_with("0x") {
-                return Err(BccError::InvalidHash(format!(
+                return Err(ScopeError::InvalidHash(format!(
                     "Transaction hash must start with '0x': {}",
                     hash
                 )));
             }
             if hash.len() != 66 {
-                return Err(BccError::InvalidHash(format!(
+                return Err(ScopeError::InvalidHash(format!(
                     "Transaction hash must be 66 characters (0x + 64 hex): {}",
                     hash
                 )));
             }
             if !hash[2..].chars().all(|c| c.is_ascii_hexdigit()) {
-                return Err(BccError::InvalidHash(format!(
+                return Err(ScopeError::InvalidHash(format!(
                     "Transaction hash contains invalid hex characters: {}",
                     hash
                 )));
@@ -333,7 +333,7 @@ fn validate_tx_hash(hash: &str, chain: &str) -> Result<()> {
             validate_tron_tx_hash(hash)?;
         }
         _ => {
-            return Err(BccError::Chain(format!(
+            return Err(ScopeError::Chain(format!(
                 "Unsupported chain: {}. Supported: ethereum, polygon, arbitrum, optimism, base, bsc, aegis, solana, tron",
                 chain
             )));

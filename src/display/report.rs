@@ -14,8 +14,8 @@
 //! ## Usage
 //!
 //! ```rust,no_run
-//! use bcc::display::report::{generate_report, save_report};
-//! use bcc::chains::TokenAnalytics;
+//! use scope::display::report::{generate_report, save_report};
+//! use scope::chains::TokenAnalytics;
 //!
 //! // Assuming you have TokenAnalytics data
 //! // let analytics = ...;
@@ -1050,7 +1050,7 @@ fn generate_data_sources(analytics: &TokenAnalytics) -> String {
 /// Returns `Ok(())` on success, or an error if the file cannot be written.
 pub fn save_report(report: &str, path: impl AsRef<Path>) -> Result<()> {
     std::fs::write(path.as_ref(), report).map_err(|e| {
-        crate::error::BccError::Io(format!(
+        crate::error::ScopeError::Io(format!(
             "Failed to write report to {}: {}",
             path.as_ref().display(),
             e

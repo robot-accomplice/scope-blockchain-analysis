@@ -15,11 +15,11 @@
 //! ## Usage
 //!
 //! ```rust,no_run
-//! use bcc::chains::SolanaClient;
-//! use bcc::config::ChainsConfig;
+//! use scope::chains::SolanaClient;
+//! use scope::config::ChainsConfig;
 //!
 //! #[tokio::main]
-//! async fn main() -> bcc::Result<()> {
+//! async fn main() -> scope::Result<()> {
 //!     let config = ChainsConfig::default();
 //!     let client = SolanaClient::new(&config)?;
 //!     
@@ -32,7 +32,7 @@
 
 use crate::chains::{Balance, ChainClient, Token, Transaction};
 use crate::config::ChainsConfig;
-use crate::error::{BccError, Result};
+use crate::error::{Result, ScopeError};
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -252,8 +252,8 @@ impl SolanaClient {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use bcc::chains::SolanaClient;
-    /// use bcc::config::ChainsConfig;
+    /// use scope::chains::SolanaClient;
+    /// use scope::config::ChainsConfig;
     ///
     /// let config = ChainsConfig::default();
     /// let client = SolanaClient::new(&config).unwrap();
@@ -262,7 +262,7 @@ impl SolanaClient {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
-            .map_err(|e| BccError::Chain(format!("Failed to create HTTP client: {}", e)))?;
+            .map_err(|e| ScopeError::Chain(format!("Failed to create HTTP client: {}", e)))?;
 
         let rpc_url = config
             .solana_rpc
@@ -312,8 +312,8 @@ impl SolanaClient {
     ///
     /// # Errors
     ///
-    /// Returns [`BccError::InvalidAddress`] if the address format is invalid.
-    /// Returns [`BccError::Request`] if the API request fails.
+    /// Returns [`ScopeError::InvalidAddress`] if the address format is invalid.
+    /// Returns [`ScopeError::Request`] if the API request fails.
     pub async fn get_balance(&self, address: &str) -> Result<Balance> {
         // Validate address
         validate_solana_address(address)?;
@@ -337,7 +337,7 @@ impl SolanaClient {
             .await?;
 
         if let Some(error) = response.error {
-            return Err(BccError::Chain(format!(
+            return Err(ScopeError::Chain(format!(
                 "Solana RPC error ({}): {}",
                 error.code, error.message
             )));
@@ -345,7 +345,7 @@ impl SolanaClient {
 
         let balance = response
             .result
-            .ok_or_else(|| BccError::Chain("Empty RPC response".to_string()))?;
+            .ok_or_else(|| ScopeError::Chain("Empty RPC response".to_string()))?;
 
         let lamports = balance.value;
         let sol = lamports as f64 / 10_f64.powi(SOL_DECIMALS as i32);
@@ -381,8 +381,8 @@ impl SolanaClient {
     ///
     /// # Errors
     ///
-    /// Returns [`BccError::InvalidAddress`] if the address format is invalid.
-    /// Returns [`BccError::Request`] if the API request fails.
+    /// Returns [`ScopeError::InvalidAddress`] if the address format is invalid.
+    /// Returns [`ScopeError::Request`] if the API request fails.
     pub async fn get_token_balances(&self, address: &str) -> Result<Vec<TokenBalance>> {
         validate_solana_address(address)?;
 
@@ -413,7 +413,7 @@ impl SolanaClient {
             .await?;
 
         if let Some(error) = response.error {
-            return Err(BccError::Chain(format!(
+            return Err(ScopeError::Chain(format!(
                 "Solana RPC error ({}): {}",
                 error.code, error.message
             )));
@@ -421,7 +421,7 @@ impl SolanaClient {
 
         let accounts = response
             .result
-            .ok_or_else(|| BccError::Chain("Empty RPC response".to_string()))?;
+            .ok_or_else(|| ScopeError::Chain("Empty RPC response".to_string()))?;
 
         let token_balances: Vec<TokenBalance> = accounts
             .value
@@ -506,7 +506,7 @@ impl SolanaClient {
             .await?;
 
         if let Some(error) = response.error {
-            return Err(BccError::Chain(format!(
+            return Err(ScopeError::Chain(format!(
                 "Solana RPC error ({}): {}",
                 error.code, error.message
             )));
@@ -514,7 +514,7 @@ impl SolanaClient {
 
         response
             .result
-            .ok_or_else(|| BccError::Chain("Empty RPC response".to_string()))
+            .ok_or_else(|| ScopeError::Chain("Empty RPC response".to_string()))
     }
 
     /// Fetches transaction details by signature.
@@ -559,7 +559,7 @@ impl SolanaClient {
             .await?;
 
         if let Some(error) = response.error {
-            return Err(BccError::Chain(format!(
+            return Err(ScopeError::Chain(format!(
                 "Solana RPC error ({}): {}",
                 error.code, error.message
             )));
@@ -567,7 +567,7 @@ impl SolanaClient {
 
         let tx_result = response
             .result
-            .ok_or_else(|| BccError::NotFound(format!("Transaction not found: {}", signature)))?;
+            .ok_or_else(|| ScopeError::NotFound(format!("Transaction not found: {}", signature)))?;
 
         // Extract the first signer (fee payer) as "from"
         let from = tx_result
@@ -699,7 +699,7 @@ impl SolanaClient {
             .await?;
 
         if let Some(error) = response.error {
-            return Err(BccError::Chain(format!(
+            return Err(ScopeError::Chain(format!(
                 "Solana RPC error ({}): {}",
                 error.code, error.message
             )));
@@ -707,7 +707,7 @@ impl SolanaClient {
 
         response
             .result
-            .ok_or_else(|| BccError::Chain("Empty RPC response".to_string()))
+            .ok_or_else(|| ScopeError::Chain("Empty RPC response".to_string()))
     }
 }
 
@@ -735,12 +735,12 @@ pub fn validate_solana_address(address: &str) -> Result<()> {
     // They are typically 32-44 characters long
 
     if address.is_empty() {
-        return Err(BccError::InvalidAddress("Address cannot be empty".into()));
+        return Err(ScopeError::InvalidAddress("Address cannot be empty".into()));
     }
 
     // Check length (base58 encoded 32-byte keys are 32-44 chars)
     if address.len() < 32 || address.len() > 44 {
-        return Err(BccError::InvalidAddress(format!(
+        return Err(ScopeError::InvalidAddress(format!(
             "Solana address must be 32-44 characters, got {}: {}",
             address.len(),
             address
@@ -752,7 +752,7 @@ pub fn validate_solana_address(address: &str) -> Result<()> {
         Ok(bytes) => {
             // Should decode to 32 bytes (ed25519 public key)
             if bytes.len() != 32 {
-                return Err(BccError::InvalidAddress(format!(
+                return Err(ScopeError::InvalidAddress(format!(
                     "Solana address must decode to 32 bytes, got {}: {}",
                     bytes.len(),
                     address
@@ -760,7 +760,7 @@ pub fn validate_solana_address(address: &str) -> Result<()> {
             }
         }
         Err(e) => {
-            return Err(BccError::InvalidAddress(format!(
+            return Err(ScopeError::InvalidAddress(format!(
                 "Invalid base58 encoding: {}: {}",
                 e, address
             )));
@@ -784,12 +784,12 @@ pub fn validate_solana_signature(signature: &str) -> Result<()> {
     // They are typically 87-88 characters long
 
     if signature.is_empty() {
-        return Err(BccError::InvalidHash("Signature cannot be empty".into()));
+        return Err(ScopeError::InvalidHash("Signature cannot be empty".into()));
     }
 
     // Check length (base58 encoded 64-byte signatures are ~87-88 chars)
     if signature.len() < 80 || signature.len() > 90 {
-        return Err(BccError::InvalidHash(format!(
+        return Err(ScopeError::InvalidHash(format!(
             "Solana signature must be 80-90 characters, got {}: {}",
             signature.len(),
             signature
@@ -801,7 +801,7 @@ pub fn validate_solana_signature(signature: &str) -> Result<()> {
         Ok(bytes) => {
             // Should decode to 64 bytes (ed25519 signature)
             if bytes.len() != 64 {
-                return Err(BccError::InvalidHash(format!(
+                return Err(ScopeError::InvalidHash(format!(
                     "Solana signature must decode to 64 bytes, got {}: {}",
                     bytes.len(),
                     signature
@@ -809,7 +809,7 @@ pub fn validate_solana_signature(signature: &str) -> Result<()> {
             }
         }
         Err(e) => {
-            return Err(BccError::InvalidHash(format!(
+            return Err(ScopeError::InvalidHash(format!(
                 "Invalid base58 encoding: {}: {}",
                 e, signature
             )));

@@ -1,17 +1,8 @@
-# BCC - Blockchain Crawler CLI
+# Scope Blockchain Analysis
 
-[![CI](https://github.com/robot-accomplice/bcc/actions/workflows/ci.yml/badge.svg)](https://github.com/robot-accomplice/bcc/actions/workflows/ci.yml)
+[![CI](https://github.com/robot-accomplice/bca/actions/workflows/ci.yml/badge.svg)](https://github.com/robot-accomplice/bca/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org/)
-
-```
-  ██████╗  ██████╗ ██████╗             ______ 
-  ██╔══██╗██╔════╝██╔════╝    /^|^|^\_/_o__o_\_/^|^|^\
-  ██████╔╝██║     ██║         \ \ \ \ \_v__v_/ / / / /
-  ██╔══██╗██║     ██║
-  ██████╔╝╚██████╗╚██████╗    Blockchain Crawler CLI
-  ╚═════╝  ╚═════╝ ╚═════╝
-```
 
 A production-grade command-line tool for blockchain data analysis, portfolio tracking, transaction investigation, and **compliance-grade risk assessment**.
 
@@ -22,7 +13,7 @@ A production-grade command-line tool for blockchain data analysis, portfolio tra
 - **Token Crawling**: Crawl DEX data for any token -- price, volume, liquidity, holder analysis, and risk scoring with markdown report generation
 - **Live Monitoring**: Real-time TUI dashboard with price/volume/candlestick charts, buy/sell gauges, and activity logs
 - **Portfolio Management**: Track multiple addresses across chains with labels, tags, and aggregated balance views
-- **Compliance & Risk Assessment**: Risk scoring, transaction pattern detection, taint analysis, and compliance reporting (NEW)
+- **Compliance & Risk Assessment**: Risk scoring, transaction pattern detection, taint analysis, and compliance reporting
 - **Interactive Mode**: REPL with preserved context between commands for faster workflow
 - **USD Valuation**: Native token balances enriched with real-time USD prices via DexScreener
 - **Multi-Chain Support**: 
@@ -33,8 +24,8 @@ A production-grade command-line tool for blockchain data analysis, portfolio tra
 
 ```bash
 # Clone the repository
-git clone https://github.com/robot-accomplice/bcc.git
-cd bcc
+git clone https://github.com/robot-accomplice/bca.git
+cd bca
 
 # Build and install
 cargo install --path .
@@ -44,64 +35,64 @@ cargo install --path .
 
 ```bash
 # Analyze an Ethereum address (auto-detects chain from address format)
-bcc address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
+scope address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
 
 # Include transaction history and token balances
-bcc address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --include-txs --include-tokens
+scope address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --include-txs --include-tokens
 
 # Analyze addresses on other chains (auto-detected or explicit)
-bcc address DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy --chain solana
-bcc address TDqSquXBgUCLYvYC4XZgrprLK589dkhSCf --chain tron
+scope address DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy --chain solana
+scope address TDqSquXBgUCLYvYC4XZgrprLK589dkhSCf --chain tron
 
 # Look up a transaction
-bcc tx 0xabc123def456789012345678901234567890123456789012345678901234abcd
+scope tx 0xabc123def456789012345678901234567890123456789012345678901234abcd
 
-# Risk assessment for compliance (NEW)
+# Risk assessment for compliance
 export ETHERSCAN_API_KEY="your_key_here"
-bcc risk 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --detailed
+scope risk 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --detailed
 
-# Pattern detection (NEW)
-bcc analyze 0xabc... --patterns structuring,layering
+# Pattern detection
+scope analyze 0xabc... --patterns structuring,layering
 
 # Token crawling with report generation
-bcc crawl 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --chain ethereum
+scope crawl 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --chain ethereum
 
 # Live monitor with real-time dashboard
-bcc monitor 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --chain ethereum
+scope monitor 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --chain ethereum
 
 # Interactive mode
-bcc interactive
+scope interactive
 ```
 
-## Compliance Features (New)
+## Compliance Features
 
-BCC now includes enterprise-grade compliance and risk analysis:
+Scope includes enterprise-grade compliance and risk analysis:
 
 ### Risk Assessment
 ```bash
 # Basic risk score
-bcc risk 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
+scope risk 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
 
 # Detailed breakdown with evidence
-bcc risk 0xabc... --detailed --format markdown
+scope risk 0xabc... --detailed --format markdown
 
 # Export for compliance records
-bcc risk 0xabc... --output risk-report.json
+scope risk 0xabc... --output risk-report.json
 ```
 
 ### Pattern Detection
 ```bash
 # Detect structuring, layering, velocity anomalies
-bcc analyze 0xabc... --patterns structuring,layering,velocity
+scope analyze 0xabc... --patterns structuring,layering,velocity
 
 # Time-range analysis
-bcc analyze 0xabc... --range 30d
+scope analyze 0xabc... --range 30d
 ```
 
 ### Transaction Tracing
 ```bash
 # Trace fund flow through multiple hops
-bcc trace 0xtxhash... --depth 5 --flag-suspicious
+scope trace 0xtxhash... --depth 5 --flag-suspicious
 ```
 
 **Note**: Set `ETHERSCAN_API_KEY` environment variable for full compliance analysis. Without it, basic scoring is used.
@@ -111,23 +102,23 @@ bcc trace 0xtxhash... --depth 5 --flag-suspicious
 Launch a REPL where context persists between commands:
 
 ```bash
-$ bcc interactive
+$ scope interactive
 
-bcc:ethereum> chain solana
+scope:ethereum> chain solana
 Chain set to: solana
 
-bcc:solana> address 7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU
+scope:solana> address 7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU
 # Uses solana chain automatically
 
-bcc:solana> format json
+scope:solana> format json
 Format set to: json
 
-bcc:solana> exit
+scope:solana> exit
 ```
 
 ## Configuration
 
-Create `~/.config/bcc/config.yaml`:
+Create `~/.config/scope/config.yaml`:
 
 ```yaml
 chains:
@@ -146,7 +137,7 @@ output:
 ### Environment Variables
 
 - `ETHERSCAN_API_KEY` - Required for compliance features
-- `BCC_CONFIG` - Path to custom config file
+- `SCOPE_CONFIG` - Path to custom config file
 - `RUST_LOG` - Log level override
 
 ## Development
@@ -190,13 +181,13 @@ just lint      # Run lints
 ## CI/CD
 
 GitHub Actions workflow runs:
-- ✅ Check - Fast compilation
-- ✅ Format - Code style
-- ✅ Clippy - Linting
-- ✅ Test - Unit and integration tests
-- ✅ Docs - Documentation build
-- ✅ Build - Release binaries (Linux, macOS)
-- ✅ Security - Dependency audit
+- Check - Fast compilation
+- Format - Code style
+- Clippy - Linting
+- Test - Unit and integration tests
+- Docs - Documentation build
+- Build - Release binaries (Linux, macOS)
+- Security - Dependency audit
 
 ## License
 

@@ -1,4 +1,4 @@
-//! Risk Scoring Engine for BCC
+//! Risk Scoring Engine for Scope
 //!
 //! Provides compliance-grade risk analysis for blockchain addresses.
 //! Aggregates data from multiple sources to produce comprehensive risk scores.

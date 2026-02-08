@@ -1,4 +1,4 @@
-//! Compliance module for BCC
+//! Compliance module for Scope
 //!
 //! Provides risk scoring, transaction taint analysis, pattern detection,
 //! and compliance reporting for blockchain addresses and transactions.

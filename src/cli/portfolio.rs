@@ -21,7 +21,7 @@
 
 use crate::chains::ChainClientFactory;
 use crate::config::{Config, OutputFormat};
-use crate::error::{BccError, Result};
+use crate::error::{Result, ScopeError};
 use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -208,7 +208,7 @@ impl Portfolio {
 
         let contents = std::fs::read_to_string(&path)?;
         let portfolio: Portfolio = serde_yaml::from_str(&contents)
-            .map_err(|e| BccError::Config(crate::error::ConfigError::Parse { source: e }))?;
+            .map_err(|e| ScopeError::Config(crate::error::ConfigError::Parse { source: e }))?;
 
         Ok(portfolio)
     }
@@ -219,7 +219,7 @@ impl Portfolio {
 
         let path = data_dir.join("portfolio.yaml");
         let contents = serde_yaml::to_string(self)
-            .map_err(|e| BccError::Export(format!("Failed to serialize portfolio: {}", e)))?;
+            .map_err(|e| ScopeError::Export(format!("Failed to serialize portfolio: {}", e)))?;
 
         std::fs::write(&path, contents)?;
         Ok(())
@@ -233,7 +233,7 @@ impl Portfolio {
             .iter()
             .any(|a| a.address.to_lowercase() == watched.address.to_lowercase())
         {
-            return Err(BccError::Chain(format!(
+            return Err(ScopeError::Chain(format!(
                 "Address already in portfolio: {}",
                 watched.address
             )));

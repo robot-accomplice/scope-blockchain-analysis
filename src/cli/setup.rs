@@ -1,7 +1,7 @@
 //! # Setup Command
 //!
 //! This module implements the `setup` command for interactive configuration
-//! of the BCC application. It walks users through setting up API keys and
+//! of the Scope application. It walks users through setting up API keys and
 //! preferences.
 //!
 //! ## Usage
@@ -18,7 +18,7 @@
 //! ```
 
 use crate::config::{Config, OutputFormat};
-use crate::error::{BccError, ConfigError, Result};
+use crate::error::{ConfigError, Result, ScopeError};
 use clap::Args;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -71,7 +71,7 @@ pub async fn run(args: SetupArgs, config: &Config) -> Result<()> {
 /// Shows the current configuration status.
 fn show_status(config: &Config) {
     println!();
-    println!("BCC Configuration Status");
+    println!("Scope Configuration Status");
     println!("{}", "=".repeat(60));
     println!();
 
@@ -136,8 +136,8 @@ fn show_status(config: &Config) {
     );
 
     println!();
-    println!("Run 'bcc setup' to configure missing settings.");
-    println!("Run 'bcc setup --key <provider>' to configure a specific key.");
+    println!("Run 'scope setup' to configure missing settings.");
+    println!("Run 'scope setup --key <provider>' to configure a specific key.");
     println!();
 }
 
@@ -147,21 +147,21 @@ fn get_api_key_items(config: &Config) -> Vec<ConfigItem> {
         ConfigItem {
             name: "etherscan",
             description: "Ethereum mainnet block explorer",
-            env_var: "BCC_ETHERSCAN_API_KEY",
+            env_var: "SCOPE_ETHERSCAN_API_KEY",
             is_set: config.chains.api_keys.contains_key("etherscan"),
             value_hint: config.chains.api_keys.get("etherscan").map(|k| mask_key(k)),
         },
         ConfigItem {
             name: "bscscan",
             description: "BNB Smart Chain block explorer",
-            env_var: "BCC_BSCSCAN_API_KEY",
+            env_var: "SCOPE_BSCSCAN_API_KEY",
             is_set: config.chains.api_keys.contains_key("bscscan"),
             value_hint: config.chains.api_keys.get("bscscan").map(|k| mask_key(k)),
         },
         ConfigItem {
             name: "polygonscan",
             description: "Polygon block explorer",
-            env_var: "BCC_POLYGONSCAN_API_KEY",
+            env_var: "SCOPE_POLYGONSCAN_API_KEY",
             is_set: config.chains.api_keys.contains_key("polygonscan"),
             value_hint: config
                 .chains
@@ -172,21 +172,21 @@ fn get_api_key_items(config: &Config) -> Vec<ConfigItem> {
         ConfigItem {
             name: "arbiscan",
             description: "Arbitrum block explorer",
-            env_var: "BCC_ARBISCAN_API_KEY",
+            env_var: "SCOPE_ARBISCAN_API_KEY",
             is_set: config.chains.api_keys.contains_key("arbiscan"),
             value_hint: config.chains.api_keys.get("arbiscan").map(|k| mask_key(k)),
         },
         ConfigItem {
             name: "basescan",
             description: "Base block explorer",
-            env_var: "BCC_BASESCAN_API_KEY",
+            env_var: "SCOPE_BASESCAN_API_KEY",
             is_set: config.chains.api_keys.contains_key("basescan"),
             value_hint: config.chains.api_keys.get("basescan").map(|k| mask_key(k)),
         },
         ConfigItem {
             name: "optimism",
             description: "Optimism block explorer",
-            env_var: "BCC_OPTIMISM_API_KEY",
+            env_var: "SCOPE_OPTIMISM_API_KEY",
             is_set: config.chains.api_keys.contains_key("optimism"),
             value_hint: config.chains.api_keys.get("optimism").map(|k| mask_key(k)),
         },
@@ -204,8 +204,8 @@ fn mask_key(key: &str) -> String {
 /// Resets configuration to defaults.
 fn reset_config() -> Result<()> {
     let config_path = Config::config_path().ok_or_else(|| {
-        BccError::Config(ConfigError::NotFound {
-            path: PathBuf::from("~/.config/bcc/config.yaml"),
+        ScopeError::Config(ConfigError::NotFound {
+            path: PathBuf::from("~/.config/scope/config.yaml"),
         })
     })?;
 
@@ -213,19 +213,19 @@ fn reset_config() -> Result<()> {
         print!("This will delete your current configuration. Continue? [y/N]: ");
         io::stdout()
             .flush()
-            .map_err(|e| BccError::Io(e.to_string()))?;
+            .map_err(|e| ScopeError::Io(e.to_string()))?;
 
         let mut input = String::new();
         io::stdin()
             .read_line(&mut input)
-            .map_err(|e| BccError::Io(e.to_string()))?;
+            .map_err(|e| ScopeError::Io(e.to_string()))?;
 
         if !matches!(input.trim().to_lowercase().as_str(), "y" | "yes") {
             println!("Cancelled.");
             return Ok(());
         }
 
-        std::fs::remove_file(&config_path).map_err(|e| BccError::Io(e.to_string()))?;
+        std::fs::remove_file(&config_path).map_err(|e| ScopeError::Io(e.to_string()))?;
         println!("Configuration reset to defaults.");
     } else {
         println!("No configuration file found. Already using defaults.");
@@ -354,10 +354,10 @@ fn get_api_key_url(key_name: &str) -> &'static str {
 async fn run_setup_wizard(config: &Config) -> Result<()> {
     println!();
     println!("╔══════════════════════════════════════════════════════════════╗");
-    println!("║                    BCC Setup Wizard                          ║");
+    println!("║                    Scope Setup Wizard                          ║");
     println!("╚══════════════════════════════════════════════════════════════╝");
     println!();
-    println!("This wizard will help you configure BCC (Blockchain Crawler CLI).");
+    println!("This wizard will help you configure Scope (Blockchain Crawler CLI).");
     println!("Press Enter to skip any optional setting.");
     println!();
 
@@ -408,12 +408,12 @@ async fn run_setup_wizard(config: &Config) -> Result<()> {
     print!("Configure API keys for other chains (BSC, Polygon, Arbitrum, etc.)? [y/N]: ");
     io::stdout()
         .flush()
-        .map_err(|e| BccError::Io(e.to_string()))?;
+        .map_err(|e| ScopeError::Io(e.to_string()))?;
 
     let mut input = String::new();
     io::stdin()
         .read_line(&mut input)
-        .map_err(|e| BccError::Io(e.to_string()))?;
+        .map_err(|e| ScopeError::Io(e.to_string()))?;
 
     if matches!(input.trim().to_lowercase().as_str(), "y" | "yes") {
         println!();
@@ -453,12 +453,12 @@ async fn run_setup_wizard(config: &Config) -> Result<()> {
     print!("Select [1-3, Enter for default]: ");
     io::stdout()
         .flush()
-        .map_err(|e| BccError::Io(e.to_string()))?;
+        .map_err(|e| ScopeError::Io(e.to_string()))?;
 
     input.clear();
     io::stdin()
         .read_line(&mut input)
-        .map_err(|e| BccError::Io(e.to_string()))?;
+        .map_err(|e| ScopeError::Io(e.to_string()))?;
 
     match input.trim() {
         "2" => {
@@ -478,21 +478,21 @@ async fn run_setup_wizard(config: &Config) -> Result<()> {
         println!("Saving configuration...");
         save_config(&new_config)?;
         println!();
-        println!("✓ Configuration saved to ~/.config/bcc/config.yaml");
+        println!("✓ Configuration saved to ~/.config/scope/config.yaml");
     } else {
         println!();
         println!("No changes made.");
     }
 
     println!();
-    println!("Setup complete! You can now use BCC.");
+    println!("Setup complete! You can now use Scope.");
     println!();
     println!("Quick start:");
-    println!("  bcc crawl USDC              # Analyze a token");
-    println!("  bcc address 0x...           # Analyze an address");
-    println!("  bcc interactive             # Interactive mode");
+    println!("  scope crawl USDC              # Analyze a token");
+    println!("  scope address 0x...           # Analyze an address");
+    println!("  scope interactive             # Interactive mode");
     println!();
-    println!("Run 'bcc setup --status' to view your configuration.");
+    println!("Run 'scope setup --status' to view your configuration.");
     println!();
 
     Ok(())
@@ -503,12 +503,12 @@ fn prompt_optional_key(name: &str) -> Result<Option<String>> {
     print!("  {} API key (or Enter to skip): ", name);
     io::stdout()
         .flush()
-        .map_err(|e| BccError::Io(e.to_string()))?;
+        .map_err(|e| ScopeError::Io(e.to_string()))?;
 
     let mut input = String::new();
     io::stdin()
         .read_line(&mut input)
-        .map_err(|e| BccError::Io(e.to_string()))?;
+        .map_err(|e| ScopeError::Io(e.to_string()))?;
 
     let key = input.trim().to_string();
     if key.is_empty() {
@@ -523,12 +523,12 @@ fn prompt_api_key(name: &str) -> Result<String> {
     print!("Enter {} API key: ", name);
     io::stdout()
         .flush()
-        .map_err(|e| BccError::Io(e.to_string()))?;
+        .map_err(|e| ScopeError::Io(e.to_string()))?;
 
     let mut input = String::new();
     io::stdin()
         .read_line(&mut input)
-        .map_err(|e| BccError::Io(e.to_string()))?;
+        .map_err(|e| ScopeError::Io(e.to_string()))?;
 
     Ok(input.trim().to_string())
 }
@@ -536,19 +536,19 @@ fn prompt_api_key(name: &str) -> Result<String> {
 /// Saves the configuration to file.
 fn save_config(config: &Config) -> Result<()> {
     let config_path = Config::config_path().ok_or_else(|| {
-        BccError::Config(ConfigError::NotFound {
-            path: PathBuf::from("~/.config/bcc/config.yaml"),
+        ScopeError::Config(ConfigError::NotFound {
+            path: PathBuf::from("~/.config/scope/config.yaml"),
         })
     })?;
 
     // Ensure directory exists
     if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| BccError::Io(e.to_string()))?;
+        std::fs::create_dir_all(parent).map_err(|e| ScopeError::Io(e.to_string()))?;
     }
 
     // Build YAML manually for cleaner output
     let mut yaml = String::new();
-    yaml.push_str("# BCC Configuration\n");
+    yaml.push_str("# Scope Configuration\n");
     yaml.push_str("# Generated by 'bca setup'\n\n");
 
     // Chains section
@@ -572,7 +572,7 @@ fn save_config(config: &Config) -> Result<()> {
     yaml.push_str(&format!("  format: {}\n", config.output.format));
     yaml.push_str(&format!("  color: {}\n", config.output.color));
 
-    std::fs::write(&config_path, yaml).map_err(|e| BccError::Io(e.to_string()))?;
+    std::fs::write(&config_path, yaml).map_err(|e| ScopeError::Io(e.to_string()))?;
 
     Ok(())
 }
@@ -927,7 +927,7 @@ mod tests {
 
     #[test]
     fn test_save_config_creates_file() {
-        let tmp_dir = std::env::temp_dir().join("bcc_test_setup");
+        let tmp_dir = std::env::temp_dir().join("scope_test_setup");
         let _ = std::fs::create_dir_all(&tmp_dir);
         let tmp_file = tmp_dir.join("config.yaml");
 
@@ -942,7 +942,7 @@ mod tests {
 
         // Build the YAML manually (same logic as save_config)
         let mut yaml = String::new();
-        yaml.push_str("# BCC Configuration\n");
+        yaml.push_str("# Scope Configuration\n");
         yaml.push_str("# Generated by 'bca setup'\n\n");
         yaml.push_str("chains:\n");
         if !config.chains.api_keys.is_empty() {

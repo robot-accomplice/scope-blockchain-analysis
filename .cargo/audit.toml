@@ -1,0 +1,6 @@
+# cargo-audit configuration
+# See: https://github.com/rustsec/rustsec/tree/main/cargo-audit
+
+[advisories]
+# No advisories to ignore at this time
+ignore = []

@@ -4,8 +4,8 @@
 //! from multiple sources with the following priority (highest to lowest):
 //!
 //! 1. CLI arguments
-//! 2. Environment variables (`BCC_*` prefix)
-//! 3. User config file (`~/.config/bcc/config.yaml`)
+//! 2. Environment variables (`SCOPE_*` prefix)
+//! 3. User config file (`~/.config/scope/config.yaml`)
 //! 4. Built-in defaults
 //!
 //! ## Configuration File Format
@@ -32,15 +32,15 @@
 //!   color: true
 //!
 //! portfolio:
-//!   data_dir: "~/.local/share/bcc"
+//!   data_dir: "~/.local/share/scope"
 //! ```
 //!
 //! ## Error Handling
 //!
-//! Configuration errors are wrapped in [`BccError::Config`] and include
+//! Configuration errors are wrapped in [`ScopeError::Config`] and include
 //! context about which source caused the failure.
 
-use crate::error::{BccError, ConfigError, Result};
+use crate::error::{ConfigError, Result, ScopeError};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -54,7 +54,7 @@ use std::path::{Path, PathBuf};
 /// # Examples
 ///
 /// ```rust
-/// use bcc::Config;
+/// use scope::Config;
 ///
 /// // Load from default location or custom path
 /// let config = Config::load(None).unwrap_or_default();
@@ -137,7 +137,7 @@ pub struct OutputConfig {
 pub struct PortfolioConfig {
     /// Directory for storing portfolio data.
     ///
-    /// Defaults to `~/.local/share/bcc` on Linux/macOS.
+    /// Defaults to `~/.local/share/scope` on Linux/macOS.
     pub data_dir: Option<PathBuf>,
 }
 
@@ -171,7 +171,7 @@ impl Config {
     /// # Arguments
     ///
     /// * `path` - Optional path to a configuration file. If `None`, looks
-    ///   for config at `~/.config/bcc/config.yaml`.
+    ///   for config at `~/.config/scope/config.yaml`.
     ///
     /// # Returns
     ///
@@ -179,13 +179,13 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// Returns [`BccError::Config`] if the file exists but cannot be read
+    /// Returns [`ScopeError::Config`] if the file exists but cannot be read
     /// or contains invalid YAML.
     ///
     /// # Examples
     ///
     /// ```rust
-    /// use bcc::Config;
+    /// use scope::Config;
     /// use std::path::Path;
     ///
     /// // Load from default location
@@ -198,7 +198,7 @@ impl Config {
         // Determine config path: CLI arg > env var > default location
         let config_path = path
             .map(PathBuf::from)
-            .or_else(|| std::env::var("BCC_CONFIG").ok().map(PathBuf::from))
+            .or_else(|| std::env::var("SCOPE_CONFIG").ok().map(PathBuf::from))
             .unwrap_or_else(Self::default_path);
 
         // Return defaults if no config file exists
@@ -214,7 +214,7 @@ impl Config {
         tracing::debug!(path = %config_path.display(), "Loading configuration");
 
         let contents = std::fs::read_to_string(&config_path).map_err(|e| {
-            BccError::Config(ConfigError::Read {
+            ScopeError::Config(ConfigError::Read {
                 path: config_path.clone(),
                 source: e,
             })
@@ -229,14 +229,14 @@ impl Config {
     /// Returns the default configuration file path.
     ///
     /// Checks multiple locations in order:
-    /// 1. `~/.config/bcc/config.yaml` (XDG-style, preferred for CLI tools)
+    /// 1. `~/.config/scope/config.yaml` (XDG-style, preferred for CLI tools)
     /// 2. Platform-specific config dir (e.g., `~/Library/Application Support/` on macOS)
     ///
     /// Returns the first location that exists, or the XDG-style path if neither exists.
     pub fn default_path() -> PathBuf {
-        // Prefer XDG-style ~/.config/bcc/ which is common for CLI tools
+        // Prefer XDG-style ~/.config/scope/ which is common for CLI tools
         if let Some(home) = dirs::home_dir() {
-            let xdg_path = home.join(".config").join("bcc").join("config.yaml");
+            let xdg_path = home.join(".config").join("scope").join("config.yaml");
             if xdg_path.exists() {
                 return xdg_path;
             }
@@ -244,7 +244,7 @@ impl Config {
 
         // Check platform-specific config dir
         if let Some(config_dir) = dirs::config_dir() {
-            let platform_path = config_dir.join("bcc").join("config.yaml");
+            let platform_path = config_dir.join("scope").join("config.yaml");
             if platform_path.exists() {
                 return platform_path;
             }
@@ -252,27 +252,27 @@ impl Config {
 
         // Default to XDG-style path for new configs
         dirs::home_dir()
-            .map(|h| h.join(".config").join("bcc").join("config.yaml"))
-            .unwrap_or_else(|| PathBuf::from(".").join("bcc").join("config.yaml"))
+            .map(|h| h.join(".config").join("scope").join("config.yaml"))
+            .unwrap_or_else(|| PathBuf::from(".").join("scope").join("config.yaml"))
     }
 
     /// Returns the configuration file path, if it can be determined.
     ///
     /// Returns `Some(path)` for the config file location, or `None` if
     /// the path cannot be determined (e.g., no home directory).
-    /// Prefers the XDG-style `~/.config/bcc/` location.
+    /// Prefers the XDG-style `~/.config/scope/` location.
     pub fn config_path() -> Option<PathBuf> {
-        dirs::home_dir().map(|h| h.join(".config").join("bcc").join("config.yaml"))
+        dirs::home_dir().map(|h| h.join(".config").join("scope").join("config.yaml"))
     }
 
     /// Returns the default data directory for portfolio storage.
     ///
-    /// On Linux/macOS: `~/.local/share/bcc`
+    /// On Linux/macOS: `~/.local/share/scope`
     /// On Windows: `%LOCALAPPDATA%\bca`
     pub fn default_data_dir() -> PathBuf {
         dirs::data_local_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("bcc")
+            .join("scope")
     }
 
     /// Returns the effective data directory, using config or default.
@@ -439,7 +439,7 @@ chains:
 
         let result = Config::load(Some(file.path()));
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), BccError::Config(_)));
+        assert!(matches!(result.unwrap_err(), ScopeError::Config(_)));
     }
 
     #[test]
@@ -472,13 +472,13 @@ chains:
     fn test_default_path_is_absolute_or_relative() {
         let path = Config::default_path();
         // Should end with expected structure
-        assert!(path.ends_with("bcc/config.yaml") || path.ends_with("bcc\\config.yaml"));
+        assert!(path.ends_with("scope/config.yaml") || path.ends_with("scope\\config.yaml"));
     }
 
     #[test]
     fn test_default_data_dir() {
         let data_dir = Config::default_data_dir();
-        assert!(data_dir.ends_with("bcc") || data_dir.to_string_lossy().contains("bcc"));
+        assert!(data_dir.ends_with("scope") || data_dir.to_string_lossy().contains("scope"));
     }
 
     #[test]
@@ -511,7 +511,7 @@ chains:
         let path = Config::config_path();
         // Should return Some on systems with a home dir
         assert!(path.is_some());
-        assert!(path.unwrap().to_string_lossy().contains("bcc"));
+        assert!(path.unwrap().to_string_lossy().contains("scope"));
     }
 
     #[test]
@@ -563,7 +563,7 @@ chains:
     }
 
     #[test]
-    fn test_load_via_bcc_config_env_var() {
+    fn test_load_via_scope_config_env_var() {
         let yaml = r#"
 chains:
   ethereum_rpc: "https://env-test.example.com"
@@ -574,7 +574,7 @@ output:
         file.write_all(yaml.as_bytes()).unwrap();
 
         let path_str = file.path().to_string_lossy().to_string();
-        unsafe { std::env::set_var("BCC_CONFIG", &path_str) };
+        unsafe { std::env::set_var("SCOPE_CONFIG", &path_str) };
 
         // Load with None path — should pick up the env var
         let config = Config::load(None).unwrap();
@@ -584,7 +584,7 @@ output:
         );
         assert_eq!(config.output.format, OutputFormat::Csv);
 
-        unsafe { std::env::remove_var("BCC_CONFIG") };
+        unsafe { std::env::remove_var("SCOPE_CONFIG") };
     }
 
     #[test]

@@ -1,8 +1,0 @@
-# cargo-audit configuration
-# See: https://github.com/rustsec/rustsec/tree/main/cargo-audit
-
-[advisories]
-# RUSTSEC-2024-0383: Our crate is named "bcc" which collides with an
-# unmaintained crate of the same name on crates.io. This is a false
-# positive — we are not using that crate.
-ignore = ["RUSTSEC-2024-0383"]

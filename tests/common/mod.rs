@@ -12,7 +12,7 @@ pub fn create_temp_dir() -> TempDir {
 
 /// Creates a test configuration file.
 pub fn create_test_config(dir: &TempDir, content: &str) -> PathBuf {
-    let config_dir = dir.path().join(".config").join("bcc");
+    let config_dir = dir.path().join(".config").join("scope");
     std::fs::create_dir_all(&config_dir).expect("Failed to create config directory");
     
     let config_path = config_dir.join("config.yaml");
@@ -23,7 +23,7 @@ pub fn create_test_config(dir: &TempDir, content: &str) -> PathBuf {
 
 /// Creates a test portfolio file.
 pub fn create_test_portfolio(dir: &TempDir, content: &str) -> PathBuf {
-    let data_dir = dir.path().join(".local").join("share").join("bcc");
+    let data_dir = dir.path().join(".local").join("share").join("scope");
     std::fs::create_dir_all(&data_dir).expect("Failed to create data directory");
     
     let portfolio_path = data_dir.join("portfolio.yaml");

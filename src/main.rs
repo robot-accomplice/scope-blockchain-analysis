@@ -1,27 +1,27 @@
-//! # BCC - Blockchain Crawler CLI
+//! # Scope Blockchain Analysis
 //!
 //! Entry point for the blockchain analysis command-line tool.
 //!
 //! This binary provides commands for:
-//! - Address analysis (`bcc address`)
-//! - Transaction analysis (`bcc tx`)
-//! - Portfolio management (`bcc portfolio`)
-//! - Data export (`bcc export`)
+//! - Address analysis (`scope address`)
+//! - Transaction analysis (`scope tx`)
+//! - Portfolio management (`scope portfolio`)
+//! - Data export (`scope export`)
 //!
 //! ## Usage
 //!
 //! ```bash
-//! bcc --help
-//! bcc address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
-//! bcc tx 0xabc123...
-//! bcc portfolio list
+//! scope --help
+//! scope address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
+//! scope tx 0xabc123...
+//! scope portfolio list
 //! ```
 
 use anyhow::Result;
-use bcc::Config;
-use bcc::chains::DefaultClientFactory;
-use bcc::cli::{Cli, Commands};
 use clap::Parser;
+use scope::Config;
+use scope::chains::DefaultClientFactory;
+use scope::cli::{Cli, Commands};
 use std::io::{self, Write};
 use tracing_subscriber::EnvFilter;
 
@@ -51,7 +51,7 @@ async fn main() -> Result<()> {
         print_banner();
     }
 
-    tracing::debug!("BCC v{} starting", bcc::VERSION);
+    tracing::debug!("Scope v{} starting", scope::VERSION);
 
     // Check if this is a setup command (don't prompt for setup if already running setup)
     let is_setup_command = matches!(cli.command, Commands::Setup(_));
@@ -65,12 +65,12 @@ async fn main() -> Result<()> {
     // Check if config file exists and prompt for setup if needed
     if !is_setup_command && !config_file_exists(&cli) && prompt_for_setup() {
         // Run setup wizard
-        let setup_args = bcc::cli::setup::SetupArgs {
+        let setup_args = scope::cli::setup::SetupArgs {
             status: false,
             key: None,
             reset: false,
         };
-        if let Err(e) = bcc::cli::setup::run(setup_args, &config).await {
+        if let Err(e) = scope::cli::setup::run(setup_args, &config).await {
             eprintln!("Setup failed: {}", e);
         }
         // Reload config after setup
@@ -85,33 +85,33 @@ async fn main() -> Result<()> {
 
     // Dispatch to command handler
     let result = match cli.command {
-        Commands::Address(args) => bcc::cli::address::run(args, &config, &factory).await,
-        Commands::Tx(args) => bcc::cli::tx::run(args, &config, &factory).await,
-        Commands::Crawl(args) => bcc::cli::crawl::run(args, &config, &factory).await,
-        Commands::Portfolio(args) => bcc::cli::portfolio::run(args, &config, &factory).await,
-        Commands::Export(args) => bcc::cli::export::run(args, &config, &factory).await,
-        Commands::Interactive(args) => bcc::cli::interactive::run(args, &config, &factory).await,
-        Commands::Setup(args) => bcc::cli::setup::run(args, &config).await,
+        Commands::Address(args) => scope::cli::address::run(args, &config, &factory).await,
+        Commands::Tx(args) => scope::cli::tx::run(args, &config, &factory).await,
+        Commands::Crawl(args) => scope::cli::crawl::run(args, &config, &factory).await,
+        Commands::Portfolio(args) => scope::cli::portfolio::run(args, &config, &factory).await,
+        Commands::Export(args) => scope::cli::export::run(args, &config, &factory).await,
+        Commands::Interactive(args) => scope::cli::interactive::run(args, &config, &factory).await,
+        Commands::Setup(args) => scope::cli::setup::run(args, &config).await,
         Commands::Compliance(compliance_cmd) => match compliance_cmd {
-            bcc::cli::compliance::ComplianceCommands::Risk(args) => {
-                bcc::cli::compliance::handle_risk(args)
+            scope::cli::compliance::ComplianceCommands::Risk(args) => {
+                scope::cli::compliance::handle_risk(args)
                     .await
-                    .map_err(|e| bcc::error::BccError::Other(e.to_string()))
+                    .map_err(|e| scope::error::ScopeError::Other(e.to_string()))
             }
-            bcc::cli::compliance::ComplianceCommands::Trace(args) => {
-                bcc::cli::compliance::handle_trace(args)
+            scope::cli::compliance::ComplianceCommands::Trace(args) => {
+                scope::cli::compliance::handle_trace(args)
                     .await
-                    .map_err(|e| bcc::error::BccError::Other(e.to_string()))
+                    .map_err(|e| scope::error::ScopeError::Other(e.to_string()))
             }
-            bcc::cli::compliance::ComplianceCommands::Analyze(args) => {
-                bcc::cli::compliance::handle_analyze(args)
+            scope::cli::compliance::ComplianceCommands::Analyze(args) => {
+                scope::cli::compliance::handle_analyze(args)
                     .await
-                    .map_err(|e| bcc::error::BccError::Other(e.to_string()))
+                    .map_err(|e| scope::error::ScopeError::Other(e.to_string()))
             }
-            bcc::cli::compliance::ComplianceCommands::ComplianceReport(args) => {
-                bcc::cli::compliance::handle_compliance_report(args)
+            scope::cli::compliance::ComplianceCommands::ComplianceReport(args) => {
+                scope::cli::compliance::handle_compliance_report(args)
                     .await
-                    .map_err(|e| bcc::error::BccError::Other(e.to_string()))
+                    .map_err(|e| scope::error::ScopeError::Other(e.to_string()))
             }
         },
     };
@@ -137,7 +137,7 @@ fn config_file_exists(cli: &Cli) -> bool {
 /// Prompts the user to run setup.
 fn prompt_for_setup() -> bool {
     eprintln!();
-    eprintln!("Welcome to BCC (Blockchain Crawler CLI)!");
+    eprintln!("Welcome to Scope Blockchain Analysis!");
     eprintln!();
     eprintln!("No configuration file found. Would you like to run the setup wizard");
     eprintln!("to configure API keys and preferences?");
@@ -161,33 +161,33 @@ async fn run_command(command: Commands, config: &Config) -> Result<()> {
         chains_config: config.chains.clone(),
     };
     let result = match command {
-        Commands::Address(args) => bcc::cli::address::run(args, config, &factory).await,
-        Commands::Tx(args) => bcc::cli::tx::run(args, config, &factory).await,
-        Commands::Crawl(args) => bcc::cli::crawl::run(args, config, &factory).await,
-        Commands::Portfolio(args) => bcc::cli::portfolio::run(args, config, &factory).await,
-        Commands::Export(args) => bcc::cli::export::run(args, config, &factory).await,
-        Commands::Interactive(args) => bcc::cli::interactive::run(args, config, &factory).await,
-        Commands::Setup(args) => bcc::cli::setup::run(args, config).await,
+        Commands::Address(args) => scope::cli::address::run(args, config, &factory).await,
+        Commands::Tx(args) => scope::cli::tx::run(args, config, &factory).await,
+        Commands::Crawl(args) => scope::cli::crawl::run(args, config, &factory).await,
+        Commands::Portfolio(args) => scope::cli::portfolio::run(args, config, &factory).await,
+        Commands::Export(args) => scope::cli::export::run(args, config, &factory).await,
+        Commands::Interactive(args) => scope::cli::interactive::run(args, config, &factory).await,
+        Commands::Setup(args) => scope::cli::setup::run(args, config).await,
         Commands::Compliance(compliance_cmd) => match compliance_cmd {
-            bcc::cli::compliance::ComplianceCommands::Risk(args) => {
-                bcc::cli::compliance::handle_risk(args)
+            scope::cli::compliance::ComplianceCommands::Risk(args) => {
+                scope::cli::compliance::handle_risk(args)
                     .await
-                    .map_err(|e| bcc::error::BccError::Other(e.to_string()))
+                    .map_err(|e| scope::error::ScopeError::Other(e.to_string()))
             }
-            bcc::cli::compliance::ComplianceCommands::Trace(args) => {
-                bcc::cli::compliance::handle_trace(args)
+            scope::cli::compliance::ComplianceCommands::Trace(args) => {
+                scope::cli::compliance::handle_trace(args)
                     .await
-                    .map_err(|e| bcc::error::BccError::Other(e.to_string()))
+                    .map_err(|e| scope::error::ScopeError::Other(e.to_string()))
             }
-            bcc::cli::compliance::ComplianceCommands::Analyze(args) => {
-                bcc::cli::compliance::handle_analyze(args)
+            scope::cli::compliance::ComplianceCommands::Analyze(args) => {
+                scope::cli::compliance::handle_analyze(args)
                     .await
-                    .map_err(|e| bcc::error::BccError::Other(e.to_string()))
+                    .map_err(|e| scope::error::ScopeError::Other(e.to_string()))
             }
-            bcc::cli::compliance::ComplianceCommands::ComplianceReport(args) => {
-                bcc::cli::compliance::handle_compliance_report(args)
+            scope::cli::compliance::ComplianceCommands::ComplianceReport(args) => {
+                scope::cli::compliance::handle_compliance_report(args)
                     .await
-                    .map_err(|e| bcc::error::BccError::Other(e.to_string()))
+                    .map_err(|e| scope::error::ScopeError::Other(e.to_string()))
             }
         },
     };
@@ -222,7 +222,7 @@ fn init_logging(verbosity: u8) {
 
     // Allow RUST_LOG to override if set
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(format!("bcc={},warn", level)));
+        .unwrap_or_else(|_| EnvFilter::new(format!("scope={},warn", level)));
 
     tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -284,7 +284,7 @@ mod tests {
     fn test_cli_parsing() {
         // Verify CLI can be parsed (basic smoke test)
         let result = Cli::try_parse_from([
-            "bcc",
+            "scope",
             "address",
             "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
         ]);
@@ -294,14 +294,14 @@ mod tests {
     #[test]
     fn test_cli_help_flag() {
         // Help should cause an error (it exits)
-        let result = Cli::try_parse_from(["bcc", "--help"]);
+        let result = Cli::try_parse_from(["scope", "--help"]);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_cli_version_flag() {
         // Version should cause an error (it exits)
-        let result = Cli::try_parse_from(["bcc", "--version"]);
+        let result = Cli::try_parse_from(["scope", "--version"]);
         assert!(result.is_err());
     }
 }

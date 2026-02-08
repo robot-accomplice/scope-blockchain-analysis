@@ -18,7 +18,7 @@
 
 use crate::chains::{ChainClientFactory, infer_chain_from_address};
 use crate::config::{Config, OutputFormat};
-use crate::error::{BccError, Result};
+use crate::error::{Result, ScopeError};
 use clap::Args;
 use std::path::PathBuf;
 
@@ -90,8 +90,8 @@ pub struct ExportReport {
 ///
 /// # Errors
 ///
-/// Returns [`BccError::Export`] if the export operation fails.
-/// Returns [`BccError::Io`] if file operations fail.
+/// Returns [`ScopeError::Export`] if the export operation fails.
+/// Returns [`ScopeError::Io`] if file operations fail.
 pub async fn run(
     args: ExportArgs,
     config: &Config,
@@ -111,7 +111,7 @@ pub async fn run(
     } else if let Some(ref address) = args.address {
         export_address(address, &args, format, clients).await
     } else {
-        Err(BccError::Export(
+        Err(ScopeError::Export(
             "Must specify either --address or --portfolio".to_string(),
         ))
     }
@@ -150,7 +150,7 @@ async fn export_portfolio(args: &ExportArgs, format: OutputFormat, config: &Conf
             csv
         }
         OutputFormat::Table => {
-            return Err(BccError::Export(
+            return Err(ScopeError::Export(
                 "Table format not supported for file export".to_string(),
             ));
         }
@@ -265,7 +265,7 @@ async fn export_address(
             csv
         }
         OutputFormat::Table => {
-            return Err(BccError::Export(
+            return Err(ScopeError::Export(
                 "Table format not supported for file export".to_string(),
             ));
         }

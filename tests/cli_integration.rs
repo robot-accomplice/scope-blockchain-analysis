@@ -1,16 +1,16 @@
 //! # CLI Integration Tests
 //!
-//! End-to-end tests for the BCC command-line interface.
+//! End-to-end tests for the Scope command-line interface.
 //! These tests verify that the CLI binary works correctly
 //! for various commands and argument combinations.
 
 use assert_cmd::Command;
 use predicates::prelude::*;
 
-/// Returns a Command for the BCC binary.
+/// Returns a Command for the Scope binary.
 #[allow(deprecated)] // TODO: Migrate to cargo::cargo_bin_cmd! when stable
-fn bcc() -> Command {
-    Command::cargo_bin("bcc").unwrap()
+fn scope_cmd() -> Command {
+    Command::cargo_bin("scope").unwrap()
 }
 
 // ============================================================================
@@ -19,11 +19,11 @@ fn bcc() -> Command {
 
 #[test]
 fn test_help_output() {
-    bcc()
+    scope_cmd()
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Blockchain Crawler CLI"))
+        .stdout(predicate::str::contains("Scope Blockchain Analysis"))
         .stdout(predicate::str::contains("address"))
         .stdout(predicate::str::contains("tx"))
         .stdout(predicate::str::contains("portfolio"))
@@ -33,7 +33,7 @@ fn test_help_output() {
 
 #[test]
 fn test_version_output() {
-    bcc()
+    scope_cmd()
         .arg("--version")
         .assert()
         .success()
@@ -42,7 +42,7 @@ fn test_version_output() {
 
 #[test]
 fn test_short_help() {
-    bcc()
+    scope_cmd()
         .arg("-h")
         .assert()
         .success()
@@ -55,7 +55,7 @@ fn test_short_help() {
 
 #[test]
 fn test_address_help() {
-    bcc()
+    scope_cmd()
         .args(["address", "--help"])
         .assert()
         .success()
@@ -65,7 +65,7 @@ fn test_address_help() {
 
 #[test]
 fn test_tx_help() {
-    bcc()
+    scope_cmd()
         .args(["tx", "--help"])
         .assert()
         .success()
@@ -75,7 +75,7 @@ fn test_tx_help() {
 
 #[test]
 fn test_portfolio_help() {
-    bcc()
+    scope_cmd()
         .args(["portfolio", "--help"])
         .assert()
         .success()
@@ -86,7 +86,7 @@ fn test_portfolio_help() {
 
 #[test]
 fn test_export_help() {
-    bcc()
+    scope_cmd()
         .args(["export", "--help"])
         .assert()
         .success()
@@ -100,7 +100,7 @@ fn test_export_help() {
 
 #[test]
 fn test_no_subcommand_shows_help() {
-    bcc()
+    scope_cmd()
         .assert()
         .failure()
         .stderr(predicate::str::contains("Usage:"));
@@ -108,7 +108,7 @@ fn test_no_subcommand_shows_help() {
 
 #[test]
 fn test_invalid_subcommand() {
-    bcc()
+    scope_cmd()
         .arg("invalid")
         .assert()
         .failure()
@@ -117,7 +117,7 @@ fn test_invalid_subcommand() {
 
 #[test]
 fn test_address_missing_address_arg() {
-    bcc()
+    scope_cmd()
         .arg("address")
         .assert()
         .failure()
@@ -126,7 +126,7 @@ fn test_address_missing_address_arg() {
 
 #[test]
 fn test_tx_missing_hash_arg() {
-    bcc()
+    scope_cmd()
         .arg("tx")
         .assert()
         .failure()
@@ -139,7 +139,7 @@ fn test_tx_missing_hash_arg() {
 
 #[test]
 fn test_addr_alias() {
-    bcc()
+    scope_cmd()
         .args(["addr", "--help"])
         .assert()
         .success()
@@ -148,7 +148,7 @@ fn test_addr_alias() {
 
 #[test]
 fn test_transaction_alias() {
-    bcc()
+    scope_cmd()
         .args(["transaction", "--help"])
         .assert()
         .success()
@@ -157,7 +157,7 @@ fn test_transaction_alias() {
 
 #[test]
 fn test_port_alias() {
-    bcc()
+    scope_cmd()
         .args(["port", "--help"])
         .assert()
         .success()
@@ -171,17 +171,23 @@ fn test_port_alias() {
 #[test]
 fn test_verbose_flag() {
     // Verbose flag should be accepted before subcommand
-    bcc().args(["-v", "address", "--help"]).assert().success();
+    scope_cmd()
+        .args(["-v", "address", "--help"])
+        .assert()
+        .success();
 }
 
 #[test]
 fn test_multiple_verbose_flags() {
-    bcc().args(["-vvv", "tx", "--help"]).assert().success();
+    scope_cmd()
+        .args(["-vvv", "tx", "--help"])
+        .assert()
+        .success();
 }
 
 #[test]
 fn test_config_option() {
-    bcc()
+    scope_cmd()
         .args(["--config", "/nonexistent/path.yaml", "portfolio", "list"])
         .assert()
         .success(); // Should succeed with defaults when config not found
@@ -189,7 +195,7 @@ fn test_config_option() {
 
 #[test]
 fn test_no_color_option() {
-    bcc()
+    scope_cmd()
         .args(["--no-color", "address", "--help"])
         .assert()
         .success();
@@ -201,7 +207,7 @@ fn test_no_color_option() {
 
 #[test]
 fn test_address_invalid_format() {
-    bcc()
+    scope_cmd()
         .args(["address", "not-an-address"])
         .assert()
         .failure()
@@ -210,7 +216,7 @@ fn test_address_invalid_format() {
 
 #[test]
 fn test_address_missing_prefix() {
-    bcc()
+    scope_cmd()
         .args(["address", "742d35Cc6634C0532925a3b844Bc9e7595f1b3c2"])
         .assert()
         .failure()
@@ -219,7 +225,7 @@ fn test_address_missing_prefix() {
 
 #[test]
 fn test_address_unsupported_chain() {
-    bcc()
+    scope_cmd()
         .args([
             "address",
             "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
@@ -237,7 +243,7 @@ fn test_address_unsupported_chain() {
 
 #[test]
 fn test_tx_invalid_hash() {
-    bcc()
+    scope_cmd()
         .args(["tx", "not-a-hash"])
         .assert()
         .failure()
@@ -246,7 +252,7 @@ fn test_tx_invalid_hash() {
 
 #[test]
 fn test_tx_short_hash() {
-    bcc()
+    scope_cmd()
         .args(["tx", "0xabc123"])
         .assert()
         .failure()
@@ -262,7 +268,7 @@ fn test_portfolio_list_empty() {
     // Use a temp directory to avoid polluting real config
     let temp_dir = tempfile::tempdir().unwrap();
 
-    bcc()
+    scope_cmd()
         .env("HOME", temp_dir.path())
         .args(["portfolio", "list"])
         .assert()
@@ -272,7 +278,7 @@ fn test_portfolio_list_empty() {
 
 #[test]
 fn test_portfolio_add_requires_address() {
-    bcc()
+    scope_cmd()
         .args(["portfolio", "add"])
         .assert()
         .failure()
@@ -281,7 +287,7 @@ fn test_portfolio_add_requires_address() {
 
 #[test]
 fn test_portfolio_remove_requires_address() {
-    bcc()
+    scope_cmd()
         .args(["portfolio", "remove"])
         .assert()
         .failure()
@@ -294,7 +300,7 @@ fn test_portfolio_remove_requires_address() {
 
 #[test]
 fn test_export_requires_output() {
-    bcc()
+    scope_cmd()
         .args([
             "export",
             "--address",
@@ -310,7 +316,7 @@ fn test_export_requires_source() {
     let temp_dir = tempfile::tempdir().unwrap();
     let output = temp_dir.path().join("output.json");
 
-    bcc()
+    scope_cmd()
         .args(["export", "--output", output.to_str().unwrap()])
         .assert()
         .failure()
@@ -323,7 +329,7 @@ fn test_export_requires_source() {
 
 #[test]
 fn test_address_json_format_option() {
-    bcc()
+    scope_cmd()
         .args([
             "address",
             "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
@@ -337,7 +343,7 @@ fn test_address_json_format_option() {
 
 #[test]
 fn test_address_csv_format_option() {
-    bcc()
+    scope_cmd()
         .args([
             "address",
             "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",

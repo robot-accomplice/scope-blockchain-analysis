@@ -260,7 +260,7 @@ pub async fn handle_compliance_report(args: ComplianceReportArgs) -> anyhow::Res
         format!("{:?}", args.report_type).to_lowercase(),
         args.jurisdiction
     );
-    println!("\nFor now, use 'bcc risk' and 'bcc analyze' for compliance checks.");
+    println!("\nFor now, use 'scope risk' and 'scope analyze' for compliance checks.");
 
     Ok(())
 }

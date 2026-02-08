@@ -10,8 +10,8 @@
 //! ## Usage
 //!
 //! ```rust,no_run
-//! use bcc::display::charts::{render_price_chart, render_volume_chart};
-//! use bcc::chains::PricePoint;
+//! use scope::display::charts::{render_price_chart, render_volume_chart};
+//! use scope::chains::PricePoint;
 //!
 //! let price_history = vec![
 //!     PricePoint { timestamp: 0, price: 1.0 },
