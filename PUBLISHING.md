@@ -144,14 +144,21 @@ name = "new-name"
 
 BCC uses Codecov for coverage reporting. Target: **80%+ coverage** before publishing.
 
-### Setup Steps
+### Setup Steps (OIDC - No Token Required)
+
+BCC uses **OIDC authentication** with Codecov — no static tokens needed.
 
 1. **Sign up for Codecov**: https://about.codecov.io/
 2. **Add repository**: Connect `robot-accomplice/bcc` GitHub repo
-3. **Get token**: Copy the repository upload token
-4. **Add GitHub Secret**:
-   - Go to: https://github.com/robot-accomplice/bcc/settings/secrets/actions
-   - Add secret: `CODECOV_TOKEN` with your token value
+3. **Enable OIDC**: Already configured in `.github/workflows/coverage.yml`
+4. **No secrets required** — OIDC handles authentication automatically
+
+### Alternative: Token-Based (If OIDC Fails)
+
+If OIDC doesn't work:
+1. Get token from: https://app.codecov.io/gh/robot-accomplice/bcc/settings
+2. Add GitHub Secret: `CODECOV_TOKEN`
+3. Edit workflow: Remove `use_oidc: true` and uncomment token line
 
 ### Coverage Badge
 

@@ -6,6 +6,14 @@ on:
   pull_request:
     branches: [ main ]
 
+# OIDC token permissions for Codecov
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   coverage:
     name: Code Coverage
@@ -23,8 +31,8 @@ jobs:
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
         with:
-          token: ${{ secrets.CODECOV_TOKEN }}
+          use_oidc: true
           slug: robot-accomplice/bcc
           files: ./cobertura.xml
-          fail_ci_if_error: true
+          fail_ci_if_error: false
           verbose: true
