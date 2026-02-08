@@ -127,7 +127,25 @@ scope:solana> exit
 
 ## Configuration
 
-Create `~/.config/scope/config.yaml`:
+On first run, Scope detects that no configuration file exists and offers to launch the interactive setup wizard. The wizard walks you through configuring API keys, RPC endpoints, and output preferences, then saves the result to `~/.config/scope/config.yaml`.
+
+You can revisit the setup wizard at any time without editing the config file directly:
+
+```bash
+# Re-run the full setup wizard
+scope setup
+
+# View current configuration status
+scope setup --status
+
+# Configure a single API key
+scope setup --key etherscan
+
+# Reset configuration to defaults
+scope setup --reset
+```
+
+The generated config file follows this structure:
 
 ```yaml
 chains:
