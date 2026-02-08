@@ -1209,4 +1209,194 @@ mod tests {
     fn test_get_native_symbol_bsc() {
         assert_eq!(get_native_symbol("bsc"), "???");
     }
+
+    #[tokio::test]
+    async fn test_run_portfolio_list_csv_format() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            portfolio: crate::config::PortfolioConfig {
+                data_dir: Some(tmp_dir.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+        let factory = mock_factory();
+
+        // Add address
+        let add_args = PortfolioArgs {
+            command: PortfolioCommands::Add(AddArgs {
+                address: "0xCSV_test".to_string(),
+                label: Some("CsvAddr".to_string()),
+                chain: "ethereum".to_string(),
+                tags: vec!["test".to_string()],
+            }),
+            format: None,
+        };
+        super::run(add_args, &config, &factory).await.unwrap();
+
+        // List with CSV
+        let list_args = PortfolioArgs {
+            command: PortfolioCommands::List,
+            format: Some(OutputFormat::Csv),
+        };
+        let result = super::run(list_args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_portfolio_list_table_format() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            portfolio: crate::config::PortfolioConfig {
+                data_dir: Some(tmp_dir.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+        let factory = mock_factory();
+
+        // Add addresses with and without labels
+        let add_args = PortfolioArgs {
+            command: PortfolioCommands::Add(AddArgs {
+                address: "0xTable_test1".to_string(),
+                label: Some("LabeledAddr".to_string()),
+                chain: "ethereum".to_string(),
+                tags: vec!["personal".to_string(), "defi".to_string()],
+            }),
+            format: None,
+        };
+        super::run(add_args, &config, &factory).await.unwrap();
+
+        let add_args2 = PortfolioArgs {
+            command: PortfolioCommands::Add(AddArgs {
+                address: "0xTable_test2".to_string(),
+                label: None,
+                chain: "polygon".to_string(),
+                tags: vec![],
+            }),
+            format: None,
+        };
+        super::run(add_args2, &config, &factory).await.unwrap();
+
+        // List with Table
+        let list_args = PortfolioArgs {
+            command: PortfolioCommands::List,
+            format: Some(OutputFormat::Table),
+        };
+        let result = super::run(list_args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_portfolio_summary_table_with_tokens() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            portfolio: crate::config::PortfolioConfig {
+                data_dir: Some(tmp_dir.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+        let factory = mock_factory();
+
+        // Add address
+        let add_args = PortfolioArgs {
+            command: PortfolioCommands::Add(AddArgs {
+                address: "0xTokenTest".to_string(),
+                label: Some("TokenAddr".to_string()),
+                chain: "ethereum".to_string(),
+                tags: vec![],
+            }),
+            format: None,
+        };
+        super::run(add_args, &config, &factory).await.unwrap();
+
+        // Summary with Table and tokens included
+        let summary_args = PortfolioArgs {
+            command: PortfolioCommands::Summary(SummaryArgs {
+                chain: None,
+                tag: None,
+                include_tokens: true,
+            }),
+            format: Some(OutputFormat::Table),
+        };
+        let result = super::run(summary_args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_portfolio_summary_multiple_chains() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            portfolio: crate::config::PortfolioConfig {
+                data_dir: Some(tmp_dir.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+        let factory = mock_factory();
+
+        // Add addresses on the same chain to test chain balance aggregation
+        let add1 = PortfolioArgs {
+            command: PortfolioCommands::Add(AddArgs {
+                address: "0xMulti1".to_string(),
+                label: None,
+                chain: "ethereum".to_string(),
+                tags: vec![],
+            }),
+            format: None,
+        };
+        super::run(add1, &config, &factory).await.unwrap();
+
+        let add2 = PortfolioArgs {
+            command: PortfolioCommands::Add(AddArgs {
+                address: "0xMulti2".to_string(),
+                label: None,
+                chain: "ethereum".to_string(),
+                tags: vec![],
+            }),
+            format: None,
+        };
+        super::run(add2, &config, &factory).await.unwrap();
+
+        // Summary - should aggregate chain balances
+        let summary_args = PortfolioArgs {
+            command: PortfolioCommands::Summary(SummaryArgs {
+                chain: None,
+                tag: None,
+                include_tokens: false,
+            }),
+            format: Some(OutputFormat::Table),
+        };
+        let result = super::run(summary_args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_portfolio_list_no_format() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            portfolio: crate::config::PortfolioConfig {
+                data_dir: Some(tmp_dir.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+        let factory = mock_factory();
+
+        // Add address
+        let add_args = PortfolioArgs {
+            command: PortfolioCommands::Add(AddArgs {
+                address: "0xNoFmt".to_string(),
+                label: Some("Test".to_string()),
+                chain: "ethereum".to_string(),
+                tags: vec![],
+            }),
+            format: None,
+        };
+        super::run(add_args, &config, &factory).await.unwrap();
+
+        // List with default format (None -> Table)
+        let list_args = PortfolioArgs {
+            command: PortfolioCommands::List,
+            format: None,
+        };
+        let result = super::run(list_args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
 }

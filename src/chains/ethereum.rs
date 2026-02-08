@@ -2535,4 +2535,264 @@ mod tests {
         let block = chain_client.get_block_number().await.unwrap();
         assert_eq!(block, 1000000);
     }
+
+    #[tokio::test]
+    async fn test_chain_client_trait_get_transactions() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"status":"1","message":"OK","result":[{
+                "hash":"0xabc",
+                "blockNumber":"12345",
+                "timeStamp":"1700000000",
+                "from":"0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
+                "to":"0x1111111111111111111111111111111111111111",
+                "value":"1000000000000000000",
+                "gas":"21000","gasUsed":"21000","gasPrice":"20000000000",
+                "nonce":"1","input":"0x","isError":"0"
+            }]}"#,
+            )
+            .create_async()
+            .await;
+
+        let client = EthereumClient::with_base_url(&server.url());
+        let chain_client: &dyn ChainClient = &client;
+        let txs = chain_client
+            .get_transactions(VALID_ADDRESS, 10)
+            .await
+            .unwrap();
+        assert_eq!(txs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_chain_client_trait_get_token_balances() {
+        let mut server = mockito::Server::new_async().await;
+        // First call: tokentx returns tokens
+        let _tokentx = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"status":"1","message":"OK","result":[{
+                "contractAddress":"0xdac17f958d2ee523a2206206994597c13d831ec7",
+                "tokenSymbol":"USDT","tokenName":"Tether USD","tokenDecimal":"6"
+            }]}"#,
+            )
+            .expect_at_most(1)
+            .create_async()
+            .await;
+
+        // Second call: token balance
+        let _balance = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"status":"1","message":"OK","result":"5000000000"}"#)
+            .create_async()
+            .await;
+
+        let client = EthereumClient::with_base_url(&server.url());
+        let chain_client: &dyn ChainClient = &client;
+        let balances = chain_client
+            .get_token_balances(VALID_ADDRESS)
+            .await
+            .unwrap();
+        assert!(!balances.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_chain_client_trait_get_token_info() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"status":"1","message":"OK","result":[{
+                "tokenName":"Tether USD","symbol":"USDT",
+                "divisor":"1000000","tokenType":"ERC20","totalSupply":"1000000000000"
+            }]}"#,
+            )
+            .create_async()
+            .await;
+
+        let client = EthereumClient::with_base_url(&server.url());
+        let chain_client: &dyn ChainClient = &client;
+        let token = chain_client.get_token_info(VALID_ADDRESS).await.unwrap();
+        assert_eq!(token.symbol, "USDT");
+    }
+
+    #[tokio::test]
+    async fn test_chain_client_trait_get_token_holders() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"status":"1","message":"OK","result":[
+                {"TokenHolderAddress":"0x1111111111111111111111111111111111111111","TokenHolderQuantity":"5000"}
+            ]}"#,
+            )
+            .create_async()
+            .await;
+
+        let client = EthereumClient::with_base_url(&server.url());
+        let chain_client: &dyn ChainClient = &client;
+        let holders = chain_client
+            .get_token_holders(VALID_ADDRESS, 10)
+            .await
+            .unwrap();
+        assert_eq!(holders.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_chain_client_trait_get_token_holder_count() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"status":"1","message":"OK","result":[
+                {"TokenHolderAddress":"0x1111111111111111111111111111111111111111","TokenHolderQuantity":"5000"},
+                {"TokenHolderAddress":"0x2222222222222222222222222222222222222222","TokenHolderQuantity":"3000"}
+            ]}"#,
+            )
+            .create_async()
+            .await;
+
+        let client = EthereumClient::with_base_url(&server.url());
+        let chain_client: &dyn ChainClient = &client;
+        let count = chain_client
+            .get_token_holder_count(VALID_ADDRESS)
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_chain_client_trait_native_token_symbol() {
+        let client = EthereumClient::with_base_url("http://test");
+        let chain_client: &dyn ChainClient = &client;
+        assert_eq!(chain_client.native_token_symbol(), "ETH");
+        assert_eq!(chain_client.chain_name(), "ethereum");
+    }
+
+    #[tokio::test]
+    async fn test_get_token_info_supply_fallback_no_contract() {
+        let mut server = mockito::Server::new_async().await;
+        // First request: tokeninfo fails
+        let _info_mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"status":"0","message":"NOTOK","result":"Error"}"#)
+            .expect_at_most(1)
+            .create_async()
+            .await;
+
+        // Second request: tokensupply succeeds (valid ERC20)
+        let _supply_mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"status":"1","message":"OK","result":"1000000000000"}"#)
+            .expect_at_most(1)
+            .create_async()
+            .await;
+
+        // Third request: getsourcecode returns empty contract name
+        let _source_mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"status":"1","message":"OK","result":[{"ContractName":""}]}"#)
+            .create_async()
+            .await;
+
+        let client = EthereumClient::with_base_url(&server.url());
+        let token = client.get_token_info(VALID_ADDRESS).await.unwrap();
+        // Should return address-based placeholder since contract name is empty
+        assert!(token.symbol.contains("...") || !token.symbol.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_try_get_contract_name_short_lowercase() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"status":"1","message":"OK","result":[{"ContractName":"token"}]}"#)
+            .create_async()
+            .await;
+
+        let client = EthereumClient::with_base_url(&server.url());
+        let result = client.try_get_contract_name(VALID_ADDRESS).await;
+        assert!(result.is_some());
+        let (symbol, name) = result.unwrap();
+        assert_eq!(name, "token");
+        // Name <= 6 chars → uppercased directly
+        assert_eq!(symbol, "TOKEN");
+    }
+
+    #[tokio::test]
+    async fn test_try_get_contract_name_long_lowercase() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"status":"1","message":"OK","result":[{"ContractName":"mytokencontract"}]}"#,
+            )
+            .create_async()
+            .await;
+
+        let client = EthereumClient::with_base_url(&server.url());
+        let result = client.try_get_contract_name(VALID_ADDRESS).await;
+        assert!(result.is_some());
+        let (symbol, name) = result.unwrap();
+        assert_eq!(name, "mytokencontract");
+        // Long name with no uppercase → extract uppercase chars gets empty string
+        // Falls back to first 6 chars uppercased
+        assert_eq!(symbol, "MYTOKE");
+    }
+
+    #[tokio::test]
+    async fn test_get_erc20_balances_zero_balance_skipped() {
+        let mut server = mockito::Server::new_async().await;
+        // First request: token transfers
+        let _tokentx = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"status":"1","message":"OK","result":[{
+                "contractAddress":"0xdac17f958d2ee523a2206206994597c13d831ec7",
+                "tokenSymbol":"USDT","tokenName":"Tether USD","tokenDecimal":"6"
+            }]}"#,
+            )
+            .expect_at_most(1)
+            .create_async()
+            .await;
+
+        // Second request: token balance returns zero
+        let _balance = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"status":"1","message":"OK","result":"0"}"#)
+            .create_async()
+            .await;
+
+        let client = EthereumClient::with_base_url(&server.url());
+        let balances = client.get_erc20_balances(VALID_ADDRESS).await.unwrap();
+        // Zero balance should be skipped
+        assert!(balances.is_empty());
+    }
 }

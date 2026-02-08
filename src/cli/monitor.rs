@@ -1961,13 +1961,13 @@ mod tests {
     fn test_monitor_state_should_refresh() {
         let token_data = create_test_token_data();
         let mut state = MonitorState::new(&token_data, "ethereum");
-        state.refresh_rate = Duration::from_millis(10);
+        state.refresh_rate = Duration::from_secs(60);
 
-        // Just created, should not need refresh
+        // Just created, should not need refresh (60s refresh rate)
         assert!(!state.should_refresh());
 
-        // Simulate time passing
-        state.last_update = Instant::now() - Duration::from_secs(10);
+        // Simulate time passing well beyond refresh rate
+        state.last_update = Instant::now() - Duration::from_secs(120);
         assert!(state.should_refresh());
 
         // Pause should prevent refresh
@@ -2973,6 +2973,132 @@ mod tests {
         state.price_change_24h = -50.0; // <-0.5 -> ▼
         terminal
             .draw(|f| render_header(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_price_chart_empty_data() {
+        let mut terminal = create_test_terminal();
+        let token_data = create_test_token_data();
+        // Create state with no price history data
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        state.price_history.clear();
+        terminal
+            .draw(|f| render_price_chart(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_price_chart_price_down() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        // Force price down scenario
+        state.price_change_24h = -15.0;
+        state.current_price = 0.5; // Below initial
+        terminal
+            .draw(|f| render_price_chart(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_price_chart_zero_first_price() {
+        let mut terminal = create_test_terminal();
+        let mut token_data = create_test_token_data();
+        token_data.price_usd = 0.0;
+        let state = MonitorState::new(&token_data, "ethereum");
+        terminal
+            .draw(|f| render_price_chart(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_metrics_panel_zero_5m_change() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        state.price_change_5m = 0.0; // Exactly zero
+        terminal
+            .draw(|f| render_metrics_panel(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_metrics_panel_positive_5m_change() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        state.price_change_5m = 5.0; // Positive
+        terminal
+            .draw(|f| render_metrics_panel(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_metrics_panel_negative_5m_change() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        state.price_change_5m = -3.0; // Negative
+        terminal
+            .draw(|f| render_metrics_panel(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_metrics_panel_negative_24h_change() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        state.price_change_24h = -10.0;
+        terminal
+            .draw(|f| render_metrics_panel(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_metrics_panel_old_last_change() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        // Set last_price_change_at to over an hour ago
+        state.last_price_change_at = chrono::Utc::now().timestamp() as f64 - 7200.0; // 2h ago
+        terminal
+            .draw(|f| render_metrics_panel(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_metrics_panel_minutes_ago_change() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        // Set last_price_change_at to minutes ago
+        state.last_price_change_at = chrono::Utc::now().timestamp() as f64 - 300.0; // 5 min ago
+        terminal
+            .draw(|f| render_metrics_panel(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_candlestick_empty_fresh_state() {
+        let mut terminal = create_test_terminal();
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        state.price_history.clear();
+        state.chart_mode = ChartMode::Candlestick;
+        terminal
+            .draw(|f| render_candlestick_chart(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_candlestick_price_down() {
+        let mut terminal = create_test_terminal();
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        // Add data going down
+        for i in 0..20 {
+            let mut data = token_data.clone();
+            data.price_usd = 2.0 - (i as f64 * 0.05);
+            state.update(&data);
+        }
+        state.chart_mode = ChartMode::Candlestick;
+        terminal
+            .draw(|f| render_candlestick_chart(f, f.area(), &state))
             .unwrap();
     }
 

@@ -1358,4 +1358,334 @@ mod tests {
         assert_eq!(balances[0].token.symbol, "TRC20");
         assert_eq!(balances[0].token.name, "TRC-20 Token");
     }
+
+    #[tokio::test]
+    async fn test_chain_client_trait_get_transaction_tron() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"/v1/transactions/.*".to_string()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"data": [{
+                "txID": "b3c12d62ad7e7b8b83b09a68b9b8f9b23a1b8f8b8f9b8f9b8f9b8f9b8f9b8f9b",
+                "block_number": 50000000,
+                "block_timestamp": 1700000000000,
+                "raw_data": {
+                    "contract": [{
+                        "parameter": {
+                            "value": {
+                                "amount": 1000000,
+                                "owner_address": "TDqSquXBgUCLYvYC4XZgrprLK589dkhSCf",
+                                "to_address": "TDqSquXBgUCLYvYC4XZgrprLK589dkhSCg"
+                            }
+                        },
+                        "type": "TransferContract"
+                    }]
+                },
+                "ret": [{"contractRet": "SUCCESS"}]
+            }], "success": true}"#,
+            )
+            .create_async()
+            .await;
+
+        let client = TronClient::with_api_url(&server.url());
+        let chain_client: &dyn ChainClient = &client;
+        let tx = chain_client.get_transaction(VALID_TX_HASH).await.unwrap();
+        assert_eq!(tx.hash, VALID_TX_HASH);
+        assert!(tx.status.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_chain_client_trait_get_transactions_tron() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"/v1/accounts/.*/transactions.*".to_string()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"data": [{
+                "txID": "b3c12d62ad7e7b8b83b09a68b9b8f9b23a1b8f8b8f9b8f9b8f9b8f9b8f9b8f9b",
+                "block_number": 50000000,
+                "block_timestamp": 1700000000000,
+                "raw_data": {
+                    "contract": [{
+                        "parameter": {
+                            "value": {
+                                "amount": 2000000,
+                                "owner_address": "TDqSquXBgUCLYvYC4XZgrprLK589dkhSCf",
+                                "to_address": "TDqSquXBgUCLYvYC4XZgrprLK589dkhSCg"
+                            }
+                        }
+                    }]
+                },
+                "ret": [{"contractRet": "REVERT"}]
+            }], "success": true}"#,
+            )
+            .create_async()
+            .await;
+
+        let client = TronClient::with_api_url(&server.url());
+        let chain_client: &dyn ChainClient = &client;
+        let txs = chain_client
+            .get_transactions(VALID_ADDRESS, 10)
+            .await
+            .unwrap();
+        assert_eq!(txs.len(), 1);
+        assert!(!txs[0].status.unwrap()); // REVERT means failure
+    }
+
+    #[tokio::test]
+    async fn test_get_balance_with_api_key() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Regex(r"/v1/accounts/.*".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"data": [{"balance": 10000000, "address": "TDqSquXBgUCLYvYC4XZgrprLK589dkhSCf", "trc20": []}], "success": true}"#,
+            )
+            .create_async()
+            .await;
+
+        let config = ChainsConfig {
+            tron_api: Some(server.url()),
+            api_keys: {
+                let mut m = std::collections::HashMap::new();
+                m.insert("tronscan".to_string(), "test-api-key".to_string());
+                m
+            },
+            ..Default::default()
+        };
+        let client = TronClient::new(&config).unwrap();
+        let balance = client.get_balance(VALID_ADDRESS).await.unwrap();
+        assert_eq!(balance.symbol, "TRX");
+        assert!(balance.formatted.contains("TRX"));
+    }
+
+    #[tokio::test]
+    async fn test_get_trc20_balances_error_response() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"/v1/accounts/.*".to_string()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data": [], "success": false, "error": "Rate limit exceeded"}"#)
+            .create_async()
+            .await;
+
+        let client = TronClient::with_api_url(&server.url());
+        let result = client.get_trc20_balances(VALID_ADDRESS).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Rate limit"));
+    }
+
+    #[tokio::test]
+    async fn test_get_trc20_balances_no_data() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"/v1/accounts/.*".to_string()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data": [], "success": true}"#)
+            .create_async()
+            .await;
+
+        let client = TronClient::with_api_url(&server.url());
+        let balances = client.get_trc20_balances(VALID_ADDRESS).await.unwrap();
+        assert!(balances.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_trc20_balances_with_api_key() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Regex(r"/v1/accounts/.*".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"data": [{"balance": 0, "address": "TDqSquXBgUCLYvYC4XZgrprLK589dkhSCf", "trc20": [{"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t": "10000000"}]}], "success": true}"#,
+            )
+            .create_async()
+            .await;
+
+        let config = ChainsConfig {
+            tron_api: Some(server.url()),
+            api_keys: {
+                let mut m = std::collections::HashMap::new();
+                m.insert("tronscan".to_string(), "my-api-key".to_string());
+                m
+            },
+            ..Default::default()
+        };
+        let client = TronClient::new(&config).unwrap();
+        let balances = client.get_trc20_balances(VALID_ADDRESS).await.unwrap();
+        assert_eq!(balances.len(), 1);
+    }
+
+    #[test]
+    fn test_validate_tron_address_bad_checksum() {
+        // Construct a valid-looking address with bad checksum by modifying last char
+        // TDqSquXBgUCLYvYC4XZgrprLK589dkhSCf -> change last char
+        let result = validate_tron_address("TDqSquXBgUCLYvYC4XZgrprLK589dkhSCe");
+        assert!(result.is_err());
+        // Could be checksum error or base58 decode error
+        let err_str = result.unwrap_err().to_string();
+        assert!(
+            err_str.contains("checksum")
+                || err_str.contains("base58")
+                || err_str.contains("prefix")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_transaction_tron_success() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"/v1/transactions/.*".to_string()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"data": [{
+                "txID": "b3c12d62ad7e7b8b83b09a68b9b8f9b23a1b8f8b8f9b8f9b8f9b8f9b8f9b8f9b",
+                "block_number": 50000000,
+                "block_timestamp": 1700000000000,
+                "raw_data": {
+                    "contract": [{
+                        "parameter": {
+                            "value": {
+                                "amount": 5000000,
+                                "owner_address": "TDqSquXBgUCLYvYC4XZgrprLK589dkhSCf",
+                                "to_address": "TDqSquXBgUCLYvYC4XZgrprLK589dkhSCg"
+                            }
+                        }
+                    }]
+                },
+                "ret": [{"contractRet": "SUCCESS"}]
+            }], "success": true}"#,
+            )
+            .create_async()
+            .await;
+
+        let client = TronClient::with_api_url(&server.url());
+        let tx = client.get_transaction(VALID_TX_HASH).await.unwrap();
+        assert_eq!(tx.hash, VALID_TX_HASH);
+        assert!(tx.status.unwrap());
+        assert_eq!(tx.value, "5000000");
+        assert_eq!(tx.timestamp, Some(1700000000)); // Converted from ms to s
+    }
+
+    #[tokio::test]
+    async fn test_get_transaction_tron_error() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"/v1/transactions/.*".to_string()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data": [], "success": false, "error": "Transaction not found"}"#)
+            .create_async()
+            .await;
+
+        let client = TronClient::with_api_url(&server.url());
+        let result = client.get_transaction(VALID_TX_HASH).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_transactions_tron_success() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"/v1/accounts/.*/transactions.*".to_string()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"data": [
+                {
+                    "txID": "aaa12d62ad7e7b8b83b09a68b9b8f9b23a1b8f8b8f9b8f9b8f9b8f9b8f9b8f9b",
+                    "block_number": 50000001,
+                    "block_timestamp": 1700000003000,
+                    "raw_data": {"contract": [{"parameter": {"value": {"amount": 1000000, "owner_address": "TDqSquXBgUCLYvYC4XZgrprLK589dkhSCf"}}}]},
+                    "ret": [{"contractRet": "SUCCESS"}]
+                },
+                {
+                    "txID": "bbb12d62ad7e7b8b83b09a68b9b8f9b23a1b8f8b8f9b8f9b8f9b8f9b8f9b8f9b",
+                    "block_number": 50000002,
+                    "block_timestamp": 1700000006000,
+                    "raw_data": {"contract": [{"parameter": {"value": {"amount": 2000000, "owner_address": "TDqSquXBgUCLYvYC4XZgrprLK589dkhSCf", "to_address": "TDqSquXBgUCLYvYC4XZgrprLK589dkhSCg"}}}]},
+                    "ret": [{"contractRet": "SUCCESS"}]
+                }
+            ], "success": true}"#,
+            )
+            .create_async()
+            .await;
+
+        let client = TronClient::with_api_url(&server.url());
+        let txs = client.get_transactions(VALID_ADDRESS, 10).await.unwrap();
+        assert_eq!(txs.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_get_transactions_tron_error() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"/v1/accounts/.*/transactions.*".to_string()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data": [], "success": false, "error": "Invalid address"}"#)
+            .create_async()
+            .await;
+
+        let client = TronClient::with_api_url(&server.url());
+        let result = client.get_transactions(VALID_ADDRESS, 10).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_balance_error_response() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"/v1/accounts/.*".to_string()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data": [], "success": false, "error": "Account not found"}"#)
+            .create_async()
+            .await;
+
+        let client = TronClient::with_api_url(&server.url());
+        let result = client.get_balance(VALID_ADDRESS).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Account not found")
+        );
+    }
 }

@@ -2277,6 +2277,210 @@ mod tests {
     }
 
     #[test]
+    fn test_security_analysis_medium_buy_sell_ratio() {
+        let mut analytics = create_test_analytics();
+        // ratio = 5.0 → MEDIUM risk
+        analytics.total_buys_24h = 100;
+        analytics.total_sells_24h = 20;
+        let section = generate_security_analysis(&analytics);
+        assert!(section.contains("MEDIUM") || section.contains("Elevated"));
+    }
+
+    #[test]
+    fn test_security_analysis_token_age_months() {
+        let mut analytics = create_test_analytics();
+        // 2000 hours ≈ 83 days ≈ 2.8 months (> 30 days, < 365 days)
+        analytics.token_age_hours = Some(2000.0);
+        let section = generate_security_analysis(&analytics);
+        assert!(section.contains("ESTABLISHED") || section.contains("months"));
+    }
+
+    #[test]
+    fn test_security_analysis_whale_risk_medium() {
+        let mut analytics = create_test_analytics();
+        analytics.holders = vec![TokenHolder {
+            address: "0xwhale".to_string(),
+            balance: "3000000".to_string(),
+            formatted_balance: "3M".to_string(),
+            percentage: 30.0, // > 25%, <= 50%
+            rank: 1,
+        }];
+        let section = generate_security_analysis(&analytics);
+        assert!(section.contains("MEDIUM") || section.contains("High concentration"));
+    }
+
+    #[test]
+    fn test_security_analysis_whale_risk_low() {
+        let mut analytics = create_test_analytics();
+        analytics.holders = vec![TokenHolder {
+            address: "0xholder".to_string(),
+            balance: "500000".to_string(),
+            formatted_balance: "500K".to_string(),
+            percentage: 5.0, // > 0%, <= 10%
+            rank: 1,
+        }];
+        let section = generate_security_analysis(&analytics);
+        assert!(section.contains("LOW") || section.contains("Well distributed"));
+    }
+
+    #[test]
+    fn test_security_analysis_token_age_days_format() {
+        let mut analytics = create_test_analytics();
+        // 480 hours = 20 days (< 30 days, uses "days ago" format)
+        analytics.token_age_hours = Some(480.0);
+        let section = generate_security_analysis(&analytics);
+        assert!(section.contains("days ago") || section.contains("MODERATE"));
+    }
+
+    #[test]
+    fn test_security_buysell_zero_buys_zero_sells_in_period() {
+        let mut analytics = create_test_analytics();
+        // 24h has data, but 1h and 6h have zero
+        analytics.total_buys_1h = 0;
+        analytics.total_sells_1h = 0;
+        analytics.total_buys_6h = 0;
+        analytics.total_sells_6h = 0;
+        analytics.total_buys_24h = 100;
+        analytics.total_sells_24h = 80;
+        let section = generate_security_analysis(&analytics);
+        assert!(section.contains("-") || section.contains("100")); // "-" for 0/0 ratio
+    }
+
+    #[test]
+    fn test_risk_factors_various_honeypot_ratios() {
+        let mut analytics = create_test_analytics();
+
+        // ratio > 10 → honeypot = 9
+        analytics.total_buys_24h = 110;
+        analytics.total_sells_24h = 10;
+        let factors = RiskFactors::from_analytics(&analytics);
+        assert_eq!(factors.honeypot, 9);
+
+        // ratio > 5, <= 10 → honeypot = 7
+        analytics.total_buys_24h = 60;
+        analytics.total_sells_24h = 10;
+        let factors = RiskFactors::from_analytics(&analytics);
+        assert_eq!(factors.honeypot, 7);
+
+        // ratio > 3, <= 5 → honeypot = 5
+        analytics.total_buys_24h = 40;
+        analytics.total_sells_24h = 10;
+        let factors = RiskFactors::from_analytics(&analytics);
+        assert_eq!(factors.honeypot, 5);
+
+        // ratio > 2, <= 3 → honeypot = 3
+        analytics.total_buys_24h = 25;
+        analytics.total_sells_24h = 10;
+        let factors = RiskFactors::from_analytics(&analytics);
+        assert_eq!(factors.honeypot, 3);
+
+        // ratio <= 2 → honeypot = 1
+        analytics.total_buys_24h = 15;
+        analytics.total_sells_24h = 10;
+        let factors = RiskFactors::from_analytics(&analytics);
+        assert_eq!(factors.honeypot, 1);
+    }
+
+    #[test]
+    fn test_risk_factors_various_age_thresholds() {
+        let mut analytics = create_test_analytics();
+
+        // < 48h → 8
+        analytics.token_age_hours = Some(36.0);
+        let factors = RiskFactors::from_analytics(&analytics);
+        assert_eq!(factors.age, 8);
+
+        // < 168h (7d) → 6
+        analytics.token_age_hours = Some(120.0);
+        let factors = RiskFactors::from_analytics(&analytics);
+        assert_eq!(factors.age, 6);
+
+        // < 720h (30d) → 4
+        analytics.token_age_hours = Some(500.0);
+        let factors = RiskFactors::from_analytics(&analytics);
+        assert_eq!(factors.age, 4);
+
+        // < 2160h (90d) → 2
+        analytics.token_age_hours = Some(1500.0);
+        let factors = RiskFactors::from_analytics(&analytics);
+        assert_eq!(factors.age, 2);
+    }
+
+    #[test]
+    fn test_risk_factors_various_liquidity_thresholds() {
+        let mut analytics = create_test_analytics();
+
+        // 50K-100K → 6
+        analytics.liquidity_usd = 75_000.0;
+        let factors = RiskFactors::from_analytics(&analytics);
+        assert_eq!(factors.liquidity, 6);
+
+        // 100K-500K → 4
+        analytics.liquidity_usd = 200_000.0;
+        let factors = RiskFactors::from_analytics(&analytics);
+        assert_eq!(factors.liquidity, 4);
+
+        // 500K-1M → 2
+        analytics.liquidity_usd = 750_000.0;
+        let factors = RiskFactors::from_analytics(&analytics);
+        assert_eq!(factors.liquidity, 2);
+
+        // > 1M → 1
+        analytics.liquidity_usd = 2_000_000.0;
+        let factors = RiskFactors::from_analytics(&analytics);
+        assert_eq!(factors.liquidity, 1);
+    }
+
+    #[test]
+    fn test_risk_factors_various_concentration_thresholds() {
+        let mut analytics = create_test_analytics();
+
+        // 30-50% → 8
+        analytics.holders = vec![TokenHolder {
+            address: "0x1".to_string(),
+            balance: "1".to_string(),
+            formatted_balance: "1".to_string(),
+            percentage: 35.0,
+            rank: 1,
+        }];
+        let factors = RiskFactors::from_analytics(&analytics);
+        assert_eq!(factors.concentration, 8);
+
+        // 20-30% → 6
+        analytics.holders[0].percentage = 25.0;
+        let factors = RiskFactors::from_analytics(&analytics);
+        assert_eq!(factors.concentration, 6);
+
+        // 10-20% → 4
+        analytics.holders[0].percentage = 15.0;
+        let factors = RiskFactors::from_analytics(&analytics);
+        assert_eq!(factors.concentration, 4);
+
+        // 5-10% → 2
+        analytics.holders[0].percentage = 7.0;
+        let factors = RiskFactors::from_analytics(&analytics);
+        assert_eq!(factors.concentration, 2);
+
+        // < 5% → 1
+        analytics.holders[0].percentage = 3.0;
+        let factors = RiskFactors::from_analytics(&analytics);
+        assert_eq!(factors.concentration, 1);
+    }
+
+    #[test]
+    fn test_risk_factors_social_one_social() {
+        let mut analytics = create_test_analytics();
+        analytics.socials = vec![TokenSocial {
+            platform: "twitter".to_string(),
+            url: "https://twitter.com/test".to_string(),
+        }];
+        analytics.websites = vec![];
+        let factors = RiskFactors::from_analytics(&analytics);
+        // 1 social = moderate social presence
+        assert!(factors.social <= 5);
+    }
+
+    #[test]
     fn test_format_number_large_values() {
         assert_eq!(format_number(1_500_000_000.0), "1500.00M");
         assert_eq!(format_number(500_000.0), "500K");

@@ -1493,4 +1493,216 @@ mod tests {
         let price = trait_client.get_token_price("ethereum", "0xtoken").await;
         assert!(price.is_some());
     }
+
+    #[tokio::test]
+    async fn test_dex_data_source_trait_get_native_token_price() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"pairs":[{
+                "chainId":"ethereum",
+                "dexId":"uniswap",
+                "pairAddress":"0xpair",
+                "baseToken":{"address":"0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2","name":"WETH","symbol":"WETH"},
+                "quoteToken":{"address":"0xquote","name":"USDC","symbol":"USDC"},
+                "priceUsd":"3500.0",
+                "liquidity":{"usd":10000000.0},
+                "volume":{"h24":5000000.0}
+            }]}"#,
+            )
+            .create_async()
+            .await;
+
+        let client = DexClient::with_base_url(&server.url());
+        let trait_client: &dyn DexDataSource = &client;
+        let price = trait_client.get_native_token_price("ethereum").await;
+        assert!(price.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_dex_data_source_trait_get_token_data() {
+        let mut server = mockito::Server::new_async().await;
+        let pair_json = build_test_pair_json("ethereum", "TKN", "0xtoken", "50.0");
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(format!(r#"{{"pairs":[{}]}}"#, pair_json))
+            .create_async()
+            .await;
+
+        let client = DexClient::with_base_url(&server.url());
+        let trait_client: &dyn DexDataSource = &client;
+        let data = trait_client.get_token_data("ethereum", "0xtoken").await;
+        assert!(data.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_dex_data_source_trait_search_tokens() {
+        let mut server = mockito::Server::new_async().await;
+        let pair_json = build_test_pair_json("ethereum", "TKN", "0xtoken", "50.0");
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(format!(r#"{{"pairs":[{}]}}"#, pair_json))
+            .create_async()
+            .await;
+
+        let client = DexClient::with_base_url(&server.url());
+        let trait_client: &dyn DexDataSource = &client;
+        let results = trait_client.search_tokens("TKN", None).await;
+        assert!(results.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_get_token_data_quote_token() {
+        let mut server = mockito::Server::new_async().await;
+        // Token is the quote token, not the base
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"pairs":[{
+                "chainId":"ethereum","dexId":"uniswap","pairAddress":"0xpair",
+                "baseToken":{"address":"0xother","name":"Other","symbol":"OTH"},
+                "quoteToken":{"address":"0xmytoken","name":"MyToken","symbol":"MTK"},
+                "priceUsd":"25.0",
+                "priceChange":{"h24":1.0,"h6":0.5,"h1":0.2,"m5":0.05},
+                "volume":{"h24":500000,"h6":100000,"h1":20000,"m5":2000},
+                "liquidity":{"usd":0,"base":0,"quote":0},
+                "txns":{"h24":{"buys":50,"sells":40},"h6":{"buys":10,"sells":8},"h1":{"buys":2,"sells":1}},
+                "pairCreatedAt":1690000000000,
+                "url":"https://dexscreener.com/ethereum/0xpair"
+            }]}"#,
+            )
+            .create_async()
+            .await;
+
+        let client = DexClient::with_base_url(&server.url());
+        let data = client
+            .get_token_data("ethereum", "0xmytoken")
+            .await
+            .unwrap();
+        // Should identify the quote token
+        assert_eq!(data.symbol, "MTK");
+        assert_eq!(data.name, "MyToken");
+        // Zero liquidity fallback for price: should use priceUsd from first pair
+        assert!(data.price_usd > 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_get_token_data_with_socials() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"pairs":[{
+                "chainId":"ethereum","dexId":"uniswap","pairAddress":"0xpair",
+                "baseToken":{"address":"0xtoken","name":"Token","symbol":"TKN"},
+                "quoteToken":{"address":"0xquote","name":"USDC","symbol":"USDC"},
+                "priceUsd":"50.0",
+                "priceChange":{"h24":5.0,"h6":2.0,"h1":1.0,"m5":0.1},
+                "volume":{"h24":1000000,"h6":250000,"h1":50000,"m5":5000},
+                "liquidity":{"usd":1000000,"base":100,"quote":1000000},
+                "txns":{"h24":{"buys":100,"sells":80},"h6":{"buys":20,"sells":15},"h1":{"buys":5,"sells":3}},
+                "pairCreatedAt":1690000000000,
+                "url":"https://dexscreener.com/ethereum/0xpair",
+                "info":{
+                    "imageUrl":"https://example.com/logo.png",
+                    "websites":[{"url":"https://example.com"}],
+                    "socials":[
+                        {"type":"twitter","url":"https://twitter.com/token"},
+                        {"type":"telegram","url":"https://t.me/token"}
+                    ]
+                }
+            }]}"#,
+            )
+            .create_async()
+            .await;
+
+        let client = DexClient::with_base_url(&server.url());
+        let data = client.get_token_data("ethereum", "0xtoken").await.unwrap();
+        assert_eq!(data.symbol, "TKN");
+        assert!(data.image_url.is_some());
+        assert!(!data.websites.is_empty());
+        assert!(!data.socials.is_empty());
+        assert_eq!(data.socials[0].platform, "twitter");
+    }
+
+    #[tokio::test]
+    async fn test_search_tokens_quote_match_and_updates() {
+        let mut server = mockito::Server::new_async().await;
+        // Token matches as quote, not base
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"pairs":[
+                {
+                    "chainId":"ethereum","dexId":"uniswap","pairAddress":"0xpair1",
+                    "baseToken":{"address":"0xother","name":"Other","symbol":"OTH"},
+                    "quoteToken":{"address":"0xmytk","name":"MySearch","symbol":"MSR"},
+                    "liquidity":{"usd":500000.0},
+                    "volume":{"h24":100000.0},
+                    "marketCap":5000000
+                },
+                {
+                    "chainId":"ethereum","dexId":"sushi","pairAddress":"0xpair2",
+                    "baseToken":{"address":"0xmytk","name":"MySearch","symbol":"MSR"},
+                    "quoteToken":{"address":"0xweth","name":"WETH","symbol":"WETH"},
+                    "priceUsd":"10.5",
+                    "liquidity":{"usd":800000.0},
+                    "volume":{"h24":200000.0}
+                }
+            ]}"#,
+            )
+            .create_async()
+            .await;
+
+        let client = DexClient::with_base_url(&server.url());
+        let results = client.search_tokens("MySearch", None).await.unwrap();
+        assert_eq!(results.len(), 1); // Same token aggregated
+        assert_eq!(results[0].symbol, "MSR");
+        // Volume should be aggregated
+        assert!(results[0].volume_24h >= 300000.0);
+        // Liquidity should be aggregated
+        assert!(results[0].liquidity_usd >= 1300000.0);
+        // Price should be set from the second pair
+        assert!(results[0].price_usd.is_some());
+        // Market cap should be carried from first pair
+        assert!(results[0].market_cap.is_some());
+    }
+
+    #[test]
+    fn test_interpolate_points_midpoint() {
+        let mut history = vec![
+            PricePoint {
+                timestamp: 1000,
+                price: 10.0,
+            },
+            PricePoint {
+                timestamp: 2000,
+                price: 20.0,
+            },
+        ];
+        // Should not interpolate if already enough points
+        DexClient::interpolate_points(&mut history, 2);
+        assert_eq!(history.len(), 2);
+
+        // Should add midpoints
+        DexClient::interpolate_points(&mut history, 5);
+        assert!(history.len() > 2);
+        // Check that a midpoint was added
+        let midpoints: Vec<_> = history.iter().filter(|p| p.timestamp == 1500).collect();
+        assert!(!midpoints.is_empty());
+        assert!((midpoints[0].price - 15.0).abs() < 0.01);
+    }
 }
