@@ -1,5 +1,9 @@
 # BCC - Blockchain Crawler CLI
 
+[![CI](https://github.com/robot-accomplice/bcc/actions/workflows/ci.yml/badge.svg)](https://github.com/robot-accomplice/bcc/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org/)
+
 ```
   ██████╗  ██████╗ ██████╗             ______ 
   ██╔══██╗██╔════╝██╔════╝    /^|^|^\_/_o__o_\_/^|^|^\
@@ -9,15 +13,18 @@
   ╚═════╝  ╚═════╝ ╚═════╝
 ```
 
-A production-grade command-line tool for blockchain data analysis, portfolio tracking, and transaction investigation.
+A production-grade command-line tool for blockchain data analysis, portfolio tracking, transaction investigation, and **compliance-grade risk assessment**.
 
 ## Features
 
-- **Address Analysis**: Query balances, transaction history, and token holdings for blockchain addresses
-- **Transaction Analysis**: Decode and trace blockchain transactions, including internal calls
-- **Portfolio Management**: Track multiple addresses across chains with labels and tags
-- **Data Export**: Export analysis results in JSON, CSV, or formatted table output
+- **Address Analysis**: Query balances (with USD valuation), transaction history, and token holdings for blockchain addresses
+- **Transaction Analysis**: Look up and decode blockchain transactions across all supported chains
+- **Token Crawling**: Crawl DEX data for any token -- price, volume, liquidity, holder analysis, and risk scoring with markdown report generation
+- **Live Monitoring**: Real-time TUI dashboard with price/volume/candlestick charts, buy/sell gauges, and activity logs
+- **Portfolio Management**: Track multiple addresses across chains with labels, tags, and aggregated balance views
+- **Compliance & Risk Assessment**: Risk scoring, transaction pattern detection, taint analysis, and compliance reporting (NEW)
 - **Interactive Mode**: REPL with preserved context between commands for faster workflow
+- **USD Valuation**: Native token balances enriched with real-time USD prices via DexScreener
 - **Multi-Chain Support**: 
   - EVM chains: Ethereum, Polygon, Arbitrum, Optimism, Base, BSC, Aegis
   - Non-EVM chains: Solana, Tron
@@ -26,7 +33,7 @@ A production-grade command-line tool for blockchain data analysis, portfolio tra
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/bcc.git
+git clone https://github.com/robot-accomplice/bcc.git
 cd bcc
 
 # Build and install
@@ -36,359 +43,165 @@ cargo install --path .
 ## Quick Start
 
 ```bash
-# Analyze an Ethereum address
+# Analyze an Ethereum address (auto-detects chain from address format)
 bcc address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
 
-# Analyze an address on other EVM chains
-bcc address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --chain polygon
-bcc address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --chain bsc
+# Include transaction history and token balances
+bcc address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --include-txs --include-tokens
 
-# Analyze a Solana address
+# Analyze addresses on other chains (auto-detected or explicit)
 bcc address DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy --chain solana
-
-# Analyze a Tron address
 bcc address TDqSquXBgUCLYvYC4XZgrprLK589dkhSCf --chain tron
 
-# Analyze a transaction
+# Look up a transaction
 bcc tx 0xabc123def456789012345678901234567890123456789012345678901234abcd
 
-# Add an address to your portfolio
-bcc portfolio add 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --label "Main Wallet"
+# Risk assessment for compliance (NEW)
+export ETHERSCAN_API_KEY="your_key_here"
+bcc risk 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --detailed
 
-# List portfolio addresses
-bcc portfolio list
+# Pattern detection (NEW)
+bcc analyze 0xabc... --patterns structuring,layering
 
-# Export data
-bcc export --address 0x742d35... --output history.json
+# Token crawling with report generation
+bcc crawl 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --chain ethereum
 
-# Launch interactive mode
+# Live monitor with real-time dashboard
+bcc monitor 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --chain ethereum
+
+# Interactive mode
 bcc interactive
 ```
 
+## Compliance Features (New)
+
+BCC now includes enterprise-grade compliance and risk analysis:
+
+### Risk Assessment
+```bash
+# Basic risk score
+bcc risk 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
+
+# Detailed breakdown with evidence
+bcc risk 0xabc... --detailed --format markdown
+
+# Export for compliance records
+bcc risk 0xabc... --output risk-report.json
+```
+
+### Pattern Detection
+```bash
+# Detect structuring, layering, velocity anomalies
+bcc analyze 0xabc... --patterns structuring,layering,velocity
+
+# Time-range analysis
+bcc analyze 0xabc... --range 30d
+```
+
+### Transaction Tracing
+```bash
+# Trace fund flow through multiple hops
+bcc trace 0xtxhash... --depth 5 --flag-suspicious
+```
+
+**Note**: Set `ETHERSCAN_API_KEY` environment variable for full compliance analysis. Without it, basic scoring is used.
+
 ## Interactive Mode
 
-Launch a REPL where context (chain, format, flags) persists between commands:
+Launch a REPL where context persists between commands:
 
 ```bash
 $ bcc interactive
-
-  ██████╗  ██████╗ ██████╗              ______ 
-  ██╔══██╗██╔════╝██╔════╝    /^|^|^\_/_o__o_\_/^|^|^\
-  ██████╔╝██║     ██║        \ \ \ \ \_v__v_/ / / / /
-  ██╔══██╗██║     ██║
-  ██████╔╝╚██████╗╚██████╗    Blockchain Crawler CLI
-  ╚═════╝  ╚═════╝ ╚═════╝
-
-Welcome to BCC Interactive Mode!
-Type 'help' for available commands, 'exit' to quit.
 
 bcc:ethereum> chain solana
 Chain set to: solana
 
 bcc:solana> address 7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU
-Address Analysis Report
-=======================
-Chain:        Solana
-Address:      7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU
-Balance:      1.5 SOL
-...
-
-bcc:solana> tx 5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUW
-# Uses Solana context automatically
+# Uses solana chain automatically
 
 bcc:solana> format json
 Format set to: json
 
-bcc:solana> tokens
-Include tokens: on
-
-bcc:solana> address
-# Re-runs last address with new settings
-
 bcc:solana> exit
-Goodbye!
-```
-
-### Interactive Commands
-
-
-| Command        | Description                        |
-| -------------- | ---------------------------------- |
-| `chain [name]` | Set or show current chain          |
-| `format [fmt]` | Set output format (table/json/csv) |
-| `ctx`          | Show current session context       |
-| `clear`        | Reset context to defaults          |
-| `tokens`       | Toggle include_tokens flag         |
-| `txs`          | Toggle include_txs flag            |
-| `trace`        | Toggle trace flag                  |
-| `decode`       | Toggle decode flag                 |
-| `limit [n]`    | Set transaction limit              |
-| `help`         | Show available commands            |
-| `exit`         | Exit interactive mode              |
-
-
-Session context is automatically saved and restored between sessions.
-
-## Commands
-
-### Address Analysis
-
-Analyze a blockchain address to view balances and transaction history.
-
-```bash
-bcc address <ADDRESS> [OPTIONS]
-
-Options:
-  -c, --chain <CHAIN>     Target blockchain (default: ethereum)
-  -f, --format <FORMAT>   Output format: table, json, csv
-  --include-txs           Include transaction history
-  --include-tokens        Include token balances
-  --limit <N>             Max transactions to retrieve (default: 100)
-```
-
-### Transaction Analysis
-
-Analyze a specific transaction.
-
-```bash
-bcc tx <HASH> [OPTIONS]
-
-Options:
-  -c, --chain <CHAIN>     Target blockchain (default: ethereum)
-  -f, --format <FORMAT>   Output format: table, json, csv
-  --trace                 Include internal transactions
-  --decode                Decode input data
-```
-
-### Portfolio Management
-
-Track multiple addresses across chains.
-
-```bash
-# Add an address
-bcc portfolio add <ADDRESS> [OPTIONS]
-  -l, --label <LABEL>     Human-readable label
-  -c, --chain <CHAIN>     Blockchain network
-  -t, --tags <TAGS>       Comma-separated tags
-
-# List addresses
-bcc portfolio list
-
-# Remove an address
-bcc portfolio remove <ADDRESS>
-
-# View portfolio summary
-bcc portfolio summary
-```
-
-### Data Export
-
-Export analysis data to files.
-
-```bash
-bcc export [OPTIONS]
-
-Options:
-  -a, --address <ADDR>    Export data for an address
-  -p, --portfolio         Export portfolio data
-  -o, --output <PATH>     Output file path (required)
-  -f, --format <FORMAT>   Output format (auto-detected from extension)
-```
-
-### Interactive Mode
-
-Launch an interactive REPL session.
-
-```bash
-bcc interactive [OPTIONS]
-
-Options:
-  --no-banner             Skip the startup banner
-
-Alias: bcc shell
 ```
 
 ## Configuration
 
-BCC reads configuration from `~/.config/bcc/config.yaml`:
+Create `~/.config/bcc/config.yaml`:
 
 ```yaml
 chains:
-  # EVM-compatible chains
   ethereum_rpc: "https://mainnet.infura.io/v3/YOUR_KEY"
-  bsc_rpc: "https://bsc-dataseed.binance.org"
-  aegis_rpc: "http://localhost:8545"  # Aegis/Wraith blockchain
-
-  # Non-EVM chains
   solana_rpc: "https://api.mainnet-beta.solana.com"
-  tron_api: "https://api.trongrid.io"
-
-  # API keys for block explorers
+  
   api_keys:
     etherscan: "YOUR_ETHERSCAN_KEY"
-    polygonscan: "YOUR_POLYGONSCAN_KEY"
-    arbiscan: "YOUR_ARBISCAN_KEY"
-    bscscan: "YOUR_BSCSCAN_KEY"
     solscan: "YOUR_SOLSCAN_KEY"
-    tronscan: "YOUR_TRONSCAN_KEY"
 
 output:
-  format: table  # table, json, csv
+  format: table
   color: true
-
-portfolio:
-  data_dir: "~/.local/share/bcc"
 ```
 
 ### Environment Variables
 
-- `BCC_CONFIG`: Path to configuration file
-- `RUST_LOG`: Override log level (e.g., `bcc=debug`)
-
-## Library Usage
-
-BCC can be used as a library in your Rust applications:
-
-### Ethereum/EVM Chains
-
-```rust
-use bca::{Config, chains::EthereumClient};
-
-#[tokio::main]
-async fn main() -> bca::Result<()> {
-    let config = Config::load(None)?;
-    
-    // Ethereum mainnet
-    let client = EthereumClient::new(&config.chains)?;
-    let balance = client.get_balance("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2").await?;
-    println!("ETH Balance: {}", balance.formatted);
-    
-    // Other EVM chains
-    let bsc_client = EthereumClient::for_chain("bsc", &config.chains)?;
-    let aegis_client = EthereumClient::for_chain("aegis", &config.chains)?;
-    
-    Ok(())
-}
-```
-
-### Solana
-
-```rust
-use bca::{Config, chains::SolanaClient};
-
-#[tokio::main]
-async fn main() -> bca::Result<()> {
-    let config = Config::load(None)?;
-    let client = SolanaClient::new(&config.chains)?;
-    
-    let balance = client.get_balance("DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy").await?;
-    println!("SOL Balance: {}", balance.formatted);
-    
-    Ok(())
-}
-```
-
-### Tron
-
-```rust
-use bca::{Config, chains::TronClient};
-
-#[tokio::main]
-async fn main() -> bca::Result<()> {
-    let config = Config::load(None)?;
-    let client = TronClient::new(&config.chains)?;
-    
-    let balance = client.get_balance("TDqSquXBgUCLYvYC4XZgrprLK589dkhSCf").await?;
-    println!("TRX Balance: {}", balance.formatted);
-    
-    Ok(())
-}
-```
+- `ETHERSCAN_API_KEY` - Required for compliance features
+- `BCC_CONFIG` - Path to custom config file
+- `RUST_LOG` - Log level override
 
 ## Development
-
-BCC uses [just](https://github.com/casey/just) as a task runner. Run `just --list` to see all available commands.
-
-```bash
-# Run all tests with nextest
-just test
-
-# Run full CI workflow locally
-just ci-test
-
-# Format code
-just format
-
-# Run lints
-just lint
-
-# Build release
-just build-release
-
-# Run with coverage
-just coverage
-
-# Run security audit
-just audit
-```
-
-### Manual Commands
 
 ```bash
 # Run tests
 cargo test
 
-# Run with coverage
-cargo tarpaulin --out Html
-
-# Build release
-cargo build --release
+# Format code
+cargo fmt
 
 # Run lints
 cargo clippy -- -D warnings
 
-# Format code
-cargo fmt
+# Build release
+cargo build --release
+```
+
+Or use just:
+```bash
+just test      # Run all tests
+just ci-test   # Full CI workflow
+just format    # Format code
+just lint      # Run lints
 ```
 
 ## Supported Chains
 
-### EVM-Compatible Chains
-
-
-| Chain    | Explorer API         | Native Token | Address Format |
-| -------- | -------------------- | ------------ | -------------- |
-| Ethereum | Etherscan            | ETH          | 0x...          |
-| Polygon  | Polygonscan          | MATIC        | 0x...          |
-| Arbitrum | Arbiscan             | ETH          | 0x...          |
-| Optimism | Optimistic Etherscan | ETH          | 0x...          |
-| Base     | Basescan             | ETH          | 0x...          |
-| BSC      | BscScan              | BNB          | 0x...          |
-| Aegis    | JSON-RPC (direct)    | WRAITH       | 0x...          |
-
-
-### Non-EVM Chains
-
-
-| Chain  | API             | Native Token | Address Format       |
-| ------ | --------------- | ------------ | -------------------- |
-| Solana | Solana JSON-RPC | SOL          | Base58 (32-44 chars) |
-| Tron   | TronGrid API    | TRX          | T... (34 chars)      |
-
+| Chain | Type | Address Format | Explorer |
+|-------|------|---------------|----------|
+| Ethereum | EVM | 0x... | Etherscan |
+| Polygon | EVM | 0x... | Polygonscan |
+| Arbitrum | EVM | 0x... | Arbiscan |
+| Optimism | EVM | 0x... | Optimistic Etherscan |
+| Base | EVM | 0x... | Basescan |
+| BSC | EVM | 0x... | BscScan |
+| Aegis | EVM | 0x... | JSON-RPC |
+| Solana | Non-EVM | Base58 | Solscan |
+| Tron | Non-EVM | T... | Tronscan |
 
 ## CI/CD
 
-BCC includes a GitHub Actions workflow (`.github/workflows/ci.yml`) that runs:
-
-1. **Check** - Fast compilation check
-2. **Format** - Code formatting verification
-3. **Lint** - Clippy with warnings as errors
-4. **Test** - Unit and integration tests with nextest
-5. **Docs** - Documentation build verification
-6. **Coverage** - Code coverage reporting (main branch only)
-7. **Build** - Release binary build
-8. **Security** - Dependency vulnerability audit
+GitHub Actions workflow runs:
+- ✅ Check - Fast compilation
+- ✅ Format - Code style
+- ✅ Clippy - Linting
+- ✅ Test - Unit and integration tests
+- ✅ Docs - Documentation build
+- ✅ Build - Release binaries (Linux, macOS)
+- ✅ Security - Dependency audit
 
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.
+
+---
+
+*Built with Rust. Designed for analysts, compliance officers, and blockchain researchers.*

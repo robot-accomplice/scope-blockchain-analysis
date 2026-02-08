@@ -5,9 +5,11 @@
 //!
 //! ## Features
 //!
-//! - Balance queries via TronGrid API
+//! - Balance queries via TronGrid API (with USD valuation via DexScreener)
 //! - Transaction history retrieval
-//! - T-address validation
+//! - Transaction details lookup by hash
+//! - TRC-20 token balance fetching from TronGrid account endpoint
+//! - T-address validation with full base58check verification (double SHA256 checksum)
 //!
 //! ## Usage
 //!
@@ -31,6 +33,8 @@ use crate::config::ChainsConfig;
 use crate::error::{BccError, Result};
 use reqwest::Client;
 use serde::Deserialize;
+use serde_json;
+use sha2::{Digest, Sha256};
 
 /// Default TronGrid API endpoint.
 const DEFAULT_TRON_API: &str = "https://api.trongrid.io";
@@ -243,8 +247,81 @@ impl TronClient {
             formatted: format!("{:.6} TRX", trx),
             decimals: TRX_DECIMALS,
             symbol: "TRX".to_string(),
-            usd_value: None,
+            usd_value: None, // Populated by caller via enrich_balance_usd
         })
+    }
+
+    /// Fetches TRC-20 token balances for an address.
+    ///
+    /// Uses the TronGrid `/v1/accounts/{address}` endpoint which includes
+    /// TRC-20 balances in the account data.
+    pub async fn get_trc20_balances(&self, address: &str) -> Result<Vec<Trc20TokenBalance>> {
+        validate_tron_address(address)?;
+
+        let url = format!("{}/v1/accounts/{}", self.api_url, address);
+
+        tracing::debug!(url = %url, "Fetching TRC-20 token balances");
+
+        let mut request = self.client.get(&url);
+        if let Some(ref key) = self.api_key {
+            request = request.header("TRON-PRO-API-KEY", key);
+        }
+
+        let response: AccountResponse = request.send().await?.json().await?;
+
+        if !response.success {
+            return Err(BccError::Chain(format!(
+                "TronGrid API error: {}",
+                response.error.unwrap_or_else(|| "Unknown error".into())
+            )));
+        }
+
+        let account = match response.data.first() {
+            Some(data) => data,
+            None => return Ok(vec![]),
+        };
+
+        let mut balances = Vec::new();
+        for trc20 in &account.trc20 {
+            for (contract_address, raw_balance) in &trc20.balances {
+                // Skip zero balances
+                if raw_balance == "0" {
+                    continue;
+                }
+                balances.push(Trc20TokenBalance {
+                    contract_address: contract_address.clone(),
+                    raw_balance: raw_balance.clone(),
+                });
+            }
+        }
+
+        Ok(balances)
+    }
+
+    /// Enriches a balance with a USD value using DexScreener price lookup.
+    ///
+    /// Note: Tron native token price lookup via DexScreener is not yet supported.
+    /// This is a placeholder that uses CoinGecko-style simple price API as fallback.
+    pub async fn enrich_balance_usd(&self, balance: &mut Balance) {
+        // Try to get TRX price from a simple API
+        let url = "https://api.dexscreener.com/latest/dex/search?q=TRX%20USDT";
+        if let Ok(response) = self.client.get(url).send().await
+            && let Ok(text) = response.text().await
+            && let Ok(search_result) = serde_json::from_str::<DexSearchResponse>(&text)
+            && let Some(pairs) = search_result.pairs
+        {
+            for pair in &pairs {
+                if (pair.base_token_symbol.as_deref() == Some("TRX")
+                    || pair.base_token_symbol.as_deref() == Some("WTRX"))
+                    && let Some(price) = pair.price_usd.as_ref().and_then(|p| p.parse::<f64>().ok())
+                {
+                    let sun: f64 = balance.raw.parse().unwrap_or(0.0);
+                    let trx = sun / 10_f64.powi(TRX_DECIMALS as i32);
+                    balance.usd_value = Some(trx * price);
+                    return;
+                }
+            }
+        }
     }
 
     /// Fetches transaction details by hash.
@@ -451,6 +528,32 @@ impl Default for TronClient {
 ///
 /// * `address` - The address to validate
 ///
+/// TRC-20 token balance result.
+#[derive(Debug, Clone)]
+pub struct Trc20TokenBalance {
+    /// Token contract address (base58).
+    pub contract_address: String,
+    /// Raw balance string.
+    pub raw_balance: String,
+}
+
+/// Minimal DexScreener search response for price lookups.
+#[derive(Debug, Deserialize)]
+struct DexSearchResponse {
+    #[serde(default)]
+    pairs: Option<Vec<DexSearchPair>>,
+}
+
+/// A pair from DexScreener search results.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DexSearchPair {
+    #[serde(default)]
+    base_token_symbol: Option<String>,
+    #[serde(default)]
+    price_usd: Option<String>,
+}
+
 /// # Returns
 ///
 /// Returns `Ok(())` if valid, or an error describing the validation failure.
@@ -496,7 +599,19 @@ pub fn validate_tron_address(address: &str) -> Result<()> {
                 )));
             }
 
-            // TODO: Verify checksum (last 4 bytes are double SHA256 of first 21 bytes)
+            // Verify checksum: last 4 bytes must equal first 4 bytes of double SHA256 of first 21 bytes
+            let payload = &bytes[0..21];
+            let hash1 = Sha256::digest(payload);
+            let hash2 = Sha256::digest(hash1);
+            let expected_checksum = &hash2[0..4];
+            let actual_checksum = &bytes[21..25];
+
+            if expected_checksum != actual_checksum {
+                return Err(BccError::InvalidAddress(format!(
+                    "Invalid Tron address checksum: {}",
+                    address
+                )));
+            }
         }
         Err(e) => {
             return Err(BccError::InvalidAddress(format!(

@@ -5,9 +5,12 @@
 //!
 //! ## Features
 //!
-//! - Balance queries via Solana JSON-RPC
-//! - Transaction history via Solscan API (optional)
-//! - Base58 address validation
+//! - Balance queries via Solana JSON-RPC (with USD valuation via DexScreener)
+//! - Transaction details lookup via `getTransaction` RPC (jsonParsed encoding)
+//! - Enriched transaction history with slot, timestamp, and status from `getSignaturesForAddress`
+//! - SPL token balance fetching via `getTokenAccountsByOwner`
+//! - Base58 address and signature validation
+//! - Support for both legacy and versioned transactions
 //!
 //! ## Usage
 //!
@@ -20,7 +23,8 @@
 //!     let config = ChainsConfig::default();
 //!     let client = SolanaClient::new(&config)?;
 //!     
-//!     let balance = client.get_balance("DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy").await?;
+//!     let mut balance = client.get_balance("DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy").await?;
+//!     client.enrich_balance_usd(&mut balance).await;
 //!     println!("Balance: {} SOL", balance.formatted);
 //!     Ok(())
 //! }
@@ -168,6 +172,62 @@ struct SignatureInfo {
     err: Option<serde_json::Value>,
 }
 
+/// Solana transaction result from getTransaction RPC.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SolanaTransactionResult {
+    #[serde(default)]
+    slot: Option<u64>,
+    #[serde(default)]
+    block_time: Option<i64>,
+    #[serde(default)]
+    transaction: Option<SolanaTransactionData>,
+    #[serde(default)]
+    meta: Option<SolanaTransactionMeta>,
+}
+
+/// Transaction data from Solana RPC.
+#[derive(Debug, Deserialize)]
+struct SolanaTransactionData {
+    #[serde(default)]
+    message: Option<SolanaTransactionMessage>,
+}
+
+/// Transaction message from Solana RPC.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SolanaTransactionMessage {
+    #[serde(default)]
+    account_keys: Option<Vec<AccountKeyEntry>>,
+}
+
+/// Account key can be a string or an object with pubkey + signer fields.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum AccountKeyEntry {
+    String(String),
+    Object {
+        pubkey: String,
+        #[serde(default)]
+        #[allow(dead_code)]
+        signer: bool,
+    },
+}
+
+/// Transaction metadata from Solana RPC.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SolanaTransactionMeta {
+    #[serde(default)]
+    fee: Option<u64>,
+    #[serde(default)]
+    pre_balances: Option<Vec<u64>>,
+    #[serde(default)]
+    post_balances: Option<Vec<u64>>,
+    #[serde(default)]
+    err: Option<serde_json::Value>,
+}
+
 /// Solscan account info response.
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)] // Reserved for future Solscan integration
@@ -294,8 +354,18 @@ impl SolanaClient {
             formatted: format!("{:.9} SOL", sol),
             decimals: SOL_DECIMALS,
             symbol: "SOL".to_string(),
-            usd_value: None,
+            usd_value: None, // Populated by caller via enrich_balance_usd
         })
+    }
+
+    /// Enriches a balance with a USD value using DexScreener price lookup.
+    pub async fn enrich_balance_usd(&self, balance: &mut Balance) {
+        let dex = crate::chains::DexClient::new();
+        if let Some(price) = dex.get_native_token_price("solana").await {
+            let lamports: f64 = balance.raw.parse().unwrap_or(0.0);
+            let sol = lamports / 10_f64.powi(SOL_DECIMALS as i32);
+            balance.usd_value = Some(sol * price);
+        }
     }
 
     /// Fetches all SPL token balances for an address.
@@ -358,7 +428,7 @@ impl SolanaClient {
             .filter_map(|account| {
                 let info = &account.account.data.parsed.info;
                 let ui_amount = info.token_amount.ui_amount.unwrap_or(0.0);
-                
+
                 // Skip zero balances
                 if ui_amount == 0.0 {
                     return None;
@@ -390,6 +460,12 @@ impl SolanaClient {
     ///
     /// Returns a vector of transaction signatures.
     pub async fn get_signatures(&self, address: &str, limit: u32) -> Result<Vec<String>> {
+        let infos = self.get_signature_infos(address, limit).await?;
+        Ok(infos.into_iter().map(|s| s.signature).collect())
+    }
+
+    /// Fetches recent transaction signature info (with metadata) for an address.
+    async fn get_signature_infos(&self, address: &str, limit: u32) -> Result<Vec<SignatureInfo>> {
         validate_solana_address(address)?;
 
         #[derive(Serialize)]
@@ -435,14 +511,9 @@ impl SolanaClient {
             )));
         }
 
-        let signatures = response
+        response
             .result
-            .ok_or_else(|| BccError::Chain("Empty RPC response".to_string()))?
-            .into_iter()
-            .map(|s| s.signature)
-            .collect();
-
-        Ok(signatures)
+            .ok_or_else(|| BccError::Chain("Empty RPC response".to_string()))
     }
 
     /// Fetches transaction details by signature.
@@ -458,10 +529,117 @@ impl SolanaClient {
         // Validate signature format
         validate_solana_signature(signature)?;
 
-        // TODO: Implement full transaction details fetching
-        Err(BccError::Chain(
-            "Transaction lookup not yet implemented".to_string(),
-        ))
+        let request = RpcRequest {
+            jsonrpc: "2.0",
+            id: 1,
+            method: "getTransaction",
+            params: serde_json::json!([
+                signature,
+                {
+                    "encoding": "jsonParsed",
+                    "maxSupportedTransactionVersion": 0
+                }
+            ]),
+        };
+
+        tracing::debug!(
+            url = %self.rpc_url,
+            signature = %signature,
+            "Fetching Solana transaction"
+        );
+
+        let response: RpcResponse<SolanaTransactionResult> = self
+            .client
+            .post(&self.rpc_url)
+            .json(&request)
+            .send()
+            .await?
+            .json()
+            .await?;
+
+        if let Some(error) = response.error {
+            return Err(BccError::Chain(format!(
+                "Solana RPC error ({}): {}",
+                error.code, error.message
+            )));
+        }
+
+        let tx_result = response
+            .result
+            .ok_or_else(|| BccError::NotFound(format!("Transaction not found: {}", signature)))?;
+
+        // Extract the first signer (fee payer) as "from"
+        let from = tx_result
+            .transaction
+            .as_ref()
+            .and_then(|tx| tx.message.as_ref())
+            .and_then(|msg| msg.account_keys.as_ref())
+            .and_then(|keys| keys.first())
+            .map(|key| match key {
+                AccountKeyEntry::String(s) => s.clone(),
+                AccountKeyEntry::Object { pubkey, .. } => pubkey.clone(),
+            })
+            .unwrap_or_default();
+
+        // Try to find the SOL transfer amount from the transaction
+        let value = tx_result
+            .meta
+            .as_ref()
+            .and_then(|meta| {
+                let pre = meta.pre_balances.as_ref()?;
+                let post = meta.post_balances.as_ref()?;
+                if pre.len() >= 2 && post.len() >= 2 {
+                    // Amount sent = pre[0] - post[0] - fee (fee payer's balance change minus fee)
+                    let fee = meta.fee.unwrap_or(0);
+                    let sent = pre[0].saturating_sub(post[0]).saturating_sub(fee);
+                    if sent > 0 {
+                        let sol = sent as f64 / 10_f64.powi(SOL_DECIMALS as i32);
+                        return Some(format!("{:.9}", sol));
+                    }
+                }
+                None
+            })
+            .unwrap_or_else(|| "0".to_string());
+
+        // Extract "to" address (second account key, typically the recipient)
+        let to = tx_result
+            .transaction
+            .as_ref()
+            .and_then(|tx| tx.message.as_ref())
+            .and_then(|msg| msg.account_keys.as_ref())
+            .and_then(|keys| {
+                if keys.len() >= 2 {
+                    Some(match &keys[1] {
+                        AccountKeyEntry::String(s) => s.clone(),
+                        AccountKeyEntry::Object { pubkey, .. } => pubkey.clone(),
+                    })
+                } else {
+                    None
+                }
+            });
+
+        let fee = tx_result
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.fee)
+            .unwrap_or(0);
+
+        let status = tx_result.meta.as_ref().map(|meta| meta.err.is_none());
+
+        Ok(Transaction {
+            hash: signature.to_string(),
+            block_number: tx_result.slot,
+            timestamp: tx_result.block_time.map(|t| t as u64),
+            from,
+            to,
+            value,
+            gas_limit: 0, // Solana uses compute units, not gas
+            gas_used: None,
+            gas_price: fee.to_string(), // Use fee as gas_price equivalent
+            nonce: 0,
+            input: String::new(),
+            status,
+        })
     }
 
     /// Fetches recent transactions for an address.
@@ -477,17 +655,15 @@ impl SolanaClient {
     pub async fn get_transactions(&self, address: &str, limit: u32) -> Result<Vec<Transaction>> {
         validate_solana_address(address)?;
 
-        // Get signatures first
-        let signatures = self.get_signatures(address, limit).await?;
+        // Get signature infos (includes slot, blockTime, err)
+        let sig_infos = self.get_signature_infos(address, limit).await?;
 
-        // For now, return basic transaction info
-        // Full details would require additional RPC calls
-        let transactions: Vec<Transaction> = signatures
+        let transactions: Vec<Transaction> = sig_infos
             .into_iter()
-            .map(|sig| Transaction {
-                hash: sig,
-                block_number: None,
-                timestamp: None,
+            .map(|info| Transaction {
+                hash: info.signature,
+                block_number: Some(info.slot),
+                timestamp: info.block_time.map(|t| t as u64),
                 from: address.to_string(),
                 to: None,
                 value: "0".to_string(),
@@ -496,7 +672,7 @@ impl SolanaClient {
                 gas_price: "0".to_string(),
                 nonce: 0,
                 input: String::new(),
-                status: None,
+                status: Some(info.err.is_none()),
             })
             .collect();
 

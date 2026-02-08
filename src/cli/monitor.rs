@@ -25,9 +25,10 @@ use crate::error::{BccError, Result};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
+    Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -37,7 +38,6 @@ use ratatui::{
         Axis, Block, Borders, Chart, Dataset, Gauge, GraphType, List, ListItem, Paragraph,
         canvas::{Canvas, Line as CanvasLine, Rectangle},
     },
-    Frame, Terminal,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -52,7 +52,7 @@ use super::interactive::SessionContext;
 /// At 5-second intervals: 24 * 60 * 12 = 17,280 points max per history.
 /// With DataPoint at 24 bytes: ~415 KB per history, ~830 KB total.
 /// Data is persisted to OS temp folder for session continuity.
-const MAX_DATA_AGE_SECS: f64 = 24.0 * 3600.0;  // 24 hours
+const MAX_DATA_AGE_SECS: f64 = 24.0 * 3600.0; // 24 hours
 
 /// Cache file prefix in temp directory.
 const CACHE_FILE_PREFIX: &str = "bcc_monitor_";
@@ -200,7 +200,7 @@ impl ChartMode {
             ChartMode::Candlestick => ChartMode::Line,
         }
     }
-    
+
     /// Returns a display label for this mode.
     pub fn label(&self) -> &'static str {
         match self {
@@ -305,15 +305,17 @@ impl MonitorState {
         let now_ts = chrono::Utc::now().timestamp() as f64;
 
         // Try to load cached data first
-        let (price_history, volume_history, real_data_count) = 
+        let (price_history, volume_history, real_data_count) =
             if let Some(cached) = Self::load_cache(&token_data.address, chain) {
                 // Filter out data older than 24 hours
                 let cutoff = now_ts - MAX_DATA_AGE_SECS;
-                let price_hist: VecDeque<DataPoint> = cached.price_history
+                let price_hist: VecDeque<DataPoint> = cached
+                    .price_history
                     .into_iter()
                     .filter(|p| p.timestamp >= cutoff)
                     .collect();
-                let vol_hist: VecDeque<DataPoint> = cached.volume_history
+                let vol_hist: VecDeque<DataPoint> = cached
+                    .volume_history
                     .into_iter()
                     .filter(|p| p.timestamp >= cutoff)
                     .collect();
@@ -350,7 +352,7 @@ impl MonitorState {
             price_change_6h: token_data.price_change_6h,
             price_change_1h: token_data.price_change_1h,
             price_change_5m: token_data.price_change_5m,
-            last_price_change_at: now_ts,  // Initialize to current time
+            last_price_change_at: now_ts, // Initialize to current time
             previous_price: token_data.price_usd,
             buys_24h: token_data.total_buys_24h,
             sells_24h: token_data.total_sells_24h,
@@ -363,8 +365,8 @@ impl MonitorState {
             paused: false,
             log_messages: VecDeque::with_capacity(10),
             error_message: None,
-            time_period: TimePeriod::Hour1,  // Default to 1 hour view
-            chart_mode: ChartMode::Line,     // Default to line chart
+            time_period: TimePeriod::Hour1, // Default to 1 hour view
+            chart_mode: ChartMode::Line,    // Default to line chart
             start_timestamp: now_ts as i64,
         }
     }
@@ -379,7 +381,8 @@ impl MonitorState {
     fn cache_path(token_address: &str, chain: &str) -> PathBuf {
         let mut path = std::env::temp_dir();
         // Create a safe filename from address (first 16 chars) and chain
-        let safe_addr = token_address.chars()
+        let safe_addr = token_address
+            .chars()
             .filter(|c| c.is_alphanumeric())
             .take(16)
             .collect::<String>()
@@ -400,8 +403,8 @@ impl MonitorState {
                 match serde_json::from_str::<CachedMonitorData>(&contents) {
                     Ok(cached) => {
                         // Verify this is for the same token
-                        if cached.token_address.to_lowercase() == token_address.to_lowercase() 
-                            && cached.chain.to_lowercase() == chain.to_lowercase() 
+                        if cached.token_address.to_lowercase() == token_address.to_lowercase()
+                            && cached.chain.to_lowercase() == chain.to_lowercase()
                         {
                             Some(cached)
                         } else {
@@ -542,7 +545,7 @@ impl MonitorState {
 
         // Trim data points older than 24 hours
         let cutoff = now_ts - MAX_DATA_AGE_SECS;
-        
+
         while let Some(point) = self.price_history.front() {
             if point.timestamp < cutoff {
                 self.price_history.pop_front();
@@ -584,7 +587,7 @@ impl MonitorState {
         self.log(format!("Updated: ${:.6}", token_data.price_usd));
 
         // Periodically save to cache (every 60 updates, ~5 minutes at 5s refresh)
-        if self.real_data_count % 60 == 0 {
+        if self.real_data_count.is_multiple_of(60) {
             self.save_cache();
         }
     }
@@ -595,7 +598,8 @@ impl MonitorState {
         let now_ts = chrono::Utc::now().timestamp() as f64;
         let cutoff = now_ts - self.time_period.duration_secs() as f64;
 
-        let filtered: Vec<&DataPoint> = self.price_history
+        let filtered: Vec<&DataPoint> = self
+            .price_history
             .iter()
             .filter(|p| p.timestamp >= cutoff)
             .collect();
@@ -612,7 +616,8 @@ impl MonitorState {
         let now_ts = chrono::Utc::now().timestamp() as f64;
         let cutoff = now_ts - self.time_period.duration_secs() as f64;
 
-        let filtered: Vec<&DataPoint> = self.volume_history
+        let filtered: Vec<&DataPoint> = self
+            .volume_history
             .iter()
             .filter(|p| p.timestamp >= cutoff)
             .collect();
@@ -628,12 +633,16 @@ impl MonitorState {
         let now_ts = chrono::Utc::now().timestamp() as f64;
         let cutoff = now_ts - self.time_period.duration_secs() as f64;
 
-        let (synthetic, real) = self.price_history
+        let (synthetic, real) = self
+            .price_history
             .iter()
             .filter(|p| p.timestamp >= cutoff)
-            .fold((0, 0), |(s, r), p| {
-                if p.is_real { (s, r + 1) } else { (s + 1, r) }
-            });
+            .fold(
+                (0, 0),
+                |(s, r), p| {
+                    if p.is_real { (s, r + 1) } else { (s + 1, r) }
+                },
+            );
 
         (synthetic, real)
     }
@@ -646,7 +655,7 @@ impl MonitorState {
     }
 
     /// Generates OHLC candles from price history for the current time period.
-    /// 
+    ///
     /// The candle duration is automatically determined based on the selected time period:
     /// - 15m view: 1-minute candles
     /// - 1h view: 5-minute candles
@@ -654,25 +663,25 @@ impl MonitorState {
     /// - 24h view: 1-hour candles
     pub fn get_ohlc_candles(&self) -> Vec<OhlcCandle> {
         let (data, _) = self.get_price_data_for_period();
-        
+
         if data.is_empty() {
             return vec![];
         }
 
         // Determine candle duration based on time period
         let candle_duration_secs = match self.time_period {
-            TimePeriod::Min15 => 60.0,      // 1-minute candles
-            TimePeriod::Hour1 => 300.0,     // 5-minute candles
-            TimePeriod::Hour6 => 900.0,     // 15-minute candles
-            TimePeriod::Hour24 => 3600.0,   // 1-hour candles
+            TimePeriod::Min15 => 60.0,    // 1-minute candles
+            TimePeriod::Hour1 => 300.0,   // 5-minute candles
+            TimePeriod::Hour6 => 900.0,   // 15-minute candles
+            TimePeriod::Hour24 => 3600.0, // 1-hour candles
         };
 
         let mut candles: Vec<OhlcCandle> = Vec::new();
-        
+
         for (timestamp, price) in data {
             // Determine which candle this point belongs to
             let candle_start = (timestamp / candle_duration_secs).floor() * candle_duration_secs;
-            
+
             if let Some(last_candle) = candles.last_mut() {
                 if (last_candle.timestamp - candle_start).abs() < 0.001 {
                     // Same candle, update it
@@ -705,7 +714,8 @@ impl MonitorState {
     /// Logs a message to the log panel.
     fn log(&mut self, message: String) {
         let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
-        self.log_messages.push_back(format!("[{}] {}", timestamp, message));
+        self.log_messages
+            .push_back(format!("[{}] {}", timestamp, message));
         while self.log_messages.len() > 10 {
             self.log_messages.pop_front();
         }
@@ -783,7 +793,8 @@ impl MonitorApp {
     /// Creates a new monitor application.
     pub fn new(initial_data: DexTokenData, chain: &str) -> Result<Self> {
         // Setup terminal
-        enable_raw_mode().map_err(|e| BccError::Chain(format!("Failed to enable raw mode: {}", e)))?;
+        enable_raw_mode()
+            .map_err(|e| BccError::Chain(format!("Failed to enable raw mode: {}", e)))?;
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
             .map_err(|e| BccError::Chain(format!("Failed to enter alternate screen: {}", e)))?;
@@ -871,7 +882,8 @@ impl MonitorApp {
 
     /// Fetches new data from the API.
     async fn fetch_data(&mut self) {
-        match self.dex_client
+        match self
+            .dex_client
             .get_token_data(&self.state.chain, &self.state.token_address)
             .await
         {
@@ -889,7 +901,7 @@ impl MonitorApp {
     pub fn cleanup(&mut self) -> Result<()> {
         // Save cache before exiting
         self.state.save_cache();
-        
+
         disable_raw_mode()
             .map_err(|e| BccError::Chain(format!("Failed to disable raw mode: {}", e)))?;
         execute!(
@@ -898,7 +910,8 @@ impl MonitorApp {
             DisableMouseCapture
         )
         .map_err(|e| BccError::Chain(format!("Failed to leave alternate screen: {}", e)))?;
-        self.terminal.show_cursor()
+        self.terminal
+            .show_cursor()
             .map_err(|e| BccError::Chain(format!("Failed to show cursor: {}", e)))?;
         Ok(())
     }
@@ -973,8 +986,13 @@ fn render_header(f: &mut Frame, area: Rect, state: &MonitorState) {
         "▽"
     };
 
-    let change_str = format!("{}{:.2}%", 
-        if state.price_change_24h >= 0.0 { "+" } else { "" },
+    let change_str = format!(
+        "{}{:.2}%",
+        if state.price_change_24h >= 0.0 {
+            "+"
+        } else {
+            ""
+        },
         state.price_change_24h
     );
 
@@ -989,7 +1007,12 @@ fn render_header(f: &mut Frame, area: Rect, state: &MonitorState) {
     let price_str = format_price_usd(state.current_price);
 
     let header = Paragraph::new(Line::from(vec![
-        Span::styled(price_str, Style::default().fg(price_color).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            price_str,
+            Style::default()
+                .fg(price_color)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" "),
         Span::styled(trend_arrow, Style::default().fg(price_color)),
         Span::styled(format!(" {}", change_str), Style::default().fg(price_color)),
@@ -1010,8 +1033,11 @@ fn render_price_chart(f: &mut Frame, area: Rect, state: &MonitorState) {
     let (data, is_real) = state.get_price_data_for_period();
 
     if data.is_empty() {
-        let empty = Paragraph::new("No price data")
-            .block(Block::default().title(" Price (USD) ").borders(Borders::ALL));
+        let empty = Paragraph::new("No price data").block(
+            Block::default()
+                .title(" Price (USD) ")
+                .borders(Borders::ALL),
+        );
         f.render_widget(empty, area);
         return;
     }
@@ -1025,18 +1051,26 @@ fn render_price_chart(f: &mut Frame, area: Rect, state: &MonitorState) {
     } else {
         0.0
     };
-    
+
     // Determine if price is up or down for coloring
     let is_price_up = price_change >= 0.0;
-    let trend_color = if is_price_up { Color::Green } else { Color::Red };
+    let trend_color = if is_price_up {
+        Color::Green
+    } else {
+        Color::Red
+    };
     let trend_symbol = if is_price_up { "▲" } else { "▼" };
-    
+
     // Format current price based on magnitude
     let price_str = format_price_usd(current_price);
     let change_str = if price_change_pct.abs() < 0.01 {
         "0.00%".to_string()
     } else {
-        format!("{}{:.2}%", if is_price_up { "+" } else { "" }, price_change_pct)
+        format!(
+            "{}{:.2}%",
+            if is_price_up { "+" } else { "" },
+            price_change_pct
+        )
     };
 
     // Build title with current price and change
@@ -1044,7 +1078,9 @@ fn render_price_chart(f: &mut Frame, area: Rect, state: &MonitorState) {
         Span::raw(" ◆ "),
         Span::styled(
             format!("{} {} ", price_str, trend_symbol),
-            Style::default().fg(trend_color).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(trend_color)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!("({}) ", change_str),
@@ -1057,9 +1093,11 @@ fn render_price_chart(f: &mut Frame, area: Rect, state: &MonitorState) {
     ]);
 
     // Calculate bounds
-    let (min_price, max_price) = data.iter().fold((f64::MAX, f64::MIN), |(min, max), (_, p)| {
-        (min.min(*p), max.max(*p))
-    });
+    let (min_price, max_price) = data
+        .iter()
+        .fold((f64::MAX, f64::MIN), |(min, max), (_, p)| {
+            (min.min(*p), max.max(*p))
+        });
 
     // Handle case where all prices are the same (e.g., stablecoins)
     let price_range = max_price - min_price;
@@ -1074,27 +1112,32 @@ fn render_price_chart(f: &mut Frame, area: Rect, state: &MonitorState) {
     let x_min = data.first().map(|(t, _)| *t).unwrap_or(0.0);
     let x_max = data.last().map(|(t, _)| *t).unwrap_or(1.0);
     // Ensure x range is non-zero for proper rendering
-    let x_max = if (x_max - x_min).abs() < 0.001 { x_min + 1.0 } else { x_max };
+    let x_max = if (x_max - x_min).abs() < 0.001 {
+        x_min + 1.0
+    } else {
+        x_max
+    };
 
     // Split data into synthetic and real datasets for visual differentiation
-    let synthetic_data: Vec<(f64, f64)> = data.iter().zip(&is_real)
+    let synthetic_data: Vec<(f64, f64)> = data
+        .iter()
+        .zip(&is_real)
         .filter(|(_, real)| !**real)
         .map(|(point, _)| *point)
         .collect();
-    
-    let real_data: Vec<(f64, f64)> = data.iter().zip(&is_real)
+
+    let real_data: Vec<(f64, f64)> = data
+        .iter()
+        .zip(&is_real)
         .filter(|(_, real)| **real)
         .map(|(point, _)| *point)
         .collect();
 
     // Create reference line at first price (horizontal line for comparison)
-    let reference_line: Vec<(f64, f64)> = vec![
-        (x_min, first_price),
-        (x_max, first_price),
-    ];
+    let reference_line: Vec<(f64, f64)> = vec![(x_min, first_price), (x_max, first_price)];
 
     let mut datasets = Vec::new();
-    
+
     // Reference line (starting price) - dashed gray
     datasets.push(
         Dataset::default()
@@ -1102,9 +1145,9 @@ fn render_price_chart(f: &mut Frame, area: Rect, state: &MonitorState) {
             .marker(symbols::Marker::Braille)
             .graph_type(GraphType::Line)
             .style(Style::default().fg(Color::DarkGray))
-            .data(&reference_line)
+            .data(&reference_line),
     );
-    
+
     // Synthetic data shown with Dot marker and dimmed color
     if !synthetic_data.is_empty() {
         datasets.push(
@@ -1113,10 +1156,10 @@ fn render_price_chart(f: &mut Frame, area: Rect, state: &MonitorState) {
                 .marker(symbols::Marker::Braille)
                 .graph_type(GraphType::Line)
                 .style(Style::default().fg(Color::Cyan))
-                .data(&synthetic_data)
+                .data(&synthetic_data),
         );
     }
-    
+
     // Real data shown with Braille marker and trend color
     if !real_data.is_empty() {
         datasets.push(
@@ -1125,13 +1168,13 @@ fn render_price_chart(f: &mut Frame, area: Rect, state: &MonitorState) {
                 .marker(symbols::Marker::Braille)
                 .graph_type(GraphType::Line)
                 .style(Style::default().fg(trend_color))
-                .data(&real_data)
+                .data(&real_data),
         );
     }
 
     // Create time labels based on period
     let time_label = format!("-{}", state.time_period.label());
-    
+
     // Calculate middle price for 3-point y-axis labels
     let mid_price = (y_min + y_max) / 2.0;
 
@@ -1147,10 +1190,7 @@ fn render_price_chart(f: &mut Frame, area: Rect, state: &MonitorState) {
                 .title(Span::styled("Time", Style::default().fg(Color::Gray)))
                 .style(Style::default().fg(Color::Gray))
                 .bounds([x_min, x_max])
-                .labels(vec![
-                    Span::raw(time_label),
-                    Span::raw("now"),
-                ]),
+                .labels(vec![Span::raw(time_label), Span::raw("now")]),
         )
         .y_axis(
             Axis::default()
@@ -1169,7 +1209,7 @@ fn render_price_chart(f: &mut Frame, area: Rect, state: &MonitorState) {
 
 /// Checks if a price indicates a stablecoin (pegged around $1.00).
 fn is_stablecoin_price(price: f64) -> bool {
-    price >= 0.95 && price <= 1.05
+    (0.95..=1.05).contains(&price)
 }
 
 /// Formats a price in USD with appropriate precision.
@@ -1194,10 +1234,13 @@ fn format_price_usd(price: f64) -> String {
 /// Renders a candlestick chart using OHLC data.
 fn render_candlestick_chart(f: &mut Frame, area: Rect, state: &MonitorState) {
     let candles = state.get_ohlc_candles();
-    
+
     if candles.is_empty() {
-        let empty = Paragraph::new("No candle data (waiting for more data points)")
-            .block(Block::default().title(" Candlestick (USD) ").borders(Borders::ALL));
+        let empty = Paragraph::new("No candle data (waiting for more data points)").block(
+            Block::default()
+                .title(" Candlestick (USD) ")
+                .borders(Borders::ALL),
+        );
         f.render_widget(empty, area);
         return;
     }
@@ -1212,19 +1255,27 @@ fn render_candlestick_chart(f: &mut Frame, area: Rect, state: &MonitorState) {
     } else {
         0.0
     };
-    
+
     let is_price_up = price_change >= 0.0;
-    let trend_color = if is_price_up { Color::Green } else { Color::Red };
+    let trend_color = if is_price_up {
+        Color::Green
+    } else {
+        Color::Red
+    };
     let trend_symbol = if is_price_up { "▲" } else { "▼" };
-    
+
     let price_str = format_price_usd(current_price);
-    let change_str = format!("{}{:.2}%", if is_price_up { "+" } else { "" }, price_change_pct);
+    let change_str = format!(
+        "{}{:.2}%",
+        if is_price_up { "+" } else { "" },
+        price_change_pct
+    );
 
     // Calculate bounds from all candle high/low
     let (min_price, max_price) = candles.iter().fold((f64::MAX, f64::MIN), |(min, max), c| {
         (min.min(c.low), max.max(c.high))
     });
-    
+
     let price_range = max_price - min_price;
     let (y_min, y_max) = if price_range < 0.0001 {
         let padding = min_price * 0.001;
@@ -1236,18 +1287,24 @@ fn render_candlestick_chart(f: &mut Frame, area: Rect, state: &MonitorState) {
     let x_min = candles.first().map(|c| c.timestamp).unwrap_or(0.0);
     let x_max = candles.last().map(|c| c.timestamp).unwrap_or(1.0);
     let x_range = x_max - x_min;
-    let x_max = if x_range < 0.001 { x_min + 1.0 } else { x_max + x_range * 0.05 };
-    
+    let x_max = if x_range < 0.001 {
+        x_min + 1.0
+    } else {
+        x_max + x_range * 0.05
+    };
+
     // Calculate candle width based on number of candles and area
     let candle_count = candles.len() as f64;
     let candle_spacing = x_range / candle_count.max(1.0);
-    let candle_width = candle_spacing * 0.6;  // 60% of spacing for body
+    let candle_width = candle_spacing * 0.6; // 60% of spacing for body
 
     let title = Line::from(vec![
         Span::raw(" ⬡ "),
         Span::styled(
             format!("{} {} ", price_str, trend_symbol),
-            Style::default().fg(trend_color).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(trend_color)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!("({}) ", change_str),
@@ -1257,15 +1314,12 @@ fn render_candlestick_chart(f: &mut Frame, area: Rect, state: &MonitorState) {
             format!("│{}│ ", state.time_period.label()),
             Style::default().fg(Color::Gray),
         ),
-        Span::styled(
-            "⊞Candles ",
-            Style::default().fg(Color::Magenta),
-        ),
+        Span::styled("⊞Candles ", Style::default().fg(Color::Magenta)),
     ]);
 
     // Clone candles for the closure
     let candles_clone = candles.clone();
-    
+
     let canvas = Canvas::default()
         .block(
             Block::default()
@@ -1277,8 +1331,12 @@ fn render_candlestick_chart(f: &mut Frame, area: Rect, state: &MonitorState) {
         .y_bounds([y_min, y_max])
         .paint(move |ctx| {
             for candle in &candles_clone {
-                let color = if candle.is_bullish { Color::Green } else { Color::Red };
-                
+                let color = if candle.is_bullish {
+                    Color::Green
+                } else {
+                    Color::Red
+                };
+
                 // Draw the wick (high-low line)
                 ctx.draw(&CanvasLine {
                     x1: candle.timestamp,
@@ -1287,12 +1345,12 @@ fn render_candlestick_chart(f: &mut Frame, area: Rect, state: &MonitorState) {
                     y2: candle.high,
                     color,
                 });
-                
+
                 // Draw the body (open-close rectangle)
                 let body_top = candle.open.max(candle.close);
                 let body_bottom = candle.open.min(candle.close);
                 let body_height = (body_top - body_bottom).max(price_range * 0.002); // Minimum visible height
-                
+
                 ctx.draw(&Rectangle {
                     x: candle.timestamp - candle_width / 2.0,
                     y: body_bottom,
@@ -1317,15 +1375,15 @@ fn render_volume_chart(f: &mut Frame, area: Rect, state: &MonitorState) {
         f.render_widget(empty, area);
         return;
     }
-    
+
     // Get current volume for display
     let current_volume = state.volume_24h;
     let volume_str = format_usd(current_volume);
-    
+
     // Count synthetic vs real points for the legend
     let has_synthetic = is_real.iter().any(|r| !r);
     let has_real = is_real.iter().any(|r| *r);
-    
+
     // Build title with current volume
     let data_indicator = if has_synthetic && has_real {
         "[◆ est │ ● live]"
@@ -1334,27 +1392,26 @@ fn render_volume_chart(f: &mut Frame, area: Rect, state: &MonitorState) {
     } else {
         "[● live]"
     };
-    
+
     let chart_title = Line::from(vec![
         Span::raw(" ▣ "),
         Span::styled(
             format!("24h Vol: {} ", volume_str),
-            Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!("│{}│ ", state.time_period.label()),
             Style::default().fg(Color::Gray),
         ),
-        Span::styled(
-            data_indicator,
-            Style::default().fg(Color::DarkGray),
-        ),
+        Span::styled(data_indicator, Style::default().fg(Color::DarkGray)),
     ]);
 
     // Calculate bounds
     let max_volume = data.iter().map(|(_, v)| *v).fold(0.0_f64, f64::max);
     let min_volume = data.iter().map(|(_, v)| *v).fold(f64::MAX, f64::min);
-    
+
     // Handle case where volumes are similar (cumulative 24h volume doesn't change much)
     let vol_range = max_volume - min_volume;
     let (y_min, y_max) = if vol_range < max_volume * 0.01 {
@@ -1365,28 +1422,36 @@ fn render_volume_chart(f: &mut Frame, area: Rect, state: &MonitorState) {
         // Normal variation - show from 0 to max
         (0.0, max_volume * 1.1)
     };
-    
+
     // Ensure y_min is not negative
     let y_min = y_min.max(0.0);
 
     let x_min = data.first().map(|(t, _)| *t).unwrap_or(0.0);
     let x_max = data.last().map(|(t, _)| *t).unwrap_or(1.0);
     // Ensure x range is non-zero
-    let x_max = if (x_max - x_min).abs() < 0.001 { x_min + 1.0 } else { x_max };
+    let x_max = if (x_max - x_min).abs() < 0.001 {
+        x_min + 1.0
+    } else {
+        x_max
+    };
 
     // Split data into synthetic and real datasets for visual differentiation
-    let synthetic_data: Vec<(f64, f64)> = data.iter().zip(&is_real)
+    let synthetic_data: Vec<(f64, f64)> = data
+        .iter()
+        .zip(&is_real)
         .filter(|(_, real)| !**real)
         .map(|(point, _)| *point)
         .collect();
-    
-    let real_data: Vec<(f64, f64)> = data.iter().zip(&is_real)
+
+    let real_data: Vec<(f64, f64)> = data
+        .iter()
+        .zip(&is_real)
         .filter(|(_, real)| **real)
         .map(|(point, _)| *point)
         .collect();
 
     let mut datasets = Vec::new();
-    
+
     // Synthetic data shown with Dot marker and light blue color
     if !synthetic_data.is_empty() {
         datasets.push(
@@ -1395,10 +1460,10 @@ fn render_volume_chart(f: &mut Frame, area: Rect, state: &MonitorState) {
                 .marker(symbols::Marker::Braille)
                 .graph_type(GraphType::Line)
                 .style(Style::default().fg(Color::LightBlue))
-                .data(&synthetic_data)
+                .data(&synthetic_data),
         );
     }
-    
+
     // Real data shown with Braille marker and blue color
     if !real_data.is_empty() {
         datasets.push(
@@ -1407,7 +1472,7 @@ fn render_volume_chart(f: &mut Frame, area: Rect, state: &MonitorState) {
                 .marker(symbols::Marker::Braille)
                 .graph_type(GraphType::Line)
                 .style(Style::default().fg(Color::Blue))
-                .data(&real_data)
+                .data(&real_data),
         );
     }
 
@@ -1426,10 +1491,7 @@ fn render_volume_chart(f: &mut Frame, area: Rect, state: &MonitorState) {
                 .title("Time")
                 .style(Style::default().fg(Color::Gray))
                 .bounds([x_min, x_max])
-                .labels(vec![
-                    Span::raw(time_label),
-                    Span::raw("now"),
-                ]),
+                .labels(vec![Span::raw(time_label), Span::raw("now")]),
         )
         .y_axis(
             Axis::default()
@@ -1455,12 +1517,16 @@ fn render_buy_sell_gauge(f: &mut Frame, area: Rect, state: &MonitorState) {
 
     // Buy/Sell gauge
     let ratio = state.buy_ratio();
-    let color = if ratio > 0.5 { Color::Green } else { Color::Red };
+    let color = if ratio > 0.5 {
+        Color::Green
+    } else {
+        Color::Red
+    };
 
     // Create a visual bar using Unicode block characters
     let buy_indicator = if ratio > 0.5 { "▶" } else { "▷" };
     let sell_indicator = if ratio < 0.5 { "◀" } else { "◁" };
-    
+
     let gauge = Gauge::default()
         .block(
             Block::default()
@@ -1490,13 +1556,12 @@ fn render_buy_sell_gauge(f: &mut Frame, area: Rect, state: &MonitorState) {
         .map(|msg| ListItem::new(msg.as_str()).style(Style::default().fg(Color::Gray)))
         .collect();
 
-    let log_list = List::new(items)
-        .block(
-            Block::default()
-                .title(" ◷ Activity Log ")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray)),
-        );
+    let log_list = List::new(items).block(
+        Block::default()
+            .title(" ◷ Activity Log ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray)),
+    );
 
     f.render_widget(log_list, chunks[1]);
 }
@@ -1545,28 +1610,42 @@ fn render_metrics_panel(f: &mut Frame, area: Rect, state: &MonitorState) {
             Span::raw("Last Δ:     "),
             Span::styled(
                 last_change_str,
-                Style::default().fg(if secs_since_change < 60 { Color::Green } else { Color::Yellow }),
+                Style::default().fg(if secs_since_change < 60 {
+                    Color::Green
+                } else {
+                    Color::Yellow
+                }),
             ),
         ]),
-        Line::from(format!("24h Change: {}{:.2}%", 
-            if state.price_change_24h >= 0.0 { "+" } else { "" },
+        Line::from(format!(
+            "24h Change: {}{:.2}%",
+            if state.price_change_24h >= 0.0 {
+                "+"
+            } else {
+                ""
+            },
             state.price_change_24h
         )),
         Line::from(format!("Liquidity:  {}", format_usd(state.liquidity_usd))),
         Line::from(format!("24h Volume: {}", format_usd(state.volume_24h))),
-        Line::from(format!("Market Cap: {}", state.market_cap.map(format_usd).unwrap_or_else(|| "N/A".to_string()))),
+        Line::from(format!(
+            "Market Cap: {}",
+            state
+                .market_cap
+                .map(format_usd)
+                .unwrap_or_else(|| "N/A".to_string())
+        )),
         Line::from(String::new()),
         Line::from(format!("24h Buys:   {}", state.buys_24h)),
         Line::from(format!("24h Sells:  {}", state.sells_24h)),
     ];
 
-    let panel = Paragraph::new(text)
-        .block(
-            Block::default()
-                .title(" ◉ Key Metrics ")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Magenta)),
-        );
+    let panel = Paragraph::new(text).block(
+        Block::default()
+            .title(" ◉ Key Metrics ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Magenta)),
+    );
 
     f.render_widget(panel, area);
 }
@@ -1574,7 +1653,7 @@ fn render_metrics_panel(f: &mut Frame, area: Rect, state: &MonitorState) {
 /// Renders the footer with status and controls.
 fn render_footer(f: &mut Frame, area: Rect, state: &MonitorState) {
     let elapsed = state.last_update.elapsed().as_secs();
-    
+
     // Calculate time since last price change
     let now_ts = chrono::Utc::now().timestamp() as f64;
     let secs_since_change = (now_ts - state.last_price_change_at).max(0.0) as u64;
@@ -1585,7 +1664,7 @@ fn render_footer(f: &mut Frame, area: Rect, state: &MonitorState) {
     } else {
         format!("{}h", secs_since_change / 3600)
     };
-    
+
     // Get data stats
     let (synthetic_count, real_count) = state.data_stats();
     let memory_bytes = state.memory_usage();
@@ -1596,15 +1675,25 @@ fn render_footer(f: &mut Frame, area: Rect, state: &MonitorState) {
     } else {
         format!("{}B", memory_bytes)
     };
-    
+
     let status = if let Some(ref err) = state.error_message {
         Span::styled(format!("⚠ {}", err), Style::default().fg(Color::Red))
     } else if state.paused {
-        Span::styled("⏸ PAUSED", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+        Span::styled(
+            "⏸ PAUSED",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
     } else {
         Span::styled(
-            format!("↻ {}s │ Δ {} │ {} pts │ {}", 
-                elapsed, price_change_str, synthetic_count + real_count, memory_str),
+            format!(
+                "↻ {}s │ Δ {} │ {} pts │ {}",
+                elapsed,
+                price_change_str,
+                synthetic_count + real_count,
+                memory_str
+            ),
             Style::default().fg(Color::Gray),
         )
     };
@@ -1612,24 +1701,56 @@ fn render_footer(f: &mut Frame, area: Rect, state: &MonitorState) {
     let spans = vec![
         status,
         Span::raw(" ║ "),
-        Span::styled("Q", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "Q",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ),
         Span::raw("uit "),
-        Span::styled("R", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "R",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw("efresh "),
-        Span::styled("P", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "P",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw("ause "),
-        Span::styled("1-4", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "1-4",
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw("/"),
-        Span::styled("T", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "T",
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw("ime "),
-        Span::styled("C", Style::default().fg(Color::LightBlue).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "C",
+            Style::default()
+                .fg(Color::LightBlue)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(format!("hart:{} ", state.chart_mode.label())),
-        Span::styled("±", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "±",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw("Speed"),
     ];
 
-    let footer = Paragraph::new(Line::from(spans))
-        .block(Block::default().borders(Borders::ALL));
+    let footer = Paragraph::new(Line::from(spans)).block(Block::default().borders(Borders::ALL));
 
     f.render_widget(footer, area);
 }
@@ -1661,11 +1782,7 @@ fn format_usd(n: f64) -> String {
 }
 
 /// Entry point for the monitor command from interactive mode.
-pub async fn run(
-    token: Option<String>,
-    ctx: &SessionContext,
-    config: &Config,
-) -> Result<()> {
+pub async fn run(token: Option<String>, ctx: &SessionContext, config: &Config) -> Result<()> {
     let token_input = match token {
         Some(t) => t,
         None => {
@@ -1683,7 +1800,9 @@ pub async fn run(
 
     // Fetch initial data
     let dex_client = DexClient::new();
-    let initial_data = dex_client.get_token_data(&ctx.chain, &token_address).await?;
+    let initial_data = dex_client
+        .get_token_data(&ctx.chain, &token_address)
+        .await?;
 
     println!(
         "Monitoring {} ({}) on {}",
@@ -1707,11 +1826,7 @@ pub async fn run(
 }
 
 /// Resolves a token input (address or symbol) to an address.
-async fn resolve_token_address(
-    input: &str,
-    chain: &str,
-    _config: &Config,
-) -> Result<String> {
+async fn resolve_token_address(input: &str, chain: &str, _config: &Config) -> Result<String> {
     // Check if it's already an address
     if input.starts_with("0x") && input.len() == 42 {
         return Ok(input.to_string());
@@ -1763,6 +1878,7 @@ mod tests {
             price_change_24h: 5.0,
             price_change_6h: 2.0,
             price_change_1h: 0.5,
+            price_change_5m: 0.1,
             volume_24h: 1_000_000.0,
             volume_6h: 250_000.0,
             volume_1h: 50_000.0,
@@ -1964,8 +2080,7 @@ mod tests {
         assert_eq!(state.real_data_count, 0);
 
         // Price history should span approximately 24 hours
-        if let (Some(first), Some(last)) = 
-            (state.price_history.front(), state.price_history.back()) 
+        if let (Some(first), Some(last)) = (state.price_history.front(), state.price_history.back())
         {
             let span = last.timestamp - first.timestamp;
             assert!(span > 20.0 * 3600.0); // At least ~20 hours
@@ -1993,7 +2108,13 @@ mod tests {
         assert_eq!(state.real_data_count, 1);
 
         // The last point should be real
-        assert!(state.price_history.back().map(|p| p.is_real).unwrap_or(false));
+        assert!(
+            state
+                .price_history
+                .back()
+                .map(|p| p.is_real)
+                .unwrap_or(false)
+        );
     }
 
     #[test]
@@ -2004,7 +2125,7 @@ mod tests {
         let mem = state.memory_usage();
         // DataPoint is 24 bytes, should have some data points
         assert!(mem > 0);
-        
+
         // Each DataPoint is 24 bytes (f64 + f64 + bool + padding)
         let expected_point_size = std::mem::size_of::<DataPoint>();
         assert_eq!(expected_point_size, 24);
@@ -2022,7 +2143,7 @@ mod tests {
 
         // Add real data point
         state.update(&token_data);
-        
+
         let (_data2, is_real2) = state.get_price_data_for_period();
         // Should have at least one real point now
         assert!(is_real2.iter().any(|r| *r));
@@ -2030,7 +2151,8 @@ mod tests {
 
     #[test]
     fn test_cache_path_generation() {
-        let path = MonitorState::cache_path("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", "ethereum");
+        let path =
+            MonitorState::cache_path("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", "ethereum");
         assert!(path.to_string_lossy().contains("bcc_monitor_"));
         assert!(path.to_string_lossy().contains("ethereum"));
         // Should be in temp directory
@@ -2042,27 +2164,27 @@ mod tests {
     fn test_cache_save_and_load() {
         let token_data = create_test_token_data();
         let mut state = MonitorState::new(&token_data, "test_chain");
-        
+
         // Add some real data
         state.update(&token_data);
         state.update(&token_data);
-        
+
         // Save cache
         state.save_cache();
-        
+
         // Verify cache file exists
         let path = MonitorState::cache_path(&state.token_address, &state.chain);
         assert!(path.exists(), "Cache file should exist after save");
-        
+
         // Load cache
         let loaded = MonitorState::load_cache(&state.token_address, &state.chain);
         assert!(loaded.is_some(), "Should be able to load saved cache");
-        
+
         let cached = loaded.unwrap();
         assert_eq!(cached.token_address, state.token_address);
         assert_eq!(cached.chain, state.chain);
         assert!(!cached.price_history.is_empty());
-        
+
         // Cleanup
         let _ = std::fs::remove_file(path);
     }

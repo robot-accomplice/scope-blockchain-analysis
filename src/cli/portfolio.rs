@@ -396,11 +396,12 @@ async fn run_summary(
 
     for watched in &filtered {
         let (balance, tokens) = fetch_address_balance(
-            &watched.address, 
-            &watched.chain, 
+            &watched.address,
+            &watched.chain,
             config,
             args.include_tokens,
-        ).await;
+        )
+        .await;
 
         // Aggregate chain balances
         if let Some(chain_bal) = balances_by_chain.get_mut(&watched.chain) {
@@ -408,11 +409,14 @@ async fn run_summary(
             // A more complete implementation would sum balances
             let _ = chain_bal;
         } else {
-            balances_by_chain.insert(watched.chain.clone(), ChainBalance {
-                native_balance: balance.clone(),
-                symbol: get_native_symbol(&watched.chain),
-                usd: None,
-            });
+            balances_by_chain.insert(
+                watched.chain.clone(),
+                ChainBalance {
+                    native_balance: balance.clone(),
+                    symbol: get_native_symbol(&watched.chain),
+                    usd: None,
+                },
+            );
         }
 
         address_summaries.push(AddressSummary {
@@ -464,7 +468,7 @@ async fn run_summary(
                     addr.balance,
                     addr.usd.map_or(String::new(), |u| format!("(${:.2})", u))
                 );
-                
+
                 // Show token balances
                 for token in &addr.tokens {
                     let symbol = token.symbol.as_deref().unwrap_or(&token.mint[..8]);
@@ -490,17 +494,11 @@ async fn fetch_address_balance(
     include_tokens: bool,
 ) -> (String, Vec<TokenSummary>) {
     let chain_lower = chain.to_lowercase();
-    
+
     match chain_lower.as_str() {
-        "solana" | "sol" => {
-            fetch_solana_balance(address, config, include_tokens).await
-        }
-        "ethereum" | "eth" => {
-            fetch_ethereum_balance(address, config).await
-        }
-        "tron" | "trx" => {
-            fetch_tron_balance(address, config).await
-        }
+        "solana" | "sol" => fetch_solana_balance(address, config, include_tokens).await,
+        "ethereum" | "eth" => fetch_ethereum_balance(address, config).await,
+        "tron" | "trx" => fetch_tron_balance(address, config).await,
         _ => {
             tracing::warn!(chain = %chain, "Unknown chain, cannot fetch balance");
             ("Unknown chain".to_string(), vec![])
@@ -510,7 +508,7 @@ async fn fetch_address_balance(
 
 /// Fetches Solana balance and optionally SPL token balances.
 async fn fetch_solana_balance(
-    address: &str, 
+    address: &str,
     config: &Config,
     include_tokens: bool,
 ) -> (String, Vec<TokenSummary>) {
@@ -534,14 +532,15 @@ async fn fetch_solana_balance(
     // Fetch SPL token balances if requested (or always for portfolio summary)
     let tokens = if include_tokens {
         match client.get_token_balances(address).await {
-            Ok(token_bals) => {
-                token_bals.into_iter().map(|t| TokenSummary {
+            Ok(token_bals) => token_bals
+                .into_iter()
+                .map(|t| TokenSummary {
                     mint: t.mint,
                     balance: format!("{}", t.ui_amount),
                     decimals: t.decimals,
                     symbol: t.symbol,
-                }).collect()
-            }
+                })
+                .collect(),
             Err(e) => {
                 tracing::error!(error = %e, address = %address, "Failed to fetch SPL token balances");
                 vec![]
@@ -550,14 +549,15 @@ async fn fetch_solana_balance(
     } else {
         // Always fetch tokens for portfolio - the flag is for verbose output
         match client.get_token_balances(address).await {
-            Ok(token_bals) => {
-                token_bals.into_iter().map(|t| TokenSummary {
+            Ok(token_bals) => token_bals
+                .into_iter()
+                .map(|t| TokenSummary {
                     mint: t.mint,
                     balance: format!("{}", t.ui_amount),
                     decimals: t.decimals,
                     symbol: t.symbol,
-                }).collect()
-            }
+                })
+                .collect(),
             Err(e) => {
                 tracing::warn!(error = %e, "Could not fetch token balances");
                 vec![]
@@ -568,7 +568,7 @@ async fn fetch_solana_balance(
     (native_balance, tokens)
 }
 
-/// Fetches Ethereum balance.
+/// Fetches Ethereum balance including ERC-20 tokens.
 async fn fetch_ethereum_balance(address: &str, config: &Config) -> (String, Vec<TokenSummary>) {
     let client = match EthereumClient::new(&config.chains) {
         Ok(c) => c,
@@ -586,11 +586,27 @@ async fn fetch_ethereum_balance(address: &str, config: &Config) -> (String, Vec<
         }
     };
 
-    // TODO: Add ERC20 token balance fetching
-    (balance, vec![])
+    // Fetch ERC-20 token balances
+    let tokens = match client.get_erc20_balances(address).await {
+        Ok(token_bals) => token_bals
+            .into_iter()
+            .map(|tb| TokenSummary {
+                mint: tb.token.contract_address,
+                balance: tb.formatted_balance,
+                decimals: tb.token.decimals,
+                symbol: Some(tb.token.symbol),
+            })
+            .collect(),
+        Err(e) => {
+            tracing::warn!(error = %e, "Could not fetch ERC-20 token balances");
+            vec![]
+        }
+    };
+
+    (balance, tokens)
 }
 
-/// Fetches Tron balance.
+/// Fetches Tron balance including TRC-20 tokens.
 async fn fetch_tron_balance(address: &str, config: &Config) -> (String, Vec<TokenSummary>) {
     let client = match TronClient::new(&config.chains) {
         Ok(c) => c,
@@ -608,8 +624,30 @@ async fn fetch_tron_balance(address: &str, config: &Config) -> (String, Vec<Toke
         }
     };
 
-    // TODO: Add TRC20 token balance fetching
-    (balance, vec![])
+    // Fetch TRC-20 token balances
+    let tokens = match client.get_trc20_balances(address).await {
+        Ok(trc20_bals) => {
+            trc20_bals
+                .into_iter()
+                .map(|tb| {
+                    // TRC-20 balances from TronGrid don't include decimals/symbol metadata
+                    // We provide what we have; symbol resolution would require additional API calls
+                    TokenSummary {
+                        mint: tb.contract_address,
+                        balance: tb.raw_balance,
+                        decimals: 0, // Unknown without additional lookup
+                        symbol: None,
+                    }
+                })
+                .collect()
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Could not fetch TRC-20 token balances");
+            vec![]
+        }
+    };
+
+    (balance, tokens)
 }
 
 /// Returns the native token symbol for a chain.

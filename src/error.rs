@@ -98,6 +98,10 @@ pub enum BccError {
     /// Resource not found.
     #[error("Not found: {0}")]
     NotFound(String),
+
+    /// Other unspecified error.
+    #[error("{0}")]
+    Other(String),
 }
 
 /// Configuration-specific error type.

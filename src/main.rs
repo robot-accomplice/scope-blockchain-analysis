@@ -86,6 +86,12 @@ async fn main() -> Result<()> {
         Commands::Export(args) => bcc::cli::export::run(args, &config).await,
         Commands::Interactive(args) => bcc::cli::interactive::run(args, &config).await,
         Commands::Setup(args) => bcc::cli::setup::run(args, &config).await,
+        Commands::Compliance(compliance_cmd) => match compliance_cmd {
+            bcc::cli::compliance::ComplianceCommands::Risk(args) => bcc::cli::compliance::handle_risk(args).await.map_err(|e| bcc::error::BccError::Other(e.to_string())),
+            bcc::cli::compliance::ComplianceCommands::Trace(args) => bcc::cli::compliance::handle_trace(args).await.map_err(|e| bcc::error::BccError::Other(e.to_string())),
+            bcc::cli::compliance::ComplianceCommands::Analyze(args) => bcc::cli::compliance::handle_analyze(args).await.map_err(|e| bcc::error::BccError::Other(e.to_string())),
+            bcc::cli::compliance::ComplianceCommands::ComplianceReport(args) => bcc::cli::compliance::handle_compliance_report(args).await.map_err(|e| bcc::error::BccError::Other(e.to_string())),
+        },
     };
 
     // Handle errors gracefully
@@ -137,6 +143,12 @@ async fn run_command(command: Commands, config: &Config) -> Result<()> {
         Commands::Export(args) => bcc::cli::export::run(args, config).await,
         Commands::Interactive(args) => bcc::cli::interactive::run(args, config).await,
         Commands::Setup(args) => bcc::cli::setup::run(args, config).await,
+        Commands::Compliance(compliance_cmd) => match compliance_cmd {
+            bcc::cli::compliance::ComplianceCommands::Risk(args) => bcc::cli::compliance::handle_risk(args).await.map_err(|e| bcc::error::BccError::Other(e.to_string())),
+            bcc::cli::compliance::ComplianceCommands::Trace(args) => bcc::cli::compliance::handle_trace(args).await.map_err(|e| bcc::error::BccError::Other(e.to_string())),
+            bcc::cli::compliance::ComplianceCommands::Analyze(args) => bcc::cli::compliance::handle_analyze(args).await.map_err(|e| bcc::error::BccError::Other(e.to_string())),
+            bcc::cli::compliance::ComplianceCommands::ComplianceReport(args) => bcc::cli::compliance::handle_compliance_report(args).await.map_err(|e| bcc::error::BccError::Other(e.to_string())),
+        },
     };
 
     if let Err(e) = result {

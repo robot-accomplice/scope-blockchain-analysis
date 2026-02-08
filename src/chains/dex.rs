@@ -8,6 +8,15 @@
 //! - **DexScreener** (primary): Free API, no key required
 //!   - Token data: `GET https://api.dexscreener.com/latest/dex/tokens/{address}`
 //!   - Pair data: `GET https://api.dexscreener.com/latest/dex/pairs/{chain}/{pair}`
+//!   - Token search: `GET https://api.dexscreener.com/latest/dex/search?q={query}`
+//!
+//! ## Features
+//!
+//! - Comprehensive token data aggregation across all DEX pairs
+//! - Native token price lookups for USD valuation (ETH, SOL, BNB, MATIC, etc.)
+//! - Individual token price lookups by contract address
+//! - Token search with chain filtering
+//! - Historical price and volume data interpolation
 //!
 //! ## Usage
 //!
@@ -21,6 +30,11 @@
 //!     // Fetch token data by address
 //!     let data = client.get_token_data("ethereum", "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").await?;
 //!     println!("Price: ${}", data.price_usd);
+//!     
+//!     // Get native token price for USD valuation
+//!     if let Some(eth_price) = client.get_native_token_price("ethereum").await {
+//!         println!("ETH: ${:.2}", eth_price);
+//!     }
 //!     
 //!     Ok(())
 //! }
@@ -327,6 +341,48 @@ impl DexClient {
             "avalanche" | "avax" => "avalanche".to_string(),
             _ => chain.to_lowercase(),
         }
+    }
+
+    /// Fetches the USD price of a token by its address.
+    ///
+    /// Returns `None` if the token is not found or has no price data.
+    pub async fn get_token_price(&self, chain: &str, token_address: &str) -> Option<f64> {
+        let url = format!(
+            "{}/latest/dex/tokens/{}",
+            DEXSCREENER_API_BASE, token_address
+        );
+
+        let response = self.http.get(&url).send().await.ok()?;
+        let dex_response: DexScreenerTokenResponse = response.json().await.ok()?;
+
+        let dex_chain = Self::map_chain_to_dexscreener(chain);
+
+        dex_response
+            .pairs
+            .as_ref()?
+            .iter()
+            .filter(|p| p.chain_id.to_lowercase() == dex_chain)
+            .filter_map(|p| p.price_usd.as_ref()?.parse::<f64>().ok())
+            .next()
+    }
+
+    /// Fetches the native token price for a chain.
+    ///
+    /// Uses well-known wrapped token addresses to determine the native token price.
+    pub async fn get_native_token_price(&self, chain: &str) -> Option<f64> {
+        let (search_chain, token_address) = match chain.to_lowercase().as_str() {
+            "ethereum" | "eth" => ("ethereum", "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"), // WETH
+            "polygon" | "matic" => ("polygon", "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270"), // WMATIC
+            "arbitrum" | "arb" => ("arbitrum", "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"), // WETH on Arb
+            "optimism" | "op" => ("optimism", "0x4200000000000000000000000000000000000006"), // WETH on OP
+            "base" => ("base", "0x4200000000000000000000000000000000000006"), // WETH on Base
+            "bsc" | "bnb" => ("bsc", "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"), // WBNB
+            "solana" | "sol" => ("solana", "So11111111111111111111111111111111111111112"), // Wrapped SOL
+            "tron" | "trx" => return None, // Tron wrapped token varies; skip for now
+            _ => return None,
+        };
+
+        self.get_token_price(search_chain, token_address).await
     }
 
     /// Fetches token data from DexScreener.

@@ -17,7 +17,9 @@
 //! bca tx 0xabc123... --trace
 //! ```
 
-use crate::chains::{validate_solana_signature, validate_tron_tx_hash};
+use crate::chains::{
+    EthereumClient, SolanaClient, TronClient, validate_solana_signature, validate_tron_tx_hash,
+};
 use crate::config::{Config, OutputFormat};
 use crate::error::{BccError, Result};
 use clap::Args;
@@ -223,36 +225,77 @@ pub async fn run(mut args: TxArgs, config: &Config) -> Result<()> {
     // Validate transaction hash
     validate_tx_hash(&args.hash, &args.chain)?;
 
-    // TODO: Implement actual blockchain queries
-    // For now, return a placeholder report
+    println!("Analyzing transaction on {}...", args.chain);
+
+    let chain_lower = args.chain.to_lowercase();
+    let tx = match chain_lower.as_str() {
+        "solana" | "sol" => {
+            let client = SolanaClient::new(&config.chains)?;
+            client.get_transaction(&args.hash).await?
+        }
+        "tron" | "trx" => {
+            let client = TronClient::new(&config.chains)?;
+            client.get_transaction(&args.hash).await?
+        }
+        _ => {
+            // EVM chains
+            let client = EthereumClient::for_chain(&args.chain, &config.chains)?;
+            client.get_transaction(&args.hash).await?
+        }
+    };
+
+    // Calculate transaction fee
+    let gas_price_val: u128 = tx.gas_price.parse().unwrap_or(0);
+    let gas_used_val = tx.gas_used.unwrap_or(0) as u128;
+    let fee_wei = gas_price_val * gas_used_val;
+    let fee_str = if chain_lower == "solana" || chain_lower == "sol" {
+        // For Solana, gas_price already contains the fee in lamports
+        let fee_sol = tx.gas_price.parse::<f64>().unwrap_or(0.0) / 1_000_000_000.0;
+        format!("{:.9}", fee_sol)
+    } else {
+        fee_wei.to_string()
+    };
+
     let report = TransactionReport {
-        hash: args.hash.clone(),
+        hash: tx.hash.clone(),
         chain: args.chain.clone(),
         block: BlockInfo {
-            number: 0,
-            timestamp: 0,
-            hash: "0x0".to_string(),
+            number: tx.block_number.unwrap_or(0),
+            timestamp: tx.timestamp.unwrap_or(0),
+            hash: String::new(), // Block hash not available from tx data
         },
         transaction: TransactionDetails {
-            from: "0x0".to_string(),
-            to: Some("0x0".to_string()),
-            value: "0".to_string(),
-            nonce: 0,
+            from: tx.from.clone(),
+            to: tx.to.clone(),
+            value: tx.value.clone(),
+            nonce: tx.nonce,
             transaction_index: 0,
-            status: true,
-            input: "0x".to_string(),
+            status: tx.status.unwrap_or(true),
+            input: tx.input.clone(),
         },
         gas: GasInfo {
-            gas_limit: 21000,
-            gas_used: 21000,
-            gas_price: "0".to_string(),
-            transaction_fee: "0".to_string(),
+            gas_limit: tx.gas_limit,
+            gas_used: tx.gas_used.unwrap_or(0),
+            gas_price: tx.gas_price.clone(),
+            transaction_fee: fee_str,
             effective_gas_price: None,
         },
-        decoded_input: if args.decode {
+        decoded_input: if args.decode && !tx.input.is_empty() && tx.input != "0x" {
+            // Basic decode: show function selector (first 4 bytes)
+            let selector = if tx.input.len() >= 10 {
+                &tx.input[..10]
+            } else {
+                &tx.input
+            };
             Some(DecodedInput {
-                function_signature: "unknown()".to_string(),
-                function_name: "unknown".to_string(),
+                function_signature: format!("{}(...)", selector),
+                function_name: selector.to_string(),
+                parameters: vec![],
+            })
+        } else if args.decode {
+            Some(DecodedInput {
+                function_signature: "transfer()".to_string(),
+                function_name: "Native Transfer".to_string(),
                 parameters: vec![],
             })
         } else {

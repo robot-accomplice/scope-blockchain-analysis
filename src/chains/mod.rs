@@ -4,22 +4,34 @@
 //! with various blockchain networks. It defines a common `ChainClient` trait
 //! that all chain-specific implementations must satisfy.
 //!
+//! ## Capabilities
+//!
+//! All chain clients support:
+//! - **Balance queries** with optional USD valuation via DexScreener
+//! - **Transaction lookup** by hash/signature with full details
+//! - **Transaction history** for addresses with pagination
+//! - **Token balances** (ERC-20, SPL, TRC-20) for portfolio tracking
+//!
 //! ## Supported Chains
 //!
 //! ### EVM-Compatible Chains
 //!
-//! - **Ethereum** - Ethereum Mainnet
+//! - **Ethereum** - Ethereum Mainnet (via Etherscan V2 API)
 //! - **Polygon** - Polygon PoS
 //! - **Arbitrum** - Arbitrum One
 //! - **Optimism** - Optimism Mainnet
 //! - **Base** - Base (Coinbase L2)
 //! - **BSC** - BNB Smart Chain (Binance)
-//! - **Aegis** - Aegis/Wraith blockchain
+//! - **Aegis** - Aegis/Wraith blockchain (JSON-RPC)
 //!
 //! ### Non-EVM Chains
 //!
-//! - **Solana** - Solana Mainnet
-//! - **Tron** - Tron Mainnet
+//! - **Solana** - Solana Mainnet (JSON-RPC with `jsonParsed` encoding)
+//! - **Tron** - Tron Mainnet (TronGrid API, base58check address validation)
+//!
+//! ### DEX Data
+//!
+//! - **DexScreener** - Token prices, volume, liquidity, and trading data across all DEX pairs
 //!
 //! ## Usage
 //!

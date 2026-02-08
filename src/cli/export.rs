@@ -16,6 +16,7 @@
 //! bca export --portfolio --output portfolio.json
 //! ```
 
+use crate::chains::{EthereumClient, SolanaClient, TronClient, infer_chain_from_address};
 use crate::config::{Config, OutputFormat};
 use crate::error::{BccError, Result};
 use clap::Args;
@@ -177,22 +178,77 @@ async fn export_address(
     address: &str,
     args: &ExportArgs,
     format: OutputFormat,
-    _config: &Config,
+    config: &Config,
 ) -> Result<()> {
+    // Auto-detect chain if default
+    let chain = if args.chain == "ethereum" {
+        infer_chain_from_address(address)
+            .unwrap_or("ethereum")
+            .to_string()
+    } else {
+        args.chain.clone()
+    };
+
     tracing::info!(
         address = %address,
-        chain = %args.chain,
+        chain = %chain,
         "Exporting address data"
     );
 
-    // TODO: Fetch actual transaction history
-    // For now, create a placeholder export
-    let transactions: Vec<TransactionExport> = vec![];
+    println!("Fetching transactions for {} on {}...", address, chain);
+
+    // Fetch real transaction history
+    let chain_txs = match chain.as_str() {
+        "solana" | "sol" => {
+            let client = SolanaClient::new(&config.chains)?;
+            client.get_transactions(address, args.limit).await?
+        }
+        "tron" | "trx" => {
+            let client = TronClient::new(&config.chains)?;
+            client.get_transactions(address, args.limit).await?
+        }
+        _ => {
+            let client = EthereumClient::for_chain(&chain, &config.chains)?;
+            client.get_transactions(address, args.limit).await?
+        }
+    };
+
+    // Apply date filtering if --from / --to are provided
+    let from_ts = args.from.as_deref().and_then(parse_date_to_ts);
+    let to_ts = args.to.as_deref().and_then(parse_date_to_ts);
+
+    let transactions: Vec<TransactionExport> = chain_txs
+        .into_iter()
+        .filter(|tx| {
+            let ts = tx.timestamp.unwrap_or(0);
+            if let Some(from) = from_ts
+                && ts < from
+            {
+                return false;
+            }
+            if let Some(to) = to_ts
+                && ts > to
+            {
+                return false;
+            }
+            true
+        })
+        .map(|tx| TransactionExport {
+            hash: tx.hash,
+            block_number: tx.block_number.unwrap_or(0),
+            timestamp: tx.timestamp.unwrap_or(0),
+            from: tx.from,
+            to: tx.to,
+            value: tx.value,
+            gas_used: tx.gas_used.unwrap_or(0),
+            status: tx.status.unwrap_or(true),
+        })
+        .collect();
 
     let content = match format {
         OutputFormat::Json => serde_json::to_string_pretty(&ExportData {
             address: address.to_string(),
-            chain: args.chain.clone(),
+            chain: chain.clone(),
             transactions: transactions.clone(),
             exported_at: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -242,6 +298,40 @@ async fn export_address(
     );
 
     Ok(())
+}
+
+/// Parses a YYYY-MM-DD date string to a Unix timestamp.
+fn parse_date_to_ts(date: &str) -> Option<u64> {
+    let parts: Vec<&str> = date.split('-').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let year: i32 = parts[0].parse().ok()?;
+    let month: u32 = parts[1].parse().ok()?;
+    let day: u32 = parts[2].parse().ok()?;
+
+    // Simple calculation: days since epoch * 86400
+    // Use chrono-like calculation without the crate
+    // For simplicity, use a basic approach
+    let days_from_epoch = days_since_epoch(year, month, day)?;
+    Some((days_from_epoch as u64) * 86400)
+}
+
+/// Calculates days since Unix epoch (1970-01-01) for a given date.
+fn days_since_epoch(year: i32, month: u32, day: u32) -> Option<i64> {
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+
+    // Algorithm from http://howardhinnant.github.io/date_algorithms.html
+    let y = if month <= 2 { year - 1 } else { year } as i64;
+    let m = if month <= 2 { month + 9 } else { month - 3 } as i64;
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u64;
+    let doy = (153 * m as u64 + 2) / 5 + day as u64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe as i64 - 719468;
+    Some(days)
 }
 
 /// Exported transaction data.

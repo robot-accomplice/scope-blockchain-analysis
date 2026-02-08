@@ -24,6 +24,7 @@
 //! ```
 
 pub mod address;
+pub mod compliance;
 pub mod crawl;
 pub mod export;
 pub mod interactive;
@@ -133,6 +134,13 @@ pub enum Commands {
     /// or use --status to view current configuration.
     #[command(visible_alias = "config")]
     Setup(SetupArgs),
+
+    /// Compliance and risk analysis commands.
+    ///
+    /// Assess risk, trace taint, detect patterns, and generate
+    /// compliance reports for blockchain addresses.
+    #[command(subcommand)]
+    Compliance(compliance::ComplianceCommands),
 }
 
 impl Cli {

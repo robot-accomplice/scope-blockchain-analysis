@@ -17,7 +17,9 @@
 //! bca address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --format json
 //! ```
 
-use crate::chains::{validate_solana_address, validate_tron_address};
+use crate::chains::{
+    EthereumClient, SolanaClient, TronClient, validate_solana_address, validate_tron_address,
+};
 use crate::config::{Config, OutputFormat};
 use crate::error::Result;
 use clap::Args;
@@ -176,23 +178,16 @@ pub async fn run(mut args: AddressArgs, config: &Config) -> Result<()> {
     // Validate address format
     validate_address(&args.address, &args.chain)?;
 
-    // TODO: Implement actual blockchain queries
-    // For now, return a placeholder report
-    let report = AddressReport {
-        address: args.address.clone(),
-        chain: args.chain.clone(),
-        balance: Balance {
-            raw: "0".to_string(),
-            formatted: "0.0".to_string(),
-            usd: None,
-        },
-        transaction_count: 0,
-        transactions: if args.include_txs { Some(vec![]) } else { None },
-        tokens: if args.include_tokens {
-            Some(vec![])
-        } else {
-            None
-        },
+    println!("Analyzing address on {}...", args.chain);
+
+    let chain_lower = args.chain.to_lowercase();
+    let report = match chain_lower.as_str() {
+        "solana" | "sol" => analyze_solana_address(&args, config).await?,
+        "tron" | "trx" => analyze_tron_address(&args, config).await?,
+        _ => {
+            // EVM chains
+            analyze_evm_address(&args, config).await?
+        }
     };
 
     // Output based on format
@@ -200,6 +195,193 @@ pub async fn run(mut args: AddressArgs, config: &Config) -> Result<()> {
     output_report(&report, format)?;
 
     Ok(())
+}
+
+/// Analyzes an EVM-compatible address.
+async fn analyze_evm_address(args: &AddressArgs, config: &Config) -> Result<AddressReport> {
+    let client = EthereumClient::for_chain(&args.chain, &config.chains)?;
+
+    // Fetch balance
+    let mut chain_balance = client.get_balance(&args.address).await?;
+    client.enrich_balance_usd(&mut chain_balance).await;
+
+    let balance = Balance {
+        raw: chain_balance.raw.clone(),
+        formatted: chain_balance.formatted.clone(),
+        usd: chain_balance.usd_value,
+    };
+
+    // Fetch transactions if requested
+    let transactions = if args.include_txs {
+        match client.get_transactions(&args.address, args.limit).await {
+            Ok(txs) => Some(
+                txs.into_iter()
+                    .map(|tx| TransactionSummary {
+                        hash: tx.hash,
+                        block_number: tx.block_number.unwrap_or(0),
+                        timestamp: tx.timestamp.unwrap_or(0),
+                        from: tx.from,
+                        to: tx.to,
+                        value: tx.value,
+                        status: tx.status.unwrap_or(true),
+                    })
+                    .collect(),
+            ),
+            Err(e) => {
+                tracing::warn!("Failed to fetch transactions: {}", e);
+                Some(vec![])
+            }
+        }
+    } else {
+        None
+    };
+
+    // Transaction count is the number we fetched (or 0)
+    let transaction_count = transactions.as_ref().map(|t| t.len() as u64).unwrap_or(0);
+
+    Ok(AddressReport {
+        address: args.address.clone(),
+        chain: args.chain.clone(),
+        balance,
+        transaction_count,
+        transactions,
+        tokens: if args.include_tokens {
+            Some(vec![])
+        } else {
+            None
+        },
+    })
+}
+
+/// Analyzes a Solana address.
+async fn analyze_solana_address(args: &AddressArgs, config: &Config) -> Result<AddressReport> {
+    let client = SolanaClient::new(&config.chains)?;
+
+    // Fetch balance
+    let mut chain_balance = client.get_balance(&args.address).await?;
+    client.enrich_balance_usd(&mut chain_balance).await;
+
+    let balance = Balance {
+        raw: chain_balance.raw.clone(),
+        formatted: chain_balance.formatted.clone(),
+        usd: chain_balance.usd_value,
+    };
+
+    // Fetch transactions if requested
+    let transactions = if args.include_txs {
+        match client.get_transactions(&args.address, args.limit).await {
+            Ok(txs) => Some(
+                txs.into_iter()
+                    .map(|tx| TransactionSummary {
+                        hash: tx.hash,
+                        block_number: tx.block_number.unwrap_or(0),
+                        timestamp: tx.timestamp.unwrap_or(0),
+                        from: tx.from,
+                        to: tx.to,
+                        value: tx.value,
+                        status: tx.status.unwrap_or(true),
+                    })
+                    .collect(),
+            ),
+            Err(e) => {
+                tracing::warn!("Failed to fetch transactions: {}", e);
+                Some(vec![])
+            }
+        }
+    } else {
+        None
+    };
+
+    let transaction_count = transactions.as_ref().map(|t| t.len() as u64).unwrap_or(0);
+
+    // Fetch SPL token balances if requested
+    let tokens = if args.include_tokens {
+        match client.get_token_balances(&args.address).await {
+            Ok(token_bals) => Some(
+                token_bals
+                    .into_iter()
+                    .map(|tb| TokenBalance {
+                        contract_address: tb.mint.clone(),
+                        symbol: tb.symbol.unwrap_or_else(|| tb.mint[..8].to_string()),
+                        name: tb.name.unwrap_or_else(|| "SPL Token".to_string()),
+                        decimals: tb.decimals,
+                        balance: tb.raw_amount,
+                        formatted_balance: format!("{:.6}", tb.ui_amount),
+                    })
+                    .collect(),
+            ),
+            Err(e) => {
+                tracing::warn!("Failed to fetch token balances: {}", e);
+                Some(vec![])
+            }
+        }
+    } else {
+        None
+    };
+
+    Ok(AddressReport {
+        address: args.address.clone(),
+        chain: args.chain.clone(),
+        balance,
+        transaction_count,
+        transactions,
+        tokens,
+    })
+}
+
+/// Analyzes a Tron address.
+async fn analyze_tron_address(args: &AddressArgs, config: &Config) -> Result<AddressReport> {
+    let client = TronClient::new(&config.chains)?;
+
+    // Fetch balance
+    let mut chain_balance = client.get_balance(&args.address).await?;
+    client.enrich_balance_usd(&mut chain_balance).await;
+
+    let balance = Balance {
+        raw: chain_balance.raw.clone(),
+        formatted: chain_balance.formatted.clone(),
+        usd: chain_balance.usd_value,
+    };
+
+    // Fetch transactions if requested
+    let transactions = if args.include_txs {
+        match client.get_transactions(&args.address, args.limit).await {
+            Ok(txs) => Some(
+                txs.into_iter()
+                    .map(|tx| TransactionSummary {
+                        hash: tx.hash,
+                        block_number: tx.block_number.unwrap_or(0),
+                        timestamp: tx.timestamp.unwrap_or(0),
+                        from: tx.from,
+                        to: tx.to,
+                        value: tx.value,
+                        status: tx.status.unwrap_or(true),
+                    })
+                    .collect(),
+            ),
+            Err(e) => {
+                tracing::warn!("Failed to fetch transactions: {}", e);
+                Some(vec![])
+            }
+        }
+    } else {
+        None
+    };
+
+    let transaction_count = transactions.as_ref().map(|t| t.len() as u64).unwrap_or(0);
+
+    Ok(AddressReport {
+        address: args.address.clone(),
+        chain: args.chain.clone(),
+        balance,
+        transaction_count,
+        transactions,
+        tokens: if args.include_tokens {
+            Some(vec![])
+        } else {
+            None
+        },
+    })
 }
 
 /// Validates an address format for the given chain.

@@ -5,17 +5,29 @@
 //!
 //! ## Features
 //!
-//! - **Address Analysis**: Query balances, transaction history, and token holdings
-//!   for blockchain addresses across multiple EVM-compatible chains.
+//! - **Address Analysis**: Query balances (with USD valuation), transaction history,
+//!   and token holdings (ERC-20, SPL, TRC-20) for blockchain addresses across
+//!   multiple chains. Chain auto-detection from address format.
 //!
-//! - **Transaction Analysis**: Decode and trace blockchain transactions,
-//!   including internal calls and contract interactions.
+//! - **Transaction Analysis**: Look up and decode blockchain transactions across
+//!   EVM chains (via Etherscan proxy API), Solana (via `getTransaction` RPC),
+//!   and Tron (via TronGrid). Includes receipt data, gas usage, and status.
+//!
+//! - **Token Crawling**: Crawl DEX data for any token with price, volume,
+//!   liquidity, holder analysis, and risk scoring. Markdown report generation.
+//!
+//! - **Live Monitoring**: Real-time TUI dashboard with price/volume/candlestick
+//!   charts, buy/sell gauges, activity logs, and Unicode-rich visualization.
 //!
 //! - **Portfolio Management**: Track multiple addresses across chains with
-//!   labels, tags, and aggregated balance views.
+//!   labels, tags, and aggregated balance views including ERC-20, SPL, and
+//!   TRC-20 token balances.
 //!
-//! - **Data Export**: Export analysis results in JSON, CSV, or formatted
-//!   table output for further processing.
+//! - **Data Export**: Export transaction history in JSON or CSV with date range
+//!   filtering. Chain auto-detection for addresses.
+//!
+//! - **USD Valuation**: Native token prices via DexScreener for all supported
+//!   chains (ETH, SOL, BNB, MATIC, etc.).
 //!
 //! ## Supported Chains
 //!
@@ -66,9 +78,20 @@
 //!     // Create a chain client
 //!     let client = EthereumClient::new(&config.chains)?;
 //!     
-//!     // Query an address balance
-//!     let balance = client.get_balance("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2").await?;
-//!     println!("Balance: {}", balance.formatted);
+//!     // Query an address balance (with USD valuation)
+//!     let mut balance = client.get_balance("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2").await?;
+//!     client.enrich_balance_usd(&mut balance).await;
+//!     println!("Balance: {} (${:.2})", balance.formatted, balance.usd_value.unwrap_or(0.0));
+//!     
+//!     // Look up a transaction
+//!     let tx = client.get_transaction("0xabc123...").await?;
+//!     println!("From: {}, Status: {:?}", tx.from, tx.status);
+//!     
+//!     // Fetch ERC-20 token balances
+//!     let tokens = client.get_erc20_balances("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2").await?;
+//!     for token in &tokens {
+//!         println!("{}: {}", token.token.symbol, token.formatted_balance);
+//!     }
 //!     
 //!     Ok(())
 //! }
@@ -123,10 +146,12 @@
 //!
 //! ## Modules
 //!
-//! - [`chains`]: Blockchain client implementations
-//! - [`cli`]: Command-line interface definitions
+//! - [`chains`]: Blockchain client implementations (Ethereum/EVM, Solana, Tron, DexScreener)
+//! - [`cli`]: Command-line interface definitions (address, tx, crawl, monitor, portfolio, export)
 //! - [`config`]: Configuration management
+//! - [`display`]: Terminal output utilities and markdown report generation
 //! - [`error`]: Error types and result aliases
+//! - [`tokens`]: Token alias storage for friendly name lookups
 
 // Re-export commonly used types at crate root
 pub use config::Config;
@@ -170,6 +195,12 @@ pub mod error;
 /// Allows users to reference tokens by friendly names instead
 /// of full contract addresses.
 pub mod tokens;
+
+/// Compliance and risk analysis module.
+///
+/// Provides risk scoring, transaction taint analysis, pattern detection,
+/// and compliance reporting for blockchain addresses.
+pub mod compliance;
 
 /// Library version string.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

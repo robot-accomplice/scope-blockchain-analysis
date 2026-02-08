@@ -686,7 +686,10 @@ fn generate_txn_activity_chart(analytics: &TokenAnalytics) -> String {
         } else {
             "-".to_string()
         };
-        chart.push_str(&format!("| {} | {} | {} | {} |\n", period, buys, sells, ratio));
+        chart.push_str(&format!(
+            "| {} | {} | {} | {} |\n",
+            period, buys, sells, ratio
+        ));
     }
 
     chart.push('\n');

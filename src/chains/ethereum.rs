@@ -7,9 +7,14 @@
 //!
 //! ## Features
 //!
-//! - Balance queries via block explorer APIs
+//! - Balance queries via block explorer APIs (with USD valuation via DexScreener)
+//! - Transaction details lookup via Etherscan proxy API (`eth_getTransactionByHash`)
+//! - Transaction receipt fetching for gas usage and status
 //! - Transaction history retrieval
-//! - Transaction details lookup
+//! - ERC-20 token balance fetching (via `tokentx` + `tokenbalance` endpoints)
+//! - Token holder count estimation with pagination
+//! - Token information and holder analytics
+//! - Support for both block explorer API and JSON-RPC modes
 //!
 //! ## Usage
 //!
@@ -22,8 +27,9 @@
 //!     let config = ChainsConfig::default();
 //!     let client = EthereumClient::new(&config)?;
 //!     
-//!     let balance = client.get_balance("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2").await?;
-//!     println!("Balance: {} ETH", balance.formatted);
+//!     let mut balance = client.get_balance("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2").await?;
+//!     client.enrich_balance_usd(&mut balance).await;
+//!     println!("Balance: {} (${:.2})", balance.formatted, balance.usd_value.unwrap_or(0.0));
 //!     Ok(())
 //! }
 //! ```
@@ -113,6 +119,44 @@ struct TxListItem {
     input: String,
     #[serde(rename = "isError")]
     is_error: String,
+}
+
+/// Proxy API response wrapper (JSON-RPC style from Etherscan proxy endpoints).
+#[derive(Debug, Deserialize)]
+struct ProxyResponse<T> {
+    result: Option<T>,
+}
+
+/// Transaction object from eth_getTransactionByHash proxy endpoint.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProxyTransaction {
+    #[serde(default)]
+    block_number: Option<String>,
+    #[serde(default)]
+    from: Option<String>,
+    #[serde(default)]
+    to: Option<String>,
+    #[serde(default)]
+    gas: Option<String>,
+    #[serde(default)]
+    gas_price: Option<String>,
+    #[serde(default)]
+    value: Option<String>,
+    #[serde(default)]
+    nonce: Option<String>,
+    #[serde(default)]
+    input: Option<String>,
+}
+
+/// Transaction receipt from eth_getTransactionReceipt proxy endpoint.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProxyTransactionReceipt {
+    #[serde(default)]
+    gas_used: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
 }
 
 /// Token holder list item from API.
@@ -436,8 +480,18 @@ impl EthereumClient {
             formatted: format!("{:.6} {}", eth, self.native_symbol),
             decimals: self.native_decimals,
             symbol: self.native_symbol.clone(),
-            usd_value: None, // TODO: Implement price fetching
+            usd_value: None, // Populated by caller via enrich_balance_usd
         })
+    }
+
+    /// Enriches a balance with a USD value using DexScreener price lookup.
+    pub async fn enrich_balance_usd(&self, balance: &mut Balance) {
+        let dex = crate::chains::DexClient::new();
+        if let Some(price) = dex.get_native_token_price(&self.chain_name).await {
+            let amount: f64 =
+                balance.raw.parse().unwrap_or(0.0) / 10_f64.powi(self.native_decimals as i32);
+            balance.usd_value = Some(amount * price);
+        }
     }
 
     /// Fetches transaction details by hash.
@@ -453,11 +507,243 @@ impl EthereumClient {
         // Validate hash
         validate_tx_hash(hash)?;
 
-        // TODO: Implement actual API call
-        // For now, return a placeholder
-        Err(BccError::Chain(
-            "Transaction lookup not yet implemented".to_string(),
-        ))
+        match self.api_type {
+            ApiType::BlockExplorer => self.get_transaction_explorer(hash).await,
+            ApiType::JsonRpc => self.get_transaction_rpc(hash).await,
+        }
+    }
+
+    /// Fetches transaction via Etherscan proxy API (eth_getTransactionByHash).
+    async fn get_transaction_explorer(&self, hash: &str) -> Result<Transaction> {
+        // Fetch the transaction object
+        let tx_url = self.build_api_url(&format!(
+            "module=proxy&action=eth_getTransactionByHash&txhash={}",
+            hash
+        ));
+
+        tracing::debug!(url = %tx_url, "Fetching transaction via block explorer proxy");
+
+        let tx_response: ProxyResponse<ProxyTransaction> =
+            self.client.get(&tx_url).send().await?.json().await?;
+
+        let proxy_tx = tx_response
+            .result
+            .ok_or_else(|| BccError::NotFound(format!("Transaction not found: {}", hash)))?;
+
+        // Fetch the receipt for gas_used and status
+        let receipt_url = self.build_api_url(&format!(
+            "module=proxy&action=eth_getTransactionReceipt&txhash={}",
+            hash
+        ));
+
+        tracing::debug!(url = %receipt_url, "Fetching transaction receipt");
+
+        let receipt_response: ProxyResponse<ProxyTransactionReceipt> =
+            self.client.get(&receipt_url).send().await?.json().await?;
+
+        let receipt = receipt_response.result;
+
+        // Parse block number from hex
+        let block_number = proxy_tx
+            .block_number
+            .as_deref()
+            .and_then(|bn| u64::from_str_radix(bn.trim_start_matches("0x"), 16).ok());
+
+        // Parse gas limit from hex
+        let gas_limit = proxy_tx
+            .gas
+            .as_deref()
+            .and_then(|g| u64::from_str_radix(g.trim_start_matches("0x"), 16).ok())
+            .unwrap_or(0);
+
+        // Parse gas price from hex to decimal string
+        let gas_price = proxy_tx
+            .gas_price
+            .as_deref()
+            .and_then(|gp| u128::from_str_radix(gp.trim_start_matches("0x"), 16).ok())
+            .map(|gp| gp.to_string())
+            .unwrap_or_else(|| "0".to_string());
+
+        // Parse nonce from hex
+        let nonce = proxy_tx
+            .nonce
+            .as_deref()
+            .and_then(|n| u64::from_str_radix(n.trim_start_matches("0x"), 16).ok())
+            .unwrap_or(0);
+
+        // Parse value from hex wei to decimal string
+        let value = proxy_tx
+            .value
+            .as_deref()
+            .and_then(|v| u128::from_str_radix(v.trim_start_matches("0x"), 16).ok())
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "0".to_string());
+
+        // Parse receipt fields
+        let gas_used = receipt.as_ref().and_then(|r| {
+            r.gas_used
+                .as_deref()
+                .and_then(|gu| u64::from_str_radix(gu.trim_start_matches("0x"), 16).ok())
+        });
+
+        let status = receipt
+            .as_ref()
+            .and_then(|r| r.status.as_deref().map(|s| s == "0x1"));
+
+        // Get block timestamp if we have a block number
+        let timestamp = if let Some(bn) = block_number {
+            self.get_block_timestamp(bn).await.ok()
+        } else {
+            None
+        };
+
+        Ok(Transaction {
+            hash: hash.to_string(),
+            block_number,
+            timestamp,
+            from: proxy_tx.from.unwrap_or_default(),
+            to: proxy_tx.to,
+            value,
+            gas_limit,
+            gas_used,
+            gas_price,
+            nonce,
+            input: proxy_tx.input.unwrap_or_else(|| "0x".to_string()),
+            status,
+        })
+    }
+
+    /// Fetches transaction via JSON-RPC (eth_getTransactionByHash).
+    async fn get_transaction_rpc(&self, hash: &str) -> Result<Transaction> {
+        #[derive(serde::Serialize)]
+        struct RpcRequest<'a> {
+            jsonrpc: &'a str,
+            method: &'a str,
+            params: Vec<&'a str>,
+            id: u64,
+        }
+
+        let request = RpcRequest {
+            jsonrpc: "2.0",
+            method: "eth_getTransactionByHash",
+            params: vec![hash],
+            id: 1,
+        };
+
+        let response: ProxyResponse<ProxyTransaction> = self
+            .client
+            .post(&self.base_url)
+            .json(&request)
+            .send()
+            .await?
+            .json()
+            .await?;
+
+        let proxy_tx = response
+            .result
+            .ok_or_else(|| BccError::NotFound(format!("Transaction not found: {}", hash)))?;
+
+        // Also fetch receipt
+        let receipt_request = RpcRequest {
+            jsonrpc: "2.0",
+            method: "eth_getTransactionReceipt",
+            params: vec![hash],
+            id: 2,
+        };
+
+        let receipt_response: ProxyResponse<ProxyTransactionReceipt> = self
+            .client
+            .post(&self.base_url)
+            .json(&receipt_request)
+            .send()
+            .await?
+            .json()
+            .await?;
+
+        let receipt = receipt_response.result;
+
+        let block_number = proxy_tx
+            .block_number
+            .as_deref()
+            .and_then(|bn| u64::from_str_radix(bn.trim_start_matches("0x"), 16).ok());
+
+        let gas_limit = proxy_tx
+            .gas
+            .as_deref()
+            .and_then(|g| u64::from_str_radix(g.trim_start_matches("0x"), 16).ok())
+            .unwrap_or(0);
+
+        let gas_price = proxy_tx
+            .gas_price
+            .as_deref()
+            .and_then(|gp| u128::from_str_radix(gp.trim_start_matches("0x"), 16).ok())
+            .map(|gp| gp.to_string())
+            .unwrap_or_else(|| "0".to_string());
+
+        let nonce = proxy_tx
+            .nonce
+            .as_deref()
+            .and_then(|n| u64::from_str_radix(n.trim_start_matches("0x"), 16).ok())
+            .unwrap_or(0);
+
+        let value = proxy_tx
+            .value
+            .as_deref()
+            .and_then(|v| u128::from_str_radix(v.trim_start_matches("0x"), 16).ok())
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "0".to_string());
+
+        let gas_used = receipt.as_ref().and_then(|r| {
+            r.gas_used
+                .as_deref()
+                .and_then(|gu| u64::from_str_radix(gu.trim_start_matches("0x"), 16).ok())
+        });
+
+        let status = receipt
+            .as_ref()
+            .and_then(|r| r.status.as_deref().map(|s| s == "0x1"));
+
+        Ok(Transaction {
+            hash: hash.to_string(),
+            block_number,
+            timestamp: None, // JSON-RPC doesn't easily give us timestamp without another call
+            from: proxy_tx.from.unwrap_or_default(),
+            to: proxy_tx.to,
+            value,
+            gas_limit,
+            gas_used,
+            gas_price,
+            nonce,
+            input: proxy_tx.input.unwrap_or_else(|| "0x".to_string()),
+            status,
+        })
+    }
+
+    /// Fetches block timestamp for a given block number.
+    async fn get_block_timestamp(&self, block_number: u64) -> Result<u64> {
+        let hex_block = format!("0x{:x}", block_number);
+        let url = self.build_api_url(&format!(
+            "module=proxy&action=eth_getBlockByNumber&tag={}&boolean=false",
+            hex_block
+        ));
+
+        #[derive(Deserialize)]
+        struct BlockResult {
+            timestamp: Option<String>,
+        }
+
+        let response: ProxyResponse<BlockResult> =
+            self.client.get(&url).send().await?.json().await?;
+
+        let block = response
+            .result
+            .ok_or_else(|| BccError::Chain(format!("Block not found: {}", block_number)))?;
+
+        block
+            .timestamp
+            .as_deref()
+            .and_then(|ts| u64::from_str_radix(ts.trim_start_matches("0x"), 16).ok())
+            .ok_or_else(|| BccError::Chain("Invalid block timestamp".to_string()))
     }
 
     /// Fetches recent transactions for an address.
@@ -526,6 +812,94 @@ impl EthereumClient {
             .map_err(|_| BccError::Chain("Invalid block number response".to_string()))?;
 
         Ok(block_number)
+    }
+
+    /// Fetches ERC-20 token balances for an address.
+    ///
+    /// Uses Etherscan's tokentx endpoint to find unique tokens the address
+    /// has interacted with, then fetches current balances for each.
+    pub async fn get_erc20_balances(
+        &self,
+        address: &str,
+    ) -> Result<Vec<crate::chains::TokenBalance>> {
+        validate_eth_address(address)?;
+
+        // Step 1: Get recent ERC-20 token transfers to find unique tokens
+        let url = self.build_api_url(&format!(
+            "module=account&action=tokentx&address={}&page=1&offset=100&sort=desc",
+            address
+        ));
+
+        tracing::debug!(url = %url, "Fetching ERC-20 token transfers");
+
+        let response = self.client.get(&url).send().await?.text().await?;
+
+        #[derive(Deserialize)]
+        struct TokenTxItem {
+            #[serde(rename = "contractAddress")]
+            contract_address: String,
+            #[serde(rename = "tokenSymbol")]
+            token_symbol: String,
+            #[serde(rename = "tokenName")]
+            token_name: String,
+            #[serde(rename = "tokenDecimal")]
+            token_decimal: String,
+        }
+
+        let parsed: std::result::Result<ApiResponse<Vec<TokenTxItem>>, _> =
+            serde_json::from_str(&response);
+
+        let token_txs = match parsed {
+            Ok(api_resp) if api_resp.status == "1" => api_resp.result,
+            _ => return Ok(vec![]),
+        };
+
+        // Step 2: Deduplicate by contract address
+        let mut seen = std::collections::HashSet::new();
+        let unique_tokens: Vec<&TokenTxItem> = token_txs
+            .iter()
+            .filter(|tx| seen.insert(tx.contract_address.to_lowercase()))
+            .collect();
+
+        // Step 3: Fetch current balance for each unique token
+        let mut balances = Vec::new();
+        for token_tx in unique_tokens.iter().take(20) {
+            // Cap at 20 to avoid rate limits
+            let balance_url = self.build_api_url(&format!(
+                "module=account&action=tokenbalance&contractaddress={}&address={}&tag=latest",
+                token_tx.contract_address, address
+            ));
+
+            if let Ok(resp) = self.client.get(&balance_url).send().await {
+                if let Ok(bal_resp) = resp.json::<ApiResponse<String>>().await {
+                    if bal_resp.status == "1" {
+                        let raw_balance = bal_resp.result;
+                        let decimals: u8 = token_tx.token_decimal.parse().unwrap_or(18);
+
+                        // Skip zero balances
+                        if raw_balance == "0" {
+                            continue;
+                        }
+
+                        let formatted = format_token_balance(&raw_balance, decimals);
+
+                        balances.push(crate::chains::TokenBalance {
+                            token: Token {
+                                contract_address: token_tx.contract_address.clone(),
+                                symbol: token_tx.token_symbol.clone(),
+                                name: token_tx.token_name.clone(),
+                                decimals,
+                            },
+                            balance: raw_balance,
+                            formatted_balance: formatted,
+                            usd_value: None,
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(balances)
     }
 
     /// Fetches token information for a contract address.
@@ -775,20 +1149,49 @@ impl EthereumClient {
 
     /// Gets the total holder count for a token.
     ///
-    /// Note: This is estimated from the available holder data.
-    /// For accurate counts, a specialized API endpoint would be needed.
+    /// Uses Etherscan token holder list endpoint to estimate the count.
+    /// If the API returns a full page at the max limit, the count is approximate.
     pub async fn get_token_holder_count(&self, token_address: &str) -> Result<u64> {
-        // Etherscan doesn't provide a direct holder count endpoint
-        // We can estimate by fetching a page of holders and checking if there are more
-        let holders = self.get_token_holders(token_address, 1).await?;
+        // First try to get a large page of holders - the page size tells us if there are more
+        let max_page_size: u32 = 1000;
+        let holders = self.get_token_holders(token_address, max_page_size).await?;
 
-        // If we got holders, there's at least that many
-        // For a proper count, you'd need a different data source
         if holders.is_empty() {
-            Ok(0)
+            return Ok(0);
+        }
+
+        let count = holders.len() as u64;
+
+        if count < max_page_size as u64 {
+            // We got all holders - this is the exact count
+            Ok(count)
         } else {
-            // Return a placeholder - in production, use a service like Moralis or Alchemy
-            Ok(1000) // Placeholder
+            // The result was capped - there are at least this many holders.
+            // Try fetching additional pages to refine the estimate.
+            let mut total = count;
+            let mut page = 2u32;
+            loop {
+                let url = self.build_api_url(&format!(
+                    "module=token&action=tokenholderlist&contractaddress={}&page={}&offset={}",
+                    token_address, page, max_page_size
+                ));
+                let response: std::result::Result<ApiResponse<Vec<TokenHolderItem>>, _> =
+                    self.client.get(&url).send().await?.json().await;
+
+                match response {
+                    Ok(api_resp) if api_resp.status == "1" => {
+                        let page_count = api_resp.result.len() as u64;
+                        total += page_count;
+                        if page_count < max_page_size as u64 || page >= 10 {
+                            // Got a partial page (end of list) or hit our max pages limit
+                            break;
+                        }
+                        page += 1;
+                    }
+                    _ => break,
+                }
+            }
+            Ok(total)
         }
     }
 }
