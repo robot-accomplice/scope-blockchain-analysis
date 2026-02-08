@@ -226,20 +226,61 @@ release:
     
     # Run tests to ensure everything works
     echo ""
-    echo "Step 3/6: Running tests..."
+    echo "Step 3/7: Running tests..."
     cargo test --quiet
     echo "✓ All tests passed"
     
+    # Check code coverage
+    echo ""
+    echo "Step 4/7: Checking code coverage (minimum 80%)..."
+    
+    # Check if cargo-tarpaulin is installed
+    if ! command -v cargo-tarpaulin &> /dev/null; then
+        echo "⚠️  cargo-tarpaulin not found. Installing..."
+        cargo install cargo-tarpaulin
+    fi
+    
+    # Generate coverage and extract percentage
+    COVERAGE_OUTPUT=$(cargo tarpaulin --out Stdout 2>&1)
+    COVERAGE_PCT=$(echo "$COVERAGE_OUTPUT" | grep -o '[0-9]\+\.[0-9]\+% coverage' | head -1 | sed 's/% coverage//')
+    
+    echo "Current coverage: $COVERAGE_PCT%"
+    
+    # Compare coverage (using bc for float comparison)
+    if command -v bc &> /dev/null; then
+        COVERAGE_OK=$(echo "$COVERAGE_PCT >= 80.0" | bc)
+        if [ "$COVERAGE_OK" -eq 0 ]; then
+            echo ""
+            echo "❌ ERROR: Coverage $COVERAGE_PCT% is below 80% threshold"
+            echo "Release blocked. Add more tests to reach 80% coverage."
+            echo ""
+            echo "Top uncovered modules:"
+            echo "$COVERAGE_OUTPUT" | grep -E '^\|\| src/' | head -10
+            echo ""
+            read -p "Continue anyway? (y/N): " FORCE_CONTINUE
+            if [ "$FORCE_CONTINUE" != "y" ] && [ "$FORCE_CONTINUE" != "Y" ]; then
+                echo "Release aborted."
+                exit 1
+            fi
+            echo "⚠️  Continuing with insufficient coverage (override)"
+        else
+            echo "✓ Coverage check passed ($COVERAGE_PCT% >= 80%)"
+        fi
+    else
+        echo "⚠️  bc not installed, skipping coverage check"
+        echo "   Install with: brew install bc (macOS) or apt-get install bc (Linux)"
+    fi
+    
     # Commit changes
     echo ""
-    echo "Step 4/6: Committing version bump..."
+    echo "Step 5/7: Committing version bump..."
     git add Cargo.toml Cargo.lock CHANGELOG.md
     git commit -m "Release v$NEW_VERSION"
     echo "✓ Changes committed"
     
     # Create and push tag
     echo ""
-    echo "Step 5/6: Creating and pushing git tag..."
+    echo "Step 6/7: Creating and pushing git tag..."
     git tag -a "v$NEW_VERSION" -m "Release version $NEW_VERSION"
     git push origin main
     git push origin "v$NEW_VERSION"
@@ -276,7 +317,7 @@ release:
     
     # Publish to crates.io
     echo ""
-    echo "Step 6/6: Publishing to crates.io..."
+    echo "Step 7/7: Publishing to crates.io..."
     echo ""
     read -p "Publish v$NEW_VERSION to crates.io? (y/n): " PUBLISH
     
