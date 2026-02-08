@@ -70,7 +70,7 @@ pub struct RiskAssessment {
     pub recommendations: Vec<String>,
 }
 
-use super::datasource::{BlockchainDataClient, PatternAnalysis, analyze_patterns};
+use super::datasource::{BlockchainDataClient, analyze_patterns};
 
 /// Risk scoring engine configuration
 #[derive(Debug)]
@@ -290,7 +290,7 @@ impl RiskEngine {
     }
 
     /// Identify if address belongs to known entity
-    async fn identify_entity(&self, address: &str, chain: &str) -> anyhow::Result<RiskFactor> {
+    async fn identify_entity(&self, address: &str, _chain: &str) -> anyhow::Result<RiskFactor> {
         let mut evidence = Vec::new();
         let mut score: f32 = 2.0;
 

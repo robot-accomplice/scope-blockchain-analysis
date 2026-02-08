@@ -6,7 +6,6 @@
 pub mod datasource;
 pub mod risk;
 
-use datasource::{BlockchainDataClient, DataSources};
 use risk::{RiskEngine, RiskAssessment};
 
 /// Main compliance analyzer

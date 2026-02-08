@@ -3,7 +3,6 @@
 //! Integrates with external APIs to fetch real blockchain data for risk analysis.
 
 use serde::Deserialize;
-use std::collections::HashMap;
 
 /// Configuration for external data sources
 #[derive(Debug, Clone)]
@@ -158,7 +157,7 @@ impl BlockchainDataClient {
     pub async fn trace_transaction(
         &self,
         tx_hash: &str,
-        depth: u32,
+        _depth: u32,
     ) -> anyhow::Result<TransactionTrace> {
         let mut trace = TransactionTrace {
             root_hash: tx_hash.to_string(),
@@ -172,7 +171,7 @@ impl BlockchainDataClient {
             self.sources.etherscan_key()
         );
 
-        let response = self.http_client
+        let _response = self.http_client
             .get(&url)
             .send()
             .await?;
