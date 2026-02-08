@@ -2,11 +2,20 @@
 name = "bcc"
 version = "0.1.0"
 edition = "2024"
+authors = ["Jon Machen <jon@palmusd.com>"]
 description = "Blockchain Crawler CLI - A production-grade tool for blockchain data analysis, portfolio tracking, and transaction investigation"
 license = "MIT"
 readme = "README.md"
-keywords = ["blockchain", "ethereum", "cli", "analysis", "crypto"]
+repository = "https://github.com/robot-accomplice/bcc"
+homepage = "https://github.com/robot-accomplice/bcc"
+keywords = ["blockchain", "ethereum", "cli", "analysis", "crypto", "compliance"]
 categories = ["command-line-utilities", "cryptography::cryptocurrencies"]
+exclude = [
+    ".github/",
+    "tests/fixtures/",
+    "*.md",
+    "justfile",
+]
 
 [lib]
 name = "bcc"

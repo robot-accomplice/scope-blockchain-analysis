@@ -334,6 +334,6 @@ mod tests {
 
         let analysis = analyze_patterns(&txs);
         assert_eq!(analysis.total_transactions, 2);
-        assert_eq!(analysis.velocity_score, 1.0);
+        assert_eq!(analysis.velocity_score, 2.0); // 2 transactions over 1 day
     }
 }
