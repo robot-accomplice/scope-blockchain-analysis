@@ -1,6 +1,6 @@
 # Scope Blockchain Analysis
 
-[![CI](https://github.com/robot-accomplice/bca/actions/workflows/ci.yml/badge.svg)](https://github.com/robot-accomplice/bca/actions/workflows/ci.yml)
+[![CI](https://github.com/robot-accomplice/scope-blockchain-analysis/actions/workflows/ci.yml/badge.svg)](https://github.com/robot-accomplice/scope-blockchain-analysis/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org/)
 
@@ -24,7 +24,7 @@ A production-grade command-line tool for blockchain data analysis, portfolio tra
 
 ```bash
 # Clone the repository
-git clone https://github.com/robot-accomplice/bca.git
+git clone https://github.com/robot-accomplice/scope-blockchain-analysis.git
 cd bca
 
 # Build and install

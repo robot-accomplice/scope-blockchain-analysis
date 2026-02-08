@@ -32,7 +32,7 @@ jobs:
         uses: codecov/codecov-action@v4
         with:
           use_oidc: true
-          slug: robot-accomplice/bca
+          slug: robot-accomplice/scope-blockchain-analysis
           files: ./cobertura.xml
           fail_ci_if_error: false
           verbose: true

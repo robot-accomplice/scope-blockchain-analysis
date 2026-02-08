@@ -6,9 +6,9 @@ authors = ["Jon Machen <jon@palmusd.com>"]
 description = "Scope Blockchain Analysis - A production-grade tool for blockchain data analysis, portfolio tracking, and transaction investigation"
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/robot-accomplice/bca"
-homepage = "https://github.com/robot-accomplice/bca"
-keywords = ["blockchain", "ethereum", "cli", "analysis", "crypto", "compliance"]
+repository = "https://github.com/robot-accomplice/scope-blockchain-analysis"
+homepage = "https://github.com/robot-accomplice/scope-blockchain-analysis"
+keywords = ["blockchain", "ethereum", "cli", "analysis", "crypto"]
 categories = ["command-line-utilities", "cryptography::cryptocurrencies"]
 exclude = [
     ".github/",

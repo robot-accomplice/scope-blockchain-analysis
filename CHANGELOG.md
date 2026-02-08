@@ -47,8 +47,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Configuration system with YAML support
 - Support for ERC-20, SPL, and TRC-20 tokens
 
-[Unreleased]: https://github.com/robot-accomplice/bca/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/robot-accomplice/bca/releases/tag/v0.1.0
-[0.2.0]: https://github.com/robot-accomplice/bca/compare/v0.1.0...v0.2.0
-[0.2.0]: https://github.com/robot-accomplice/bca/compare/v0.2.0...v0.2.0
-[0.2.1]: https://github.com/robot-accomplice/bca/compare/v0.2.0...v0.2.1
+[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/releases/tag/v0.1.0
+[0.2.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.1.0...v0.2.0
+[0.2.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.2.0...v0.2.0
+[0.2.1]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.2.0...v0.2.1

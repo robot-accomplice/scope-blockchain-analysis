@@ -218,9 +218,9 @@ release:
     awk -v ver="$NEW_VERSION" -v dt="$TODAY" '{print} /^## \[Unreleased\]/ {print ""; print "## [" ver "] - " dt}' CHANGELOG.md > CHANGELOG.tmp && mv CHANGELOG.tmp CHANGELOG.md
     
     # Update comparison links at bottom
-    OLD_LINK="[Unreleased]: https://github.com/robot-accomplice/bca/compare/v$CURRENT_VERSION...HEAD"
-    NEW_LINK="[Unreleased]: https://github.com/robot-accomplice/bca/compare/v$NEW_VERSION...HEAD"
-    VER_LINK="[$NEW_VERSION]: https://github.com/robot-accomplice/bca/compare/v$CURRENT_VERSION...v$NEW_VERSION"
+    OLD_LINK="[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v$CURRENT_VERSION...HEAD"
+    NEW_LINK="[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v$NEW_VERSION...HEAD"
+    VER_LINK="[$NEW_VERSION]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v$CURRENT_VERSION...v$NEW_VERSION"
     sed -i '' "s#$OLD_LINK#$NEW_LINK#" CHANGELOG.md
     echo "$VER_LINK" >> CHANGELOG.md
     
@@ -318,7 +318,7 @@ release:
     echo "  - macOS x64 binary"
     echo "  - macOS ARM64 binary"
     echo ""
-    echo "Check progress at: https://github.com/robot-accomplice/bca/actions"
+    echo "Check progress at: https://github.com/robot-accomplice/scope-blockchain-analysis/actions"
     echo ""
     read -p "Wait for GitHub Actions to complete before publishing? (y/n): " WAIT
     
@@ -331,7 +331,7 @@ release:
         # Poll for workflow completion (simplified)
         sleep 5
         echo "Workflow started. Check status:"
-        echo "https://github.com/robot-accomplice/bca/actions"
+        echo "https://github.com/robot-accomplice/scope-blockchain-analysis/actions"
         echo ""
         read -p "Press Enter when GitHub Actions workflow has completed..."
     fi
@@ -358,7 +358,7 @@ release:
     
     echo ""
     echo "Next steps:"
-    echo "  1. Check the GitHub release: https://github.com/robot-accomplice/bca/releases"
+    echo "  1. Check the GitHub release: https://github.com/robot-accomplice/scope-blockchain-analysis/releases"
     echo "  2. Verify binaries are attached"
     echo "  3. Update release notes if needed"
     echo ""

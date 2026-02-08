@@ -4,7 +4,7 @@ This document describes how to publish Scope releases and the crate to crates.io
 
 ## Prerequisites
 
-- GitHub account with access to `robot-accomplice/bca` repository
+- GitHub account with access to `robot-accomplice/scope-blockchain-analysis` repository
 - crates.io account with publish permissions (for crate publishing)
 - `cargo` and `rust` installed locally
 
@@ -72,7 +72,7 @@ git push origin v0.2.0
 ### 4. Review GitHub Release
 
 The release workflow will create a draft release. Review it at:
-https://github.com/robot-accomplice/bca/releases
+https://github.com/robot-accomplice/scope-blockchain-analysis/releases
 
 - Edit release notes
 - Verify all binary assets are attached
@@ -126,7 +126,7 @@ Common issues:
 ### Binary build fails
 
 Check the Actions logs at:
-https://github.com/robot-accomplice/bca/actions
+https://github.com/robot-accomplice/scope-blockchain-analysis/actions
 
 ### Crate name taken
 
@@ -149,14 +149,14 @@ Scope uses Codecov for coverage reporting. Target: **80%+ coverage** before publ
 Scope uses **OIDC authentication** with Codecov — no static tokens needed.
 
 1. **Sign up for Codecov**: https://about.codecov.io/
-2. **Add repository**: Connect `robot-accomplice/bca` GitHub repo
+2. **Add repository**: Connect `robot-accomplice/scope-blockchain-analysis` GitHub repo
 3. **Enable OIDC**: Already configured in `.github/workflows/coverage.yml`
 4. **No secrets required** — OIDC handles authentication automatically
 
 ### Alternative: Token-Based (If OIDC Fails)
 
 If OIDC doesn't work:
-1. Get token from: https://app.codecov.io/gh/robot-accomplice/bca/settings
+1. Get token from: https://app.codecov.io/gh/robot-accomplice/scope-blockchain-analysis/settings
 2. Add GitHub Secret: `CODECOV_TOKEN`
 3. Edit workflow: Remove `use_oidc: true` and uncomment token line
 
@@ -164,7 +164,7 @@ If OIDC doesn't work:
 
 Add to README.md after setup:
 ```markdown
-[![codecov](https://codecov.io/gh/robot-accomplice/bca/branch/main/graph/badge.svg)](https://codecov.io/gh/robot-accomplice/bca)
+[![codecov](https://codecov.io/gh/robot-accomplice/scope-blockchain-analysis/branch/main/graph/badge.svg)](https://codecov.io/gh/robot-accomplice/scope-blockchain-analysis)
 ```
 
 ### Running Coverage Locally
