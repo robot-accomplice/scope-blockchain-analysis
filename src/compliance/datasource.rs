@@ -572,10 +572,10 @@ mod tests {
         // Mix of round numbers and non-round: 2 out of 5 rounds = not over half
         let txs = vec![
             create_test_tx("1609459200", "1.0"),   // round
-            create_test_tx("1609459300", "2.345"),  // not round
-            create_test_tx("1609459400", "5.0"),    // round
-            create_test_tx("1609459500", "0.123"),  // not round
-            create_test_tx("1609459600", "7.891"),  // not round
+            create_test_tx("1609459300", "2.345"), // not round
+            create_test_tx("1609459400", "5.0"),   // round
+            create_test_tx("1609459500", "0.123"), // not round
+            create_test_tx("1609459600", "7.891"), // not round
         ];
         let analysis = analyze_patterns(&txs);
         assert!(!analysis.round_number_pattern); // 2 out of 5 is not > half

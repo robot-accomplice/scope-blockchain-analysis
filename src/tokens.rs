@@ -352,9 +352,7 @@ mod tests {
             "DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy"
         ));
         // System program address
-        assert!(TokenAliases::is_address(
-            "11111111111111111111111111111111"
-        ));
+        assert!(TokenAliases::is_address("11111111111111111111111111111111"));
     }
 
     #[test]
@@ -426,7 +424,12 @@ mod tests {
         let mut aliases = TokenAliases::default();
         // Add 25 tokens, recent should be capped at 20
         for i in 0..25 {
-            aliases.add(&format!("T{}", i), "ethereum", &format!("0x{}...", i), &format!("Token {}", i));
+            aliases.add(
+                &format!("T{}", i),
+                "ethereum",
+                &format!("0x{}...", i),
+                &format!("Token {}", i),
+            );
         }
         assert_eq!(aliases.recent().len(), 20);
         // The most recent should be T24

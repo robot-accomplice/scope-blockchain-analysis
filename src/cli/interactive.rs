@@ -1786,14 +1786,9 @@ mod tests {
         let factory = mock_factory();
         let mut ctx = SessionContext::default();
         // Add first
-        execute_input(
-            "portfolio add 0xtest",
-            &mut ctx,
-            &config,
-            &factory,
-        )
-        .await
-        .unwrap();
+        execute_input("portfolio add 0xtest", &mut ctx, &config, &factory)
+            .await
+            .unwrap();
         // Then summary
         let result = execute_input("portfolio summary", &mut ctx, &config, &factory).await;
         assert!(result.is_ok());

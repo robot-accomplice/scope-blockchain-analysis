@@ -167,7 +167,10 @@ mod tests {
             .analyze_address("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2", "ethereum")
             .await
             .unwrap();
-        assert_eq!(assessment.address, "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2");
+        assert_eq!(
+            assessment.address,
+            "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2"
+        );
         assert_eq!(assessment.chain, "ethereum");
         assert!(!assessment.factors.is_empty());
     }

@@ -841,17 +841,36 @@ mod tests {
     #[test]
     fn test_show_status_with_multiple_keys() {
         let mut config = Config::default();
-        config.chains.api_keys.insert("etherscan".to_string(), "abc123def456789".to_string());
-        config.chains.api_keys.insert("polygonscan".to_string(), "poly_key_12345".to_string());
-        config.chains.api_keys.insert("bscscan".to_string(), "bsc".to_string()); // Short key
+        config
+            .chains
+            .api_keys
+            .insert("etherscan".to_string(), "abc123def456789".to_string());
+        config
+            .chains
+            .api_keys
+            .insert("polygonscan".to_string(), "poly_key_12345".to_string());
+        config
+            .chains
+            .api_keys
+            .insert("bscscan".to_string(), "bsc".to_string()); // Short key
         show_status(&config);
     }
 
     #[test]
     fn test_show_status_with_all_keys() {
         let mut config = Config::default();
-        for key in ["etherscan", "bscscan", "polygonscan", "arbiscan", "basescan", "optimism"] {
-            config.chains.api_keys.insert(key.to_string(), format!("{}_key_12345678", key));
+        for key in [
+            "etherscan",
+            "bscscan",
+            "polygonscan",
+            "arbiscan",
+            "basescan",
+            "optimism",
+        ] {
+            config
+                .chains
+                .api_keys
+                .insert(key.to_string(), format!("{}_key_12345678", key));
         }
         // No missing keys → should skip "where to get" section
         show_status(&config);
@@ -869,8 +888,18 @@ mod tests {
     #[test]
     fn test_get_api_key_items_all_set() {
         let mut config = Config::default();
-        for key in ["etherscan", "bscscan", "polygonscan", "arbiscan", "basescan", "optimism"] {
-            config.chains.api_keys.insert(key.to_string(), format!("{}_key_12345678", key));
+        for key in [
+            "etherscan",
+            "bscscan",
+            "polygonscan",
+            "arbiscan",
+            "basescan",
+            "optimism",
+        ] {
+            config
+                .chains
+                .api_keys
+                .insert(key.to_string(), format!("{}_key_12345678", key));
         }
         let items = get_api_key_items(&config);
         assert_eq!(items.len(), 6);
@@ -882,7 +911,14 @@ mod tests {
 
     #[test]
     fn test_get_api_key_info_features_not_empty() {
-        for key in ["etherscan", "bscscan", "polygonscan", "arbiscan", "basescan", "optimism"] {
+        for key in [
+            "etherscan",
+            "bscscan",
+            "polygonscan",
+            "arbiscan",
+            "basescan",
+            "optimism",
+        ] {
             let info = get_api_key_info(key);
             assert!(!info.features.is_empty());
             assert!(!info.signup_steps.is_empty());

@@ -2126,8 +2126,14 @@ mod tests {
         analytics.price_change_24h = 0.0;
         analytics.price_change_7d = 0.0;
         analytics.price_history = vec![
-            PricePoint { timestamp: 1700000000, price: 1.0 },
-            PricePoint { timestamp: 1700003600, price: 1.5 },
+            PricePoint {
+                timestamp: 1700000000,
+                price: 1.0,
+            },
+            PricePoint {
+                timestamp: 1700003600,
+                price: 1.5,
+            },
         ];
         let chart = generate_price_chart(&analytics);
         assert!(chart.contains("Price History")); // Falls back to history chart

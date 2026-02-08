@@ -532,7 +532,10 @@ chains:
     #[test]
     fn test_config_serialization_roundtrip() {
         let mut config = Config::default();
-        config.chains.api_keys.insert("etherscan".to_string(), "test_key".to_string());
+        config
+            .chains
+            .api_keys
+            .insert("etherscan".to_string(), "test_key".to_string());
         config.output.format = OutputFormat::Json;
         config.output.color = false;
         config.portfolio.data_dir = Some(PathBuf::from("/custom"));

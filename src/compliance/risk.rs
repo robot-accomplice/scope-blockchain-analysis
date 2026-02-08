@@ -641,10 +641,7 @@ mod tests {
     #[tokio::test]
     async fn test_assess_address_has_all_factors() {
         let engine = RiskEngine::new();
-        let assessment = engine
-            .assess_address("0xtest", "ethereum")
-            .await
-            .unwrap();
+        let assessment = engine.assess_address("0xtest", "ethereum").await.unwrap();
 
         // Without a data client, should have 4 factors (behavior, association, source, entity)
         assert_eq!(assessment.factors.len(), 4);
@@ -659,16 +656,21 @@ mod tests {
     #[tokio::test]
     async fn test_assess_address_factors_have_evidence() {
         let engine = RiskEngine::new();
-        let assessment = engine
-            .assess_address("0xtest", "ethereum")
-            .await
-            .unwrap();
+        let assessment = engine.assess_address("0xtest", "ethereum").await.unwrap();
 
         for factor in &assessment.factors {
-            assert!(!factor.evidence.is_empty(), "Factor {} has no evidence", factor.name);
+            assert!(
+                !factor.evidence.is_empty(),
+                "Factor {} has no evidence",
+                factor.name
+            );
             // Without data client, evidence should mention "No data client configured"
             assert!(
-                factor.evidence.iter().any(|e| e.contains("No data client configured") || e.contains("not in known entity")),
+                factor
+                    .evidence
+                    .iter()
+                    .any(|e| e.contains("No data client configured")
+                        || e.contains("not in known entity")),
                 "Factor {} doesn't have expected evidence: {:?}",
                 factor.name,
                 factor.evidence
@@ -679,10 +681,7 @@ mod tests {
     #[tokio::test]
     async fn test_assess_address_score_in_bounds() {
         let engine = RiskEngine::new();
-        let assessment = engine
-            .assess_address("0xtest", "ethereum")
-            .await
-            .unwrap();
+        let assessment = engine.assess_address("0xtest", "ethereum").await.unwrap();
 
         assert!(assessment.overall_score >= 0.0);
         assert!(assessment.overall_score <= 10.0);
