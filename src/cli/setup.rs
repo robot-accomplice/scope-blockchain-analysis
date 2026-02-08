@@ -990,5 +990,4 @@ mod tests {
         };
         assert!(args.reset);
     }
-
 }

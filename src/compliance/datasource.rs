@@ -629,7 +629,12 @@ mod tests {
         let client = BlockchainDataClient::new(sources);
         let result = client.get_transactions("0xabc", "polygon").await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not yet supported"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("not yet supported")
+        );
     }
 
     #[test]
@@ -650,7 +655,10 @@ mod tests {
 
     fn mock_etherscan_tx_response(txs: &[EtherscanTransaction]) -> String {
         let result_json = serde_json::to_string(txs).unwrap();
-        format!(r#"{{"status":"1","message":"OK","result":{}}}"#, result_json)
+        format!(
+            r#"{{"status":"1","message":"OK","result":{}}}"#,
+            result_json
+        )
     }
 
     #[tokio::test]
@@ -688,7 +696,12 @@ mod tests {
         let client = BlockchainDataClient::with_base_url(sources, &server.url());
         let result = client.get_transactions("0xabc", "ethereum").await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Etherscan API error"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Etherscan API error")
+        );
     }
 
     #[tokio::test]

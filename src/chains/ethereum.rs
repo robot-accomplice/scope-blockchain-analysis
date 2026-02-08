@@ -2372,7 +2372,10 @@ mod tests {
             .await;
 
         let client = EthereumClient::with_base_url(&server.url());
-        let holders = client.get_token_holders("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", 10).await.unwrap();
+        let holders = client
+            .get_token_holders("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", 10)
+            .await
+            .unwrap();
         assert!(holders.is_empty());
     }
 
@@ -2388,7 +2391,9 @@ mod tests {
             .await;
 
         let client = EthereumClient::with_base_url(&server.url());
-        let result = client.get_token_holders("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", 10).await;
+        let result = client
+            .get_token_holders("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", 10)
+            .await;
         assert!(result.is_err());
     }
 
@@ -2399,15 +2404,20 @@ mod tests {
             .mock("GET", mockito::Matcher::Any)
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"status":"1","message":"OK","result":[
+            .with_body(
+                r#"{"status":"1","message":"OK","result":[
                 {"TokenHolderAddress":"0xHolder1","TokenHolderQuantity":"1000000000000000000"},
                 {"TokenHolderAddress":"0xHolder2","TokenHolderQuantity":"500000000000000000"}
-            ]}"#)
+            ]}"#,
+            )
             .create_async()
             .await;
 
         let client = EthereumClient::with_base_url(&server.url());
-        let holders = client.get_token_holders("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", 10).await.unwrap();
+        let holders = client
+            .get_token_holders("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", 10)
+            .await
+            .unwrap();
         assert_eq!(holders.len(), 2);
         assert_eq!(holders[0].rank, 1);
         assert_eq!(holders[1].rank, 2);
@@ -2427,7 +2437,10 @@ mod tests {
             .await;
 
         let client = EthereumClient::with_base_url(&server.url());
-        let token = client.get_token_info("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").await.unwrap();
+        let token = client
+            .get_token_info("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
+            .await
+            .unwrap();
         assert_eq!(token.symbol, "UNKNOWN");
     }
 
@@ -2438,7 +2451,8 @@ mod tests {
             .mock("GET", mockito::Matcher::Any)
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"jsonrpc":"2.0","id":1,"result":{
+            .with_body(
+                r#"{"jsonrpc":"2.0","id":1,"result":{
                 "hash":"0xabc123def456789012345678901234567890123456789012345678901234abcd",
                 "from":"0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
                 "to":"0xB0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
@@ -2448,7 +2462,8 @@ mod tests {
                 "nonce":"0x5",
                 "input":"0x",
                 "blockNumber":null
-            }}"#)
+            }}"#,
+            )
             .create_async()
             .await;
 
@@ -2482,7 +2497,8 @@ mod tests {
             .mock("GET", mockito::Matcher::Any)
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"jsonrpc":"2.0","id":1,"result":{
+            .with_body(
+                r#"{"jsonrpc":"2.0","id":1,"result":{
                 "hash":"0xabc123def456789012345678901234567890123456789012345678901234abcd",
                 "from":"0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
                 "to":"0xB0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
@@ -2492,7 +2508,8 @@ mod tests {
                 "nonce":"0x5",
                 "input":"0x",
                 "blockNumber":"0xf4240"
-            }}"#)
+            }}"#,
+            )
             .create_async()
             .await;
 

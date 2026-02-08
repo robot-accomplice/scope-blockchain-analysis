@@ -1386,7 +1386,8 @@ mod tests {
             .mock("GET", mockito::Matcher::Any)
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"pairs":[
+            .with_body(
+                r#"{"pairs":[
                 {
                     "chainId":"ethereum",
                     "dexId":"uniswap",
@@ -1407,7 +1408,8 @@ mod tests {
                     "liquidity":{"usd":2000000.0},
                     "volume":{"h24":500000.0}
                 }
-            ]}"#)
+            ]}"#,
+            )
             .create_async()
             .await;
 
@@ -1428,7 +1430,8 @@ mod tests {
             .mock("GET", mockito::Matcher::Any)
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"pairs":[
+            .with_body(
+                r#"{"pairs":[
                 {
                     "chainId":"ethereum",
                     "dexId":"uniswap",
@@ -1449,7 +1452,8 @@ mod tests {
                     "liquidity":{"usd":500000.0},
                     "volume":{"h24":50000.0}
                 }
-            ]}"#)
+            ]}"#,
+            )
             .create_async()
             .await;
 
@@ -1468,7 +1472,8 @@ mod tests {
             .mock("GET", mockito::Matcher::Any)
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"pairs":[{
+            .with_body(
+                r#"{"pairs":[{
                 "chainId":"ethereum",
                 "dexId":"uniswap",
                 "pairAddress":"0xpair",
@@ -1477,7 +1482,8 @@ mod tests {
                 "priceUsd":"50.0",
                 "liquidity":{"usd":1000000.0},
                 "volume":{"h24":100000.0}
-            }]}"#)
+            }]}"#,
+            )
             .create_async()
             .await;
 

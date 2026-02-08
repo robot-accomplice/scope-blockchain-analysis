@@ -831,7 +831,10 @@ mod tests {
     #[tokio::test]
     async fn test_assess_address_generates_all_factors() {
         let engine = RiskEngine::new();
-        let assessment = engine.assess_address("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2", "ethereum").await.unwrap();
+        let assessment = engine
+            .assess_address("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2", "ethereum")
+            .await
+            .unwrap();
         // Should have 4 risk factors (behavior, associations, sources, entity)
         assert_eq!(assessment.factors.len(), 4);
         // Check factor names
@@ -901,11 +904,16 @@ mod tests {
     #[test]
     fn test_analyze_patterns_structuring() {
         // Create transactions with values just under 10000 (structuring pattern)
-        let txs: Vec<datasource::EtherscanTransaction> = (0..5).map(|i| {
-            let mut tx = make_test_tx(&format!("{}", 1700000000 + i * 3600), "9.5");
-            tx.value = format!("{}", (9500 + i * 100) as u128 * 1_000_000_000_000_000_000u128);
-            tx
-        }).collect();
+        let txs: Vec<datasource::EtherscanTransaction> = (0..5)
+            .map(|i| {
+                let mut tx = make_test_tx(&format!("{}", 1700000000 + i * 3600), "9.5");
+                tx.value = format!(
+                    "{}",
+                    (9500 + i * 100) as u128 * 1_000_000_000_000_000_000u128
+                );
+                tx
+            })
+            .collect();
         let analysis = analyze_patterns(&txs);
         assert_eq!(analysis.total_transactions, 5);
     }
@@ -913,12 +921,14 @@ mod tests {
     #[test]
     fn test_analyze_patterns_round_numbers() {
         // Create transactions with round ETH values
-        let txs: Vec<datasource::EtherscanTransaction> = (0..10).map(|i| {
-            let mut tx = make_test_tx(&format!("{}", 1700000000 + i * 3600), "1.0");
-            // 1 ETH = 1e18 wei, 10 ETH = 10e18 wei, etc.
-            tx.value = format!("{}", 10u128.pow(18) * (i + 1) as u128);
-            tx
-        }).collect();
+        let txs: Vec<datasource::EtherscanTransaction> = (0..10)
+            .map(|i| {
+                let mut tx = make_test_tx(&format!("{}", 1700000000 + i * 3600), "1.0");
+                // 1 ETH = 1e18 wei, 10 ETH = 10e18 wei, etc.
+                tx.value = format!("{}", 10u128.pow(18) * (i + 1) as u128);
+                tx
+            })
+            .collect();
         let analysis = analyze_patterns(&txs);
         assert!(analysis.round_number_pattern);
     }
@@ -927,16 +937,21 @@ mod tests {
     fn test_analyze_patterns_high_velocity() {
         // Create many transactions spread over 2 days (high velocity)
         // Velocity = tx_count / days; 100 txs over 2 days = 50 tx/day
-        let txs: Vec<datasource::EtherscanTransaction> = (0..100).map(|i| {
-            make_test_tx(&format!("{}", 1700000000 + i * 1800), "0.1") // 100 txs over ~2 days
-        }).collect();
+        let txs: Vec<datasource::EtherscanTransaction> = (0..100)
+            .map(|i| {
+                make_test_tx(&format!("{}", 1700000000 + i * 1800), "0.1") // 100 txs over ~2 days
+            })
+            .collect();
         let analysis = analyze_patterns(&txs);
         assert!(analysis.velocity_score > 1.0); // More than 1 tx per day
     }
 
     fn mock_etherscan_tx_response(txs: &[datasource::EtherscanTransaction]) -> String {
         let result_json = serde_json::to_string(txs).unwrap();
-        format!(r#"{{"status":"1","message":"OK","result":{}}}"#, result_json)
+        format!(
+            r#"{{"status":"1","message":"OK","result":{}}}"#,
+            result_json
+        )
     }
 
     #[tokio::test]
@@ -944,22 +959,32 @@ mod tests {
         let mut server = mockito::Server::new_async().await;
 
         // Create test transactions with various patterns
-        let txs: Vec<datasource::EtherscanTransaction> = (0..20).map(|i| {
-            let mut tx = make_test_tx(&format!("{}", 1700000000 + i * 3600), "1.0");
-            tx.from = if i % 2 == 0 {
-                "0xSender".to_string()
-            } else {
-                "0xAddr".to_string()
-            };
-            tx.to = if i % 2 == 0 {
-                "0xAddr".to_string()
-            } else {
-                format!("0xRecipient{}", i)
-            };
-            tx.is_error = if i == 5 { "1".to_string() } else { "0".to_string() };
-            tx.contract_address = if i == 10 { "0xContract".to_string() } else { String::new() };
-            tx
-        }).collect();
+        let txs: Vec<datasource::EtherscanTransaction> = (0..20)
+            .map(|i| {
+                let mut tx = make_test_tx(&format!("{}", 1700000000 + i * 3600), "1.0");
+                tx.from = if i % 2 == 0 {
+                    "0xSender".to_string()
+                } else {
+                    "0xAddr".to_string()
+                };
+                tx.to = if i % 2 == 0 {
+                    "0xAddr".to_string()
+                } else {
+                    format!("0xRecipient{}", i)
+                };
+                tx.is_error = if i == 5 {
+                    "1".to_string()
+                } else {
+                    "0".to_string()
+                };
+                tx.contract_address = if i == 10 {
+                    "0xContract".to_string()
+                } else {
+                    String::new()
+                };
+                tx
+            })
+            .collect();
 
         let body = mock_etherscan_tx_response(&txs);
         let _mock = server
@@ -981,15 +1006,27 @@ mod tests {
         assert!(!assessment.recommendations.is_empty());
 
         // Behavioral factor should have evidence about analyzed transactions
-        let behavior = assessment.factors.iter().find(|f| f.name == "Behavioral Patterns").unwrap();
+        let behavior = assessment
+            .factors
+            .iter()
+            .find(|f| f.name == "Behavioral Patterns")
+            .unwrap();
         assert!(behavior.evidence.iter().any(|e| e.contains("Analyzed")));
 
         // Association factor should have counterparty evidence
-        let assoc = assessment.factors.iter().find(|f| f.name == "Address Associations").unwrap();
+        let assoc = assessment
+            .factors
+            .iter()
+            .find(|f| f.name == "Address Associations")
+            .unwrap();
         assert!(assoc.evidence.iter().any(|e| e.contains("counterpart")));
 
         // Source factor should mention incoming transactions
-        let source = assessment.factors.iter().find(|f| f.name == "Source of Funds").unwrap();
+        let source = assessment
+            .factors
+            .iter()
+            .find(|f| f.name == "Source of Funds")
+            .unwrap();
         assert!(source.evidence.iter().any(|e| e.contains("incoming")));
     }
 
@@ -1012,8 +1049,17 @@ mod tests {
         // Should still produce an assessment, but with error evidence
         assert_eq!(assessment.factors.len(), 4);
         // Behavior factor should mention the error
-        let behavior = assessment.factors.iter().find(|f| f.name == "Behavioral Patterns").unwrap();
-        assert!(behavior.evidence.iter().any(|e| e.contains("Could not fetch")));
+        let behavior = assessment
+            .factors
+            .iter()
+            .find(|f| f.name == "Behavioral Patterns")
+            .unwrap();
+        assert!(
+            behavior
+                .evidence
+                .iter()
+                .any(|e| e.contains("Could not fetch"))
+        );
     }
 
     #[tokio::test]
@@ -1044,7 +1090,11 @@ mod tests {
         let assessment = engine.assess_address("0xAddr", "ethereum").await.unwrap();
 
         // Association factor should mention self-transfers
-        let assoc = assessment.factors.iter().find(|f| f.name == "Address Associations").unwrap();
+        let assoc = assessment
+            .factors
+            .iter()
+            .find(|f| f.name == "Address Associations")
+            .unwrap();
         assert!(assoc.evidence.iter().any(|e| e.contains("self-transfer")));
     }
 
@@ -1090,6 +1140,9 @@ mod tests {
             evidence: vec![],
         }];
         let recs = engine.generate_recommendations(&factors, RiskLevel::Low);
-        assert!(recs.iter().any(|r| r.contains("Address Test Factor concerns")));
+        assert!(
+            recs.iter()
+                .any(|r| r.contains("Address Test Factor concerns"))
+        );
     }
 }

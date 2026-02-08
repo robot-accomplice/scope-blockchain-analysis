@@ -993,7 +993,9 @@ mod tests {
     // Output formatting tests
     // ========================================================================
 
-    use crate::chains::{DexPair, PricePoint, Token, TokenAnalytics, TokenHolder, TokenSearchResult, TokenSocial};
+    use crate::chains::{
+        DexPair, PricePoint, Token, TokenAnalytics, TokenHolder, TokenSearchResult, TokenSocial,
+    };
 
     fn make_test_analytics(with_dex: bool) -> TokenAnalytics {
         TokenAnalytics {

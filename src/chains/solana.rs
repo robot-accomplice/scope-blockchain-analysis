@@ -1428,7 +1428,9 @@ mod tests {
             .mock("POST", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"jsonrpc":"2.0","result":{"context":{"slot":1},"value":1000000000},"id":1}"#)
+            .with_body(
+                r#"{"jsonrpc":"2.0","result":{"context":{"slot":1},"value":1000000000},"id":1}"#,
+            )
             .create_async()
             .await;
 
@@ -1462,7 +1464,8 @@ mod tests {
             .mock("POST", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"jsonrpc":"2.0","result":{"context":{"slot":1},"value":[
+            .with_body(
+                r#"{"jsonrpc":"2.0","result":{"context":{"slot":1},"value":[
                 {
                     "pubkey":"TokenAccAddr1",
                     "account":{
@@ -1481,15 +1484,22 @@ mod tests {
                         }
                     }
                 }
-            ]},"id":1}"#)
+            ]},"id":1}"#,
+            )
             .create_async()
             .await;
 
         let client = SolanaClient::with_rpc_url(&server.url());
         let chain_client: &dyn ChainClient = &client;
-        let balances = chain_client.get_token_balances(VALID_ADDRESS).await.unwrap();
+        let balances = chain_client
+            .get_token_balances(VALID_ADDRESS)
+            .await
+            .unwrap();
         assert!(!balances.is_empty());
         // Verify the mapping from SolanaTokenBalance to TokenBalance
-        assert_eq!(balances[0].token.contract_address, "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+        assert_eq!(
+            balances[0].token.contract_address,
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+        );
     }
 }

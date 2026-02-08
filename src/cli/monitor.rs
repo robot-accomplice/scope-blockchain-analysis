@@ -2929,7 +2929,12 @@ mod tests {
         let mut state = create_populated_state();
 
         // Test all combinations of time period + chart mode
-        for period in &[TimePeriod::Min15, TimePeriod::Hour1, TimePeriod::Hour6, TimePeriod::Hour24] {
+        for period in &[
+            TimePeriod::Min15,
+            TimePeriod::Hour1,
+            TimePeriod::Hour6,
+            TimePeriod::Hour24,
+        ] {
             for mode in &[ChartMode::Line, ChartMode::Candlestick] {
                 state.set_time_period(*period);
                 state.chart_mode = *mode;

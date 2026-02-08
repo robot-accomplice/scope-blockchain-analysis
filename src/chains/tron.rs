@@ -41,8 +41,7 @@ use sha2::{Digest, Sha256};
 const DEFAULT_TRON_API: &str = "https://api.trongrid.io";
 
 /// DexScreener search URL for TRX/USDT price lookup.
-const DEXSCREENER_TRX_SEARCH: &str =
-    "https://api.dexscreener.com/latest/dex/search?q=TRX%20USDT";
+const DEXSCREENER_TRX_SEARCH: &str = "https://api.dexscreener.com/latest/dex/search?q=TRX%20USDT";
 
 /// Tron native token decimals (TRX uses 6 decimals, stored as "sun").
 const TRX_DECIMALS: u8 = 6;
@@ -1217,10 +1216,14 @@ mod tests {
         let mut server = mockito::Server::new_async().await;
         let valid_hash = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
         let _mock = server
-            .mock("GET", mockito::Matcher::Regex(r"/v1/transactions/.*".to_string()))
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"/v1/transactions/.*".to_string()),
+            )
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"data":[{
+            .with_body(
+                r#"{"data":[{
                 "txID":"a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
                 "blockNumber":60000000,
                 "block_timestamp":1700000000000,
@@ -1230,7 +1233,8 @@ mod tests {
                     "amount":1000000
                 }}}]},
                 "ret":[{"contractRet":"SUCCESS"}]
-            }],"success":true}"#)
+            }],"success":true}"#,
+            )
             .create_async()
             .await;
 
@@ -1245,7 +1249,10 @@ mod tests {
         let mut server = mockito::Server::new_async().await;
         let valid_hash = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
         let _mock = server
-            .mock("GET", mockito::Matcher::Regex(r"/v1/transactions/.*".to_string()))
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"/v1/transactions/.*".to_string()),
+            )
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"data":[],"success":false,"error":"Transaction not found"}"#)
@@ -1261,10 +1268,14 @@ mod tests {
     async fn test_get_transactions_success() {
         let mut server = mockito::Server::new_async().await;
         let _mock = server
-            .mock("GET", mockito::Matcher::Regex(r"/v1/accounts/.*/transactions.*".to_string()))
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"/v1/accounts/.*/transactions.*".to_string()),
+            )
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"data":[{
+            .with_body(
+                r#"{"data":[{
                 "txID":"abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234",
                 "blockNumber":60000000,
                 "block_timestamp":1700000000000,
@@ -1273,7 +1284,8 @@ mod tests {
                     "amount":500000
                 }}}]},
                 "ret":[{"contractRet":"SUCCESS"}]
-            }],"success":true}"#)
+            }],"success":true}"#,
+            )
             .create_async()
             .await;
 
@@ -1337,7 +1349,10 @@ mod tests {
 
         let client = TronClient::with_api_url(&server.url());
         let chain_client: &dyn ChainClient = &client;
-        let balances = chain_client.get_token_balances(VALID_ADDRESS).await.unwrap();
+        let balances = chain_client
+            .get_token_balances(VALID_ADDRESS)
+            .await
+            .unwrap();
         assert_eq!(balances.len(), 1);
         // Verify the mapping from Trc20TokenBalance to TokenBalance
         assert_eq!(balances[0].token.symbol, "TRC20");
