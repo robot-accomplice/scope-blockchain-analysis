@@ -71,6 +71,9 @@ pub struct Config {
 
     /// Portfolio management configuration.
     pub portfolio: PortfolioConfig,
+
+    /// Monitor TUI configuration (layout, widgets, refresh rate).
+    pub monitor: crate::cli::monitor::MonitorConfig,
 }
 
 /// Blockchain client configuration.

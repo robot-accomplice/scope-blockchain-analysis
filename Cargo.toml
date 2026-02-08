@@ -67,7 +67,8 @@ rustyline = "14"
 
 # Terminal UI for live monitor
 ratatui = "0.30"
-crossterm = "0.29"
+crossterm = { version = "0.29", features = ["event-stream"] }
+futures = "0.3"
 sha2 = "0.10.9"
 
 [dev-dependencies]

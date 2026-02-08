@@ -13,7 +13,7 @@ A production-grade command-line tool for blockchain data analysis, portfolio tra
 - **Address Analysis**: Query balances (with USD valuation), transaction history, and token holdings for blockchain addresses
 - **Transaction Analysis**: Look up and decode blockchain transactions across all supported chains
 - **Token Crawling**: Crawl DEX data for any token -- price, volume, liquidity, holder analysis, and risk scoring with markdown report generation
-- **Live Monitoring**: Real-time TUI dashboard with price/volume/candlestick charts, buy/sell gauges, and activity logs (via interactive mode)
+- **Live Monitoring**: Real-time TUI dashboard with four layout presets (Dashboard, Chart, Feed, Compact), responsive terminal sizing, config-driven widget visibility, and price/volume/candlestick charts
 - **Portfolio Management**: Track multiple addresses across chains with labels, tags, and aggregated balance views
 - **Compliance & Risk Assessment**: Risk scoring, transaction pattern detection, taint analysis, and compliance reporting
 - **Data Export**: Export address history and portfolio data to JSON or CSV with date range filtering
@@ -195,7 +195,7 @@ Available interactive commands:
 - `address` / `addr` -- Analyze a blockchain address
 - `tx` / `transaction` -- Analyze a transaction
 - `crawl` / `token` -- Crawl token analytics
-- `monitor` / `mon` -- Live TUI dashboard with price, volume, and candlestick charts
+- `monitor` / `mon` -- Live TUI dashboard with four layout presets, widget toggles, and price/volume/candlestick charts
 - `portfolio` / `port` -- Portfolio management (add, remove, list, summary)
 - `tokens` / `aliases` -- Token alias management (add, remove, list, recent)
 - `setup` / `config` -- Configuration commands
@@ -208,6 +208,36 @@ Available interactive commands:
 - `clear` / `reset` -- Reset context to defaults
 - `help` / `?` -- Show help
 - `exit` / `quit` -- Exit interactive mode
+
+### Live Monitor
+
+The `monitor` command launches a real-time TUI dashboard. It supports four layout presets that can be switched at runtime or configured in `config.yaml`:
+
+| Preset | Description |
+|---|---|
+| **Dashboard** | Balanced 2x2 grid with all widgets (default) |
+| **Chart** | Price chart takes ~80% of the screen |
+| **Feed** | Activity log prioritized; metrics on top |
+| **Compact** | Minimal single-column view for small terminals |
+
+The monitor automatically selects the best layout for your terminal size (responsive breakpoints). Manual layout switching disables auto-selection until you press `A`.
+
+**Monitor keybindings:**
+
+| Key | Action |
+|---|---|
+| `Q` / `Esc` | Quit monitor |
+| `R` | Force refresh |
+| `P` / `Space` | Pause/resume |
+| `L` | Cycle layout forward (Dashboard -> Chart -> Feed -> Compact) |
+| `H` | Cycle layout backward |
+| `W` + `1-5` | Toggle widget visibility (1=price chart, 2=volume, 3=buy/sell, 4=metrics, 5=activity) |
+| `A` | Re-enable auto layout |
+| `C` | Toggle chart mode (line/candlestick) |
+| `T` / `Tab` | Cycle time period |
+| `1-4` | Select time period (15m, 1h, 6h, 24h) |
+| `J` / `K` | Scroll activity log |
+| `+` / `-` | Adjust refresh speed |
 
 ## Configuration
 
@@ -255,6 +285,17 @@ output:
 
 portfolio:
   data_dir: "~/.local/share/scope"
+
+# Monitor TUI configuration (all optional, shown with defaults)
+monitor:
+  layout: dashboard          # dashboard | chart-focus | feed | compact
+  refresh_seconds: 10
+  widgets:
+    price_chart: true
+    volume_chart: true
+    buy_sell_pressure: true
+    metrics_panel: true
+    activity_log: true
 ```
 
 ### Environment Variables
