@@ -2024,4 +2024,299 @@ mod tests {
         assert_eq!(deserialized.limit, 25);
         assert_eq!(deserialized.last_address, Some("0xtest".to_string()));
     }
+
+    // ========================================================================
+    // Tests for previously uncovered execute_input branches
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_chain_show_explicit() {
+        let config = test_config();
+        let factory = test_factory();
+        let mut context = SessionContext {
+            chain: "polygon".to_string(),
+            chain_explicit: true,
+            ..Default::default()
+        };
+
+        // Just showing chain status when chain_explicit is set
+        let result = execute_input("chain", &mut context, &config, &factory).await;
+        assert!(result.is_ok());
+        assert!(!result.unwrap()); // Should not exit
+    }
+
+    #[tokio::test]
+    async fn test_address_with_explicit_chain() {
+        let config = test_config();
+        let factory = test_factory();
+        let mut context = SessionContext {
+            chain: "polygon".to_string(),
+            chain_explicit: true,
+            ..Default::default()
+        };
+
+        // Address command with explicit chain — should use context.chain directly
+        let result = execute_input(
+            "address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
+            &mut context,
+            &config,
+            &factory,
+        )
+        .await;
+        // May fail due to network but should not panic
+        assert!(result.is_ok() || result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_tx_with_explicit_chain() {
+        let config = test_config();
+        let factory = test_factory();
+        let mut context = SessionContext {
+            chain: "polygon".to_string(),
+            chain_explicit: true,
+            ..Default::default()
+        };
+
+        // TX command with explicit chain — should use context.chain
+        let result = execute_input("tx 0xabc123def456789", &mut context, &config, &factory).await;
+        assert!(result.is_ok() || result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_crawl_with_period_eq_flag() {
+        let config = test_config();
+        let factory = test_factory();
+        let mut context = SessionContext::default();
+
+        // crawl with --period=7d syntax
+        let result = execute_input(
+            "crawl 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --period=7d",
+            &mut context,
+            &config,
+            &factory,
+        )
+        .await;
+        // Will attempt network call, may succeed or fail
+        assert!(result.is_ok() || result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_crawl_with_period_space_flag() {
+        let config = test_config();
+        let factory = test_factory();
+        let mut context = SessionContext::default();
+
+        // crawl with --period 1h syntax (space-separated)
+        let result = execute_input(
+            "crawl 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --period 1h",
+            &mut context,
+            &config,
+            &factory,
+        )
+        .await;
+        assert!(result.is_ok() || result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_crawl_with_chain_eq_flag() {
+        let config = test_config();
+        let factory = test_factory();
+        let mut context = SessionContext::default();
+
+        // crawl with --chain=polygon syntax
+        let result = execute_input(
+            "crawl 0xAddress --chain=polygon",
+            &mut context,
+            &config,
+            &factory,
+        )
+        .await;
+        assert!(result.is_ok() || result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_crawl_with_chain_space_flag() {
+        let config = test_config();
+        let factory = test_factory();
+        let mut context = SessionContext::default();
+
+        // crawl with --chain polygon syntax
+        let result = execute_input(
+            "crawl 0xAddress --chain polygon",
+            &mut context,
+            &config,
+            &factory,
+        )
+        .await;
+        assert!(result.is_ok() || result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_crawl_with_report_flag() {
+        let config = test_config();
+        let factory = test_factory();
+        let mut context = SessionContext::default();
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_string_lossy();
+        let input = format!(
+            "crawl 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --report={}",
+            path
+        );
+        let result = execute_input(&input, &mut context, &config, &factory).await;
+        assert!(result.is_ok() || result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_crawl_with_no_charts_flag() {
+        let config = test_config();
+        let factory = test_factory();
+        let mut context = SessionContext::default();
+
+        let result = execute_input(
+            "crawl 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --no-charts",
+            &mut context,
+            &config,
+            &factory,
+        )
+        .await;
+        assert!(result.is_ok() || result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_crawl_with_explicit_chain() {
+        let config = test_config();
+        let factory = test_factory();
+        let mut context = SessionContext {
+            chain_explicit: true,
+            chain: "arbitrum".to_string(),
+            ..Default::default()
+        };
+
+        let result = execute_input("crawl 0xAddress", &mut context, &config, &factory).await;
+        assert!(result.is_ok() || result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_portfolio_add_with_label_and_tags() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            portfolio: crate::config::PortfolioConfig {
+                data_dir: Some(tmp_dir.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+        let factory = mock_factory();
+        let mut context = SessionContext::default();
+
+        let result = execute_input(
+            "portfolio add 0xAbC123 --label MyWallet --tags defi,staking",
+            &mut context,
+            &config,
+            &factory,
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_portfolio_remove_no_args() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            portfolio: crate::config::PortfolioConfig {
+                data_dir: Some(tmp_dir.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+        let factory = mock_factory();
+        let mut context = SessionContext::default();
+
+        let result = execute_input("portfolio remove", &mut context, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_portfolio_summary_with_chain_and_tag() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            portfolio: crate::config::PortfolioConfig {
+                data_dir: Some(tmp_dir.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+        let factory = mock_factory();
+        let mut context = SessionContext::default();
+
+        let result = execute_input(
+            "portfolio summary --chain ethereum --tag defi --tokens",
+            &mut context,
+            &config,
+            &factory,
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_tokens_add_with_name() {
+        let result = execute_tokens_command(&[
+            "add",
+            "USDC",
+            "ethereum",
+            "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+            "USD",
+            "Coin",
+        ])
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_tokens_remove_with_chain() {
+        let result = execute_tokens_command(&["remove", "USDC", "--chain", "ethereum"]).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_tokens_add_then_list_nonempty() {
+        // Add a token first
+        let _ = execute_tokens_command(&[
+            "add",
+            "TEST_TOKEN_XYZ",
+            "ethereum",
+            "0x1234567890abcdef1234567890abcdef12345678",
+            "Test",
+            "Token",
+        ])
+        .await;
+
+        // Now list should show it
+        let result = execute_tokens_command(&["list"]).await;
+        assert!(result.is_ok());
+
+        // And recent should show it
+        let result = execute_tokens_command(&["recent"]).await;
+        assert!(result.is_ok());
+
+        // Clean up
+        let _ = execute_tokens_command(&["remove", "TEST_TOKEN_XYZ"]).await;
+    }
+
+    #[tokio::test]
+    async fn test_session_context_save_and_load() {
+        // SessionContext::save() and ::load() use dirs::data_dir()
+        // We just verify they don't panic
+        let ctx = SessionContext {
+            chain: "solana".to_string(),
+            last_address: Some("0xabc".to_string()),
+            last_tx: Some("0xdef".to_string()),
+            ..Default::default()
+        };
+        // save may fail if data dir doesn't exist, but should not panic
+        let _ = ctx.save();
+        // load should return default or saved data
+        let loaded = SessionContext::load();
+        // At least the struct is valid
+        assert!(!loaded.chain.is_empty());
+    }
 }

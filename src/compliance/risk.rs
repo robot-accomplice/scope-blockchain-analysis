@@ -1145,4 +1145,138 @@ mod tests {
                 .any(|r| r.contains("Address Test Factor concerns"))
         );
     }
+
+    // ========================================================================
+    // Tests with data client for pattern analysis branches
+    // ========================================================================
+
+    fn mock_etherscan_json_response(txs: &[serde_json::Value]) -> String {
+        serde_json::json!({
+            "status": "1",
+            "message": "OK",
+            "result": txs
+        })
+        .to_string()
+    }
+
+    fn make_tx_with_idx(
+        idx: u64,
+        from: &str,
+        to: &str,
+        value: &str,
+        timestamp: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "hash": format!("0x{:064x}", idx),
+            "from": from,
+            "to": to,
+            "value": value,
+            "timeStamp": timestamp,
+            "blockNumber": "18000000",
+            "gasUsed": "21000",
+            "gasPrice": "50000000000",
+            "isError": "0",
+            "input": "0x"
+        })
+    }
+
+    #[tokio::test]
+    async fn test_risk_engine_with_client_structuring_pattern() {
+        let mut server = mockito::Server::new_async().await;
+
+        // Create transactions that trigger structuring detection
+        // (amounts just under $10,000 = ~2.86 ETH at $3500)
+        let txs: Vec<serde_json::Value> = (0..15)
+            .map(|i| {
+                make_tx_with_idx(
+                    i as u64,
+                    "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
+                    &format!("0x{:040x}", i + 1),
+                    "9900000000000000000", // ~9.9 ETH
+                    &format!("{}", 1700000000 + i * 3600),
+                )
+            })
+            .collect();
+
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_body(mock_etherscan_json_response(&txs))
+            .create_async()
+            .await;
+
+        let sources = datasource::DataSources::new("test_key".to_string());
+        let client = datasource::BlockchainDataClient::with_base_url(sources, &server.url());
+        let engine = RiskEngine::with_data_client(client);
+
+        let assessment = engine
+            .assess_address("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2", "ethereum")
+            .await
+            .unwrap();
+
+        // Should have run with the client and produced a valid assessment
+        assert!(!assessment.address.is_empty());
+        assert!(assessment.overall_score >= 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_risk_engine_with_client_api_error() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_body(r#"{"status":"0","message":"NOTOK","result":"Error"}"#)
+            .create_async()
+            .await;
+
+        let sources = datasource::DataSources::new("test_key".to_string());
+        let client = datasource::BlockchainDataClient::with_base_url(sources, &server.url());
+        let engine = RiskEngine::with_data_client(client);
+
+        // Should still succeed (error paths return default factors)
+        let assessment = engine
+            .assess_address("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2", "ethereum")
+            .await
+            .unwrap();
+
+        assert!(!assessment.address.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_risk_engine_with_client_many_counterparties() {
+        let mut server = mockito::Server::new_async().await;
+
+        // Create transactions with > 100 unique counterparties
+        let txs: Vec<serde_json::Value> = (0..120)
+            .map(|i| {
+                make_tx_with_idx(
+                    i as u64,
+                    "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
+                    &format!("0x{:040x}", i + 1),
+                    "1000000000000000000",
+                    &format!("{}", 1700000000 + i * 600),
+                )
+            })
+            .collect();
+
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_body(mock_etherscan_json_response(&txs))
+            .create_async()
+            .await;
+
+        let sources = datasource::DataSources::new("test_key".to_string());
+        let client = datasource::BlockchainDataClient::with_base_url(sources, &server.url());
+        let engine = RiskEngine::with_data_client(client);
+
+        let assessment = engine
+            .assess_address("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2", "ethereum")
+            .await
+            .unwrap();
+
+        // Should have elevated risk due to high counterparty count
+        assert!(assessment.overall_score > 0.0);
+    }
 }

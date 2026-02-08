@@ -1175,6 +1175,74 @@ mod tests {
         let price = dex.get_native_token_price("ethereum").await;
         assert_eq!(price, Some(2500.0));
     }
+
+    // ========================================================================
+    // Default ChainClient trait method tests
+    // ========================================================================
+
+    /// Minimal ChainClient impl that uses all default methods.
+    struct MinimalChainClient;
+
+    #[async_trait::async_trait]
+    impl ChainClient for MinimalChainClient {
+        fn chain_name(&self) -> &str {
+            "test"
+        }
+
+        fn native_token_symbol(&self) -> &str {
+            "TEST"
+        }
+
+        async fn get_balance(&self, _address: &str) -> Result<Balance> {
+            Ok(Balance {
+                raw: "0".to_string(),
+                formatted: "0".to_string(),
+                decimals: 18,
+                symbol: "TEST".to_string(),
+                usd_value: None,
+            })
+        }
+
+        async fn get_transaction(&self, _hash: &str) -> Result<Transaction> {
+            unimplemented!()
+        }
+
+        async fn get_transactions(&self, _address: &str, _limit: u32) -> Result<Vec<Transaction>> {
+            Ok(Vec::new())
+        }
+
+        async fn get_block_number(&self) -> Result<u64> {
+            Ok(0)
+        }
+
+        async fn get_token_balances(&self, _address: &str) -> Result<Vec<TokenBalance>> {
+            Ok(Vec::new())
+        }
+
+        async fn enrich_balance_usd(&self, _balance: &mut Balance) {}
+    }
+
+    #[tokio::test]
+    async fn test_default_get_token_info() {
+        let client = MinimalChainClient;
+        let result = client.get_token_info("0xtest").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not supported"));
+    }
+
+    #[tokio::test]
+    async fn test_default_get_token_holders() {
+        let client = MinimalChainClient;
+        let holders = client.get_token_holders("0xtest", 10).await.unwrap();
+        assert!(holders.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_default_get_token_holder_count() {
+        let client = MinimalChainClient;
+        let count = client.get_token_holder_count("0xtest").await.unwrap();
+        assert_eq!(count, 0);
+    }
 }
 
 // ============================================================================

@@ -132,6 +132,14 @@ pub enum ReportType {
 
 /// Handle risk assessment command
 pub async fn handle_risk(args: RiskArgs) -> anyhow::Result<()> {
+    handle_risk_with_client(args, None).await
+}
+
+/// Handle risk assessment with an optional pre-built client (for testability).
+pub async fn handle_risk_with_client(
+    args: RiskArgs,
+    client: Option<BlockchainDataClient>,
+) -> anyhow::Result<()> {
     // Auto-detect chain if not specified
     let chain = match args.chain {
         Some(c) => c,
@@ -140,17 +148,22 @@ pub async fn handle_risk(args: RiskArgs) -> anyhow::Result<()> {
 
     println!("Assessing risk for {} on {}...", args.address, chain);
 
-    // Try to load API key from environment
-    let etherscan_key = std::env::var("ETHERSCAN_API_KEY").ok();
-
-    let engine = if let Some(key) = etherscan_key {
-        let sources = DataSources::new(key);
-        let client = BlockchainDataClient::new(sources);
+    let engine = if let Some(c) = client {
         println!("Using Etherscan API for enhanced analysis");
-        RiskEngine::with_data_client(client)
+        RiskEngine::with_data_client(c)
     } else {
-        println!("Note: Set ETHERSCAN_API_KEY for enhanced analysis");
-        RiskEngine::new()
+        // Try to load API key from environment
+        let etherscan_key = std::env::var("ETHERSCAN_API_KEY").ok();
+
+        if let Some(key) = etherscan_key {
+            let sources = DataSources::new(key);
+            let client = BlockchainDataClient::new(sources);
+            println!("Using Etherscan API for enhanced analysis");
+            RiskEngine::with_data_client(client)
+        } else {
+            println!("Note: Set ETHERSCAN_API_KEY for enhanced analysis");
+            RiskEngine::new()
+        }
     };
 
     let assessment = engine.assess_address(&args.address, &chain).await?;
@@ -171,6 +184,14 @@ pub async fn handle_risk(args: RiskArgs) -> anyhow::Result<()> {
 
 /// Handle transaction tracing command
 pub async fn handle_trace(args: TraceArgs) -> anyhow::Result<()> {
+    handle_trace_with_client(args, None).await
+}
+
+/// Handle transaction tracing with an optional pre-built client (for testability).
+pub async fn handle_trace_with_client(
+    args: TraceArgs,
+    client: Option<BlockchainDataClient>,
+) -> anyhow::Result<()> {
     println!("Tracing transaction {}...", args.tx_hash);
     println!("Depth: {} hops", args.depth);
 
@@ -178,13 +199,16 @@ pub async fn handle_trace(args: TraceArgs) -> anyhow::Result<()> {
         println!("Flagging suspicious addresses enabled");
     }
 
-    // Try to load API key from environment
-    let etherscan_key = std::env::var("ETHERSCAN_API_KEY").ok();
+    let resolved_client = if let Some(c) = client {
+        Some(c)
+    } else {
+        std::env::var("ETHERSCAN_API_KEY").ok().map(|key| {
+            let sources = DataSources::new(key);
+            BlockchainDataClient::new(sources)
+        })
+    };
 
-    if let Some(key) = etherscan_key {
-        let sources = DataSources::new(key);
-        let client = BlockchainDataClient::new(sources);
-
+    if let Some(client) = resolved_client {
         match client.trace_transaction(&args.tx_hash, args.depth).await {
             Ok(trace) => {
                 println!("\nTransaction Trace");
@@ -212,17 +236,28 @@ pub async fn handle_trace(args: TraceArgs) -> anyhow::Result<()> {
 
 /// Handle pattern analysis command
 pub async fn handle_analyze(args: AnalyzeArgs) -> anyhow::Result<()> {
+    handle_analyze_with_client(args, None).await
+}
+
+/// Handle pattern analysis with an optional pre-built client (for testability).
+pub async fn handle_analyze_with_client(
+    args: AnalyzeArgs,
+    client: Option<BlockchainDataClient>,
+) -> anyhow::Result<()> {
     println!("Analyzing patterns for {}...", args.address);
     println!("Patterns: {:?}", args.patterns);
     println!("Time range: {}", args.range);
 
-    // Try to load API key from environment
-    let etherscan_key = std::env::var("ETHERSCAN_API_KEY").ok();
+    let resolved_client = if let Some(c) = client {
+        Some(c)
+    } else {
+        std::env::var("ETHERSCAN_API_KEY").ok().map(|key| {
+            let sources = DataSources::new(key);
+            BlockchainDataClient::new(sources)
+        })
+    };
 
-    if let Some(key) = etherscan_key {
-        let sources = DataSources::new(key);
-        let client = BlockchainDataClient::new(sources);
-
+    if let Some(client) = resolved_client {
         // Auto-detect chain
         let chain = match detect_chain(&args.address) {
             Ok(c) => c,
@@ -506,6 +541,202 @@ mod tests {
             output: None,
         };
         let result = handle_risk(args).await;
+        assert!(result.is_ok());
+    }
+
+    // ========================================================================
+    // Tests with injected mockito client (covers API-present paths)
+    // ========================================================================
+
+    fn mock_etherscan_response(txs: &[serde_json::Value]) -> String {
+        serde_json::json!({
+            "status": "1",
+            "message": "OK",
+            "result": txs
+        })
+        .to_string()
+    }
+
+    fn make_mock_client(base_url: &str) -> BlockchainDataClient {
+        let sources = DataSources::new("test_api_key".to_string());
+        BlockchainDataClient::with_base_url(sources, base_url)
+    }
+
+    #[tokio::test]
+    async fn test_handle_risk_with_api_client() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_body(mock_etherscan_response(&[]))
+            .create_async()
+            .await;
+
+        let client = make_mock_client(&server.url());
+        let args = RiskArgs {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: Some("ethereum".to_string()),
+            format: OutputFormat::Table,
+            detailed: true,
+            output: None,
+        };
+        let result = handle_risk_with_client(args, Some(client)).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_risk_with_api_client_json_export() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_body(mock_etherscan_response(&[]))
+            .create_async()
+            .await;
+
+        let client = make_mock_client(&server.url());
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_string_lossy().to_string();
+
+        let args = RiskArgs {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: Some("ethereum".to_string()),
+            format: OutputFormat::Table,
+            detailed: false,
+            output: Some(path.clone()),
+        };
+        let result = handle_risk_with_client(args, Some(client)).await;
+        assert!(result.is_ok());
+        assert!(std::path::Path::new(&path).exists());
+    }
+
+    #[tokio::test]
+    async fn test_handle_trace_with_api_client() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_body(mock_etherscan_response(&[serde_json::json!({
+                "hash": "0xabc",
+                "from": "0x111",
+                "to": "0x222",
+                "value": "1000000000000000000",
+                "timeStamp": "1700000000",
+                "blockNumber": "18000000",
+                "gasUsed": "21000",
+                "gasPrice": "50000000000",
+                "isError": "0",
+                "input": "0x"
+            })]))
+            .create_async()
+            .await;
+
+        let client = make_mock_client(&server.url());
+        let args = TraceArgs {
+            tx_hash: "0xabc123def456".to_string(),
+            depth: 2,
+            flag_suspicious: true,
+            format: OutputFormat::Table,
+        };
+        let result = handle_trace_with_client(args, Some(client)).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_trace_with_api_client_error() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_body(r#"{"status":"0","message":"NOTOK","result":"Error"}"#)
+            .create_async()
+            .await;
+
+        let client = make_mock_client(&server.url());
+        let args = TraceArgs {
+            tx_hash: "0xabc123def456".to_string(),
+            depth: 3,
+            flag_suspicious: false,
+            format: OutputFormat::Table,
+        };
+        // Error path: should print error but return Ok
+        let result = handle_trace_with_client(args, Some(client)).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_analyze_with_api_client() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_body(mock_etherscan_response(&[serde_json::json!({
+                "hash": "0xabc",
+                "from": "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
+                "to": "0x222",
+                "value": "1000000000000000000",
+                "timeStamp": "1700000000",
+                "blockNumber": "18000000",
+                "gasUsed": "21000",
+                "gasPrice": "50000000000",
+                "isError": "0",
+                "input": "0x"
+            })]))
+            .create_async()
+            .await;
+
+        let client = make_mock_client(&server.url());
+        let args = AnalyzeArgs {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            patterns: vec![PatternType::Structuring, PatternType::Velocity],
+            range: "30d".to_string(),
+            format: OutputFormat::Table,
+        };
+        let result = handle_analyze_with_client(args, Some(client)).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_analyze_with_api_client_error() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_body(r#"{"status":"0","message":"NOTOK","result":"Error"}"#)
+            .create_async()
+            .await;
+
+        let client = make_mock_client(&server.url());
+        let args = AnalyzeArgs {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            patterns: vec![PatternType::Layering],
+            range: "7d".to_string(),
+            format: OutputFormat::Table,
+        };
+        // Error path in analyze
+        let result = handle_analyze_with_client(args, Some(client)).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_analyze_with_detect_chain_failure() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_body(mock_etherscan_response(&[]))
+            .create_async()
+            .await;
+
+        let client = make_mock_client(&server.url());
+        // Address that won't auto-detect → falls back to "ethereum"
+        let args = AnalyzeArgs {
+            address: "unknown_format_addr".to_string(),
+            patterns: vec![PatternType::Integration],
+            range: "1y".to_string(),
+            format: OutputFormat::Json,
+        };
+        let result = handle_analyze_with_client(args, Some(client)).await;
         assert!(result.is_ok());
     }
 

@@ -20,8 +20,8 @@
 use crate::config::{Config, OutputFormat};
 use crate::error::{ConfigError, Result, ScopeError};
 use clap::Args;
-use std::io::{self, Write};
-use std::path::PathBuf;
+use std::io::{self, BufRead, Write};
+use std::path::{Path, PathBuf};
 
 /// Arguments for the setup command.
 #[derive(Debug, Args)]
@@ -208,27 +208,44 @@ fn reset_config() -> Result<()> {
             path: PathBuf::from("~/.config/scope/config.yaml"),
         })
     })?;
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    reset_config_impl(&mut stdin.lock(), &mut stdout.lock(), &config_path)
+}
 
+/// Testable implementation of reset_config with injected I/O and path.
+fn reset_config_impl(
+    reader: &mut impl BufRead,
+    writer: &mut impl Write,
+    config_path: &Path,
+) -> Result<()> {
     if config_path.exists() {
-        print!("This will delete your current configuration. Continue? [y/N]: ");
-        io::stdout()
-            .flush()
-            .map_err(|e| ScopeError::Io(e.to_string()))?;
+        write!(
+            writer,
+            "This will delete your current configuration. Continue? [y/N]: "
+        )
+        .map_err(|e| ScopeError::Io(e.to_string()))?;
+        writer.flush().map_err(|e| ScopeError::Io(e.to_string()))?;
 
         let mut input = String::new();
-        io::stdin()
+        reader
             .read_line(&mut input)
             .map_err(|e| ScopeError::Io(e.to_string()))?;
 
         if !matches!(input.trim().to_lowercase().as_str(), "y" | "yes") {
-            println!("Cancelled.");
+            writeln!(writer, "Cancelled.").map_err(|e| ScopeError::Io(e.to_string()))?;
             return Ok(());
         }
 
-        std::fs::remove_file(&config_path).map_err(|e| ScopeError::Io(e.to_string()))?;
-        println!("Configuration reset to defaults.");
+        std::fs::remove_file(config_path).map_err(|e| ScopeError::Io(e.to_string()))?;
+        writeln!(writer, "Configuration reset to defaults.")
+            .map_err(|e| ScopeError::Io(e.to_string()))?;
     } else {
-        println!("No configuration file found. Already using defaults.");
+        writeln!(
+            writer,
+            "No configuration file found. Already using defaults."
+        )
+        .map_err(|e| ScopeError::Io(e.to_string()))?;
     }
 
     Ok(())
@@ -236,6 +253,30 @@ fn reset_config() -> Result<()> {
 
 /// Configures a single API key.
 async fn configure_single_key(key_name: &str, config: &Config) -> Result<()> {
+    let config_path = Config::config_path().ok_or_else(|| {
+        ScopeError::Config(ConfigError::NotFound {
+            path: PathBuf::from("~/.config/scope/config.yaml"),
+        })
+    })?;
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    configure_single_key_impl(
+        &mut stdin.lock(),
+        &mut stdout.lock(),
+        key_name,
+        config,
+        &config_path,
+    )
+}
+
+/// Testable implementation of configure_single_key with injected I/O.
+fn configure_single_key_impl(
+    reader: &mut impl BufRead,
+    writer: &mut impl Write,
+    key_name: &str,
+    config: &Config,
+    config_path: &Path,
+) -> Result<()> {
     let valid_keys = [
         "etherscan",
         "bscscan",
@@ -246,35 +287,46 @@ async fn configure_single_key(key_name: &str, config: &Config) -> Result<()> {
     ];
 
     if !valid_keys.contains(&key_name) {
-        println!("Unknown API key: {}", key_name);
-        println!();
-        println!("Valid options:");
+        writeln!(writer, "Unknown API key: {}", key_name)
+            .map_err(|e| ScopeError::Io(e.to_string()))?;
+        writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
+        writeln!(writer, "Valid options:").map_err(|e| ScopeError::Io(e.to_string()))?;
         for key in valid_keys {
             let info = get_api_key_info(key);
-            println!("  {:<15} - {}", key, info.chain);
+            writeln!(writer, "  {:<15} - {}", key, info.chain)
+                .map_err(|e| ScopeError::Io(e.to_string()))?;
         }
         return Ok(());
     }
 
     let info = get_api_key_info(key_name);
-    println!();
-    println!("╔══════════════════════════════════════════════════════════════╗");
-    println!("║  Configure {} API Key", key_name.to_uppercase());
-    println!("╚══════════════════════════════════════════════════════════════╝");
-    println!();
-    println!("Chain: {}", info.chain);
-    println!("Enables: {}", info.features);
-    println!();
-    println!("How to get your free API key:");
-    println!("  {}", info.signup_steps);
-    println!();
-    println!("URL: {}", info.url);
-    println!();
+    writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(
+        writer,
+        "╔══════════════════════════════════════════════════════════════╗"
+    )
+    .map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(writer, "║  Configure {} API Key", key_name.to_uppercase())
+        .map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(
+        writer,
+        "╚══════════════════════════════════════════════════════════════╝"
+    )
+    .map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(writer, "Chain: {}", info.chain).map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(writer, "Enables: {}", info.features).map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(writer, "How to get your free API key:").map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(writer, "  {}", info.signup_steps).map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(writer, "URL: {}", info.url).map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
 
-    let key = prompt_api_key(key_name)?;
+    let key = prompt_api_key_impl(reader, writer, key_name)?;
 
     if key.is_empty() {
-        println!("Skipped.");
+        writeln!(writer, "Skipped.").map_err(|e| ScopeError::Io(e.to_string()))?;
         return Ok(());
     }
 
@@ -282,8 +334,8 @@ async fn configure_single_key(key_name: &str, config: &Config) -> Result<()> {
     let mut new_config = config.clone();
     new_config.chains.api_keys.insert(key_name.to_string(), key);
 
-    save_config(&new_config)?;
-    println!("✓ {} API key saved.", key_name);
+    save_config_to_path(&new_config, config_path)?;
+    writeln!(writer, "✓ {} API key saved.", key_name).map_err(|e| ScopeError::Io(e.to_string()))?;
 
     Ok(())
 }
@@ -352,111 +404,185 @@ fn get_api_key_url(key_name: &str) -> &'static str {
 
 /// Runs the full setup wizard.
 async fn run_setup_wizard(config: &Config) -> Result<()> {
-    println!();
-    println!("╔══════════════════════════════════════════════════════════════╗");
-    println!("║                    Scope Setup Wizard                          ║");
-    println!("╚══════════════════════════════════════════════════════════════╝");
-    println!();
-    println!("This wizard will help you configure Scope (Blockchain Crawler CLI).");
-    println!("Press Enter to skip any optional setting.");
-    println!();
+    let config_path = Config::config_path().ok_or_else(|| {
+        ScopeError::Config(ConfigError::NotFound {
+            path: PathBuf::from("~/.config/scope/config.yaml"),
+        })
+    })?;
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    run_setup_wizard_impl(&mut stdin.lock(), &mut stdout.lock(), config, &config_path)
+}
+
+/// Testable implementation of the setup wizard with injected I/O.
+fn run_setup_wizard_impl(
+    reader: &mut impl BufRead,
+    writer: &mut impl Write,
+    config: &Config,
+    config_path: &Path,
+) -> Result<()> {
+    writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(
+        writer,
+        "╔══════════════════════════════════════════════════════════════╗"
+    )
+    .map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(
+        writer,
+        "║                    Scope Setup Wizard                          ║"
+    )
+    .map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(
+        writer,
+        "╚══════════════════════════════════════════════════════════════╝"
+    )
+    .map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(
+        writer,
+        "This wizard will help you configure Scope (Blockchain Crawler CLI)."
+    )
+    .map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(writer, "Press Enter to skip any optional setting.")
+        .map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
 
     let mut new_config = config.clone();
     let mut changes_made = false;
 
     // Step 1: API Keys
-    println!("Step 1: API Keys");
-    println!("{}", "=".repeat(60));
-    println!();
-    println!("API keys enable access to block explorer data including:");
-    println!("  • Token balances and holder information");
-    println!("  • Transaction history and details");
-    println!("  • Contract verification status");
-    println!("  • Token analytics and metrics");
-    println!();
-    println!("All API keys are FREE and take just a minute to obtain.");
-    println!();
+    writeln!(writer, "Step 1: API Keys").map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(writer, "{}", "=".repeat(60)).map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(
+        writer,
+        "API keys enable access to block explorer data including:"
+    )
+    .map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(writer, "  • Token balances and holder information")
+        .map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(writer, "  • Transaction history and details")
+        .map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(writer, "  • Contract verification status")
+        .map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(writer, "  • Token analytics and metrics")
+        .map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(
+        writer,
+        "All API keys are FREE and take just a minute to obtain."
+    )
+    .map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
 
     // Etherscan (primary)
     if !config.chains.api_keys.contains_key("etherscan") {
         let info = get_api_key_info("etherscan");
-        println!("┌────────────────────────────────────────────────────────────┐");
-        println!("│  ETHERSCAN API KEY (Recommended)                           │");
-        println!("└────────────────────────────────────────────────────────────┘");
-        println!("  Chain: {}", info.chain);
-        println!("  Enables: {}", info.features);
-        println!();
-        println!("  How to get your free API key:");
-        println!("  {}", info.signup_steps);
-        println!();
-        println!("  URL: {}", info.url);
-        println!();
-        if let Some(key) = prompt_optional_key("etherscan")? {
+        writeln!(
+            writer,
+            "┌────────────────────────────────────────────────────────────┐"
+        )
+        .map_err(|e| ScopeError::Io(e.to_string()))?;
+        writeln!(
+            writer,
+            "│  ETHERSCAN API KEY (Recommended)                           │"
+        )
+        .map_err(|e| ScopeError::Io(e.to_string()))?;
+        writeln!(
+            writer,
+            "└────────────────────────────────────────────────────────────┘"
+        )
+        .map_err(|e| ScopeError::Io(e.to_string()))?;
+        writeln!(writer, "  Chain: {}", info.chain).map_err(|e| ScopeError::Io(e.to_string()))?;
+        writeln!(writer, "  Enables: {}", info.features)
+            .map_err(|e| ScopeError::Io(e.to_string()))?;
+        writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
+        writeln!(writer, "  How to get your free API key:")
+            .map_err(|e| ScopeError::Io(e.to_string()))?;
+        writeln!(writer, "  {}", info.signup_steps).map_err(|e| ScopeError::Io(e.to_string()))?;
+        writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
+        writeln!(writer, "  URL: {}", info.url).map_err(|e| ScopeError::Io(e.to_string()))?;
+        writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
+        if let Some(key) = prompt_optional_key_impl(reader, writer, "etherscan")? {
             new_config
                 .chains
                 .api_keys
                 .insert("etherscan".to_string(), key);
             changes_made = true;
         }
-        println!();
+        writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
     } else {
-        println!("✓ Etherscan API key already configured");
-        println!();
+        writeln!(writer, "✓ Etherscan API key already configured")
+            .map_err(|e| ScopeError::Io(e.to_string()))?;
+        writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
     }
 
     // Ask about other chains
-    print!("Configure API keys for other chains (BSC, Polygon, Arbitrum, etc.)? [y/N]: ");
-    io::stdout()
-        .flush()
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
+    write!(
+        writer,
+        "Configure API keys for other chains (BSC, Polygon, Arbitrum, etc.)? [y/N]: "
+    )
+    .map_err(|e| ScopeError::Io(e.to_string()))?;
+    writer.flush().map_err(|e| ScopeError::Io(e.to_string()))?;
 
     let mut input = String::new();
-    io::stdin()
+    reader
         .read_line(&mut input)
         .map_err(|e| ScopeError::Io(e.to_string()))?;
 
     if matches!(input.trim().to_lowercase().as_str(), "y" | "yes") {
-        println!();
+        writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
 
         let other_chains = ["bscscan", "polygonscan", "arbiscan", "basescan", "optimism"];
 
         for key_name in other_chains {
             if !config.chains.api_keys.contains_key(key_name) {
                 let info = get_api_key_info(key_name);
-                println!("┌────────────────────────────────────────────────────────────┐");
-                println!("│  {} API KEY", key_name.to_uppercase());
-                println!("└────────────────────────────────────────────────────────────┘");
-                println!("  Chain: {}", info.chain);
-                println!("  Enables: {}", info.features);
-                println!("  URL: {}", info.url);
-                println!();
-                if let Some(key) = prompt_optional_key(key_name)? {
+                writeln!(
+                    writer,
+                    "┌────────────────────────────────────────────────────────────┐"
+                )
+                .map_err(|e| ScopeError::Io(e.to_string()))?;
+                writeln!(writer, "│  {} API KEY", key_name.to_uppercase())
+                    .map_err(|e| ScopeError::Io(e.to_string()))?;
+                writeln!(
+                    writer,
+                    "└────────────────────────────────────────────────────────────┘"
+                )
+                .map_err(|e| ScopeError::Io(e.to_string()))?;
+                writeln!(writer, "  Chain: {}", info.chain)
+                    .map_err(|e| ScopeError::Io(e.to_string()))?;
+                writeln!(writer, "  Enables: {}", info.features)
+                    .map_err(|e| ScopeError::Io(e.to_string()))?;
+                writeln!(writer, "  URL: {}", info.url)
+                    .map_err(|e| ScopeError::Io(e.to_string()))?;
+                writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
+                if let Some(key) = prompt_optional_key_impl(reader, writer, key_name)? {
                     new_config.chains.api_keys.insert(key_name.to_string(), key);
                     changes_made = true;
                 }
-                println!();
+                writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
             }
         }
     }
 
     // Step 2: Preferences
-    println!();
-    println!("Step 2: Preferences");
-    println!("{}", "=".repeat(60));
-    println!();
+    writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(writer, "Step 2: Preferences").map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(writer, "{}", "=".repeat(60)).map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
 
     // Default output format
-    println!("Default output format:");
-    println!("  1. table (default)");
-    println!("  2. json");
-    println!("  3. csv");
-    print!("Select [1-3, Enter for default]: ");
-    io::stdout()
-        .flush()
+    writeln!(writer, "Default output format:").map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(writer, "  1. table (default)").map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(writer, "  2. json").map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(writer, "  3. csv").map_err(|e| ScopeError::Io(e.to_string()))?;
+    write!(writer, "Select [1-3, Enter for default]: ")
         .map_err(|e| ScopeError::Io(e.to_string()))?;
+    writer.flush().map_err(|e| ScopeError::Io(e.to_string()))?;
 
     input.clear();
-    io::stdin()
+    reader
         .read_line(&mut input)
         .map_err(|e| ScopeError::Io(e.to_string()))?;
 
@@ -474,39 +600,57 @@ async fn run_setup_wizard(config: &Config) -> Result<()> {
 
     // Save configuration
     if changes_made {
-        println!();
-        println!("Saving configuration...");
-        save_config(&new_config)?;
-        println!();
-        println!("✓ Configuration saved to ~/.config/scope/config.yaml");
+        writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
+        writeln!(writer, "Saving configuration...").map_err(|e| ScopeError::Io(e.to_string()))?;
+        save_config_to_path(&new_config, config_path)?;
+        writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
+        writeln!(
+            writer,
+            "✓ Configuration saved to ~/.config/scope/config.yaml"
+        )
+        .map_err(|e| ScopeError::Io(e.to_string()))?;
     } else {
-        println!();
-        println!("No changes made.");
+        writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
+        writeln!(writer, "No changes made.").map_err(|e| ScopeError::Io(e.to_string()))?;
     }
 
-    println!();
-    println!("Setup complete! You can now use Scope.");
-    println!();
-    println!("Quick start:");
-    println!("  scope crawl USDC              # Analyze a token");
-    println!("  scope address 0x...           # Analyze an address");
-    println!("  scope interactive             # Interactive mode");
-    println!();
-    println!("Run 'scope setup --status' to view your configuration.");
-    println!();
+    writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(writer, "Setup complete! You can now use Scope.")
+        .map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(writer, "Quick start:").map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(writer, "  scope crawl USDC              # Analyze a token")
+        .map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(
+        writer,
+        "  scope address 0x...           # Analyze an address"
+    )
+    .map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(writer, "  scope interactive             # Interactive mode")
+        .map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(
+        writer,
+        "Run 'scope setup --status' to view your configuration."
+    )
+    .map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
 
     Ok(())
 }
 
-/// Prompts for an optional API key.
-fn prompt_optional_key(name: &str) -> Result<Option<String>> {
-    print!("  {} API key (or Enter to skip): ", name);
-    io::stdout()
-        .flush()
+/// Testable implementation of prompt_optional_key with injected I/O.
+fn prompt_optional_key_impl(
+    reader: &mut impl BufRead,
+    writer: &mut impl Write,
+    name: &str,
+) -> Result<Option<String>> {
+    write!(writer, "  {} API key (or Enter to skip): ", name)
         .map_err(|e| ScopeError::Io(e.to_string()))?;
+    writer.flush().map_err(|e| ScopeError::Io(e.to_string()))?;
 
     let mut input = String::new();
-    io::stdin()
+    reader
         .read_line(&mut input)
         .map_err(|e| ScopeError::Io(e.to_string()))?;
 
@@ -518,29 +662,25 @@ fn prompt_optional_key(name: &str) -> Result<Option<String>> {
     }
 }
 
-/// Prompts for an API key (for single key configuration).
-fn prompt_api_key(name: &str) -> Result<String> {
-    print!("Enter {} API key: ", name);
-    io::stdout()
-        .flush()
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
+/// Testable implementation of prompt_api_key with injected I/O.
+fn prompt_api_key_impl(
+    reader: &mut impl BufRead,
+    writer: &mut impl Write,
+    name: &str,
+) -> Result<String> {
+    write!(writer, "Enter {} API key: ", name).map_err(|e| ScopeError::Io(e.to_string()))?;
+    writer.flush().map_err(|e| ScopeError::Io(e.to_string()))?;
 
     let mut input = String::new();
-    io::stdin()
+    reader
         .read_line(&mut input)
         .map_err(|e| ScopeError::Io(e.to_string()))?;
 
     Ok(input.trim().to_string())
 }
 
-/// Saves the configuration to file.
-fn save_config(config: &Config) -> Result<()> {
-    let config_path = Config::config_path().ok_or_else(|| {
-        ScopeError::Config(ConfigError::NotFound {
-            path: PathBuf::from("~/.config/scope/config.yaml"),
-        })
-    })?;
-
+/// Saves the configuration to a specific path. Testable variant.
+fn save_config_to_path(config: &Config, config_path: &Path) -> Result<()> {
     // Ensure directory exists
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| ScopeError::Io(e.to_string()))?;
@@ -572,7 +712,7 @@ fn save_config(config: &Config) -> Result<()> {
     yaml.push_str(&format!("  format: {}\n", config.output.format));
     yaml.push_str(&format!("  color: {}\n", config.output.color));
 
-    std::fs::write(&config_path, yaml).map_err(|e| ScopeError::Io(e.to_string()))?;
+    std::fs::write(config_path, yaml).map_err(|e| ScopeError::Io(e.to_string()))?;
 
     Ok(())
 }
@@ -989,5 +1129,333 @@ mod tests {
             reset: true,
         };
         assert!(args.reset);
+    }
+
+    // ========================================================================
+    // Refactored _impl function tests
+    // ========================================================================
+
+    #[test]
+    fn test_prompt_api_key_impl_with_input() {
+        let input = b"MY_SECRET_API_KEY_123\n";
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut writer = Vec::new();
+
+        let result = prompt_api_key_impl(&mut reader, &mut writer, "etherscan").unwrap();
+        assert_eq!(result, "MY_SECRET_API_KEY_123");
+        let output = String::from_utf8(writer).unwrap();
+        assert!(output.contains("Enter etherscan API key"));
+    }
+
+    #[test]
+    fn test_prompt_api_key_impl_empty_input() {
+        let input = b"\n";
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut writer = Vec::new();
+
+        let result = prompt_api_key_impl(&mut reader, &mut writer, "bscscan").unwrap();
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_prompt_optional_key_impl_with_key() {
+        let input = b"my_key_12345\n";
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut writer = Vec::new();
+
+        let result = prompt_optional_key_impl(&mut reader, &mut writer, "polygonscan").unwrap();
+        assert_eq!(result, Some("my_key_12345".to_string()));
+    }
+
+    #[test]
+    fn test_prompt_optional_key_impl_skip() {
+        let input = b"\n";
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut writer = Vec::new();
+
+        let result = prompt_optional_key_impl(&mut reader, &mut writer, "arbiscan").unwrap();
+        assert_eq!(result, None);
+        let output = String::from_utf8(writer).unwrap();
+        assert!(output.contains("arbiscan API key"));
+    }
+
+    #[test]
+    fn test_save_config_to_path_creates_file_and_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("subdir").join("config.yaml");
+        let mut config = Config::default();
+        config
+            .chains
+            .api_keys
+            .insert("etherscan".to_string(), "test_key_abc".to_string());
+        config.output.format = OutputFormat::Json;
+        config.output.color = false;
+
+        save_config_to_path(&config, &config_path).unwrap();
+
+        assert!(config_path.exists());
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        assert!(content.contains("etherscan"));
+        assert!(content.contains("test_key_abc"));
+        assert!(content.contains("json"));
+        assert!(content.contains("color: false"));
+        assert!(content.contains("# Scope Configuration"));
+    }
+
+    #[test]
+    fn test_save_config_to_path_with_rpc() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.yaml");
+        let mut config = Config::default();
+        config.chains.ethereum_rpc = Some("https://my-rpc.example.com".to_string());
+
+        save_config_to_path(&config, &config_path).unwrap();
+
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        assert!(content.contains("ethereum_rpc"));
+        assert!(content.contains("https://my-rpc.example.com"));
+    }
+
+    #[test]
+    fn test_reset_config_impl_confirm_yes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.yaml");
+        std::fs::write(&config_path, "test: data").unwrap();
+
+        let input = b"y\n";
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut writer = Vec::new();
+
+        reset_config_impl(&mut reader, &mut writer, &config_path).unwrap();
+        assert!(!config_path.exists());
+        let output = String::from_utf8(writer).unwrap();
+        assert!(output.contains("Configuration reset to defaults"));
+    }
+
+    #[test]
+    fn test_reset_config_impl_confirm_yes_full() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.yaml");
+        std::fs::write(&config_path, "test: data").unwrap();
+
+        let input = b"yes\n";
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut writer = Vec::new();
+
+        reset_config_impl(&mut reader, &mut writer, &config_path).unwrap();
+        assert!(!config_path.exists());
+    }
+
+    #[test]
+    fn test_reset_config_impl_cancel() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.yaml");
+        std::fs::write(&config_path, "test: data").unwrap();
+
+        let input = b"n\n";
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut writer = Vec::new();
+
+        reset_config_impl(&mut reader, &mut writer, &config_path).unwrap();
+        assert!(config_path.exists()); // Not deleted
+        let output = String::from_utf8(writer).unwrap();
+        assert!(output.contains("Cancelled"));
+    }
+
+    #[test]
+    fn test_reset_config_impl_no_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("nonexistent.yaml");
+
+        let input = b"";
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut writer = Vec::new();
+
+        reset_config_impl(&mut reader, &mut writer, &config_path).unwrap();
+        let output = String::from_utf8(writer).unwrap();
+        assert!(output.contains("No configuration file found"));
+    }
+
+    #[test]
+    fn test_configure_single_key_impl_valid_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.yaml");
+        let config = Config::default();
+
+        let input = b"MY_ETH_KEY_12345678\n";
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut writer = Vec::new();
+
+        configure_single_key_impl(&mut reader, &mut writer, "etherscan", &config, &config_path)
+            .unwrap();
+
+        let output = String::from_utf8(writer).unwrap();
+        assert!(output.contains("Configure ETHERSCAN API Key"));
+        assert!(output.contains("Ethereum Mainnet"));
+        assert!(output.contains("etherscan API key saved"));
+
+        // Config file should be created
+        assert!(config_path.exists());
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        assert!(content.contains("MY_ETH_KEY_12345678"));
+    }
+
+    #[test]
+    fn test_configure_single_key_impl_empty_skips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.yaml");
+        let config = Config::default();
+
+        let input = b"\n";
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut writer = Vec::new();
+
+        configure_single_key_impl(&mut reader, &mut writer, "etherscan", &config, &config_path)
+            .unwrap();
+
+        let output = String::from_utf8(writer).unwrap();
+        assert!(output.contains("Skipped"));
+        assert!(!config_path.exists()); // No file created
+    }
+
+    #[test]
+    fn test_configure_single_key_impl_invalid_key_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.yaml");
+        let config = Config::default();
+
+        let input = b"";
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut writer = Vec::new();
+
+        configure_single_key_impl(&mut reader, &mut writer, "invalid", &config, &config_path)
+            .unwrap();
+
+        let output = String::from_utf8(writer).unwrap();
+        assert!(output.contains("Unknown API key: invalid"));
+        assert!(output.contains("Valid options"));
+    }
+
+    #[test]
+    fn test_configure_single_key_impl_bscscan() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.yaml");
+        let config = Config::default();
+
+        let input = b"BSC_KEY_ABCDEF\n";
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut writer = Vec::new();
+
+        configure_single_key_impl(&mut reader, &mut writer, "bscscan", &config, &config_path)
+            .unwrap();
+
+        let output = String::from_utf8(writer).unwrap();
+        assert!(output.contains("Configure BSCSCAN API Key"));
+        assert!(output.contains("BNB Smart Chain"));
+        assert!(config_path.exists());
+    }
+
+    #[test]
+    fn test_wizard_no_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.yaml");
+        let config = Config::default();
+
+        // Skip etherscan, decline other chains, keep default format
+        let input = b"\nn\n\n";
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut writer = Vec::new();
+
+        run_setup_wizard_impl(&mut reader, &mut writer, &config, &config_path).unwrap();
+
+        let output = String::from_utf8(writer).unwrap();
+        assert!(output.contains("Scope Setup Wizard"));
+        assert!(output.contains("Step 1: API Keys"));
+        assert!(output.contains("Step 2: Preferences"));
+        assert!(output.contains("No changes made"));
+        assert!(output.contains("Setup complete"));
+        assert!(!config_path.exists()); // No config saved
+    }
+
+    #[test]
+    fn test_wizard_with_etherscan_key_and_json_format() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.yaml");
+        let config = Config::default();
+
+        // Provide etherscan key, decline other chains, select JSON format (2)
+        let input = b"MY_ETH_KEY\nn\n2\n";
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut writer = Vec::new();
+
+        run_setup_wizard_impl(&mut reader, &mut writer, &config, &config_path).unwrap();
+
+        let output = String::from_utf8(writer).unwrap();
+        assert!(output.contains("Configuration saved"));
+        assert!(config_path.exists());
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        assert!(content.contains("MY_ETH_KEY"));
+        assert!(content.contains("json"));
+    }
+
+    #[test]
+    fn test_wizard_with_csv_format() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.yaml");
+        let config = Config::default();
+
+        // Skip etherscan, decline other chains, select CSV format (3)
+        let input = b"\nn\n3\n";
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut writer = Vec::new();
+
+        run_setup_wizard_impl(&mut reader, &mut writer, &config, &config_path).unwrap();
+
+        let output = String::from_utf8(writer).unwrap();
+        assert!(output.contains("Configuration saved"));
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        assert!(content.contains("csv"));
+    }
+
+    #[test]
+    fn test_wizard_with_other_chains_yes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.yaml");
+        let config = Config::default();
+
+        // Skip etherscan, say yes to other chains, provide bscscan key, skip rest, keep default format
+        let input = b"\ny\nBSC_KEY_123\n\n\n\n\n\n";
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut writer = Vec::new();
+
+        run_setup_wizard_impl(&mut reader, &mut writer, &config, &config_path).unwrap();
+
+        let output = String::from_utf8(writer).unwrap();
+        assert!(output.contains("BSCSCAN API KEY"));
+        assert!(output.contains("Configuration saved"));
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        assert!(content.contains("BSC_KEY_123"));
+    }
+
+    #[test]
+    fn test_wizard_etherscan_already_configured() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.yaml");
+        let mut config = Config::default();
+        config
+            .chains
+            .api_keys
+            .insert("etherscan".to_string(), "existing_key".to_string());
+
+        // Decline other chains, keep default format
+        let input = b"n\n\n";
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut writer = Vec::new();
+
+        run_setup_wizard_impl(&mut reader, &mut writer, &config, &config_path).unwrap();
+
+        let output = String::from_utf8(writer).unwrap();
+        assert!(output.contains("Etherscan API key already configured"));
+        assert!(output.contains("No changes made"));
     }
 }

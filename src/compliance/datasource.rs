@@ -80,7 +80,6 @@ impl BlockchainDataClient {
     }
 
     /// Create new client with a custom base URL (for testing)
-    #[cfg(test)]
     pub fn with_base_url(sources: DataSources, base_url: &str) -> Self {
         Self {
             sources,

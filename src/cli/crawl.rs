@@ -33,7 +33,7 @@ use crate::display::{charts, report};
 use crate::error::{Result, ScopeError};
 use crate::tokens::TokenAliases;
 use clap::Args;
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
 /// Time period for analytics data.
@@ -218,24 +218,41 @@ async fn resolve_token_input(
 
 /// Displays token search results and prompts user to select one.
 fn select_token(results: &[TokenSearchResult], auto_select: bool) -> Result<&TokenSearchResult> {
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    select_token_impl(results, auto_select, &mut stdin.lock(), &mut stdout.lock())
+}
+
+/// Testable implementation of select_token with injected I/O.
+fn select_token_impl<'a>(
+    results: &'a [TokenSearchResult],
+    auto_select: bool,
+    reader: &mut impl BufRead,
+    writer: &mut impl Write,
+) -> Result<&'a TokenSearchResult> {
     if results.len() == 1 || auto_select {
         let selected = &results[0];
-        println!(
+        writeln!(
+            writer,
             "Selected: {} ({}) on {} - ${:.6}",
             selected.symbol,
             selected.name,
             selected.chain,
             selected.price_usd.unwrap_or(0.0)
-        );
+        )
+        .map_err(|e| ScopeError::Io(e.to_string()))?;
         return Ok(selected);
     }
 
-    println!("\nFound {} matching tokens:\n", results.len());
-    println!(
+    writeln!(writer, "\nFound {} matching tokens:\n", results.len())
+        .map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(
+        writer,
         "{:>3}  {:>8}  {:<20}  {:<12}  {:>12}  {:>12}",
         "#", "Symbol", "Name", "Chain", "Price", "Liquidity"
-    );
-    println!("{}", "-".repeat(80));
+    )
+    .map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(writer, "{}", "-".repeat(80)).map_err(|e| ScopeError::Io(e.to_string()))?;
 
     for (i, token) in results.iter().enumerate() {
         let price = token
@@ -252,7 +269,8 @@ fn select_token(results: &[TokenSearchResult], auto_select: bool) -> Result<&Tok
             token.name.clone()
         };
 
-        println!(
+        writeln!(
+            writer,
             "{:>3}  {:>8}  {:<20}  {:<12}  {:>12}  {:>12}",
             i + 1,
             token.symbol,
@@ -260,17 +278,17 @@ fn select_token(results: &[TokenSearchResult], auto_select: bool) -> Result<&Tok
             token.chain,
             price,
             liquidity
-        );
+        )
+        .map_err(|e| ScopeError::Io(e.to_string()))?;
     }
 
-    println!();
-    print!("Select token (1-{}): ", results.len());
-    io::stdout()
-        .flush()
+    writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
+    write!(writer, "Select token (1-{}): ", results.len())
         .map_err(|e| ScopeError::Io(e.to_string()))?;
+    writer.flush().map_err(|e| ScopeError::Io(e.to_string()))?;
 
     let mut input = String::new();
-    io::stdin()
+    reader
         .read_line(&mut input)
         .map_err(|e| ScopeError::Io(e.to_string()))?;
 
@@ -291,13 +309,22 @@ fn select_token(results: &[TokenSearchResult], auto_select: bool) -> Result<&Tok
 
 /// Prompts the user to save the token alias.
 fn prompt_save_alias() -> bool {
-    print!("Save this token for future use? [y/N]: ");
-    if io::stdout().flush().is_err() {
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    prompt_save_alias_impl(&mut stdin.lock(), &mut stdout.lock())
+}
+
+/// Testable implementation of prompt_save_alias with injected I/O.
+fn prompt_save_alias_impl(reader: &mut impl BufRead, writer: &mut impl Write) -> bool {
+    if write!(writer, "Save this token for future use? [y/N]: ").is_err() {
+        return false;
+    }
+    if writer.flush().is_err() {
         return false;
     }
 
     let mut input = String::new();
-    if io::stdin().read_line(&mut input).is_err() {
+    if reader.read_line(&mut input).is_err() {
         return false;
     }
 
@@ -1719,5 +1746,323 @@ mod tests {
         let analytics = make_test_analytics(true);
         let result = serde_json::to_string_pretty(&analytics);
         assert!(result.is_ok());
+    }
+
+    // ========================================================================
+    // select_token_impl tests
+    // ========================================================================
+
+    fn make_search_results() -> Vec<TokenSearchResult> {
+        vec![
+            TokenSearchResult {
+                symbol: "USDC".to_string(),
+                name: "USD Coin".to_string(),
+                address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+                chain: "ethereum".to_string(),
+                price_usd: Some(1.0),
+                volume_24h: 1_000_000.0,
+                liquidity_usd: 500_000_000.0,
+                market_cap: Some(30_000_000_000.0),
+            },
+            TokenSearchResult {
+                symbol: "USDC".to_string(),
+                name: "USD Coin on Polygon".to_string(),
+                address: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174".to_string(),
+                chain: "polygon".to_string(),
+                price_usd: Some(0.9999),
+                volume_24h: 500_000.0,
+                liquidity_usd: 100_000_000.0,
+                market_cap: None,
+            },
+            TokenSearchResult {
+                symbol: "USDC".to_string(),
+                name: "Very Long Token Name That Should Be Truncated To Fit".to_string(),
+                address: "0x1234567890abcdef".to_string(),
+                chain: "arbitrum".to_string(),
+                price_usd: None,
+                volume_24h: 0.0,
+                liquidity_usd: 50_000.0,
+                market_cap: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn test_select_token_impl_auto_select_multi() {
+        let results = make_search_results();
+        let mut writer = Vec::new();
+        let mut reader = std::io::Cursor::new(b"" as &[u8]);
+
+        let selected = select_token_impl(&results, true, &mut reader, &mut writer).unwrap();
+        assert_eq!(selected.symbol, "USDC");
+        assert_eq!(selected.chain, "ethereum");
+        let output = String::from_utf8(writer).unwrap();
+        assert!(output.contains("Selected:"));
+    }
+
+    #[test]
+    fn test_select_token_impl_single_result() {
+        let results = vec![make_search_results().remove(0)];
+        let mut writer = Vec::new();
+        let mut reader = std::io::Cursor::new(b"" as &[u8]);
+
+        let selected = select_token_impl(&results, false, &mut reader, &mut writer).unwrap();
+        assert_eq!(selected.symbol, "USDC");
+    }
+
+    #[test]
+    fn test_select_token_user_selects_second() {
+        let results = make_search_results();
+        let input = b"2\n";
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut writer = Vec::new();
+
+        let selected = select_token_impl(&results, false, &mut reader, &mut writer).unwrap();
+        assert_eq!(selected.chain, "polygon");
+        let output = String::from_utf8(writer).unwrap();
+        assert!(output.contains("Found 3 matching tokens"));
+        assert!(output.contains("USDC"));
+    }
+
+    #[test]
+    fn test_select_token_user_selects_third() {
+        let results = make_search_results();
+        let input = b"3\n";
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut writer = Vec::new();
+
+        let selected = select_token_impl(&results, false, &mut reader, &mut writer).unwrap();
+        assert_eq!(selected.chain, "arbitrum");
+        // Long name should be truncated in output
+        let output = String::from_utf8(writer).unwrap();
+        assert!(output.contains("..."));
+    }
+
+    #[test]
+    fn test_select_token_invalid_input() {
+        let results = make_search_results();
+        let input = b"abc\n";
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut writer = Vec::new();
+
+        let result = select_token_impl(&results, false, &mut reader, &mut writer);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid selection")
+        );
+    }
+
+    #[test]
+    fn test_select_token_out_of_range_zero() {
+        let results = make_search_results();
+        let input = b"0\n";
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut writer = Vec::new();
+
+        let result = select_token_impl(&results, false, &mut reader, &mut writer);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Selection must be between")
+        );
+    }
+
+    #[test]
+    fn test_select_token_out_of_range_high() {
+        let results = make_search_results();
+        let input = b"99\n";
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut writer = Vec::new();
+
+        let result = select_token_impl(&results, false, &mut reader, &mut writer);
+        assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // prompt_save_alias_impl tests
+    // ========================================================================
+
+    #[test]
+    fn test_prompt_save_alias_yes() {
+        let input = b"y\n";
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut writer = Vec::new();
+
+        assert!(prompt_save_alias_impl(&mut reader, &mut writer));
+        let output = String::from_utf8(writer).unwrap();
+        assert!(output.contains("Save this token"));
+    }
+
+    #[test]
+    fn test_prompt_save_alias_yes_full() {
+        let input = b"yes\n";
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut writer = Vec::new();
+
+        assert!(prompt_save_alias_impl(&mut reader, &mut writer));
+    }
+
+    #[test]
+    fn test_prompt_save_alias_no() {
+        let input = b"n\n";
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut writer = Vec::new();
+
+        assert!(!prompt_save_alias_impl(&mut reader, &mut writer));
+    }
+
+    #[test]
+    fn test_prompt_save_alias_empty() {
+        let input = b"\n";
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut writer = Vec::new();
+
+        assert!(!prompt_save_alias_impl(&mut reader, &mut writer));
+    }
+
+    // ========================================================================
+    // output_table and output_csv tests
+    // ========================================================================
+
+    #[test]
+    fn test_output_csv_no_panic() {
+        let analytics = create_test_analytics_minimal();
+        let result = output_csv(&analytics);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_table_no_dex_data() {
+        // analytics with price_usd=0 → explorer-only output
+        let analytics = create_test_analytics_minimal();
+        let args = CrawlArgs {
+            token: "0xtest".to_string(),
+            chain: "ethereum".to_string(),
+            period: Period::Hour24,
+            holders_limit: 10,
+            format: OutputFormat::Table,
+            no_charts: true,
+            report: None,
+            yes: false,
+            save: false,
+        };
+        let result = output_table(&analytics, &args);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_table_with_dex_data_no_charts() {
+        let mut analytics = create_test_analytics_minimal();
+        analytics.price_usd = 1.0;
+        analytics.volume_24h = 1_000_000.0;
+        analytics.liquidity_usd = 500_000.0;
+        analytics.market_cap = Some(1_000_000_000.0);
+        analytics.fdv = Some(2_000_000_000.0);
+
+        let args = CrawlArgs {
+            token: "0xtest".to_string(),
+            chain: "ethereum".to_string(),
+            period: Period::Hour24,
+            holders_limit: 10,
+            format: OutputFormat::Table,
+            no_charts: true,
+            report: None,
+            yes: false,
+            save: false,
+        };
+        let result = output_table(&analytics, &args);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_table_with_dex_data_and_charts() {
+        let mut analytics = create_test_analytics_minimal();
+        analytics.price_usd = 1.0;
+        analytics.volume_24h = 1_000_000.0;
+        analytics.liquidity_usd = 500_000.0;
+        analytics.price_history = vec![
+            crate::chains::PricePoint {
+                timestamp: 1,
+                price: 0.99,
+            },
+            crate::chains::PricePoint {
+                timestamp: 2,
+                price: 1.01,
+            },
+        ];
+        analytics.volume_history = vec![
+            crate::chains::VolumePoint {
+                timestamp: 1,
+                volume: 50000.0,
+            },
+            crate::chains::VolumePoint {
+                timestamp: 2,
+                volume: 60000.0,
+            },
+        ];
+
+        let args = CrawlArgs {
+            token: "0xtest".to_string(),
+            chain: "ethereum".to_string(),
+            period: Period::Hour24,
+            holders_limit: 10,
+            format: OutputFormat::Table,
+            no_charts: false,
+            report: None,
+            yes: false,
+            save: false,
+        };
+        let result = output_table(&analytics, &args);
+        assert!(result.is_ok());
+    }
+
+    fn create_test_analytics_minimal() -> TokenAnalytics {
+        TokenAnalytics {
+            token: Token {
+                contract_address: "0xtest".to_string(),
+                symbol: "TEST".to_string(),
+                name: "Test Token".to_string(),
+                decimals: 18,
+            },
+            chain: "ethereum".to_string(),
+            holders: Vec::new(),
+            total_holders: 0,
+            volume_24h: 0.0,
+            volume_7d: 0.0,
+            price_usd: 0.0,
+            price_change_24h: 0.0,
+            price_change_7d: 0.0,
+            liquidity_usd: 0.0,
+            market_cap: None,
+            fdv: None,
+            total_supply: None,
+            circulating_supply: None,
+            price_history: Vec::new(),
+            volume_history: Vec::new(),
+            holder_history: Vec::new(),
+            dex_pairs: Vec::new(),
+            fetched_at: 0,
+            top_10_concentration: None,
+            top_50_concentration: None,
+            top_100_concentration: None,
+            price_change_6h: 0.0,
+            price_change_1h: 0.0,
+            total_buys_24h: 0,
+            total_sells_24h: 0,
+            total_buys_6h: 0,
+            total_sells_6h: 0,
+            total_buys_1h: 0,
+            total_sells_1h: 0,
+            token_age_hours: None,
+            image_url: None,
+            websites: Vec::new(),
+            socials: Vec::new(),
+            dexscreener_url: None,
+        }
     }
 }
