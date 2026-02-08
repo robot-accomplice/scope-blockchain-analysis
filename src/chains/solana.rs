@@ -946,7 +946,7 @@ mod tests {
 
     #[test]
     fn test_validate_solana_signature_too_short() {
-        let result = validate_solana_signature("5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosK");
+        let result = validate_solana_signature("abc");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("80-90"));
     }
@@ -1374,5 +1374,122 @@ mod tests {
         let client = SolanaClient::with_rpc_url(&server.url());
         let result = client.get_slot().await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_solana_signature_invalid_base58() {
+        // '0' and 'O' and 'I' and 'l' are not valid base58 characters
+        let bad_sig = "0OIl00000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+        let result = validate_solana_signature(bad_sig);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_solana_signature_wrong_decoded_length() {
+        // Valid base58 but decodes to wrong length (not 64 bytes)
+        // "1" decodes to a single zero byte
+        let short = "11111111111111111111111111111111"; // 32 chars of '1' = 32 zero bytes
+        let result = validate_solana_signature(short);
+        // This should fail: either length check or decoded-byte-count check
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_transaction_rpc_error() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","error":{"code":-32600,"message":"Transaction not found"},"id":1}"#)
+            .create_async()
+            .await;
+
+        let client = SolanaClient::with_rpc_url(&server.url());
+        let result = client
+            .get_transaction("5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUW")
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("RPC error"));
+    }
+
+    #[tokio::test]
+    async fn test_solana_chain_client_trait_chain_name() {
+        let client = SolanaClient::with_rpc_url("http://localhost:8899");
+        let chain_client: &dyn ChainClient = &client;
+        assert_eq!(chain_client.chain_name(), "solana");
+        assert_eq!(chain_client.native_token_symbol(), "SOL");
+    }
+
+    #[tokio::test]
+    async fn test_chain_client_trait_get_balance() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","result":{"context":{"slot":1},"value":1000000000},"id":1}"#)
+            .create_async()
+            .await;
+
+        let client = SolanaClient::with_rpc_url(&server.url());
+        let chain_client: &dyn ChainClient = &client;
+        let balance = chain_client.get_balance(VALID_ADDRESS).await.unwrap();
+        assert_eq!(balance.symbol, "SOL");
+    }
+
+    #[tokio::test]
+    async fn test_chain_client_trait_get_block_number() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","result":250000000,"id":1}"#)
+            .create_async()
+            .await;
+
+        let client = SolanaClient::with_rpc_url(&server.url());
+        let chain_client: &dyn ChainClient = &client;
+        let slot = chain_client.get_block_number().await.unwrap();
+        assert_eq!(slot, 250000000);
+    }
+
+    #[tokio::test]
+    async fn test_chain_client_trait_get_token_balances() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","result":{"context":{"slot":1},"value":[
+                {
+                    "pubkey":"TokenAccAddr1",
+                    "account":{
+                        "data":{
+                            "parsed":{
+                                "info":{
+                                    "mint":"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                                    "tokenAmount":{
+                                        "amount":"1000000",
+                                        "decimals":6,
+                                        "uiAmount":1.0,
+                                        "uiAmountString":"1"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            ]},"id":1}"#)
+            .create_async()
+            .await;
+
+        let client = SolanaClient::with_rpc_url(&server.url());
+        let chain_client: &dyn ChainClient = &client;
+        let balances = chain_client.get_token_balances(VALID_ADDRESS).await.unwrap();
+        assert!(!balances.is_empty());
+        // Verify the mapping from SolanaTokenBalance to TokenBalance
+        assert_eq!(balances[0].token.contract_address, "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
     }
 }

@@ -1940,4 +1940,78 @@ mod tests {
         let result = execute_input("port list", &mut ctx, &config, &factory).await;
         assert!(result.is_ok());
     }
+
+    // ========================================================================
+    // execute_tokens_command direct tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_execute_tokens_list_empty() {
+        let result = execute_tokens_command(&[]).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_execute_tokens_list_subcommand() {
+        let result = execute_tokens_command(&["list"]).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_execute_tokens_recent() {
+        let result = execute_tokens_command(&["recent"]).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_execute_tokens_add_insufficient_args() {
+        let result = execute_tokens_command(&["add"]).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_execute_tokens_add_success() {
+        let result = execute_tokens_command(&["add", "TEST_INTERACTIVE", "ethereum", "0xtest123456789", "Test Token"]).await;
+        assert!(result.is_ok());
+        let _ = execute_tokens_command(&["remove", "TEST_INTERACTIVE"]).await;
+    }
+
+    #[tokio::test]
+    async fn test_execute_tokens_remove_no_args() {
+        let result = execute_tokens_command(&["remove"]).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_execute_tokens_remove_with_symbol() {
+        let _ = execute_tokens_command(&["add", "RMTEST", "ethereum", "0xrmtest", "Remove Test"]).await;
+        let result = execute_tokens_command(&["remove", "RMTEST"]).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_execute_tokens_unknown_subcommand() {
+        let result = execute_tokens_command(&["invalid"]).await;
+        assert!(result.is_ok());
+    }
+
+    // ========================================================================
+    // SessionContext additional tests (default and display already exist above)
+    // ========================================================================
+
+    #[test]
+    fn test_session_context_serialization_roundtrip() {
+        let mut ctx = SessionContext::default();
+        ctx.chain = "solana".to_string();
+        ctx.include_tokens = true;
+        ctx.limit = 25;
+        ctx.last_address = Some("0xtest".to_string());
+
+        let yaml = serde_yaml::to_string(&ctx).unwrap();
+        let deserialized: SessionContext = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(deserialized.chain, "solana");
+        assert!(deserialized.include_tokens);
+        assert_eq!(deserialized.limit, 25);
+        assert_eq!(deserialized.last_address, Some("0xtest".to_string()));
+    }
 }

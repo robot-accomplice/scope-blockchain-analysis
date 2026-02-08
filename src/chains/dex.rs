@@ -1340,4 +1340,151 @@ mod tests {
         assert_eq!(DexClient::map_chain_to_dexscreener("avax"), "avalanche");
         assert_eq!(DexClient::map_chain_to_dexscreener("unknown"), "unknown");
     }
+
+    #[tokio::test]
+    async fn test_get_native_token_price_ethereum() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"pairs":[{
+                "chainId":"ethereum",
+                "dexId":"uniswap",
+                "pairAddress":"0xpair",
+                "baseToken":{"address":"0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2","name":"WETH","symbol":"WETH"},
+                "quoteToken":{"address":"0xusdt","name":"USDT","symbol":"USDT"},
+                "priceUsd":"3500.00"
+            }]}"#)
+            .create_async()
+            .await;
+
+        let client = DexClient::with_base_url(&server.url());
+        let price = client.get_native_token_price("ethereum").await;
+        assert!(price.is_some());
+        assert!((price.unwrap() - 3500.0).abs() < 0.01);
+    }
+
+    #[tokio::test]
+    async fn test_get_native_token_price_tron_returns_none() {
+        let client = DexClient::with_base_url("http://localhost:1");
+        let price = client.get_native_token_price("tron").await;
+        assert!(price.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_native_token_price_unknown_chain() {
+        let client = DexClient::with_base_url("http://localhost:1");
+        let price = client.get_native_token_price("unknownchain").await;
+        assert!(price.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_search_tokens_chain_filter_ethereum_only() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"pairs":[
+                {
+                    "chainId":"ethereum",
+                    "dexId":"uniswap",
+                    "pairAddress":"0xpair1",
+                    "baseToken":{"address":"0xtoken1","name":"USD Coin","symbol":"USDC"},
+                    "quoteToken":{"address":"0xweth","name":"WETH","symbol":"WETH"},
+                    "priceUsd":"1.00",
+                    "liquidity":{"usd":5000000.0},
+                    "volume":{"h24":1000000.0}
+                },
+                {
+                    "chainId":"bsc",
+                    "dexId":"pancakeswap",
+                    "pairAddress":"0xpair2",
+                    "baseToken":{"address":"0xtoken2","name":"Binance USD","symbol":"BUSD"},
+                    "quoteToken":{"address":"0xbnb","name":"BNB","symbol":"BNB"},
+                    "priceUsd":"1.00",
+                    "liquidity":{"usd":2000000.0},
+                    "volume":{"h24":500000.0}
+                }
+            ]}"#)
+            .create_async()
+            .await;
+
+        let client = DexClient::with_base_url(&server.url());
+        // Filter to ethereum only
+        let results = client.search_tokens("USD", Some("ethereum")).await.unwrap();
+        assert!(!results.is_empty());
+        // All results should be on ethereum
+        for r in &results {
+            assert_eq!(r.chain.to_lowercase(), "ethereum");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_search_tokens_aggregates_volume_and_liquidity() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"pairs":[
+                {
+                    "chainId":"ethereum",
+                    "dexId":"uniswap",
+                    "pairAddress":"0xpair1",
+                    "baseToken":{"address":"0xSameToken","name":"Test Token","symbol":"TEST"},
+                    "quoteToken":{"address":"0xweth","name":"WETH","symbol":"WETH"},
+                    "priceUsd":"10.00",
+                    "liquidity":{"usd":1000000.0},
+                    "volume":{"h24":100000.0}
+                },
+                {
+                    "chainId":"ethereum",
+                    "dexId":"sushiswap",
+                    "pairAddress":"0xpair2",
+                    "baseToken":{"address":"0xSameToken","name":"Test Token","symbol":"TEST"},
+                    "quoteToken":{"address":"0xusdc","name":"USDC","symbol":"USDC"},
+                    "priceUsd":"10.05",
+                    "liquidity":{"usd":500000.0},
+                    "volume":{"h24":50000.0}
+                }
+            ]}"#)
+            .create_async()
+            .await;
+
+        let client = DexClient::with_base_url(&server.url());
+        let results = client.search_tokens("TEST", None).await.unwrap();
+        assert_eq!(results.len(), 1); // Same token aggregated
+        // Volume and liquidity should be summed
+        assert!(results[0].volume_24h > 100000.0);
+        assert!(results[0].liquidity_usd > 1000000.0);
+    }
+
+    #[tokio::test]
+    async fn test_dex_data_source_trait_methods() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"pairs":[{
+                "chainId":"ethereum",
+                "dexId":"uniswap",
+                "pairAddress":"0xpair",
+                "baseToken":{"address":"0xtoken","name":"Token","symbol":"TKN"},
+                "quoteToken":{"address":"0xquote","name":"USDC","symbol":"USDC"},
+                "priceUsd":"50.0",
+                "liquidity":{"usd":1000000.0},
+                "volume":{"h24":100000.0}
+            }]}"#)
+            .create_async()
+            .await;
+
+        let client = DexClient::with_base_url(&server.url());
+        // Test through DexDataSource trait
+        let trait_client: &dyn DexDataSource = &client;
+        let price = trait_client.get_token_price("ethereum", "0xtoken").await;
+        assert!(price.is_some());
+    }
 }

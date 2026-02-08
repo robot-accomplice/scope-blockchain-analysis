@@ -41,6 +41,15 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde::Deserialize;
 
+/// Default Etherscan V2 API base URL.
+///
+/// All EVM chains (Ethereum, Polygon, Arbitrum, etc.) use this single
+/// endpoint with a `chainid` query parameter to select the network.
+const ETHERSCAN_V2_API: &str = "https://api.etherscan.io/v2/api";
+
+/// Default JSON-RPC fallback URL for Aegis/Wraith chain.
+const DEFAULT_AEGIS_RPC: &str = "http://localhost:8545";
+
 /// API type for the client endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApiType {
@@ -215,7 +224,7 @@ impl EthereumClient {
 
         Ok(Self {
             client,
-            base_url: "https://api.etherscan.io/v2/api".to_string(),
+            base_url: ETHERSCAN_V2_API.to_string(),
             chain_id: Some("1".to_string()),
             api_key: config.api_keys.get("etherscan").cloned(),
             chain_name: "ethereum".to_string(),
@@ -268,29 +277,16 @@ impl EthereumClient {
         // Etherscan V2 API uses chainid parameter
         // V2 format: https://api.etherscan.io/v2/api?chainid=X&module=...
         let (base_url, chain_id, api_key_name, symbol) = match chain {
-            "ethereum" => ("https://api.etherscan.io/v2/api", "1", "etherscan", "ETH"),
-            "polygon" => (
-                "https://api.etherscan.io/v2/api",
-                "137",
-                "polygonscan",
-                "MATIC",
-            ),
-            "arbitrum" => (
-                "https://api.etherscan.io/v2/api",
-                "42161",
-                "arbiscan",
-                "ETH",
-            ),
-            "optimism" => ("https://api.etherscan.io/v2/api", "10", "optimism", "ETH"),
-            "base" => ("https://api.etherscan.io/v2/api", "8453", "basescan", "ETH"),
-            "bsc" => ("https://api.etherscan.io/v2/api", "56", "bscscan", "BNB"),
+            "ethereum" => (ETHERSCAN_V2_API, "1", "etherscan", "ETH"),
+            "polygon" => (ETHERSCAN_V2_API, "137", "polygonscan", "MATIC"),
+            "arbitrum" => (ETHERSCAN_V2_API, "42161", "arbiscan", "ETH"),
+            "optimism" => (ETHERSCAN_V2_API, "10", "optimism", "ETH"),
+            "base" => (ETHERSCAN_V2_API, "8453", "basescan", "ETH"),
+            "bsc" => (ETHERSCAN_V2_API, "56", "bscscan", "BNB"),
             "aegis" => {
                 // Aegis/Wraith uses direct JSON-RPC, not block explorer API.
                 // Fall back to localhost if not configured.
-                let rpc_url = config
-                    .aegis_rpc
-                    .as_deref()
-                    .unwrap_or("http://localhost:8545");
+                let rpc_url = config.aegis_rpc.as_deref().unwrap_or(DEFAULT_AEGIS_RPC);
                 return Self::for_aegis(rpc_url, config);
             }
             _ => {
@@ -1224,7 +1220,7 @@ impl Default for EthereumClient {
     fn default() -> Self {
         Self {
             client: Client::new(),
-            base_url: "https://api.etherscan.io/v2/api".to_string(),
+            base_url: ETHERSCAN_V2_API.to_string(),
             chain_id: Some("1".to_string()),
             api_key: None,
             chain_name: "ethereum".to_string(),
@@ -2338,5 +2334,188 @@ mod tests {
         let client = EthereumClient::with_base_url("http://test");
         assert_eq!(client.chain_name(), "ethereum");
         assert_eq!(client.native_token_symbol(), "ETH");
+    }
+
+    #[test]
+    fn test_validate_tx_hash_invalid_hex() {
+        let hash = "0xZZZZ23def456789012345678901234567890123456789012345678901234abcd";
+        let result = validate_tx_hash(hash);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid hex"));
+    }
+
+    #[tokio::test]
+    async fn test_get_transactions_api_error() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"status":"0","message":"NOTOK","result":"Max rate limit reached"}"#)
+            .create_async()
+            .await;
+
+        let client = EthereumClient::with_base_url(&server.url());
+        let result = client.get_transactions(VALID_ADDRESS, 10).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_token_holders_pro_key_required() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"status":"0","message":"Pro API key required","result":[]}"#)
+            .create_async()
+            .await;
+
+        let client = EthereumClient::with_base_url(&server.url());
+        let holders = client.get_token_holders("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", 10).await.unwrap();
+        assert!(holders.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_token_holders_api_error() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"status":"0","message":"Some other error","result":[]}"#)
+            .create_async()
+            .await;
+
+        let client = EthereumClient::with_base_url(&server.url());
+        let result = client.get_token_holders("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", 10).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_token_holders_success() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"status":"1","message":"OK","result":[
+                {"TokenHolderAddress":"0xHolder1","TokenHolderQuantity":"1000000000000000000"},
+                {"TokenHolderAddress":"0xHolder2","TokenHolderQuantity":"500000000000000000"}
+            ]}"#)
+            .create_async()
+            .await;
+
+        let client = EthereumClient::with_base_url(&server.url());
+        let holders = client.get_token_holders("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", 10).await.unwrap();
+        assert_eq!(holders.len(), 2);
+        assert_eq!(holders[0].rank, 1);
+        assert_eq!(holders[1].rank, 2);
+        assert!(holders[0].percentage > 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_get_token_info_unknown_token() {
+        let mut server = mockito::Server::new_async().await;
+        // First call for tokeninfo - return empty/error
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"status":"0","message":"No data found","result":[]}"#)
+            .create_async()
+            .await;
+
+        let client = EthereumClient::with_base_url(&server.url());
+        let token = client.get_token_info("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").await.unwrap();
+        assert_eq!(token.symbol, "UNKNOWN");
+    }
+
+    #[tokio::test]
+    async fn test_get_transaction_with_null_block_number() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","id":1,"result":{
+                "hash":"0xabc123def456789012345678901234567890123456789012345678901234abcd",
+                "from":"0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
+                "to":"0xB0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+                "value":"0xde0b6b3a7640000",
+                "gas":"0x5208",
+                "gasPrice":"0x3b9aca00",
+                "nonce":"0x5",
+                "input":"0x",
+                "blockNumber":null
+            }}"#)
+            .create_async()
+            .await;
+
+        let client = EthereumClient::with_base_url(&server.url());
+        let tx = client.get_transaction(VALID_TX_HASH).await.unwrap();
+        // blockNumber is null, so timestamp should also be None
+        assert!(tx.timestamp.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_chain_client_trait_balance() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"status":"1","message":"OK","result":"1000000000000000000"}"#)
+            .create_async()
+            .await;
+
+        let client = EthereumClient::with_base_url(&server.url());
+        let chain_client: &dyn ChainClient = &client;
+        let balance = chain_client.get_balance(VALID_ADDRESS).await.unwrap();
+        assert_eq!(balance.symbol, "ETH");
+    }
+
+    #[tokio::test]
+    async fn test_chain_client_trait_get_transaction() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","id":1,"result":{
+                "hash":"0xabc123def456789012345678901234567890123456789012345678901234abcd",
+                "from":"0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
+                "to":"0xB0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+                "value":"0xde0b6b3a7640000",
+                "gas":"0x5208",
+                "gasPrice":"0x3b9aca00",
+                "nonce":"0x5",
+                "input":"0x",
+                "blockNumber":"0xf4240"
+            }}"#)
+            .create_async()
+            .await;
+
+        let client = EthereumClient::with_base_url(&server.url());
+        let chain_client: &dyn ChainClient = &client;
+        let tx = chain_client.get_transaction(VALID_TX_HASH).await.unwrap();
+        assert!(!tx.hash.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_chain_client_trait_get_block_number() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","id":1,"result":"0xf4240"}"#)
+            .create_async()
+            .await;
+
+        let client = EthereumClient::with_base_url(&server.url());
+        let chain_client: &dyn ChainClient = &client;
+        let block = chain_client.get_block_number().await.unwrap();
+        assert_eq!(block, 1000000);
     }
 }

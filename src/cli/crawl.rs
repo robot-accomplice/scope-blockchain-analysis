@@ -993,7 +993,7 @@ mod tests {
     // Output formatting tests
     // ========================================================================
 
-    use crate::chains::{DexPair, PricePoint, Token, TokenAnalytics, TokenHolder, TokenSocial};
+    use crate::chains::{DexPair, PricePoint, Token, TokenAnalytics, TokenHolder, TokenSearchResult, TokenSocial};
 
     fn make_test_analytics(with_dex: bool) -> TokenAnalytics {
         TokenAnalytics {
@@ -1561,5 +1561,161 @@ mod tests {
         // Report file should exist and contain markdown
         let content = std::fs::read_to_string(tmp.path()).unwrap();
         assert!(content.contains("Token Analysis Report"));
+    }
+
+    // ========================================================================
+    // Additional output formatting coverage
+    // ========================================================================
+
+    #[test]
+    fn test_output_table_explorer_long_address_truncation() {
+        let mut analytics = make_test_analytics(false);
+        analytics.holders = vec![TokenHolder {
+            address: "0x1234567890abcdef1234567890abcdef12345678".to_string(),
+            balance: "1000000".to_string(),
+            formatted_balance: "1,000,000".to_string(),
+            percentage: 50.0,
+            rank: 1,
+        }];
+        let result = output_table_explorer_only(&analytics);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_table_with_dex_empty_pairs() {
+        let mut analytics = make_test_analytics(true);
+        analytics.dex_pairs = vec![];
+        let args = make_test_crawl_args();
+        let result = output_table_with_dex(&analytics, &args);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_table_explorer_no_concentration() {
+        let mut analytics = make_test_analytics(false);
+        analytics.top_10_concentration = None;
+        analytics.top_50_concentration = None;
+        analytics.top_100_concentration = None;
+        let result = output_table_explorer_only(&analytics);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_table_with_dex_top_10_only() {
+        let mut analytics = make_test_analytics(true);
+        analytics.top_10_concentration = Some(25.0);
+        analytics.top_50_concentration = None;
+        analytics.top_100_concentration = None;
+        let args = make_test_crawl_args();
+        let result = output_table_with_dex(&analytics, &args);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_table_with_dex_top_100_concentration() {
+        let mut analytics = make_test_analytics(true);
+        analytics.top_10_concentration = Some(20.0);
+        analytics.top_50_concentration = Some(45.0);
+        analytics.top_100_concentration = Some(65.0);
+        let args = make_test_crawl_args();
+        let result = output_table_with_dex(&analytics, &args);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_csv_with_market_cap_and_fdv() {
+        let mut analytics = make_test_analytics(true);
+        analytics.market_cap = Some(1_000_000_000.0);
+        analytics.fdv = Some(1_500_000_000.0);
+        let result = output_csv(&analytics);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_table_routing_has_dex_data() {
+        let analytics = make_test_analytics(true);
+        assert!(analytics.price_usd > 0.0);
+        let args = make_test_crawl_args();
+        let result = output_table(&analytics, &args);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_table_routing_no_dex_data() {
+        let analytics = make_test_analytics(false);
+        assert_eq!(analytics.price_usd, 0.0);
+        let args = make_test_crawl_args();
+        let result = output_table(&analytics, &args);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_format_large_number_negative() {
+        let result = format_large_number(-1_000_000.0);
+        assert!(result.contains("M") || result.contains("-"));
+    }
+
+    #[test]
+    fn test_select_token_auto_select() {
+        let results = vec![TokenSearchResult {
+            address: "0xtoken".to_string(),
+            symbol: "TKN".to_string(),
+            name: "Test Token".to_string(),
+            chain: "ethereum".to_string(),
+            price_usd: Some(10.0),
+            volume_24h: 100000.0,
+            liquidity_usd: 500000.0,
+            market_cap: Some(1000000.0),
+        }];
+        let selected = select_token(&results, true).unwrap();
+        assert_eq!(selected.symbol, "TKN");
+    }
+
+    #[test]
+    fn test_select_token_single_result() {
+        let results = vec![TokenSearchResult {
+            address: "0xtoken".to_string(),
+            symbol: "SINGLE".to_string(),
+            name: "Single Token".to_string(),
+            chain: "ethereum".to_string(),
+            price_usd: None,
+            volume_24h: 0.0,
+            liquidity_usd: 0.0,
+            market_cap: None,
+        }];
+        // Single result auto-selects even without auto_select flag
+        let selected = select_token(&results, false).unwrap();
+        assert_eq!(selected.symbol, "SINGLE");
+    }
+
+    #[test]
+    fn test_output_table_with_dex_with_holders() {
+        let mut analytics = make_test_analytics(true);
+        analytics.holders = vec![
+            TokenHolder {
+                address: "0xholder1".to_string(),
+                balance: "1000000".to_string(),
+                formatted_balance: "1,000,000".to_string(),
+                percentage: 30.0,
+                rank: 1,
+            },
+            TokenHolder {
+                address: "0xholder2".to_string(),
+                balance: "500000".to_string(),
+                formatted_balance: "500,000".to_string(),
+                percentage: 15.0,
+                rank: 2,
+            },
+        ];
+        let args = make_test_crawl_args();
+        let result = output_table_with_dex(&analytics, &args);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_json() {
+        let analytics = make_test_analytics(true);
+        let result = serde_json::to_string_pretty(&analytics);
+        assert!(result.is_ok());
     }
 }

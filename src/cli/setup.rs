@@ -963,4 +963,32 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
+
+    #[test]
+    fn test_save_config_to_temp_dir() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("scope").join("config.yaml");
+
+        // Create parent dirs
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+
+        let config = Config::default();
+        let yaml = serde_yaml::to_string(&config.chains).unwrap();
+        std::fs::write(&config_path, yaml).unwrap();
+
+        assert!(config_path.exists());
+        let contents = std::fs::read_to_string(&config_path).unwrap();
+        assert!(!contents.is_empty());
+    }
+
+    #[test]
+    fn test_setup_args_reset_flag() {
+        let args = SetupArgs {
+            status: false,
+            key: None,
+            reset: true,
+        };
+        assert!(args.reset);
+    }
+
 }

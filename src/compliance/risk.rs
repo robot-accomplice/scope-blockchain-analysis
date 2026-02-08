@@ -827,4 +827,269 @@ mod tests {
         // With a single timestamp, velocity can't be computed
         assert_eq!(analysis.velocity_score, 0.0);
     }
+
+    #[tokio::test]
+    async fn test_assess_address_generates_all_factors() {
+        let engine = RiskEngine::new();
+        let assessment = engine.assess_address("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2", "ethereum").await.unwrap();
+        // Should have 4 risk factors (behavior, associations, sources, entity)
+        assert_eq!(assessment.factors.len(), 4);
+        // Check factor names
+        let factor_names: Vec<&str> = assessment.factors.iter().map(|f| f.name.as_str()).collect();
+        assert!(factor_names.contains(&"Behavioral Patterns"));
+        assert!(factor_names.contains(&"Address Associations"));
+        assert!(factor_names.contains(&"Source of Funds"));
+        assert!(factor_names.contains(&"Entity Identification"));
+    }
+
+    #[test]
+    fn test_risk_assessment_json_roundtrip() {
+        let assessment = RiskAssessment {
+            address: "0xtest".to_string(),
+            chain: "ethereum".to_string(),
+            overall_score: 35.0,
+            risk_level: RiskLevel::Medium,
+            factors: vec![RiskFactor {
+                name: "Test Factor".to_string(),
+                category: RiskCategory::Behavioral,
+                score: 30.0,
+                weight: 0.25,
+                description: "test details".to_string(),
+                evidence: vec!["evidence1".to_string()],
+            }],
+            recommendations: vec!["recommendation".to_string()],
+            assessed_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&assessment).unwrap();
+        let deserialized: RiskAssessment = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.address, "0xtest");
+        assert_eq!(deserialized.overall_score, 35.0);
+        assert_eq!(deserialized.factors.len(), 1);
+    }
+
+    #[test]
+    fn test_generate_recommendations_low_risk() {
+        let engine = RiskEngine::new();
+        let recs = engine.generate_recommendations(&[], RiskLevel::Low);
+        assert!(!recs.is_empty());
+        // Low risk should have standard monitoring recommendation
+        assert!(recs.iter().any(|r| r.contains("Standard monitoring")));
+    }
+
+    #[test]
+    fn test_generate_recommendations_high_risk() {
+        let engine = RiskEngine::new();
+        let factors = vec![RiskFactor {
+            name: "Behavioral Patterns".to_string(),
+            category: RiskCategory::Behavioral,
+            score: 80.0,
+            weight: 0.3,
+            description: "concerning".to_string(),
+            evidence: vec!["High velocity".to_string()],
+        }];
+        let recs = engine.generate_recommendations(&factors, RiskLevel::High);
+        assert!(!recs.is_empty());
+    }
+
+    #[test]
+    fn test_calculate_weighted_score_empty() {
+        let engine = RiskEngine::new();
+        let score = engine.calculate_weighted_score(&[]);
+        assert_eq!(score, 0.0);
+    }
+
+    #[test]
+    fn test_analyze_patterns_structuring() {
+        // Create transactions with values just under 10000 (structuring pattern)
+        let txs: Vec<datasource::EtherscanTransaction> = (0..5).map(|i| {
+            let mut tx = make_test_tx(&format!("{}", 1700000000 + i * 3600), "9.5");
+            tx.value = format!("{}", (9500 + i * 100) as u128 * 1_000_000_000_000_000_000u128);
+            tx
+        }).collect();
+        let analysis = analyze_patterns(&txs);
+        assert_eq!(analysis.total_transactions, 5);
+    }
+
+    #[test]
+    fn test_analyze_patterns_round_numbers() {
+        // Create transactions with round ETH values
+        let txs: Vec<datasource::EtherscanTransaction> = (0..10).map(|i| {
+            let mut tx = make_test_tx(&format!("{}", 1700000000 + i * 3600), "1.0");
+            // 1 ETH = 1e18 wei, 10 ETH = 10e18 wei, etc.
+            tx.value = format!("{}", 10u128.pow(18) * (i + 1) as u128);
+            tx
+        }).collect();
+        let analysis = analyze_patterns(&txs);
+        assert!(analysis.round_number_pattern);
+    }
+
+    #[test]
+    fn test_analyze_patterns_high_velocity() {
+        // Create many transactions spread over 2 days (high velocity)
+        // Velocity = tx_count / days; 100 txs over 2 days = 50 tx/day
+        let txs: Vec<datasource::EtherscanTransaction> = (0..100).map(|i| {
+            make_test_tx(&format!("{}", 1700000000 + i * 1800), "0.1") // 100 txs over ~2 days
+        }).collect();
+        let analysis = analyze_patterns(&txs);
+        assert!(analysis.velocity_score > 1.0); // More than 1 tx per day
+    }
+
+    fn mock_etherscan_tx_response(txs: &[datasource::EtherscanTransaction]) -> String {
+        let result_json = serde_json::to_string(txs).unwrap();
+        format!(r#"{{"status":"1","message":"OK","result":{}}}"#, result_json)
+    }
+
+    #[tokio::test]
+    async fn test_risk_engine_with_data_client_assess() {
+        let mut server = mockito::Server::new_async().await;
+
+        // Create test transactions with various patterns
+        let txs: Vec<datasource::EtherscanTransaction> = (0..20).map(|i| {
+            let mut tx = make_test_tx(&format!("{}", 1700000000 + i * 3600), "1.0");
+            tx.from = if i % 2 == 0 {
+                "0xSender".to_string()
+            } else {
+                "0xAddr".to_string()
+            };
+            tx.to = if i % 2 == 0 {
+                "0xAddr".to_string()
+            } else {
+                format!("0xRecipient{}", i)
+            };
+            tx.is_error = if i == 5 { "1".to_string() } else { "0".to_string() };
+            tx.contract_address = if i == 10 { "0xContract".to_string() } else { String::new() };
+            tx
+        }).collect();
+
+        let body = mock_etherscan_tx_response(&txs);
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&body)
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let sources = datasource::DataSources::new("test_key".to_string());
+        let client = datasource::BlockchainDataClient::with_base_url(sources, &server.url());
+        let engine = RiskEngine::with_data_client(client);
+        let assessment = engine.assess_address("0xAddr", "ethereum").await.unwrap();
+
+        assert_eq!(assessment.factors.len(), 4);
+        assert!(assessment.overall_score > 0.0);
+        assert!(!assessment.recommendations.is_empty());
+
+        // Behavioral factor should have evidence about analyzed transactions
+        let behavior = assessment.factors.iter().find(|f| f.name == "Behavioral Patterns").unwrap();
+        assert!(behavior.evidence.iter().any(|e| e.contains("Analyzed")));
+
+        // Association factor should have counterparty evidence
+        let assoc = assessment.factors.iter().find(|f| f.name == "Address Associations").unwrap();
+        assert!(assoc.evidence.iter().any(|e| e.contains("counterpart")));
+
+        // Source factor should mention incoming transactions
+        let source = assessment.factors.iter().find(|f| f.name == "Source of Funds").unwrap();
+        assert!(source.evidence.iter().any(|e| e.contains("incoming")));
+    }
+
+    #[tokio::test]
+    async fn test_risk_engine_with_data_client_api_error() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"status":"0","message":"NOTOK","result":null}"#)
+            .create_async()
+            .await;
+
+        let sources = datasource::DataSources::new("test_key".to_string());
+        let client = datasource::BlockchainDataClient::with_base_url(sources, &server.url());
+        let engine = RiskEngine::with_data_client(client);
+        let assessment = engine.assess_address("0xAddr", "ethereum").await.unwrap();
+
+        // Should still produce an assessment, but with error evidence
+        assert_eq!(assessment.factors.len(), 4);
+        // Behavior factor should mention the error
+        let behavior = assessment.factors.iter().find(|f| f.name == "Behavioral Patterns").unwrap();
+        assert!(behavior.evidence.iter().any(|e| e.contains("Could not fetch")));
+    }
+
+    #[tokio::test]
+    async fn test_risk_engine_with_data_client_self_transfers() {
+        let mut server = mockito::Server::new_async().await;
+
+        // Create self-transfers (from == to)
+        let mut txs = Vec::new();
+        for i in 0..5 {
+            let mut tx = make_test_tx(&format!("{}", 1700000000 + i * 3600), "1.0");
+            tx.from = "0xAddr".to_string();
+            tx.to = "0xAddr".to_string(); // self-transfer
+            txs.push(tx);
+        }
+
+        let body = mock_etherscan_tx_response(&txs);
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&body)
+            .create_async()
+            .await;
+
+        let sources = datasource::DataSources::new("test_key".to_string());
+        let client = datasource::BlockchainDataClient::with_base_url(sources, &server.url());
+        let engine = RiskEngine::with_data_client(client);
+        let assessment = engine.assess_address("0xAddr", "ethereum").await.unwrap();
+
+        // Association factor should mention self-transfers
+        let assoc = assessment.factors.iter().find(|f| f.name == "Address Associations").unwrap();
+        assert!(assoc.evidence.iter().any(|e| e.contains("self-transfer")));
+    }
+
+    #[test]
+    fn test_generate_recommendations_critical() {
+        let engine = RiskEngine::new();
+        let factors = vec![RiskFactor {
+            name: "Behavioral Patterns".to_string(),
+            category: RiskCategory::Behavioral,
+            score: 9.0,
+            weight: 0.25,
+            description: "test".to_string(),
+            evidence: vec![],
+        }];
+        let recs = engine.generate_recommendations(&factors, RiskLevel::Critical);
+        assert!(recs.iter().any(|r| r.contains("Immediate investigation")));
+        assert!(recs.iter().any(|r| r.contains("SAR")));
+    }
+
+    #[test]
+    fn test_generate_recommendations_high() {
+        let engine = RiskEngine::new();
+        let recs = engine.generate_recommendations(&[], RiskLevel::High);
+        assert!(recs.iter().any(|r| r.contains("Enhanced due diligence")));
+    }
+
+    #[test]
+    fn test_generate_recommendations_medium() {
+        let engine = RiskEngine::new();
+        let recs = engine.generate_recommendations(&[], RiskLevel::Medium);
+        assert!(recs.iter().any(|r| r.contains("Standard due diligence")));
+    }
+
+    #[test]
+    fn test_generate_recommendations_with_high_score_factor() {
+        let engine = RiskEngine::new();
+        let factors = vec![RiskFactor {
+            name: "Test Factor".to_string(),
+            category: RiskCategory::Behavioral,
+            score: 8.5,
+            weight: 0.25,
+            description: "test".to_string(),
+            evidence: vec![],
+        }];
+        let recs = engine.generate_recommendations(&factors, RiskLevel::Low);
+        assert!(recs.iter().any(|r| r.contains("Address Test Factor concerns")));
+    }
 }

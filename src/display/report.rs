@@ -28,6 +28,30 @@ use crate::error::Result;
 use chrono::{DateTime, Utc};
 use std::path::Path;
 
+// ============================================================================
+// Block explorer base URLs
+// ============================================================================
+
+/// Etherscan base URL for Ethereum token pages.
+const ETHERSCAN_TOKEN_BASE: &str = "https://etherscan.io/token";
+/// PolygonScan base URL for Polygon token pages.
+const POLYGONSCAN_TOKEN_BASE: &str = "https://polygonscan.com/token";
+/// Arbiscan base URL for Arbitrum token pages.
+const ARBISCAN_TOKEN_BASE: &str = "https://arbiscan.io/token";
+/// Optimistic Etherscan base URL for Optimism token pages.
+const OPTIMISM_TOKEN_BASE: &str = "https://optimistic.etherscan.io/token";
+/// BaseScan base URL for Base token pages.
+const BASESCAN_TOKEN_BASE: &str = "https://basescan.org/token";
+/// BscScan base URL for BSC token pages.
+const BSCSCAN_TOKEN_BASE: &str = "https://bscscan.com/token";
+/// Solscan base URL for Solana token pages.
+const SOLSCAN_TOKEN_BASE: &str = "https://solscan.io/token";
+
+/// DexScreener base URL for token pair pages.
+const DEXSCREENER_BASE: &str = "https://dexscreener.com";
+/// GeckoTerminal base URL for pool pages.
+const GECKOTERMINAL_BASE: &str = "https://www.geckoterminal.com";
+
 /// Generates a comprehensive markdown report from token analytics.
 ///
 /// # Arguments
@@ -1006,14 +1030,14 @@ fn generate_data_sources(analytics: &TokenAnalytics) -> String {
 
     // Explorer links based on chain
     let explorer_url = match chain.as_str() {
-        "ethereum" => format!("https://etherscan.io/token/{}", address),
-        "polygon" => format!("https://polygonscan.com/token/{}", address),
-        "arbitrum" => format!("https://arbiscan.io/token/{}", address),
-        "optimism" => format!("https://optimistic.etherscan.io/token/{}", address),
-        "base" => format!("https://basescan.org/token/{}", address),
-        "bsc" => format!("https://bscscan.com/token/{}", address),
-        "solana" => format!("https://solscan.io/token/{}", address),
-        _ => format!("https://etherscan.io/token/{}", address),
+        "ethereum" => format!("{}/{}", ETHERSCAN_TOKEN_BASE, address),
+        "polygon" => format!("{}/{}", POLYGONSCAN_TOKEN_BASE, address),
+        "arbitrum" => format!("{}/{}", ARBISCAN_TOKEN_BASE, address),
+        "optimism" => format!("{}/{}", OPTIMISM_TOKEN_BASE, address),
+        "base" => format!("{}/{}", BASESCAN_TOKEN_BASE, address),
+        "bsc" => format!("{}/{}", BSCSCAN_TOKEN_BASE, address),
+        "solana" => format!("{}/{}", SOLSCAN_TOKEN_BASE, address),
+        _ => format!("{}/{}", ETHERSCAN_TOKEN_BASE, address),
     };
 
     section.push_str(&format!(
@@ -1023,13 +1047,13 @@ fn generate_data_sources(analytics: &TokenAnalytics) -> String {
     ));
 
     section.push_str(&format!(
-        "- [DexScreener](https://dexscreener.com/{}/{})\n",
-        chain, address
+        "- [DexScreener]({}/{}/{})\n",
+        DEXSCREENER_BASE, chain, address
     ));
 
     section.push_str(&format!(
-        "- [GeckoTerminal](https://www.geckoterminal.com/{}/pools/{})\n",
-        chain, address
+        "- [GeckoTerminal]({}/{}/pools/{})\n",
+        GECKOTERMINAL_BASE, chain, address
     ));
 
     section.push_str("\n---\n\n");

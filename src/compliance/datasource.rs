@@ -4,6 +4,9 @@
 
 use serde::Deserialize;
 
+/// Default Etherscan API base URL.
+const ETHERSCAN_API_BASE: &str = "https://api.etherscan.io";
+
 /// Configuration for external data sources
 #[derive(Debug, Clone)]
 pub struct DataSources {
@@ -23,7 +26,7 @@ impl DataSources {
 }
 
 /// Transaction data from Etherscan
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct EtherscanTransaction {
     pub block_number: String,
     pub timestamp: String,
@@ -54,6 +57,7 @@ pub struct EtherscanResponse<T> {
 pub struct BlockchainDataClient {
     sources: DataSources,
     http_client: reqwest::Client,
+    base_url: String,
 }
 
 impl std::fmt::Debug for BlockchainDataClient {
@@ -71,6 +75,17 @@ impl BlockchainDataClient {
         Self {
             sources,
             http_client: reqwest::Client::new(),
+            base_url: ETHERSCAN_API_BASE.to_string(),
+        }
+    }
+
+    /// Create new client with a custom base URL (for testing)
+    #[cfg(test)]
+    pub fn with_base_url(sources: DataSources, base_url: &str) -> Self {
+        Self {
+            sources,
+            http_client: reqwest::Client::new(),
+            base_url: base_url.to_string(),
         }
     }
 
@@ -95,7 +110,8 @@ impl BlockchainDataClient {
         address: &str,
     ) -> anyhow::Result<Vec<EtherscanTransaction>> {
         let url = format!(
-            "https://api.etherscan.io/api?module=account&action=txlist&address={}&startblock=0&endblock=99999999&sort=asc&apikey={}",
+            "{}/api?module=account&action=txlist&address={}&startblock=0&endblock=99999999&sort=asc&apikey={}",
+            self.base_url,
             address,
             self.sources.etherscan_key()
         );
@@ -117,7 +133,8 @@ impl BlockchainDataClient {
         address: &str,
     ) -> anyhow::Result<Vec<EtherscanTransaction>> {
         let url = format!(
-            "https://api.etherscan.io/api?module=account&action=txlistinternal&address={}&startblock=0&endblock=99999999&sort=asc&apikey={}",
+            "{}/api?module=account&action=txlistinternal&address={}&startblock=0&endblock=99999999&sort=asc&apikey={}",
+            self.base_url,
             address,
             self.sources.etherscan_key()
         );
@@ -135,7 +152,8 @@ impl BlockchainDataClient {
         address: &str,
     ) -> anyhow::Result<Vec<EtherscanTransaction>> {
         let url = format!(
-            "https://api.etherscan.io/api?module=account&action=tokentx&address={}&startblock=0&endblock=99999999&sort=asc&apikey={}",
+            "{}/api?module=account&action=tokentx&address={}&startblock=0&endblock=99999999&sort=asc&apikey={}",
+            self.base_url,
             address,
             self.sources.etherscan_key()
         );
@@ -160,7 +178,8 @@ impl BlockchainDataClient {
 
         // Get the transaction
         let url = format!(
-            "https://api.etherscan.io/api?module=proxy&action=eth_getTransactionByHash&txhash={}&apikey={}",
+            "{}/api?module=proxy&action=eth_getTransactionByHash&txhash={}&apikey={}",
+            self.base_url,
             tx_hash,
             self.sources.etherscan_key()
         );
@@ -269,7 +288,7 @@ pub fn analyze_patterns(transactions: &[EtherscanTransaction]) -> PatternAnalysi
 }
 
 /// Pattern analysis results
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PatternAnalysis {
     pub total_transactions: usize,
     pub velocity_score: f32,
@@ -602,5 +621,148 @@ mod tests {
         assert_eq!(cloned.hash, "0x1");
         let debug = format!("{:?}", tx);
         assert!(debug.contains("EtherscanTransaction"));
+    }
+
+    #[tokio::test]
+    async fn test_get_transactions_unsupported_chain() {
+        let sources = DataSources::new("test_key".to_string());
+        let client = BlockchainDataClient::new(sources);
+        let result = client.get_transactions("0xabc", "polygon").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not yet supported"));
+    }
+
+    #[test]
+    fn test_data_sources_etherscan_key() {
+        let sources = DataSources::new("my_key_123".to_string());
+        assert_eq!(sources.etherscan_key(), "my_key_123");
+    }
+
+    #[test]
+    fn test_pattern_analysis_default() {
+        let analysis = PatternAnalysis::default();
+        assert_eq!(analysis.total_transactions, 0);
+        assert_eq!(analysis.velocity_score, 0.0);
+        assert!(!analysis.structuring_detected);
+        assert!(!analysis.round_number_pattern);
+        assert_eq!(analysis.unusual_hours, 0);
+    }
+
+    fn mock_etherscan_tx_response(txs: &[EtherscanTransaction]) -> String {
+        let result_json = serde_json::to_string(txs).unwrap();
+        format!(r#"{{"status":"1","message":"OK","result":{}}}"#, result_json)
+    }
+
+    #[tokio::test]
+    async fn test_get_etherscan_transactions_success() {
+        let mut server = mockito::Server::new_async().await;
+        let tx = create_test_tx("1700000000", "1.0");
+        let body = mock_etherscan_tx_response(&[tx]);
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&body)
+            .create_async()
+            .await;
+
+        let sources = DataSources::new("test_key".to_string());
+        let client = BlockchainDataClient::with_base_url(sources, &server.url());
+        let txs = client.get_transactions("0xabc", "ethereum").await.unwrap();
+        assert_eq!(txs.len(), 1);
+        assert_eq!(txs[0].hash, "0x1");
+    }
+
+    #[tokio::test]
+    async fn test_get_etherscan_transactions_api_error() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"status":"0","message":"NOTOK","result":null}"#)
+            .create_async()
+            .await;
+
+        let sources = DataSources::new("test_key".to_string());
+        let client = BlockchainDataClient::with_base_url(sources, &server.url());
+        let result = client.get_transactions("0xabc", "ethereum").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Etherscan API error"));
+    }
+
+    #[tokio::test]
+    async fn test_get_internal_transactions() {
+        let mut server = mockito::Server::new_async().await;
+        let tx = create_test_tx("1700000000", "0.5");
+        let body = mock_etherscan_tx_response(&[tx]);
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&body)
+            .create_async()
+            .await;
+
+        let sources = DataSources::new("test_key".to_string());
+        let client = BlockchainDataClient::with_base_url(sources, &server.url());
+        let txs = client.get_internal_transactions("0xabc").await.unwrap();
+        assert_eq!(txs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_get_token_transfers() {
+        let mut server = mockito::Server::new_async().await;
+        let body = mock_etherscan_tx_response(&[]);
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&body)
+            .create_async()
+            .await;
+
+        let sources = DataSources::new("test_key".to_string());
+        let client = BlockchainDataClient::with_base_url(sources, &server.url());
+        let txs = client.get_token_transfers("0xabc").await.unwrap();
+        assert!(txs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_trace_transaction() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","result":{"hash":"0xabc"}}"#)
+            .create_async()
+            .await;
+
+        let sources = DataSources::new("test_key".to_string());
+        let client = BlockchainDataClient::with_base_url(sources, &server.url());
+        let trace = client.trace_transaction("0xabc123", 3).await.unwrap();
+        assert_eq!(trace.root_hash, "0xabc123");
+        assert_eq!(trace.hops.len(), 1);
+        assert_eq!(trace.hops[0].depth, 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_transactions_mainnet_alias() {
+        let mut server = mockito::Server::new_async().await;
+        let body = mock_etherscan_tx_response(&[]);
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&body)
+            .create_async()
+            .await;
+
+        let sources = DataSources::new("test_key".to_string());
+        let client = BlockchainDataClient::with_base_url(sources, &server.url());
+        // "mainnet" should work as an alias for "ethereum"
+        let txs = client.get_transactions("0xabc", "mainnet").await.unwrap();
+        assert!(txs.is_empty());
     }
 }
