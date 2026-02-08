@@ -251,15 +251,12 @@ pub async fn handle_analyze(args: AnalyzeArgs) -> anyhow::Result<()> {
 
 /// Handle compliance report generation
 pub async fn handle_compliance_report(args: ComplianceReportArgs) -> anyhow::Result<()> {
-    println!("Generating {} report for {}...", 
+    println!("Compliance report generation is not yet implemented.");
+    println!("Planned features: {} report for {:?} jurisdiction",
         format!("{:?}", args.report_type).to_lowercase(),
-        args.target
+        args.jurisdiction
     );
-    println!("Jurisdiction: {:?}", args.jurisdiction);
-
-    // TODO: Implement compliance reporting
-    println!("\nCompliance reporting coming soon...");
-    println!("Output will be saved to: {}", args.output);
+    println!("\nFor now, use 'bcc risk' and 'bcc analyze' for compliance checks.");
 
     Ok(())
 }
