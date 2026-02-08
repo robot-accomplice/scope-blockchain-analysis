@@ -36,7 +36,7 @@ use ratatui::{
     symbols,
     text::{Line, Span},
     widgets::{
-        Axis, Block, Borders, Chart, Dataset, Gauge, GraphType, List, ListItem, Paragraph,
+        Axis, Block, Borders, Chart, Dataset, GraphType, List, ListItem, Paragraph,
         canvas::{Canvas, Line as CanvasLine, Rectangle},
     },
 };
@@ -1568,37 +1568,61 @@ fn render_buy_sell_gauge(f: &mut Frame, area: Rect, state: &MonitorState) {
         .constraints([Constraint::Length(3), Constraint::Min(0)])
         .split(area);
 
-    // Buy/Sell gauge
+    // Buy/Sell ratio bar — green for buys, red for sells
     let ratio = state.buy_ratio();
-    let color = if ratio > 0.5 {
+    let border_color = if ratio > 0.5 {
         Color::Green
     } else {
         Color::Red
     };
 
-    // Create a visual bar using Unicode block characters
-    let buy_indicator = if ratio > 0.5 { "▶" } else { "▷" };
-    let sell_indicator = if ratio < 0.5 { "◀" } else { "◁" };
+    let block = Block::default()
+        .title(" ◐ Buy/Sell Ratio (24h) ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color));
 
-    let gauge = Gauge::default()
-        .block(
-            Block::default()
-                .title(" ◐ Buy/Sell Ratio (24h) ")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(color)),
-        )
-        .gauge_style(Style::default().fg(color))
-        .ratio(ratio)
-        .label(format!(
+    let inner = block.inner(chunks[0]);
+    f.render_widget(block, chunks[0]);
+
+    // Build a two-tone bar: green portion for buys, red portion for sells
+    if inner.width > 0 && inner.height > 0 {
+        let buy_width = ((ratio * inner.width as f64).round() as u16).min(inner.width);
+        let sell_width = inner.width.saturating_sub(buy_width);
+
+        let buy_indicator = if ratio > 0.5 { "▶" } else { "▷" };
+        let sell_indicator = if ratio < 0.5 { "◀" } else { "◁" };
+        let label = format!(
             "{}Buys: {} │ Sells: {}{} ({:.1}%)",
             buy_indicator,
             state.buys_24h,
             state.sells_24h,
             sell_indicator,
             ratio * 100.0
-        ));
+        );
 
-    f.render_widget(gauge, chunks[0]);
+        // Render green buy blocks and red sell blocks
+        let buy_bar = "█".repeat(buy_width as usize);
+        let sell_bar = "█".repeat(sell_width as usize);
+        let bar_line = Line::from(vec![
+            Span::styled(buy_bar, Style::default().fg(Color::Green)),
+            Span::styled(sell_bar, Style::default().fg(Color::Red)),
+        ]);
+        f.render_widget(Paragraph::new(bar_line), inner);
+
+        // Center the label on top of the bar
+        let label_len = label.len() as u16;
+        if label_len <= inner.width {
+            let x_offset = (inner.width.saturating_sub(label_len)) / 2;
+            let label_area = Rect::new(inner.x + x_offset, inner.y, label_len, 1);
+            let label_widget = Paragraph::new(Span::styled(
+                label,
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            f.render_widget(label_widget, label_area);
+        }
+    }
 
     // Activity log
     let items: Vec<ListItem> = state

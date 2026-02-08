@@ -13,10 +13,12 @@ A production-grade command-line tool for blockchain data analysis, portfolio tra
 - **Address Analysis**: Query balances (with USD valuation), transaction history, and token holdings for blockchain addresses
 - **Transaction Analysis**: Look up and decode blockchain transactions across all supported chains
 - **Token Crawling**: Crawl DEX data for any token -- price, volume, liquidity, holder analysis, and risk scoring with markdown report generation
-- **Live Monitoring**: Real-time TUI dashboard with price/volume/candlestick charts, buy/sell gauges, and activity logs
+- **Live Monitoring**: Real-time TUI dashboard with price/volume/candlestick charts, buy/sell gauges, and activity logs (via interactive mode)
 - **Portfolio Management**: Track multiple addresses across chains with labels, tags, and aggregated balance views
 - **Compliance & Risk Assessment**: Risk scoring, transaction pattern detection, taint analysis, and compliance reporting
+- **Data Export**: Export address history and portfolio data to JSON or CSV with date range filtering
 - **Interactive Mode**: REPL with preserved context between commands for faster workflow
+- **Setup Wizard**: Guided first-run configuration with `scope setup` for API keys and preferences
 - **USD Valuation**: Native token balances enriched with real-time USD prices via DexScreener
 - **Multi-Chain Support**:
   - EVM chains: Ethereum, Polygon, Arbitrum, Optimism, Base, BSC, Aegis
@@ -55,60 +57,120 @@ scope tx 0xabc123def456789012345678901234567890123456789012345678901234abcd
 
 # Risk assessment for compliance
 export ETHERSCAN_API_KEY="your_key_here"
-scope risk 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --detailed
+scope compliance risk 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --detailed
 
 # Pattern detection
-scope analyze 0xabc... --patterns structuring,layering
+scope compliance analyze 0xabc... --patterns structuring,layering
 
 # Token crawling with report generation
 scope crawl 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --chain ethereum
 
-# Live monitor with real-time dashboard
-scope monitor 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --chain ethereum
+# Export data
+scope export --address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --output data.json
 
-# Interactive mode
+# Interactive mode (includes live monitor, portfolio, and all commands)
 scope interactive
 ```
 
 ## Compliance Features
 
-Scope includes enterprise-grade compliance and risk analysis:
+Scope includes enterprise-grade compliance and risk analysis. All compliance commands live under `scope compliance`:
 
 ### Risk Assessment
 
 ```bash
 # Basic risk score
-scope risk 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
+scope compliance risk 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
 
 # Detailed breakdown with evidence
-scope risk 0xabc... --detailed --format markdown
+scope compliance risk 0xabc... --detailed --format markdown
 
 # Export for compliance records
-scope risk 0xabc... --output risk-report.json
+scope compliance risk 0xabc... --output risk-report.json
 ```
 
 ### Pattern Detection
 
 ```bash
-# Detect structuring, layering, velocity anomalies
-scope analyze 0xabc... --patterns structuring,layering,velocity
+# Detect structuring, layering, and velocity anomalies
+scope compliance analyze 0xabc... --patterns structuring,layering,velocity
 
-# Time-range analysis
-scope analyze 0xabc... --range 30d
+# Time-range analysis (default: 30d)
+scope compliance analyze 0xabc... --range 6m
 ```
+
+Available pattern types: `structuring`, `layering`, `integration`, `velocity`, `round-numbers`.
 
 ### Transaction Tracing
 
 ```bash
-# Trace fund flow through multiple hops
-scope trace 0xtxhash... --depth 5 --flag-suspicious
+# Trace fund flow through multiple hops (default depth: 3)
+scope compliance trace 0xtxhash... --depth 5 --flag-suspicious
 ```
+
+### Compliance Reporting
+
+```bash
+# Generate a compliance report for a specific jurisdiction
+scope compliance compliance-report 0xabc... --jurisdiction us --output report.json
+
+# Detailed SAR report
+scope compliance compliance-report 0xabc... --jurisdiction eu --report-type sar --output sar.json
+```
+
+Available jurisdictions: `us`, `eu`, `uk`, `switzerland`, `singapore`.
+Report types: `summary` (default), `detailed`, `sar`, `travel-rule`.
+
+Compliance output formats: `table` (default), `json`, `yaml`, `markdown`.
 
 **Note**: Set `ETHERSCAN_API_KEY` environment variable for full compliance analysis. Without it, basic scoring is used.
 
+## Token Crawling
+
+Crawl DEX data for any token by address or name. Supports searching by symbol, displaying ASCII charts, and generating markdown reports:
+
+```bash
+# Crawl by contract address
+scope crawl 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --chain ethereum
+
+# Search by token name or symbol
+scope crawl USDC
+scope crawl "wrapped ether"
+
+# Specify time period (1h, 24h, 7d, 30d)
+scope crawl USDC --period 7d
+
+# Generate a markdown report
+scope crawl USDC --report report.md
+
+# Disable ASCII charts, output as JSON
+scope crawl USDC --no-charts --format json
+
+# Skip interactive prompts (use first match)
+scope crawl USDC --yes
+
+# Save the selected token as an alias for future use
+scope crawl USDC --save
+```
+
+## Data Export
+
+Export address history or portfolio data to JSON or CSV:
+
+```bash
+# Export address transaction history
+scope export --address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --output history.json
+
+# Export as CSV with date range and limit
+scope export --address 0x742d... --output history.csv --format csv --from 2025-01-01 --to 2025-12-31 --limit 500
+
+# Export portfolio data
+scope export --portfolio --output portfolio.json
+```
+
 ## Interactive Mode
 
-Launch a REPL where context persists between commands:
+Launch a REPL where context persists between commands. Interactive mode provides access to all commands plus the live monitor:
 
 ```bash
 $ scope interactive
@@ -122,8 +184,30 @@ scope:solana> address 7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU
 scope:solana> format json
 Format set to: json
 
+scope:solana> monitor USDC
+# Launches a real-time TUI dashboard with price/volume charts
+
 scope:solana> exit
 ```
+
+Available interactive commands:
+
+- `address` / `addr` -- Analyze a blockchain address
+- `tx` / `transaction` -- Analyze a transaction
+- `crawl` / `token` -- Crawl token analytics
+- `monitor` / `mon` -- Live TUI dashboard with price, volume, and candlestick charts
+- `portfolio` / `port` -- Portfolio management (add, remove, list, summary)
+- `tokens` / `aliases` -- Token alias management (add, remove, list, recent)
+- `setup` / `config` -- Configuration commands
+- `chain` -- Set or show current chain
+- `format` -- Set or show output format (table, json, csv)
+- `limit` -- Set or show transaction limit
+- `+tokens` / `+txs` -- Toggle token/transaction display flags
+- `trace` / `decode` -- Toggle trace/decode flags
+- `ctx` / `context` -- Show current session context
+- `clear` / `reset` -- Reset context to defaults
+- `help` / `?` -- Show help
+- `exit` / `quit` -- Exit interactive mode
 
 ## Configuration
 
@@ -149,22 +233,34 @@ The generated config file follows this structure:
 
 ```yaml
 chains:
+  # EVM-compatible chains
   ethereum_rpc: "https://mainnet.infura.io/v3/YOUR_KEY"
+  bsc_rpc: "https://bsc-dataseed.binance.org"
+  aegis_rpc: "http://localhost:8545"
+
+  # Non-EVM chains
   solana_rpc: "https://api.mainnet-beta.solana.com"
-  
+  tron_api: "https://api.trongrid.io"
+
+  # Block explorer API keys
   api_keys:
-    etherscan: "YOUR_ETHERSCAN_KEY"
-    solscan: "YOUR_SOLSCAN_KEY"
+    etherscan: "YOUR_API_KEY"
+    bscscan: "YOUR_API_KEY"
+    solscan: "YOUR_API_KEY"
+    tronscan: "YOUR_API_KEY"
 
 output:
-  format: table
+  format: table  # table, json, or csv
   color: true
+
+portfolio:
+  data_dir: "~/.local/share/scope"
 ```
 
 ### Environment Variables
 
 - `ETHERSCAN_API_KEY` - Required for compliance features
-- `SCOPE_CONFIG` - Path to custom config file
+- `SCOPE_CONFIG` - Custom config file path (overrides default location)
 - `RUST_LOG` - Log level override
 
 ## Development
@@ -210,13 +306,13 @@ just lint      # Run lints
 
 GitHub Actions workflow runs:
 
-- Check - Fast compilation
-- Format - Code style
-- Clippy - Linting
-- Test - Unit and integration tests
-- Docs - Documentation build
-- Build - Release binaries (Linux, macOS)
-- Security - Dependency audit
+- **Check** - Fast compilation verification
+- **Format** - Code style enforcement (`cargo fmt`)
+- **Clippy** - Lint analysis (`cargo clippy`)
+- **Test** - Unit and integration tests (`cargo test`)
+- **Docs** - Documentation build verification
+- **Build Release** - Release binaries (Linux, macOS)
+- **Security Audit** - Dependency vulnerability scanning
 
 ## License
 
