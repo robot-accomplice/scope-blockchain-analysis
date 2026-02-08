@@ -349,7 +349,7 @@ release:
         echo "✓ v$NEW_VERSION published to crates.io!"
         echo "═══════════════════════════════════════════════════════════════════"
         echo ""
-        echo "Users can now install with: cargo install scope"
+        echo "Users can now install with: cargo install scope-bca"
     else
         echo ""
         echo "Skipped publishing. To publish manually:"
