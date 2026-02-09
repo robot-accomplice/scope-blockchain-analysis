@@ -248,11 +248,11 @@ fn select_token_impl<'a>(
         .map_err(|e| ScopeError::Io(e.to_string()))?;
     writeln!(
         writer,
-        "{:>3}  {:>8}  {:<20}  {:<12}  {:>12}  {:>12}",
-        "#", "Symbol", "Name", "Chain", "Price", "Liquidity"
+        "{:>3}  {:>8}  {:<22}  {:<16}  {:<12}  {:>12}  {:>12}",
+        "#", "Symbol", "Name", "Address", "Chain", "Price", "Liquidity"
     )
     .map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(writer, "{}", "-".repeat(80)).map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(writer, "{}", "─".repeat(98)).map_err(|e| ScopeError::Io(e.to_string()))?;
 
     for (i, token) in results.iter().enumerate() {
         let price = token
@@ -261,20 +261,22 @@ fn select_token_impl<'a>(
             .unwrap_or_else(|| "N/A".to_string());
 
         let liquidity = format_large_number(token.liquidity_usd);
+        let addr = abbreviate_address(&token.address);
 
         // Truncate name if too long
-        let name = if token.name.len() > 18 {
-            format!("{}...", &token.name[..15])
+        let name = if token.name.len() > 20 {
+            format!("{}...", &token.name[..17])
         } else {
             token.name.clone()
         };
 
         writeln!(
             writer,
-            "{:>3}  {:>8}  {:<20}  {:<12}  {:>12}  {:>12}",
+            "{:>3}  {:>8}  {:<22}  {:<16}  {:<12}  {:>12}  {:>12}",
             i + 1,
             token.symbol,
             name,
+            addr,
             token.chain,
             price,
             liquidity
@@ -885,6 +887,15 @@ fn output_csv(analytics: &TokenAnalytics) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Abbreviates a blockchain address for display (e.g. "0x1234...abcd").
+fn abbreviate_address(addr: &str) -> String {
+    if addr.len() > 16 {
+        format!("{}...{}", &addr[..8], &addr[addr.len() - 6..])
+    } else {
+        addr.to_string()
+    }
 }
 
 /// Formats a large number with K, M, B suffixes.
@@ -1822,6 +1833,33 @@ mod tests {
         let output = String::from_utf8(writer).unwrap();
         assert!(output.contains("Found 3 matching tokens"));
         assert!(output.contains("USDC"));
+    }
+
+    #[test]
+    fn test_select_token_shows_address_column() {
+        let results = make_search_results();
+        let input = b"1\n";
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut writer = Vec::new();
+
+        select_token_impl(&results, false, &mut reader, &mut writer).unwrap();
+        let output = String::from_utf8(writer).unwrap();
+
+        // Table header should include Address column
+        assert!(output.contains("Address"));
+        // Abbreviated addresses should appear
+        assert!(output.contains("0xA0b869...06eB48"));
+        assert!(output.contains("0x2791Bc...a84174"));
+    }
+
+    #[test]
+    fn test_abbreviate_address() {
+        assert_eq!(
+            abbreviate_address("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"),
+            "0xA0b869...06eB48"
+        );
+        // Short address is not abbreviated
+        assert_eq!(abbreviate_address("0x1234abcd"), "0x1234abcd");
     }
 
     #[test]

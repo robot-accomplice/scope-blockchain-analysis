@@ -1,0 +1,88 @@
+# Scope Monitor Configuration Schema
+# Configuration lives in the `monitor:` section of ~/.config/scope/config.yaml
+
+# ============================================================
+# IMPLEMENTED — These fields are active and used by the monitor
+# ============================================================
+
+monitor:
+  # Layout preset: dashboard | chart-focus | feed | compact
+  # Responsive auto-selection picks the best preset for terminal size.
+  # Manual switching (L/H keys) overrides auto until A is pressed.
+  layout: dashboard
+
+  # Refresh interval in seconds (affects API polling and UI updates)
+  refresh_seconds: 10
+
+  # Y-axis scale mode for price charts: linear | log
+  # Log scale is useful for tokens with very wide price ranges.
+  # Toggle at runtime with S key.
+  scale: linear
+
+  # Color scheme: green-red | blue-orange | monochrome
+  # Cycle at runtime with / key.
+  color_scheme: green-red
+
+  # Widget visibility toggles
+  # Toggle at runtime with W + digit (1=price_chart, 2=volume, 3=buy_sell, 4=metrics, 5=activity)
+  widgets:
+    price_chart: true
+    volume_chart: true
+    buy_sell_pressure: true
+    metrics_panel: true
+    activity_log: true
+    holder_count: true        # Show on-chain holder count in metrics panel
+    liquidity_depth: true     # Show per-pair liquidity depth breakdown
+
+  # Alert thresholds — alerts flash visually when triggered
+  # All fields are optional; set to null to disable.
+  alerts:
+    price_min: null           # Alert when price drops below this USD value
+    price_max: null           # Alert when price exceeds this USD value
+    whale_min_usd: null       # Whale detection: alert when avg tx size >= this USD value
+    volume_spike_threshold_pct: null  # Alert on volume spike exceeding this % over rolling average
+
+  # CSV export configuration
+  # Toggle export at runtime with E key. REC indicator shows when active.
+  # Exported columns: timestamp, price_usd, volume_24h, liquidity_usd, buys_24h, sells_24h, market_cap
+  export:
+    path: null                # Base directory (default: ./scope-exports/)
+
+  # Auto-pause: pause data fetching while the user is interacting.
+  # Resumes 3 seconds after the last keypress.
+  # Toggle at runtime with Shift+P.
+  auto_pause_on_input: false
+
+# ============================================================
+# PLANNED / FUTURE — Not yet implemented; documented for roadmap
+# ============================================================
+
+  # Transaction feed filters (planned)
+  # feed:
+  #   min_transaction_usd: 100
+  #   max_entries: 50
+  #   auto_scroll: true
+  #   show_internal: false
+
+  # Behavior settings (planned)
+  # behavior:
+  #   confirm_exit: true
+  #   show_help_on_startup: false
+  #   persist_layout: true
+
+# Keybindings (current defaults, not yet user-configurable)
+# keybindings:
+#   quit: ["q", "ctrl+c"]
+#   pause: ["p", "space"]
+#   auto_pause: "shift+p"
+#   export: "e"
+#   layout_next: "l"
+#   layout_prev: "h"
+#   chart_type: "c"
+#   scale_toggle: "s"
+#   color_scheme: "/"
+#   timeframe_up: "+"
+#   timeframe_down: "-"
+#   toggle_widget: "w"
+#   auto_layout: "a"
+#   help: "?"

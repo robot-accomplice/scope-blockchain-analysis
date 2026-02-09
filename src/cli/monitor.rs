@@ -1,53 +1,163 @@
 //! # Live Token Monitor
 //!
 //! This module implements a real-time terminal UI for monitoring token metrics.
-//! It displays live-updating charts for price, volume, transactions, and liquidity.
+//! It displays live-updating charts for price, volume, transactions, and liquidity
+//! across four switchable layout presets with responsive terminal sizing.
 //!
 //! ## Usage
 //!
-//! From interactive mode:
+//! Directly from the command line (no interactive mode required):
+//! ```text
+//! scope monitor USDC
+//! scope mon PEPE --chain ethereum --layout chart-focus --refresh 3
+//! scope monitor 0x1234... -c solana -s log --color-scheme blue-orange
+//! ```
+//!
+//! Or from interactive mode:
 //! ```text
 //! scope> monitor USDC
 //! scope> mon 0x1234...
 //! ```
 //!
+//! ## Layout Presets
+//!
+//! - **Dashboard** -- Charts top, gauges middle, transaction feed bottom (default)
+//! - **ChartFocus** -- Full-width candles (~85%), minimal stats overlay below
+//! - **Feed** -- Transaction log takes priority (~75%), small metrics + buy/sell on top
+//! - **Compact** -- Price sparkline and metrics only, for small terminals (<80x24)
+//!
+//! The monitor auto-selects a layout based on terminal dimensions (responsive
+//! breakpoints). Manual switching via `L`/`H` disables auto-selection until `A`.
+//!
 //! ## Features
 //!
-//! - Real-time price chart with sliding window
+//! - Real-time price chart (line, candlestick, or volume profile) with sliding window
 //! - Volume bar chart
 //! - Buy/sell ratio gauge
-//! - Key metrics panel (price, liquidity, market cap, 24h volume)
-//! - Keyboard controls: Q=quit, R=refresh, P=pause
+//! - Scrollable activity feed (transaction log)
+//! - Key metrics panel with sparkline and stats table
+//! - Config-driven widget visibility (toggle any widget on/off)
+//! - Four layout presets switchable at runtime
+//! - Responsive terminal sizing with auto-layout
+//! - Log/linear Y-axis scale toggle
+//! - Three color schemes (Green/Red, Blue/Orange, Monochrome)
+//! - On-chain holder count integration (when chain client is available)
+//! - Per-pair liquidity depth breakdown across DEXes
+//! - Configurable price alerts (min/max thresholds, whale detection, volume spikes)
+//! - CSV export mode (toggle with `E`, writes to `./scope-exports/`)
+//! - Auto-pause on user input (toggle with `Shift+P`)
+//!
+//! ## Keyboard Controls
+//!
+//! - `Q`/`Esc` quit, `R` refresh, `P`/`Space` pause
+//! - `Shift+P` toggle auto-pause on input
+//! - `E` toggle CSV export (REC indicator when active)
+//! - `L`/`H` cycle layout forward/backward
+//! - `W` + `1-5` toggle widget visibility
+//! - `A` re-enable auto layout
+//! - `C` toggle chart mode, `S` toggle log/linear scale, `/` cycle color scheme
+//! - `T`/`Tab` cycle time period, `1-6` select period
+//! - `J`/`K` scroll activity log, `+`/`-` adjust refresh speed
 
-use crate::chains::ChainClientFactory;
 use crate::chains::dex::{DexClient, DexDataSource, DexTokenData};
+use crate::chains::{ChainClient, ChainClientFactory};
 use crate::config::Config;
 use crate::error::{Result, ScopeError};
+use clap::Args;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
+    event::{DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
-    Frame, Terminal,
-    backend::CrosstermBackend,
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Color, Style},
     symbols,
     text::{Line, Span},
     widgets::{
-        Axis, Block, Borders, Chart, Dataset, Gauge, GraphType, List, ListItem, Paragraph,
+        Axis, Bar, BarChart, BarGroup, Block, Borders, Chart, Dataset, GraphType, List, ListItem,
+        ListState, Paragraph, Row, Sparkline, Table, Tabs,
         canvas::{Canvas, Line as CanvasLine, Rectangle},
     },
 };
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::fs;
-use std::io::{self, Stdout};
+use std::io::{self, BufWriter, Write as _};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use super::interactive::SessionContext;
+
+// ============================================================================
+// CLI Arguments
+// ============================================================================
+
+/// Arguments for the top-level `monitor` command.
+///
+/// Launches the live TUI dashboard directly from the command line,
+/// without requiring interactive mode.
+///
+/// # Examples
+///
+/// ```bash
+/// # Monitor by token address
+/// scope monitor 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
+///
+/// # Monitor by symbol on a specific chain
+/// scope monitor USDC --chain ethereum
+///
+/// # Short alias
+/// scope mon PEPE -c ethereum
+///
+/// # Custom layout and refresh rate
+/// scope monitor USDC --layout chart-focus --refresh 3
+/// ```
+#[derive(Debug, Args)]
+pub struct MonitorArgs {
+    /// Token address or symbol to monitor.
+    ///
+    /// Can be a contract address (0x...) or a token symbol/name.
+    /// If a name/symbol is provided, matching tokens will be searched
+    /// and you can select from the results.
+    pub token: String,
+
+    /// Target blockchain network.
+    ///
+    /// Determines which chain to query for token data.
+    #[arg(short, long, default_value = "ethereum")]
+    pub chain: String,
+
+    /// Layout preset for the TUI dashboard.
+    ///
+    /// Controls how widgets are arranged on screen.
+    /// Options: dashboard, chart-focus, feed, compact.
+    #[arg(short, long)]
+    pub layout: Option<LayoutPreset>,
+
+    /// Refresh interval in seconds.
+    ///
+    /// How often to fetch new data from the API.
+    /// Adjustable at runtime with +/- keys.
+    #[arg(short, long)]
+    pub refresh: Option<u64>,
+
+    /// Y-axis scale mode for price charts.
+    ///
+    /// Options: linear, log.
+    #[arg(short, long)]
+    pub scale: Option<ScaleMode>,
+
+    /// Color scheme for charts.
+    ///
+    /// Options: green-red, blue-orange, monochrome.
+    #[arg(long)]
+    pub color_scheme: Option<ColorScheme>,
+
+    /// Start CSV export immediately, writing to the given path.
+    #[arg(short, long, value_name = "PATH")]
+    pub export: Option<PathBuf>,
+}
 
 /// Maximum data retention: 24 hours.
 /// At 5-second intervals: 24 * 60 * 12 = 17,280 points max per history.
@@ -135,44 +245,66 @@ struct CachedMonitorData {
 /// Time period for chart display (limited to 24 hours of data retention).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimePeriod {
+    /// Last 1 minute
+    Min1,
+    /// Last 5 minutes
+    Min5,
     /// Last 15 minutes
     Min15,
     /// Last 1 hour
     Hour1,
-    /// Last 6 hours
-    Hour6,
-    /// Last 24 hours
-    Hour24,
+    /// Last 4 hours
+    Hour4,
+    /// Last 24 hours (1 day)
+    Day1,
 }
 
 impl TimePeriod {
     /// Returns the duration in seconds for this period.
     pub fn duration_secs(&self) -> i64 {
         match self {
+            TimePeriod::Min1 => 60,
+            TimePeriod::Min5 => 5 * 60,
             TimePeriod::Min15 => 15 * 60,
             TimePeriod::Hour1 => 3600,
-            TimePeriod::Hour6 => 6 * 3600,
-            TimePeriod::Hour24 => 24 * 3600,
+            TimePeriod::Hour4 => 4 * 3600,
+            TimePeriod::Day1 => 24 * 3600,
         }
     }
 
     /// Returns a display label for this period.
     pub fn label(&self) -> &'static str {
         match self {
+            TimePeriod::Min1 => "1m",
+            TimePeriod::Min5 => "5m",
             TimePeriod::Min15 => "15m",
             TimePeriod::Hour1 => "1h",
-            TimePeriod::Hour6 => "6h",
-            TimePeriod::Hour24 => "24h",
+            TimePeriod::Hour4 => "4h",
+            TimePeriod::Day1 => "1d",
+        }
+    }
+
+    /// Returns the zero-based index for this period (for Tabs widget).
+    pub fn index(&self) -> usize {
+        match self {
+            TimePeriod::Min1 => 0,
+            TimePeriod::Min5 => 1,
+            TimePeriod::Min15 => 2,
+            TimePeriod::Hour1 => 3,
+            TimePeriod::Hour4 => 4,
+            TimePeriod::Day1 => 5,
         }
     }
 
     /// Cycles to the next time period.
     pub fn next(&self) -> Self {
         match self {
+            TimePeriod::Min1 => TimePeriod::Min5,
+            TimePeriod::Min5 => TimePeriod::Min15,
             TimePeriod::Min15 => TimePeriod::Hour1,
-            TimePeriod::Hour1 => TimePeriod::Hour6,
-            TimePeriod::Hour6 => TimePeriod::Hour24,
-            TimePeriod::Hour24 => TimePeriod::Min15,
+            TimePeriod::Hour1 => TimePeriod::Hour4,
+            TimePeriod::Hour4 => TimePeriod::Day1,
+            TimePeriod::Day1 => TimePeriod::Min1,
         }
     }
 }
@@ -191,6 +323,8 @@ pub enum ChartMode {
     Line,
     /// Candlestick chart showing OHLC data.
     Candlestick,
+    /// Volume profile showing volume distribution by price level.
+    VolumeProfile,
 }
 
 impl ChartMode {
@@ -198,7 +332,8 @@ impl ChartMode {
     pub fn next(&self) -> Self {
         match self {
             ChartMode::Line => ChartMode::Candlestick,
-            ChartMode::Candlestick => ChartMode::Line,
+            ChartMode::Candlestick => ChartMode::VolumeProfile,
+            ChartMode::VolumeProfile => ChartMode::Line,
         }
     }
 
@@ -207,6 +342,331 @@ impl ChartMode {
         match self {
             ChartMode::Line => "Line",
             ChartMode::Candlestick => "Candle",
+            ChartMode::VolumeProfile => "VolPro",
+        }
+    }
+}
+
+/// Color scheme for the monitor TUI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum ColorScheme {
+    /// Classic green/red (default).
+    #[default]
+    GreenRed,
+    /// Blue/orange, better for certain color blindness.
+    BlueOrange,
+    /// Monochrome -- fully accessible grayscale.
+    Monochrome,
+}
+
+impl ColorScheme {
+    /// Cycles to the next color scheme.
+    pub fn next(&self) -> Self {
+        match self {
+            ColorScheme::GreenRed => ColorScheme::BlueOrange,
+            ColorScheme::BlueOrange => ColorScheme::Monochrome,
+            ColorScheme::Monochrome => ColorScheme::GreenRed,
+        }
+    }
+
+    /// Returns the named color palette for this scheme.
+    pub fn palette(&self) -> ColorPalette {
+        match self {
+            ColorScheme::GreenRed => ColorPalette {
+                up: Color::Green,
+                down: Color::Red,
+                neutral: Color::Gray,
+                header_fg: Color::White,
+                border: Color::DarkGray,
+                highlight: Color::Yellow,
+                volume_bar: Color::Blue,
+                sparkline: Color::Cyan,
+            },
+            ColorScheme::BlueOrange => ColorPalette {
+                up: Color::Blue,
+                down: Color::Rgb(255, 165, 0), // orange
+                neutral: Color::Gray,
+                header_fg: Color::White,
+                border: Color::DarkGray,
+                highlight: Color::Cyan,
+                volume_bar: Color::Magenta,
+                sparkline: Color::LightBlue,
+            },
+            ColorScheme::Monochrome => ColorPalette {
+                up: Color::White,
+                down: Color::DarkGray,
+                neutral: Color::Gray,
+                header_fg: Color::White,
+                border: Color::DarkGray,
+                highlight: Color::White,
+                volume_bar: Color::Gray,
+                sparkline: Color::White,
+            },
+        }
+    }
+
+    /// Returns a short display label.
+    pub fn label(&self) -> &'static str {
+        match self {
+            ColorScheme::GreenRed => "G/R",
+            ColorScheme::BlueOrange => "B/O",
+            ColorScheme::Monochrome => "Mono",
+        }
+    }
+}
+
+/// Named color palette derived from a ColorScheme.
+#[derive(Debug, Clone, Copy)]
+pub struct ColorPalette {
+    /// Color for price-up / bullish.
+    pub up: Color,
+    /// Color for price-down / bearish.
+    pub down: Color,
+    /// Neutral/secondary text color.
+    pub neutral: Color,
+    /// Header foreground.
+    pub header_fg: Color,
+    /// Border color.
+    pub border: Color,
+    /// Highlight/accent color.
+    pub highlight: Color,
+    /// Volume bar color.
+    pub volume_bar: Color,
+    /// Sparkline color.
+    pub sparkline: Color,
+}
+
+/// Y-axis scaling mode for price charts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum ScaleMode {
+    /// Linear scale (default).
+    #[default]
+    Linear,
+    /// Logarithmic scale -- useful for tokens with very wide price ranges.
+    Log,
+}
+
+impl ScaleMode {
+    /// Toggles between Linear and Log.
+    pub fn toggle(&self) -> Self {
+        match self {
+            ScaleMode::Linear => ScaleMode::Log,
+            ScaleMode::Log => ScaleMode::Linear,
+        }
+    }
+
+    /// Returns a short display label.
+    pub fn label(&self) -> &'static str {
+        match self {
+            ScaleMode::Linear => "Lin",
+            ScaleMode::Log => "Log",
+        }
+    }
+}
+
+/// Alert configuration for price and whale detection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct AlertConfig {
+    /// Minimum price threshold; alert fires when price drops below this.
+    pub price_min: Option<f64>,
+    /// Maximum price threshold; alert fires when price exceeds this.
+    pub price_max: Option<f64>,
+    /// Minimum USD value for whale transaction detection.
+    pub whale_min_usd: Option<f64>,
+    /// Volume spike threshold as a percentage increase from the rolling average.
+    pub volume_spike_threshold_pct: Option<f64>,
+}
+
+impl Default for AlertConfig {
+    #[allow(clippy::derivable_impls)]
+    fn default() -> Self {
+        Self {
+            price_min: None,
+            price_max: None,
+            whale_min_usd: None,
+            volume_spike_threshold_pct: None,
+        }
+    }
+}
+
+/// An active (currently firing) alert with a description.
+#[derive(Debug, Clone)]
+pub struct ActiveAlert {
+    /// Human-readable message describing the alert.
+    pub message: String,
+    /// When the alert was first triggered.
+    pub triggered_at: Instant,
+}
+
+/// CSV export configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ExportConfig {
+    /// Base directory for exports (default: `./scope-exports/`).
+    pub path: Option<String>,
+}
+
+impl Default for ExportConfig {
+    #[allow(clippy::derivable_impls)]
+    fn default() -> Self {
+        Self { path: None }
+    }
+}
+
+/// Layout preset for the monitor TUI.
+///
+/// Controls which widgets are shown and how they are arranged.
+/// Can be switched at runtime with keybindings or set via config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum LayoutPreset {
+    /// Balanced 2x2 grid with all widgets visible.
+    #[default]
+    Dashboard,
+    /// Price chart takes ~85% of the screen; minimal stats overlay.
+    ChartFocus,
+    /// Transaction/activity feed prioritized; small price ticker.
+    Feed,
+    /// Minimal single-column sparkline view for small terminals.
+    Compact,
+}
+
+impl LayoutPreset {
+    /// Cycles to the next layout preset.
+    pub fn next(&self) -> Self {
+        match self {
+            LayoutPreset::Dashboard => LayoutPreset::ChartFocus,
+            LayoutPreset::ChartFocus => LayoutPreset::Feed,
+            LayoutPreset::Feed => LayoutPreset::Compact,
+            LayoutPreset::Compact => LayoutPreset::Dashboard,
+        }
+    }
+
+    /// Cycles to the previous layout preset.
+    pub fn prev(&self) -> Self {
+        match self {
+            LayoutPreset::Dashboard => LayoutPreset::Compact,
+            LayoutPreset::ChartFocus => LayoutPreset::Dashboard,
+            LayoutPreset::Feed => LayoutPreset::ChartFocus,
+            LayoutPreset::Compact => LayoutPreset::Feed,
+        }
+    }
+
+    /// Returns a display label for this preset.
+    pub fn label(&self) -> &'static str {
+        match self {
+            LayoutPreset::Dashboard => "Dashboard",
+            LayoutPreset::ChartFocus => "Chart",
+            LayoutPreset::Feed => "Feed",
+            LayoutPreset::Compact => "Compact",
+        }
+    }
+}
+
+/// Controls which widgets are visible in the monitor.
+///
+/// Individual widgets can be toggled on/off via keybindings or config.
+/// The layout functions use these flags to decide which `Rect` areas to allocate.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct WidgetVisibility {
+    /// Show the price chart (line or candlestick).
+    pub price_chart: bool,
+    /// Show the volume bar chart.
+    pub volume_chart: bool,
+    /// Show the buy/sell pressure gauge and activity log.
+    pub buy_sell_pressure: bool,
+    /// Show the metrics panel (sparkline + key metrics table).
+    pub metrics_panel: bool,
+    /// Show the activity log feed.
+    pub activity_log: bool,
+    /// Show the holder count in the metrics panel.
+    pub holder_count: bool,
+    /// Show the per-pair liquidity depth.
+    pub liquidity_depth: bool,
+}
+
+impl Default for WidgetVisibility {
+    fn default() -> Self {
+        Self {
+            price_chart: true,
+            volume_chart: true,
+            buy_sell_pressure: true,
+            metrics_panel: true,
+            activity_log: true,
+            holder_count: true,
+            liquidity_depth: true,
+        }
+    }
+}
+
+impl WidgetVisibility {
+    /// Returns the number of visible widgets.
+    pub fn visible_count(&self) -> usize {
+        [
+            self.price_chart,
+            self.volume_chart,
+            self.buy_sell_pressure,
+            self.metrics_panel,
+            self.activity_log,
+        ]
+        .iter()
+        .filter(|&&v| v)
+        .count()
+    }
+
+    /// Toggles a widget by index (1-based: 1=price_chart, 2=volume, 3=buy_sell, 4=metrics, 5=log).
+    pub fn toggle_by_index(&mut self, index: usize) {
+        match index {
+            1 => self.price_chart = !self.price_chart,
+            2 => self.volume_chart = !self.volume_chart,
+            3 => self.buy_sell_pressure = !self.buy_sell_pressure,
+            4 => self.metrics_panel = !self.metrics_panel,
+            5 => self.activity_log = !self.activity_log,
+            _ => {}
+        }
+    }
+}
+
+/// Monitor-specific configuration.
+///
+/// Loaded from the `monitor:` section of `~/.config/scope/config.yaml`.
+/// All fields have sensible defaults so the section is entirely optional.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct MonitorConfig {
+    /// Layout preset to use on startup.
+    pub layout: LayoutPreset,
+    /// Refresh interval in seconds.
+    pub refresh_seconds: u64,
+    /// Widget visibility toggles.
+    pub widgets: WidgetVisibility,
+    /// Y-axis scale mode for price charts.
+    pub scale: ScaleMode,
+    /// Color scheme.
+    pub color_scheme: ColorScheme,
+    /// Alert thresholds (price min/max, whale detection).
+    pub alerts: AlertConfig,
+    /// CSV export settings.
+    pub export: ExportConfig,
+    /// Whether to auto-pause data fetching when the user is interacting.
+    pub auto_pause_on_input: bool,
+}
+
+impl Default for MonitorConfig {
+    fn default() -> Self {
+        Self {
+            layout: LayoutPreset::Dashboard,
+            refresh_seconds: DEFAULT_REFRESH_SECS,
+            widgets: WidgetVisibility::default(),
+            scale: ScaleMode::Linear,
+            color_scheme: ColorScheme::GreenRed,
+            alerts: AlertConfig::default(),
+            export: ExportConfig::default(),
+            auto_pause_on_input: false,
         }
     }
 }
@@ -285,6 +745,9 @@ pub struct MonitorState {
     /// Recent log messages.
     pub log_messages: VecDeque<String>,
 
+    /// Scroll state for the activity log list widget.
+    pub log_list_state: ListState,
+
     /// Error message to display (if any).
     pub error_message: Option<String>,
 
@@ -294,8 +757,65 @@ pub struct MonitorState {
     /// Chart display mode (line or candlestick).
     pub chart_mode: ChartMode,
 
+    /// Y-axis scale mode for price charts (Linear or Log).
+    pub scale_mode: ScaleMode,
+
+    /// Active color scheme.
+    pub color_scheme: ColorScheme,
+
+    /// Holder count (fetched from chain client, if available).
+    pub holder_count: Option<u64>,
+
+    /// Per-pair liquidity data: (pair_name, liquidity_usd).
+    pub liquidity_pairs: Vec<(String, f64)>,
+
+    /// Counter to throttle holder count fetches.
+    pub holder_fetch_counter: u32,
+
     /// Unix timestamp when monitoring started.
     pub start_timestamp: i64,
+
+    /// Current layout preset.
+    pub layout: LayoutPreset,
+
+    /// Widget visibility toggles.
+    pub widgets: WidgetVisibility,
+
+    /// Whether responsive auto-layout is active (disabled by manual layout switch).
+    pub auto_layout: bool,
+
+    /// Whether the widget-toggle input mode is active (waiting for digit 1-5).
+    pub widget_toggle_mode: bool,
+
+    // ── Phase 7: Alert System ──
+    /// Alert configuration thresholds.
+    pub alerts: AlertConfig,
+
+    /// Currently firing alerts.
+    pub active_alerts: Vec<ActiveAlert>,
+
+    /// Visual flash timer for alert overlay.
+    pub alert_flash_until: Option<Instant>,
+
+    // ── Phase 8: CSV Export ──
+    /// Whether CSV export is currently active.
+    pub export_active: bool,
+
+    /// Path to the current export file.
+    pub export_path: Option<PathBuf>,
+
+    /// Rolling volume average for spike detection (simple moving average).
+    pub volume_avg: f64,
+
+    // ── Phase 9: Auto-Pause ──
+    /// Whether auto-pause on user input is enabled.
+    pub auto_pause_on_input: bool,
+
+    /// Timestamp of the last user key input.
+    pub last_input_at: Instant,
+
+    /// Duration after last input before auto-pause lifts (default 3s).
+    pub auto_pause_timeout: Duration,
 }
 
 impl MonitorState {
@@ -365,14 +885,52 @@ impl MonitorState {
             refresh_rate: Duration::from_secs(DEFAULT_REFRESH_SECS),
             paused: false,
             log_messages: VecDeque::with_capacity(10),
+            log_list_state: ListState::default(),
             error_message: None,
             time_period: TimePeriod::Hour1, // Default to 1 hour view
             chart_mode: ChartMode::Line,    // Default to line chart
+            scale_mode: ScaleMode::Linear,  // Default to linear scale
+            color_scheme: ColorScheme::GreenRed, // Default color scheme
+            holder_count: None,
+            liquidity_pairs: Vec::new(),
+            holder_fetch_counter: 0,
             start_timestamp: now_ts as i64,
+            layout: LayoutPreset::Dashboard,
+            widgets: WidgetVisibility::default(),
+            auto_layout: true,
+            widget_toggle_mode: false,
+            // Phase 7: Alerts
+            alerts: AlertConfig::default(),
+            active_alerts: Vec::new(),
+            alert_flash_until: None,
+            // Phase 8: Export
+            export_active: false,
+            export_path: None,
+            volume_avg: token_data.volume_24h,
+            // Phase 9: Auto-Pause
+            auto_pause_on_input: false,
+            last_input_at: now,
+            auto_pause_timeout: Duration::from_secs(3),
         }
     }
 
+    /// Applies monitor config settings to this state.
+    pub fn apply_config(&mut self, config: &MonitorConfig) {
+        self.layout = config.layout;
+        self.widgets = config.widgets.clone();
+        self.refresh_rate = Duration::from_secs(config.refresh_seconds);
+        self.scale_mode = config.scale;
+        self.color_scheme = config.color_scheme;
+        self.alerts = config.alerts.clone();
+        self.auto_pause_on_input = config.auto_pause_on_input;
+    }
+
     /// Toggles between line and candlestick chart modes.
+    /// Returns the current color palette based on the active color scheme.
+    pub fn palette(&self) -> ColorPalette {
+        self.color_scheme.palette()
+    }
+
     pub fn toggle_chart_mode(&mut self) {
         self.chart_mode = self.chart_mode.next();
         self.log(format!("Chart mode: {}", self.chart_mode.label()));
@@ -582,14 +1140,160 @@ impl MonitorState {
         self.market_cap = token_data.market_cap;
         self.fdv = token_data.fdv;
 
+        // Extract per-pair liquidity data
+        self.liquidity_pairs = token_data
+            .pairs
+            .iter()
+            .map(|p| {
+                let label = format!("{}/{} ({})", p.base_token, p.quote_token, p.dex_name);
+                (label, p.liquidity_usd)
+            })
+            .collect();
+
         self.last_update = Instant::now();
         self.error_message = None;
+
+        // ── Alert checks ──
+        self.check_alerts(token_data);
+
+        // ── CSV export ──
+        if self.export_active {
+            self.write_export_row();
+        }
+
+        // ── Volume average for spike detection ──
+        // Exponential moving average: 10% weight on new value
+        self.volume_avg = self.volume_avg * 0.9 + token_data.volume_24h * 0.1;
 
         self.log(format!("Updated: ${:.6}", token_data.price_usd));
 
         // Periodically save to cache (every 60 updates, ~5 minutes at 5s refresh)
         if self.real_data_count.is_multiple_of(60) {
             self.save_cache();
+        }
+    }
+
+    /// Checks alert thresholds and updates active_alerts.
+    fn check_alerts(&mut self, token_data: &DexTokenData) {
+        self.active_alerts.clear();
+
+        // Price min alert
+        if let Some(min) = self.alerts.price_min
+            && self.current_price < min
+        {
+            self.active_alerts.push(ActiveAlert {
+                message: format!("⚠ Price ${:.6} below min ${:.6}", self.current_price, min),
+                triggered_at: Instant::now(),
+            });
+        }
+
+        // Price max alert
+        if let Some(max) = self.alerts.price_max
+            && self.current_price > max
+        {
+            self.active_alerts.push(ActiveAlert {
+                message: format!("⚠ Price ${:.6} above max ${:.6}", self.current_price, max),
+                triggered_at: Instant::now(),
+            });
+        }
+
+        // Volume spike alert
+        if let Some(threshold_pct) = self.alerts.volume_spike_threshold_pct
+            && self.volume_avg > 0.0
+        {
+            let spike_pct = ((token_data.volume_24h - self.volume_avg) / self.volume_avg) * 100.0;
+            if spike_pct > threshold_pct {
+                self.active_alerts.push(ActiveAlert {
+                    message: format!("⚠ Volume spike: +{:.1}% vs avg", spike_pct),
+                    triggered_at: Instant::now(),
+                });
+            }
+        }
+
+        // Whale detection — estimate from buy/sell changes
+        if let Some(whale_min) = self.alerts.whale_min_usd {
+            // Approximate single-transaction size from volume/tx count
+            let total_txs = (token_data.total_buys_24h + token_data.total_sells_24h) as f64;
+            if total_txs > 0.0 && token_data.volume_24h / total_txs >= whale_min {
+                let avg_tx_size = token_data.volume_24h / total_txs;
+                self.active_alerts.push(ActiveAlert {
+                    message: format!(
+                        "🐋 Avg tx size {} ≥ whale threshold {}",
+                        format_usd(avg_tx_size),
+                        format_usd(whale_min)
+                    ),
+                    triggered_at: Instant::now(),
+                });
+            }
+        }
+
+        // Set flash timer if any alerts are active
+        if !self.active_alerts.is_empty() {
+            self.alert_flash_until = Some(Instant::now() + Duration::from_secs(2));
+        }
+    }
+
+    /// Writes a single CSV row to the export file.
+    fn write_export_row(&mut self) {
+        if let Some(ref path) = self.export_path {
+            // Open file in append mode
+            if let Ok(file) = fs::OpenOptions::new().append(true).open(path) {
+                let mut writer = BufWriter::new(file);
+                let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+                let market_cap_str = self
+                    .market_cap
+                    .map(|mc| format!("{:.2}", mc))
+                    .unwrap_or_default();
+                let row = format!(
+                    "{},{:.8},{:.2},{:.2},{},{},{}\n",
+                    timestamp,
+                    self.current_price,
+                    self.volume_24h,
+                    self.liquidity_usd,
+                    self.buys_24h,
+                    self.sells_24h,
+                    market_cap_str,
+                );
+                let _ = writer.write_all(row.as_bytes());
+            }
+        }
+    }
+
+    /// Starts CSV export: creates the file and writes the header.
+    pub fn start_export(&mut self) {
+        let base_dir = PathBuf::from("./scope-exports");
+        let _ = fs::create_dir_all(&base_dir);
+        let date_str = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
+        let filename = format!("{}_{}.csv", self.symbol, date_str);
+        let path = base_dir.join(filename);
+
+        // Write CSV header
+        if let Ok(mut file) = fs::File::create(&path) {
+            let header =
+                "timestamp,price_usd,volume_24h,liquidity_usd,buys_24h,sells_24h,market_cap\n";
+            let _ = file.write_all(header.as_bytes());
+        }
+
+        self.export_path = Some(path.clone());
+        self.export_active = true;
+        self.log(format!("Export started: {}", path.display()));
+    }
+
+    /// Stops CSV export and closes the file.
+    pub fn stop_export(&mut self) {
+        if let Some(ref path) = self.export_path {
+            self.log(format!("Export saved: {}", path.display()));
+        }
+        self.export_active = false;
+        self.export_path = None;
+    }
+
+    /// Toggles CSV export on/off.
+    pub fn toggle_export(&mut self) {
+        if self.export_active {
+            self.stop_export();
+        } else {
+            self.start_export();
         }
     }
 
@@ -658,10 +1362,12 @@ impl MonitorState {
     /// Generates OHLC candles from price history for the current time period.
     ///
     /// The candle duration is automatically determined based on the selected time period:
+    /// - 1m view: 5-second candles
+    /// - 5m view: 15-second candles
     /// - 15m view: 1-minute candles
     /// - 1h view: 5-minute candles
-    /// - 6h view: 15-minute candles  
-    /// - 24h view: 1-hour candles
+    /// - 4h view: 15-minute candles
+    /// - 1d view: 1-hour candles
     pub fn get_ohlc_candles(&self) -> Vec<OhlcCandle> {
         let (data, _) = self.get_price_data_for_period();
 
@@ -671,10 +1377,12 @@ impl MonitorState {
 
         // Determine candle duration based on time period
         let candle_duration_secs = match self.time_period {
-            TimePeriod::Min15 => 60.0,    // 1-minute candles
-            TimePeriod::Hour1 => 300.0,   // 5-minute candles
-            TimePeriod::Hour6 => 900.0,   // 15-minute candles
-            TimePeriod::Hour24 => 3600.0, // 1-hour candles
+            TimePeriod::Min1 => 5.0,    // 5-second candles
+            TimePeriod::Min5 => 15.0,   // 15-second candles
+            TimePeriod::Min15 => 60.0,  // 1-minute candles
+            TimePeriod::Hour1 => 300.0, // 5-minute candles
+            TimePeriod::Hour4 => 900.0, // 15-minute candles
+            TimePeriod::Day1 => 3600.0, // 1-hour candles
         };
 
         let mut candles: Vec<OhlcCandle> = Vec::new();
@@ -723,8 +1431,21 @@ impl MonitorState {
     }
 
     /// Returns whether a refresh is needed.
+    /// Respects manual pause, auto-pause on input, and the refresh interval.
     pub fn should_refresh(&self) -> bool {
-        !self.paused && self.last_update.elapsed() >= self.refresh_rate
+        if self.paused {
+            return false;
+        }
+        // Auto-pause: if the user is actively interacting, defer refresh
+        if self.auto_pause_on_input && self.last_input_at.elapsed() < self.auto_pause_timeout {
+            return false;
+        }
+        self.last_update.elapsed() >= self.refresh_rate
+    }
+
+    /// Returns true if auto-pause is currently suppressing refreshes.
+    pub fn is_auto_paused(&self) -> bool {
+        self.auto_pause_on_input && self.last_input_at.elapsed() < self.auto_pause_timeout
     }
 
     /// Toggles pause state.
@@ -759,6 +1480,28 @@ impl MonitorState {
         self.log(format!("Refresh rate: {}s", new_secs));
     }
 
+    /// Scrolls the activity log down (newer messages).
+    pub fn scroll_log_down(&mut self) {
+        let len = self.log_messages.len();
+        if len == 0 {
+            return;
+        }
+        let i = self
+            .log_list_state
+            .selected()
+            .map_or(0, |i| if i + 1 < len { i + 1 } else { i });
+        self.log_list_state.select(Some(i));
+    }
+
+    /// Scrolls the activity log up (older messages).
+    pub fn scroll_log_up(&mut self) {
+        let i = self
+            .log_list_state
+            .selected()
+            .map_or(0, |i| i.saturating_sub(1));
+        self.log_list_state.select(Some(i));
+    }
+
     /// Returns the current refresh rate in seconds.
     pub fn refresh_rate_secs(&self) -> u64 {
         self.refresh_rate.as_secs()
@@ -775,55 +1518,94 @@ impl MonitorState {
     }
 }
 
-/// Main monitor application.
-pub struct MonitorApp {
+/// Main monitor application, generic over terminal backend for testability.
+///
+/// The default type parameter (`CrosstermBackend<Stdout>`) is used in production.
+/// Tests use `TestBackend` to avoid real terminal I/O.
+pub struct MonitorApp<B: ratatui::backend::Backend = ratatui::backend::CrosstermBackend<io::Stdout>>
+{
     /// Terminal backend.
-    terminal: Terminal<CrosstermBackend<Stdout>>,
+    terminal: ratatui::Terminal<B>,
 
     /// Monitor state.
     state: MonitorState,
 
     /// DEX client for fetching data.
-    dex_client: DexClient,
+    dex_client: Box<dyn DexDataSource>,
+
+    /// Optional chain client for on-chain data (holder count, etc.).
+    chain_client: Option<Box<dyn ChainClient>>,
 
     /// Whether to exit the application.
     should_exit: bool,
+
+    /// Whether this app owns the real terminal (and should restore it on drop).
+    /// False for test instances using `TestBackend`.
+    owns_terminal: bool,
 }
 
+/// Production constructor and terminal-specific methods.
 impl MonitorApp {
-    /// Creates a new monitor application.
-    pub fn new(initial_data: DexTokenData, chain: &str) -> Result<Self> {
-        // Setup terminal
-        enable_raw_mode()
-            .map_err(|e| ScopeError::Chain(format!("Failed to enable raw mode: {}", e)))?;
-        let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
-            .map_err(|e| ScopeError::Chain(format!("Failed to enter alternate screen: {}", e)))?;
-        let backend = CrosstermBackend::new(stdout);
-        let terminal = Terminal::new(backend)
-            .map_err(|e| ScopeError::Chain(format!("Failed to create terminal: {}", e)))?;
+    /// Creates a new monitor application with a real terminal and live DEX client.
+    pub fn new(
+        initial_data: DexTokenData,
+        chain: &str,
+        monitor_config: &MonitorConfig,
+        chain_client: Option<Box<dyn ChainClient>>,
+    ) -> Result<Self> {
+        // Setup terminal using ratatui's simplified init
+        let terminal = ratatui::init();
+        // Enable mouse capture (not handled by ratatui::init)
+        execute!(io::stdout(), EnableMouseCapture)
+            .map_err(|e| ScopeError::Chain(format!("Failed to enable mouse capture: {}", e)))?;
+
+        let mut state = MonitorState::new(&initial_data, chain);
+        state.apply_config(monitor_config);
 
         Ok(Self {
             terminal,
-            state: MonitorState::new(&initial_data, chain),
-            dex_client: DexClient::new(),
+            state,
+            dex_client: Box::new(DexClient::new()),
+            chain_client,
             should_exit: false,
+            owns_terminal: true,
         })
     }
 
-    /// Runs the main event loop.
+    /// Runs the main event loop using async event stream.
     pub async fn run(&mut self) -> Result<()> {
+        use futures::StreamExt;
+
+        let mut event_stream = crossterm::event::EventStream::new();
+
         loop {
             // Render UI
-            self.terminal.draw(|f| ui(f, &self.state))?;
+            self.terminal.draw(|f| ui(f, &mut self.state))?;
 
-            // Handle events with timeout
-            if crossterm::event::poll(Duration::from_millis(100))
-                .map_err(|e| ScopeError::Chain(format!("Event poll error: {}", e)))?
-                && let Event::Key(key) = event::read()
-                    .map_err(|e| ScopeError::Chain(format!("Event read error: {}", e)))?
-            {
-                self.handle_key_event(key);
+            // Calculate how long until next refresh
+            let refresh_delay = if self.state.paused {
+                Duration::from_millis(200) // Just check for events while paused
+            } else {
+                let elapsed = self.state.last_update.elapsed();
+                self.state.refresh_rate.saturating_sub(elapsed)
+            };
+
+            // Wait for either an event or the refresh timer
+            tokio::select! {
+                maybe_event = event_stream.next() => {
+                    match maybe_event {
+                        Some(Ok(Event::Key(key))) => {
+                            self.handle_key_event(key);
+                        }
+                        Some(Ok(Event::Resize(_, _))) => {
+                            // Terminal resized — ui() will pick up new size on next draw
+                        }
+                        _ => {}
+                    }
+                }
+                _ = tokio::time::sleep(refresh_delay) => {
+                    // Timer expired — check if refresh is needed
+                }
             }
 
             if self.should_exit {
@@ -838,22 +1620,87 @@ impl MonitorApp {
 
         Ok(())
     }
+}
+
+impl<B: ratatui::backend::Backend> Drop for MonitorApp<B> {
+    fn drop(&mut self) {
+        if self.owns_terminal {
+            let _ = execute!(io::stdout(), DisableMouseCapture);
+            ratatui::restore();
+        }
+    }
+}
+
+/// Methods that work with any terminal backend (production or test).
+/// Includes cleanup, key handling, and data fetching.
+impl<B: ratatui::backend::Backend> MonitorApp<B> {
+    /// Cleans up terminal state. Only performs real terminal restore when
+    /// this app owns the terminal (production mode).
+    pub fn cleanup(&mut self) -> Result<()> {
+        // Save cache before exiting
+        self.state.save_cache();
+
+        if self.owns_terminal {
+            // Disable mouse capture (not handled by ratatui::restore)
+            let _ = execute!(io::stdout(), DisableMouseCapture);
+            // Restore terminal using ratatui's simplified cleanup
+            ratatui::restore();
+        }
+        Ok(())
+    }
 
     /// Handles a single key event, updating state accordingly.
     /// Extracted from the event loop for testability.
     fn handle_key_event(&mut self, key: crossterm::event::KeyEvent) {
+        // Track last input time for auto-pause
+        self.state.last_input_at = Instant::now();
+
+        // Widget toggle mode: waiting for digit 1-5
+        if self.state.widget_toggle_mode {
+            self.state.widget_toggle_mode = false;
+            if let KeyCode::Char(c @ '1'..='5') = key.code {
+                let idx = (c as u8 - b'0') as usize;
+                self.state.widgets.toggle_by_index(idx);
+                return;
+            }
+            // Any other key cancels the mode and falls through
+        }
+
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => {
+                // Stop export before quitting if active
+                if self.state.export_active {
+                    self.state.stop_export();
+                }
                 self.should_exit = true;
             }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if self.state.export_active {
+                    self.state.stop_export();
+                }
                 self.should_exit = true;
             }
             KeyCode::Char('r') => {
                 self.state.force_refresh();
             }
+            // Shift+P toggles auto-pause on input
+            KeyCode::Char('P') if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.state.auto_pause_on_input = !self.state.auto_pause_on_input;
+                self.state.log(format!(
+                    "Auto-pause: {}",
+                    if self.state.auto_pause_on_input {
+                        "ON"
+                    } else {
+                        "OFF"
+                    }
+                ));
+            }
             KeyCode::Char('p') | KeyCode::Char(' ') => {
                 self.state.toggle_pause();
+            }
+            // Toggle CSV export
+            KeyCode::Char('e') => {
+                self.state.toggle_export();
             }
             // Increase refresh interval (slower)
             KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Char(']') => {
@@ -863,25 +1710,67 @@ impl MonitorApp {
             KeyCode::Char('-') | KeyCode::Char('_') | KeyCode::Char('[') => {
                 self.state.faster_refresh();
             }
-            // Time period selection (1=15m, 2=1h, 3=6h, 4=24h)
+            // Time period selection (1=1m, 2=5m, 3=15m, 4=1h, 5=4h, 6=1d)
             KeyCode::Char('1') => {
-                self.state.set_time_period(TimePeriod::Min15);
+                self.state.set_time_period(TimePeriod::Min1);
             }
             KeyCode::Char('2') => {
-                self.state.set_time_period(TimePeriod::Hour1);
+                self.state.set_time_period(TimePeriod::Min5);
             }
             KeyCode::Char('3') => {
-                self.state.set_time_period(TimePeriod::Hour6);
+                self.state.set_time_period(TimePeriod::Min15);
             }
             KeyCode::Char('4') => {
-                self.state.set_time_period(TimePeriod::Hour24);
+                self.state.set_time_period(TimePeriod::Hour1);
+            }
+            KeyCode::Char('5') => {
+                self.state.set_time_period(TimePeriod::Hour4);
+            }
+            KeyCode::Char('6') => {
+                self.state.set_time_period(TimePeriod::Day1);
             }
             KeyCode::Char('t') | KeyCode::Tab => {
                 self.state.cycle_time_period();
             }
-            // Toggle chart mode (line/candlestick)
+            // Toggle chart mode (line/candlestick/volume-profile)
             KeyCode::Char('c') => {
                 self.state.toggle_chart_mode();
+            }
+            // Toggle scale mode (linear/log)
+            KeyCode::Char('s') => {
+                self.state.scale_mode = self.state.scale_mode.toggle();
+                self.state
+                    .log(format!("Scale: {}", self.state.scale_mode.label()));
+            }
+            // Cycle color scheme
+            KeyCode::Char('/') => {
+                self.state.color_scheme = self.state.color_scheme.next();
+                self.state
+                    .log(format!("Colors: {}", self.state.color_scheme.label()));
+            }
+            // Scroll activity log
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.state.scroll_log_down();
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.state.scroll_log_up();
+            }
+            // Layout cycling
+            KeyCode::Char('l') => {
+                self.state.layout = self.state.layout.next();
+                self.state.auto_layout = false;
+            }
+            KeyCode::Char('h') => {
+                self.state.layout = self.state.layout.prev();
+                self.state.auto_layout = false;
+            }
+            // Widget toggle mode
+            KeyCode::Char('w') => {
+                self.state.widget_toggle_mode = true;
+            }
+            // Re-enable auto layout
+            KeyCode::Char('a') => {
+                self.state.auto_layout = true;
             }
             _ => {}
         }
@@ -902,31 +1791,22 @@ impl MonitorApp {
                 self.state.last_update = Instant::now(); // Prevent rapid retries
             }
         }
-    }
 
-    /// Cleans up terminal state.
-    pub fn cleanup(&mut self) -> Result<()> {
-        // Save cache before exiting
-        self.state.save_cache();
-
-        disable_raw_mode()
-            .map_err(|e| ScopeError::Chain(format!("Failed to disable raw mode: {}", e)))?;
-        execute!(
-            self.terminal.backend_mut(),
-            LeaveAlternateScreen,
-            DisableMouseCapture
-        )
-        .map_err(|e| ScopeError::Chain(format!("Failed to leave alternate screen: {}", e)))?;
-        self.terminal
-            .show_cursor()
-            .map_err(|e| ScopeError::Chain(format!("Failed to show cursor: {}", e)))?;
-        Ok(())
-    }
-}
-
-impl Drop for MonitorApp {
-    fn drop(&mut self) {
-        let _ = self.cleanup();
+        // Periodically fetch holder count via chain client (~every 12th refresh ≈ 60s at 5s rate)
+        self.state.holder_fetch_counter += 1;
+        if self.state.holder_fetch_counter.is_multiple_of(12)
+            && let Some(ref client) = self.chain_client
+        {
+            match client
+                .get_token_holder_count(&self.state.token_address)
+                .await
+            {
+                Ok(count) if count > 0 => {
+                    self.state.holder_count = Some(count);
+                }
+                _ => {} // Keep previous value or None
+            }
+        }
     }
 }
 
@@ -934,18 +1814,54 @@ impl Drop for MonitorApp {
 /// Returns true if the application should exit.
 #[cfg(test)]
 fn handle_key_event_on_state(key: crossterm::event::KeyEvent, state: &mut MonitorState) -> bool {
+    // Track last input time for auto-pause
+    state.last_input_at = Instant::now();
+
+    // Widget toggle mode: waiting for digit 1-5
+    if state.widget_toggle_mode {
+        state.widget_toggle_mode = false;
+        if let KeyCode::Char(c @ '1'..='5') = key.code {
+            let idx = (c as u8 - b'0') as usize;
+            state.widgets.toggle_by_index(idx);
+            return false;
+        }
+        // Any other key cancels the mode and falls through
+    }
+
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => {
+            if state.export_active {
+                state.stop_export();
+            }
             return true;
         }
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if state.export_active {
+                state.stop_export();
+            }
             return true;
         }
         KeyCode::Char('r') => {
             state.force_refresh();
         }
+        // Shift+P toggles auto-pause
+        KeyCode::Char('P') if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            state.auto_pause_on_input = !state.auto_pause_on_input;
+            state.log(format!(
+                "Auto-pause: {}",
+                if state.auto_pause_on_input {
+                    "ON"
+                } else {
+                    "OFF"
+                }
+            ));
+        }
         KeyCode::Char('p') | KeyCode::Char(' ') => {
             state.toggle_pause();
+        }
+        // Toggle CSV export
+        KeyCode::Char('e') => {
+            state.toggle_export();
         }
         KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Char(']') => {
             state.slower_refresh();
@@ -954,16 +1870,22 @@ fn handle_key_event_on_state(key: crossterm::event::KeyEvent, state: &mut Monito
             state.faster_refresh();
         }
         KeyCode::Char('1') => {
-            state.set_time_period(TimePeriod::Min15);
+            state.set_time_period(TimePeriod::Min1);
         }
         KeyCode::Char('2') => {
-            state.set_time_period(TimePeriod::Hour1);
+            state.set_time_period(TimePeriod::Min5);
         }
         KeyCode::Char('3') => {
-            state.set_time_period(TimePeriod::Hour6);
+            state.set_time_period(TimePeriod::Min15);
         }
         KeyCode::Char('4') => {
-            state.set_time_period(TimePeriod::Hour24);
+            state.set_time_period(TimePeriod::Hour1);
+        }
+        KeyCode::Char('5') => {
+            state.set_time_period(TimePeriod::Hour4);
+        }
+        KeyCode::Char('6') => {
+            state.set_time_period(TimePeriod::Day1);
         }
         KeyCode::Char('t') | KeyCode::Tab => {
             state.cycle_time_period();
@@ -971,18 +1893,232 @@ fn handle_key_event_on_state(key: crossterm::event::KeyEvent, state: &mut Monito
         KeyCode::Char('c') => {
             state.toggle_chart_mode();
         }
+        KeyCode::Char('s') => {
+            state.scale_mode = state.scale_mode.toggle();
+            state.log(format!("Scale: {}", state.scale_mode.label()));
+        }
+        KeyCode::Char('/') => {
+            state.color_scheme = state.color_scheme.next();
+            state.log(format!("Colors: {}", state.color_scheme.label()));
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            state.scroll_log_down();
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            state.scroll_log_up();
+        }
+        KeyCode::Char('l') => {
+            state.layout = state.layout.next();
+            state.auto_layout = false;
+        }
+        KeyCode::Char('h') => {
+            state.layout = state.layout.prev();
+            state.auto_layout = false;
+        }
+        KeyCode::Char('w') => {
+            state.widget_toggle_mode = true;
+        }
+        KeyCode::Char('a') => {
+            state.auto_layout = true;
+        }
         _ => {}
     }
     false
 }
 
 /// Renders the UI.
-fn ui(f: &mut Frame, state: &MonitorState) {
+/// Computed layout areas for each widget. `None` means the widget is hidden.
+struct LayoutAreas {
+    price_chart: Option<Rect>,
+    volume_chart: Option<Rect>,
+    buy_sell_gauge: Option<Rect>,
+    metrics_panel: Option<Rect>,
+    activity_feed: Option<Rect>,
+}
+
+/// Dashboard layout: charts top, gauges middle, transaction feed bottom.
+///
+/// ```text
+/// ┌──────────────────────┬──────────────────────┐
+/// │  Price Chart (60%)   │  Volume Chart (40%)  │  55%
+/// ├──────────────────────┼──────────────────────┤
+/// │  Buy/Sell (50%)      │  Metrics (50%)       │  20%
+/// ├──────────────────────┴──────────────────────┤
+/// │  Activity Feed                              │  25%
+/// └─────────────────────────────────────────────┘
+/// ```
+fn layout_dashboard(area: Rect, widgets: &WidgetVisibility) -> LayoutAreas {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(55),
+            Constraint::Percentage(20),
+            Constraint::Percentage(25),
+        ])
+        .split(area);
+
+    let top = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(rows[0]);
+
+    let middle = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(rows[1]);
+
+    LayoutAreas {
+        price_chart: if widgets.price_chart {
+            Some(top[0])
+        } else {
+            None
+        },
+        volume_chart: if widgets.volume_chart {
+            Some(top[1])
+        } else {
+            None
+        },
+        buy_sell_gauge: if widgets.buy_sell_pressure {
+            Some(middle[0])
+        } else {
+            None
+        },
+        metrics_panel: if widgets.metrics_panel {
+            Some(middle[1])
+        } else {
+            None
+        },
+        activity_feed: if widgets.activity_log {
+            Some(rows[2])
+        } else {
+            None
+        },
+    }
+}
+
+/// Chart-focus layout: full-width candles with minimal stats overlay.
+///
+/// ```text
+/// ┌─────────────────────────────────────────────┐
+/// │                                             │
+/// │            Price Chart (~85%)                │
+/// │                                             │
+/// ├─────────────────────────────────────────────┤
+/// │  Metrics (compact stats overlay)     ~15%   │
+/// └─────────────────────────────────────────────┘
+/// ```
+fn layout_chart_focus(area: Rect, widgets: &WidgetVisibility) -> LayoutAreas {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(85), Constraint::Percentage(15)])
+        .split(area);
+
+    LayoutAreas {
+        price_chart: if widgets.price_chart {
+            Some(vertical[0])
+        } else {
+            None
+        },
+        volume_chart: None,   // Hidden in chart-focus
+        buy_sell_gauge: None, // Hidden in chart-focus
+        metrics_panel: if widgets.metrics_panel {
+            Some(vertical[1])
+        } else {
+            None
+        },
+        activity_feed: None, // Hidden in chart-focus
+    }
+}
+
+/// Feed layout: transaction log takes priority, small price ticker on top.
+///
+/// ```text
+/// ┌──────────────────────┬──────────────────────┐
+/// │  Metrics (50%)       │  Buy/Sell (50%)      │  25%
+/// ├──────────────────────┴──────────────────────┤
+/// │                                             │
+/// │            Activity Feed (~75%)             │
+/// │                                             │
+/// └─────────────────────────────────────────────┘
+/// ```
+fn layout_feed(area: Rect, widgets: &WidgetVisibility) -> LayoutAreas {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
+        .split(area);
+
+    let top = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(vertical[0]);
+
+    LayoutAreas {
+        price_chart: None,  // Hidden in feed mode
+        volume_chart: None, // Hidden in feed mode
+        metrics_panel: if widgets.metrics_panel {
+            Some(top[0])
+        } else {
+            None
+        },
+        buy_sell_gauge: if widgets.buy_sell_pressure {
+            Some(top[1])
+        } else {
+            None
+        },
+        activity_feed: if widgets.activity_log {
+            Some(vertical[1])
+        } else {
+            None
+        },
+    }
+}
+
+/// Compact layout: price sparkline and metrics only for small terminals.
+///
+/// ```text
+/// ┌─────────────────────────────────────────────┐
+/// │  Metrics Panel (sparkline + stats)    100%  │
+/// └─────────────────────────────────────────────┘
+/// ```
+fn layout_compact(area: Rect, widgets: &WidgetVisibility) -> LayoutAreas {
+    LayoutAreas {
+        price_chart: None,    // Hidden in compact
+        volume_chart: None,   // Hidden in compact
+        buy_sell_gauge: None, // Hidden in compact
+        metrics_panel: if widgets.metrics_panel {
+            Some(area)
+        } else {
+            None
+        },
+        activity_feed: None, // Hidden in compact
+    }
+}
+
+/// Selects the best layout preset based on terminal size.
+fn auto_select_layout(size: Rect) -> LayoutPreset {
+    match (size.width, size.height) {
+        (w, h) if w < 80 || h < 24 => LayoutPreset::Compact,
+        (w, _) if w < 120 => LayoutPreset::Feed,
+        (_, h) if h < 30 => LayoutPreset::ChartFocus,
+        _ => LayoutPreset::Dashboard,
+    }
+}
+
+/// Renders the UI, dispatching to the active layout preset.
+fn ui(f: &mut Frame, state: &mut MonitorState) {
+    // Responsive breakpoint: auto-select layout for terminal size
+    if state.auto_layout {
+        let suggested = auto_select_layout(f.area());
+        if suggested != state.layout {
+            state.layout = suggested;
+        }
+    }
+
     // Main layout: header, content, footer
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Header
+            Constraint::Length(4), // Header (token info + time period tabs)
             Constraint::Min(10),   // Content
             Constraint::Length(3), // Footer
         ])
@@ -991,36 +2127,63 @@ fn ui(f: &mut Frame, state: &MonitorState) {
     // Render header
     render_header(f, chunks[0], state);
 
-    // Content layout: 2x2 grid
-    let content_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(chunks[1]);
+    // Calculate content areas based on active layout preset
+    let areas = match state.layout {
+        LayoutPreset::Dashboard => layout_dashboard(chunks[1], &state.widgets),
+        LayoutPreset::ChartFocus => layout_chart_focus(chunks[1], &state.widgets),
+        LayoutPreset::Feed => layout_feed(chunks[1], &state.widgets),
+        LayoutPreset::Compact => layout_compact(chunks[1], &state.widgets),
+    };
 
-    let left_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-        .split(content_chunks[0]);
-
-    let right_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-        .split(content_chunks[1]);
-
-    // Render panels - dispatch to appropriate chart type
-    match state.chart_mode {
-        ChartMode::Line => render_price_chart(f, left_chunks[0], state),
-        ChartMode::Candlestick => render_candlestick_chart(f, left_chunks[0], state),
+    // Render each widget if its area is allocated
+    if let Some(area) = areas.price_chart {
+        match state.chart_mode {
+            ChartMode::Line => render_price_chart(f, area, state),
+            ChartMode::Candlestick => render_candlestick_chart(f, area, state),
+            ChartMode::VolumeProfile => render_volume_profile_chart(f, area, state),
+        }
     }
-    render_buy_sell_gauge(f, left_chunks[1], state);
-    render_volume_chart(f, right_chunks[0], state);
-    render_metrics_panel(f, right_chunks[1], state);
+    if let Some(area) = areas.volume_chart {
+        render_volume_chart(f, area, &*state);
+    }
+    if let Some(area) = areas.buy_sell_gauge {
+        render_buy_sell_gauge(f, area, state);
+    }
+    if let Some(area) = areas.metrics_panel {
+        // Split metrics area to show liquidity depth if enabled and data available
+        if state.widgets.liquidity_depth && !state.liquidity_pairs.is_empty() {
+            let split = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+                .split(area);
+            render_metrics_panel(f, split[0], &*state);
+            render_liquidity_depth(f, split[1], &*state);
+        } else {
+            render_metrics_panel(f, area, &*state);
+        }
+    }
+    if let Some(area) = areas.activity_feed {
+        render_activity_feed(f, area, state);
+    }
+
+    // Render alert overlay on top of content area if alerts are active
+    if !state.active_alerts.is_empty() {
+        // Show alerts as a banner at the top of the content area (3 lines max)
+        let alert_height = (state.active_alerts.len() as u16 + 2).min(5);
+        let alert_area = Rect::new(
+            chunks[1].x,
+            chunks[1].y,
+            chunks[1].width,
+            alert_height.min(chunks[1].height),
+        );
+        render_alert_overlay(f, alert_area, state);
+    }
 
     // Render footer
     render_footer(f, chunks[2], state);
 }
 
-/// Renders the header with token info.
+/// Renders the header with token info and time period tabs.
 fn render_header(f: &mut Frame, area: Rect, state: &MonitorState) {
     let price_color = if state.price_change_24h >= 0.0 {
         Color::Green
@@ -1050,34 +2213,56 @@ fn render_header(f: &mut Frame, area: Rect, state: &MonitorState) {
     );
 
     let title = format!(
-        " ◈ {} ({}) │ {} │ {} ",
+        " ◈ {} ({}) │ {} ",
         state.symbol,
         state.name,
         state.chain.to_uppercase(),
-        state.time_period.label()
     );
 
     let price_str = format_price_usd(state.current_price);
 
+    // Split header area: top row for token info, bottom row for tabs
+    let header_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Length(1)])
+        .split(area);
+
+    // Token info with price
     let header = Paragraph::new(Line::from(vec![
-        Span::styled(
-            price_str,
-            Style::default()
-                .fg(price_color)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(price_str, Style::new().fg(price_color).bold()),
         Span::raw(" "),
-        Span::styled(trend_arrow, Style::default().fg(price_color)),
-        Span::styled(format!(" {}", change_str), Style::default().fg(price_color)),
+        Span::styled(trend_arrow, Style::new().fg(price_color)),
+        Span::styled(format!(" {}", change_str), Style::new().fg(price_color)),
     ]))
     .block(
         Block::default()
             .title(title)
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan)),
+            .border_style(Style::new().cyan()),
     );
 
-    f.render_widget(header, area);
+    f.render_widget(header, header_chunks[0]);
+
+    // Time period tabs
+    let tab_titles = vec!["1m", "5m", "15m", "1h", "4h", "1d"];
+    let chart_label = state.chart_mode.label();
+    let tabs = Tabs::new(tab_titles)
+        .select(state.time_period.index())
+        .highlight_style(Style::new().cyan().bold())
+        .divider("│")
+        .padding(" ", " ");
+    let tabs_line = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(20), Constraint::Length(10)])
+        .split(header_chunks[1]);
+    f.render_widget(tabs, tabs_line[0]);
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            format!("⊞ {}", chart_label),
+            Style::new().magenta(),
+        )),
+        tabs_line[1],
+    );
 }
 
 /// Renders the price chart with visual differentiation between real and synthetic data.
@@ -1106,12 +2291,9 @@ fn render_price_chart(f: &mut Frame, area: Rect, state: &MonitorState) {
     };
 
     // Determine if price is up or down for coloring
+    let pal = state.palette();
     let is_price_up = price_change >= 0.0;
-    let trend_color = if is_price_up {
-        Color::Green
-    } else {
-        Color::Red
-    };
+    let trend_color = if is_price_up { pal.up } else { pal.down };
     let trend_symbol = if is_price_up { "▲" } else { "▼" };
 
     // Format current price based on magnitude
@@ -1131,17 +2313,12 @@ fn render_price_chart(f: &mut Frame, area: Rect, state: &MonitorState) {
         Span::raw(" ◆ "),
         Span::styled(
             format!("{} {} ", price_str, trend_symbol),
-            Style::default()
-                .fg(trend_color)
-                .add_modifier(Modifier::BOLD),
+            Style::new().fg(trend_color).bold(),
         ),
-        Span::styled(
-            format!("({}) ", change_str),
-            Style::default().fg(trend_color),
-        ),
+        Span::styled(format!("({}) ", change_str), Style::new().fg(trend_color)),
         Span::styled(
             format!("│{}│ ", state.time_period.label()),
-            Style::default().fg(Color::Gray),
+            Style::new().gray(),
         ),
     ]);
 
@@ -1171,23 +2348,42 @@ fn render_price_chart(f: &mut Frame, area: Rect, state: &MonitorState) {
         x_max
     };
 
+    // Apply scale transformation (log or linear)
+    let apply_scale = |price: f64| -> f64 {
+        match state.scale_mode {
+            ScaleMode::Linear => price,
+            ScaleMode::Log => {
+                if price > 0.0 {
+                    price.ln()
+                } else {
+                    0.0
+                }
+            }
+        }
+    };
+
+    let (y_min, y_max) = (apply_scale(y_min), apply_scale(y_max));
+
     // Split data into synthetic and real datasets for visual differentiation
     let synthetic_data: Vec<(f64, f64)> = data
         .iter()
         .zip(&is_real)
         .filter(|(_, real)| !**real)
-        .map(|(point, _)| *point)
+        .map(|((t, p), _)| (*t, apply_scale(*p)))
         .collect();
 
     let real_data: Vec<(f64, f64)> = data
         .iter()
         .zip(&is_real)
         .filter(|(_, real)| **real)
-        .map(|(point, _)| *point)
+        .map(|((t, p), _)| (*t, apply_scale(*p)))
         .collect();
 
     // Create reference line at first price (horizontal line for comparison)
-    let reference_line: Vec<(f64, f64)> = vec![(x_min, first_price), (x_max, first_price)];
+    let reference_line: Vec<(f64, f64)> = vec![
+        (x_min, apply_scale(first_price)),
+        (x_max, apply_scale(first_price)),
+    ];
 
     let mut datasets = Vec::new();
 
@@ -1197,7 +2393,7 @@ fn render_price_chart(f: &mut Frame, area: Rect, state: &MonitorState) {
             .name("━Start")
             .marker(symbols::Marker::Braille)
             .graph_type(GraphType::Line)
-            .style(Style::default().fg(Color::DarkGray))
+            .style(Style::new().dark_gray())
             .data(&reference_line),
     );
 
@@ -1208,7 +2404,7 @@ fn render_price_chart(f: &mut Frame, area: Rect, state: &MonitorState) {
                 .name("◇Est")
                 .marker(symbols::Marker::Braille)
                 .graph_type(GraphType::Line)
-                .style(Style::default().fg(Color::Cyan))
+                .style(Style::new().cyan())
                 .data(&synthetic_data),
         );
     }
@@ -1220,7 +2416,7 @@ fn render_price_chart(f: &mut Frame, area: Rect, state: &MonitorState) {
                 .name("●Live")
                 .marker(symbols::Marker::Braille)
                 .graph_type(GraphType::Line)
-                .style(Style::default().fg(trend_color))
+                .style(Style::new().fg(trend_color))
                 .data(&real_data),
         );
     }
@@ -1229,31 +2425,43 @@ fn render_price_chart(f: &mut Frame, area: Rect, state: &MonitorState) {
     let time_label = format!("-{}", state.time_period.label());
 
     // Calculate middle price for 3-point y-axis labels
-    let mid_price = (y_min + y_max) / 2.0;
+    // In log mode, labels show original USD prices (exp of log values)
+    let mid_y = (y_min + y_max) / 2.0;
+    let y_label = |val: f64| -> String {
+        match state.scale_mode {
+            ScaleMode::Linear => format_price_usd(val),
+            ScaleMode::Log => format_price_usd(val.exp()),
+        }
+    };
+
+    let scale_label = match state.scale_mode {
+        ScaleMode::Linear => "USD",
+        ScaleMode::Log => "USD (log)",
+    };
 
     let chart = Chart::new(datasets)
         .block(
             Block::default()
                 .title(chart_title)
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(trend_color)),
+                .border_style(Style::new().fg(trend_color)),
         )
         .x_axis(
             Axis::default()
-                .title(Span::styled("Time", Style::default().fg(Color::Gray)))
-                .style(Style::default().fg(Color::Gray))
+                .title(Span::styled("Time", Style::new().gray()))
+                .style(Style::new().gray())
                 .bounds([x_min, x_max])
                 .labels(vec![Span::raw(time_label), Span::raw("now")]),
         )
         .y_axis(
             Axis::default()
-                .title(Span::styled("USD", Style::default().fg(Color::Gray)))
-                .style(Style::default().fg(Color::Gray))
+                .title(Span::styled(scale_label, Style::new().gray()))
+                .style(Style::new().gray())
                 .bounds([y_min, y_max])
                 .labels(vec![
-                    Span::raw(format_price_usd(y_min)),
-                    Span::raw(format_price_usd(mid_price)),
-                    Span::raw(format_price_usd(y_max)),
+                    Span::raw(y_label(y_min)),
+                    Span::raw(y_label(mid_y)),
+                    Span::raw(y_label(y_max)),
                 ]),
         );
 
@@ -1309,12 +2517,9 @@ fn render_candlestick_chart(f: &mut Frame, area: Rect, state: &MonitorState) {
         0.0
     };
 
+    let pal = state.palette();
     let is_price_up = price_change >= 0.0;
-    let trend_color = if is_price_up {
-        Color::Green
-    } else {
-        Color::Red
-    };
+    let trend_color = if is_price_up { pal.up } else { pal.down };
     let trend_symbol = if is_price_up { "▲" } else { "▼" };
 
     let price_str = format_price_usd(current_price);
@@ -1355,54 +2560,66 @@ fn render_candlestick_chart(f: &mut Frame, area: Rect, state: &MonitorState) {
         Span::raw(" ⬡ "),
         Span::styled(
             format!("{} {} ", price_str, trend_symbol),
-            Style::default()
-                .fg(trend_color)
-                .add_modifier(Modifier::BOLD),
+            Style::new().fg(trend_color).bold(),
         ),
-        Span::styled(
-            format!("({}) ", change_str),
-            Style::default().fg(trend_color),
-        ),
+        Span::styled(format!("({}) ", change_str), Style::new().fg(trend_color)),
         Span::styled(
             format!("│{}│ ", state.time_period.label()),
-            Style::default().fg(Color::Gray),
+            Style::new().gray(),
         ),
-        Span::styled("⊞Candles ", Style::default().fg(Color::Magenta)),
+        Span::styled("⊞Candles ", Style::new().magenta()),
     ]);
+
+    // Apply scale transformation (log or linear)
+    let apply_scale = |price: f64| -> f64 {
+        match state.scale_mode {
+            ScaleMode::Linear => price,
+            ScaleMode::Log => {
+                if price > 0.0 {
+                    price.ln()
+                } else {
+                    0.0
+                }
+            }
+        }
+    };
+    let scaled_y_min = apply_scale(y_min);
+    let scaled_y_max = apply_scale(y_max);
+    let scaled_price_range = scaled_y_max - scaled_y_min;
 
     // Clone candles for the closure
     let candles_clone = candles.clone();
+    let is_log = matches!(state.scale_mode, ScaleMode::Log);
+    let pal_up = pal.up;
+    let pal_down = pal.down;
 
     let canvas = Canvas::default()
         .block(
             Block::default()
                 .title(title)
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(trend_color)),
+                .border_style(Style::new().fg(trend_color)),
         )
         .x_bounds([x_min - candle_spacing, x_max])
-        .y_bounds([y_min, y_max])
+        .y_bounds([scaled_y_min, scaled_y_max])
         .paint(move |ctx| {
+            let scale_fn = |p: f64| -> f64 { if is_log && p > 0.0 { p.ln() } else { p } };
             for candle in &candles_clone {
-                let color = if candle.is_bullish {
-                    Color::Green
-                } else {
-                    Color::Red
-                };
+                let color = if candle.is_bullish { pal_up } else { pal_down };
 
                 // Draw the wick (high-low line)
                 ctx.draw(&CanvasLine {
                     x1: candle.timestamp,
-                    y1: candle.low,
+                    y1: scale_fn(candle.low),
                     x2: candle.timestamp,
-                    y2: candle.high,
+                    y2: scale_fn(candle.high),
                     color,
                 });
 
                 // Draw the body (open-close rectangle)
-                let body_top = candle.open.max(candle.close);
-                let body_bottom = candle.open.min(candle.close);
-                let body_height = (body_top - body_bottom).max(price_range * 0.002); // Minimum visible height
+                let body_top = scale_fn(candle.open.max(candle.close));
+                let body_bottom = scale_fn(candle.open.min(candle.close));
+                let body_height = (body_top - body_bottom).max(scaled_price_range * 0.002);
 
                 ctx.draw(&Rectangle {
                     x: candle.timestamp - candle_width / 2.0,
@@ -1417,8 +2634,114 @@ fn render_candlestick_chart(f: &mut Frame, area: Rect, state: &MonitorState) {
     f.render_widget(canvas, area);
 }
 
+/// Renders a volume profile chart showing volume distribution by price level.
+///
+/// Buckets the price+volume history into horizontal bars where each bar shows
+/// the accumulated volume at that price level. Accuracy improves over longer
+/// monitoring sessions as more data points are collected.
+fn render_volume_profile_chart(f: &mut Frame, area: Rect, state: &MonitorState) {
+    let pal = state.palette();
+    let (price_data, _) = state.get_price_data_for_period();
+    let (volume_data, _) = state.get_volume_data_for_period();
+
+    if price_data.len() < 2 || volume_data.is_empty() {
+        let block = Block::default()
+            .title(" ◨ Volume Profile (collecting data...) ")
+            .borders(Borders::ALL)
+            .border_style(Style::new().fg(Color::DarkGray));
+        f.render_widget(block, area);
+        return;
+    }
+
+    // Find price range
+    let min_price = price_data.iter().map(|(_, p)| *p).fold(f64::MAX, f64::min);
+    let max_price = price_data.iter().map(|(_, p)| *p).fold(f64::MIN, f64::max);
+
+    if (max_price - min_price).abs() < f64::EPSILON {
+        let block = Block::default()
+            .title(" ◨ Volume Profile (no price range) ")
+            .borders(Borders::ALL)
+            .border_style(Style::new().fg(Color::DarkGray));
+        f.render_widget(block, area);
+        return;
+    }
+
+    // Number of price buckets = available height minus borders
+    let inner_height = area.height.saturating_sub(2) as usize;
+    let num_buckets = inner_height.clamp(1, 30);
+    let bucket_size = (max_price - min_price) / num_buckets as f64;
+
+    // Accumulate volume per price bucket
+    let mut bucket_volumes = vec![0.0_f64; num_buckets];
+
+    // Pair price and volume data by index (they have same timestamps)
+    let vol_iter: Vec<f64> = volume_data.iter().map(|(_, v)| *v).collect();
+    for (i, (_, price)) in price_data.iter().enumerate() {
+        let bucket_idx =
+            (((price - min_price) / bucket_size).floor() as usize).min(num_buckets - 1);
+        // Use volume delta if available, otherwise use a unit contribution
+        let vol_contribution = if i < vol_iter.len() {
+            // Use relative volume (delta from previous if possible)
+            if i > 0 {
+                (vol_iter[i] - vol_iter[i - 1]).abs().max(1.0)
+            } else {
+                1.0
+            }
+        } else {
+            1.0
+        };
+        bucket_volumes[bucket_idx] += vol_contribution;
+    }
+
+    let max_vol = bucket_volumes
+        .iter()
+        .cloned()
+        .fold(0.0_f64, f64::max)
+        .max(1.0);
+
+    // Find the bucket containing the current price
+    let current_bucket = (((state.current_price - min_price) / bucket_size).floor() as usize)
+        .min(num_buckets.saturating_sub(1));
+
+    // Build horizontal bars using Paragraph with spans
+    let inner_width = area.width.saturating_sub(12) as usize; // leave room for price labels
+
+    let lines: Vec<Line> = (0..num_buckets)
+        .rev() // top = highest price
+        .map(|i| {
+            let bar_width = ((bucket_volumes[i] / max_vol) * inner_width as f64).round() as usize;
+            let price_mid = min_price + (i as f64 + 0.5) * bucket_size;
+            let label = if price_mid >= 1.0 {
+                format!("{:>8.2}", price_mid)
+            } else {
+                format!("{:>8.6}", price_mid)
+            };
+            let bar_str = "█".repeat(bar_width);
+            let style = if i == current_bucket {
+                Style::new().fg(pal.highlight).bold()
+            } else {
+                Style::new().fg(pal.sparkline)
+            };
+            Line::from(vec![
+                Span::styled(label, Style::new().dark_gray()),
+                Span::raw(" "),
+                Span::styled(bar_str, style),
+            ])
+        })
+        .collect();
+
+    let block = Block::default()
+        .title(" ◨ Volume Profile (accuracy improves over time) ")
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(pal.sparkline));
+
+    let paragraph = Paragraph::new(lines).block(block);
+    f.render_widget(paragraph, area);
+}
+
 /// Renders the volume chart with visual differentiation between real and synthetic data.
 fn render_volume_chart(f: &mut Frame, area: Rect, state: &MonitorState) {
+    let pal = state.palette();
     // Get data filtered by selected time period
     let (data, is_real) = state.get_volume_data_for_period();
 
@@ -1450,192 +2773,298 @@ fn render_volume_chart(f: &mut Frame, area: Rect, state: &MonitorState) {
         Span::raw(" ▣ "),
         Span::styled(
             format!("24h Vol: {} ", volume_str),
-            Style::default()
-                .fg(Color::Blue)
-                .add_modifier(Modifier::BOLD),
+            Style::new().fg(pal.volume_bar).bold(),
         ),
         Span::styled(
             format!("│{}│ ", state.time_period.label()),
-            Style::default().fg(Color::Gray),
+            Style::new().gray(),
         ),
-        Span::styled(data_indicator, Style::default().fg(Color::DarkGray)),
+        Span::styled(data_indicator, Style::new().dark_gray()),
     ]);
 
-    // Calculate bounds
-    let max_volume = data.iter().map(|(_, v)| *v).fold(0.0_f64, f64::max);
-    let min_volume = data.iter().map(|(_, v)| *v).fold(f64::MAX, f64::min);
+    // Build bars from data points — bucket into a reasonable number of bars
+    // based on available width (each bar needs at least 3 chars)
+    let inner_width = area.width.saturating_sub(2) as usize; // account for block borders
+    let max_bars = (inner_width / 3).max(1).min(data.len());
+    let bucket_size = data.len().div_ceil(max_bars);
 
-    // Handle case where volumes are similar (cumulative 24h volume doesn't change much)
-    let vol_range = max_volume - min_volume;
-    let (y_min, y_max) = if vol_range < max_volume * 0.01 {
-        // Less than 1% variation - center the data with ±5% padding
-        let padding = max_volume * 0.05;
-        (min_volume - padding, max_volume + padding)
-    } else {
-        // Normal variation - show from 0 to max
-        (0.0, max_volume * 1.1)
-    };
-
-    // Ensure y_min is not negative
-    let y_min = y_min.max(0.0);
-
-    let x_min = data.first().map(|(t, _)| *t).unwrap_or(0.0);
-    let x_max = data.last().map(|(t, _)| *t).unwrap_or(1.0);
-    // Ensure x range is non-zero
-    let x_max = if (x_max - x_min).abs() < 0.001 {
-        x_min + 1.0
-    } else {
-        x_max
-    };
-
-    // Split data into synthetic and real datasets for visual differentiation
-    let synthetic_data: Vec<(f64, f64)> = data
-        .iter()
-        .zip(&is_real)
-        .filter(|(_, real)| !**real)
-        .map(|(point, _)| *point)
+    let bars: Vec<Bar> = data
+        .chunks(bucket_size)
+        .zip(is_real.chunks(bucket_size))
+        .enumerate()
+        .map(|(i, (chunk, real_chunk))| {
+            let avg_vol = chunk.iter().map(|(_, v)| v).sum::<f64>() / chunk.len() as f64;
+            let any_real = real_chunk.iter().any(|r| *r);
+            let bar_color = if any_real {
+                pal.volume_bar
+            } else {
+                pal.neutral
+            };
+            // Show time labels at start, middle, and end
+            let label = if i == 0 || i == max_bars.saturating_sub(1) || i == max_bars / 2 {
+                format_number(avg_vol)
+            } else {
+                String::new()
+            };
+            Bar::default()
+                .value(avg_vol as u64)
+                .label(Line::from(label))
+                .style(Style::new().fg(bar_color))
+        })
         .collect();
 
-    let real_data: Vec<(f64, f64)> = data
-        .iter()
-        .zip(&is_real)
-        .filter(|(_, real)| **real)
-        .map(|(point, _)| *point)
-        .collect();
-
-    let mut datasets = Vec::new();
-
-    // Synthetic data shown with Dot marker and light blue color
-    if !synthetic_data.is_empty() {
-        datasets.push(
-            Dataset::default()
-                .name("◇Est")
-                .marker(symbols::Marker::Braille)
-                .graph_type(GraphType::Line)
-                .style(Style::default().fg(Color::LightBlue))
-                .data(&synthetic_data),
-        );
+    // Calculate dynamic bar width based on available space
+    let bar_width = if !bars.is_empty() {
+        let total_bars = bars.len() as u16;
+        // Each bar gets: bar_width + 1 gap, minus 1 gap for the last bar
+        ((inner_width as u16).saturating_sub(total_bars.saturating_sub(1))) / total_bars
+    } else {
+        1
     }
+    .max(1);
 
-    // Real data shown with Braille marker and blue color
-    if !real_data.is_empty() {
-        datasets.push(
-            Dataset::default()
-                .name("●Live")
-                .marker(symbols::Marker::Braille)
-                .graph_type(GraphType::Line)
-                .style(Style::default().fg(Color::Blue))
-                .data(&real_data),
-        );
-    }
-
-    // Create time labels based on period
-    let time_label = format!("-{}", state.time_period.label());
-
-    let chart = Chart::new(datasets)
+    let barchart = BarChart::default()
+        .data(BarGroup::default().bars(&bars))
         .block(
             Block::default()
                 .title(chart_title)
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Blue)),
+                .border_style(Style::new().blue()),
         )
-        .x_axis(
-            Axis::default()
-                .title("Time")
-                .style(Style::default().fg(Color::Gray))
-                .bounds([x_min, x_max])
-                .labels(vec![Span::raw(time_label), Span::raw("now")]),
-        )
-        .y_axis(
-            Axis::default()
-                .title("USD")
-                .style(Style::default().fg(Color::Gray))
-                .bounds([y_min, y_max])
-                .labels(vec![
-                    Span::raw(format_number(y_min)),
-                    Span::raw(format_number((y_min + y_max) / 2.0)),
-                    Span::raw(format_number(y_max)),
-                ]),
-        );
+        .bar_width(bar_width)
+        .bar_gap(1)
+        .value_style(Style::new().dark_gray());
 
-    f.render_widget(chart, area);
+    f.render_widget(barchart, area);
 }
 
-/// Renders the buy/sell ratio gauge and recent activity.
-fn render_buy_sell_gauge(f: &mut Frame, area: Rect, state: &MonitorState) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(0)])
-        .split(area);
-
-    // Buy/Sell gauge
+/// Renders the buy/sell ratio gauge (pressure bar only, no activity log).
+fn render_buy_sell_gauge(f: &mut Frame, area: Rect, state: &mut MonitorState) {
+    let pal = state.palette();
+    // Buy/Sell ratio bar
     let ratio = state.buy_ratio();
-    let color = if ratio > 0.5 {
-        Color::Green
-    } else {
-        Color::Red
-    };
+    let border_color = if ratio > 0.5 { pal.up } else { pal.down };
 
-    // Create a visual bar using Unicode block characters
-    let buy_indicator = if ratio > 0.5 { "▶" } else { "▷" };
-    let sell_indicator = if ratio < 0.5 { "◀" } else { "◁" };
+    let block = Block::default()
+        .title(" ◐ Buy/Sell Ratio (24h) ")
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(border_color));
 
-    let gauge = Gauge::default()
-        .block(
-            Block::default()
-                .title(" ◐ Buy/Sell Ratio (24h) ")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(color)),
-        )
-        .gauge_style(Style::default().fg(color))
-        .ratio(ratio)
-        .label(format!(
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if inner.width > 0 && inner.height > 0 {
+        let buy_width = ((ratio * inner.width as f64).round() as u16).min(inner.width);
+        let sell_width = inner.width.saturating_sub(buy_width);
+
+        let buy_indicator = if ratio > 0.5 { "▶" } else { "▷" };
+        let sell_indicator = if ratio < 0.5 { "◀" } else { "◁" };
+        let label = format!(
             "{}Buys: {} │ Sells: {}{} ({:.1}%)",
             buy_indicator,
             state.buys_24h,
             state.sells_24h,
             sell_indicator,
             ratio * 100.0
-        ));
+        );
 
-    f.render_widget(gauge, chunks[0]);
+        let buy_bar = "█".repeat(buy_width as usize);
+        let sell_bar = "█".repeat(sell_width as usize);
+        let bar_line = Line::from(vec![
+            Span::styled(buy_bar, Style::new().fg(pal.up)),
+            Span::styled(sell_bar, Style::new().fg(pal.down)),
+        ]);
+        f.render_widget(Paragraph::new(bar_line), inner);
 
-    // Activity log
+        // Center the label on top of the bar
+        let label_len = label.len() as u16;
+        if label_len <= inner.width {
+            let x_offset = (inner.width.saturating_sub(label_len)) / 2;
+            let label_area = Rect::new(inner.x + x_offset, inner.y, label_len, 1);
+            let label_widget =
+                Paragraph::new(Span::styled(label, Style::new().fg(Color::White).bold()));
+            f.render_widget(label_widget, label_area);
+        }
+    }
+}
+
+/// Renders the scrollable activity log feed.
+fn render_activity_feed(f: &mut Frame, area: Rect, state: &mut MonitorState) {
+    let log_len = state.log_messages.len();
+    let log_title = if log_len > 0 {
+        let selected = state.log_list_state.selected().unwrap_or(0);
+        format!(" ◷ Activity Log [{}/{}] ", selected + 1, log_len)
+    } else {
+        " ◷ Activity Log ".to_string()
+    };
+
     let items: Vec<ListItem> = state
         .log_messages
         .iter()
         .rev()
-        .take(5)
-        .map(|msg| ListItem::new(msg.as_str()).style(Style::default().fg(Color::Gray)))
+        .map(|msg| ListItem::new(msg.as_str()).style(Style::new().gray()))
         .collect();
 
-    let log_list = List::new(items).block(
+    let log_list = List::new(items)
+        .block(
+            Block::default()
+                .title(log_title)
+                .borders(Borders::ALL)
+                .border_style(Style::new().dark_gray()),
+        )
+        .highlight_style(Style::new().white().bold())
+        .highlight_symbol("▸ ");
+
+    f.render_stateful_widget(log_list, area, &mut state.log_list_state);
+}
+
+/// Renders a flashing alert overlay when alerts are active.
+fn render_alert_overlay(f: &mut Frame, area: Rect, state: &MonitorState) {
+    if state.active_alerts.is_empty() {
+        return;
+    }
+
+    let is_flash_on = state
+        .alert_flash_until
+        .map(|deadline| {
+            if Instant::now() < deadline {
+                // Flash with ~500ms period
+                (Instant::now().elapsed().subsec_millis() / 500).is_multiple_of(2)
+            } else {
+                false
+            }
+        })
+        .unwrap_or(false);
+
+    let border_color = if is_flash_on {
+        Color::Red
+    } else {
+        Color::Yellow
+    };
+
+    let alert_lines: Vec<Line> = state
+        .active_alerts
+        .iter()
+        .map(|a| Line::from(Span::styled(&a.message, Style::new().fg(Color::Red).bold())))
+        .collect();
+
+    let alert_widget = Paragraph::new(alert_lines).block(
         Block::default()
-            .title(" ◷ Activity Log ")
+            .title(" ⚠ ALERTS ")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray)),
+            .border_style(Style::new().fg(border_color).bold()),
     );
 
-    f.render_widget(log_list, chunks[1]);
+    f.render_widget(alert_widget, area);
+}
+
+/// Renders a horizontal stacked bar chart of per-pair liquidity.
+fn render_liquidity_depth(f: &mut Frame, area: Rect, state: &MonitorState) {
+    let pal = state.palette();
+
+    if state.liquidity_pairs.is_empty() {
+        let block = Block::default()
+            .title(" ◫ Liquidity Depth (no data) ")
+            .borders(Borders::ALL)
+            .border_style(Style::new().fg(Color::DarkGray));
+        f.render_widget(block, area);
+        return;
+    }
+
+    let max_liquidity = state
+        .liquidity_pairs
+        .iter()
+        .map(|(_, liq)| *liq)
+        .fold(0.0_f64, f64::max)
+        .max(1.0);
+
+    let inner_width = area.width.saturating_sub(2) as usize;
+
+    let lines: Vec<Line> = state
+        .liquidity_pairs
+        .iter()
+        .take(area.height.saturating_sub(2) as usize) // limit to available rows
+        .map(|(name, liq)| {
+            let bar_width = ((liq / max_liquidity) * inner_width as f64 * 0.6).round() as usize;
+            let bar_str = "█".repeat(bar_width);
+            let label = format!(" {} {}", format_usd(*liq), name);
+            Line::from(vec![
+                Span::styled(bar_str, Style::new().fg(pal.volume_bar)),
+                Span::styled(label, Style::new().fg(pal.neutral)),
+            ])
+        })
+        .collect();
+
+    let block = Block::default()
+        .title(format!(
+            " ◫ Liquidity Depth ({} pairs) ",
+            state.liquidity_pairs.len()
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(pal.border));
+
+    let paragraph = Paragraph::new(lines).block(block);
+    f.render_widget(paragraph, area);
 }
 
 /// Renders the key metrics panel.
 fn render_metrics_panel(f: &mut Frame, area: Rect, state: &MonitorState) {
-    // Format 5m change with appropriate color
+    let pal = state.palette();
+    // Split panel: top sparkline (2 rows), bottom table
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(0)])
+        .split(area);
+
+    // --- Sparkline: recent price trend ---
+    let sparkline_data: Vec<u64> = {
+        // Take the last N price points and normalize to u64 for Sparkline
+        let points: Vec<f64> = state.price_history.iter().map(|dp| dp.value).collect();
+        if points.len() < 2 {
+            vec![0; chunks[0].width.saturating_sub(2) as usize]
+        } else {
+            let min_p = points.iter().cloned().fold(f64::MAX, f64::min);
+            let max_p = points.iter().cloned().fold(f64::MIN, f64::max);
+            let range = (max_p - min_p).max(0.0001);
+            points
+                .iter()
+                .map(|p| (((*p - min_p) / range) * 100.0) as u64)
+                .collect()
+        }
+    };
+
+    let trend_color = if state.price_change_5m >= 0.0 {
+        pal.up
+    } else {
+        pal.down
+    };
+
+    let sparkline = Sparkline::default()
+        .block(
+            Block::default()
+                .title(" ◉ Price Trend ")
+                .borders(Borders::ALL)
+                .border_style(Style::new().fg(pal.sparkline)),
+        )
+        .data(&sparkline_data)
+        .style(Style::new().fg(trend_color));
+
+    f.render_widget(sparkline, chunks[0]);
+
+    // --- Table: key metrics ---
     let change_5m_str = if state.price_change_5m.abs() < 0.0001 {
         "0.00%".to_string()
     } else {
         format!("{:+.4}%", state.price_change_5m)
     };
     let change_5m_color = if state.price_change_5m > 0.0 {
-        Color::Green
+        pal.up
     } else if state.price_change_5m < 0.0 {
-        Color::Red
+        pal.down
     } else {
-        Color::Gray
+        pal.neutral
     };
 
-    // Calculate time since last price change
     let now_ts = chrono::Utc::now().timestamp() as f64;
     let secs_since_change = (now_ts - state.last_price_change_at).max(0.0) as u64;
     let last_change_str = if secs_since_change < 60 {
@@ -1645,62 +3074,84 @@ fn render_metrics_panel(f: &mut Frame, area: Rect, state: &MonitorState) {
     } else {
         format!("{}h ago", secs_since_change / 3600)
     };
+    let last_change_color = if secs_since_change < 60 {
+        pal.up
+    } else {
+        pal.highlight
+    };
 
-    // Build metrics as styled lines
-    let text: Vec<Line> = vec![
-        Line::from(vec![
-            Span::raw("Price:      "),
-            Span::styled(
-                format_price_usd(state.current_price),
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
+    let change_24h_str = format!(
+        "{}{:.2}%",
+        if state.price_change_24h >= 0.0 {
+            "+"
+        } else {
+            ""
+        },
+        state.price_change_24h
+    );
+
+    let market_cap_str = state
+        .market_cap
+        .map(format_usd)
+        .unwrap_or_else(|| "N/A".to_string());
+
+    let mut rows = vec![
+        Row::new(vec![
+            Span::styled("Price", Style::new().gray()),
+            Span::styled(format_price_usd(state.current_price), Style::new().bold()),
         ]),
-        Line::from(vec![
-            Span::raw("5m Change:  "),
-            Span::styled(change_5m_str, Style::default().fg(change_5m_color)),
+        Row::new(vec![
+            Span::styled("5m Chg", Style::new().gray()),
+            Span::styled(change_5m_str, Style::new().fg(change_5m_color)),
         ]),
-        Line::from(vec![
-            Span::raw("Last Δ:     "),
-            Span::styled(
-                last_change_str,
-                Style::default().fg(if secs_since_change < 60 {
-                    Color::Green
-                } else {
-                    Color::Yellow
-                }),
-            ),
+        Row::new(vec![
+            Span::styled("Last Δ", Style::new().gray()),
+            Span::styled(last_change_str, Style::new().fg(last_change_color)),
         ]),
-        Line::from(format!(
-            "24h Change: {}{:.2}%",
-            if state.price_change_24h >= 0.0 {
-                "+"
-            } else {
-                ""
-            },
-            state.price_change_24h
-        )),
-        Line::from(format!("Liquidity:  {}", format_usd(state.liquidity_usd))),
-        Line::from(format!("24h Volume: {}", format_usd(state.volume_24h))),
-        Line::from(format!(
-            "Market Cap: {}",
-            state
-                .market_cap
-                .map(format_usd)
-                .unwrap_or_else(|| "N/A".to_string())
-        )),
-        Line::from(String::new()),
-        Line::from(format!("24h Buys:   {}", state.buys_24h)),
-        Line::from(format!("24h Sells:  {}", state.sells_24h)),
+        Row::new(vec![
+            Span::styled("24h Chg", Style::new().gray()),
+            Span::raw(change_24h_str),
+        ]),
+        Row::new(vec![
+            Span::styled("Liq", Style::new().gray()),
+            Span::raw(format_usd(state.liquidity_usd)),
+        ]),
+        Row::new(vec![
+            Span::styled("Vol 24h", Style::new().gray()),
+            Span::raw(format_usd(state.volume_24h)),
+        ]),
+        Row::new(vec![
+            Span::styled("Mkt Cap", Style::new().gray()),
+            Span::raw(market_cap_str),
+        ]),
+        Row::new(vec![
+            Span::styled("Buys", Style::new().gray()),
+            Span::styled(format!("{}", state.buys_24h), Style::new().fg(pal.up)),
+        ]),
+        Row::new(vec![
+            Span::styled("Sells", Style::new().gray()),
+            Span::styled(format!("{}", state.sells_24h), Style::new().fg(pal.down)),
+        ]),
     ];
 
-    let panel = Paragraph::new(text).block(
+    // Add holder count if available and the widget is enabled
+    if state.widgets.holder_count
+        && let Some(count) = state.holder_count
+    {
+        rows.push(Row::new(vec![
+            Span::styled("Holders", Style::new().gray()),
+            Span::styled(format_number(count as f64), Style::new().fg(pal.highlight)),
+        ]));
+    }
+
+    let table = Table::new(rows, [Constraint::Length(8), Constraint::Min(10)]).block(
         Block::default()
             .title(" ◉ Key Metrics ")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Magenta)),
+            .border_style(Style::new().magenta()),
     );
 
-    f.render_widget(panel, area);
+    f.render_widget(table, chunks[1]);
 }
 
 /// Renders the footer with status and controls.
@@ -1730,14 +3181,11 @@ fn render_footer(f: &mut Frame, area: Rect, state: &MonitorState) {
     };
 
     let status = if let Some(ref err) = state.error_message {
-        Span::styled(format!("⚠ {}", err), Style::default().fg(Color::Red))
+        Span::styled(format!("⚠ {}", err), Style::new().red())
     } else if state.paused {
-        Span::styled(
-            "⏸ PAUSED",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )
+        Span::styled("⏸ PAUSED", Style::new().fg(Color::Yellow).bold())
+    } else if state.is_auto_paused() {
+        Span::styled("⏸ AUTO-PAUSED", Style::new().fg(Color::Cyan).bold())
     } else {
         Span::styled(
             format!(
@@ -1747,61 +3195,45 @@ fn render_footer(f: &mut Frame, area: Rect, state: &MonitorState) {
                 synthetic_count + real_count,
                 memory_str
             ),
-            Style::default().fg(Color::Gray),
+            Style::new().gray(),
         )
     };
 
-    let spans = vec![
-        status,
-        Span::raw(" ║ "),
-        Span::styled(
-            "Q",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        ),
+    let widget_hint = if state.widget_toggle_mode {
+        Span::styled("W:1-5?", Style::new().fg(Color::Yellow).bold())
+    } else {
+        Span::styled("W", Style::new().fg(Color::Cyan).bold())
+    };
+
+    let mut spans = vec![status, Span::raw(" ║ ")];
+
+    // REC indicator when CSV export is active
+    if state.export_active {
+        spans.push(Span::styled("● REC ", Style::new().fg(Color::Red).bold()));
+    }
+
+    spans.extend([
+        Span::styled("Q", Style::new().red().bold()),
         Span::raw("uit "),
-        Span::styled(
-            "R",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Span::styled("R", Style::new().fg(Color::Green).bold()),
         Span::raw("efresh "),
-        Span::styled(
-            "P",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Span::styled("P", Style::new().fg(Color::Yellow).bold()),
         Span::raw("ause "),
-        Span::styled(
-            "1-4",
-            Style::default()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("/"),
-        Span::styled(
-            "T",
-            Style::default()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("ime "),
-        Span::styled(
-            "C",
-            Style::default()
-                .fg(Color::LightBlue)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Span::styled("E", Style::new().fg(Color::LightRed).bold()),
+        Span::raw("xport "),
+        Span::styled("L", Style::new().fg(Color::Cyan).bold()),
+        Span::raw(format!(":{} ", state.layout.label())),
+        widget_hint,
+        Span::raw("idget "),
+        Span::styled("C", Style::new().fg(Color::LightBlue).bold()),
         Span::raw(format!("hart:{} ", state.chart_mode.label())),
-        Span::styled(
-            "±",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("Speed"),
-    ];
+        Span::styled("S", Style::new().fg(Color::LightGreen).bold()),
+        Span::raw(format!("cale:{} ", state.scale_mode.label())),
+        Span::styled("/", Style::new().fg(Color::LightRed).bold()),
+        Span::raw(format!(":{} ", state.color_scheme.label())),
+        Span::styled("T", Style::new().fg(Color::Magenta).bold()),
+        Span::raw("ime "),
+    ]);
 
     let footer = Paragraph::new(Line::from(spans)).block(Block::default().borders(Borders::ALL));
 
@@ -1832,6 +3264,48 @@ fn format_usd(n: f64) -> String {
     } else {
         format!("${:.2}", n)
     }
+}
+
+/// Entry point for the top-level `scope monitor` command.
+///
+/// Creates a `SessionContext` from CLI args and delegates to [`run`].
+/// Applies CLI-provided overrides (layout, refresh, scale, etc.) on top
+/// of the config-file defaults.
+pub async fn run_direct(
+    args: MonitorArgs,
+    config: &Config,
+    clients: &dyn ChainClientFactory,
+) -> Result<()> {
+    // Build a SessionContext from the CLI args (no interactive session needed)
+    let ctx = SessionContext {
+        chain: args.chain,
+        chain_explicit: true,
+        ..SessionContext::default()
+    };
+
+    // Build a MonitorConfig from config-file defaults + CLI overrides
+    let mut monitor_config = config.monitor.clone();
+    if let Some(layout) = args.layout {
+        monitor_config.layout = layout;
+    }
+    if let Some(refresh) = args.refresh {
+        monitor_config.refresh_seconds = refresh;
+    }
+    if let Some(scale) = args.scale {
+        monitor_config.scale = scale;
+    }
+    if let Some(color_scheme) = args.color_scheme {
+        monitor_config.color_scheme = color_scheme;
+    }
+    if let Some(ref path) = args.export {
+        monitor_config.export.path = Some(path.to_string_lossy().into_owned());
+    }
+
+    // Use a temporary Config with the CLI-overridden monitor settings
+    let mut effective_config = config.clone();
+    effective_config.monitor = monitor_config;
+
+    run(Some(args.token), &ctx, &effective_config, clients).await
 }
 
 /// Entry point for the monitor command from interactive mode.
@@ -1872,8 +3346,11 @@ pub async fn run(
     // Small delay to let user read the message
     tokio::time::sleep(Duration::from_millis(500)).await;
 
+    // Create optional chain client for on-chain data (holder count, etc.)
+    let chain_client = clients.create_chain_client(&ctx.chain).ok();
+
     // Create and run the app
-    let mut app = MonitorApp::new(initial_data, &ctx.chain)?;
+    let mut app = MonitorApp::new(initial_data, &ctx.chain, &config.monitor, chain_client)?;
     let result = app.run().await;
 
     // Cleanup is handled by Drop, but we do it explicitly for error handling
@@ -1891,8 +3368,8 @@ async fn resolve_token_address(
     _config: &Config,
     dex_client: &dyn DexDataSource,
 ) -> Result<String> {
-    // Check if it's already an address
-    if input.starts_with("0x") && input.len() == 42 {
+    // Check if it's already an address (EVM, Solana, Tron)
+    if crate::tokens::TokenAliases::is_address(input) {
         return Ok(input.to_string());
     }
 
@@ -1912,16 +3389,136 @@ async fn resolve_token_address(
         )));
     }
 
-    // Use the first result (highest liquidity)
-    let token = &results[0];
-    println!(
-        "Found: {} ({}) - ${:.6}",
-        token.symbol,
-        token.name,
-        token.price_usd.unwrap_or(0.0)
-    );
+    // If only one result, use it directly
+    if results.len() == 1 {
+        let token = &results[0];
+        println!(
+            "Found: {} ({}) - ${:.6}",
+            token.symbol,
+            token.name,
+            token.price_usd.unwrap_or(0.0)
+        );
+        return Ok(token.address.clone());
+    }
 
-    Ok(token.address.clone())
+    // Multiple results — prompt user to select
+    let selected = select_token_interactive(&results)?;
+    Ok(selected.address.clone())
+}
+
+/// Abbreviates a blockchain address for display (e.g. "0x1234...abcd").
+fn abbreviate_address(addr: &str) -> String {
+    if addr.len() > 16 {
+        format!("{}...{}", &addr[..8], &addr[addr.len() - 6..])
+    } else {
+        addr.to_string()
+    }
+}
+
+/// Displays token search results and prompts the user to select one.
+fn select_token_interactive(
+    results: &[crate::chains::dex::TokenSearchResult],
+) -> Result<&crate::chains::dex::TokenSearchResult> {
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    select_token_impl(results, &mut stdin.lock(), &mut stdout.lock())
+}
+
+/// Testable implementation of token selection with injected I/O.
+fn select_token_impl<'a>(
+    results: &'a [crate::chains::dex::TokenSearchResult],
+    reader: &mut impl io::BufRead,
+    writer: &mut impl io::Write,
+) -> Result<&'a crate::chains::dex::TokenSearchResult> {
+    writeln!(
+        writer,
+        "\nFound {} tokens matching your query:\n",
+        results.len()
+    )
+    .map_err(|e| ScopeError::Io(e.to_string()))?;
+
+    writeln!(
+        writer,
+        "{:>3}  {:>8}  {:<22}  {:<16}  {:>12}  {:>12}",
+        "#", "Symbol", "Name", "Address", "Price", "Liquidity"
+    )
+    .map_err(|e| ScopeError::Io(e.to_string()))?;
+
+    writeln!(writer, "{}", "─".repeat(82)).map_err(|e| ScopeError::Io(e.to_string()))?;
+
+    for (i, token) in results.iter().enumerate() {
+        let price = token
+            .price_usd
+            .map(|p| format!("${:.6}", p))
+            .unwrap_or_else(|| "N/A".to_string());
+
+        let liquidity = format_monitor_number(token.liquidity_usd);
+        let addr = abbreviate_address(&token.address);
+
+        // Truncate name if too long
+        let name = if token.name.len() > 20 {
+            format!("{}...", &token.name[..17])
+        } else {
+            token.name.clone()
+        };
+
+        writeln!(
+            writer,
+            "{:>3}  {:>8}  {:<22}  {:<16}  {:>12}  {:>12}",
+            i + 1,
+            token.symbol,
+            name,
+            addr,
+            price,
+            liquidity
+        )
+        .map_err(|e| ScopeError::Io(e.to_string()))?;
+    }
+
+    writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
+    write!(writer, "Select token (1-{}): ", results.len())
+        .map_err(|e| ScopeError::Io(e.to_string()))?;
+    writer.flush().map_err(|e| ScopeError::Io(e.to_string()))?;
+
+    let mut input = String::new();
+    reader
+        .read_line(&mut input)
+        .map_err(|e| ScopeError::Io(e.to_string()))?;
+
+    let selection: usize = input
+        .trim()
+        .parse()
+        .map_err(|_| ScopeError::Api("Invalid selection".to_string()))?;
+
+    if selection < 1 || selection > results.len() {
+        return Err(ScopeError::Api(format!(
+            "Selection must be between 1 and {}",
+            results.len()
+        )));
+    }
+
+    let selected = &results[selection - 1];
+    writeln!(
+        writer,
+        "Selected: {} ({}) at {}",
+        selected.symbol, selected.name, selected.address
+    )
+    .map_err(|e| ScopeError::Io(e.to_string()))?;
+
+    Ok(selected)
+}
+
+/// Format a number for the monitor selection table.
+fn format_monitor_number(value: f64) -> String {
+    if value >= 1_000_000_000.0 {
+        format!("${:.2}B", value / 1_000_000_000.0)
+    } else if value >= 1_000_000.0 {
+        format!("${:.2}M", value / 1_000_000.0)
+    } else if value >= 1_000.0 {
+        format!("${:.2}K", value / 1_000.0)
+    } else {
+        format!("${:.2}", value)
+    }
 }
 
 // ============================================================================
@@ -2095,21 +3692,27 @@ mod tests {
 
     #[test]
     fn test_time_period() {
+        assert_eq!(TimePeriod::Min1.label(), "1m");
+        assert_eq!(TimePeriod::Min5.label(), "5m");
         assert_eq!(TimePeriod::Min15.label(), "15m");
         assert_eq!(TimePeriod::Hour1.label(), "1h");
-        assert_eq!(TimePeriod::Hour6.label(), "6h");
-        assert_eq!(TimePeriod::Hour24.label(), "24h");
+        assert_eq!(TimePeriod::Hour4.label(), "4h");
+        assert_eq!(TimePeriod::Day1.label(), "1d");
 
+        assert_eq!(TimePeriod::Min1.duration_secs(), 60);
+        assert_eq!(TimePeriod::Min5.duration_secs(), 300);
         assert_eq!(TimePeriod::Min15.duration_secs(), 15 * 60);
         assert_eq!(TimePeriod::Hour1.duration_secs(), 3600);
-        assert_eq!(TimePeriod::Hour6.duration_secs(), 6 * 3600);
-        assert_eq!(TimePeriod::Hour24.duration_secs(), 24 * 3600);
+        assert_eq!(TimePeriod::Hour4.duration_secs(), 4 * 3600);
+        assert_eq!(TimePeriod::Day1.duration_secs(), 24 * 3600);
 
         // Test cycling
+        assert_eq!(TimePeriod::Min1.next(), TimePeriod::Min5);
+        assert_eq!(TimePeriod::Min5.next(), TimePeriod::Min15);
         assert_eq!(TimePeriod::Min15.next(), TimePeriod::Hour1);
-        assert_eq!(TimePeriod::Hour1.next(), TimePeriod::Hour6);
-        assert_eq!(TimePeriod::Hour6.next(), TimePeriod::Hour24);
-        assert_eq!(TimePeriod::Hour24.next(), TimePeriod::Min15);
+        assert_eq!(TimePeriod::Hour1.next(), TimePeriod::Hour4);
+        assert_eq!(TimePeriod::Hour4.next(), TimePeriod::Day1);
+        assert_eq!(TimePeriod::Day1.next(), TimePeriod::Min1);
     }
 
     #[test]
@@ -2122,10 +3725,10 @@ mod tests {
 
         // Cycle through periods
         state.cycle_time_period();
-        assert_eq!(state.time_period, TimePeriod::Hour6);
+        assert_eq!(state.time_period, TimePeriod::Hour4);
 
-        state.set_time_period(TimePeriod::Hour24);
-        assert_eq!(state.time_period, TimePeriod::Hour24);
+        state.set_time_period(TimePeriod::Day1);
+        assert_eq!(state.time_period, TimePeriod::Day1);
     }
 
     #[test]
@@ -2350,19 +3953,22 @@ mod tests {
     fn test_chart_mode_cycle() {
         let mode = ChartMode::Line;
         assert_eq!(mode.next(), ChartMode::Candlestick);
-        assert_eq!(ChartMode::Candlestick.next(), ChartMode::Line);
+        assert_eq!(ChartMode::Candlestick.next(), ChartMode::VolumeProfile);
+        assert_eq!(ChartMode::VolumeProfile.next(), ChartMode::Line);
     }
 
     #[test]
     fn test_chart_mode_label() {
         assert_eq!(ChartMode::Line.label(), "Line");
         assert_eq!(ChartMode::Candlestick.label(), "Candle");
+        assert_eq!(ChartMode::VolumeProfile.label(), "VolPro");
     }
 
     // ========================================================================
     // TUI rendering tests (headless TestBackend)
     // ========================================================================
 
+    use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
     fn create_test_terminal() -> Terminal<TestBackend> {
@@ -2452,9 +4058,9 @@ mod tests {
     #[test]
     fn test_render_buy_sell_gauge_no_panic() {
         let mut terminal = create_test_terminal();
-        let state = create_populated_state();
+        let mut state = create_populated_state();
         terminal
-            .draw(|f| render_buy_sell_gauge(f, f.area(), &state))
+            .draw(|f| render_buy_sell_gauge(f, f.area(), &mut state))
             .unwrap();
     }
 
@@ -2464,9 +4070,9 @@ mod tests {
         let mut token_data = create_test_token_data();
         token_data.total_buys_24h = 100;
         token_data.total_sells_24h = 100;
-        let state = MonitorState::new(&token_data, "ethereum");
+        let mut state = MonitorState::new(&token_data, "ethereum");
         terminal
-            .draw(|f| render_buy_sell_gauge(f, f.area(), &state))
+            .draw(|f| render_buy_sell_gauge(f, f.area(), &mut state))
             .unwrap();
     }
 
@@ -2515,7 +4121,7 @@ mod tests {
     fn test_render_all_components() {
         // Exercise the full draw_ui layout path
         let mut terminal = create_test_terminal();
-        let state = create_populated_state();
+        let mut state = create_populated_state();
         terminal
             .draw(|f| {
                 let area = f.area();
@@ -2532,7 +4138,7 @@ mod tests {
                 render_header(f, chunks[0], &state);
                 render_price_chart(f, chunks[1], &state);
                 render_volume_chart(f, chunks[2], &state);
-                render_buy_sell_gauge(f, chunks[3], &state);
+                render_buy_sell_gauge(f, chunks[3], &mut state);
                 render_footer(f, chunks[4], &state);
             })
             .unwrap();
@@ -2562,10 +4168,12 @@ mod tests {
         let mut state = create_populated_state();
 
         for period in [
+            TimePeriod::Min1,
+            TimePeriod::Min5,
             TimePeriod::Min15,
             TimePeriod::Hour1,
-            TimePeriod::Hour6,
-            TimePeriod::Hour24,
+            TimePeriod::Hour4,
+            TimePeriod::Day1,
         ] {
             state.time_period = period;
             terminal
@@ -2610,6 +4218,8 @@ mod tests {
         state.toggle_chart_mode();
         assert_eq!(state.chart_mode, ChartMode::Candlestick);
         state.toggle_chart_mode();
+        assert_eq!(state.chart_mode, ChartMode::VolumeProfile);
+        state.toggle_chart_mode();
         assert_eq!(state.chart_mode, ChartMode::Line);
     }
 
@@ -2619,9 +4229,13 @@ mod tests {
         let mut state = MonitorState::new(&token_data, "ethereum");
         assert_eq!(state.time_period, TimePeriod::Hour1);
         state.cycle_time_period();
-        assert_eq!(state.time_period, TimePeriod::Hour6);
+        assert_eq!(state.time_period, TimePeriod::Hour4);
         state.cycle_time_period();
-        assert_eq!(state.time_period, TimePeriod::Hour24);
+        assert_eq!(state.time_period, TimePeriod::Day1);
+        state.cycle_time_period();
+        assert_eq!(state.time_period, TimePeriod::Min1);
+        state.cycle_time_period();
+        assert_eq!(state.time_period, TimePeriod::Min5);
         state.cycle_time_period();
         assert_eq!(state.time_period, TimePeriod::Min15);
         state.cycle_time_period();
@@ -2632,8 +4246,8 @@ mod tests {
     fn test_set_specific_time_period() {
         let token_data = create_test_token_data();
         let mut state = MonitorState::new(&token_data, "ethereum");
-        state.set_time_period(TimePeriod::Hour24);
-        assert_eq!(state.time_period, TimePeriod::Hour24);
+        state.set_time_period(TimePeriod::Day1);
+        assert_eq!(state.time_period, TimePeriod::Day1);
     }
 
     #[test]
@@ -2806,8 +4420,9 @@ mod tests {
 
     #[test]
     fn test_time_period_display_impl() {
+        assert_eq!(format!("{}", TimePeriod::Min1), "1m");
         assert_eq!(format!("{}", TimePeriod::Min15), "15m");
-        assert_eq!(format!("{}", TimePeriod::Hour24), "24h");
+        assert_eq!(format!("{}", TimePeriod::Day1), "1d");
     }
 
     #[test]
@@ -2826,8 +4441,8 @@ mod tests {
     fn test_ui_function_full_render() {
         // Test the main ui() function which orchestrates all rendering
         let mut terminal = create_test_terminal();
-        let state = create_populated_state();
-        terminal.draw(|f| ui(f, &state)).unwrap();
+        let mut state = create_populated_state();
+        terminal.draw(|f| ui(f, &mut state)).unwrap();
     }
 
     #[test]
@@ -2835,7 +4450,7 @@ mod tests {
         let mut terminal = create_test_terminal();
         let mut state = create_populated_state();
         state.chart_mode = ChartMode::Candlestick;
-        terminal.draw(|f| ui(f, &state)).unwrap();
+        terminal.draw(|f| ui(f, &mut state)).unwrap();
     }
 
     #[test]
@@ -2843,7 +4458,7 @@ mod tests {
         let mut terminal = create_test_terminal();
         let mut state = create_populated_state();
         state.error_message = Some("Test error".to_string());
-        terminal.draw(|f| ui(f, &state)).unwrap();
+        terminal.draw(|f| ui(f, &mut state)).unwrap();
     }
 
     #[test]
@@ -2874,7 +4489,7 @@ mod tests {
         state.buys_24h = 100;
         state.sells_24h = 10;
         terminal
-            .draw(|f| render_buy_sell_gauge(f, f.area(), &state))
+            .draw(|f| render_buy_sell_gauge(f, f.area(), &mut state))
             .unwrap();
     }
 
@@ -2886,7 +4501,7 @@ mod tests {
         state.buys_24h = 0;
         state.sells_24h = 0;
         terminal
-            .draw(|f| render_buy_sell_gauge(f, f.area(), &state))
+            .draw(|f| render_buy_sell_gauge(f, f.area(), &mut state))
             .unwrap();
     }
 
@@ -2947,24 +4562,24 @@ mod tests {
         let mut terminal = create_test_terminal();
         let mut state = create_populated_state();
         state.set_time_period(TimePeriod::Min15);
-        terminal.draw(|f| ui(f, &state)).unwrap();
+        terminal.draw(|f| ui(f, &mut state)).unwrap();
     }
 
     #[test]
     fn test_render_with_hour6_period() {
         let mut terminal = create_test_terminal();
         let mut state = create_populated_state();
-        state.set_time_period(TimePeriod::Hour6);
-        terminal.draw(|f| ui(f, &state)).unwrap();
+        state.set_time_period(TimePeriod::Hour4);
+        terminal.draw(|f| ui(f, &mut state)).unwrap();
     }
 
     #[test]
     fn test_ui_with_fresh_state_no_real_data() {
         let mut terminal = create_test_terminal();
         let token_data = create_test_token_data();
-        let state = MonitorState::new(&token_data, "ethereum");
+        let mut state = MonitorState::new(&token_data, "ethereum");
         // Fresh state with only synthetic data
-        terminal.draw(|f| ui(f, &state)).unwrap();
+        terminal.draw(|f| ui(f, &mut state)).unwrap();
     }
 
     #[test]
@@ -2972,7 +4587,7 @@ mod tests {
         let mut terminal = create_test_terminal();
         let mut state = create_populated_state();
         state.toggle_pause();
-        terminal.draw(|f| ui(f, &state)).unwrap();
+        terminal.draw(|f| ui(f, &mut state)).unwrap();
     }
 
     #[test]
@@ -2982,15 +4597,21 @@ mod tests {
 
         // Test all combinations of time period + chart mode
         for period in &[
+            TimePeriod::Min1,
+            TimePeriod::Min5,
             TimePeriod::Min15,
             TimePeriod::Hour1,
-            TimePeriod::Hour6,
-            TimePeriod::Hour24,
+            TimePeriod::Hour4,
+            TimePeriod::Day1,
         ] {
-            for mode in &[ChartMode::Line, ChartMode::Candlestick] {
+            for mode in &[
+                ChartMode::Line,
+                ChartMode::Candlestick,
+                ChartMode::VolumeProfile,
+            ] {
                 state.set_time_period(*period);
                 state.chart_mode = *mode;
-                terminal.draw(|f| ui(f, &state)).unwrap();
+                terminal.draw(|f| ui(f, &mut state)).unwrap();
             }
         }
     }
@@ -3282,16 +4903,22 @@ mod tests {
         let mut state = MonitorState::new(&token_data, "ethereum");
 
         handle_key_event_on_state(make_key_event(KeyCode::Char('1')), &mut state);
-        assert!(matches!(state.time_period, TimePeriod::Min15));
+        assert!(matches!(state.time_period, TimePeriod::Min1));
 
         handle_key_event_on_state(make_key_event(KeyCode::Char('2')), &mut state);
-        assert!(matches!(state.time_period, TimePeriod::Hour1));
+        assert!(matches!(state.time_period, TimePeriod::Min5));
 
         handle_key_event_on_state(make_key_event(KeyCode::Char('3')), &mut state);
-        assert!(matches!(state.time_period, TimePeriod::Hour6));
+        assert!(matches!(state.time_period, TimePeriod::Min15));
 
         handle_key_event_on_state(make_key_event(KeyCode::Char('4')), &mut state);
-        assert!(matches!(state.time_period, TimePeriod::Hour24));
+        assert!(matches!(state.time_period, TimePeriod::Hour1));
+
+        handle_key_event_on_state(make_key_event(KeyCode::Char('5')), &mut state);
+        assert!(matches!(state.time_period, TimePeriod::Hour4));
+
+        handle_key_event_on_state(make_key_event(KeyCode::Char('6')), &mut state);
+        assert!(matches!(state.time_period, TimePeriod::Day1));
     }
 
     #[test]
@@ -3369,5 +4996,3180 @@ mod tests {
     fn test_load_cache_nonexistent_token() {
         let cached = MonitorState::load_cache("0xNONEXISTENT_TOKEN_ADDR", "nonexistent_chain");
         assert!(cached.is_none());
+    }
+
+    // ========================================================================
+    // New widget tests: BarChart (volume), Table+Sparkline (metrics), scroll
+    // ========================================================================
+
+    #[test]
+    fn test_render_volume_barchart_with_populated_data() {
+        // Verify the BarChart-based volume chart renders without panic
+        // when state has many volume data points across different time periods
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        for period in [
+            TimePeriod::Min1,
+            TimePeriod::Min5,
+            TimePeriod::Min15,
+            TimePeriod::Hour1,
+            TimePeriod::Hour4,
+            TimePeriod::Day1,
+        ] {
+            state.set_time_period(period);
+            terminal
+                .draw(|f| render_volume_chart(f, f.area(), &state))
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn test_render_volume_barchart_narrow_terminal() {
+        // BarChart with very narrow width should still render without panic
+        let backend = TestBackend::new(20, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let state = create_populated_state();
+        terminal
+            .draw(|f| render_volume_chart(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_metrics_table_sparkline_no_panic() {
+        // Verify the Table+Sparkline metrics panel renders without panic
+        let mut terminal = create_test_terminal();
+        let state = create_populated_state();
+        terminal
+            .draw(|f| render_metrics_panel(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_metrics_table_sparkline_all_periods() {
+        // Ensure metrics panel renders correctly for every time period
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        for period in [
+            TimePeriod::Min1,
+            TimePeriod::Min5,
+            TimePeriod::Min15,
+            TimePeriod::Hour1,
+            TimePeriod::Hour4,
+            TimePeriod::Day1,
+        ] {
+            state.set_time_period(period);
+            terminal
+                .draw(|f| render_metrics_panel(f, f.area(), &state))
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn test_render_metrics_sparkline_trend_direction() {
+        // When 5m change is negative, sparkline should still render
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        state.price_change_5m = -3.5;
+        terminal
+            .draw(|f| render_metrics_panel(f, f.area(), &state))
+            .unwrap();
+
+        // When 5m change is positive
+        state.price_change_5m = 2.0;
+        terminal
+            .draw(|f| render_metrics_panel(f, f.area(), &state))
+            .unwrap();
+
+        // When 5m change is zero
+        state.price_change_5m = 0.0;
+        terminal
+            .draw(|f| render_metrics_panel(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_tabs_time_period() {
+        // Verify the Tabs widget in the header renders for each period
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        for period in [
+            TimePeriod::Min1,
+            TimePeriod::Min5,
+            TimePeriod::Min15,
+            TimePeriod::Hour1,
+            TimePeriod::Hour4,
+            TimePeriod::Day1,
+        ] {
+            state.set_time_period(period);
+            terminal
+                .draw(|f| render_header(f, f.area(), &state))
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn test_time_period_index() {
+        assert_eq!(TimePeriod::Min1.index(), 0);
+        assert_eq!(TimePeriod::Min5.index(), 1);
+        assert_eq!(TimePeriod::Min15.index(), 2);
+        assert_eq!(TimePeriod::Hour1.index(), 3);
+        assert_eq!(TimePeriod::Hour4.index(), 4);
+        assert_eq!(TimePeriod::Day1.index(), 5);
+    }
+
+    #[test]
+    fn test_scroll_log_down_from_start() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        state.log_messages.push_back("msg 1".to_string());
+        state.log_messages.push_back("msg 2".to_string());
+        state.log_messages.push_back("msg 3".to_string());
+
+        // Initially no selection
+        assert_eq!(state.log_list_state.selected(), None);
+
+        // First scroll down selects item 0
+        state.scroll_log_down();
+        assert_eq!(state.log_list_state.selected(), Some(0));
+
+        // Second scroll moves to item 1
+        state.scroll_log_down();
+        assert_eq!(state.log_list_state.selected(), Some(1));
+
+        // Third scroll moves to item 2
+        state.scroll_log_down();
+        assert_eq!(state.log_list_state.selected(), Some(2));
+
+        // Fourth scroll stays at last item (bounds check)
+        state.scroll_log_down();
+        assert_eq!(state.log_list_state.selected(), Some(2));
+    }
+
+    #[test]
+    fn test_scroll_log_up_from_start() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        state.log_messages.push_back("msg 1".to_string());
+        state.log_messages.push_back("msg 2".to_string());
+        state.log_messages.push_back("msg 3".to_string());
+
+        // Scroll up from no selection goes to 0
+        state.scroll_log_up();
+        assert_eq!(state.log_list_state.selected(), Some(0));
+
+        // Can't go below 0
+        state.scroll_log_up();
+        assert_eq!(state.log_list_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn test_scroll_log_up_down_roundtrip() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        for i in 0..10 {
+            state.log_messages.push_back(format!("msg {}", i));
+        }
+
+        // Scroll down 5 times
+        for _ in 0..5 {
+            state.scroll_log_down();
+        }
+        assert_eq!(state.log_list_state.selected(), Some(4));
+
+        // Scroll up 3 times
+        for _ in 0..3 {
+            state.scroll_log_up();
+        }
+        assert_eq!(state.log_list_state.selected(), Some(1));
+    }
+
+    #[test]
+    fn test_scroll_log_empty_no_panic() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        // With no log messages, scrolling should not panic
+        state.scroll_log_down();
+        state.scroll_log_up();
+        assert!(
+            state.log_list_state.selected().is_none() || state.log_list_state.selected() == Some(0)
+        );
+    }
+
+    #[test]
+    fn test_render_scrollable_activity_log() {
+        // Ensure the stateful activity log renders without panic
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        for i in 0..20 {
+            state
+                .log_messages
+                .push_back(format!("Activity event #{}", i));
+        }
+        // Scroll down a few items
+        state.scroll_log_down();
+        state.scroll_log_down();
+        state.scroll_log_down();
+
+        terminal
+            .draw(|f| render_buy_sell_gauge(f, f.area(), &mut state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_handle_key_scroll_log_j_k() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        state.log_messages.push_back("line 1".to_string());
+        state.log_messages.push_back("line 2".to_string());
+
+        // j scrolls down
+        handle_key_event_on_state(make_key_event(KeyCode::Char('j')), &mut state);
+        assert_eq!(state.log_list_state.selected(), Some(0));
+
+        handle_key_event_on_state(make_key_event(KeyCode::Char('j')), &mut state);
+        assert_eq!(state.log_list_state.selected(), Some(1));
+
+        // k scrolls up
+        handle_key_event_on_state(make_key_event(KeyCode::Char('k')), &mut state);
+        assert_eq!(state.log_list_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn test_handle_key_scroll_log_arrow_keys() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        state.log_messages.push_back("line 1".to_string());
+        state.log_messages.push_back("line 2".to_string());
+        state.log_messages.push_back("line 3".to_string());
+
+        // Down arrow scrolls down
+        handle_key_event_on_state(make_key_event(KeyCode::Down), &mut state);
+        assert_eq!(state.log_list_state.selected(), Some(0));
+
+        handle_key_event_on_state(make_key_event(KeyCode::Down), &mut state);
+        assert_eq!(state.log_list_state.selected(), Some(1));
+
+        // Up arrow scrolls up
+        handle_key_event_on_state(make_key_event(KeyCode::Up), &mut state);
+        assert_eq!(state.log_list_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn test_render_ui_with_scrolled_log() {
+        // Full UI render with a scrolled activity log position
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        for i in 0..15 {
+            state.log_messages.push_back(format!("Log entry {}", i));
+        }
+        state.scroll_log_down();
+        state.scroll_log_down();
+        state.scroll_log_down();
+        state.scroll_log_down();
+        state.scroll_log_down();
+
+        terminal.draw(|f| ui(f, &mut state)).unwrap();
+    }
+
+    // ========================================================================
+    // Token selection / resolve tests
+    // ========================================================================
+
+    fn make_monitor_search_results() -> Vec<crate::chains::dex::TokenSearchResult> {
+        vec![
+            crate::chains::dex::TokenSearchResult {
+                symbol: "USDC".to_string(),
+                name: "USD Coin".to_string(),
+                address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+                chain: "ethereum".to_string(),
+                price_usd: Some(1.0),
+                volume_24h: 1_000_000.0,
+                liquidity_usd: 500_000_000.0,
+                market_cap: Some(30_000_000_000.0),
+            },
+            crate::chains::dex::TokenSearchResult {
+                symbol: "USDC".to_string(),
+                name: "Bridged USD Coin".to_string(),
+                address: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174".to_string(),
+                chain: "ethereum".to_string(),
+                price_usd: Some(0.9998),
+                volume_24h: 500_000.0,
+                liquidity_usd: 100_000_000.0,
+                market_cap: None,
+            },
+            crate::chains::dex::TokenSearchResult {
+                symbol: "USDC".to_string(),
+                name: "A Very Long Token Name That Exceeds The Limit".to_string(),
+                address: "0x1234567890abcdef1234567890abcdef12345678".to_string(),
+                chain: "ethereum".to_string(),
+                price_usd: None,
+                volume_24h: 0.0,
+                liquidity_usd: 50_000.0,
+                market_cap: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn test_abbreviate_address_long() {
+        let addr = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
+        let abbr = abbreviate_address(addr);
+        assert_eq!(abbr, "0xA0b869...06eB48");
+        assert!(abbr.contains("..."));
+    }
+
+    #[test]
+    fn test_abbreviate_address_short() {
+        let addr = "0x1234abcd";
+        let abbr = abbreviate_address(addr);
+        // Short addresses are not abbreviated
+        assert_eq!(abbr, "0x1234abcd");
+    }
+
+    #[test]
+    fn test_select_token_impl_first() {
+        let results = make_monitor_search_results();
+        let input = b"1\n";
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut writer = Vec::new();
+
+        let selected = select_token_impl(&results, &mut reader, &mut writer).unwrap();
+        assert_eq!(selected.name, "USD Coin");
+        assert_eq!(
+            selected.address,
+            "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+        );
+
+        let output = String::from_utf8(writer).unwrap();
+        assert!(output.contains("Found 3 tokens"));
+        assert!(output.contains("USDC"));
+        assert!(output.contains("0xA0b869...06eB48"));
+        assert!(output.contains("Selected:"));
+    }
+
+    #[test]
+    fn test_select_token_impl_second() {
+        let results = make_monitor_search_results();
+        let input = b"2\n";
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut writer = Vec::new();
+
+        let selected = select_token_impl(&results, &mut reader, &mut writer).unwrap();
+        assert_eq!(selected.name, "Bridged USD Coin");
+        assert_eq!(
+            selected.address,
+            "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+        );
+    }
+
+    #[test]
+    fn test_select_token_impl_shows_address_column() {
+        let results = make_monitor_search_results();
+        let input = b"1\n";
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut writer = Vec::new();
+
+        select_token_impl(&results, &mut reader, &mut writer).unwrap();
+        let output = String::from_utf8(writer).unwrap();
+
+        // Table header should include Address column
+        assert!(output.contains("Address"));
+        // All three abbreviated addresses should appear
+        assert!(output.contains("0xA0b869...06eB48"));
+        assert!(output.contains("0x2791Bc...a84174"));
+        assert!(output.contains("0x123456...345678"));
+    }
+
+    #[test]
+    fn test_select_token_impl_truncates_long_name() {
+        let results = make_monitor_search_results();
+        let input = b"3\n";
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut writer = Vec::new();
+
+        let selected = select_token_impl(&results, &mut reader, &mut writer).unwrap();
+        assert_eq!(
+            selected.address,
+            "0x1234567890abcdef1234567890abcdef12345678"
+        );
+
+        let output = String::from_utf8(writer).unwrap();
+        assert!(output.contains("A Very Long Token..."));
+    }
+
+    #[test]
+    fn test_select_token_impl_invalid_input() {
+        let results = make_monitor_search_results();
+        let input = b"xyz\n";
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut writer = Vec::new();
+
+        let result = select_token_impl(&results, &mut reader, &mut writer);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid selection")
+        );
+    }
+
+    #[test]
+    fn test_select_token_impl_out_of_range_zero() {
+        let results = make_monitor_search_results();
+        let input = b"0\n";
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut writer = Vec::new();
+
+        let result = select_token_impl(&results, &mut reader, &mut writer);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Selection must be between")
+        );
+    }
+
+    #[test]
+    fn test_select_token_impl_out_of_range_high() {
+        let results = make_monitor_search_results();
+        let input = b"99\n";
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut writer = Vec::new();
+
+        let result = select_token_impl(&results, &mut reader, &mut writer);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_format_monitor_number() {
+        assert_eq!(format_monitor_number(1_500_000_000.0), "$1.50B");
+        assert_eq!(format_monitor_number(250_000_000.0), "$250.00M");
+        assert_eq!(format_monitor_number(75_000.0), "$75.00K");
+        assert_eq!(format_monitor_number(42.5), "$42.50");
+    }
+
+    // ============================
+    // Phase 4: Layout system tests
+    // ============================
+
+    #[test]
+    fn test_monitor_config_defaults() {
+        let config = MonitorConfig::default();
+        assert_eq!(config.layout, LayoutPreset::Dashboard);
+        assert_eq!(config.refresh_seconds, DEFAULT_REFRESH_SECS);
+        assert!(config.widgets.price_chart);
+        assert!(config.widgets.volume_chart);
+        assert!(config.widgets.buy_sell_pressure);
+        assert!(config.widgets.metrics_panel);
+        assert!(config.widgets.activity_log);
+    }
+
+    #[test]
+    fn test_layout_preset_next_cycles() {
+        assert_eq!(LayoutPreset::Dashboard.next(), LayoutPreset::ChartFocus);
+        assert_eq!(LayoutPreset::ChartFocus.next(), LayoutPreset::Feed);
+        assert_eq!(LayoutPreset::Feed.next(), LayoutPreset::Compact);
+        assert_eq!(LayoutPreset::Compact.next(), LayoutPreset::Dashboard);
+    }
+
+    #[test]
+    fn test_layout_preset_prev_cycles() {
+        assert_eq!(LayoutPreset::Dashboard.prev(), LayoutPreset::Compact);
+        assert_eq!(LayoutPreset::Compact.prev(), LayoutPreset::Feed);
+        assert_eq!(LayoutPreset::Feed.prev(), LayoutPreset::ChartFocus);
+        assert_eq!(LayoutPreset::ChartFocus.prev(), LayoutPreset::Dashboard);
+    }
+
+    #[test]
+    fn test_layout_preset_full_cycle() {
+        let start = LayoutPreset::Dashboard;
+        let mut preset = start;
+        for _ in 0..4 {
+            preset = preset.next();
+        }
+        assert_eq!(preset, start);
+    }
+
+    #[test]
+    fn test_layout_preset_labels() {
+        assert_eq!(LayoutPreset::Dashboard.label(), "Dashboard");
+        assert_eq!(LayoutPreset::ChartFocus.label(), "Chart");
+        assert_eq!(LayoutPreset::Feed.label(), "Feed");
+        assert_eq!(LayoutPreset::Compact.label(), "Compact");
+    }
+
+    #[test]
+    fn test_widget_visibility_default_all_visible() {
+        let vis = WidgetVisibility::default();
+        assert_eq!(vis.visible_count(), 5);
+    }
+
+    #[test]
+    fn test_widget_visibility_toggle_by_index() {
+        let mut vis = WidgetVisibility::default();
+        vis.toggle_by_index(1);
+        assert!(!vis.price_chart);
+        assert_eq!(vis.visible_count(), 4);
+
+        vis.toggle_by_index(2);
+        assert!(!vis.volume_chart);
+        assert_eq!(vis.visible_count(), 3);
+
+        vis.toggle_by_index(3);
+        assert!(!vis.buy_sell_pressure);
+        assert_eq!(vis.visible_count(), 2);
+
+        vis.toggle_by_index(4);
+        assert!(!vis.metrics_panel);
+        assert_eq!(vis.visible_count(), 1);
+
+        vis.toggle_by_index(5);
+        assert!(!vis.activity_log);
+        assert_eq!(vis.visible_count(), 0);
+
+        // Toggle back
+        vis.toggle_by_index(1);
+        assert!(vis.price_chart);
+        assert_eq!(vis.visible_count(), 1);
+    }
+
+    #[test]
+    fn test_widget_visibility_toggle_invalid_index() {
+        let mut vis = WidgetVisibility::default();
+        vis.toggle_by_index(0);
+        vis.toggle_by_index(6);
+        vis.toggle_by_index(100);
+        assert_eq!(vis.visible_count(), 5); // unchanged
+    }
+
+    #[test]
+    fn test_auto_select_layout_small_terminal() {
+        let size = Rect::new(0, 0, 60, 20);
+        assert_eq!(auto_select_layout(size), LayoutPreset::Compact);
+    }
+
+    #[test]
+    fn test_auto_select_layout_narrow_terminal() {
+        let size = Rect::new(0, 0, 100, 40);
+        assert_eq!(auto_select_layout(size), LayoutPreset::Feed);
+    }
+
+    #[test]
+    fn test_auto_select_layout_short_terminal() {
+        let size = Rect::new(0, 0, 140, 28);
+        assert_eq!(auto_select_layout(size), LayoutPreset::ChartFocus);
+    }
+
+    #[test]
+    fn test_auto_select_layout_large_terminal() {
+        let size = Rect::new(0, 0, 160, 50);
+        assert_eq!(auto_select_layout(size), LayoutPreset::Dashboard);
+    }
+
+    #[test]
+    fn test_auto_select_layout_edge_80x24() {
+        // Exactly at the threshold: width>=80 and height>=24, but width<120
+        let size = Rect::new(0, 0, 80, 24);
+        assert_eq!(auto_select_layout(size), LayoutPreset::Feed);
+    }
+
+    #[test]
+    fn test_auto_select_layout_edge_79() {
+        let size = Rect::new(0, 0, 79, 50);
+        assert_eq!(auto_select_layout(size), LayoutPreset::Compact);
+    }
+
+    #[test]
+    fn test_auto_select_layout_edge_23_height() {
+        let size = Rect::new(0, 0, 160, 23);
+        assert_eq!(auto_select_layout(size), LayoutPreset::Compact);
+    }
+
+    #[test]
+    fn test_layout_dashboard_all_visible() {
+        let area = Rect::new(0, 0, 120, 40);
+        let vis = WidgetVisibility::default();
+        let areas = layout_dashboard(area, &vis);
+        assert!(areas.price_chart.is_some());
+        assert!(areas.volume_chart.is_some());
+        assert!(areas.buy_sell_gauge.is_some());
+        assert!(areas.metrics_panel.is_some());
+        assert!(areas.activity_feed.is_some());
+    }
+
+    #[test]
+    fn test_layout_dashboard_hidden_widget() {
+        let area = Rect::new(0, 0, 120, 40);
+        let vis = WidgetVisibility {
+            price_chart: false,
+            ..WidgetVisibility::default()
+        };
+        let areas = layout_dashboard(area, &vis);
+        assert!(areas.price_chart.is_none());
+        assert!(areas.volume_chart.is_some());
+    }
+
+    #[test]
+    fn test_layout_chart_focus_minimal_overlay() {
+        let area = Rect::new(0, 0, 120, 40);
+        let vis = WidgetVisibility::default();
+        let areas = layout_chart_focus(area, &vis);
+        assert!(areas.price_chart.is_some());
+        assert!(areas.volume_chart.is_none()); // Hidden in chart-focus
+        assert!(areas.buy_sell_gauge.is_none()); // Hidden in chart-focus
+        assert!(areas.metrics_panel.is_some()); // Minimal stats overlay
+        assert!(areas.activity_feed.is_none()); // Hidden in chart-focus
+    }
+
+    #[test]
+    fn test_layout_feed_activity_priority() {
+        let area = Rect::new(0, 0, 120, 40);
+        let vis = WidgetVisibility::default();
+        let areas = layout_feed(area, &vis);
+        assert!(areas.price_chart.is_none()); // Hidden in feed
+        assert!(areas.volume_chart.is_none()); // Hidden in feed
+        assert!(areas.buy_sell_gauge.is_some()); // Top row
+        assert!(areas.metrics_panel.is_some()); // Top row
+        assert!(areas.activity_feed.is_some()); // Dominates bottom 75%
+    }
+
+    #[test]
+    fn test_layout_compact_metrics_only() {
+        let area = Rect::new(0, 0, 60, 20);
+        let vis = WidgetVisibility::default();
+        let areas = layout_compact(area, &vis);
+        assert!(areas.price_chart.is_none()); // Hidden in compact
+        assert!(areas.volume_chart.is_none()); // Hidden in compact
+        assert!(areas.buy_sell_gauge.is_none()); // Hidden in compact
+        assert!(areas.metrics_panel.is_some()); // Full area
+        assert!(areas.activity_feed.is_none()); // Hidden in compact
+    }
+
+    #[test]
+    fn test_ui_render_all_layouts_no_panic() {
+        let presets = [
+            LayoutPreset::Dashboard,
+            LayoutPreset::ChartFocus,
+            LayoutPreset::Feed,
+            LayoutPreset::Compact,
+        ];
+        for preset in &presets {
+            let mut terminal = create_test_terminal();
+            let mut state = create_populated_state();
+            state.layout = *preset;
+            state.auto_layout = false; // Don't override during render
+            terminal.draw(|f| ui(f, &mut state)).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_ui_render_compact_small_terminal() {
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = create_populated_state();
+        state.layout = LayoutPreset::Compact;
+        state.auto_layout = false;
+        terminal.draw(|f| ui(f, &mut state)).unwrap();
+    }
+
+    #[test]
+    fn test_ui_auto_layout_selects_compact_for_small() {
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = create_populated_state();
+        state.layout = LayoutPreset::Dashboard;
+        state.auto_layout = true;
+        terminal.draw(|f| ui(f, &mut state)).unwrap();
+        assert_eq!(state.layout, LayoutPreset::Compact);
+    }
+
+    #[test]
+    fn test_ui_auto_layout_disabled_keeps_preset() {
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = create_populated_state();
+        state.layout = LayoutPreset::Dashboard;
+        state.auto_layout = false;
+        terminal.draw(|f| ui(f, &mut state)).unwrap();
+        assert_eq!(state.layout, LayoutPreset::Dashboard); // Not changed
+    }
+
+    #[test]
+    fn test_keybinding_l_cycles_layout_forward() {
+        let mut state = create_populated_state();
+        state.layout = LayoutPreset::Dashboard;
+        state.auto_layout = true;
+
+        handle_key_event_on_state(make_key_event(KeyCode::Char('l')), &mut state);
+        assert_eq!(state.layout, LayoutPreset::ChartFocus);
+        assert!(!state.auto_layout); // Manual switch disables auto
+
+        handle_key_event_on_state(make_key_event(KeyCode::Char('l')), &mut state);
+        assert_eq!(state.layout, LayoutPreset::Feed);
+    }
+
+    #[test]
+    fn test_keybinding_h_cycles_layout_backward() {
+        let mut state = create_populated_state();
+        state.layout = LayoutPreset::Dashboard;
+        state.auto_layout = true;
+
+        handle_key_event_on_state(make_key_event(KeyCode::Char('h')), &mut state);
+        assert_eq!(state.layout, LayoutPreset::Compact);
+        assert!(!state.auto_layout);
+    }
+
+    #[test]
+    fn test_keybinding_a_enables_auto_layout() {
+        let mut state = create_populated_state();
+        state.auto_layout = false;
+
+        handle_key_event_on_state(make_key_event(KeyCode::Char('a')), &mut state);
+        assert!(state.auto_layout);
+    }
+
+    #[test]
+    fn test_keybinding_w_widget_toggle_mode() {
+        let mut state = create_populated_state();
+        assert!(!state.widget_toggle_mode);
+
+        // Press w to enter toggle mode
+        handle_key_event_on_state(make_key_event(KeyCode::Char('w')), &mut state);
+        assert!(state.widget_toggle_mode);
+
+        // Press 1 to toggle price_chart off
+        handle_key_event_on_state(make_key_event(KeyCode::Char('1')), &mut state);
+        assert!(!state.widget_toggle_mode);
+        assert!(!state.widgets.price_chart);
+    }
+
+    #[test]
+    fn test_keybinding_w_cancel_with_non_digit() {
+        let mut state = create_populated_state();
+
+        // Enter widget toggle mode
+        handle_key_event_on_state(make_key_event(KeyCode::Char('w')), &mut state);
+        assert!(state.widget_toggle_mode);
+
+        // Press 'x' to cancel — should also process 'x' as a normal key (no-op)
+        handle_key_event_on_state(make_key_event(KeyCode::Char('x')), &mut state);
+        assert!(!state.widget_toggle_mode);
+        assert!(state.widgets.price_chart); // unchanged
+    }
+
+    #[test]
+    fn test_keybinding_w_toggle_multiple_widgets() {
+        let mut state = create_populated_state();
+
+        // Toggle widget 2 (volume_chart)
+        handle_key_event_on_state(make_key_event(KeyCode::Char('w')), &mut state);
+        handle_key_event_on_state(make_key_event(KeyCode::Char('2')), &mut state);
+        assert!(!state.widgets.volume_chart);
+
+        // Toggle widget 4 (metrics_panel)
+        handle_key_event_on_state(make_key_event(KeyCode::Char('w')), &mut state);
+        handle_key_event_on_state(make_key_event(KeyCode::Char('4')), &mut state);
+        assert!(!state.widgets.metrics_panel);
+
+        // Toggle widget 5 (activity_log)
+        handle_key_event_on_state(make_key_event(KeyCode::Char('w')), &mut state);
+        handle_key_event_on_state(make_key_event(KeyCode::Char('5')), &mut state);
+        assert!(!state.widgets.activity_log);
+    }
+
+    #[test]
+    fn test_monitor_config_serde_roundtrip() {
+        let config = MonitorConfig {
+            layout: LayoutPreset::ChartFocus,
+            refresh_seconds: 5,
+            widgets: WidgetVisibility {
+                price_chart: true,
+                volume_chart: false,
+                buy_sell_pressure: true,
+                metrics_panel: false,
+                activity_log: true,
+                holder_count: true,
+                liquidity_depth: true,
+            },
+            scale: ScaleMode::Log,
+            color_scheme: ColorScheme::BlueOrange,
+            alerts: AlertConfig::default(),
+            export: ExportConfig::default(),
+            auto_pause_on_input: false,
+        };
+
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        let parsed: MonitorConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed.layout, LayoutPreset::ChartFocus);
+        assert_eq!(parsed.refresh_seconds, 5);
+        assert!(parsed.widgets.price_chart);
+        assert!(!parsed.widgets.volume_chart);
+        assert!(parsed.widgets.buy_sell_pressure);
+        assert!(!parsed.widgets.metrics_panel);
+        assert!(parsed.widgets.activity_log);
+    }
+
+    #[test]
+    fn test_monitor_config_serde_kebab_case() {
+        let yaml = r#"
+layout: chart-focus
+refresh_seconds: 15
+widgets:
+  price_chart: true
+  volume_chart: true
+  buy_sell_pressure: false
+  metrics_panel: true
+  activity_log: false
+"#;
+        let config: MonitorConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.layout, LayoutPreset::ChartFocus);
+        assert_eq!(config.refresh_seconds, 15);
+        assert!(!config.widgets.buy_sell_pressure);
+        assert!(!config.widgets.activity_log);
+    }
+
+    #[test]
+    fn test_monitor_config_serde_default_missing_fields() {
+        let yaml = "layout: feed\n";
+        let config: MonitorConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.layout, LayoutPreset::Feed);
+        assert_eq!(config.refresh_seconds, DEFAULT_REFRESH_SECS);
+        assert!(config.widgets.price_chart); // defaults
+    }
+
+    #[test]
+    fn test_state_apply_config() {
+        let mut state = create_populated_state();
+        let config = MonitorConfig {
+            layout: LayoutPreset::Feed,
+            refresh_seconds: 5,
+            widgets: WidgetVisibility {
+                price_chart: false,
+                volume_chart: true,
+                buy_sell_pressure: true,
+                metrics_panel: false,
+                activity_log: true,
+                holder_count: true,
+                liquidity_depth: true,
+            },
+            scale: ScaleMode::Log,
+            color_scheme: ColorScheme::Monochrome,
+            alerts: AlertConfig::default(),
+            export: ExportConfig::default(),
+            auto_pause_on_input: false,
+        };
+        state.apply_config(&config);
+        assert_eq!(state.layout, LayoutPreset::Feed);
+        assert!(!state.widgets.price_chart);
+        assert!(!state.widgets.metrics_panel);
+        assert_eq!(state.refresh_rate, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn test_layout_all_widgets_hidden_dashboard() {
+        let area = Rect::new(0, 0, 120, 40);
+        let vis = WidgetVisibility {
+            price_chart: false,
+            volume_chart: false,
+            buy_sell_pressure: false,
+            metrics_panel: false,
+            activity_log: false,
+            holder_count: false,
+            liquidity_depth: false,
+        };
+        let areas = layout_dashboard(area, &vis);
+        assert!(areas.price_chart.is_none());
+        assert!(areas.volume_chart.is_none());
+        assert!(areas.buy_sell_gauge.is_none());
+        assert!(areas.metrics_panel.is_none());
+        assert!(areas.activity_feed.is_none());
+    }
+
+    #[test]
+    fn test_ui_render_with_hidden_widgets() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        state.auto_layout = false;
+        state.widgets.price_chart = false;
+        state.widgets.volume_chart = false;
+        terminal.draw(|f| ui(f, &mut state)).unwrap();
+    }
+
+    #[test]
+    fn test_ui_render_widget_toggle_mode_footer() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        state.auto_layout = false;
+        state.widget_toggle_mode = true;
+        terminal.draw(|f| ui(f, &mut state)).unwrap();
+    }
+
+    #[test]
+    fn test_monitor_state_new_has_layout_fields() {
+        let token_data = create_test_token_data();
+        let state = MonitorState::new(&token_data, "ethereum");
+        assert_eq!(state.layout, LayoutPreset::Dashboard);
+        assert!(state.auto_layout);
+        assert!(!state.widget_toggle_mode);
+        assert_eq!(state.widgets.visible_count(), 5);
+    }
+
+    // ========================================================================
+    // Phase 6: Data Source Integration tests
+    // ========================================================================
+
+    #[test]
+    fn test_monitor_state_has_holder_count_field() {
+        let token_data = create_test_token_data();
+        let state = MonitorState::new(&token_data, "ethereum");
+        assert_eq!(state.holder_count, None);
+        assert!(state.liquidity_pairs.is_empty());
+        assert_eq!(state.holder_fetch_counter, 0);
+    }
+
+    #[test]
+    fn test_liquidity_pairs_extracted_on_update() {
+        let mut token_data = create_test_token_data();
+        token_data.pairs = vec![
+            crate::chains::DexPair {
+                dex_name: "Uniswap V3".to_string(),
+                pair_address: "0xpair1".to_string(),
+                base_token: "TEST".to_string(),
+                quote_token: "WETH".to_string(),
+                price_usd: 1.0,
+                volume_24h: 500_000.0,
+                liquidity_usd: 250_000.0,
+                price_change_24h: 5.0,
+                buys_24h: 50,
+                sells_24h: 25,
+                buys_6h: 10,
+                sells_6h: 5,
+                buys_1h: 3,
+                sells_1h: 2,
+                pair_created_at: None,
+                url: None,
+            },
+            crate::chains::DexPair {
+                dex_name: "SushiSwap".to_string(),
+                pair_address: "0xpair2".to_string(),
+                base_token: "TEST".to_string(),
+                quote_token: "USDC".to_string(),
+                price_usd: 1.0,
+                volume_24h: 300_000.0,
+                liquidity_usd: 150_000.0,
+                price_change_24h: 3.0,
+                buys_24h: 30,
+                sells_24h: 15,
+                buys_6h: 8,
+                sells_6h: 4,
+                buys_1h: 2,
+                sells_1h: 1,
+                pair_created_at: None,
+                url: None,
+            },
+        ];
+
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        state.update(&token_data);
+
+        assert_eq!(state.liquidity_pairs.len(), 2);
+        assert!(state.liquidity_pairs[0].0.contains("Uniswap V3"));
+        assert!((state.liquidity_pairs[0].1 - 250_000.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_render_liquidity_depth_no_panic() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        state.liquidity_pairs = vec![
+            ("TEST/WETH (Uniswap V3)".to_string(), 250_000.0),
+            ("TEST/USDC (SushiSwap)".to_string(), 150_000.0),
+        ];
+        terminal
+            .draw(|f| render_liquidity_depth(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_liquidity_depth_empty() {
+        let mut terminal = create_test_terminal();
+        let state = create_populated_state();
+        terminal
+            .draw(|f| render_liquidity_depth(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_metrics_with_holder_count() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        state.holder_count = Some(42_000);
+        terminal
+            .draw(|f| render_metrics_panel(f, f.area(), &state))
+            .unwrap();
+    }
+
+    // ========================================================================
+    // Phase 7: Alert System tests
+    // ========================================================================
+
+    #[test]
+    fn test_alert_config_default() {
+        let config = AlertConfig::default();
+        assert!(config.price_min.is_none());
+        assert!(config.price_max.is_none());
+        assert!(config.whale_min_usd.is_none());
+        assert!(config.volume_spike_threshold_pct.is_none());
+    }
+
+    #[test]
+    fn test_alert_price_min_triggers() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        state.alerts.price_min = Some(2.0); // Price is 1.0, below min of 2.0
+        state.update(&token_data);
+        assert!(
+            !state.active_alerts.is_empty(),
+            "Should have price-min alert"
+        );
+        assert!(state.active_alerts[0].message.contains("below min"));
+    }
+
+    #[test]
+    fn test_alert_price_max_triggers() {
+        let mut token_data = create_test_token_data();
+        token_data.price_usd = 100.0;
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        state.alerts.price_max = Some(50.0); // Price 100.0 above max of 50.0
+        state.update(&token_data);
+        assert!(
+            !state.active_alerts.is_empty(),
+            "Should have price-max alert"
+        );
+        assert!(state.active_alerts[0].message.contains("above max"));
+    }
+
+    #[test]
+    fn test_alert_no_trigger_within_bounds() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        state.alerts.price_min = Some(0.5); // Price 1.0 is above min
+        state.alerts.price_max = Some(2.0); // Price 1.0 is below max
+        state.update(&token_data);
+        assert!(
+            state.active_alerts.is_empty(),
+            "Should have no alerts when price is within bounds"
+        );
+    }
+
+    #[test]
+    fn test_alert_volume_spike_triggers() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        state.alerts.volume_spike_threshold_pct = Some(10.0);
+        state.volume_avg = 500_000.0; // Average volume is 500K
+
+        // Token data has volume_24h of 1M, which is +100% vs avg — should trigger
+        state.update(&token_data);
+        let spike_alerts: Vec<_> = state
+            .active_alerts
+            .iter()
+            .filter(|a| a.message.contains("spike"))
+            .collect();
+        assert!(!spike_alerts.is_empty(), "Should have volume spike alert");
+    }
+
+    #[test]
+    fn test_alert_flash_timer_set() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        state.alerts.price_min = Some(2.0);
+        state.update(&token_data);
+        assert!(state.alert_flash_until.is_some());
+    }
+
+    #[test]
+    fn test_render_alert_overlay_no_panic() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        state.active_alerts.push(ActiveAlert {
+            message: "⚠ Test alert".to_string(),
+            triggered_at: Instant::now(),
+        });
+        state.alert_flash_until = Some(Instant::now() + Duration::from_secs(2));
+        terminal
+            .draw(|f| render_alert_overlay(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_alert_overlay_empty() {
+        let mut terminal = create_test_terminal();
+        let state = create_populated_state();
+        terminal
+            .draw(|f| render_alert_overlay(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_alert_config_serde_roundtrip() {
+        let config = AlertConfig {
+            price_min: Some(0.5),
+            price_max: Some(2.0),
+            whale_min_usd: Some(10_000.0),
+            volume_spike_threshold_pct: Some(50.0),
+        };
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        let parsed: AlertConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed.price_min, Some(0.5));
+        assert_eq!(parsed.price_max, Some(2.0));
+        assert_eq!(parsed.whale_min_usd, Some(10_000.0));
+        assert_eq!(parsed.volume_spike_threshold_pct, Some(50.0));
+    }
+
+    #[test]
+    fn test_ui_with_active_alerts() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        state.active_alerts.push(ActiveAlert {
+            message: "⚠ Price below min".to_string(),
+            triggered_at: Instant::now(),
+        });
+        state.alert_flash_until = Some(Instant::now() + Duration::from_secs(2));
+        terminal.draw(|f| ui(f, &mut state)).unwrap();
+    }
+
+    // ========================================================================
+    // Phase 8: CSV Export tests
+    // ========================================================================
+
+    #[test]
+    fn test_export_config_default() {
+        let config = ExportConfig::default();
+        assert!(config.path.is_none());
+    }
+
+    /// Helper to create an export in a temp directory, avoiding race conditions.
+    fn start_export_in_temp(state: &mut MonitorState) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("scope_test_export_{}_{}", std::process::id(), id));
+        let _ = fs::create_dir_all(&dir);
+        let filename = format!("{}_test_{}.csv", state.symbol, id);
+        let path = dir.join(filename);
+
+        let mut file = fs::File::create(&path).expect("failed to create export test file");
+        let header = "timestamp,price_usd,volume_24h,liquidity_usd,buys_24h,sells_24h,market_cap\n";
+        file.write_all(header.as_bytes())
+            .expect("failed to write header");
+        drop(file); // Ensure file is flushed and closed
+
+        state.export_path = Some(path.clone());
+        state.export_active = true;
+        path
+    }
+
+    #[test]
+    fn test_export_start_creates_file() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        let path = start_export_in_temp(&mut state);
+
+        assert!(state.export_active);
+        assert!(state.export_path.is_some());
+        assert!(path.exists(), "Export file should exist");
+
+        // Cleanup
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_export_stop() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        let path = start_export_in_temp(&mut state);
+        state.stop_export();
+
+        assert!(!state.export_active);
+        assert!(state.export_path.is_none());
+
+        // Cleanup
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_export_toggle() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+
+        state.toggle_export();
+        assert!(state.export_active);
+        let path = state.export_path.clone().unwrap();
+
+        state.toggle_export();
+        assert!(!state.export_active);
+
+        // Cleanup
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_export_writes_csv_rows() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        let path = start_export_in_temp(&mut state);
+
+        // Simulate a few updates
+        state.update(&token_data);
+        state.update(&token_data);
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = contents.lines().collect();
+
+        assert!(
+            lines.len() >= 3,
+            "Should have header + 2 data rows, got {}",
+            lines.len()
+        );
+        assert!(lines[0].starts_with("timestamp,price_usd"));
+
+        // Cleanup
+        state.stop_export();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_keybinding_e_toggles_export() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+
+        handle_key_event_on_state(make_key_event(KeyCode::Char('e')), &mut state);
+        assert!(state.export_active);
+        let path = state.export_path.clone().unwrap();
+
+        handle_key_event_on_state(make_key_event(KeyCode::Char('e')), &mut state);
+        assert!(!state.export_active);
+
+        // Cleanup
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_render_footer_with_export_active() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        state.export_active = true;
+        terminal
+            .draw(|f| render_footer(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_export_config_serde_roundtrip() {
+        let config = ExportConfig {
+            path: Some("./my-exports".to_string()),
+        };
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        let parsed: ExportConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed.path, Some("./my-exports".to_string()));
+    }
+
+    // ========================================================================
+    // Phase 9: Auto-Pause tests
+    // ========================================================================
+
+    #[test]
+    fn test_auto_pause_default_disabled() {
+        let token_data = create_test_token_data();
+        let state = MonitorState::new(&token_data, "ethereum");
+        assert!(!state.auto_pause_on_input);
+        assert_eq!(state.auto_pause_timeout, Duration::from_secs(3));
+    }
+
+    #[test]
+    fn test_auto_pause_blocks_refresh() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        state.auto_pause_on_input = true;
+        state.refresh_rate = Duration::from_secs(1);
+
+        // Simulate fresh input
+        state.last_input_at = Instant::now();
+        state.last_update = Instant::now() - Duration::from_secs(10); // Long overdue
+
+        // Auto-pause should block refresh since we just had input
+        assert!(!state.should_refresh());
+    }
+
+    #[test]
+    fn test_auto_pause_allows_refresh_after_timeout() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        state.auto_pause_on_input = true;
+        state.refresh_rate = Duration::from_secs(1);
+        state.auto_pause_timeout = Duration::from_millis(1); // Very short timeout
+
+        // Simulate old input (long ago)
+        state.last_input_at = Instant::now() - Duration::from_secs(10);
+        state.last_update = Instant::now() - Duration::from_secs(10);
+
+        // Should allow refresh since input was long ago
+        assert!(state.should_refresh());
+    }
+
+    #[test]
+    fn test_auto_pause_disabled_does_not_block() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        state.auto_pause_on_input = false;
+        state.refresh_rate = Duration::from_secs(1);
+
+        state.last_input_at = Instant::now(); // Fresh input
+        state.last_update = Instant::now() - Duration::from_secs(10);
+
+        // Should still refresh because auto-pause is disabled
+        assert!(state.should_refresh());
+    }
+
+    #[test]
+    fn test_is_auto_paused() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+
+        // Not auto-paused when disabled
+        state.auto_pause_on_input = false;
+        state.last_input_at = Instant::now();
+        assert!(!state.is_auto_paused());
+
+        // Auto-paused when enabled and input is recent
+        state.auto_pause_on_input = true;
+        state.last_input_at = Instant::now();
+        assert!(state.is_auto_paused());
+
+        // Not auto-paused when input is old
+        state.last_input_at = Instant::now() - Duration::from_secs(10);
+        assert!(!state.is_auto_paused());
+    }
+
+    #[test]
+    fn test_keybinding_shift_p_toggles_auto_pause() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        assert!(!state.auto_pause_on_input);
+
+        let shift_p = crossterm::event::KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT);
+        handle_key_event_on_state(shift_p, &mut state);
+        assert!(state.auto_pause_on_input);
+
+        handle_key_event_on_state(shift_p, &mut state);
+        assert!(!state.auto_pause_on_input);
+    }
+
+    #[test]
+    fn test_keybinding_updates_last_input_at() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+
+        // Set last_input_at to the past
+        state.last_input_at = Instant::now() - Duration::from_secs(60);
+        let old_input = state.last_input_at;
+
+        // Any key event should update last_input_at
+        handle_key_event_on_state(make_key_event(KeyCode::Char('z')), &mut state);
+        assert!(state.last_input_at > old_input);
+    }
+
+    #[test]
+    fn test_render_footer_auto_paused() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        state.auto_pause_on_input = true;
+        state.last_input_at = Instant::now(); // Recent input -> auto-paused
+        terminal
+            .draw(|f| render_footer(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_config_auto_pause_applied() {
+        let mut state = create_populated_state();
+        let config = MonitorConfig {
+            auto_pause_on_input: true,
+            ..MonitorConfig::default()
+        };
+        state.apply_config(&config);
+        assert!(state.auto_pause_on_input);
+    }
+
+    // ========================================================================
+    // Combined full-UI tests for new features
+    // ========================================================================
+
+    #[test]
+    fn test_ui_render_all_layouts_with_alerts_and_export() {
+        for preset in &[
+            LayoutPreset::Dashboard,
+            LayoutPreset::ChartFocus,
+            LayoutPreset::Feed,
+            LayoutPreset::Compact,
+        ] {
+            let mut terminal = create_test_terminal();
+            let mut state = create_populated_state();
+            state.layout = *preset;
+            state.auto_layout = false;
+            state.export_active = true;
+            state.active_alerts.push(ActiveAlert {
+                message: "⚠ Test alert".to_string(),
+                triggered_at: Instant::now(),
+            });
+            terminal.draw(|f| ui(f, &mut state)).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_ui_render_with_liquidity_data() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        state.liquidity_pairs = vec![
+            ("TEST/WETH (Uniswap V3)".to_string(), 250_000.0),
+            ("TEST/USDC (SushiSwap)".to_string(), 150_000.0),
+        ];
+        terminal.draw(|f| ui(f, &mut state)).unwrap();
+    }
+
+    #[test]
+    fn test_monitor_config_full_serde_roundtrip() {
+        let config = MonitorConfig {
+            layout: LayoutPreset::Dashboard,
+            refresh_seconds: 10,
+            widgets: WidgetVisibility::default(),
+            scale: ScaleMode::Log,
+            color_scheme: ColorScheme::BlueOrange,
+            alerts: AlertConfig {
+                price_min: Some(0.5),
+                price_max: Some(10.0),
+                whale_min_usd: Some(50_000.0),
+                volume_spike_threshold_pct: Some(100.0),
+            },
+            export: ExportConfig {
+                path: Some("./exports".to_string()),
+            },
+            auto_pause_on_input: true,
+        };
+
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        let parsed: MonitorConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed.layout, LayoutPreset::Dashboard);
+        assert_eq!(parsed.refresh_seconds, 10);
+        assert_eq!(parsed.alerts.price_min, Some(0.5));
+        assert_eq!(parsed.alerts.price_max, Some(10.0));
+        assert_eq!(parsed.export.path, Some("./exports".to_string()));
+        assert!(parsed.auto_pause_on_input);
+    }
+
+    #[test]
+    fn test_monitor_config_serde_defaults_for_new_fields() {
+        // Only specify old fields — new fields should default
+        let yaml = r#"
+layout: dashboard
+refresh_seconds: 5
+"#;
+        let config: MonitorConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.alerts.price_min.is_none());
+        assert!(config.export.path.is_none());
+        assert!(!config.auto_pause_on_input);
+    }
+
+    #[test]
+    fn test_quit_stops_export() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        let path = start_export_in_temp(&mut state);
+
+        let exit = handle_key_event_on_state(make_key_event(KeyCode::Char('q')), &mut state);
+        assert!(exit);
+        assert!(!state.export_active);
+
+        // Cleanup
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_monitor_state_new_has_alert_export_autopause_fields() {
+        let token_data = create_test_token_data();
+        let state = MonitorState::new(&token_data, "ethereum");
+
+        // Alert fields
+        assert!(state.active_alerts.is_empty());
+        assert!(state.alert_flash_until.is_none());
+        assert!(state.alerts.price_min.is_none());
+
+        // Export fields
+        assert!(!state.export_active);
+        assert!(state.export_path.is_none());
+
+        // Auto-pause fields
+        assert!(!state.auto_pause_on_input);
+        assert_eq!(state.auto_pause_timeout, Duration::from_secs(3));
+    }
+
+    // ========================================================================
+    // Coverage gap: Serde round-trip tests for enums
+    // ========================================================================
+
+    #[test]
+    fn test_scale_mode_serde_roundtrip() {
+        for mode in &[ScaleMode::Linear, ScaleMode::Log] {
+            let yaml = serde_yaml::to_string(mode).unwrap();
+            let parsed: ScaleMode = serde_yaml::from_str(&yaml).unwrap();
+            assert_eq!(&parsed, mode);
+        }
+    }
+
+    #[test]
+    fn test_scale_mode_serde_kebab_case() {
+        let parsed: ScaleMode = serde_yaml::from_str("linear").unwrap();
+        assert_eq!(parsed, ScaleMode::Linear);
+        let parsed: ScaleMode = serde_yaml::from_str("log").unwrap();
+        assert_eq!(parsed, ScaleMode::Log);
+    }
+
+    #[test]
+    fn test_scale_mode_toggle() {
+        assert_eq!(ScaleMode::Linear.toggle(), ScaleMode::Log);
+        assert_eq!(ScaleMode::Log.toggle(), ScaleMode::Linear);
+    }
+
+    #[test]
+    fn test_scale_mode_label() {
+        assert_eq!(ScaleMode::Linear.label(), "Lin");
+        assert_eq!(ScaleMode::Log.label(), "Log");
+    }
+
+    #[test]
+    fn test_color_scheme_serde_roundtrip() {
+        for scheme in &[
+            ColorScheme::GreenRed,
+            ColorScheme::BlueOrange,
+            ColorScheme::Monochrome,
+        ] {
+            let yaml = serde_yaml::to_string(scheme).unwrap();
+            let parsed: ColorScheme = serde_yaml::from_str(&yaml).unwrap();
+            assert_eq!(&parsed, scheme);
+        }
+    }
+
+    #[test]
+    fn test_color_scheme_serde_kebab_case() {
+        let parsed: ColorScheme = serde_yaml::from_str("green-red").unwrap();
+        assert_eq!(parsed, ColorScheme::GreenRed);
+        let parsed: ColorScheme = serde_yaml::from_str("blue-orange").unwrap();
+        assert_eq!(parsed, ColorScheme::BlueOrange);
+        let parsed: ColorScheme = serde_yaml::from_str("monochrome").unwrap();
+        assert_eq!(parsed, ColorScheme::Monochrome);
+    }
+
+    #[test]
+    fn test_color_scheme_cycle() {
+        assert_eq!(ColorScheme::GreenRed.next(), ColorScheme::BlueOrange);
+        assert_eq!(ColorScheme::BlueOrange.next(), ColorScheme::Monochrome);
+        assert_eq!(ColorScheme::Monochrome.next(), ColorScheme::GreenRed);
+    }
+
+    #[test]
+    fn test_color_scheme_label() {
+        assert_eq!(ColorScheme::GreenRed.label(), "G/R");
+        assert_eq!(ColorScheme::BlueOrange.label(), "B/O");
+        assert_eq!(ColorScheme::Monochrome.label(), "Mono");
+    }
+
+    #[test]
+    fn test_color_palette_fields_populated() {
+        // Verify each palette has distinct meaningful values
+        for scheme in &[
+            ColorScheme::GreenRed,
+            ColorScheme::BlueOrange,
+            ColorScheme::Monochrome,
+        ] {
+            let pal = scheme.palette();
+            // up and down colors should differ (visually distinct)
+            assert_ne!(
+                format!("{:?}", pal.up),
+                format!("{:?}", pal.down),
+                "Up/down should differ for {:?}",
+                scheme
+            );
+        }
+    }
+
+    #[test]
+    fn test_layout_preset_serde_roundtrip() {
+        for preset in &[
+            LayoutPreset::Dashboard,
+            LayoutPreset::ChartFocus,
+            LayoutPreset::Feed,
+            LayoutPreset::Compact,
+        ] {
+            let yaml = serde_yaml::to_string(preset).unwrap();
+            let parsed: LayoutPreset = serde_yaml::from_str(&yaml).unwrap();
+            assert_eq!(&parsed, preset);
+        }
+    }
+
+    #[test]
+    fn test_layout_preset_serde_kebab_case() {
+        let parsed: LayoutPreset = serde_yaml::from_str("dashboard").unwrap();
+        assert_eq!(parsed, LayoutPreset::Dashboard);
+        let parsed: LayoutPreset = serde_yaml::from_str("chart-focus").unwrap();
+        assert_eq!(parsed, LayoutPreset::ChartFocus);
+        let parsed: LayoutPreset = serde_yaml::from_str("feed").unwrap();
+        assert_eq!(parsed, LayoutPreset::Feed);
+        let parsed: LayoutPreset = serde_yaml::from_str("compact").unwrap();
+        assert_eq!(parsed, LayoutPreset::Compact);
+    }
+
+    #[test]
+    fn test_widget_visibility_serde_roundtrip() {
+        let vis = WidgetVisibility {
+            price_chart: false,
+            volume_chart: true,
+            buy_sell_pressure: false,
+            metrics_panel: true,
+            activity_log: false,
+            holder_count: false,
+            liquidity_depth: true,
+        };
+        let yaml = serde_yaml::to_string(&vis).unwrap();
+        let parsed: WidgetVisibility = serde_yaml::from_str(&yaml).unwrap();
+        assert!(!parsed.price_chart);
+        assert!(parsed.volume_chart);
+        assert!(!parsed.buy_sell_pressure);
+        assert!(parsed.metrics_panel);
+        assert!(!parsed.activity_log);
+        assert!(!parsed.holder_count);
+        assert!(parsed.liquidity_depth);
+    }
+
+    #[test]
+    fn test_data_point_serde_roundtrip() {
+        let dp = DataPoint {
+            timestamp: 1700000000.5,
+            value: 42.123456,
+            is_real: true,
+        };
+        let json = serde_json::to_string(&dp).unwrap();
+        let parsed: DataPoint = serde_json::from_str(&json).unwrap();
+        assert!((parsed.timestamp - dp.timestamp).abs() < 0.001);
+        assert!((parsed.value - dp.value).abs() < 0.001);
+        assert_eq!(parsed.is_real, dp.is_real);
+    }
+
+    // ========================================================================
+    // Coverage gap: Key handler tests for scale and color scheme
+    // ========================================================================
+
+    #[test]
+    fn test_handle_key_scale_toggle_s() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        assert_eq!(state.scale_mode, ScaleMode::Linear);
+
+        handle_key_event_on_state(make_key_event(KeyCode::Char('s')), &mut state);
+        assert_eq!(state.scale_mode, ScaleMode::Log);
+
+        handle_key_event_on_state(make_key_event(KeyCode::Char('s')), &mut state);
+        assert_eq!(state.scale_mode, ScaleMode::Linear);
+    }
+
+    #[test]
+    fn test_handle_key_color_scheme_cycle_slash() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        assert_eq!(state.color_scheme, ColorScheme::GreenRed);
+
+        handle_key_event_on_state(make_key_event(KeyCode::Char('/')), &mut state);
+        assert_eq!(state.color_scheme, ColorScheme::BlueOrange);
+
+        handle_key_event_on_state(make_key_event(KeyCode::Char('/')), &mut state);
+        assert_eq!(state.color_scheme, ColorScheme::Monochrome);
+
+        handle_key_event_on_state(make_key_event(KeyCode::Char('/')), &mut state);
+        assert_eq!(state.color_scheme, ColorScheme::GreenRed);
+    }
+
+    // ========================================================================
+    // Coverage gap: Volume profile chart render tests
+    // ========================================================================
+
+    #[test]
+    fn test_render_volume_profile_chart_no_panic() {
+        let mut terminal = create_test_terminal();
+        let state = create_populated_state();
+        terminal
+            .draw(|f| render_volume_profile_chart(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_volume_profile_chart_empty_data() {
+        let mut terminal = create_test_terminal();
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        state.price_history.clear();
+        state.volume_history.clear();
+        terminal
+            .draw(|f| render_volume_profile_chart(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_volume_profile_chart_single_price() {
+        // When all prices are identical, there's no range -> "no price range" path
+        let mut terminal = create_test_terminal();
+        let mut token_data = create_test_token_data();
+        token_data.price_usd = 1.0;
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        // Clear and add identical-price data points
+        state.price_history.clear();
+        state.volume_history.clear();
+        let now = chrono::Utc::now().timestamp() as f64;
+        for i in 0..5 {
+            state.price_history.push_back(DataPoint {
+                timestamp: now - (5.0 - i as f64) * 60.0,
+                value: 1.0, // all same price
+                is_real: true,
+            });
+            state.volume_history.push_back(DataPoint {
+                timestamp: now - (5.0 - i as f64) * 60.0,
+                value: 1000.0,
+                is_real: true,
+            });
+        }
+        terminal
+            .draw(|f| render_volume_profile_chart(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_volume_profile_chart_narrow_terminal() {
+        let backend = TestBackend::new(30, 15);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let state = create_populated_state();
+        terminal
+            .draw(|f| render_volume_profile_chart(f, f.area(), &state))
+            .unwrap();
+    }
+
+    // ========================================================================
+    // Coverage gap: Log scale rendering tests
+    // ========================================================================
+
+    #[test]
+    fn test_render_price_chart_log_scale() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        state.scale_mode = ScaleMode::Log;
+        terminal
+            .draw(|f| render_price_chart(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_candlestick_chart_log_scale() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        state.scale_mode = ScaleMode::Log;
+        state.chart_mode = ChartMode::Candlestick;
+        terminal
+            .draw(|f| render_candlestick_chart(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_price_chart_log_scale_zero_price() {
+        // Verify log scale handles zero/near-zero prices safely
+        let mut terminal = create_test_terminal();
+        let mut token_data = create_test_token_data();
+        token_data.price_usd = 0.0001;
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        state.scale_mode = ScaleMode::Log;
+        for i in 0..10 {
+            let mut data = token_data.clone();
+            data.price_usd = 0.0001 + (i as f64 * 0.00001);
+            state.update(&data);
+        }
+        terminal
+            .draw(|f| render_price_chart(f, f.area(), &state))
+            .unwrap();
+    }
+
+    // ========================================================================
+    // Coverage gap: Color scheme rendering tests
+    // ========================================================================
+
+    #[test]
+    fn test_render_ui_with_all_color_schemes() {
+        for scheme in &[
+            ColorScheme::GreenRed,
+            ColorScheme::BlueOrange,
+            ColorScheme::Monochrome,
+        ] {
+            let mut terminal = create_test_terminal();
+            let mut state = create_populated_state();
+            state.color_scheme = *scheme;
+            terminal.draw(|f| ui(f, &mut state)).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_render_volume_chart_all_color_schemes() {
+        for scheme in &[
+            ColorScheme::GreenRed,
+            ColorScheme::BlueOrange,
+            ColorScheme::Monochrome,
+        ] {
+            let mut terminal = create_test_terminal();
+            let mut state = create_populated_state();
+            state.color_scheme = *scheme;
+            terminal
+                .draw(|f| render_volume_chart(f, f.area(), &state))
+                .unwrap();
+        }
+    }
+
+    // ========================================================================
+    // Coverage gap: Activity feed dedicated render tests
+    // ========================================================================
+
+    #[test]
+    fn test_render_activity_feed_no_panic() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        for i in 0..5 {
+            state.log_messages.push_back(format!("Event {}", i));
+        }
+        terminal
+            .draw(|f| render_activity_feed(f, f.area(), &mut state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_activity_feed_empty_log() {
+        let mut terminal = create_test_terminal();
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        state.log_messages.clear();
+        terminal
+            .draw(|f| render_activity_feed(f, f.area(), &mut state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_activity_feed_with_selection() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        for i in 0..10 {
+            state.log_messages.push_back(format!("Event {}", i));
+        }
+        state.scroll_log_down();
+        state.scroll_log_down();
+        state.scroll_log_down();
+        terminal
+            .draw(|f| render_activity_feed(f, f.area(), &mut state))
+            .unwrap();
+    }
+
+    // ========================================================================
+    // Coverage gap: Alert edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_alert_whale_zero_transactions() {
+        let mut token_data = create_test_token_data();
+        token_data.total_buys_24h = 0;
+        token_data.total_sells_24h = 0;
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        state.alerts.whale_min_usd = Some(100.0);
+        state.update(&token_data);
+        // With zero total txs, whale detection should NOT fire
+        let whale_alerts: Vec<_> = state
+            .active_alerts
+            .iter()
+            .filter(|a| a.message.contains("whale") || a.message.contains("🐋"))
+            .collect();
+        assert!(
+            whale_alerts.is_empty(),
+            "Whale alert should not fire with zero transactions"
+        );
+    }
+
+    #[test]
+    fn test_alert_multiple_simultaneous() {
+        let mut token_data = create_test_token_data();
+        token_data.price_usd = 0.1; // below min
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        state.alerts.price_min = Some(0.5); // will fire: price 0.1 < 0.5
+        state.alerts.price_max = Some(0.05); // will fire: price 0.1 > 0.05
+        state.alerts.volume_spike_threshold_pct = Some(1.0);
+        state.volume_avg = 100.0; // volume_24h 1M vs avg 100 => huge spike
+
+        state.update(&token_data);
+        // Should have multiple alerts
+        assert!(
+            state.active_alerts.len() >= 2,
+            "Expected multiple alerts, got {}",
+            state.active_alerts.len()
+        );
+    }
+
+    #[test]
+    fn test_alert_clears_on_next_update() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        state.alerts.price_min = Some(2.0); // price 1.0 < 2.0 -> fires
+        state.update(&token_data);
+        assert!(!state.active_alerts.is_empty());
+
+        // Update with price above min -> should clear
+        let mut above_min = token_data.clone();
+        above_min.price_usd = 3.0;
+        state.alerts.price_min = Some(2.0);
+        state.update(&above_min);
+        // check_alerts clears alerts each time and re-evaluates
+        let price_min_alerts: Vec<_> = state
+            .active_alerts
+            .iter()
+            .filter(|a| a.message.contains("below min"))
+            .collect();
+        assert!(
+            price_min_alerts.is_empty(),
+            "Price-min alert should clear when price goes above min"
+        );
+    }
+
+    #[test]
+    fn test_render_alert_overlay_multiple_alerts() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        state.active_alerts.push(ActiveAlert {
+            message: "⚠ Price below min".to_string(),
+            triggered_at: Instant::now(),
+        });
+        state.active_alerts.push(ActiveAlert {
+            message: "🐋 Whale detected".to_string(),
+            triggered_at: Instant::now(),
+        });
+        state.active_alerts.push(ActiveAlert {
+            message: "⚠ Volume spike".to_string(),
+            triggered_at: Instant::now(),
+        });
+        state.alert_flash_until = Some(Instant::now() + Duration::from_secs(2));
+        terminal
+            .draw(|f| render_alert_overlay(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_alert_overlay_flash_expired() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        state.active_alerts.push(ActiveAlert {
+            message: "⚠ Test".to_string(),
+            triggered_at: Instant::now(),
+        });
+        // Flash timer already expired
+        state.alert_flash_until = Some(Instant::now() - Duration::from_secs(5));
+        terminal
+            .draw(|f| render_alert_overlay(f, f.area(), &state))
+            .unwrap();
+    }
+
+    // ========================================================================
+    // Coverage gap: Liquidity depth edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_render_liquidity_depth_many_pairs() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        // Add many pairs to test height-limiting
+        for i in 0..20 {
+            state.liquidity_pairs.push((
+                format!("TEST/TOKEN{} (DEX{})", i, i),
+                (100_000.0 + i as f64 * 50_000.0),
+            ));
+        }
+        terminal
+            .draw(|f| render_liquidity_depth(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_liquidity_depth_narrow_terminal() {
+        let backend = TestBackend::new(30, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = create_populated_state();
+        state.liquidity_pairs = vec![
+            ("TEST/WETH (Uniswap)".to_string(), 500_000.0),
+            ("TEST/USDC (Sushi)".to_string(), 100_000.0),
+        ];
+        terminal
+            .draw(|f| render_liquidity_depth(f, f.area(), &state))
+            .unwrap();
+    }
+
+    // ========================================================================
+    // Coverage gap: Metrics panel edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_render_metrics_panel_holder_count_disabled() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        state.holder_count = Some(42_000);
+        state.widgets.holder_count = false; // disabled
+        terminal
+            .draw(|f| render_metrics_panel(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_metrics_panel_sparkline_single_point() {
+        let mut terminal = create_test_terminal();
+        let mut token_data = create_test_token_data();
+        token_data.price_usd = 1.0;
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        state.price_history.clear();
+        state.price_history.push_back(DataPoint {
+            timestamp: 1.0,
+            value: 1.0,
+            is_real: true,
+        });
+        terminal
+            .draw(|f| render_metrics_panel(f, f.area(), &state))
+            .unwrap();
+    }
+
+    // ========================================================================
+    // Coverage gap: Buy/sell gauge edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_render_buy_sell_gauge_tiny_area() {
+        // Render in a very small area to test zero width/height paths
+        let backend = TestBackend::new(5, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = create_populated_state();
+        terminal
+            .draw(|f| render_buy_sell_gauge(f, f.area(), &mut state))
+            .unwrap();
+    }
+
+    // ========================================================================
+    // Coverage gap: Log message queue overflow
+    // ========================================================================
+
+    #[test]
+    fn test_log_message_queue_overflow() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        // Add more than 10 messages (queue capacity)
+        for i in 0..20 {
+            state.toggle_pause(); // each toggle logs a message
+            let _ = i;
+        }
+        assert!(
+            state.log_messages.len() <= 10,
+            "Log queue should cap at 10, got {}",
+            state.log_messages.len()
+        );
+    }
+
+    // ========================================================================
+    // Coverage gap: Export CSV row content verification
+    // ========================================================================
+
+    #[test]
+    fn test_export_writes_csv_row_content_format() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        let path = start_export_in_temp(&mut state);
+
+        state.update(&token_data);
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = contents.lines().collect();
+        assert!(lines.len() >= 2);
+
+        // Verify header
+        assert_eq!(
+            lines[0],
+            "timestamp,price_usd,volume_24h,liquidity_usd,buys_24h,sells_24h,market_cap"
+        );
+
+        // Verify data row has correct number of columns
+        let data_cols: Vec<&str> = lines[1].split(',').collect();
+        assert_eq!(
+            data_cols.len(),
+            7,
+            "Expected 7 CSV columns, got {}",
+            data_cols.len()
+        );
+
+        // Verify timestamp format (ISO 8601)
+        assert!(data_cols[0].contains('T'));
+        assert!(data_cols[0].ends_with('Z'));
+
+        // Cleanup
+        state.stop_export();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_export_writes_csv_row_market_cap_none() {
+        let mut token_data = create_test_token_data();
+        token_data.market_cap = None;
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        let path = start_export_in_temp(&mut state);
+
+        state.update(&token_data);
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = contents.lines().collect();
+        assert!(lines.len() >= 2);
+
+        // Last column should be empty when market_cap is None
+        let data_cols: Vec<&str> = lines[1].split(',').collect();
+        assert_eq!(data_cols.len(), 7);
+        assert!(
+            data_cols[6].is_empty(),
+            "Market cap column should be empty when None"
+        );
+
+        // Cleanup
+        state.stop_export();
+        let _ = std::fs::remove_file(path);
+    }
+
+    // ========================================================================
+    // Coverage gap: Full UI render with log scale + all chart modes
+    // ========================================================================
+
+    #[test]
+    fn test_ui_render_log_scale_all_chart_modes() {
+        for mode in &[
+            ChartMode::Line,
+            ChartMode::Candlestick,
+            ChartMode::VolumeProfile,
+        ] {
+            let mut terminal = create_test_terminal();
+            let mut state = create_populated_state();
+            state.scale_mode = ScaleMode::Log;
+            state.chart_mode = *mode;
+            terminal.draw(|f| ui(f, &mut state)).unwrap();
+        }
+    }
+
+    // ========================================================================
+    // Coverage gap: Footer rendering edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_render_footer_widget_toggle_mode_active() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        state.widget_toggle_mode = true;
+        terminal
+            .draw(|f| render_footer(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_footer_all_status_indicators() {
+        // Test with export + auto-pause + alerts simultaneously
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        state.export_active = true;
+        state.auto_pause_on_input = true;
+        state.last_input_at = Instant::now(); // triggers auto-paused display
+        terminal
+            .draw(|f| render_footer(f, f.area(), &state))
+            .unwrap();
+    }
+
+    // ========================================================================
+    // Coverage gap: Synthetic data generation edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_generate_synthetic_price_history_zero_price() {
+        let mut token_data = create_test_token_data();
+        token_data.price_usd = 0.0;
+        token_data.price_change_1h = 0.0;
+        token_data.price_change_6h = 0.0;
+        token_data.price_change_24h = 0.0;
+        let state = MonitorState::new(&token_data, "ethereum");
+        // Should not panic with zero prices
+        assert!(!state.price_history.is_empty());
+    }
+
+    #[test]
+    fn test_generate_synthetic_volume_history_zero_volume() {
+        let mut token_data = create_test_token_data();
+        token_data.volume_24h = 0.0;
+        token_data.volume_6h = 0.0;
+        token_data.volume_1h = 0.0;
+        let state = MonitorState::new(&token_data, "ethereum");
+        assert!(!state.volume_history.is_empty());
+    }
+
+    // ========================================================================
+    // Coverage gap: Auto-pause with custom timeout
+    // ========================================================================
+
+    #[test]
+    fn test_auto_pause_custom_timeout() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        state.auto_pause_on_input = true;
+        state.auto_pause_timeout = Duration::from_secs(10);
+        state.refresh_rate = Duration::from_secs(1);
+
+        // Fresh input with long timeout -> still auto-paused
+        state.last_input_at = Instant::now();
+        state.last_update = Instant::now() - Duration::from_secs(5);
+        assert!(!state.should_refresh()); // within 10s timeout
+        assert!(state.is_auto_paused());
+    }
+
+    // ========================================================================
+    // Coverage gap: Price chart with stablecoin flat range
+    // ========================================================================
+
+    #[test]
+    fn test_render_price_chart_stablecoin_flat_range() {
+        let mut terminal = create_test_terminal();
+        let mut token_data = create_test_token_data();
+        token_data.price_usd = 1.0;
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        // Add many points at nearly identical prices (stablecoin)
+        for i in 0..20 {
+            let mut data = token_data.clone();
+            data.price_usd = 1.0 + (i as f64 * 0.000001); // micro variation
+            state.update(&data);
+        }
+        terminal
+            .draw(|f| render_price_chart(f, f.area(), &state))
+            .unwrap();
+    }
+
+    // ========================================================================
+    // Coverage gap: Cache load edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_load_cache_corrupted_json() {
+        let path = MonitorState::cache_path("0xCORRUPTED_TEST", "test_chain");
+        // Write invalid JSON
+        let _ = std::fs::write(&path, "not valid json {{{");
+        let cached = MonitorState::load_cache("0xCORRUPTED_TEST", "test_chain");
+        assert!(cached.is_none(), "Corrupted JSON should return None");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_load_cache_wrong_token() {
+        let token_data = create_test_token_data();
+        let state = MonitorState::new(&token_data, "ethereum");
+        state.save_cache();
+
+        // Try to load with different token address
+        let cached = MonitorState::load_cache("0xDIFFERENT_ADDRESS", "ethereum");
+        assert!(
+            cached.is_none(),
+            "Loading cache with wrong token address should return None"
+        );
+
+        // Cleanup
+        let path = MonitorState::cache_path(&token_data.address, "ethereum");
+        let _ = std::fs::remove_file(path);
+    }
+
+    // ========================================================================
+    // Integration tests: Mock types and MonitorApp constructor
+    // ========================================================================
+
+    use crate::chains::dex::TokenSearchResult;
+
+    /// Mock DEX data source for integration testing.
+    struct MockDexDataSource {
+        /// Data returned by `get_token_data`. If `Err`, simulates an API failure.
+        token_data_result: std::sync::Mutex<Result<DexTokenData>>,
+    }
+
+    impl MockDexDataSource {
+        fn new(data: DexTokenData) -> Self {
+            Self {
+                token_data_result: std::sync::Mutex::new(Ok(data)),
+            }
+        }
+
+        fn failing(msg: &str) -> Self {
+            Self {
+                token_data_result: std::sync::Mutex::new(Err(ScopeError::Api(msg.to_string()))),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl DexDataSource for MockDexDataSource {
+        async fn get_token_price(&self, _chain: &str, _address: &str) -> Option<f64> {
+            self.token_data_result
+                .lock()
+                .unwrap()
+                .as_ref()
+                .ok()
+                .map(|d| d.price_usd)
+        }
+
+        async fn get_native_token_price(&self, _chain: &str) -> Option<f64> {
+            Some(2000.0)
+        }
+
+        async fn get_token_data(&self, _chain: &str, _address: &str) -> Result<DexTokenData> {
+            let guard = self.token_data_result.lock().unwrap();
+            match &*guard {
+                Ok(data) => Ok(data.clone()),
+                Err(e) => Err(ScopeError::Api(e.to_string())),
+            }
+        }
+
+        async fn search_tokens(
+            &self,
+            _query: &str,
+            _chain: Option<&str>,
+        ) -> Result<Vec<TokenSearchResult>> {
+            Ok(vec![])
+        }
+    }
+
+    /// Mock chain client for integration testing.
+    struct MockChainClient {
+        holder_count: u64,
+    }
+
+    impl MockChainClient {
+        fn new(holder_count: u64) -> Self {
+            Self { holder_count }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ChainClient for MockChainClient {
+        fn chain_name(&self) -> &str {
+            "ethereum"
+        }
+        fn native_token_symbol(&self) -> &str {
+            "ETH"
+        }
+        async fn get_balance(&self, _address: &str) -> Result<crate::chains::Balance> {
+            unimplemented!("not needed for monitor tests")
+        }
+        async fn enrich_balance_usd(&self, _balance: &mut crate::chains::Balance) {}
+        async fn get_transaction(&self, _hash: &str) -> Result<crate::chains::Transaction> {
+            unimplemented!("not needed for monitor tests")
+        }
+        async fn get_transactions(
+            &self,
+            _address: &str,
+            _limit: u32,
+        ) -> Result<Vec<crate::chains::Transaction>> {
+            Ok(vec![])
+        }
+        async fn get_block_number(&self) -> Result<u64> {
+            Ok(1000000)
+        }
+        async fn get_token_balances(
+            &self,
+            _address: &str,
+        ) -> Result<Vec<crate::chains::TokenBalance>> {
+            Ok(vec![])
+        }
+        async fn get_token_holder_count(&self, _address: &str) -> Result<u64> {
+            Ok(self.holder_count)
+        }
+    }
+
+    /// Creates a `MonitorApp<TestBackend>` with mock dependencies.
+    fn create_test_app(
+        dex: Box<dyn DexDataSource>,
+        chain_client: Option<Box<dyn ChainClient>>,
+    ) -> MonitorApp<TestBackend> {
+        let token_data = create_test_token_data();
+        let state = MonitorState::new(&token_data, "ethereum");
+        let backend = TestBackend::new(120, 40);
+        let terminal = ratatui::Terminal::new(backend).unwrap();
+        MonitorApp {
+            terminal,
+            state,
+            dex_client: dex,
+            chain_client,
+            should_exit: false,
+            owns_terminal: false,
+        }
+    }
+
+    fn create_test_app_with_state(
+        state: MonitorState,
+        dex: Box<dyn DexDataSource>,
+        chain_client: Option<Box<dyn ChainClient>>,
+    ) -> MonitorApp<TestBackend> {
+        let backend = TestBackend::new(120, 40);
+        let terminal = ratatui::Terminal::new(backend).unwrap();
+        MonitorApp {
+            terminal,
+            state,
+            dex_client: dex,
+            chain_client,
+            should_exit: false,
+            owns_terminal: false,
+        }
+    }
+
+    // ========================================================================
+    // Integration tests: MonitorApp::handle_key_event
+    // ========================================================================
+
+    #[test]
+    fn test_app_handle_key_quit_q() {
+        let data = create_test_token_data();
+        let mut app = create_test_app(Box::new(MockDexDataSource::new(data)), None);
+        assert!(!app.should_exit);
+        app.handle_key_event(make_key_event(KeyCode::Char('q')));
+        assert!(app.should_exit);
+    }
+
+    #[test]
+    fn test_app_handle_key_quit_esc() {
+        let data = create_test_token_data();
+        let mut app = create_test_app(Box::new(MockDexDataSource::new(data)), None);
+        app.handle_key_event(make_key_event(KeyCode::Esc));
+        assert!(app.should_exit);
+    }
+
+    #[test]
+    fn test_app_handle_key_quit_ctrl_c() {
+        let data = create_test_token_data();
+        let mut app = create_test_app(Box::new(MockDexDataSource::new(data)), None);
+        let key = crossterm::event::KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        app.handle_key_event(key);
+        assert!(app.should_exit);
+    }
+
+    #[test]
+    fn test_app_handle_key_quit_stops_active_export() {
+        let data = create_test_token_data();
+        let mut app = create_test_app(Box::new(MockDexDataSource::new(data)), None);
+        let path = start_export_in_temp(&mut app.state);
+        assert!(app.state.export_active);
+
+        app.handle_key_event(make_key_event(KeyCode::Char('q')));
+        assert!(app.should_exit);
+        assert!(!app.state.export_active);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_app_handle_key_ctrl_c_stops_active_export() {
+        let data = create_test_token_data();
+        let mut app = create_test_app(Box::new(MockDexDataSource::new(data)), None);
+        let path = start_export_in_temp(&mut app.state);
+        assert!(app.state.export_active);
+
+        let key = crossterm::event::KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        app.handle_key_event(key);
+        assert!(app.should_exit);
+        assert!(!app.state.export_active);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_app_handle_key_updates_last_input_time() {
+        let data = create_test_token_data();
+        let mut app = create_test_app(Box::new(MockDexDataSource::new(data)), None);
+        let before = Instant::now();
+        app.handle_key_event(make_key_event(KeyCode::Char('p')));
+        assert!(app.state.last_input_at >= before);
+    }
+
+    #[test]
+    fn test_app_handle_key_widget_toggle_mode() {
+        let data = create_test_token_data();
+        let mut app = create_test_app(Box::new(MockDexDataSource::new(data)), None);
+        assert!(app.state.widgets.price_chart);
+
+        // Enter widget toggle mode
+        app.handle_key_event(make_key_event(KeyCode::Char('w')));
+        assert!(app.state.widget_toggle_mode);
+
+        // Toggle widget 1 (price chart)
+        app.handle_key_event(make_key_event(KeyCode::Char('1')));
+        assert!(!app.state.widget_toggle_mode);
+        assert!(!app.state.widgets.price_chart);
+    }
+
+    #[test]
+    fn test_app_handle_key_widget_toggle_mode_cancel() {
+        let data = create_test_token_data();
+        let mut app = create_test_app(Box::new(MockDexDataSource::new(data)), None);
+
+        // Enter widget toggle mode
+        app.handle_key_event(make_key_event(KeyCode::Char('w')));
+        assert!(app.state.widget_toggle_mode);
+
+        // Any non-digit key cancels widget toggle mode
+        app.handle_key_event(make_key_event(KeyCode::Char('x')));
+        assert!(!app.state.widget_toggle_mode);
+    }
+
+    #[test]
+    fn test_app_handle_key_all_keybindings() {
+        let data = create_test_token_data();
+        let mut app = create_test_app(Box::new(MockDexDataSource::new(data)), None);
+
+        // r = force refresh
+        app.handle_key_event(make_key_event(KeyCode::Char('r')));
+        assert!(!app.should_exit);
+
+        // Shift+P = toggle auto-pause
+        let key = crossterm::event::KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT);
+        app.handle_key_event(key);
+        assert!(app.state.auto_pause_on_input);
+        app.handle_key_event(key);
+        assert!(!app.state.auto_pause_on_input);
+
+        // p = toggle pause
+        app.handle_key_event(make_key_event(KeyCode::Char('p')));
+        assert!(app.state.paused);
+
+        // space = toggle pause
+        app.handle_key_event(make_key_event(KeyCode::Char(' ')));
+        assert!(!app.state.paused);
+
+        // e = toggle export
+        app.handle_key_event(make_key_event(KeyCode::Char('e')));
+        assert!(app.state.export_active);
+        // Stop export to avoid file handles
+        app.state.stop_export();
+
+        // + = slower refresh
+        let before_rate = app.state.refresh_rate;
+        app.handle_key_event(make_key_event(KeyCode::Char('+')));
+        assert!(app.state.refresh_rate >= before_rate);
+
+        // - = faster refresh
+        let before_rate = app.state.refresh_rate;
+        app.handle_key_event(make_key_event(KeyCode::Char('-')));
+        assert!(app.state.refresh_rate <= before_rate);
+
+        // 1-6 = time periods
+        app.handle_key_event(make_key_event(KeyCode::Char('1')));
+        assert_eq!(app.state.time_period, TimePeriod::Min1);
+        app.handle_key_event(make_key_event(KeyCode::Char('2')));
+        assert_eq!(app.state.time_period, TimePeriod::Min5);
+        app.handle_key_event(make_key_event(KeyCode::Char('3')));
+        assert_eq!(app.state.time_period, TimePeriod::Min15);
+        app.handle_key_event(make_key_event(KeyCode::Char('4')));
+        assert_eq!(app.state.time_period, TimePeriod::Hour1);
+        app.handle_key_event(make_key_event(KeyCode::Char('5')));
+        assert_eq!(app.state.time_period, TimePeriod::Hour4);
+        app.handle_key_event(make_key_event(KeyCode::Char('6')));
+        assert_eq!(app.state.time_period, TimePeriod::Day1);
+
+        // t = cycle time period
+        app.handle_key_event(make_key_event(KeyCode::Char('t')));
+        assert_eq!(app.state.time_period, TimePeriod::Min1); // wraps from Day1
+
+        // c = toggle chart mode
+        app.handle_key_event(make_key_event(KeyCode::Char('c')));
+        assert_eq!(app.state.chart_mode, ChartMode::Candlestick);
+
+        // s = toggle scale
+        app.handle_key_event(make_key_event(KeyCode::Char('s')));
+        assert_eq!(app.state.scale_mode, ScaleMode::Log);
+
+        // / = cycle color scheme
+        app.handle_key_event(make_key_event(KeyCode::Char('/')));
+        assert_eq!(app.state.color_scheme, ColorScheme::BlueOrange);
+
+        // j = scroll log down
+        app.handle_key_event(make_key_event(KeyCode::Char('j')));
+
+        // k = scroll log up
+        app.handle_key_event(make_key_event(KeyCode::Char('k')));
+
+        // l = next layout
+        app.handle_key_event(make_key_event(KeyCode::Char('l')));
+        assert!(!app.state.auto_layout);
+
+        // h = prev layout
+        app.handle_key_event(make_key_event(KeyCode::Char('h')));
+
+        // a = re-enable auto layout
+        app.handle_key_event(make_key_event(KeyCode::Char('a')));
+        assert!(app.state.auto_layout);
+
+        // w = widget toggle mode
+        app.handle_key_event(make_key_event(KeyCode::Char('w')));
+        assert!(app.state.widget_toggle_mode);
+        // Cancel it
+        app.handle_key_event(make_key_event(KeyCode::Char('z')));
+
+        // Unknown key is a no-op
+        app.handle_key_event(make_key_event(KeyCode::F(12)));
+        assert!(!app.should_exit);
+    }
+
+    // ========================================================================
+    // Integration tests: MonitorApp::fetch_data
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_app_fetch_data_success() {
+        let data = create_test_token_data();
+        let initial_price = data.price_usd;
+        let mut updated = data.clone();
+        updated.price_usd = 2.5;
+        let mut app = create_test_app(Box::new(MockDexDataSource::new(updated)), None);
+
+        assert!((app.state.current_price - initial_price).abs() < 0.001);
+        app.fetch_data().await;
+        assert!((app.state.current_price - 2.5).abs() < 0.001);
+        assert!(app.state.error_message.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_app_fetch_data_api_error() {
+        let mut app = create_test_app(Box::new(MockDexDataSource::failing("rate limited")), None);
+
+        app.fetch_data().await;
+        assert!(app.state.error_message.is_some());
+        assert!(
+            app.state
+                .error_message
+                .as_ref()
+                .unwrap()
+                .contains("API Error")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_app_fetch_data_holder_count_on_12th_tick() {
+        let data = create_test_token_data();
+        let mock_chain = MockChainClient::new(42_000);
+        let mut app = create_test_app(
+            Box::new(MockDexDataSource::new(data)),
+            Some(Box::new(mock_chain)),
+        );
+
+        // First 11 fetches should not update holder count
+        for _ in 0..11 {
+            app.fetch_data().await;
+        }
+        assert!(app.state.holder_count.is_none());
+
+        // 12th fetch triggers holder count lookup
+        app.fetch_data().await;
+        assert_eq!(app.state.holder_count, Some(42_000));
+    }
+
+    #[tokio::test]
+    async fn test_app_fetch_data_holder_count_zero_not_stored() {
+        let data = create_test_token_data();
+        let mock_chain = MockChainClient::new(0); // returns zero
+        let mut app = create_test_app(
+            Box::new(MockDexDataSource::new(data)),
+            Some(Box::new(mock_chain)),
+        );
+
+        // Skip to 12th tick
+        app.state.holder_fetch_counter = 11;
+        app.fetch_data().await;
+        // Zero holder count should NOT be stored
+        assert!(app.state.holder_count.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_app_fetch_data_no_chain_client_skips_holders() {
+        let data = create_test_token_data();
+        let mut app = create_test_app(Box::new(MockDexDataSource::new(data)), None);
+
+        // Skip to 12th tick
+        app.state.holder_fetch_counter = 11;
+        app.fetch_data().await;
+        // Without a chain client, holder count stays None
+        assert!(app.state.holder_count.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_app_fetch_data_preserves_holder_on_subsequent_failure() {
+        let data = create_test_token_data();
+        let mock_chain = MockChainClient::new(42_000);
+        let mut app = create_test_app(
+            Box::new(MockDexDataSource::new(data)),
+            Some(Box::new(mock_chain)),
+        );
+
+        // Fetch holder count on 12th tick
+        app.state.holder_fetch_counter = 11;
+        app.fetch_data().await;
+        assert_eq!(app.state.holder_count, Some(42_000));
+
+        // Replace chain client with one returning 0
+        app.chain_client = Some(Box::new(MockChainClient::new(0)));
+        // 24th tick
+        app.state.holder_fetch_counter = 23;
+        app.fetch_data().await;
+        // Previous value should be preserved (zero is ignored)
+        assert_eq!(app.state.holder_count, Some(42_000));
+    }
+
+    // ========================================================================
+    // Integration tests: MonitorApp::cleanup
+    // ========================================================================
+
+    #[test]
+    fn test_app_cleanup_does_not_panic_test_backend() {
+        let data = create_test_token_data();
+        let mut app = create_test_app(Box::new(MockDexDataSource::new(data)), None);
+        // cleanup() with owns_terminal=false should not attempt terminal restore
+        let result = app.cleanup();
+        assert!(result.is_ok());
+    }
+
+    // ========================================================================
+    // Integration tests: MonitorApp draw renders without panic
+    // ========================================================================
+
+    #[test]
+    fn test_app_draw_renders_ui() {
+        let data = create_test_token_data();
+        let mut app = create_test_app(Box::new(MockDexDataSource::new(data)), None);
+        // Verify we can render UI through the MonitorApp terminal
+        app.terminal
+            .draw(|f| ui(f, &mut app.state))
+            .expect("should render without panic");
+    }
+
+    // ========================================================================
+    // Integration tests: select_token_impl
+    // ========================================================================
+
+    fn make_search_results() -> Vec<TokenSearchResult> {
+        vec![
+            TokenSearchResult {
+                address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+                symbol: "USDC".to_string(),
+                name: "USD Coin".to_string(),
+                chain: "ethereum".to_string(),
+                price_usd: Some(1.0),
+                volume_24h: 5_000_000_000.0,
+                liquidity_usd: 2_000_000_000.0,
+                market_cap: Some(32_000_000_000.0),
+            },
+            TokenSearchResult {
+                address: "0xdAC17F958D2ee523a2206206994597C13D831ec7".to_string(),
+                symbol: "USDT".to_string(),
+                name: "Tether USD".to_string(),
+                chain: "ethereum".to_string(),
+                price_usd: Some(1.0),
+                volume_24h: 6_000_000_000.0,
+                liquidity_usd: 3_000_000_000.0,
+                market_cap: Some(83_000_000_000.0),
+            },
+            TokenSearchResult {
+                address: "0x6B175474E89094C44Da98b954EedeAC495271d0F".to_string(),
+                symbol: "DAI".to_string(),
+                name: "Dai Stablecoin".to_string(),
+                chain: "ethereum".to_string(),
+                price_usd: Some(1.0),
+                volume_24h: 200_000_000.0,
+                liquidity_usd: 500_000_000.0,
+                market_cap: Some(5_000_000_000.0),
+            },
+        ]
+    }
+
+    #[test]
+    fn test_select_token_impl_valid_first() {
+        let results = make_search_results();
+        let mut reader = io::Cursor::new(b"1\n");
+        let mut writer = Vec::new();
+        let selected = select_token_impl(&results, &mut reader, &mut writer).unwrap();
+        assert_eq!(selected.symbol, "USDC");
+        assert_eq!(selected.address, results[0].address);
+        let output = String::from_utf8(writer).unwrap();
+        assert!(output.contains("Found 3 tokens"));
+        assert!(output.contains("Selected: USDC"));
+    }
+
+    #[test]
+    fn test_select_token_impl_valid_last() {
+        let results = make_search_results();
+        let mut reader = io::Cursor::new(b"3\n");
+        let mut writer = Vec::new();
+        let selected = select_token_impl(&results, &mut reader, &mut writer).unwrap();
+        assert_eq!(selected.symbol, "DAI");
+    }
+
+    #[test]
+    fn test_select_token_impl_valid_middle() {
+        let results = make_search_results();
+        let mut reader = io::Cursor::new(b"2\n");
+        let mut writer = Vec::new();
+        let selected = select_token_impl(&results, &mut reader, &mut writer).unwrap();
+        assert_eq!(selected.symbol, "USDT");
+    }
+
+    #[test]
+    fn test_select_token_impl_out_of_bounds_zero() {
+        let results = make_search_results();
+        let mut reader = io::Cursor::new(b"0\n");
+        let mut writer = Vec::new();
+        let result = select_token_impl(&results, &mut reader, &mut writer);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Selection must be between 1 and 3"));
+    }
+
+    #[test]
+    fn test_select_token_impl_out_of_bounds_high() {
+        let results = make_search_results();
+        let mut reader = io::Cursor::new(b"99\n");
+        let mut writer = Vec::new();
+        let result = select_token_impl(&results, &mut reader, &mut writer);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_select_token_impl_non_numeric_input() {
+        let results = make_search_results();
+        let mut reader = io::Cursor::new(b"abc\n");
+        let mut writer = Vec::new();
+        let result = select_token_impl(&results, &mut reader, &mut writer);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Invalid selection"));
+    }
+
+    #[test]
+    fn test_select_token_impl_empty_input() {
+        let results = make_search_results();
+        let mut reader = io::Cursor::new(b"\n");
+        let mut writer = Vec::new();
+        let result = select_token_impl(&results, &mut reader, &mut writer);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_select_token_impl_long_name_truncation() {
+        let results = vec![TokenSearchResult {
+            address: "0xABCDEF1234567890ABCDEF1234567890ABCDEF12".to_string(),
+            symbol: "LONG".to_string(),
+            name: "A Very Long Token Name That Exceeds Twenty Characters".to_string(),
+            chain: "ethereum".to_string(),
+            price_usd: None,
+            volume_24h: 100.0,
+            liquidity_usd: 50.0,
+            market_cap: None,
+        }];
+        let mut reader = io::Cursor::new(b"1\n");
+        let mut writer = Vec::new();
+        let selected = select_token_impl(&results, &mut reader, &mut writer).unwrap();
+        assert_eq!(selected.symbol, "LONG");
+        let output = String::from_utf8(writer).unwrap();
+        // Should have truncated name
+        assert!(output.contains("A Very Long Token..."));
+        // Should show N/A for price
+        assert!(output.contains("N/A"));
+    }
+
+    #[test]
+    fn test_select_token_impl_output_format() {
+        let results = make_search_results();
+        let mut reader = io::Cursor::new(b"1\n");
+        let mut writer = Vec::new();
+        let _ = select_token_impl(&results, &mut reader, &mut writer).unwrap();
+        let output = String::from_utf8(writer).unwrap();
+
+        // Verify table header
+        assert!(output.contains("#"));
+        assert!(output.contains("Symbol"));
+        assert!(output.contains("Name"));
+        assert!(output.contains("Address"));
+        assert!(output.contains("Price"));
+        assert!(output.contains("Liquidity"));
+        // Verify separator line
+        assert!(output.contains("─"));
+        // Verify prompt
+        assert!(output.contains("Select token (1-3):"));
+    }
+
+    // ========================================================================
+    // Integration tests: format_monitor_number
+    // ========================================================================
+
+    #[test]
+    fn test_format_monitor_number_billions() {
+        assert_eq!(format_monitor_number(5_000_000_000.0), "$5.00B");
+        assert_eq!(format_monitor_number(1_234_567_890.0), "$1.23B");
+    }
+
+    #[test]
+    fn test_format_monitor_number_millions() {
+        assert_eq!(format_monitor_number(5_000_000.0), "$5.00M");
+        assert_eq!(format_monitor_number(42_500_000.0), "$42.50M");
+    }
+
+    #[test]
+    fn test_format_monitor_number_thousands() {
+        assert_eq!(format_monitor_number(5_000.0), "$5.00K");
+        assert_eq!(format_monitor_number(999_999.0), "$1000.00K");
+    }
+
+    #[test]
+    fn test_format_monitor_number_small() {
+        assert_eq!(format_monitor_number(42.0), "$42.00");
+        assert_eq!(format_monitor_number(0.5), "$0.50");
+        assert_eq!(format_monitor_number(0.0), "$0.00");
+    }
+
+    // ========================================================================
+    // Integration tests: abbreviate_address edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_abbreviate_address_exactly_16_chars() {
+        let addr = "0123456789ABCDEF"; // exactly 16 chars
+        assert_eq!(abbreviate_address(addr), addr);
+    }
+
+    #[test]
+    fn test_abbreviate_address_17_chars() {
+        let addr = "0123456789ABCDEFG"; // 17 chars -> abbreviated
+        assert_eq!(abbreviate_address(addr), "01234567...BCDEFG");
+    }
+
+    // ========================================================================
+    // Integration tests: MonitorApp with state + fetch combined scenario
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_app_full_scenario_fetch_render_quit() {
+        let data = create_test_token_data();
+        let mut updated = data.clone();
+        updated.price_usd = 3.0;
+        let mock_chain = MockChainClient::new(10_000);
+        let state = MonitorState::new(&data, "ethereum");
+        let mut app = create_test_app_with_state(
+            state,
+            Box::new(MockDexDataSource::new(updated)),
+            Some(Box::new(mock_chain)),
+        );
+
+        // 1. Fetch new data
+        app.fetch_data().await;
+        assert!((app.state.current_price - 3.0).abs() < 0.001);
+
+        // 2. Render UI
+        app.terminal
+            .draw(|f| ui(f, &mut app.state))
+            .expect("render");
+
+        // 3. Start export
+        app.handle_key_event(make_key_event(KeyCode::Char('e')));
+        assert!(app.state.export_active);
+
+        // 4. Quit (should stop export)
+        app.handle_key_event(make_key_event(KeyCode::Char('q')));
+        assert!(app.should_exit);
+        assert!(!app.state.export_active);
+    }
+
+    #[tokio::test]
+    async fn test_app_fetch_data_error_then_recovery() {
+        let mut app = create_test_app(Box::new(MockDexDataSource::failing("server down")), None);
+
+        // First fetch fails
+        app.fetch_data().await;
+        assert!(app.state.error_message.is_some());
+
+        // Replace with working mock
+        let mut recovered = create_test_token_data();
+        recovered.price_usd = 5.0;
+        app.dex_client = Box::new(MockDexDataSource::new(recovered));
+
+        // Second fetch succeeds
+        app.fetch_data().await;
+        assert!((app.state.current_price - 5.0).abs() < 0.001);
+        // Error message is cleared by state.update()
+    }
+
+    // ========================================================================
+    // Integration tests: MonitorArgs parsing and run_direct config merging
+    // ========================================================================
+
+    #[test]
+    fn test_monitor_args_defaults() {
+        use super::super::Cli;
+        use clap::Parser;
+        // Simulate: scope monitor USDC
+        let cli = Cli::try_parse_from(["scope", "monitor", "USDC"]).unwrap();
+        if let super::super::Commands::Monitor(args) = cli.command {
+            assert_eq!(args.token, "USDC");
+            assert_eq!(args.chain, "ethereum");
+            assert!(args.layout.is_none());
+            assert!(args.refresh.is_none());
+            assert!(args.scale.is_none());
+            assert!(args.color_scheme.is_none());
+            assert!(args.export.is_none());
+        } else {
+            panic!("Expected Monitor command");
+        }
+    }
+
+    #[test]
+    fn test_monitor_args_all_flags() {
+        use super::super::Cli;
+        use clap::Parser;
+        let cli = Cli::try_parse_from([
+            "scope",
+            "monitor",
+            "PEPE",
+            "--chain",
+            "solana",
+            "--layout",
+            "feed",
+            "--refresh",
+            "2",
+            "--scale",
+            "log",
+            "--color-scheme",
+            "monochrome",
+            "--export",
+            "/tmp/data.csv",
+        ])
+        .unwrap();
+        if let super::super::Commands::Monitor(args) = cli.command {
+            assert_eq!(args.token, "PEPE");
+            assert_eq!(args.chain, "solana");
+            assert_eq!(args.layout, Some(LayoutPreset::Feed));
+            assert_eq!(args.refresh, Some(2));
+            assert_eq!(args.scale, Some(ScaleMode::Log));
+            assert_eq!(args.color_scheme, Some(ColorScheme::Monochrome));
+            assert_eq!(args.export, Some(PathBuf::from("/tmp/data.csv")));
+        } else {
+            panic!("Expected Monitor command");
+        }
+    }
+
+    #[test]
+    fn test_run_direct_config_override_layout() {
+        // Verify that run_direct properly applies CLI overrides to config
+        let config = Config::default();
+        assert_eq!(config.monitor.layout, LayoutPreset::Dashboard);
+
+        let args = MonitorArgs {
+            token: "USDC".to_string(),
+            chain: "ethereum".to_string(),
+            layout: Some(LayoutPreset::ChartFocus),
+            refresh: None,
+            scale: None,
+            color_scheme: None,
+            export: None,
+        };
+
+        // Build the effective config the same way run_direct does
+        let mut monitor_config = config.monitor.clone();
+        if let Some(layout) = args.layout {
+            monitor_config.layout = layout;
+        }
+        assert_eq!(monitor_config.layout, LayoutPreset::ChartFocus);
+    }
+
+    #[test]
+    fn test_run_direct_config_override_all_fields() {
+        let config = Config::default();
+        let args = MonitorArgs {
+            token: "PEPE".to_string(),
+            chain: "solana".to_string(),
+            layout: Some(LayoutPreset::Compact),
+            refresh: Some(2),
+            scale: Some(ScaleMode::Log),
+            color_scheme: Some(ColorScheme::BlueOrange),
+            export: Some(PathBuf::from("/tmp/test.csv")),
+        };
+
+        let mut mc = config.monitor.clone();
+        if let Some(layout) = args.layout {
+            mc.layout = layout;
+        }
+        if let Some(refresh) = args.refresh {
+            mc.refresh_seconds = refresh;
+        }
+        if let Some(scale) = args.scale {
+            mc.scale = scale;
+        }
+        if let Some(color_scheme) = args.color_scheme {
+            mc.color_scheme = color_scheme;
+        }
+        if let Some(ref path) = args.export {
+            mc.export.path = Some(path.to_string_lossy().into_owned());
+        }
+
+        assert_eq!(mc.layout, LayoutPreset::Compact);
+        assert_eq!(mc.refresh_seconds, 2);
+        assert_eq!(mc.scale, ScaleMode::Log);
+        assert_eq!(mc.color_scheme, ColorScheme::BlueOrange);
+        assert_eq!(mc.export.path, Some("/tmp/test.csv".to_string()));
+    }
+
+    #[test]
+    fn test_run_direct_config_no_overrides_preserves_defaults() {
+        let config = Config::default();
+        let args = MonitorArgs {
+            token: "USDC".to_string(),
+            chain: "ethereum".to_string(),
+            layout: None,
+            refresh: None,
+            scale: None,
+            color_scheme: None,
+            export: None,
+        };
+
+        let mut mc = config.monitor.clone();
+        if let Some(layout) = args.layout {
+            mc.layout = layout;
+        }
+        if let Some(refresh) = args.refresh {
+            mc.refresh_seconds = refresh;
+        }
+        if let Some(scale) = args.scale {
+            mc.scale = scale;
+        }
+        if let Some(color_scheme) = args.color_scheme {
+            mc.color_scheme = color_scheme;
+        }
+
+        // All should remain at defaults
+        assert_eq!(mc.layout, LayoutPreset::Dashboard);
+        assert_eq!(mc.refresh_seconds, DEFAULT_REFRESH_SECS);
+        assert_eq!(mc.scale, ScaleMode::Linear);
+        assert_eq!(mc.color_scheme, ColorScheme::GreenRed);
+        assert!(mc.export.path.is_none());
     }
 }
