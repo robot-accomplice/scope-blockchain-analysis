@@ -5,6 +5,7 @@
 //! This binary provides commands for:
 //! - Address analysis (`scope address`)
 //! - Transaction analysis (`scope tx`)
+//! - Live token monitoring (`scope monitor`)
 //! - Portfolio management (`scope portfolio`)
 //! - Data export (`scope export`)
 //!
@@ -14,6 +15,7 @@
 //! scope --help
 //! scope address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
 //! scope tx 0xabc123...
+//! scope monitor USDC --chain ethereum
 //! scope portfolio list
 //! ```
 
@@ -91,6 +93,7 @@ async fn main() -> Result<()> {
         Commands::Portfolio(args) => scope::cli::portfolio::run(args, &config, &factory).await,
         Commands::Export(args) => scope::cli::export::run(args, &config, &factory).await,
         Commands::Interactive(args) => scope::cli::interactive::run(args, &config, &factory).await,
+        Commands::Monitor(args) => scope::cli::monitor::run_direct(args, &config, &factory).await,
         Commands::Setup(args) => scope::cli::setup::run(args, &config).await,
         Commands::Compliance(compliance_cmd) => match compliance_cmd {
             scope::cli::compliance::ComplianceCommands::Risk(args) => {
@@ -167,6 +170,7 @@ async fn run_command(command: Commands, config: &Config) -> Result<()> {
         Commands::Portfolio(args) => scope::cli::portfolio::run(args, config, &factory).await,
         Commands::Export(args) => scope::cli::export::run(args, config, &factory).await,
         Commands::Interactive(args) => scope::cli::interactive::run(args, config, &factory).await,
+        Commands::Monitor(args) => scope::cli::monitor::run_direct(args, config, &factory).await,
         Commands::Setup(args) => scope::cli::setup::run(args, config).await,
         Commands::Compliance(compliance_cmd) => match compliance_cmd {
             scope::cli::compliance::ComplianceCommands::Risk(args) => {

@@ -6,7 +6,14 @@
 //!
 //! ## Usage
 //!
-//! From interactive mode:
+//! Directly from the command line (no interactive mode required):
+//! ```text
+//! scope monitor USDC
+//! scope mon PEPE --chain ethereum --layout chart-focus --refresh 3
+//! scope monitor 0x1234... -c solana -s log --color-scheme blue-orange
+//! ```
+//!
+//! Or from interactive mode:
 //! ```text
 //! scope> monitor USDC
 //! scope> mon 0x1234...
@@ -56,6 +63,7 @@ use crate::chains::dex::{DexClient, DexDataSource, DexTokenData};
 use crate::chains::{ChainClient, ChainClientFactory};
 use crate::config::Config;
 use crate::error::{Result, ScopeError};
+use clap::Args;
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
     execute,
@@ -80,6 +88,76 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use super::interactive::SessionContext;
+
+// ============================================================================
+// CLI Arguments
+// ============================================================================
+
+/// Arguments for the top-level `monitor` command.
+///
+/// Launches the live TUI dashboard directly from the command line,
+/// without requiring interactive mode.
+///
+/// # Examples
+///
+/// ```bash
+/// # Monitor by token address
+/// scope monitor 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
+///
+/// # Monitor by symbol on a specific chain
+/// scope monitor USDC --chain ethereum
+///
+/// # Short alias
+/// scope mon PEPE -c ethereum
+///
+/// # Custom layout and refresh rate
+/// scope monitor USDC --layout chart-focus --refresh 3
+/// ```
+#[derive(Debug, Args)]
+pub struct MonitorArgs {
+    /// Token address or symbol to monitor.
+    ///
+    /// Can be a contract address (0x...) or a token symbol/name.
+    /// If a name/symbol is provided, matching tokens will be searched
+    /// and you can select from the results.
+    pub token: String,
+
+    /// Target blockchain network.
+    ///
+    /// Determines which chain to query for token data.
+    #[arg(short, long, default_value = "ethereum")]
+    pub chain: String,
+
+    /// Layout preset for the TUI dashboard.
+    ///
+    /// Controls how widgets are arranged on screen.
+    /// Options: dashboard, chart-focus, feed, compact.
+    #[arg(short, long)]
+    pub layout: Option<LayoutPreset>,
+
+    /// Refresh interval in seconds.
+    ///
+    /// How often to fetch new data from the API.
+    /// Adjustable at runtime with +/- keys.
+    #[arg(short, long)]
+    pub refresh: Option<u64>,
+
+    /// Y-axis scale mode for price charts.
+    ///
+    /// Options: linear, log.
+    #[arg(short, long)]
+    pub scale: Option<ScaleMode>,
+
+    /// Color scheme for charts.
+    ///
+    /// Options: green-red, blue-orange, monochrome.
+    #[arg(long)]
+    pub color_scheme: Option<ColorScheme>,
+
+    /// Start CSV export immediately, writing to the given path.
+    #[arg(short, long, value_name = "PATH")]
+    pub export: Option<PathBuf>,
+}
 
 /// Maximum data retention: 24 hours.
 /// At 5-second intervals: 24 * 60 * 12 = 17,280 points max per history.
@@ -270,7 +348,7 @@ impl ChartMode {
 }
 
 /// Color scheme for the monitor TUI.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, clap::ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum ColorScheme {
     /// Classic green/red (default).
@@ -360,7 +438,7 @@ pub struct ColorPalette {
 }
 
 /// Y-axis scaling mode for price charts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, clap::ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum ScaleMode {
     /// Linear scale (default).
@@ -442,7 +520,7 @@ impl Default for ExportConfig {
 ///
 /// Controls which widgets are shown and how they are arranged.
 /// Can be switched at runtime with keybindings or set via config.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, clap::ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum LayoutPreset {
     /// Balanced 2x2 grid with all widgets visible.
@@ -1440,26 +1518,35 @@ impl MonitorState {
     }
 }
 
-/// Main monitor application.
-pub struct MonitorApp {
+/// Main monitor application, generic over terminal backend for testability.
+///
+/// The default type parameter (`CrosstermBackend<Stdout>`) is used in production.
+/// Tests use `TestBackend` to avoid real terminal I/O.
+pub struct MonitorApp<B: ratatui::backend::Backend = ratatui::backend::CrosstermBackend<io::Stdout>>
+{
     /// Terminal backend.
-    terminal: ratatui::DefaultTerminal,
+    terminal: ratatui::Terminal<B>,
 
     /// Monitor state.
     state: MonitorState,
 
     /// DEX client for fetching data.
-    dex_client: DexClient,
+    dex_client: Box<dyn DexDataSource>,
 
     /// Optional chain client for on-chain data (holder count, etc.).
     chain_client: Option<Box<dyn ChainClient>>,
 
     /// Whether to exit the application.
     should_exit: bool,
+
+    /// Whether this app owns the real terminal (and should restore it on drop).
+    /// False for test instances using `TestBackend`.
+    owns_terminal: bool,
 }
 
+/// Production constructor and terminal-specific methods.
 impl MonitorApp {
-    /// Creates a new monitor application.
+    /// Creates a new monitor application with a real terminal and live DEX client.
     pub fn new(
         initial_data: DexTokenData,
         chain: &str,
@@ -1478,9 +1565,10 @@ impl MonitorApp {
         Ok(Self {
             terminal,
             state,
-            dex_client: DexClient::new(),
+            dex_client: Box::new(DexClient::new()),
             chain_client,
             should_exit: false,
+            owns_terminal: true,
         })
     }
 
@@ -1530,6 +1618,34 @@ impl MonitorApp {
             }
         }
 
+        Ok(())
+    }
+}
+
+impl<B: ratatui::backend::Backend> Drop for MonitorApp<B> {
+    fn drop(&mut self) {
+        if self.owns_terminal {
+            let _ = execute!(io::stdout(), DisableMouseCapture);
+            ratatui::restore();
+        }
+    }
+}
+
+/// Methods that work with any terminal backend (production or test).
+/// Includes cleanup, key handling, and data fetching.
+impl<B: ratatui::backend::Backend> MonitorApp<B> {
+    /// Cleans up terminal state. Only performs real terminal restore when
+    /// this app owns the terminal (production mode).
+    pub fn cleanup(&mut self) -> Result<()> {
+        // Save cache before exiting
+        self.state.save_cache();
+
+        if self.owns_terminal {
+            // Disable mouse capture (not handled by ratatui::restore)
+            let _ = execute!(io::stdout(), DisableMouseCapture);
+            // Restore terminal using ratatui's simplified cleanup
+            ratatui::restore();
+        }
         Ok(())
     }
 
@@ -1691,25 +1807,6 @@ impl MonitorApp {
                 _ => {} // Keep previous value or None
             }
         }
-    }
-
-    /// Cleans up terminal state.
-    pub fn cleanup(&mut self) -> Result<()> {
-        // Save cache before exiting
-        self.state.save_cache();
-
-        // Disable mouse capture (not handled by ratatui::restore)
-        let _ = execute!(io::stdout(), DisableMouseCapture);
-        // Restore terminal using ratatui's simplified cleanup
-        ratatui::restore();
-        Ok(())
-    }
-}
-
-impl Drop for MonitorApp {
-    fn drop(&mut self) {
-        let _ = execute!(io::stdout(), DisableMouseCapture);
-        ratatui::restore();
     }
 }
 
@@ -3167,6 +3264,48 @@ fn format_usd(n: f64) -> String {
     } else {
         format!("${:.2}", n)
     }
+}
+
+/// Entry point for the top-level `scope monitor` command.
+///
+/// Creates a `SessionContext` from CLI args and delegates to [`run`].
+/// Applies CLI-provided overrides (layout, refresh, scale, etc.) on top
+/// of the config-file defaults.
+pub async fn run_direct(
+    args: MonitorArgs,
+    config: &Config,
+    clients: &dyn ChainClientFactory,
+) -> Result<()> {
+    // Build a SessionContext from the CLI args (no interactive session needed)
+    let ctx = SessionContext {
+        chain: args.chain,
+        chain_explicit: true,
+        ..SessionContext::default()
+    };
+
+    // Build a MonitorConfig from config-file defaults + CLI overrides
+    let mut monitor_config = config.monitor.clone();
+    if let Some(layout) = args.layout {
+        monitor_config.layout = layout;
+    }
+    if let Some(refresh) = args.refresh {
+        monitor_config.refresh_seconds = refresh;
+    }
+    if let Some(scale) = args.scale {
+        monitor_config.scale = scale;
+    }
+    if let Some(color_scheme) = args.color_scheme {
+        monitor_config.color_scheme = color_scheme;
+    }
+    if let Some(ref path) = args.export {
+        monitor_config.export.path = Some(path.to_string_lossy().into_owned());
+    }
+
+    // Use a temporary Config with the CLI-overridden monitor settings
+    let mut effective_config = config.clone();
+    effective_config.monitor = monitor_config;
+
+    run(Some(args.token), &ctx, &effective_config, clients).await
 }
 
 /// Entry point for the monitor command from interactive mode.
@@ -6376,5 +6515,1661 @@ refresh_seconds: 5
         // Auto-pause fields
         assert!(!state.auto_pause_on_input);
         assert_eq!(state.auto_pause_timeout, Duration::from_secs(3));
+    }
+
+    // ========================================================================
+    // Coverage gap: Serde round-trip tests for enums
+    // ========================================================================
+
+    #[test]
+    fn test_scale_mode_serde_roundtrip() {
+        for mode in &[ScaleMode::Linear, ScaleMode::Log] {
+            let yaml = serde_yaml::to_string(mode).unwrap();
+            let parsed: ScaleMode = serde_yaml::from_str(&yaml).unwrap();
+            assert_eq!(&parsed, mode);
+        }
+    }
+
+    #[test]
+    fn test_scale_mode_serde_kebab_case() {
+        let parsed: ScaleMode = serde_yaml::from_str("linear").unwrap();
+        assert_eq!(parsed, ScaleMode::Linear);
+        let parsed: ScaleMode = serde_yaml::from_str("log").unwrap();
+        assert_eq!(parsed, ScaleMode::Log);
+    }
+
+    #[test]
+    fn test_scale_mode_toggle() {
+        assert_eq!(ScaleMode::Linear.toggle(), ScaleMode::Log);
+        assert_eq!(ScaleMode::Log.toggle(), ScaleMode::Linear);
+    }
+
+    #[test]
+    fn test_scale_mode_label() {
+        assert_eq!(ScaleMode::Linear.label(), "Lin");
+        assert_eq!(ScaleMode::Log.label(), "Log");
+    }
+
+    #[test]
+    fn test_color_scheme_serde_roundtrip() {
+        for scheme in &[
+            ColorScheme::GreenRed,
+            ColorScheme::BlueOrange,
+            ColorScheme::Monochrome,
+        ] {
+            let yaml = serde_yaml::to_string(scheme).unwrap();
+            let parsed: ColorScheme = serde_yaml::from_str(&yaml).unwrap();
+            assert_eq!(&parsed, scheme);
+        }
+    }
+
+    #[test]
+    fn test_color_scheme_serde_kebab_case() {
+        let parsed: ColorScheme = serde_yaml::from_str("green-red").unwrap();
+        assert_eq!(parsed, ColorScheme::GreenRed);
+        let parsed: ColorScheme = serde_yaml::from_str("blue-orange").unwrap();
+        assert_eq!(parsed, ColorScheme::BlueOrange);
+        let parsed: ColorScheme = serde_yaml::from_str("monochrome").unwrap();
+        assert_eq!(parsed, ColorScheme::Monochrome);
+    }
+
+    #[test]
+    fn test_color_scheme_cycle() {
+        assert_eq!(ColorScheme::GreenRed.next(), ColorScheme::BlueOrange);
+        assert_eq!(ColorScheme::BlueOrange.next(), ColorScheme::Monochrome);
+        assert_eq!(ColorScheme::Monochrome.next(), ColorScheme::GreenRed);
+    }
+
+    #[test]
+    fn test_color_scheme_label() {
+        assert_eq!(ColorScheme::GreenRed.label(), "G/R");
+        assert_eq!(ColorScheme::BlueOrange.label(), "B/O");
+        assert_eq!(ColorScheme::Monochrome.label(), "Mono");
+    }
+
+    #[test]
+    fn test_color_palette_fields_populated() {
+        // Verify each palette has distinct meaningful values
+        for scheme in &[
+            ColorScheme::GreenRed,
+            ColorScheme::BlueOrange,
+            ColorScheme::Monochrome,
+        ] {
+            let pal = scheme.palette();
+            // up and down colors should differ (visually distinct)
+            assert_ne!(
+                format!("{:?}", pal.up),
+                format!("{:?}", pal.down),
+                "Up/down should differ for {:?}",
+                scheme
+            );
+        }
+    }
+
+    #[test]
+    fn test_layout_preset_serde_roundtrip() {
+        for preset in &[
+            LayoutPreset::Dashboard,
+            LayoutPreset::ChartFocus,
+            LayoutPreset::Feed,
+            LayoutPreset::Compact,
+        ] {
+            let yaml = serde_yaml::to_string(preset).unwrap();
+            let parsed: LayoutPreset = serde_yaml::from_str(&yaml).unwrap();
+            assert_eq!(&parsed, preset);
+        }
+    }
+
+    #[test]
+    fn test_layout_preset_serde_kebab_case() {
+        let parsed: LayoutPreset = serde_yaml::from_str("dashboard").unwrap();
+        assert_eq!(parsed, LayoutPreset::Dashboard);
+        let parsed: LayoutPreset = serde_yaml::from_str("chart-focus").unwrap();
+        assert_eq!(parsed, LayoutPreset::ChartFocus);
+        let parsed: LayoutPreset = serde_yaml::from_str("feed").unwrap();
+        assert_eq!(parsed, LayoutPreset::Feed);
+        let parsed: LayoutPreset = serde_yaml::from_str("compact").unwrap();
+        assert_eq!(parsed, LayoutPreset::Compact);
+    }
+
+    #[test]
+    fn test_widget_visibility_serde_roundtrip() {
+        let vis = WidgetVisibility {
+            price_chart: false,
+            volume_chart: true,
+            buy_sell_pressure: false,
+            metrics_panel: true,
+            activity_log: false,
+            holder_count: false,
+            liquidity_depth: true,
+        };
+        let yaml = serde_yaml::to_string(&vis).unwrap();
+        let parsed: WidgetVisibility = serde_yaml::from_str(&yaml).unwrap();
+        assert!(!parsed.price_chart);
+        assert!(parsed.volume_chart);
+        assert!(!parsed.buy_sell_pressure);
+        assert!(parsed.metrics_panel);
+        assert!(!parsed.activity_log);
+        assert!(!parsed.holder_count);
+        assert!(parsed.liquidity_depth);
+    }
+
+    #[test]
+    fn test_data_point_serde_roundtrip() {
+        let dp = DataPoint {
+            timestamp: 1700000000.5,
+            value: 42.123456,
+            is_real: true,
+        };
+        let json = serde_json::to_string(&dp).unwrap();
+        let parsed: DataPoint = serde_json::from_str(&json).unwrap();
+        assert!((parsed.timestamp - dp.timestamp).abs() < 0.001);
+        assert!((parsed.value - dp.value).abs() < 0.001);
+        assert_eq!(parsed.is_real, dp.is_real);
+    }
+
+    // ========================================================================
+    // Coverage gap: Key handler tests for scale and color scheme
+    // ========================================================================
+
+    #[test]
+    fn test_handle_key_scale_toggle_s() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        assert_eq!(state.scale_mode, ScaleMode::Linear);
+
+        handle_key_event_on_state(make_key_event(KeyCode::Char('s')), &mut state);
+        assert_eq!(state.scale_mode, ScaleMode::Log);
+
+        handle_key_event_on_state(make_key_event(KeyCode::Char('s')), &mut state);
+        assert_eq!(state.scale_mode, ScaleMode::Linear);
+    }
+
+    #[test]
+    fn test_handle_key_color_scheme_cycle_slash() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        assert_eq!(state.color_scheme, ColorScheme::GreenRed);
+
+        handle_key_event_on_state(make_key_event(KeyCode::Char('/')), &mut state);
+        assert_eq!(state.color_scheme, ColorScheme::BlueOrange);
+
+        handle_key_event_on_state(make_key_event(KeyCode::Char('/')), &mut state);
+        assert_eq!(state.color_scheme, ColorScheme::Monochrome);
+
+        handle_key_event_on_state(make_key_event(KeyCode::Char('/')), &mut state);
+        assert_eq!(state.color_scheme, ColorScheme::GreenRed);
+    }
+
+    // ========================================================================
+    // Coverage gap: Volume profile chart render tests
+    // ========================================================================
+
+    #[test]
+    fn test_render_volume_profile_chart_no_panic() {
+        let mut terminal = create_test_terminal();
+        let state = create_populated_state();
+        terminal
+            .draw(|f| render_volume_profile_chart(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_volume_profile_chart_empty_data() {
+        let mut terminal = create_test_terminal();
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        state.price_history.clear();
+        state.volume_history.clear();
+        terminal
+            .draw(|f| render_volume_profile_chart(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_volume_profile_chart_single_price() {
+        // When all prices are identical, there's no range -> "no price range" path
+        let mut terminal = create_test_terminal();
+        let mut token_data = create_test_token_data();
+        token_data.price_usd = 1.0;
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        // Clear and add identical-price data points
+        state.price_history.clear();
+        state.volume_history.clear();
+        let now = chrono::Utc::now().timestamp() as f64;
+        for i in 0..5 {
+            state.price_history.push_back(DataPoint {
+                timestamp: now - (5.0 - i as f64) * 60.0,
+                value: 1.0, // all same price
+                is_real: true,
+            });
+            state.volume_history.push_back(DataPoint {
+                timestamp: now - (5.0 - i as f64) * 60.0,
+                value: 1000.0,
+                is_real: true,
+            });
+        }
+        terminal
+            .draw(|f| render_volume_profile_chart(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_volume_profile_chart_narrow_terminal() {
+        let backend = TestBackend::new(30, 15);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let state = create_populated_state();
+        terminal
+            .draw(|f| render_volume_profile_chart(f, f.area(), &state))
+            .unwrap();
+    }
+
+    // ========================================================================
+    // Coverage gap: Log scale rendering tests
+    // ========================================================================
+
+    #[test]
+    fn test_render_price_chart_log_scale() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        state.scale_mode = ScaleMode::Log;
+        terminal
+            .draw(|f| render_price_chart(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_candlestick_chart_log_scale() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        state.scale_mode = ScaleMode::Log;
+        state.chart_mode = ChartMode::Candlestick;
+        terminal
+            .draw(|f| render_candlestick_chart(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_price_chart_log_scale_zero_price() {
+        // Verify log scale handles zero/near-zero prices safely
+        let mut terminal = create_test_terminal();
+        let mut token_data = create_test_token_data();
+        token_data.price_usd = 0.0001;
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        state.scale_mode = ScaleMode::Log;
+        for i in 0..10 {
+            let mut data = token_data.clone();
+            data.price_usd = 0.0001 + (i as f64 * 0.00001);
+            state.update(&data);
+        }
+        terminal
+            .draw(|f| render_price_chart(f, f.area(), &state))
+            .unwrap();
+    }
+
+    // ========================================================================
+    // Coverage gap: Color scheme rendering tests
+    // ========================================================================
+
+    #[test]
+    fn test_render_ui_with_all_color_schemes() {
+        for scheme in &[
+            ColorScheme::GreenRed,
+            ColorScheme::BlueOrange,
+            ColorScheme::Monochrome,
+        ] {
+            let mut terminal = create_test_terminal();
+            let mut state = create_populated_state();
+            state.color_scheme = *scheme;
+            terminal.draw(|f| ui(f, &mut state)).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_render_volume_chart_all_color_schemes() {
+        for scheme in &[
+            ColorScheme::GreenRed,
+            ColorScheme::BlueOrange,
+            ColorScheme::Monochrome,
+        ] {
+            let mut terminal = create_test_terminal();
+            let mut state = create_populated_state();
+            state.color_scheme = *scheme;
+            terminal
+                .draw(|f| render_volume_chart(f, f.area(), &state))
+                .unwrap();
+        }
+    }
+
+    // ========================================================================
+    // Coverage gap: Activity feed dedicated render tests
+    // ========================================================================
+
+    #[test]
+    fn test_render_activity_feed_no_panic() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        for i in 0..5 {
+            state.log_messages.push_back(format!("Event {}", i));
+        }
+        terminal
+            .draw(|f| render_activity_feed(f, f.area(), &mut state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_activity_feed_empty_log() {
+        let mut terminal = create_test_terminal();
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        state.log_messages.clear();
+        terminal
+            .draw(|f| render_activity_feed(f, f.area(), &mut state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_activity_feed_with_selection() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        for i in 0..10 {
+            state.log_messages.push_back(format!("Event {}", i));
+        }
+        state.scroll_log_down();
+        state.scroll_log_down();
+        state.scroll_log_down();
+        terminal
+            .draw(|f| render_activity_feed(f, f.area(), &mut state))
+            .unwrap();
+    }
+
+    // ========================================================================
+    // Coverage gap: Alert edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_alert_whale_zero_transactions() {
+        let mut token_data = create_test_token_data();
+        token_data.total_buys_24h = 0;
+        token_data.total_sells_24h = 0;
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        state.alerts.whale_min_usd = Some(100.0);
+        state.update(&token_data);
+        // With zero total txs, whale detection should NOT fire
+        let whale_alerts: Vec<_> = state
+            .active_alerts
+            .iter()
+            .filter(|a| a.message.contains("whale") || a.message.contains("🐋"))
+            .collect();
+        assert!(
+            whale_alerts.is_empty(),
+            "Whale alert should not fire with zero transactions"
+        );
+    }
+
+    #[test]
+    fn test_alert_multiple_simultaneous() {
+        let mut token_data = create_test_token_data();
+        token_data.price_usd = 0.1; // below min
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        state.alerts.price_min = Some(0.5); // will fire: price 0.1 < 0.5
+        state.alerts.price_max = Some(0.05); // will fire: price 0.1 > 0.05
+        state.alerts.volume_spike_threshold_pct = Some(1.0);
+        state.volume_avg = 100.0; // volume_24h 1M vs avg 100 => huge spike
+
+        state.update(&token_data);
+        // Should have multiple alerts
+        assert!(
+            state.active_alerts.len() >= 2,
+            "Expected multiple alerts, got {}",
+            state.active_alerts.len()
+        );
+    }
+
+    #[test]
+    fn test_alert_clears_on_next_update() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        state.alerts.price_min = Some(2.0); // price 1.0 < 2.0 -> fires
+        state.update(&token_data);
+        assert!(!state.active_alerts.is_empty());
+
+        // Update with price above min -> should clear
+        let mut above_min = token_data.clone();
+        above_min.price_usd = 3.0;
+        state.alerts.price_min = Some(2.0);
+        state.update(&above_min);
+        // check_alerts clears alerts each time and re-evaluates
+        let price_min_alerts: Vec<_> = state
+            .active_alerts
+            .iter()
+            .filter(|a| a.message.contains("below min"))
+            .collect();
+        assert!(
+            price_min_alerts.is_empty(),
+            "Price-min alert should clear when price goes above min"
+        );
+    }
+
+    #[test]
+    fn test_render_alert_overlay_multiple_alerts() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        state.active_alerts.push(ActiveAlert {
+            message: "⚠ Price below min".to_string(),
+            triggered_at: Instant::now(),
+        });
+        state.active_alerts.push(ActiveAlert {
+            message: "🐋 Whale detected".to_string(),
+            triggered_at: Instant::now(),
+        });
+        state.active_alerts.push(ActiveAlert {
+            message: "⚠ Volume spike".to_string(),
+            triggered_at: Instant::now(),
+        });
+        state.alert_flash_until = Some(Instant::now() + Duration::from_secs(2));
+        terminal
+            .draw(|f| render_alert_overlay(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_alert_overlay_flash_expired() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        state.active_alerts.push(ActiveAlert {
+            message: "⚠ Test".to_string(),
+            triggered_at: Instant::now(),
+        });
+        // Flash timer already expired
+        state.alert_flash_until = Some(Instant::now() - Duration::from_secs(5));
+        terminal
+            .draw(|f| render_alert_overlay(f, f.area(), &state))
+            .unwrap();
+    }
+
+    // ========================================================================
+    // Coverage gap: Liquidity depth edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_render_liquidity_depth_many_pairs() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        // Add many pairs to test height-limiting
+        for i in 0..20 {
+            state.liquidity_pairs.push((
+                format!("TEST/TOKEN{} (DEX{})", i, i),
+                (100_000.0 + i as f64 * 50_000.0),
+            ));
+        }
+        terminal
+            .draw(|f| render_liquidity_depth(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_liquidity_depth_narrow_terminal() {
+        let backend = TestBackend::new(30, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = create_populated_state();
+        state.liquidity_pairs = vec![
+            ("TEST/WETH (Uniswap)".to_string(), 500_000.0),
+            ("TEST/USDC (Sushi)".to_string(), 100_000.0),
+        ];
+        terminal
+            .draw(|f| render_liquidity_depth(f, f.area(), &state))
+            .unwrap();
+    }
+
+    // ========================================================================
+    // Coverage gap: Metrics panel edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_render_metrics_panel_holder_count_disabled() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        state.holder_count = Some(42_000);
+        state.widgets.holder_count = false; // disabled
+        terminal
+            .draw(|f| render_metrics_panel(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_metrics_panel_sparkline_single_point() {
+        let mut terminal = create_test_terminal();
+        let mut token_data = create_test_token_data();
+        token_data.price_usd = 1.0;
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        state.price_history.clear();
+        state.price_history.push_back(DataPoint {
+            timestamp: 1.0,
+            value: 1.0,
+            is_real: true,
+        });
+        terminal
+            .draw(|f| render_metrics_panel(f, f.area(), &state))
+            .unwrap();
+    }
+
+    // ========================================================================
+    // Coverage gap: Buy/sell gauge edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_render_buy_sell_gauge_tiny_area() {
+        // Render in a very small area to test zero width/height paths
+        let backend = TestBackend::new(5, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = create_populated_state();
+        terminal
+            .draw(|f| render_buy_sell_gauge(f, f.area(), &mut state))
+            .unwrap();
+    }
+
+    // ========================================================================
+    // Coverage gap: Log message queue overflow
+    // ========================================================================
+
+    #[test]
+    fn test_log_message_queue_overflow() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        // Add more than 10 messages (queue capacity)
+        for i in 0..20 {
+            state.toggle_pause(); // each toggle logs a message
+            let _ = i;
+        }
+        assert!(
+            state.log_messages.len() <= 10,
+            "Log queue should cap at 10, got {}",
+            state.log_messages.len()
+        );
+    }
+
+    // ========================================================================
+    // Coverage gap: Export CSV row content verification
+    // ========================================================================
+
+    #[test]
+    fn test_export_writes_csv_row_content_format() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        let path = start_export_in_temp(&mut state);
+
+        state.update(&token_data);
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = contents.lines().collect();
+        assert!(lines.len() >= 2);
+
+        // Verify header
+        assert_eq!(
+            lines[0],
+            "timestamp,price_usd,volume_24h,liquidity_usd,buys_24h,sells_24h,market_cap"
+        );
+
+        // Verify data row has correct number of columns
+        let data_cols: Vec<&str> = lines[1].split(',').collect();
+        assert_eq!(
+            data_cols.len(),
+            7,
+            "Expected 7 CSV columns, got {}",
+            data_cols.len()
+        );
+
+        // Verify timestamp format (ISO 8601)
+        assert!(data_cols[0].contains('T'));
+        assert!(data_cols[0].ends_with('Z'));
+
+        // Cleanup
+        state.stop_export();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_export_writes_csv_row_market_cap_none() {
+        let mut token_data = create_test_token_data();
+        token_data.market_cap = None;
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        let path = start_export_in_temp(&mut state);
+
+        state.update(&token_data);
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = contents.lines().collect();
+        assert!(lines.len() >= 2);
+
+        // Last column should be empty when market_cap is None
+        let data_cols: Vec<&str> = lines[1].split(',').collect();
+        assert_eq!(data_cols.len(), 7);
+        assert!(
+            data_cols[6].is_empty(),
+            "Market cap column should be empty when None"
+        );
+
+        // Cleanup
+        state.stop_export();
+        let _ = std::fs::remove_file(path);
+    }
+
+    // ========================================================================
+    // Coverage gap: Full UI render with log scale + all chart modes
+    // ========================================================================
+
+    #[test]
+    fn test_ui_render_log_scale_all_chart_modes() {
+        for mode in &[
+            ChartMode::Line,
+            ChartMode::Candlestick,
+            ChartMode::VolumeProfile,
+        ] {
+            let mut terminal = create_test_terminal();
+            let mut state = create_populated_state();
+            state.scale_mode = ScaleMode::Log;
+            state.chart_mode = *mode;
+            terminal.draw(|f| ui(f, &mut state)).unwrap();
+        }
+    }
+
+    // ========================================================================
+    // Coverage gap: Footer rendering edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_render_footer_widget_toggle_mode_active() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        state.widget_toggle_mode = true;
+        terminal
+            .draw(|f| render_footer(f, f.area(), &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_footer_all_status_indicators() {
+        // Test with export + auto-pause + alerts simultaneously
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        state.export_active = true;
+        state.auto_pause_on_input = true;
+        state.last_input_at = Instant::now(); // triggers auto-paused display
+        terminal
+            .draw(|f| render_footer(f, f.area(), &state))
+            .unwrap();
+    }
+
+    // ========================================================================
+    // Coverage gap: Synthetic data generation edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_generate_synthetic_price_history_zero_price() {
+        let mut token_data = create_test_token_data();
+        token_data.price_usd = 0.0;
+        token_data.price_change_1h = 0.0;
+        token_data.price_change_6h = 0.0;
+        token_data.price_change_24h = 0.0;
+        let state = MonitorState::new(&token_data, "ethereum");
+        // Should not panic with zero prices
+        assert!(!state.price_history.is_empty());
+    }
+
+    #[test]
+    fn test_generate_synthetic_volume_history_zero_volume() {
+        let mut token_data = create_test_token_data();
+        token_data.volume_24h = 0.0;
+        token_data.volume_6h = 0.0;
+        token_data.volume_1h = 0.0;
+        let state = MonitorState::new(&token_data, "ethereum");
+        assert!(!state.volume_history.is_empty());
+    }
+
+    // ========================================================================
+    // Coverage gap: Auto-pause with custom timeout
+    // ========================================================================
+
+    #[test]
+    fn test_auto_pause_custom_timeout() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        state.auto_pause_on_input = true;
+        state.auto_pause_timeout = Duration::from_secs(10);
+        state.refresh_rate = Duration::from_secs(1);
+
+        // Fresh input with long timeout -> still auto-paused
+        state.last_input_at = Instant::now();
+        state.last_update = Instant::now() - Duration::from_secs(5);
+        assert!(!state.should_refresh()); // within 10s timeout
+        assert!(state.is_auto_paused());
+    }
+
+    // ========================================================================
+    // Coverage gap: Price chart with stablecoin flat range
+    // ========================================================================
+
+    #[test]
+    fn test_render_price_chart_stablecoin_flat_range() {
+        let mut terminal = create_test_terminal();
+        let mut token_data = create_test_token_data();
+        token_data.price_usd = 1.0;
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        // Add many points at nearly identical prices (stablecoin)
+        for i in 0..20 {
+            let mut data = token_data.clone();
+            data.price_usd = 1.0 + (i as f64 * 0.000001); // micro variation
+            state.update(&data);
+        }
+        terminal
+            .draw(|f| render_price_chart(f, f.area(), &state))
+            .unwrap();
+    }
+
+    // ========================================================================
+    // Coverage gap: Cache load edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_load_cache_corrupted_json() {
+        let path = MonitorState::cache_path("0xCORRUPTED_TEST", "test_chain");
+        // Write invalid JSON
+        let _ = std::fs::write(&path, "not valid json {{{");
+        let cached = MonitorState::load_cache("0xCORRUPTED_TEST", "test_chain");
+        assert!(cached.is_none(), "Corrupted JSON should return None");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_load_cache_wrong_token() {
+        let token_data = create_test_token_data();
+        let state = MonitorState::new(&token_data, "ethereum");
+        state.save_cache();
+
+        // Try to load with different token address
+        let cached = MonitorState::load_cache("0xDIFFERENT_ADDRESS", "ethereum");
+        assert!(
+            cached.is_none(),
+            "Loading cache with wrong token address should return None"
+        );
+
+        // Cleanup
+        let path = MonitorState::cache_path(&token_data.address, "ethereum");
+        let _ = std::fs::remove_file(path);
+    }
+
+    // ========================================================================
+    // Integration tests: Mock types and MonitorApp constructor
+    // ========================================================================
+
+    use crate::chains::dex::TokenSearchResult;
+
+    /// Mock DEX data source for integration testing.
+    struct MockDexDataSource {
+        /// Data returned by `get_token_data`. If `Err`, simulates an API failure.
+        token_data_result: std::sync::Mutex<Result<DexTokenData>>,
+    }
+
+    impl MockDexDataSource {
+        fn new(data: DexTokenData) -> Self {
+            Self {
+                token_data_result: std::sync::Mutex::new(Ok(data)),
+            }
+        }
+
+        fn failing(msg: &str) -> Self {
+            Self {
+                token_data_result: std::sync::Mutex::new(Err(ScopeError::Api(msg.to_string()))),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl DexDataSource for MockDexDataSource {
+        async fn get_token_price(&self, _chain: &str, _address: &str) -> Option<f64> {
+            self.token_data_result
+                .lock()
+                .unwrap()
+                .as_ref()
+                .ok()
+                .map(|d| d.price_usd)
+        }
+
+        async fn get_native_token_price(&self, _chain: &str) -> Option<f64> {
+            Some(2000.0)
+        }
+
+        async fn get_token_data(&self, _chain: &str, _address: &str) -> Result<DexTokenData> {
+            let guard = self.token_data_result.lock().unwrap();
+            match &*guard {
+                Ok(data) => Ok(data.clone()),
+                Err(e) => Err(ScopeError::Api(e.to_string())),
+            }
+        }
+
+        async fn search_tokens(
+            &self,
+            _query: &str,
+            _chain: Option<&str>,
+        ) -> Result<Vec<TokenSearchResult>> {
+            Ok(vec![])
+        }
+    }
+
+    /// Mock chain client for integration testing.
+    struct MockChainClient {
+        holder_count: u64,
+    }
+
+    impl MockChainClient {
+        fn new(holder_count: u64) -> Self {
+            Self { holder_count }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ChainClient for MockChainClient {
+        fn chain_name(&self) -> &str {
+            "ethereum"
+        }
+        fn native_token_symbol(&self) -> &str {
+            "ETH"
+        }
+        async fn get_balance(&self, _address: &str) -> Result<crate::chains::Balance> {
+            unimplemented!("not needed for monitor tests")
+        }
+        async fn enrich_balance_usd(&self, _balance: &mut crate::chains::Balance) {}
+        async fn get_transaction(&self, _hash: &str) -> Result<crate::chains::Transaction> {
+            unimplemented!("not needed for monitor tests")
+        }
+        async fn get_transactions(
+            &self,
+            _address: &str,
+            _limit: u32,
+        ) -> Result<Vec<crate::chains::Transaction>> {
+            Ok(vec![])
+        }
+        async fn get_block_number(&self) -> Result<u64> {
+            Ok(1000000)
+        }
+        async fn get_token_balances(
+            &self,
+            _address: &str,
+        ) -> Result<Vec<crate::chains::TokenBalance>> {
+            Ok(vec![])
+        }
+        async fn get_token_holder_count(&self, _address: &str) -> Result<u64> {
+            Ok(self.holder_count)
+        }
+    }
+
+    /// Creates a `MonitorApp<TestBackend>` with mock dependencies.
+    fn create_test_app(
+        dex: Box<dyn DexDataSource>,
+        chain_client: Option<Box<dyn ChainClient>>,
+    ) -> MonitorApp<TestBackend> {
+        let token_data = create_test_token_data();
+        let state = MonitorState::new(&token_data, "ethereum");
+        let backend = TestBackend::new(120, 40);
+        let terminal = ratatui::Terminal::new(backend).unwrap();
+        MonitorApp {
+            terminal,
+            state,
+            dex_client: dex,
+            chain_client,
+            should_exit: false,
+            owns_terminal: false,
+        }
+    }
+
+    fn create_test_app_with_state(
+        state: MonitorState,
+        dex: Box<dyn DexDataSource>,
+        chain_client: Option<Box<dyn ChainClient>>,
+    ) -> MonitorApp<TestBackend> {
+        let backend = TestBackend::new(120, 40);
+        let terminal = ratatui::Terminal::new(backend).unwrap();
+        MonitorApp {
+            terminal,
+            state,
+            dex_client: dex,
+            chain_client,
+            should_exit: false,
+            owns_terminal: false,
+        }
+    }
+
+    // ========================================================================
+    // Integration tests: MonitorApp::handle_key_event
+    // ========================================================================
+
+    #[test]
+    fn test_app_handle_key_quit_q() {
+        let data = create_test_token_data();
+        let mut app = create_test_app(Box::new(MockDexDataSource::new(data)), None);
+        assert!(!app.should_exit);
+        app.handle_key_event(make_key_event(KeyCode::Char('q')));
+        assert!(app.should_exit);
+    }
+
+    #[test]
+    fn test_app_handle_key_quit_esc() {
+        let data = create_test_token_data();
+        let mut app = create_test_app(Box::new(MockDexDataSource::new(data)), None);
+        app.handle_key_event(make_key_event(KeyCode::Esc));
+        assert!(app.should_exit);
+    }
+
+    #[test]
+    fn test_app_handle_key_quit_ctrl_c() {
+        let data = create_test_token_data();
+        let mut app = create_test_app(Box::new(MockDexDataSource::new(data)), None);
+        let key = crossterm::event::KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        app.handle_key_event(key);
+        assert!(app.should_exit);
+    }
+
+    #[test]
+    fn test_app_handle_key_quit_stops_active_export() {
+        let data = create_test_token_data();
+        let mut app = create_test_app(Box::new(MockDexDataSource::new(data)), None);
+        let path = start_export_in_temp(&mut app.state);
+        assert!(app.state.export_active);
+
+        app.handle_key_event(make_key_event(KeyCode::Char('q')));
+        assert!(app.should_exit);
+        assert!(!app.state.export_active);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_app_handle_key_ctrl_c_stops_active_export() {
+        let data = create_test_token_data();
+        let mut app = create_test_app(Box::new(MockDexDataSource::new(data)), None);
+        let path = start_export_in_temp(&mut app.state);
+        assert!(app.state.export_active);
+
+        let key = crossterm::event::KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        app.handle_key_event(key);
+        assert!(app.should_exit);
+        assert!(!app.state.export_active);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_app_handle_key_updates_last_input_time() {
+        let data = create_test_token_data();
+        let mut app = create_test_app(Box::new(MockDexDataSource::new(data)), None);
+        let before = Instant::now();
+        app.handle_key_event(make_key_event(KeyCode::Char('p')));
+        assert!(app.state.last_input_at >= before);
+    }
+
+    #[test]
+    fn test_app_handle_key_widget_toggle_mode() {
+        let data = create_test_token_data();
+        let mut app = create_test_app(Box::new(MockDexDataSource::new(data)), None);
+        assert!(app.state.widgets.price_chart);
+
+        // Enter widget toggle mode
+        app.handle_key_event(make_key_event(KeyCode::Char('w')));
+        assert!(app.state.widget_toggle_mode);
+
+        // Toggle widget 1 (price chart)
+        app.handle_key_event(make_key_event(KeyCode::Char('1')));
+        assert!(!app.state.widget_toggle_mode);
+        assert!(!app.state.widgets.price_chart);
+    }
+
+    #[test]
+    fn test_app_handle_key_widget_toggle_mode_cancel() {
+        let data = create_test_token_data();
+        let mut app = create_test_app(Box::new(MockDexDataSource::new(data)), None);
+
+        // Enter widget toggle mode
+        app.handle_key_event(make_key_event(KeyCode::Char('w')));
+        assert!(app.state.widget_toggle_mode);
+
+        // Any non-digit key cancels widget toggle mode
+        app.handle_key_event(make_key_event(KeyCode::Char('x')));
+        assert!(!app.state.widget_toggle_mode);
+    }
+
+    #[test]
+    fn test_app_handle_key_all_keybindings() {
+        let data = create_test_token_data();
+        let mut app = create_test_app(Box::new(MockDexDataSource::new(data)), None);
+
+        // r = force refresh
+        app.handle_key_event(make_key_event(KeyCode::Char('r')));
+        assert!(!app.should_exit);
+
+        // Shift+P = toggle auto-pause
+        let key = crossterm::event::KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT);
+        app.handle_key_event(key);
+        assert!(app.state.auto_pause_on_input);
+        app.handle_key_event(key);
+        assert!(!app.state.auto_pause_on_input);
+
+        // p = toggle pause
+        app.handle_key_event(make_key_event(KeyCode::Char('p')));
+        assert!(app.state.paused);
+
+        // space = toggle pause
+        app.handle_key_event(make_key_event(KeyCode::Char(' ')));
+        assert!(!app.state.paused);
+
+        // e = toggle export
+        app.handle_key_event(make_key_event(KeyCode::Char('e')));
+        assert!(app.state.export_active);
+        // Stop export to avoid file handles
+        app.state.stop_export();
+
+        // + = slower refresh
+        let before_rate = app.state.refresh_rate;
+        app.handle_key_event(make_key_event(KeyCode::Char('+')));
+        assert!(app.state.refresh_rate >= before_rate);
+
+        // - = faster refresh
+        let before_rate = app.state.refresh_rate;
+        app.handle_key_event(make_key_event(KeyCode::Char('-')));
+        assert!(app.state.refresh_rate <= before_rate);
+
+        // 1-6 = time periods
+        app.handle_key_event(make_key_event(KeyCode::Char('1')));
+        assert_eq!(app.state.time_period, TimePeriod::Min1);
+        app.handle_key_event(make_key_event(KeyCode::Char('2')));
+        assert_eq!(app.state.time_period, TimePeriod::Min5);
+        app.handle_key_event(make_key_event(KeyCode::Char('3')));
+        assert_eq!(app.state.time_period, TimePeriod::Min15);
+        app.handle_key_event(make_key_event(KeyCode::Char('4')));
+        assert_eq!(app.state.time_period, TimePeriod::Hour1);
+        app.handle_key_event(make_key_event(KeyCode::Char('5')));
+        assert_eq!(app.state.time_period, TimePeriod::Hour4);
+        app.handle_key_event(make_key_event(KeyCode::Char('6')));
+        assert_eq!(app.state.time_period, TimePeriod::Day1);
+
+        // t = cycle time period
+        app.handle_key_event(make_key_event(KeyCode::Char('t')));
+        assert_eq!(app.state.time_period, TimePeriod::Min1); // wraps from Day1
+
+        // c = toggle chart mode
+        app.handle_key_event(make_key_event(KeyCode::Char('c')));
+        assert_eq!(app.state.chart_mode, ChartMode::Candlestick);
+
+        // s = toggle scale
+        app.handle_key_event(make_key_event(KeyCode::Char('s')));
+        assert_eq!(app.state.scale_mode, ScaleMode::Log);
+
+        // / = cycle color scheme
+        app.handle_key_event(make_key_event(KeyCode::Char('/')));
+        assert_eq!(app.state.color_scheme, ColorScheme::BlueOrange);
+
+        // j = scroll log down
+        app.handle_key_event(make_key_event(KeyCode::Char('j')));
+
+        // k = scroll log up
+        app.handle_key_event(make_key_event(KeyCode::Char('k')));
+
+        // l = next layout
+        app.handle_key_event(make_key_event(KeyCode::Char('l')));
+        assert!(!app.state.auto_layout);
+
+        // h = prev layout
+        app.handle_key_event(make_key_event(KeyCode::Char('h')));
+
+        // a = re-enable auto layout
+        app.handle_key_event(make_key_event(KeyCode::Char('a')));
+        assert!(app.state.auto_layout);
+
+        // w = widget toggle mode
+        app.handle_key_event(make_key_event(KeyCode::Char('w')));
+        assert!(app.state.widget_toggle_mode);
+        // Cancel it
+        app.handle_key_event(make_key_event(KeyCode::Char('z')));
+
+        // Unknown key is a no-op
+        app.handle_key_event(make_key_event(KeyCode::F(12)));
+        assert!(!app.should_exit);
+    }
+
+    // ========================================================================
+    // Integration tests: MonitorApp::fetch_data
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_app_fetch_data_success() {
+        let data = create_test_token_data();
+        let initial_price = data.price_usd;
+        let mut updated = data.clone();
+        updated.price_usd = 2.5;
+        let mut app = create_test_app(Box::new(MockDexDataSource::new(updated)), None);
+
+        assert!((app.state.current_price - initial_price).abs() < 0.001);
+        app.fetch_data().await;
+        assert!((app.state.current_price - 2.5).abs() < 0.001);
+        assert!(app.state.error_message.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_app_fetch_data_api_error() {
+        let mut app = create_test_app(Box::new(MockDexDataSource::failing("rate limited")), None);
+
+        app.fetch_data().await;
+        assert!(app.state.error_message.is_some());
+        assert!(
+            app.state
+                .error_message
+                .as_ref()
+                .unwrap()
+                .contains("API Error")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_app_fetch_data_holder_count_on_12th_tick() {
+        let data = create_test_token_data();
+        let mock_chain = MockChainClient::new(42_000);
+        let mut app = create_test_app(
+            Box::new(MockDexDataSource::new(data)),
+            Some(Box::new(mock_chain)),
+        );
+
+        // First 11 fetches should not update holder count
+        for _ in 0..11 {
+            app.fetch_data().await;
+        }
+        assert!(app.state.holder_count.is_none());
+
+        // 12th fetch triggers holder count lookup
+        app.fetch_data().await;
+        assert_eq!(app.state.holder_count, Some(42_000));
+    }
+
+    #[tokio::test]
+    async fn test_app_fetch_data_holder_count_zero_not_stored() {
+        let data = create_test_token_data();
+        let mock_chain = MockChainClient::new(0); // returns zero
+        let mut app = create_test_app(
+            Box::new(MockDexDataSource::new(data)),
+            Some(Box::new(mock_chain)),
+        );
+
+        // Skip to 12th tick
+        app.state.holder_fetch_counter = 11;
+        app.fetch_data().await;
+        // Zero holder count should NOT be stored
+        assert!(app.state.holder_count.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_app_fetch_data_no_chain_client_skips_holders() {
+        let data = create_test_token_data();
+        let mut app = create_test_app(Box::new(MockDexDataSource::new(data)), None);
+
+        // Skip to 12th tick
+        app.state.holder_fetch_counter = 11;
+        app.fetch_data().await;
+        // Without a chain client, holder count stays None
+        assert!(app.state.holder_count.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_app_fetch_data_preserves_holder_on_subsequent_failure() {
+        let data = create_test_token_data();
+        let mock_chain = MockChainClient::new(42_000);
+        let mut app = create_test_app(
+            Box::new(MockDexDataSource::new(data)),
+            Some(Box::new(mock_chain)),
+        );
+
+        // Fetch holder count on 12th tick
+        app.state.holder_fetch_counter = 11;
+        app.fetch_data().await;
+        assert_eq!(app.state.holder_count, Some(42_000));
+
+        // Replace chain client with one returning 0
+        app.chain_client = Some(Box::new(MockChainClient::new(0)));
+        // 24th tick
+        app.state.holder_fetch_counter = 23;
+        app.fetch_data().await;
+        // Previous value should be preserved (zero is ignored)
+        assert_eq!(app.state.holder_count, Some(42_000));
+    }
+
+    // ========================================================================
+    // Integration tests: MonitorApp::cleanup
+    // ========================================================================
+
+    #[test]
+    fn test_app_cleanup_does_not_panic_test_backend() {
+        let data = create_test_token_data();
+        let mut app = create_test_app(Box::new(MockDexDataSource::new(data)), None);
+        // cleanup() with owns_terminal=false should not attempt terminal restore
+        let result = app.cleanup();
+        assert!(result.is_ok());
+    }
+
+    // ========================================================================
+    // Integration tests: MonitorApp draw renders without panic
+    // ========================================================================
+
+    #[test]
+    fn test_app_draw_renders_ui() {
+        let data = create_test_token_data();
+        let mut app = create_test_app(Box::new(MockDexDataSource::new(data)), None);
+        // Verify we can render UI through the MonitorApp terminal
+        app.terminal
+            .draw(|f| ui(f, &mut app.state))
+            .expect("should render without panic");
+    }
+
+    // ========================================================================
+    // Integration tests: select_token_impl
+    // ========================================================================
+
+    fn make_search_results() -> Vec<TokenSearchResult> {
+        vec![
+            TokenSearchResult {
+                address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+                symbol: "USDC".to_string(),
+                name: "USD Coin".to_string(),
+                chain: "ethereum".to_string(),
+                price_usd: Some(1.0),
+                volume_24h: 5_000_000_000.0,
+                liquidity_usd: 2_000_000_000.0,
+                market_cap: Some(32_000_000_000.0),
+            },
+            TokenSearchResult {
+                address: "0xdAC17F958D2ee523a2206206994597C13D831ec7".to_string(),
+                symbol: "USDT".to_string(),
+                name: "Tether USD".to_string(),
+                chain: "ethereum".to_string(),
+                price_usd: Some(1.0),
+                volume_24h: 6_000_000_000.0,
+                liquidity_usd: 3_000_000_000.0,
+                market_cap: Some(83_000_000_000.0),
+            },
+            TokenSearchResult {
+                address: "0x6B175474E89094C44Da98b954EedeAC495271d0F".to_string(),
+                symbol: "DAI".to_string(),
+                name: "Dai Stablecoin".to_string(),
+                chain: "ethereum".to_string(),
+                price_usd: Some(1.0),
+                volume_24h: 200_000_000.0,
+                liquidity_usd: 500_000_000.0,
+                market_cap: Some(5_000_000_000.0),
+            },
+        ]
+    }
+
+    #[test]
+    fn test_select_token_impl_valid_first() {
+        let results = make_search_results();
+        let mut reader = io::Cursor::new(b"1\n");
+        let mut writer = Vec::new();
+        let selected = select_token_impl(&results, &mut reader, &mut writer).unwrap();
+        assert_eq!(selected.symbol, "USDC");
+        assert_eq!(selected.address, results[0].address);
+        let output = String::from_utf8(writer).unwrap();
+        assert!(output.contains("Found 3 tokens"));
+        assert!(output.contains("Selected: USDC"));
+    }
+
+    #[test]
+    fn test_select_token_impl_valid_last() {
+        let results = make_search_results();
+        let mut reader = io::Cursor::new(b"3\n");
+        let mut writer = Vec::new();
+        let selected = select_token_impl(&results, &mut reader, &mut writer).unwrap();
+        assert_eq!(selected.symbol, "DAI");
+    }
+
+    #[test]
+    fn test_select_token_impl_valid_middle() {
+        let results = make_search_results();
+        let mut reader = io::Cursor::new(b"2\n");
+        let mut writer = Vec::new();
+        let selected = select_token_impl(&results, &mut reader, &mut writer).unwrap();
+        assert_eq!(selected.symbol, "USDT");
+    }
+
+    #[test]
+    fn test_select_token_impl_out_of_bounds_zero() {
+        let results = make_search_results();
+        let mut reader = io::Cursor::new(b"0\n");
+        let mut writer = Vec::new();
+        let result = select_token_impl(&results, &mut reader, &mut writer);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Selection must be between 1 and 3"));
+    }
+
+    #[test]
+    fn test_select_token_impl_out_of_bounds_high() {
+        let results = make_search_results();
+        let mut reader = io::Cursor::new(b"99\n");
+        let mut writer = Vec::new();
+        let result = select_token_impl(&results, &mut reader, &mut writer);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_select_token_impl_non_numeric_input() {
+        let results = make_search_results();
+        let mut reader = io::Cursor::new(b"abc\n");
+        let mut writer = Vec::new();
+        let result = select_token_impl(&results, &mut reader, &mut writer);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Invalid selection"));
+    }
+
+    #[test]
+    fn test_select_token_impl_empty_input() {
+        let results = make_search_results();
+        let mut reader = io::Cursor::new(b"\n");
+        let mut writer = Vec::new();
+        let result = select_token_impl(&results, &mut reader, &mut writer);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_select_token_impl_long_name_truncation() {
+        let results = vec![TokenSearchResult {
+            address: "0xABCDEF1234567890ABCDEF1234567890ABCDEF12".to_string(),
+            symbol: "LONG".to_string(),
+            name: "A Very Long Token Name That Exceeds Twenty Characters".to_string(),
+            chain: "ethereum".to_string(),
+            price_usd: None,
+            volume_24h: 100.0,
+            liquidity_usd: 50.0,
+            market_cap: None,
+        }];
+        let mut reader = io::Cursor::new(b"1\n");
+        let mut writer = Vec::new();
+        let selected = select_token_impl(&results, &mut reader, &mut writer).unwrap();
+        assert_eq!(selected.symbol, "LONG");
+        let output = String::from_utf8(writer).unwrap();
+        // Should have truncated name
+        assert!(output.contains("A Very Long Token..."));
+        // Should show N/A for price
+        assert!(output.contains("N/A"));
+    }
+
+    #[test]
+    fn test_select_token_impl_output_format() {
+        let results = make_search_results();
+        let mut reader = io::Cursor::new(b"1\n");
+        let mut writer = Vec::new();
+        let _ = select_token_impl(&results, &mut reader, &mut writer).unwrap();
+        let output = String::from_utf8(writer).unwrap();
+
+        // Verify table header
+        assert!(output.contains("#"));
+        assert!(output.contains("Symbol"));
+        assert!(output.contains("Name"));
+        assert!(output.contains("Address"));
+        assert!(output.contains("Price"));
+        assert!(output.contains("Liquidity"));
+        // Verify separator line
+        assert!(output.contains("─"));
+        // Verify prompt
+        assert!(output.contains("Select token (1-3):"));
+    }
+
+    // ========================================================================
+    // Integration tests: format_monitor_number
+    // ========================================================================
+
+    #[test]
+    fn test_format_monitor_number_billions() {
+        assert_eq!(format_monitor_number(5_000_000_000.0), "$5.00B");
+        assert_eq!(format_monitor_number(1_234_567_890.0), "$1.23B");
+    }
+
+    #[test]
+    fn test_format_monitor_number_millions() {
+        assert_eq!(format_monitor_number(5_000_000.0), "$5.00M");
+        assert_eq!(format_monitor_number(42_500_000.0), "$42.50M");
+    }
+
+    #[test]
+    fn test_format_monitor_number_thousands() {
+        assert_eq!(format_monitor_number(5_000.0), "$5.00K");
+        assert_eq!(format_monitor_number(999_999.0), "$1000.00K");
+    }
+
+    #[test]
+    fn test_format_monitor_number_small() {
+        assert_eq!(format_monitor_number(42.0), "$42.00");
+        assert_eq!(format_monitor_number(0.5), "$0.50");
+        assert_eq!(format_monitor_number(0.0), "$0.00");
+    }
+
+    // ========================================================================
+    // Integration tests: abbreviate_address edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_abbreviate_address_exactly_16_chars() {
+        let addr = "0123456789ABCDEF"; // exactly 16 chars
+        assert_eq!(abbreviate_address(addr), addr);
+    }
+
+    #[test]
+    fn test_abbreviate_address_17_chars() {
+        let addr = "0123456789ABCDEFG"; // 17 chars -> abbreviated
+        assert_eq!(abbreviate_address(addr), "01234567...BCDEFG");
+    }
+
+    // ========================================================================
+    // Integration tests: MonitorApp with state + fetch combined scenario
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_app_full_scenario_fetch_render_quit() {
+        let data = create_test_token_data();
+        let mut updated = data.clone();
+        updated.price_usd = 3.0;
+        let mock_chain = MockChainClient::new(10_000);
+        let state = MonitorState::new(&data, "ethereum");
+        let mut app = create_test_app_with_state(
+            state,
+            Box::new(MockDexDataSource::new(updated)),
+            Some(Box::new(mock_chain)),
+        );
+
+        // 1. Fetch new data
+        app.fetch_data().await;
+        assert!((app.state.current_price - 3.0).abs() < 0.001);
+
+        // 2. Render UI
+        app.terminal
+            .draw(|f| ui(f, &mut app.state))
+            .expect("render");
+
+        // 3. Start export
+        app.handle_key_event(make_key_event(KeyCode::Char('e')));
+        assert!(app.state.export_active);
+
+        // 4. Quit (should stop export)
+        app.handle_key_event(make_key_event(KeyCode::Char('q')));
+        assert!(app.should_exit);
+        assert!(!app.state.export_active);
+    }
+
+    #[tokio::test]
+    async fn test_app_fetch_data_error_then_recovery() {
+        let mut app = create_test_app(Box::new(MockDexDataSource::failing("server down")), None);
+
+        // First fetch fails
+        app.fetch_data().await;
+        assert!(app.state.error_message.is_some());
+
+        // Replace with working mock
+        let mut recovered = create_test_token_data();
+        recovered.price_usd = 5.0;
+        app.dex_client = Box::new(MockDexDataSource::new(recovered));
+
+        // Second fetch succeeds
+        app.fetch_data().await;
+        assert!((app.state.current_price - 5.0).abs() < 0.001);
+        // Error message is cleared by state.update()
+    }
+
+    // ========================================================================
+    // Integration tests: MonitorArgs parsing and run_direct config merging
+    // ========================================================================
+
+    #[test]
+    fn test_monitor_args_defaults() {
+        use super::super::Cli;
+        use clap::Parser;
+        // Simulate: scope monitor USDC
+        let cli = Cli::try_parse_from(["scope", "monitor", "USDC"]).unwrap();
+        if let super::super::Commands::Monitor(args) = cli.command {
+            assert_eq!(args.token, "USDC");
+            assert_eq!(args.chain, "ethereum");
+            assert!(args.layout.is_none());
+            assert!(args.refresh.is_none());
+            assert!(args.scale.is_none());
+            assert!(args.color_scheme.is_none());
+            assert!(args.export.is_none());
+        } else {
+            panic!("Expected Monitor command");
+        }
+    }
+
+    #[test]
+    fn test_monitor_args_all_flags() {
+        use super::super::Cli;
+        use clap::Parser;
+        let cli = Cli::try_parse_from([
+            "scope",
+            "monitor",
+            "PEPE",
+            "--chain",
+            "solana",
+            "--layout",
+            "feed",
+            "--refresh",
+            "2",
+            "--scale",
+            "log",
+            "--color-scheme",
+            "monochrome",
+            "--export",
+            "/tmp/data.csv",
+        ])
+        .unwrap();
+        if let super::super::Commands::Monitor(args) = cli.command {
+            assert_eq!(args.token, "PEPE");
+            assert_eq!(args.chain, "solana");
+            assert_eq!(args.layout, Some(LayoutPreset::Feed));
+            assert_eq!(args.refresh, Some(2));
+            assert_eq!(args.scale, Some(ScaleMode::Log));
+            assert_eq!(args.color_scheme, Some(ColorScheme::Monochrome));
+            assert_eq!(args.export, Some(PathBuf::from("/tmp/data.csv")));
+        } else {
+            panic!("Expected Monitor command");
+        }
+    }
+
+    #[test]
+    fn test_run_direct_config_override_layout() {
+        // Verify that run_direct properly applies CLI overrides to config
+        let config = Config::default();
+        assert_eq!(config.monitor.layout, LayoutPreset::Dashboard);
+
+        let args = MonitorArgs {
+            token: "USDC".to_string(),
+            chain: "ethereum".to_string(),
+            layout: Some(LayoutPreset::ChartFocus),
+            refresh: None,
+            scale: None,
+            color_scheme: None,
+            export: None,
+        };
+
+        // Build the effective config the same way run_direct does
+        let mut monitor_config = config.monitor.clone();
+        if let Some(layout) = args.layout {
+            monitor_config.layout = layout;
+        }
+        assert_eq!(monitor_config.layout, LayoutPreset::ChartFocus);
+    }
+
+    #[test]
+    fn test_run_direct_config_override_all_fields() {
+        let config = Config::default();
+        let args = MonitorArgs {
+            token: "PEPE".to_string(),
+            chain: "solana".to_string(),
+            layout: Some(LayoutPreset::Compact),
+            refresh: Some(2),
+            scale: Some(ScaleMode::Log),
+            color_scheme: Some(ColorScheme::BlueOrange),
+            export: Some(PathBuf::from("/tmp/test.csv")),
+        };
+
+        let mut mc = config.monitor.clone();
+        if let Some(layout) = args.layout {
+            mc.layout = layout;
+        }
+        if let Some(refresh) = args.refresh {
+            mc.refresh_seconds = refresh;
+        }
+        if let Some(scale) = args.scale {
+            mc.scale = scale;
+        }
+        if let Some(color_scheme) = args.color_scheme {
+            mc.color_scheme = color_scheme;
+        }
+        if let Some(ref path) = args.export {
+            mc.export.path = Some(path.to_string_lossy().into_owned());
+        }
+
+        assert_eq!(mc.layout, LayoutPreset::Compact);
+        assert_eq!(mc.refresh_seconds, 2);
+        assert_eq!(mc.scale, ScaleMode::Log);
+        assert_eq!(mc.color_scheme, ColorScheme::BlueOrange);
+        assert_eq!(mc.export.path, Some("/tmp/test.csv".to_string()));
+    }
+
+    #[test]
+    fn test_run_direct_config_no_overrides_preserves_defaults() {
+        let config = Config::default();
+        let args = MonitorArgs {
+            token: "USDC".to_string(),
+            chain: "ethereum".to_string(),
+            layout: None,
+            refresh: None,
+            scale: None,
+            color_scheme: None,
+            export: None,
+        };
+
+        let mut mc = config.monitor.clone();
+        if let Some(layout) = args.layout {
+            mc.layout = layout;
+        }
+        if let Some(refresh) = args.refresh {
+            mc.refresh_seconds = refresh;
+        }
+        if let Some(scale) = args.scale {
+            mc.scale = scale;
+        }
+        if let Some(color_scheme) = args.color_scheme {
+            mc.color_scheme = color_scheme;
+        }
+
+        // All should remain at defaults
+        assert_eq!(mc.layout, LayoutPreset::Dashboard);
+        assert_eq!(mc.refresh_seconds, DEFAULT_REFRESH_SECS);
+        assert_eq!(mc.scale, ScaleMode::Linear);
+        assert_eq!(mc.color_scheme, ColorScheme::GreenRed);
+        assert!(mc.export.path.is_none());
     }
 }

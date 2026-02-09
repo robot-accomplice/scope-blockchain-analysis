@@ -65,6 +65,10 @@ scope compliance analyze 0xabc... --patterns structuring,layering
 # Token crawling with report generation
 scope crawl 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --chain ethereum
 
+# Live monitor -- launch directly from the command line
+scope monitor USDC                              # monitor by symbol (defaults to ethereum)
+scope mon PEPE --chain ethereum --layout chart-focus  # short alias with options
+
 # Export data
 scope export --address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --output data.json
 
@@ -211,7 +215,21 @@ Available interactive commands:
 
 ### Live Monitor
 
-The `monitor` command launches a real-time TUI dashboard. It supports four layout presets that can be switched at runtime or configured in `config.yaml`:
+The monitor launches a real-time TUI dashboard. You can start it two ways:
+
+```bash
+# Direct from the command line (no interactive mode needed)
+scope monitor USDC
+scope mon PEPE --chain ethereum --layout chart-focus --refresh 3
+
+# Or from interactive mode
+scope interactive
+scope> monitor USDC
+```
+
+**Direct-command flags:** `--chain` / `-c`, `--layout` / `-l`, `--refresh` / `-r`, `--scale` / `-s`, `--color-scheme`, `--export` / `-e`.
+
+The monitor supports four layout presets that can be switched at runtime or configured in `config.yaml`:
 
 | Preset | Description |
 |---|---|

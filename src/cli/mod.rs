@@ -12,9 +12,13 @@
 //! Commands:
 //!   address      Analyze a blockchain address
 //!   tx           Analyze a transaction
+//!   crawl        Crawl a token for analytics data
+//!   monitor      Live token monitor with real-time TUI dashboard
 //!   portfolio    Portfolio management commands
 //!   export       Export analysis data
 //!   interactive  Interactive mode with preserved context
+//!   setup        Configure settings and API keys
+//!   compliance   Compliance and risk analysis commands
 //!
 //! Options:
 //!   --config <PATH>   Path to configuration file
@@ -40,6 +44,7 @@ pub use address::AddressArgs;
 pub use crawl::CrawlArgs;
 pub use export::ExportArgs;
 pub use interactive::InteractiveArgs;
+pub use monitor::MonitorArgs;
 pub use portfolio::PortfolioArgs;
 pub use setup::SetupArgs;
 pub use tx::TxArgs;
@@ -127,6 +132,13 @@ pub enum Commands {
     /// between commands for faster workflow.
     #[command(visible_alias = "shell")]
     Interactive(InteractiveArgs),
+
+    /// Live token monitor with real-time TUI dashboard.
+    ///
+    /// Launches a terminal UI with price/volume charts, buy/sell gauges,
+    /// transaction feed, and more. Shortcut for `scope interactive` + `monitor <token>`.
+    #[command(visible_alias = "mon")]
+    Monitor(MonitorArgs),
 
     /// Configure Scope settings and API keys.
     ///
@@ -417,5 +429,158 @@ mod tests {
         let debug_str = format!("{:?}", cli);
         assert!(debug_str.contains("Cli"));
         assert!(debug_str.contains("Address"));
+    }
+
+    // ========================================================================
+    // Monitor command tests
+    // ========================================================================
+
+    #[test]
+    fn test_cli_parse_monitor_command() {
+        let cli = Cli::try_parse_from([
+            "scope",
+            "monitor",
+            "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+        ])
+        .unwrap();
+
+        assert!(matches!(cli.command, Commands::Monitor(_)));
+    }
+
+    #[test]
+    fn test_cli_parse_monitor_alias_mon() {
+        let cli = Cli::try_parse_from(["scope", "mon", "USDC"]).unwrap();
+
+        assert!(matches!(cli.command, Commands::Monitor(_)));
+        if let Commands::Monitor(args) = cli.command {
+            assert_eq!(args.token, "USDC");
+            assert_eq!(args.chain, "ethereum"); // default
+            assert!(args.layout.is_none());
+            assert!(args.refresh.is_none());
+            assert!(args.scale.is_none());
+            assert!(args.color_scheme.is_none());
+            assert!(args.export.is_none());
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_monitor_with_chain() {
+        let cli = Cli::try_parse_from(["scope", "monitor", "USDC", "--chain", "solana"]).unwrap();
+
+        if let Commands::Monitor(args) = cli.command {
+            assert_eq!(args.token, "USDC");
+            assert_eq!(args.chain, "solana");
+        } else {
+            panic!("Expected Monitor command");
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_monitor_chain_short_flag() {
+        let cli = Cli::try_parse_from(["scope", "monitor", "PEPE", "-c", "ethereum"]).unwrap();
+
+        if let Commands::Monitor(args) = cli.command {
+            assert_eq!(args.token, "PEPE");
+            assert_eq!(args.chain, "ethereum");
+        } else {
+            panic!("Expected Monitor command");
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_monitor_with_layout() {
+        let cli =
+            Cli::try_parse_from(["scope", "monitor", "USDC", "--layout", "chart-focus"]).unwrap();
+
+        if let Commands::Monitor(args) = cli.command {
+            assert_eq!(args.layout, Some(monitor::LayoutPreset::ChartFocus));
+        } else {
+            panic!("Expected Monitor command");
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_monitor_with_refresh() {
+        let cli = Cli::try_parse_from(["scope", "monitor", "USDC", "--refresh", "3"]).unwrap();
+
+        if let Commands::Monitor(args) = cli.command {
+            assert_eq!(args.refresh, Some(3));
+        } else {
+            panic!("Expected Monitor command");
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_monitor_with_scale() {
+        let cli = Cli::try_parse_from(["scope", "monitor", "USDC", "--scale", "log"]).unwrap();
+
+        if let Commands::Monitor(args) = cli.command {
+            assert_eq!(args.scale, Some(monitor::ScaleMode::Log));
+        } else {
+            panic!("Expected Monitor command");
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_monitor_with_color_scheme() {
+        let cli =
+            Cli::try_parse_from(["scope", "monitor", "USDC", "--color-scheme", "blue-orange"])
+                .unwrap();
+
+        if let Commands::Monitor(args) = cli.command {
+            assert_eq!(args.color_scheme, Some(monitor::ColorScheme::BlueOrange));
+        } else {
+            panic!("Expected Monitor command");
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_monitor_with_export() {
+        let cli =
+            Cli::try_parse_from(["scope", "monitor", "USDC", "--export", "/tmp/out.csv"]).unwrap();
+
+        if let Commands::Monitor(args) = cli.command {
+            assert_eq!(args.export, Some(std::path::PathBuf::from("/tmp/out.csv")));
+        } else {
+            panic!("Expected Monitor command");
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_monitor_short_flags() {
+        let cli = Cli::try_parse_from([
+            "scope", "mon", "USDC", "-c", "solana", "-l", "compact", "-r", "10", "-s", "log", "-e",
+            "data.csv",
+        ])
+        .unwrap();
+
+        if let Commands::Monitor(args) = cli.command {
+            assert_eq!(args.token, "USDC");
+            assert_eq!(args.chain, "solana");
+            assert_eq!(args.layout, Some(monitor::LayoutPreset::Compact));
+            assert_eq!(args.refresh, Some(10));
+            assert_eq!(args.scale, Some(monitor::ScaleMode::Log));
+            assert_eq!(args.export, Some(std::path::PathBuf::from("data.csv")));
+        } else {
+            panic!("Expected Monitor command");
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_monitor_missing_token_fails() {
+        let result = Cli::try_parse_from(["scope", "monitor"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cli_parse_monitor_invalid_layout_fails() {
+        let result = Cli::try_parse_from(["scope", "monitor", "USDC", "--layout", "invalid"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cli_parse_monitor_invalid_scale_fails() {
+        let result = Cli::try_parse_from(["scope", "monitor", "USDC", "--scale", "quadratic"]);
+        assert!(result.is_err());
     }
 }
