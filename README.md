@@ -13,7 +13,7 @@ A production-grade command-line tool for blockchain data analysis, portfolio tra
 - **Address Analysis**: Query balances (with USD valuation), transaction history, and token holdings for blockchain addresses
 - **Transaction Analysis**: Look up and decode blockchain transactions across all supported chains
 - **Token Crawling**: Crawl DEX data for any token -- price, volume, liquidity, holder analysis, and risk scoring with markdown report generation
-- **Live Monitoring**: Real-time TUI dashboard with four layout presets (Dashboard, Chart, Feed, Compact), responsive terminal sizing, config-driven widget visibility, and price/volume/candlestick charts
+- **Live Monitoring**: Real-time TUI dashboard with four layout presets (Dashboard, Chart, Feed, Compact), responsive terminal sizing, config-driven widget visibility, price/volume/candlestick charts, price alerts, whale detection, CSV export, and auto-pause on input
 - **Portfolio Management**: Track multiple addresses across chains with labels, tags, and aggregated balance views
 - **Compliance & Risk Assessment**: Risk scoring, transaction pattern detection, taint analysis, and compliance reporting
 - **Data Export**: Export address history and portfolio data to JSON or CSV with date range filtering
@@ -195,7 +195,7 @@ Available interactive commands:
 - `address` / `addr` -- Analyze a blockchain address
 - `tx` / `transaction` -- Analyze a transaction
 - `crawl` / `token` -- Crawl token analytics
-- `monitor` / `mon` -- Live TUI dashboard with four layout presets, widget toggles, and price/volume/candlestick charts
+- `monitor` / `mon` -- Live TUI dashboard with four layout presets, widget toggles, price/volume/candlestick charts, alerts, CSV export, and auto-pause
 - `portfolio` / `port` -- Portfolio management (add, remove, list, summary)
 - `tokens` / `aliases` -- Token alias management (add, remove, list, recent)
 - `setup` / `config` -- Configuration commands
@@ -215,12 +215,24 @@ The `monitor` command launches a real-time TUI dashboard. It supports four layou
 
 | Preset | Description |
 |---|---|
-| **Dashboard** | Balanced 2x2 grid with all widgets (default) |
-| **Chart** | Price chart takes ~80% of the screen |
-| **Feed** | Activity log prioritized; metrics on top |
-| **Compact** | Minimal single-column view for small terminals |
+| **Dashboard** | Charts top, gauges middle, transaction feed bottom (default) |
+| **Chart** | Full-width candles (~85%), minimal stats overlay |
+| **Feed** | Transaction log takes priority, small metrics + buy/sell on top |
+| **Compact** | Price sparkline and metrics only, for small terminals |
 
 The monitor automatically selects the best layout for your terminal size (responsive breakpoints). Manual layout switching disables auto-selection until you press `A`.
+
+**Monitor features:**
+
+- **Price/volume charts**: Line, Candlestick, and Volume Profile modes
+- **Six timeframes**: 1m, 5m, 15m, 1h, 4h, 1d
+- **Log/linear scale**: Toggle Y-axis scaling for wide price ranges
+- **Color schemes**: Green/Red (default), Blue/Orange, Monochrome
+- **Holder count**: On-chain holder count (when API key is configured)
+- **Liquidity depth**: Per-pair liquidity breakdown across DEXes
+- **Alerts**: Configurable price min/max, whale detection, and volume spike thresholds
+- **CSV export**: Record live data to `./scope-exports/` with a single keypress
+- **Auto-pause**: Optionally pause data fetching while interacting
 
 **Monitor keybindings:**
 
@@ -229,13 +241,17 @@ The monitor automatically selects the best layout for your terminal size (respon
 | `Q` / `Esc` | Quit monitor |
 | `R` | Force refresh |
 | `P` / `Space` | Pause/resume |
+| `Shift+P` | Toggle auto-pause on input |
+| `E` | Toggle CSV export (REC indicator when active) |
 | `L` | Cycle layout forward (Dashboard -> Chart -> Feed -> Compact) |
 | `H` | Cycle layout backward |
 | `W` + `1-5` | Toggle widget visibility (1=price chart, 2=volume, 3=buy/sell, 4=metrics, 5=activity) |
 | `A` | Re-enable auto layout |
-| `C` | Toggle chart mode (line/candlestick) |
+| `C` | Cycle chart mode (Line / Candlestick / Volume Profile) |
+| `S` | Toggle log/linear scale |
+| `/` | Cycle color scheme (Green/Red, Blue/Orange, Monochrome) |
 | `T` / `Tab` | Cycle time period |
-| `1-4` | Select time period (15m, 1h, 6h, 24h) |
+| `1-6` | Select time period (1m, 5m, 15m, 1h, 4h, 1d) |
 | `J` / `K` | Scroll activity log |
 | `+` / `-` | Adjust refresh speed |
 
@@ -290,12 +306,24 @@ portfolio:
 monitor:
   layout: dashboard          # dashboard | chart-focus | feed | compact
   refresh_seconds: 10
+  scale: linear              # linear | log
+  color_scheme: green-red    # green-red | blue-orange | monochrome
+  auto_pause_on_input: false # pause data fetching while interacting
   widgets:
     price_chart: true
     volume_chart: true
     buy_sell_pressure: true
     metrics_panel: true
     activity_log: true
+    holder_count: true
+    liquidity_depth: true
+  alerts:
+    price_min: null           # alert when price drops below (e.g., 0.50)
+    price_max: null           # alert when price exceeds (e.g., 2.00)
+    whale_min_usd: null       # whale detection threshold (e.g., 10000.0)
+    volume_spike_threshold_pct: null  # volume spike % (e.g., 100.0)
+  export:
+    path: null                # base directory (default: ./scope-exports/)
 ```
 
 ### Environment Variables
