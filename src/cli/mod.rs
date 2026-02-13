@@ -6,7 +6,7 @@
 //!
 //! ## UX Features
 //!
-//! - **Progress indicators** — Spinners and step counters via [`progress`] module
+//! - **Progress indicators** — Spinners and step counters via the `progress` module
 //! - **Help with examples** — `after_help` blocks with example invocations
 //! - **Command grouping** — Commands ordered by task (entity lookup, token
 //!   analysis, compliance, data/export, config)
