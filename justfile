@@ -185,6 +185,58 @@ ci-test:
 # Release
 # -----------------------------------------------------------------------------
 
+# Publish current version to crates.io (dry-run first, then publish)
+publish:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+    echo "═══════════════════════════════════════════════════════════════════"
+    echo "Publishing scope-bca v$VERSION to crates.io"
+    echo "═══════════════════════════════════════════════════════════════════"
+    echo ""
+
+    # Step 1: Verify clean working tree
+    echo "Step 1/4: Checking working tree..."
+    if [ -n "$(git status --porcelain)" ]; then
+        echo "❌ Working tree is dirty. Commit or stash changes first."
+        exit 1
+    fi
+    echo "✓ Working tree is clean"
+    echo ""
+
+    # Step 2: Run tests
+    echo "Step 2/4: Running tests..."
+    cargo test --quiet --all-features
+    echo "✓ All tests passed"
+    echo ""
+
+    # Step 3: Dry-run to verify packaging
+    echo "Step 3/4: Verifying package (dry-run)..."
+    cargo publish --dry-run
+    echo "✓ Package verified"
+    echo ""
+
+    # Step 4: Publish
+    echo "Step 4/4: Publishing..."
+    read -p "Publish scope-bca v$VERSION to crates.io? (y/N): " CONFIRM
+    if [ "$CONFIRM" = "y" ] || [ "$CONFIRM" = "Y" ]; then
+        cargo publish
+        echo ""
+        echo "═══════════════════════════════════════════════════════════════════"
+        echo "✓ scope-bca v$VERSION published to crates.io!"
+        echo "═══════════════════════════════════════════════════════════════════"
+        echo ""
+        echo "Install with: cargo install scope-bca"
+        echo "Crate page:   https://crates.io/crates/scope-bca"
+    else
+        echo "Aborted. To publish manually: cargo publish"
+    fi
+
+# Dry-run crates.io publish (verify packaging without uploading)
+publish-dry-run:
+    cargo publish --dry-run
+
 # Create a new release (interactive)
 release:
     #!/usr/bin/env bash
