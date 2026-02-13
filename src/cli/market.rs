@@ -624,4 +624,350 @@ mod tests {
         assert!(parse_duration("0").is_err());
         assert!(parse_duration("-5s").is_err());
     }
+
+    // ====================================================================
+    // base_symbol_from_pair tests
+    // ====================================================================
+
+    #[test]
+    fn test_base_symbol_from_pair_underscore() {
+        assert_eq!(base_symbol_from_pair("PUSD_USDT"), "PUSD");
+        assert_eq!(base_symbol_from_pair("USDC_USDT"), "USDC");
+    }
+
+    #[test]
+    fn test_base_symbol_from_pair_lowercase_underscore() {
+        assert_eq!(base_symbol_from_pair("pusd_usdt"), "pusd");
+    }
+
+    #[test]
+    fn test_base_symbol_from_pair_slash() {
+        assert_eq!(base_symbol_from_pair("USDC/USDT"), "USDC");
+    }
+
+    #[test]
+    fn test_base_symbol_from_pair_concat() {
+        assert_eq!(base_symbol_from_pair("USDCUSDT"), "USDC");
+        assert_eq!(base_symbol_from_pair("PUSDUSDT"), "PUSD");
+    }
+
+    #[test]
+    fn test_base_symbol_from_pair_plain() {
+        assert_eq!(base_symbol_from_pair("USDC"), "USDC");
+        assert_eq!(base_symbol_from_pair("ETH"), "ETH");
+    }
+
+    #[test]
+    fn test_base_symbol_from_pair_whitespace() {
+        assert_eq!(base_symbol_from_pair("  PUSD_USDT  "), "PUSD");
+    }
+
+    // ====================================================================
+    // market_summary_to_markdown tests
+    // ====================================================================
+
+    #[test]
+    fn test_market_summary_to_markdown_basic() {
+        use crate::market::{HealthCheck, MarketSummary};
+        let summary = MarketSummary {
+            pair: "USDCUSDT".to_string(),
+            peg_target: 1.0,
+            best_bid: Some(0.9999),
+            best_ask: Some(1.0001),
+            mid_price: Some(1.0000),
+            spread: Some(0.0002),
+            volume_24h: Some(1_000_000.0),
+            bid_depth: 50_000.0,
+            ask_depth: 50_000.0,
+            bid_outliers: 0,
+            ask_outliers: 0,
+            healthy: true,
+            checks: vec![HealthCheck::Pass("Spread within range".to_string())],
+            execution_10k_buy: None,
+            execution_10k_sell: None,
+            asks: vec![],
+            bids: vec![],
+        };
+        let md = market_summary_to_markdown(&summary, "Binance", "USDCUSDT");
+        assert!(md.contains("Market Health Report"));
+        assert!(md.contains("USDCUSDT"));
+        assert!(md.contains("Binance"));
+        assert!(md.contains("Peg Target"));
+        assert!(md.contains("1.0000"));
+        assert!(md.contains("Healthy"));
+    }
+
+    #[test]
+    fn test_market_summary_to_markdown_no_prices() {
+        use crate::market::{HealthCheck, MarketSummary};
+        let summary = MarketSummary {
+            pair: "TESTUSDT".to_string(),
+            peg_target: 1.0,
+            best_bid: None,
+            best_ask: None,
+            mid_price: None,
+            spread: None,
+            volume_24h: None,
+            bid_depth: 0.0,
+            ask_depth: 0.0,
+            bid_outliers: 0,
+            ask_outliers: 0,
+            healthy: false,
+            checks: vec![HealthCheck::Fail("No data".to_string())],
+            execution_10k_buy: None,
+            execution_10k_sell: None,
+            asks: vec![],
+            bids: vec![],
+        };
+        let md = market_summary_to_markdown(&summary, "Test", "TESTUSDT");
+        assert!(md.contains("Market Health Report"));
+        assert!(md.contains("-")); // missing data shown as "-"
+    }
+
+    // ====================================================================
+    // parse_duration — additional edge cases
+    // ====================================================================
+
+    #[test]
+    fn test_parse_duration_days() {
+        assert_eq!(parse_duration("1d").unwrap(), 86400);
+        assert_eq!(parse_duration("7d").unwrap(), 604800);
+        assert_eq!(parse_duration("1day").unwrap(), 86400);
+        assert_eq!(parse_duration("2days").unwrap(), 172800);
+    }
+
+    #[test]
+    fn test_parse_duration_long_names() {
+        assert_eq!(parse_duration("30seconds").unwrap(), 30);
+        assert_eq!(parse_duration("5minutes").unwrap(), 300);
+        assert_eq!(parse_duration("2hours").unwrap(), 7200);
+    }
+
+    #[test]
+    fn test_parse_duration_fractional() {
+        assert_eq!(parse_duration("0.5h").unwrap(), 1800);
+        assert_eq!(parse_duration("1.5m").unwrap(), 90);
+    }
+
+    // ====================================================================
+    // SummaryFormat tests
+    // ====================================================================
+
+    #[test]
+    fn test_summary_format_default() {
+        let fmt = SummaryFormat::default();
+        assert!(matches!(fmt, SummaryFormat::Text));
+    }
+
+    #[test]
+    fn test_summary_format_debug() {
+        let text = format!("{:?}", SummaryFormat::Text);
+        assert_eq!(text, "Text");
+        let json = format!("{:?}", SummaryFormat::Json);
+        assert_eq!(json, "Json");
+    }
+
+    // ====================================================================
+    // MarketCommands parsing tests
+    // ====================================================================
+
+    #[test]
+    fn test_summary_args_debug() {
+        let args = SummaryArgs {
+            pair: "USDC".to_string(),
+            market_venue: MarketVenue::Binance,
+            chain: "ethereum".to_string(),
+            biconomy_api_url: None,
+            peg: 1.0,
+            min_levels: 6,
+            min_depth: 3000.0,
+            peg_range: 0.001,
+            min_bid_ask_ratio: 0.2,
+            max_bid_ask_ratio: 5.0,
+            format: SummaryFormat::Text,
+            every: None,
+            duration: None,
+            report: None,
+            csv: None,
+        };
+        let debug = format!("{:?}", args);
+        assert!(debug.contains("SummaryArgs"));
+        assert!(debug.contains("USDC"));
+    }
+
+    #[test]
+    fn test_default_constants() {
+        assert_eq!(DEFAULT_EVERY_SECS, 60);
+        assert_eq!(DEFAULT_DURATION_SECS, 3600);
+    }
+
+    #[test]
+    fn test_market_summary_to_markdown_with_execution_estimates() {
+        use crate::market::{ExecutionEstimate, ExecutionSide, HealthCheck, MarketSummary};
+        let summary = MarketSummary {
+            pair: "TESTUSDT".to_string(),
+            peg_target: 1.0,
+            best_bid: Some(0.9999),
+            best_ask: Some(1.0001),
+            mid_price: Some(1.0000),
+            spread: Some(0.0002),
+            volume_24h: Some(1_000_000.0),
+            bid_depth: 50_000.0,
+            ask_depth: 50_000.0,
+            bid_outliers: 0,
+            ask_outliers: 0,
+            healthy: true,
+            checks: vec![HealthCheck::Pass("Spread within range".to_string())],
+            execution_10k_buy: Some(ExecutionEstimate {
+                notional_usdt: 10_000.0,
+                side: ExecutionSide::Buy,
+                vwap: 1.0001,
+                slippage_bps: 1.5,
+                fillable: true,
+            }),
+            execution_10k_sell: Some(ExecutionEstimate {
+                notional_usdt: 10_000.0,
+                side: ExecutionSide::Sell,
+                vwap: 0.0,
+                slippage_bps: 0.0,
+                fillable: false,
+            }),
+            asks: vec![],
+            bids: vec![],
+        };
+        let md = market_summary_to_markdown(&summary, "TestVenue", "TESTUSDT");
+        assert!(md.contains("Market Health Report"));
+        assert!(md.contains("TESTUSDT"));
+        assert!(md.contains("TestVenue"));
+        // Check for fillable buy slippage (should show "1.50 bps")
+        assert!(md.contains("1.50 bps"));
+        // Check for unfillable sell (should show "insufficient")
+        assert!(md.contains("insufficient"));
+    }
+
+    #[tokio::test]
+    async fn test_run_with_summary_command() {
+        let mut server = mockito::Server::new_async().await;
+        let orderbook_body = r#"{"asks":[["1.0001","500"],["1.0002","300"]],"bids":[["0.9999","600"],["0.9998","400"]]}"#;
+        let _mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"^/api/v1/depth\?symbol=.*$".to_string()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(orderbook_body)
+            .create();
+
+        let args = MarketCommands::Summary(SummaryArgs {
+            pair: "PUSD".to_string(),
+            market_venue: MarketVenue::Biconomy,
+            chain: "ethereum".to_string(),
+            biconomy_api_url: Some(server.url()),
+            peg: 1.0,
+            min_levels: 2,
+            min_depth: 100.0,
+            peg_range: 0.001,
+            min_bid_ask_ratio: 0.2,
+            max_bid_ask_ratio: 5.0,
+            format: SummaryFormat::Text,
+            every: None,
+            duration: None,
+            report: None,
+            csv: None,
+        });
+
+        let factory = DefaultClientFactory {
+            chains_config: Default::default(),
+        };
+        let config = Config::default();
+        let result = run(args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_summary_with_report_output() {
+        let mut server = mockito::Server::new_async().await;
+        let orderbook_body = r#"{"asks":[["1.0001","500"],["1.0002","300"]],"bids":[["0.9999","600"],["0.9998","400"]]}"#;
+        let _mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"^/api/v1/depth\?symbol=.*$".to_string()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(orderbook_body)
+            .create();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let report_path = temp_dir.path().join("report.md");
+
+        let args = SummaryArgs {
+            pair: "PUSD".to_string(),
+            market_venue: MarketVenue::Biconomy,
+            chain: "ethereum".to_string(),
+            biconomy_api_url: Some(server.url()),
+            peg: 1.0,
+            min_levels: 2,
+            min_depth: 100.0,
+            peg_range: 0.001,
+            min_bid_ask_ratio: 0.2,
+            max_bid_ask_ratio: 5.0,
+            format: SummaryFormat::Text,
+            every: None,
+            duration: None,
+            report: Some(report_path.clone()),
+            csv: None,
+        };
+
+        let factory = DefaultClientFactory {
+            chains_config: Default::default(),
+        };
+        let result = run_summary(args, &factory).await;
+        assert!(result.is_ok());
+        // Verify the report file was created
+        assert!(report_path.exists());
+        let content = std::fs::read_to_string(&report_path).unwrap();
+        assert!(content.contains("Market Health Report"));
+    }
+
+    #[tokio::test]
+    async fn test_run_summary_json_format_with_mock() {
+        let mut server = mockito::Server::new_async().await;
+        let orderbook_body = r#"{"asks":[["1.0001","500"]],"bids":[["0.9999","600"]]}"#;
+        let _mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"^/api/v1/depth\?symbol=.*$".to_string()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(orderbook_body)
+            .create();
+
+        let args = SummaryArgs {
+            pair: "PUSD".to_string(),
+            market_venue: MarketVenue::Biconomy,
+            chain: "ethereum".to_string(),
+            biconomy_api_url: Some(server.url()),
+            peg: 1.0,
+            min_levels: 1,
+            min_depth: 50.0,
+            peg_range: 0.001,
+            min_bid_ask_ratio: 0.1,
+            max_bid_ask_ratio: 10.0,
+            format: SummaryFormat::Json,
+            every: None,
+            duration: None,
+            report: None,
+            csv: None,
+        };
+
+        let factory = DefaultClientFactory {
+            chains_config: Default::default(),
+        };
+        // Exercise the JSON output path in run_summary_once
+        let result = run_summary(args, &factory).await;
+        assert!(result.is_ok());
+    }
 }

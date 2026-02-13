@@ -65,10 +65,12 @@ async fn run_batch(
         ));
     }
 
-    println!(
-        "Generating batch report for {} address(es){}...",
-        targets.len(),
-        if args.with_risk { " (with risk)" } else { "" }
+    let prog = crate::cli::progress::StepProgress::new(
+        targets.len() as u64,
+        &format!(
+            "Batch report{}",
+            if args.with_risk { " (with risk)" } else { "" }
+        ),
     );
     let mut reports = Vec::new();
     let mut risk_assessments: Vec<Option<crate::compliance::risk::RiskAssessment>> = Vec::new();
@@ -79,6 +81,13 @@ async fn run_batch(
     };
 
     for (address, chain) in &targets {
+        let short_addr = if address.len() > 12 {
+            format!("{}...{}", &address[..6], &address[address.len() - 4..])
+        } else {
+            address.clone()
+        };
+        prog.inc(&short_addr);
+
         let addr_args = AddressArgs {
             address: address.clone(),
             chain: chain.clone(),
@@ -107,9 +116,10 @@ async fn run_batch(
         }
     }
 
+    prog.finish("All addresses analyzed.");
     let md = batch_report_to_markdown(&reports, &risk_assessments, args.with_risk);
     std::fs::write(&args.output, &md)?;
-    println!("\nBatch report saved to: {}", args.output.display());
+    println!("Batch report saved to: {}", args.output.display());
     Ok(())
 }
 
@@ -358,5 +368,218 @@ mod tests {
         assert!(md.contains("Recent Transactions"));
         assert!(md.contains("Token Balances"));
         assert!(md.contains("USDC"));
+    }
+
+    #[test]
+    fn test_batch_args_debug() {
+        let args = BatchArgs {
+            addresses: vec!["0x123".to_string(), "0x456".to_string()],
+            from_file: None,
+            output: std::path::PathBuf::from("/tmp/report.md"),
+            chain: "ethereum".to_string(),
+            with_risk: false,
+        };
+        let debug = format!("{:?}", args);
+        assert!(debug.contains("BatchArgs"));
+        assert!(debug.contains("0x123"));
+    }
+
+    #[test]
+    fn test_batch_args_with_risk() {
+        let args = BatchArgs {
+            addresses: vec![],
+            from_file: Some(std::path::PathBuf::from("addrs.txt")),
+            output: std::path::PathBuf::from("/tmp/report.md"),
+            chain: "polygon".to_string(),
+            with_risk: true,
+        };
+        assert!(args.with_risk);
+        assert_eq!(args.chain, "polygon");
+        assert!(args.from_file.is_some());
+    }
+
+    #[test]
+    fn test_report_commands_debug() {
+        let cmd = ReportCommands::Batch(BatchArgs {
+            addresses: vec!["0xabc".to_string()],
+            from_file: None,
+            output: std::path::PathBuf::from("out.md"),
+            chain: "ethereum".to_string(),
+            with_risk: false,
+        });
+        let debug = format!("{:?}", cmd);
+        assert!(debug.contains("Batch"));
+    }
+
+    #[test]
+    fn test_batch_report_to_markdown_with_risk_data() {
+        use crate::compliance::risk::{RiskAssessment, RiskFactor, RiskLevel};
+
+        let reports = vec![minimal_report()];
+        let risk = RiskAssessment {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: "ethereum".to_string(),
+            overall_score: 3.5,
+            risk_level: RiskLevel::Low,
+            factors: vec![RiskFactor {
+                name: "Address Age".to_string(),
+                category: crate::compliance::risk::RiskCategory::Behavioral,
+                score: 2.0,
+                weight: 1.0,
+                description: "Address is well-established".to_string(),
+                evidence: vec!["Known address".to_string()],
+            }],
+            recommendations: vec!["Continue monitoring".to_string()],
+            assessed_at: chrono::Utc::now(),
+        };
+        let risks = vec![Some(risk)];
+        let md = batch_report_to_markdown(&reports, &risks, true);
+        assert!(md.contains("Risk Assessment"));
+        assert!(md.contains("with Risk Assessment"));
+        // Should contain actual risk data, not "unavailable"
+        assert!(!md.contains("unavailable"));
+    }
+
+    #[test]
+    fn test_batch_report_to_markdown_multiple_reports() {
+        let mut report1 = minimal_report();
+        report1.address = "0xaaa".to_string();
+        let mut report2 = minimal_report();
+        report2.address = "0xbbb".to_string();
+        report2.chain = "polygon".to_string();
+
+        let reports = vec![report1, report2];
+        let risks = vec![None, None];
+        let md = batch_report_to_markdown(&reports, &risks, false);
+        assert!(md.contains("0xaaa"));
+        assert!(md.contains("0xbbb"));
+        assert!(md.contains("Address 1"));
+        assert!(md.contains("Address 2"));
+    }
+
+    #[test]
+    fn test_resolve_targets_non_default_chain() {
+        let args = BatchArgs {
+            addresses: vec!["0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string()],
+            from_file: None,
+            output: std::path::PathBuf::from("/tmp/out.md"),
+            chain: "polygon".to_string(),
+            with_risk: false,
+        };
+        let targets = resolve_targets(&args).unwrap();
+        assert_eq!(targets.len(), 1);
+        // When chain is not "ethereum", it uses the provided chain directly
+        assert_eq!(targets[0].1, "polygon");
+    }
+
+    #[test]
+    fn test_resolve_targets_empty() {
+        let args = BatchArgs {
+            addresses: vec![],
+            from_file: None,
+            output: std::path::PathBuf::from("/tmp/out.md"),
+            chain: "ethereum".to_string(),
+            with_risk: false,
+        };
+        let targets = resolve_targets(&args).unwrap();
+        assert_eq!(targets.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_run_batch_with_mock_factory() {
+        use crate::chains::mocks::MockClientFactory;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let output_path = temp_dir.path().join("batch_report.md");
+
+        let args = BatchArgs {
+            addresses: vec!["0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string()],
+            from_file: None,
+            output: output_path.clone(),
+            chain: "ethereum".to_string(),
+            with_risk: false,
+        };
+
+        let config = Config::default();
+        let factory = MockClientFactory::new();
+
+        let result = run_batch(args, &config, &factory).await;
+        assert!(result.is_ok());
+
+        // Verify the report was written
+        assert!(output_path.exists());
+        let content = std::fs::read_to_string(&output_path).unwrap();
+        assert!(content.contains("Batch Address Report"));
+        assert!(content.contains("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2"));
+    }
+
+    #[tokio::test]
+    async fn test_run_batch_with_risk() {
+        use crate::chains::mocks::MockClientFactory;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let output_path = temp_dir.path().join("batch_risk_report.md");
+
+        let args = BatchArgs {
+            addresses: vec!["0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string()],
+            from_file: None,
+            output: output_path.clone(),
+            chain: "ethereum".to_string(),
+            with_risk: true,
+        };
+
+        let config = Config::default();
+        let factory = MockClientFactory::new();
+
+        let result = run_batch(args, &config, &factory).await;
+        assert!(result.is_ok());
+        let content = std::fs::read_to_string(&output_path).unwrap();
+        assert!(content.contains("Risk Assessment"));
+    }
+
+    #[tokio::test]
+    async fn test_run_batch_empty_targets() {
+        use crate::chains::mocks::MockClientFactory;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let output_path = temp_dir.path().join("empty.md");
+
+        let args = BatchArgs {
+            addresses: vec![],
+            from_file: None,
+            output: output_path,
+            chain: "ethereum".to_string(),
+            with_risk: false,
+        };
+
+        let config = Config::default();
+        let factory = MockClientFactory::new();
+
+        let result = run_batch(args, &config, &factory).await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("No addresses"));
+    }
+
+    #[tokio::test]
+    async fn test_run_dispatch() {
+        use crate::chains::mocks::MockClientFactory;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let output_path = temp_dir.path().join("dispatch_report.md");
+
+        let args = ReportCommands::Batch(BatchArgs {
+            addresses: vec!["0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string()],
+            from_file: None,
+            output: output_path.clone(),
+            chain: "ethereum".to_string(),
+            with_risk: false,
+        });
+
+        let config = Config::default();
+        let factory = MockClientFactory::new();
+
+        let result = run(args, &config, &factory).await;
+        assert!(result.is_ok());
     }
 }

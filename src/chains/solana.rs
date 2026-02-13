@@ -359,6 +359,90 @@ impl SolanaClient {
         })
     }
 
+    /// Fetches SPL token (mint) info from RPC.
+    ///
+    /// Parses decimals from the mint account data. Symbol and name use
+    /// placeholders (Solscan Pro API would provide full metadata).
+    pub async fn get_token_info(&self, mint_address: &str) -> Result<Token> {
+        validate_solana_address(mint_address)?;
+
+        let request = RpcRequest {
+            jsonrpc: "2.0",
+            id: 1,
+            method: "getAccountInfo",
+            params: serde_json::json!([mint_address, { "encoding": "base64" }]),
+        };
+
+        tracing::debug!(
+            url = %self.rpc_url,
+            mint = %mint_address,
+            "Fetching SPL mint info"
+        );
+
+        #[derive(Deserialize)]
+        struct AccountInfoResult {
+            value: Option<AccountInfoValue>,
+        }
+        #[derive(Deserialize)]
+        struct AccountInfoValue {
+            data: Option<Vec<String>>,
+        }
+
+        let response: RpcResponse<AccountInfoResult> = self
+            .client
+            .post(&self.rpc_url)
+            .json(&request)
+            .send()
+            .await?
+            .json()
+            .await?;
+
+        if let Some(error) = response.error {
+            return Err(ScopeError::Chain(format!(
+                "Solana RPC error ({}): {}",
+                error.code, error.message
+            )));
+        }
+
+        let account = response.result.and_then(|r| r.value).ok_or_else(|| {
+            ScopeError::NotFound(format!("Mint account not found: {}", mint_address))
+        })?;
+
+        let data_b64 = account
+            .data
+            .and_then(|d| d.into_iter().next())
+            .ok_or_else(|| {
+                ScopeError::Chain(format!("No account data for mint: {}", mint_address))
+            })?;
+
+        let data = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &data_b64)
+            .map_err(|e| ScopeError::Chain(format!("Failed to decode mint data: {}", e)))?;
+
+        // SPL Token mint layout: 32 (mint_authority) + 8 (supply) + 1 (decimals) + ...
+        const DECIMALS_OFFSET: usize = 40;
+        let decimals = if data.len() > DECIMALS_OFFSET {
+            data[DECIMALS_OFFSET]
+        } else {
+            return Err(ScopeError::Chain(format!(
+                "Invalid mint account data (too short): {}",
+                mint_address
+            )));
+        };
+
+        let short_mint = if mint_address.len() > 8 {
+            format!("{}...", &mint_address[..8])
+        } else {
+            mint_address.to_string()
+        };
+
+        Ok(Token {
+            contract_address: mint_address.to_string(),
+            symbol: short_mint,
+            name: "SPL Token".to_string(),
+            decimals,
+        })
+    }
+
     /// Enriches a balance with a USD value using DexScreener price lookup.
     pub async fn enrich_balance_usd(&self, balance: &mut Balance) {
         let dex = crate::chains::DexClient::new();
@@ -851,6 +935,10 @@ impl ChainClient for SolanaClient {
 
     async fn get_block_number(&self) -> Result<u64> {
         self.get_slot().await
+    }
+
+    async fn get_token_info(&self, address: &str) -> Result<Token> {
+        self.get_token_info(address).await
     }
 
     async fn get_token_balances(&self, address: &str) -> Result<Vec<crate::chains::TokenBalance>> {

@@ -31,21 +31,9 @@ use std::path::Path;
 // ============================================================================
 // Block explorer base URLs
 // ============================================================================
-
-/// Etherscan base URL for Ethereum token pages.
-const ETHERSCAN_TOKEN_BASE: &str = "https://etherscan.io/token";
-/// PolygonScan base URL for Polygon token pages.
-const POLYGONSCAN_TOKEN_BASE: &str = "https://polygonscan.com/token";
-/// Arbiscan base URL for Arbitrum token pages.
-const ARBISCAN_TOKEN_BASE: &str = "https://arbiscan.io/token";
-/// Optimistic Etherscan base URL for Optimism token pages.
-const OPTIMISM_TOKEN_BASE: &str = "https://optimistic.etherscan.io/token";
-/// BaseScan base URL for Base token pages.
-const BASESCAN_TOKEN_BASE: &str = "https://basescan.org/token";
-/// BscScan base URL for BSC token pages.
-const BSCSCAN_TOKEN_BASE: &str = "https://bscscan.com/token";
-/// Solscan base URL for Solana token pages.
-const SOLSCAN_TOKEN_BASE: &str = "https://solscan.io/token";
+// Token explorer URLs come from scope::chains::chain_metadata().
+// Fallback for unknown chains:
+const FALLBACK_EXPLORER_TOKEN_BASE: &str = "https://etherscan.io/token";
 
 /// DexScreener base URL for token pair pages.
 const DEXSCREENER_BASE: &str = "https://dexscreener.com";
@@ -122,6 +110,64 @@ pub fn generate_report(analytics: &TokenAnalytics) -> String {
     report
 }
 
+/// Summary of token risk for insights: score, level, key concerns, and positives.
+/// Used by the insights command to show interpretive bullets at the top.
+pub fn token_risk_summary(analytics: &TokenAnalytics) -> TokenRiskSummary {
+    let factors = RiskFactors::from_analytics(analytics);
+    let score = factors.overall_score();
+    let level = factors.risk_level();
+    let emoji = factors.risk_emoji();
+
+    let mut concerns = Vec::new();
+    let mut positives = Vec::new();
+
+    if factors.honeypot >= 7 {
+        concerns.push("Possible honeypot (buys >> sells)".to_string());
+    } else if factors.honeypot <= 3 {
+        positives.push("Normal buy/sell activity".to_string());
+    }
+
+    if factors.concentration >= 7 {
+        concerns.push(format!(
+            "High holder concentration (top holder {:.0}%+)",
+            analytics
+                .holders
+                .first()
+                .map(|h| h.percentage)
+                .unwrap_or(0.0)
+        ));
+    } else if factors.concentration <= 3 {
+        positives.push("Reasonable holder distribution".to_string());
+    }
+
+    if factors.liquidity >= 7 {
+        concerns.push("Very low liquidity".to_string());
+    } else if factors.liquidity <= 3 {
+        positives.push("Good liquidity".to_string());
+    }
+
+    if factors.age >= 7 {
+        concerns.push("Very new token (elevated risk)".to_string());
+    }
+
+    TokenRiskSummary {
+        score,
+        level,
+        emoji,
+        concerns,
+        positives,
+    }
+}
+
+/// Risk summary for token insights.
+pub struct TokenRiskSummary {
+    pub score: u8,
+    pub level: &'static str,
+    pub emoji: &'static str,
+    pub concerns: Vec<String>,
+    pub positives: Vec<String>,
+}
+
 /// Generates the report header.
 fn generate_header(analytics: &TokenAnalytics) -> String {
     let timestamp = DateTime::<Utc>::from_timestamp(analytics.fetched_at, 0)
@@ -161,25 +207,28 @@ fn generate_executive_summary(analytics: &TokenAnalytics) -> String {
     ));
     summary.push_str(&format!(
         "| 24h Volume | {} |\n",
-        format_usd(analytics.volume_24h)
+        crate::display::format_usd(analytics.volume_24h)
     ));
     summary.push_str(&format!(
         "| 7d Volume | {} |\n",
-        format_usd(analytics.volume_7d)
+        crate::display::format_usd(analytics.volume_7d)
     ));
     summary.push_str(&format!(
         "| Liquidity | {} |\n",
-        format_usd(analytics.liquidity_usd)
+        crate::display::format_usd(analytics.liquidity_usd)
     ));
 
     if let Some(mc) = analytics.market_cap {
-        summary.push_str(&format!("| Market Cap | {} |\n", format_usd(mc)));
+        summary.push_str(&format!(
+            "| Market Cap | {} |\n",
+            crate::display::format_usd(mc)
+        ));
     }
 
     if let Some(fdv) = analytics.fdv {
         summary.push_str(&format!(
             "| Fully Diluted Valuation | {} |\n",
-            format_usd(fdv)
+            crate::display::format_usd(fdv)
         ));
     }
 
@@ -249,11 +298,11 @@ fn generate_volume_analysis(analytics: &TokenAnalytics) -> String {
     section.push_str("|--------|--------|\n");
     section.push_str(&format!(
         "| 24 Hours | {} |\n",
-        format_usd(analytics.volume_24h)
+        crate::display::format_usd(analytics.volume_24h)
     ));
     section.push_str(&format!(
         "| 7 Days | {} |\n",
-        format_usd(analytics.volume_7d)
+        crate::display::format_usd(analytics.volume_7d)
     ));
 
     // Volume to liquidity ratio (indicator of trading activity)
@@ -281,7 +330,7 @@ fn generate_liquidity_analysis(analytics: &TokenAnalytics) -> String {
 
     section.push_str(&format!(
         "**Total Liquidity:** {}\n\n",
-        format_usd(analytics.liquidity_usd)
+        crate::display::format_usd(analytics.liquidity_usd)
     ));
 
     if !analytics.dex_pairs.is_empty() {
@@ -295,8 +344,8 @@ fn generate_liquidity_analysis(analytics: &TokenAnalytics) -> String {
                 pair.dex_name,
                 pair.base_token,
                 pair.quote_token,
-                format_usd(pair.liquidity_usd),
-                format_usd(pair.volume_24h),
+                crate::display::format_usd(pair.liquidity_usd),
+                crate::display::format_usd(pair.volume_24h),
                 pair.price_usd
             ));
         }
@@ -1028,17 +1077,10 @@ fn generate_data_sources(analytics: &TokenAnalytics) -> String {
     let chain = &analytics.chain.to_lowercase();
     let address = &analytics.token.contract_address;
 
-    // Explorer links based on chain
-    let explorer_url = match chain.as_str() {
-        "ethereum" => format!("{}/{}", ETHERSCAN_TOKEN_BASE, address),
-        "polygon" => format!("{}/{}", POLYGONSCAN_TOKEN_BASE, address),
-        "arbitrum" => format!("{}/{}", ARBISCAN_TOKEN_BASE, address),
-        "optimism" => format!("{}/{}", OPTIMISM_TOKEN_BASE, address),
-        "base" => format!("{}/{}", BASESCAN_TOKEN_BASE, address),
-        "bsc" => format!("{}/{}", BSCSCAN_TOKEN_BASE, address),
-        "solana" => format!("{}/{}", SOLSCAN_TOKEN_BASE, address),
-        _ => format!("{}/{}", ETHERSCAN_TOKEN_BASE, address),
-    };
+    // Explorer links from centralized chain metadata
+    let explorer_url = crate::chains::chain_metadata(chain)
+        .map(|m| format!("{}/{}", m.explorer_token_base, address))
+        .unwrap_or_else(|| format!("{}/{}", FALLBACK_EXPLORER_TOKEN_BASE, address));
 
     section.push_str(&format!(
         "- [Block Explorer ({})]({})\n",
@@ -1089,19 +1131,6 @@ pub fn save_report(report: &str, path: impl AsRef<Path>) -> Result<()> {
             e
         ))
     })
-}
-
-/// Formats a USD value with appropriate suffixes.
-fn format_usd(value: f64) -> String {
-    if value >= 1_000_000_000.0 {
-        format!("${:.2}B", value / 1_000_000_000.0)
-    } else if value >= 1_000_000.0 {
-        format!("${:.2}M", value / 1_000_000.0)
-    } else if value >= 1_000.0 {
-        format!("${:.0}K", value / 1_000.0)
-    } else {
-        format!("${:.2}", value)
-    }
 }
 
 /// Formats a number with commas.
@@ -1462,11 +1491,20 @@ mod tests {
     }
 
     #[test]
+    fn test_token_risk_summary() {
+        let analytics = create_test_analytics();
+        let summary = token_risk_summary(&analytics);
+        assert!(summary.score >= 1 && summary.score <= 10);
+        assert!(!summary.level.is_empty());
+        assert!(!summary.emoji.is_empty());
+    }
+
+    #[test]
     fn test_format_usd() {
-        assert_eq!(format_usd(1500000000.0), "$1.50B");
-        assert_eq!(format_usd(1500000.0), "$1.50M");
-        assert_eq!(format_usd(1500.0), "$2K"); // 1500 / 1000 = 1.5, rounded to 2K
-        assert_eq!(format_usd(15.5), "$15.50");
+        assert_eq!(crate::display::format_usd(1500000000.0), "$1.50B");
+        assert_eq!(crate::display::format_usd(1500000.0), "$1.50M");
+        assert_eq!(crate::display::format_usd(1500.0), "$1.50K");
+        assert_eq!(crate::display::format_usd(15.5), "$15.50");
     }
 
     #[test]
@@ -1821,9 +1859,9 @@ mod tests {
 
     #[test]
     fn test_format_usd_edge_cases() {
-        assert_eq!(format_usd(0.0), "$0.00");
-        assert_eq!(format_usd(0.50), "$0.50");
-        assert_eq!(format_usd(999.0), "$999.00");
+        assert_eq!(crate::display::format_usd(0.0), "$0.00");
+        assert_eq!(crate::display::format_usd(0.50), "$0.50");
+        assert_eq!(crate::display::format_usd(999.0), "$999.00");
     }
 
     #[test]
@@ -1850,6 +1888,7 @@ mod tests {
             ("base", "basescan.org"),
             ("bsc", "bscscan.com"),
             ("solana", "solscan.io"),
+            ("tron", "tronscan.org"),
         ];
 
         for (chain, expected_domain) in chains {
@@ -2502,5 +2541,232 @@ mod tests {
         assert_eq!(format_number(1_500_000_000.0), "1500.00M");
         assert_eq!(format_number(500_000.0), "500K");
         assert_eq!(format_number(42.0), "42");
+    }
+
+    #[test]
+    fn test_token_risk_summary_honeypot_concern() {
+        let mut analytics = create_test_analytics();
+        // Very high buy/sell ratio triggers honeypot concern (line 125)
+        analytics.total_buys_24h = 500;
+        analytics.total_sells_24h = 5;
+        analytics.total_buys_6h = 100;
+        analytics.total_sells_6h = 1;
+        analytics.total_buys_1h = 20;
+        analytics.total_sells_1h = 0;
+        // Also set in dex_pairs
+        if let Some(pair) = analytics.dex_pairs.first_mut() {
+            pair.buys_24h = 500;
+            pair.sells_24h = 5;
+        }
+        let summary = token_risk_summary(&analytics);
+        assert!(summary.concerns.iter().any(|c| c.contains("honeypot")));
+    }
+
+    #[test]
+    fn test_token_risk_summary_low_liquidity_concern() {
+        let mut analytics = create_test_analytics();
+        // Very low liquidity triggers concern (line 144)
+        analytics.liquidity_usd = 5_000.0;
+        if let Some(pair) = analytics.dex_pairs.first_mut() {
+            pair.liquidity_usd = 5_000.0;
+        }
+        let summary = token_risk_summary(&analytics);
+        assert!(
+            summary
+                .concerns
+                .iter()
+                .any(|c| c.contains("low liquidity") || c.contains("Low liquidity"))
+        );
+    }
+
+    #[test]
+    fn test_token_risk_summary_new_token_concern() {
+        let mut analytics = create_test_analytics();
+        // Very new token triggers concern (line 150)
+        analytics.token_age_hours = Some(12.0); // Less than 24 hours
+        let summary = token_risk_summary(&analytics);
+        assert!(
+            summary
+                .concerns
+                .iter()
+                .any(|c| c.contains("new token") || c.contains("New token"))
+        );
+    }
+
+    #[test]
+    fn test_token_risk_summary_reasonable_distribution() {
+        let mut analytics = create_test_analytics();
+        // Low concentration triggers positive (line 140)
+        analytics.top_10_concentration = Some(15.0);
+        analytics.top_50_concentration = Some(30.0);
+        analytics.top_100_concentration = Some(40.0);
+        analytics.holders = vec![TokenHolder {
+            address: "0x1111".to_string(),
+            balance: "1000".to_string(),
+            formatted_balance: "1000".to_string(),
+            percentage: 3.0,
+            rank: 1,
+        }];
+        let summary = token_risk_summary(&analytics);
+        assert!(
+            summary
+                .positives
+                .iter()
+                .any(|p| p.contains("holder distribution") || p.contains("distribution"))
+        );
+    }
+
+    #[test]
+    fn test_risk_factors_no_buys_no_sells() {
+        let mut analytics = create_test_analytics();
+        analytics.total_buys_24h = 0;
+        analytics.total_sells_24h = 0;
+        let factors = RiskFactors::from_analytics(&analytics);
+        // Unknown honeypot risk = 5
+        assert_eq!(factors.honeypot, 5);
+    }
+
+    #[test]
+    fn test_risk_factors_zero_sells_positive_buys() {
+        let mut analytics = create_test_analytics();
+        analytics.total_buys_24h = 50;
+        analytics.total_sells_24h = 0;
+        let factors = RiskFactors::from_analytics(&analytics);
+        assert_eq!(factors.honeypot, 10); // Maximum honeypot risk
+    }
+
+    #[test]
+    fn test_risk_factors_unknown_age() {
+        let mut analytics = create_test_analytics();
+        analytics.token_age_hours = None;
+        let factors = RiskFactors::from_analytics(&analytics);
+        assert_eq!(factors.age, 5); // Unknown = moderate risk
+    }
+
+    #[test]
+    fn test_risk_factors_very_low_liquidity() {
+        let mut analytics = create_test_analytics();
+        analytics.liquidity_usd = 8_000.0;
+        let factors = RiskFactors::from_analytics(&analytics);
+        assert_eq!(factors.liquidity, 10); // Maximum liquidity risk
+    }
+
+    #[test]
+    fn test_risk_factors_moderate_liquidity() {
+        let mut analytics = create_test_analytics();
+        analytics.liquidity_usd = 75_000.0;
+        let factors = RiskFactors::from_analytics(&analytics);
+        assert_eq!(factors.liquidity, 6);
+    }
+
+    #[test]
+    fn test_security_analysis_zero_buys_sells() {
+        let mut analytics = create_test_analytics();
+        analytics.total_buys_24h = 0;
+        analytics.total_sells_24h = 0;
+        let section = generate_security_analysis(&analytics);
+        assert!(section.contains("UNKNOWN") || section.contains("No transaction data"));
+    }
+
+    #[test]
+    fn test_security_analysis_sells_zero_buys_positive() {
+        let mut analytics = create_test_analytics();
+        analytics.total_buys_24h = 100;
+        analytics.total_sells_24h = 0;
+        let section = generate_security_analysis(&analytics);
+        assert!(section.contains("HIGH") || section.contains("honeypot"));
+    }
+
+    // ========================================================================
+    // Coverage gap tests
+    // ========================================================================
+
+    #[test]
+    fn test_risk_factors_liquidity_10k_to_50k() {
+        // Covers line 837: liquidity between 10k and 50k → score 8
+        let mut analytics = create_test_analytics();
+        analytics.liquidity_usd = 25_000.0;
+        let factors = RiskFactors::from_analytics(&analytics);
+        assert_eq!(factors.liquidity, 8);
+    }
+
+    #[test]
+    fn test_price_chart_all_zeros_no_history() {
+        // Covers line 1175: all price changes 0, no price history → return empty
+        let mut analytics = create_test_analytics();
+        analytics.price_change_1h = 0.0;
+        analytics.price_change_6h = 0.0;
+        analytics.price_change_24h = 0.0;
+        analytics.price_change_7d = 0.0;
+        analytics.price_history = vec![];
+        let chart = generate_price_chart(&analytics);
+        assert!(chart.is_empty());
+    }
+
+    #[test]
+    fn test_price_history_chart_too_few_points() {
+        // Covers line 1205: price_history.len() < 2 → return empty
+        let mut analytics = create_test_analytics();
+        analytics.price_history = vec![crate::chains::PricePoint {
+            timestamp: 1700000000,
+            price: 1.0,
+        }];
+        let chart = generate_price_history_chart(&analytics);
+        assert!(chart.is_empty());
+    }
+
+    #[test]
+    fn test_concentration_chart_top50_fallback_calculation() {
+        // Covers lines 1354-1359: top_50_concentration is None, falls back
+        // to summing holder percentages for top 50
+        let mut analytics = create_test_analytics();
+        analytics.top_10_concentration = Some(20.0);
+        analytics.top_50_concentration = None; // force the fallback closure
+        // Create 15 holders: 10 at 2% each (=20%), 5 more at 4% each (=20%)
+        // Top 10 sum = 20%, top 50 sum = 40%, diff = 20% > 5% → triggers 3-segment chart
+        analytics.holders = (0..10)
+            .map(|i| TokenHolder {
+                address: format!("0xholder{:02}", i),
+                balance: "100".to_string(),
+                formatted_balance: "100".to_string(),
+                percentage: 2.0,
+                rank: i as u32 + 1,
+            })
+            .chain((10..15).map(|i| TokenHolder {
+                address: format!("0xholder{:02}", i),
+                balance: "200".to_string(),
+                formatted_balance: "200".to_string(),
+                percentage: 4.0,
+                rank: i as u32 + 1,
+            }))
+            .collect();
+        let chart = generate_concentration_chart(&analytics);
+        assert!(chart.contains("Holder Concentration"));
+        assert!(chart.contains("Rank 11-50")); // 3-segment chart
+        assert!(chart.contains("Top 10"));
+        assert!(chart.contains("Others"));
+    }
+
+    #[test]
+    fn test_price_chart_all_zeros_with_history() {
+        // Covers line 1172-1173: all price changes 0, but has price history
+        // → falls through to generate_price_history_chart
+        let mut analytics = create_test_analytics();
+        analytics.price_change_1h = 0.0;
+        analytics.price_change_6h = 0.0;
+        analytics.price_change_24h = 0.0;
+        analytics.price_change_7d = 0.0;
+        analytics.price_history = vec![
+            crate::chains::PricePoint {
+                timestamp: 1700000000,
+                price: 1.0,
+            },
+            crate::chains::PricePoint {
+                timestamp: 1700003600,
+                price: 1.01,
+            },
+        ];
+        let chart = generate_price_chart(&analytics);
+        assert!(chart.contains("Price History"));
     }
 }

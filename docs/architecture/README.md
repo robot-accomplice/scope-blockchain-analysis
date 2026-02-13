@@ -29,6 +29,15 @@ Architecture and dataflow diagrams for the Scope blockchain analysis tool.
 | [dataflow-monitor.md](dataflow-monitor.md) | `scope monitor` | Live TUI dashboard |
 | [dataflow-interactive.md](dataflow-interactive.md) | `scope interactive` | REPL with context |
 | [dataflow-data-sources.md](dataflow-data-sources.md) | Data sources | ChainClientFactory, DexScreener, Etherscan, Biconomy |
+| [dataflow-web.md](dataflow-web.md) | `scope web` / `scope serve` | Browser mode: REST API, WebSocket monitor, daemon (feature-gated) |
+
+**Note:** `scope insights` dispatches to address, tx, and crawl handlers (see dataflow-main). `scope completions` generates shell scripts to stdout (no dataflow diagram needed).
+
+### Guidelines
+
+| Document | Description |
+|----------|-------------|
+| [cli-usability-guidelines.md](cli-usability-guidelines.md) | **CLI UX** — Usability philosophy and framework principles for feature development |
 
 ### Other Architecture Docs
 

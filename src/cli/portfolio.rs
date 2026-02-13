@@ -1,25 +1,25 @@
 //! # Portfolio Management Command
 //!
-//! This module implements the `bca portfolio` command for managing
+//! This module implements the `scope portfolio` command for managing
 //! watched addresses and viewing aggregated portfolio data.
 //!
 //! ## Usage
 //!
 //! ```bash
 //! # Add an address to portfolio
-//! bca portfolio add 0x742d... --label "Main Wallet"
+//! scope portfolio add 0x742d... --label "Main Wallet"
 //!
 //! # List watched addresses
-//! bca portfolio list
+//! scope portfolio list
 //!
 //! # Remove an address
-//! bca portfolio remove 0x742d...
+//! scope portfolio remove 0x742d...
 //!
 //! # View portfolio summary
-//! bca portfolio summary
+//! scope portfolio summary
 //! ```
 
-use crate::chains::ChainClientFactory;
+use crate::chains::{ChainClientFactory, native_symbol};
 use crate::config::{Config, OutputFormat};
 use crate::error::{Result, ScopeError};
 use clap::{Args, Subcommand};
@@ -190,8 +190,8 @@ pub struct AddressSummary {
 /// Summary for a token balance.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenSummary {
-    /// Token mint/contract address.
-    pub mint: String,
+    /// Token contract/mint address.
+    pub contract_address: String,
     /// Token balance (human-readable).
     pub balance: String,
     /// Token decimals.
@@ -333,7 +333,7 @@ async fn run_list(data_dir: &std::path::Path, format: OutputFormat) -> Result<()
     let portfolio = Portfolio::load(data_dir)?;
 
     if portfolio.addresses.is_empty() {
-        println!("Portfolio is empty. Add addresses with 'bca portfolio add <address>'");
+        println!("Portfolio is empty. Add addresses with 'scope portfolio add <address>'");
         return Ok(());
     }
 
@@ -409,7 +409,7 @@ async fn run_summary(
     let portfolio = Portfolio::load(data_dir)?;
 
     if portfolio.addresses.is_empty() {
-        println!("Portfolio is empty. Add addresses with 'bca portfolio add <address>'");
+        println!("Portfolio is empty. Add addresses with 'scope portfolio add <address>'");
         return Ok(());
     }
 
@@ -444,7 +444,7 @@ async fn run_summary(
                 watched.chain.clone(),
                 ChainBalance {
                     native_balance: balance.clone(),
-                    symbol: get_native_symbol(&watched.chain),
+                    symbol: native_symbol(&watched.chain).to_string(),
                     usd: None,
                 },
             );
@@ -502,12 +502,12 @@ async fn run_summary(
 
                 // Show token balances
                 for token in &addr.tokens {
-                    let mint_short = if token.mint.len() >= 8 {
-                        &token.mint[..8]
+                    let addr_short = if token.contract_address.len() >= 8 {
+                        &token.contract_address[..8]
                     } else {
-                        &token.mint
+                        &token.contract_address
                     };
-                    let symbol = token.symbol.as_deref().unwrap_or(mint_short);
+                    let symbol = token.symbol.as_deref().unwrap_or(addr_short);
                     println!("    └─ {} {}", token.balance, symbol);
                 }
             }
@@ -574,7 +574,7 @@ fn portfolio_summary_to_markdown(summary: &PortfolioSummary) -> String {
         let token_list: String = addr
             .tokens
             .iter()
-            .map(|t| t.symbol.as_deref().unwrap_or(&t.mint))
+            .map(|t| t.symbol.as_deref().unwrap_or(&t.contract_address))
             .take(3)
             .collect::<Vec<_>>()
             .join(", ");
@@ -631,7 +631,7 @@ async fn fetch_address_balance(
         Ok(token_bals) => token_bals
             .into_iter()
             .map(|tb| TokenSummary {
-                mint: tb.token.contract_address,
+                contract_address: tb.token.contract_address,
                 balance: tb.formatted_balance,
                 decimals: tb.token.decimals,
                 symbol: Some(tb.token.symbol),
@@ -644,16 +644,6 @@ async fn fetch_address_balance(
     };
 
     (native_balance, tokens)
-}
-
-/// Returns the native token symbol for a chain.
-fn get_native_symbol(chain: &str) -> String {
-    match chain.to_lowercase().as_str() {
-        "solana" | "sol" => "SOL".to_string(),
-        "ethereum" | "eth" => "ETH".to_string(),
-        "tron" | "trx" => "TRX".to_string(),
-        _ => "???".to_string(),
-    }
 }
 
 // ============================================================================
@@ -918,26 +908,26 @@ mod tests {
 
     #[test]
     fn test_get_native_symbol_solana() {
-        assert_eq!(get_native_symbol("solana"), "SOL");
-        assert_eq!(get_native_symbol("sol"), "SOL");
+        assert_eq!(native_symbol("solana"), "SOL");
+        assert_eq!(native_symbol("sol"), "SOL");
     }
 
     #[test]
     fn test_get_native_symbol_ethereum() {
-        assert_eq!(get_native_symbol("ethereum"), "ETH");
-        assert_eq!(get_native_symbol("eth"), "ETH");
+        assert_eq!(native_symbol("ethereum"), "ETH");
+        assert_eq!(native_symbol("eth"), "ETH");
     }
 
     #[test]
     fn test_get_native_symbol_tron() {
-        assert_eq!(get_native_symbol("tron"), "TRX");
-        assert_eq!(get_native_symbol("trx"), "TRX");
+        assert_eq!(native_symbol("tron"), "TRX");
+        assert_eq!(native_symbol("trx"), "TRX");
     }
 
     #[test]
     fn test_get_native_symbol_unknown() {
-        assert_eq!(get_native_symbol("bitcoin"), "???");
-        assert_eq!(get_native_symbol("unknown"), "???");
+        assert_eq!(native_symbol("bitcoin"), "???");
+        assert_eq!(native_symbol("unknown"), "???");
     }
 
     // ========================================================================
@@ -1316,12 +1306,19 @@ mod tests {
 
     #[test]
     fn test_get_native_symbol_polygon() {
-        assert_eq!(get_native_symbol("polygon"), "???");
+        assert_eq!(native_symbol("polygon"), "MATIC");
     }
 
     #[test]
     fn test_get_native_symbol_bsc() {
-        assert_eq!(get_native_symbol("bsc"), "???");
+        assert_eq!(native_symbol("bsc"), "BNB");
+    }
+
+    #[test]
+    fn test_get_native_symbol_evm_l2s() {
+        assert_eq!(native_symbol("arbitrum"), "ETH");
+        assert_eq!(native_symbol("optimism"), "ETH");
+        assert_eq!(native_symbol("base"), "ETH");
     }
 
     #[tokio::test]
@@ -1514,5 +1511,301 @@ mod tests {
         };
         let result = super::run(list_args, &config, &factory).await;
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_portfolio_new() {
+        let p = Portfolio::default();
+        assert!(p.addresses.is_empty());
+    }
+
+    #[test]
+    fn test_portfolio_load_missing_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let p = Portfolio::load(temp.path());
+        assert!(p.is_ok());
+        assert!(p.unwrap().addresses.is_empty());
+    }
+
+    #[test]
+    fn test_portfolio_add_and_save_roundtrip() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut p = Portfolio::default();
+        let addr = WatchedAddress {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            label: Some("Test".to_string()),
+            chain: "ethereum".to_string(),
+            tags: vec!["tag1".to_string()],
+            added_at: 1234567890,
+        };
+        p.add_address(addr).unwrap();
+        assert_eq!(p.addresses.len(), 1);
+
+        let data_dir = temp.path().to_path_buf();
+        p.save(&data_dir).unwrap();
+        let loaded = Portfolio::load(temp.path()).unwrap();
+        assert_eq!(loaded.addresses.len(), 1);
+        assert_eq!(
+            loaded.addresses[0].address,
+            "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2"
+        );
+        assert_eq!(loaded.addresses[0].label, Some("Test".to_string()));
+    }
+
+    #[test]
+    fn test_portfolio_add_duplicate() {
+        let mut p = Portfolio::default();
+        let addr1 = WatchedAddress {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            label: None,
+            chain: "ethereum".to_string(),
+            tags: vec![],
+            added_at: 0,
+        };
+        let addr2 = WatchedAddress {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            label: None,
+            chain: "ethereum".to_string(),
+            tags: vec![],
+            added_at: 0,
+        };
+        p.add_address(addr1).unwrap();
+        let result = p.add_address(addr2);
+        // Should error on duplicate
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("already in portfolio")
+        );
+    }
+
+    #[test]
+    fn test_watched_address_debug() {
+        let addr = WatchedAddress {
+            address: "0xtest".to_string(),
+            label: Some("My Wallet".to_string()),
+            chain: "ethereum".to_string(),
+            tags: vec!["defi".to_string(), "staking".to_string()],
+            added_at: 1700000000,
+        };
+        let debug = format!("{:?}", addr);
+        assert!(debug.contains("WatchedAddress"));
+        assert!(debug.contains("0xtest"));
+    }
+
+    // ========================================================================
+    // portfolio_summary_to_markdown tests
+    // ========================================================================
+
+    #[test]
+    fn test_portfolio_summary_to_markdown_basic() {
+        let mut balances_by_chain = HashMap::new();
+        balances_by_chain.insert(
+            "ethereum".to_string(),
+            ChainBalance {
+                native_balance: "1.5".to_string(),
+                symbol: "ETH".to_string(),
+                usd: None,
+            },
+        );
+
+        let summary = PortfolioSummary {
+            address_count: 2,
+            balances_by_chain,
+            total_usd: None,
+            addresses: vec![
+                AddressSummary {
+                    address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+                    label: Some("Main Wallet".to_string()),
+                    chain: "ethereum".to_string(),
+                    balance: "1.5".to_string(),
+                    usd: None,
+                    tokens: vec![],
+                },
+                AddressSummary {
+                    address: "0xABCdef1234567890abcdef1234567890ABCDEF12".to_string(),
+                    label: None,
+                    chain: "polygon".to_string(),
+                    balance: "100.0".to_string(),
+                    usd: None,
+                    tokens: vec![],
+                },
+            ],
+        };
+
+        let md = portfolio_summary_to_markdown(&summary);
+
+        // Check header elements
+        assert!(md.contains("# Portfolio Report"));
+        assert!(md.contains("**Addresses:** 2"));
+        assert!(md.contains("Allocation by Chain"));
+        assert!(md.contains("## Addresses"));
+
+        // Check chain balance table
+        assert!(md.contains("ethereum"));
+        assert!(md.contains("1.5"));
+        assert!(md.contains("ETH"));
+
+        // Check address table
+        assert!(md.contains("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2"));
+        assert!(md.contains("Main Wallet"));
+        assert!(md.contains("0xABCdef1234567890abcdef1234567890ABCDEF12"));
+        assert!(md.contains("polygon"));
+        assert!(md.contains("100.0"));
+
+        // Check footer
+        assert!(md.contains("Report generated by Scope"));
+    }
+
+    #[test]
+    fn test_portfolio_summary_to_markdown_with_usd() {
+        let mut balances_by_chain = HashMap::new();
+        balances_by_chain.insert(
+            "ethereum".to_string(),
+            ChainBalance {
+                native_balance: "2.0".to_string(),
+                symbol: "ETH".to_string(),
+                usd: Some(3000.0),
+            },
+        );
+
+        let summary = PortfolioSummary {
+            address_count: 2,
+            balances_by_chain,
+            total_usd: Some(5000.0),
+            addresses: vec![
+                AddressSummary {
+                    address: "0x1234567890123456789012345678901234567890".to_string(),
+                    label: Some("Wallet 1".to_string()),
+                    chain: "ethereum".to_string(),
+                    balance: "2.0".to_string(),
+                    usd: Some(3000.0),
+                    tokens: vec![],
+                },
+                AddressSummary {
+                    address: "0x0987654321098765432109876543210987654321".to_string(),
+                    label: Some("Wallet 2".to_string()),
+                    chain: "ethereum".to_string(),
+                    balance: "1.0".to_string(),
+                    usd: Some(2000.0),
+                    tokens: vec![],
+                },
+            ],
+        };
+
+        let md = portfolio_summary_to_markdown(&summary);
+
+        // Check total USD
+        assert!(md.contains("**Total Value (USD):** $5000.00"));
+
+        // Check chain USD value
+        assert!(md.contains("$3000.00"));
+
+        // Check address USD values
+        assert!(md.contains("$3000.00"));
+        assert!(md.contains("$2000.00"));
+    }
+
+    #[test]
+    fn test_portfolio_summary_to_markdown_with_tokens() {
+        let mut balances_by_chain = HashMap::new();
+        balances_by_chain.insert(
+            "ethereum".to_string(),
+            ChainBalance {
+                native_balance: "1.0".to_string(),
+                symbol: "ETH".to_string(),
+                usd: None,
+            },
+        );
+
+        // Create more than 3 tokens to test truncation
+        let tokens = vec![
+            TokenSummary {
+                contract_address: "0xToken1".to_string(),
+                balance: "100.0".to_string(),
+                decimals: 18,
+                symbol: Some("USDC".to_string()),
+            },
+            TokenSummary {
+                contract_address: "0xToken2".to_string(),
+                balance: "50.0".to_string(),
+                decimals: 18,
+                symbol: Some("DAI".to_string()),
+            },
+            TokenSummary {
+                contract_address: "0xToken3".to_string(),
+                balance: "25.0".to_string(),
+                decimals: 18,
+                symbol: Some("WBTC".to_string()),
+            },
+            TokenSummary {
+                contract_address: "0xToken4".to_string(),
+                balance: "10.0".to_string(),
+                decimals: 18,
+                symbol: Some("UNI".to_string()),
+            },
+            TokenSummary {
+                contract_address: "0xToken5".to_string(),
+                balance: "5.0".to_string(),
+                decimals: 18,
+                symbol: None, // Test token without symbol
+            },
+        ];
+
+        let summary = PortfolioSummary {
+            address_count: 1,
+            balances_by_chain,
+            total_usd: None,
+            addresses: vec![AddressSummary {
+                address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+                label: Some("Token Wallet".to_string()),
+                chain: "ethereum".to_string(),
+                balance: "1.0".to_string(),
+                usd: None,
+                tokens,
+            }],
+        };
+
+        let md = portfolio_summary_to_markdown(&summary);
+
+        // Check that first 3 tokens are shown
+        assert!(md.contains("USDC"));
+        assert!(md.contains("DAI"));
+        assert!(md.contains("WBTC"));
+
+        // Check truncation indicator (+2 for 5 tokens - 3 shown)
+        assert!(md.contains("+2"));
+
+        // Check that token without symbol uses contract address
+        // The first 3 tokens have symbols, so we should see USDC, DAI, WBTC
+        // Token 4 (UNI) and Token 5 (no symbol) should be truncated
+        // But we need to verify the truncation logic shows "+2"
+    }
+
+    #[test]
+    fn test_portfolio_summary_to_markdown_empty() {
+        let summary = PortfolioSummary {
+            address_count: 0,
+            balances_by_chain: HashMap::new(),
+            total_usd: None,
+            addresses: vec![],
+        };
+
+        let md = portfolio_summary_to_markdown(&summary);
+
+        // Check header
+        assert!(md.contains("# Portfolio Report"));
+        assert!(md.contains("**Addresses:** 0"));
+
+        // Check that chain allocation section exists (even if empty)
+        assert!(md.contains("Allocation by Chain"));
+
+        // Check that addresses section exists (even if empty)
+        assert!(md.contains("## Addresses"));
+
+        // Check footer
+        assert!(md.contains("Report generated by Scope"));
     }
 }

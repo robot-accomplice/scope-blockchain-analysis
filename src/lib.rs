@@ -36,6 +36,21 @@
 //! - **Token Health Suite**: Composite command (`scope token-health`) combining DEX analytics
 //!   with optional market/order book summary. Venues: binance, biconomy, eth, solana.
 //!
+//! - **Unified Insights**: Auto-detect addresses, transaction hashes, or tokens
+//!   and run the appropriate analyses (`scope insights`).
+//!
+//! - **Compliance & Risk**: Risk scoring, transaction pattern detection, taint
+//!   analysis, and compliance reporting (`scope compliance`).
+//!
+//! - **Shell Completion**: Tab-completion for bash, zsh, and fish
+//!   (`scope completions <shell>`).
+//!
+//! - **Progress Indicators**: Spinners and progress bars for all long-running
+//!   operations. Non-TTY aware (hidden in pipes).
+//!
+//! - **Error Remediation**: Actionable hints for common errors (invalid address,
+//!   missing config, network failures, auth issues).
+//!
 //! - **USD Valuation**: Native token prices via DexScreener for all supported
 //!   chains (ETH, SOL, BNB, MATIC, etc.).
 //!
@@ -64,12 +79,21 @@
 //! # Analyze a transaction
 //! scope tx 0xabc123...
 //!
+//! # Auto-detect and analyze any target
+//! scope insights 0xabc123...
+//!
+//! # Token DEX data
+//! scope crawl USDC --chain ethereum
+//!
 //! # Manage portfolio
 //! scope portfolio add 0x742d... --label "Main Wallet"
 //! scope portfolio list
 //!
 //! # Export data
 //! scope export --address 0x742d... --output history.json
+//!
+//! # Shell tab-completion
+//! scope completions zsh > ~/.zfunc/_scope
 //! ```
 //!
 //! ## Library Usage
@@ -216,6 +240,13 @@ pub mod compliance;
 /// Fetches level-2 order book data from exchange APIs and runs
 /// configurable health checks for stablecoin markets.
 pub mod market;
+
+/// Web server module for browser-based UI.
+///
+/// Provides a locally hosted HTTP server with REST API endpoints
+/// and a web UI that mirrors all CLI functionality. Supports
+/// foreground and daemon modes.
+pub mod web;
 
 /// Library version string.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

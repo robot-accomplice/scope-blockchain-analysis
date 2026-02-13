@@ -61,11 +61,22 @@ pub async fn run_with_client(
     format: OutputFormat,
     client: &DexClient,
 ) -> Result<()> {
+    let sp = crate::cli::progress::Spinner::new(&format!(
+        "Discovering {} tokens...",
+        match args.source {
+            DiscoverSource::Profiles => "featured",
+            DiscoverSource::Boosts => "boosted",
+            DiscoverSource::TopBoosts => "top boosted",
+        }
+    ));
+
     let tokens = match args.source {
         DiscoverSource::Profiles => client.get_token_profiles().await?,
         DiscoverSource::Boosts => client.get_token_boosts().await?,
         DiscoverSource::TopBoosts => client.get_token_boosts_top().await?,
     };
+
+    sp.finish("Tokens loaded.");
 
     let filtered: Vec<DiscoverToken> = if let Some(ref chain) = args.chain {
         let c = chain.to_lowercase();

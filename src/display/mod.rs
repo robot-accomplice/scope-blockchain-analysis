@@ -25,10 +25,12 @@
 
 pub mod charts;
 pub mod compliance;
+pub mod format;
 pub mod report;
 
 pub use charts::{
     ChartConfig, render_holder_distribution, render_price_chart, render_volume_chart,
 };
 pub use compliance::{OutputFormat, format_risk_report};
+pub use format::{format_large_number, format_token_balance, format_usd};
 pub use report::{generate_report, save_report};

@@ -1,6 +1,6 @@
 # Test Coverage Improvement Plan
 
-This document outlines a phased plan to address unit testing gaps identified in [TESTS.md](../../TESTS.md). The goal is to bring priority modules to ≥80% coverage and ensure critical paths are exercised.
+This document outlines a phased plan to address unit testing gaps. The goal is to bring priority modules to ≥80% coverage and ensure critical paths are exercised.
 
 ## Prerequisites
 
@@ -37,7 +37,7 @@ This document outlines a phased plan to address unit testing gaps identified in 
 
 ## Phase 2: CLI Commands — Critical Gaps (0–25% → 60%+)
 
-**Acceptance:** CLI module ≥60% per TESTS.md.
+**Acceptance:** CLI module ≥60%.
 
 ### 2.1 `src/cli/compliance.rs` (0% → 60%)
 
@@ -194,7 +194,6 @@ cmd.assert().success();
 - [x] `cargo tarpaulin --out Stdout` shows ≥80% project coverage (89.01%)
 - [x] Compliance module ≥80% (datasource 100%, mod 100%)
 - [x] CLI compliance expanded (resolve_targets, parse_address_line, export formats, trace error path)
-- [ ] TESTS.md checkboxes updated as work completes
 - [x] No new `#[ignore]` tests without documented justification
 
 ## Execution Summary (2026-02-13)
