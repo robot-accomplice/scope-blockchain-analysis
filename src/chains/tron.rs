@@ -28,7 +28,7 @@
 //! }
 //! ```
 
-use crate::chains::{Balance, ChainClient, Token, Transaction};
+use crate::chains::{Balance, ChainClient, Token, TokenHolder, Transaction};
 use crate::config::ChainsConfig;
 use crate::error::{Result, ScopeError};
 use async_trait::async_trait;
@@ -39,6 +39,9 @@ use sha2::{Digest, Sha256};
 
 /// Default TronGrid API endpoint.
 const DEFAULT_TRON_API: &str = "https://api.trongrid.io";
+
+/// Tronscan API base for token info and holder lookups.
+const TRONSCAN_API: &str = "https://apilist.tronscanapi.com";
 
 /// DexScreener search URL for TRX/USDT price lookup.
 const DEXSCREENER_TRX_SEARCH: &str = "https://api.dexscreener.com/latest/dex/search?q=TRX%20USDT";
@@ -300,6 +303,170 @@ impl TronClient {
         }
 
         Ok(balances)
+    }
+
+    /// Fetches TRC-20 token info from Tronscan API.
+    ///
+    /// Returns symbol, name, decimals, and other metadata for a TRC-20 contract.
+    pub async fn get_token_info(&self, contract_address: &str) -> Result<Token> {
+        validate_tron_address(contract_address)?;
+
+        let url = format!(
+            "{}/api/token_trc20?contract={}&showAll=1",
+            TRONSCAN_API, contract_address
+        );
+
+        tracing::debug!(url = %url, "Fetching TRC-20 token info via Tronscan");
+
+        let mut request = self.client.get(&url);
+        if let Some(ref key) = self.api_key {
+            request = request.header("TRON-PRO-API-KEY", key);
+        }
+
+        let response = request.send().await?;
+        let text = response.text().await?;
+        let json: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| ScopeError::Api(format!("Failed to parse Tronscan response: {}", e)))?;
+
+        let tokens = json
+            .get("trc20_tokens")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| {
+                ScopeError::NotFound(format!(
+                    "No token info found for TRC-20 contract {}",
+                    contract_address
+                ))
+            })?;
+
+        let token_data = tokens.first().ok_or_else(|| {
+            ScopeError::NotFound(format!(
+                "No token info found for TRC-20 contract {}",
+                contract_address
+            ))
+        })?;
+
+        let symbol = token_data
+            .get("symbol")
+            .and_then(|v| v.as_str())
+            .unwrap_or("UNKNOWN")
+            .to_string();
+        let name = token_data
+            .get("contract_name")
+            .or_else(|| token_data.get("name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown Token")
+            .to_string();
+        let decimals = token_data
+            .get("decimals")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(6) as u8;
+
+        Ok(Token {
+            contract_address: contract_address.to_string(),
+            symbol,
+            name,
+            decimals,
+        })
+    }
+
+    /// Fetches top TRC-20 token holders from Tronscan API.
+    ///
+    /// Returns holders sorted by balance (largest first).
+    pub async fn get_token_holders(
+        &self,
+        contract_address: &str,
+        limit: u32,
+    ) -> Result<Vec<TokenHolder>> {
+        validate_tron_address(contract_address)?;
+
+        let effective_limit = limit.min(100);
+        let url = format!(
+            "{}/api/token_trc20/holders?contract_address={}&start=0&limit={}",
+            TRONSCAN_API, contract_address, effective_limit
+        );
+
+        tracing::debug!(url = %url, "Fetching TRC-20 token holders via Tronscan");
+
+        let mut request = self.client.get(&url);
+        if let Some(ref key) = self.api_key {
+            request = request.header("TRON-PRO-API-KEY", key);
+        }
+
+        let response = request.send().await?;
+        let text = response.text().await?;
+        let json: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| ScopeError::Api(format!("Failed to parse Tronscan holders: {}", e)))?;
+
+        let holders_data: &[serde_json::Value] = json
+            .get("trc20_tokens")
+            .and_then(|v| v.as_array())
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+
+        // Get decimals for formatted balance
+        let token_info = self.get_token_info(contract_address).await;
+        let decimals = token_info.as_ref().map(|t| t.decimals).unwrap_or(6);
+
+        // Percentage is relative to sum of fetched holder balances (same as EVM chains)
+        let total_balance: f64 = holders_data
+            .iter()
+            .filter_map(|h| h.get("balance").and_then(|v| v.as_str()))
+            .filter_map(|s| s.parse::<f64>().ok())
+            .sum();
+
+        let token_holders: Vec<TokenHolder> = holders_data
+            .iter()
+            .enumerate()
+            .filter_map(|(i, h)| {
+                let holder_address = h.get("holder_address")?.as_str()?.to_string();
+                let balance_raw = h.get("balance")?.as_str()?.to_string();
+                let balance: f64 = balance_raw.parse().ok()?;
+                let percentage = if total_balance > 0.0 {
+                    (balance / total_balance) * 100.0
+                } else {
+                    0.0
+                };
+                let divisor = 10_f64.powi(decimals as i32);
+                let formatted = format!("{:.6}", balance / divisor);
+
+                Some(TokenHolder {
+                    address: holder_address,
+                    balance: balance_raw,
+                    formatted_balance: formatted,
+                    percentage,
+                    rank: (i + 1) as u32,
+                })
+            })
+            .collect();
+
+        Ok(token_holders)
+    }
+
+    /// Fetches total holder count for a TRC-20 token.
+    pub async fn get_token_holder_count(&self, contract_address: &str) -> Result<u64> {
+        validate_tron_address(contract_address)?;
+
+        let url = format!(
+            "{}/api/token_trc20/holders?contract_address={}&start=0&limit=1",
+            TRONSCAN_API, contract_address
+        );
+
+        let mut request = self.client.get(&url);
+        if let Some(ref key) = self.api_key {
+            request = request.header("TRON-PRO-API-KEY", key);
+        }
+
+        let response = request.send().await?;
+        let json: serde_json::Value = response.json().await.map_err(|e| {
+            ScopeError::Api(format!("Failed to parse Tronscan response: {}", e))
+        })?;
+
+        let count = json
+            .get("rangeTotal")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        Ok(count)
     }
 
     /// Enriches a balance with a USD value using DexScreener price lookup.
@@ -700,20 +867,51 @@ impl ChainClient for TronClient {
 
     async fn get_token_balances(&self, address: &str) -> Result<Vec<crate::chains::TokenBalance>> {
         let trc20_balances = self.get_trc20_balances(address).await?;
-        Ok(trc20_balances
-            .into_iter()
-            .map(|tb| crate::chains::TokenBalance {
-                token: Token {
-                    contract_address: tb.contract_address.clone(),
-                    symbol: "TRC20".to_string(),
-                    name: "TRC-20 Token".to_string(),
-                    decimals: 0, // Unknown without additional lookup
-                },
-                balance: tb.raw_balance.clone(),
-                formatted_balance: tb.raw_balance,
+        let mut result = Vec::with_capacity(trc20_balances.len());
+
+        for tb in trc20_balances {
+            let token = match self.get_token_info(&tb.contract_address).await {
+                Ok(info) => info,
+                Err(e) => {
+                    tracing::debug!(
+                        contract = %tb.contract_address,
+                        error = %e,
+                        "Could not fetch TRC-20 token info, using placeholder"
+                    );
+                    Token {
+                        contract_address: tb.contract_address.clone(),
+                        symbol: "TRC20".to_string(),
+                        name: "TRC-20 Token".to_string(),
+                        decimals: 6, // Common for USDT, USDC
+                    }
+                }
+            };
+
+            let raw: f64 = tb.raw_balance.parse().unwrap_or(0.0);
+            let divisor = 10_f64.powi(token.decimals as i32);
+            let formatted = format!("{:.6}", raw / divisor);
+
+            result.push(crate::chains::TokenBalance {
+                token,
+                balance: tb.raw_balance,
+                formatted_balance: formatted,
                 usd_value: None,
-            })
-            .collect())
+            });
+        }
+
+        Ok(result)
+    }
+
+    async fn get_token_info(&self, address: &str) -> Result<Token> {
+        self.get_token_info(address).await
+    }
+
+    async fn get_token_holders(&self, address: &str, limit: u32) -> Result<Vec<TokenHolder>> {
+        self.get_token_holders(address, limit).await
+    }
+
+    async fn get_token_holder_count(&self, address: &str) -> Result<u64> {
+        self.get_token_holder_count(address).await
     }
 }
 
@@ -1354,9 +1552,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(balances.len(), 1);
-        // Verify the mapping from Trc20TokenBalance to TokenBalance
-        assert_eq!(balances[0].token.symbol, "TRC20");
-        assert_eq!(balances[0].token.name, "TRC-20 Token");
+        // Token info enriched via Tronscan (USDT) or fallback to placeholder
+        assert!(
+            balances[0].token.symbol == "USDT" || balances[0].token.symbol == "TRC20",
+            "symbol should be USDT (Tronscan) or TRC20 (fallback)"
+        );
+        // Tronscan returns various name formats (e.g. "TetherToken", "Tether USD");
+        // fallback is "TRC-20 Token" or "Unknown Token"
+        assert!(!balances[0].token.name.is_empty(), "name must be set");
     }
 
     #[tokio::test]

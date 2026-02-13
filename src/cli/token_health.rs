@@ -280,14 +280,14 @@ fn output_token_health_table(
     println!("24h Change:      {:+.2}%", analytics.price_change_24h);
     println!(
         "24h Volume:      ${}",
-        format_large_number(analytics.volume_24h)
+        crate::display::format_large_number(analytics.volume_24h)
     );
     println!(
         "Liquidity:       ${}",
-        format_large_number(analytics.liquidity_usd)
+        crate::display::format_large_number(analytics.liquidity_usd)
     );
     if let Some(mc) = analytics.market_cap {
-        println!("Market Cap:      ${}", format_large_number(mc));
+        println!("Market Cap:      ${}", crate::display::format_large_number(mc));
     }
     if let Some(top10) = analytics.top_10_concentration {
         println!("Top 10 Holders:  {:.1}%", top10);
@@ -327,18 +327,6 @@ fn output_token_health_table(
 
     println!();
     Ok(())
-}
-
-fn format_large_number(value: f64) -> String {
-    if value >= 1_000_000_000.0 {
-        format!("{:.2}B", value / 1_000_000_000.0)
-    } else if value >= 1_000_000.0 {
-        format!("{:.2}M", value / 1_000_000.0)
-    } else if value >= 1_000.0 {
-        format!("{:.2}K", value / 1_000.0)
-    } else {
-        format!("{:.2}", value)
-    }
 }
 
 #[cfg(test)]
@@ -473,10 +461,10 @@ mod tests {
 
     #[test]
     fn test_format_large_number() {
-        assert_eq!(format_large_number(1_500_000_000.0), "1.50B");
-        assert_eq!(format_large_number(2_500_000.0), "2.50M");
-        assert_eq!(format_large_number(3_500.0), "3.50K");
-        assert_eq!(format_large_number(99.99), "99.99");
+        assert_eq!(crate::display::format_large_number(1_500_000_000.0), "1.50B");
+        assert_eq!(crate::display::format_large_number(2_500_000.0), "2.50M");
+        assert_eq!(crate::display::format_large_number(3_500.0), "3.50K");
+        assert_eq!(crate::display::format_large_number(99.99), "99.99");
     }
 
     #[test]

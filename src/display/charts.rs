@@ -157,8 +157,8 @@ pub fn render_volume_chart(volume_history: &[VolumePoint], width: u32, height: u
     let total_volume: f64 = volume_history.iter().map(|v| v.volume).sum();
 
     // Format max volume for display
-    let max_vol_formatted = format_large_number(max_volume);
-    let total_vol_formatted = format_large_number(total_volume);
+    let max_vol_formatted = crate::display::format_large_number(max_volume);
+    let total_vol_formatted = crate::display::format_large_number(total_volume);
 
     output.push_str(&format!(
         "Volume (max: ${}, total: ${})\n",
@@ -308,19 +308,6 @@ fn truncate_address(address: &str) -> String {
     }
 }
 
-/// Formats a large number with K, M, B suffixes.
-fn format_large_number(value: f64) -> String {
-    if value >= 1_000_000_000.0 {
-        format!("{:.2}B", value / 1_000_000_000.0)
-    } else if value >= 1_000_000.0 {
-        format!("{:.2}M", value / 1_000_000.0)
-    } else if value >= 1_000.0 {
-        format!("{:.2}K", value / 1_000.0)
-    } else {
-        format!("{:.2}", value)
-    }
-}
-
 // ============================================================================
 // Unit Tests
 // ============================================================================
@@ -426,10 +413,10 @@ mod tests {
 
     #[test]
     fn test_format_large_number() {
-        assert_eq!(format_large_number(1500.0), "1.50K");
-        assert_eq!(format_large_number(1500000.0), "1.50M");
-        assert_eq!(format_large_number(1500000000.0), "1.50B");
-        assert_eq!(format_large_number(500.0), "500.00");
+        assert_eq!(crate::display::format_large_number(1500.0), "1.50K");
+        assert_eq!(crate::display::format_large_number(1500000.0), "1.50M");
+        assert_eq!(crate::display::format_large_number(1500000000.0), "1.50B");
+        assert_eq!(crate::display::format_large_number(500.0), "500.00");
     }
 
     #[test]

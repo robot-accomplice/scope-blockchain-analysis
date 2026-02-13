@@ -19,7 +19,7 @@
 //! bca portfolio summary
 //! ```
 
-use crate::chains::ChainClientFactory;
+use crate::chains::{native_symbol, ChainClientFactory};
 use crate::config::{Config, OutputFormat};
 use crate::error::{Result, ScopeError};
 use clap::{Args, Subcommand};
@@ -190,8 +190,8 @@ pub struct AddressSummary {
 /// Summary for a token balance.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenSummary {
-    /// Token mint/contract address.
-    pub mint: String,
+    /// Token contract/mint address.
+    pub contract_address: String,
     /// Token balance (human-readable).
     pub balance: String,
     /// Token decimals.
@@ -444,7 +444,7 @@ async fn run_summary(
                 watched.chain.clone(),
                 ChainBalance {
                     native_balance: balance.clone(),
-                    symbol: get_native_symbol(&watched.chain),
+                    symbol: native_symbol(&watched.chain).to_string(),
                     usd: None,
                 },
             );
@@ -502,12 +502,12 @@ async fn run_summary(
 
                 // Show token balances
                 for token in &addr.tokens {
-                    let mint_short = if token.mint.len() >= 8 {
-                        &token.mint[..8]
+                    let addr_short = if token.contract_address.len() >= 8 {
+                        &token.contract_address[..8]
                     } else {
-                        &token.mint
+                        &token.contract_address
                     };
-                    let symbol = token.symbol.as_deref().unwrap_or(mint_short);
+                    let symbol = token.symbol.as_deref().unwrap_or(addr_short);
                     println!("    └─ {} {}", token.balance, symbol);
                 }
             }
@@ -574,7 +574,7 @@ fn portfolio_summary_to_markdown(summary: &PortfolioSummary) -> String {
         let token_list: String = addr
             .tokens
             .iter()
-            .map(|t| t.symbol.as_deref().unwrap_or(&t.mint))
+            .map(|t| t.symbol.as_deref().unwrap_or(&t.contract_address))
             .take(3)
             .collect::<Vec<_>>()
             .join(", ");
@@ -631,7 +631,7 @@ async fn fetch_address_balance(
         Ok(token_bals) => token_bals
             .into_iter()
             .map(|tb| TokenSummary {
-                mint: tb.token.contract_address,
+                contract_address: tb.token.contract_address,
                 balance: tb.formatted_balance,
                 decimals: tb.token.decimals,
                 symbol: Some(tb.token.symbol),
@@ -644,16 +644,6 @@ async fn fetch_address_balance(
     };
 
     (native_balance, tokens)
-}
-
-/// Returns the native token symbol for a chain.
-fn get_native_symbol(chain: &str) -> String {
-    match chain.to_lowercase().as_str() {
-        "solana" | "sol" => "SOL".to_string(),
-        "ethereum" | "eth" => "ETH".to_string(),
-        "tron" | "trx" => "TRX".to_string(),
-        _ => "???".to_string(),
-    }
 }
 
 // ============================================================================
@@ -918,26 +908,26 @@ mod tests {
 
     #[test]
     fn test_get_native_symbol_solana() {
-        assert_eq!(get_native_symbol("solana"), "SOL");
-        assert_eq!(get_native_symbol("sol"), "SOL");
+        assert_eq!(native_symbol("solana"), "SOL");
+        assert_eq!(native_symbol("sol"), "SOL");
     }
 
     #[test]
     fn test_get_native_symbol_ethereum() {
-        assert_eq!(get_native_symbol("ethereum"), "ETH");
-        assert_eq!(get_native_symbol("eth"), "ETH");
+        assert_eq!(native_symbol("ethereum"), "ETH");
+        assert_eq!(native_symbol("eth"), "ETH");
     }
 
     #[test]
     fn test_get_native_symbol_tron() {
-        assert_eq!(get_native_symbol("tron"), "TRX");
-        assert_eq!(get_native_symbol("trx"), "TRX");
+        assert_eq!(native_symbol("tron"), "TRX");
+        assert_eq!(native_symbol("trx"), "TRX");
     }
 
     #[test]
     fn test_get_native_symbol_unknown() {
-        assert_eq!(get_native_symbol("bitcoin"), "???");
-        assert_eq!(get_native_symbol("unknown"), "???");
+        assert_eq!(native_symbol("bitcoin"), "???");
+        assert_eq!(native_symbol("unknown"), "???");
     }
 
     // ========================================================================
@@ -1316,12 +1306,19 @@ mod tests {
 
     #[test]
     fn test_get_native_symbol_polygon() {
-        assert_eq!(get_native_symbol("polygon"), "???");
+        assert_eq!(native_symbol("polygon"), "MATIC");
     }
 
     #[test]
     fn test_get_native_symbol_bsc() {
-        assert_eq!(get_native_symbol("bsc"), "???");
+        assert_eq!(native_symbol("bsc"), "BNB");
+    }
+
+    #[test]
+    fn test_get_native_symbol_evm_l2s() {
+        assert_eq!(native_symbol("arbitrum"), "ETH");
+        assert_eq!(native_symbol("optimism"), "ETH");
+        assert_eq!(native_symbol("base"), "ETH");
     }
 
     #[tokio::test]

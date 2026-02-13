@@ -578,6 +578,89 @@ pub struct TokenSocial {
 }
 
 // ============================================================================
+// Chain Metadata
+// ============================================================================
+
+/// Metadata for a blockchain network (symbol, decimals, explorer URLs).
+///
+/// Used for normalized presentation across all chains.
+#[derive(Debug, Clone)]
+pub struct ChainMetadata {
+    /// Canonical chain identifier.
+    pub chain_id: &'static str,
+    /// Native token symbol (e.g., ETH, SOL, TRX).
+    pub native_symbol: &'static str,
+    /// Native token decimals.
+    pub native_decimals: u8,
+    /// Block explorer base URL for token pages.
+    pub explorer_token_base: &'static str,
+}
+
+/// Returns chain metadata for display and formatting.
+///
+/// Returns `None` for unknown chains.
+pub fn chain_metadata(chain: &str) -> Option<ChainMetadata> {
+    match chain.to_lowercase().as_str() {
+        "ethereum" | "eth" => Some(ChainMetadata {
+            chain_id: "ethereum",
+            native_symbol: "ETH",
+            native_decimals: 18,
+            explorer_token_base: "https://etherscan.io/token",
+        }),
+        "polygon" => Some(ChainMetadata {
+            chain_id: "polygon",
+            native_symbol: "MATIC",
+            native_decimals: 18,
+            explorer_token_base: "https://polygonscan.com/token",
+        }),
+        "arbitrum" => Some(ChainMetadata {
+            chain_id: "arbitrum",
+            native_symbol: "ETH",
+            native_decimals: 18,
+            explorer_token_base: "https://arbiscan.io/token",
+        }),
+        "optimism" => Some(ChainMetadata {
+            chain_id: "optimism",
+            native_symbol: "ETH",
+            native_decimals: 18,
+            explorer_token_base: "https://optimistic.etherscan.io/token",
+        }),
+        "base" => Some(ChainMetadata {
+            chain_id: "base",
+            native_symbol: "ETH",
+            native_decimals: 18,
+            explorer_token_base: "https://basescan.org/token",
+        }),
+        "bsc" => Some(ChainMetadata {
+            chain_id: "bsc",
+            native_symbol: "BNB",
+            native_decimals: 18,
+            explorer_token_base: "https://bscscan.com/token",
+        }),
+        "solana" | "sol" => Some(ChainMetadata {
+            chain_id: "solana",
+            native_symbol: "SOL",
+            native_decimals: 9,
+            explorer_token_base: "https://solscan.io/token",
+        }),
+        "tron" | "trx" => Some(ChainMetadata {
+            chain_id: "tron",
+            native_symbol: "TRX",
+            native_decimals: 6,
+            explorer_token_base: "https://tronscan.org/#/token20",
+        }),
+        _ => None,
+    }
+}
+
+/// Returns the native token symbol for a chain, or "???" if unknown.
+pub fn native_symbol(chain: &str) -> &'static str {
+    chain_metadata(chain)
+        .map(|m| m.native_symbol)
+        .unwrap_or("???")
+}
+
+// ============================================================================
 // Chain Inference
 // ============================================================================
 

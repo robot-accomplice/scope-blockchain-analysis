@@ -541,6 +541,24 @@ monitor:
     path: null                # base directory (default: ./scope-exports/)
 ```
 
+### Free Tiers: Solana & BSC
+
+You can use Scope with **Solana** and **BSC** without paying for APIs.
+
+**BSC (Binance Smart Chain)**
+
+- **RPC:** Default `bsc-dataseed.binance.org` is free. Scope automatically falls back to BSC RPC for **balance** when the block explorer returns "Free API access is not supported" (Etherscan V2 free tier limits).
+- **BscScan API:** Etherscan V2 free tier does not support BSC (chainid=56). Balance works via RPC fallback; transactions and token lists require a paid API plan.
+- **Setup:** No API key needed for balance. For transactions and tokens, a paid Etherscan plan is required. Set `bsc_rpc` in config to override the RPC endpoint.
+
+**Solana**
+
+- **RPC:** Default `api.mainnet-beta.solana.com` is free (public Solana endpoint, rate limited).
+- **Solscan:** Scope uses the public RPC for balance, transactions, and tokens. A Solscan key is optional and not required for normal use.
+- **Setup:** No API key needed for basic Solana support. Use the default RPC in config, or set `solana_rpc` to a custom endpoint if needed.
+
+**Summary:** For BSC, balance works without any API key (RPC fallback). For full BSC support (transactions, tokens), a paid Etherscan plan is required. For Solana, the default public RPC is sufficient.
+
 ### Environment Variables
 
 - `ETHERSCAN_API_KEY` - Required for compliance features

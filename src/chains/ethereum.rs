@@ -47,6 +47,9 @@ use serde::Deserialize;
 /// endpoint with a `chainid` query parameter to select the network.
 const ETHERSCAN_V2_API: &str = "https://api.etherscan.io/v2/api";
 
+/// Default BSC JSON-RPC endpoint (used as fallback when Etherscan V2 free tier blocks BSC).
+const DEFAULT_BSC_RPC: &str = "https://bsc-dataseed.binance.org";
+
 /// Default JSON-RPC fallback for custom EVM chain.
 const DEFAULT_AEGIS_RPC: &str = "http://localhost:8545";
 
@@ -88,6 +91,10 @@ pub struct EthereumClient {
 
     /// Type of API endpoint (block explorer or JSON-RPC).
     api_type: ApiType,
+
+    /// Optional RPC URL for balance fallback when block explorer free tier blocks the chain.
+    /// Used for BSC: Etherscan V2 free keys don't support chainid=56.
+    rpc_fallback_url: Option<String>,
 }
 
 /// Response from Etherscan-compatible APIs.
@@ -231,6 +238,7 @@ impl EthereumClient {
             native_symbol: "ETH".to_string(),
             native_decimals: 18,
             api_type: ApiType::BlockExplorer,
+            rpc_fallback_url: None,
         })
     }
 
@@ -249,6 +257,22 @@ impl EthereumClient {
             native_symbol: "ETH".to_string(),
             native_decimals: 18,
             api_type: ApiType::BlockExplorer,
+            rpc_fallback_url: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_base_url_and_rpc_fallback(base_url: &str, rpc_fallback_url: Option<String>) -> Self {
+        Self {
+            client: Client::new(),
+            base_url: base_url.to_string(),
+            chain_id: Some("56".to_string()),
+            api_key: None,
+            chain_name: "bsc".to_string(),
+            native_symbol: "BNB".to_string(),
+            native_decimals: 18,
+            api_type: ApiType::BlockExplorer,
+            rpc_fallback_url,
         }
     }
 
@@ -298,6 +322,18 @@ impl EthereumClient {
             .build()
             .map_err(|e| ScopeError::Chain(format!("Failed to create HTTP client: {}", e)))?;
 
+        // BSC: Etherscan V2 free tier blocks chainid=56. Fall back to BSC RPC for balance.
+        let rpc_fallback_url = if chain == "bsc" {
+            Some(
+                config
+                    .bsc_rpc
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_BSC_RPC.to_string()),
+            )
+        } else {
+            None
+        };
+
         Ok(Self {
             client,
             base_url: base_url.to_string(),
@@ -307,6 +343,7 @@ impl EthereumClient {
             native_symbol: symbol.to_string(),
             native_decimals: 18,
             api_type: ApiType::BlockExplorer,
+            rpc_fallback_url,
         })
     }
 
@@ -331,6 +368,7 @@ impl EthereumClient {
             native_symbol: "WRAITH".to_string(),
             native_decimals: 18,
             api_type: ApiType::JsonRpc,
+            rpc_fallback_url: None,
         })
     }
 
@@ -382,7 +420,23 @@ impl EthereumClient {
         validate_eth_address(address)?;
 
         match self.api_type {
-            ApiType::BlockExplorer => self.get_balance_explorer(address).await,
+            ApiType::BlockExplorer => {
+                let result = self.get_balance_explorer(address).await;
+                // Fallback to RPC when Etherscan V2 free tier blocks the chain (e.g. BSC).
+                if let (Err(e), Some(rpc_url)) =
+                    (&result, &self.rpc_fallback_url)
+                {
+                    let msg = e.to_string();
+                    if msg.contains("Free API access is not supported for this chain") {
+                        tracing::debug!(
+                            url = %rpc_url,
+                            "Falling back to RPC for balance (block explorer free tier restriction)"
+                        );
+                        return self.get_balance_via_rpc(rpc_url, address).await;
+                    }
+                }
+                result
+            }
             ApiType::JsonRpc => self.get_balance_rpc(address).await,
         }
     }
@@ -399,10 +453,13 @@ impl EthereumClient {
         let response: ApiResponse<String> = self.client.get(&url).send().await?.json().await?;
 
         if response.status != "1" {
-            return Err(ScopeError::Chain(format!(
-                "API error: {}",
-                response.message
-            )));
+            // BscScan/Etherscan put the actual reason in result (e.g. "Invalid API Key", "Max rate limit reached")
+            let detail = if response.result.is_empty() || response.result.starts_with("0x") {
+                response.message.clone()
+            } else {
+                format!("{} — {}", response.message, response.result)
+            };
+            return Err(ScopeError::Chain(format!("API error: {}", detail)));
         }
 
         self.parse_balance_wei(&response.result)
@@ -410,6 +467,11 @@ impl EthereumClient {
 
     /// Fetches balance using JSON-RPC (eth_getBalance).
     async fn get_balance_rpc(&self, address: &str) -> Result<Balance> {
+        self.get_balance_via_rpc(&self.base_url, address).await
+    }
+
+    /// Fetches balance via a specific JSON-RPC endpoint (used for fallback).
+    async fn get_balance_via_rpc(&self, rpc_url: &str, address: &str) -> Result<Balance> {
         #[derive(serde::Serialize)]
         struct RpcRequest<'a> {
             jsonrpc: &'a str,
@@ -436,11 +498,11 @@ impl EthereumClient {
             id: 1,
         };
 
-        tracing::debug!(url = %self.base_url, address = %address, "Fetching balance via JSON-RPC");
+        tracing::debug!(url = %rpc_url, address = %address, "Fetching balance via JSON-RPC");
 
         let response: RpcResponse = self
             .client
-            .post(&self.base_url)
+            .post(rpc_url)
             .json(&request)
             .send()
             .await?
@@ -880,7 +942,8 @@ impl EthereumClient {
                             continue;
                         }
 
-                        let formatted = format_token_balance(&raw_balance, decimals);
+                        let formatted =
+                            crate::display::format_token_balance(&raw_balance, decimals);
 
                         balances.push(crate::chains::TokenBalance {
                             token: Token {
@@ -1136,7 +1199,7 @@ impl EthereumClient {
                 TokenHolder {
                     address: h.address,
                     balance: h.quantity.clone(),
-                    formatted_balance: format_token_balance(&h.quantity, 18), // Default to 18 decimals
+                    formatted_balance: crate::display::format_token_balance(&h.quantity, 18), // Default to 18 decimals
                     percentage,
                     rank: (i + 1) as u32,
                 }
@@ -1195,23 +1258,6 @@ impl EthereumClient {
     }
 }
 
-/// Formats a token balance with proper decimal places.
-fn format_token_balance(balance: &str, decimals: u8) -> String {
-    let balance_f64: f64 = balance.parse().unwrap_or(0.0);
-    let divisor = 10_f64.powi(decimals as i32);
-    let formatted = balance_f64 / divisor;
-
-    if formatted >= 1_000_000_000.0 {
-        format!("{:.2}B", formatted / 1_000_000_000.0)
-    } else if formatted >= 1_000_000.0 {
-        format!("{:.2}M", formatted / 1_000_000.0)
-    } else if formatted >= 1_000.0 {
-        format!("{:.2}K", formatted / 1_000.0)
-    } else {
-        format!("{:.4}", formatted)
-    }
-}
-
 impl Default for EthereumClient {
     fn default() -> Self {
         Self {
@@ -1223,6 +1269,7 @@ impl Default for EthereumClient {
             native_symbol: "ETH".to_string(),
             native_decimals: 18,
             api_type: ApiType::BlockExplorer,
+            rpc_fallback_url: None,
         }
     }
 }
@@ -1565,28 +1612,28 @@ mod tests {
 
     #[test]
     fn test_format_token_balance_large() {
-        assert!(format_token_balance("1000000000000000000000000000", 18).contains("B"));
+        assert!(crate::display::format_token_balance("1000000000000000000000000000", 18).contains("B"));
     }
 
     #[test]
     fn test_format_token_balance_millions() {
-        assert!(format_token_balance("5000000000000000000000000", 18).contains("M"));
+        assert!(crate::display::format_token_balance("5000000000000000000000000", 18).contains("M"));
     }
 
     #[test]
     fn test_format_token_balance_thousands() {
-        assert!(format_token_balance("5000000000000000000000", 18).contains("K"));
+        assert!(crate::display::format_token_balance("5000000000000000000000", 18).contains("K"));
     }
 
     #[test]
     fn test_format_token_balance_small() {
-        let formatted = format_token_balance("500000000000000000", 18);
+        let formatted = crate::display::format_token_balance("500000000000000000", 18);
         assert!(formatted.contains("0.5"));
     }
 
     #[test]
     fn test_format_token_balance_zero() {
-        let formatted = format_token_balance("0", 18);
+        let formatted = crate::display::format_token_balance("0", 18);
         assert!(formatted.contains("0.0000"));
     }
 
@@ -1655,6 +1702,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_get_balance_bsc_rpc_fallback_on_free_tier_restriction() {
+        let mut server = mockito::Server::new_async().await;
+        let _explorer_mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"status":"0","message":"NOTOK","result":"Free API access is not supported for this chain. Please upgrade your api plan for full chain coverage. https://etherscan.io/apis"}"#)
+            .create_async()
+            .await;
+
+        let _rpc_mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","id":1,"result":"0xDE0B6B3A7640000"}"#)
+            .create_async()
+            .await;
+
+        let client = EthereumClient::with_base_url_and_rpc_fallback(
+            &server.url(),
+            Some(server.url()),
+        );
+        let balance = client.get_balance(VALID_ADDRESS).await.unwrap();
+        assert_eq!(balance.symbol, "BNB");
+        assert!(balance.formatted.contains("1.000000"));
+    }
+
+    #[tokio::test]
     async fn test_get_balance_invalid_address() {
         let client = EthereumClient::default();
         let result = client.get_balance("invalid").await;
@@ -1681,6 +1756,7 @@ mod tests {
             native_symbol: "WRAITH".to_string(),
             native_decimals: 18,
             api_type: ApiType::JsonRpc,
+            rpc_fallback_url: None,
         };
         let balance = client.get_balance(VALID_ADDRESS).await.unwrap();
         assert_eq!(balance.symbol, "WRAITH");
@@ -1707,6 +1783,7 @@ mod tests {
             native_symbol: "WRAITH".to_string(),
             native_decimals: 18,
             api_type: ApiType::JsonRpc,
+            rpc_fallback_url: None,
         };
         let result = client.get_balance(VALID_ADDRESS).await;
         assert!(result.is_err());
@@ -1733,6 +1810,7 @@ mod tests {
             native_symbol: "WRAITH".to_string(),
             native_decimals: 18,
             api_type: ApiType::JsonRpc,
+            rpc_fallback_url: None,
         };
         let result = client.get_balance(VALID_ADDRESS).await;
         assert!(result.is_err());
@@ -1874,6 +1952,7 @@ mod tests {
             native_symbol: "WRAITH".to_string(),
             native_decimals: 18,
             api_type: ApiType::JsonRpc,
+            rpc_fallback_url: None,
         };
         let tx = client.get_transaction(VALID_TX_HASH).await.unwrap();
         assert_eq!(tx.from, "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2");

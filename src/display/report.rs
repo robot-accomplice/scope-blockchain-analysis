@@ -31,21 +31,9 @@ use std::path::Path;
 // ============================================================================
 // Block explorer base URLs
 // ============================================================================
-
-/// Etherscan base URL for Ethereum token pages.
-const ETHERSCAN_TOKEN_BASE: &str = "https://etherscan.io/token";
-/// PolygonScan base URL for Polygon token pages.
-const POLYGONSCAN_TOKEN_BASE: &str = "https://polygonscan.com/token";
-/// Arbiscan base URL for Arbitrum token pages.
-const ARBISCAN_TOKEN_BASE: &str = "https://arbiscan.io/token";
-/// Optimistic Etherscan base URL for Optimism token pages.
-const OPTIMISM_TOKEN_BASE: &str = "https://optimistic.etherscan.io/token";
-/// BaseScan base URL for Base token pages.
-const BASESCAN_TOKEN_BASE: &str = "https://basescan.org/token";
-/// BscScan base URL for BSC token pages.
-const BSCSCAN_TOKEN_BASE: &str = "https://bscscan.com/token";
-/// Solscan base URL for Solana token pages.
-const SOLSCAN_TOKEN_BASE: &str = "https://solscan.io/token";
+// Token explorer URLs come from scope::chains::chain_metadata().
+// Fallback for unknown chains:
+const FALLBACK_EXPLORER_TOKEN_BASE: &str = "https://etherscan.io/token";
 
 /// DexScreener base URL for token pair pages.
 const DEXSCREENER_BASE: &str = "https://dexscreener.com";
@@ -161,25 +149,25 @@ fn generate_executive_summary(analytics: &TokenAnalytics) -> String {
     ));
     summary.push_str(&format!(
         "| 24h Volume | {} |\n",
-        format_usd(analytics.volume_24h)
+        crate::display::format_usd(analytics.volume_24h)
     ));
     summary.push_str(&format!(
         "| 7d Volume | {} |\n",
-        format_usd(analytics.volume_7d)
+        crate::display::format_usd(analytics.volume_7d)
     ));
     summary.push_str(&format!(
         "| Liquidity | {} |\n",
-        format_usd(analytics.liquidity_usd)
+        crate::display::format_usd(analytics.liquidity_usd)
     ));
 
     if let Some(mc) = analytics.market_cap {
-        summary.push_str(&format!("| Market Cap | {} |\n", format_usd(mc)));
+        summary.push_str(&format!("| Market Cap | {} |\n", crate::display::format_usd(mc)));
     }
 
     if let Some(fdv) = analytics.fdv {
         summary.push_str(&format!(
             "| Fully Diluted Valuation | {} |\n",
-            format_usd(fdv)
+            crate::display::format_usd(fdv)
         ));
     }
 
@@ -249,11 +237,11 @@ fn generate_volume_analysis(analytics: &TokenAnalytics) -> String {
     section.push_str("|--------|--------|\n");
     section.push_str(&format!(
         "| 24 Hours | {} |\n",
-        format_usd(analytics.volume_24h)
+        crate::display::format_usd(analytics.volume_24h)
     ));
     section.push_str(&format!(
         "| 7 Days | {} |\n",
-        format_usd(analytics.volume_7d)
+        crate::display::format_usd(analytics.volume_7d)
     ));
 
     // Volume to liquidity ratio (indicator of trading activity)
@@ -281,7 +269,7 @@ fn generate_liquidity_analysis(analytics: &TokenAnalytics) -> String {
 
     section.push_str(&format!(
         "**Total Liquidity:** {}\n\n",
-        format_usd(analytics.liquidity_usd)
+        crate::display::format_usd(analytics.liquidity_usd)
     ));
 
     if !analytics.dex_pairs.is_empty() {
@@ -295,8 +283,8 @@ fn generate_liquidity_analysis(analytics: &TokenAnalytics) -> String {
                 pair.dex_name,
                 pair.base_token,
                 pair.quote_token,
-                format_usd(pair.liquidity_usd),
-                format_usd(pair.volume_24h),
+                crate::display::format_usd(pair.liquidity_usd),
+                crate::display::format_usd(pair.volume_24h),
                 pair.price_usd
             ));
         }
@@ -1028,17 +1016,10 @@ fn generate_data_sources(analytics: &TokenAnalytics) -> String {
     let chain = &analytics.chain.to_lowercase();
     let address = &analytics.token.contract_address;
 
-    // Explorer links based on chain
-    let explorer_url = match chain.as_str() {
-        "ethereum" => format!("{}/{}", ETHERSCAN_TOKEN_BASE, address),
-        "polygon" => format!("{}/{}", POLYGONSCAN_TOKEN_BASE, address),
-        "arbitrum" => format!("{}/{}", ARBISCAN_TOKEN_BASE, address),
-        "optimism" => format!("{}/{}", OPTIMISM_TOKEN_BASE, address),
-        "base" => format!("{}/{}", BASESCAN_TOKEN_BASE, address),
-        "bsc" => format!("{}/{}", BSCSCAN_TOKEN_BASE, address),
-        "solana" => format!("{}/{}", SOLSCAN_TOKEN_BASE, address),
-        _ => format!("{}/{}", ETHERSCAN_TOKEN_BASE, address),
-    };
+    // Explorer links from centralized chain metadata
+    let explorer_url = crate::chains::chain_metadata(chain)
+        .map(|m| format!("{}/{}", m.explorer_token_base, address))
+        .unwrap_or_else(|| format!("{}/{}", FALLBACK_EXPLORER_TOKEN_BASE, address));
 
     section.push_str(&format!(
         "- [Block Explorer ({})]({})\n",
@@ -1089,19 +1070,6 @@ pub fn save_report(report: &str, path: impl AsRef<Path>) -> Result<()> {
             e
         ))
     })
-}
-
-/// Formats a USD value with appropriate suffixes.
-fn format_usd(value: f64) -> String {
-    if value >= 1_000_000_000.0 {
-        format!("${:.2}B", value / 1_000_000_000.0)
-    } else if value >= 1_000_000.0 {
-        format!("${:.2}M", value / 1_000_000.0)
-    } else if value >= 1_000.0 {
-        format!("${:.0}K", value / 1_000.0)
-    } else {
-        format!("${:.2}", value)
-    }
 }
 
 /// Formats a number with commas.
@@ -1463,10 +1431,10 @@ mod tests {
 
     #[test]
     fn test_format_usd() {
-        assert_eq!(format_usd(1500000000.0), "$1.50B");
-        assert_eq!(format_usd(1500000.0), "$1.50M");
-        assert_eq!(format_usd(1500.0), "$2K"); // 1500 / 1000 = 1.5, rounded to 2K
-        assert_eq!(format_usd(15.5), "$15.50");
+        assert_eq!(crate::display::format_usd(1500000000.0), "$1.50B");
+        assert_eq!(crate::display::format_usd(1500000.0), "$1.50M");
+        assert_eq!(crate::display::format_usd(1500.0), "$1.50K");
+        assert_eq!(crate::display::format_usd(15.5), "$15.50");
     }
 
     #[test]
@@ -1821,9 +1789,9 @@ mod tests {
 
     #[test]
     fn test_format_usd_edge_cases() {
-        assert_eq!(format_usd(0.0), "$0.00");
-        assert_eq!(format_usd(0.50), "$0.50");
-        assert_eq!(format_usd(999.0), "$999.00");
+        assert_eq!(crate::display::format_usd(0.0), "$0.00");
+        assert_eq!(crate::display::format_usd(0.50), "$0.50");
+        assert_eq!(crate::display::format_usd(999.0), "$999.00");
     }
 
     #[test]
@@ -1850,6 +1818,7 @@ mod tests {
             ("base", "basescan.org"),
             ("bsc", "bscscan.com"),
             ("solana", "solscan.io"),
+            ("tron", "tronscan.org"),
         ];
 
         for (chain, expected_domain) in chains {

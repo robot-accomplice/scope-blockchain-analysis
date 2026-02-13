@@ -49,6 +49,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Utilities
+base64 = "0.22"
 dirs = "5.0"
 async-trait = "0.1"
 bs58 = "0.5"
