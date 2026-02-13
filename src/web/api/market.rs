@@ -2,14 +2,13 @@
 
 use crate::cli::crawl::{self, Period};
 use crate::market::{
-    BinanceClient, HealthThresholds, MarketSummary, MarketVenue,
-    order_book_from_analytics,
+    BinanceClient, HealthThresholds, MarketSummary, MarketVenue, order_book_from_analytics,
 };
 use crate::web::AppState;
+use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::Json;
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -39,13 +38,27 @@ pub struct MarketRequest {
     pub peg_range: f64,
 }
 
-fn default_pair() -> String { "USDC".to_string() }
-fn default_venue() -> String { "binance".to_string() }
-fn default_chain() -> String { "ethereum".to_string() }
-fn default_peg() -> f64 { 1.0 }
-fn default_min_levels() -> usize { 6 }
-fn default_min_depth() -> f64 { 3000.0 }
-fn default_peg_range() -> f64 { 0.001 }
+fn default_pair() -> String {
+    "USDC".to_string()
+}
+fn default_venue() -> String {
+    "binance".to_string()
+}
+fn default_chain() -> String {
+    "ethereum".to_string()
+}
+fn default_peg() -> f64 {
+    1.0
+}
+fn default_min_levels() -> usize {
+    6
+}
+fn default_min_depth() -> f64 {
+    3000.0
+}
+fn default_peg_range() -> f64 {
+    0.001
+}
 
 /// Converts a MarketSummary to a JSON Value.
 fn summary_to_json(summary: &MarketSummary) -> serde_json::Value {
@@ -111,7 +124,8 @@ pub async fn handle(
                         .flatten(),
                     _ => None,
                 };
-                let summary = MarketSummary::from_order_book(&book, req.peg, &thresholds, volume_24h);
+                let summary =
+                    MarketSummary::from_order_book(&book, req.peg, &thresholds, volume_24h);
                 Json(summary_to_json(&summary)).into_response()
             }
             Err(e) => (
@@ -128,7 +142,15 @@ pub async fn handle(
             _ => &req.chain,
         };
 
-        match crawl::fetch_analytics_for_input(&req.pair, venue_chain, Period::Hour24, 10, &state.factory).await {
+        match crawl::fetch_analytics_for_input(
+            &req.pair,
+            venue_chain,
+            Period::Hour24,
+            10,
+            &state.factory,
+        )
+        .await
+        {
             Ok(analytics) => {
                 if analytics.dex_pairs.is_empty() {
                     return (
@@ -140,10 +162,20 @@ pub async fn handle(
                 let best_pair = analytics
                     .dex_pairs
                     .iter()
-                    .max_by(|a, b| a.liquidity_usd.partial_cmp(&b.liquidity_usd).unwrap_or(std::cmp::Ordering::Equal))
+                    .max_by(|a, b| {
+                        a.liquidity_usd
+                            .partial_cmp(&b.liquidity_usd)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
                     .unwrap();
-                let book = order_book_from_analytics(venue_chain, best_pair, &analytics.token.symbol);
-                let summary = MarketSummary::from_order_book(&book, req.peg, &thresholds, Some(best_pair.volume_24h));
+                let book =
+                    order_book_from_analytics(venue_chain, best_pair, &analytics.token.symbol);
+                let summary = MarketSummary::from_order_book(
+                    &book,
+                    req.peg,
+                    &thresholds,
+                    Some(best_pair.volume_24h),
+                );
                 Json(summary_to_json(&summary)).into_response()
             }
             Err(e) => (
@@ -224,11 +256,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_market_cex() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
         use axum::extract::State;
         use axum::response::IntoResponse;
-        use crate::config::Config;
-        use crate::chains::DefaultClientFactory;
-        use crate::web::AppState;
 
         let config = Config::default();
         let factory = DefaultClientFactory {
@@ -251,11 +283,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_market_dex() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
         use axum::extract::State;
         use axum::response::IntoResponse;
-        use crate::config::Config;
-        use crate::chains::DefaultClientFactory;
-        use crate::web::AppState;
 
         let config = Config::default();
         let factory = DefaultClientFactory {

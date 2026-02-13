@@ -6,7 +6,6 @@
 
 use assert_cmd::Command;
 use predicates::prelude::*;
-use tempfile;
 
 /// Returns a Command for the Scope binary.
 #[allow(deprecated)] // TODO: Migrate to cargo::cargo_bin_cmd! when stable
@@ -695,10 +694,7 @@ fn test_monitor_help() {
 
 #[test]
 fn test_mon_alias() {
-    scope_cmd()
-        .args(["mon", "--help"])
-        .assert()
-        .success();
+    scope_cmd().args(["mon", "--help"]).assert().success();
 }
 
 // ============================================================================
@@ -716,10 +712,7 @@ fn test_disc_alias() {
 
 #[test]
 fn test_health_alias() {
-    scope_cmd()
-        .args(["health", "--help"])
-        .assert()
-        .success();
+    scope_cmd().args(["health", "--help"]).assert().success();
 }
 
 #[test]
@@ -745,7 +738,10 @@ fn test_help_shows_version() {
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains(format!("v{}", env!("CARGO_PKG_VERSION"))));
+        .stdout(predicate::str::contains(format!(
+            "v{}",
+            env!("CARGO_PKG_VERSION")
+        )));
 }
 
 // ============================================================================
@@ -758,13 +754,12 @@ fn test_interactive_help() {
         .args(["interactive", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("interactive").or(predicate::str::contains("Interactive")));
+        .stdout(
+            predicate::str::contains("interactive").or(predicate::str::contains("Interactive")),
+        );
 }
 
 #[test]
 fn test_shell_alias() {
-    scope_cmd()
-        .args(["shell", "--help"])
-        .assert()
-        .success();
+    scope_cmd().args(["shell", "--help"]).assert().success();
 }

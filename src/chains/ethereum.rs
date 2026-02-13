@@ -423,9 +423,7 @@ impl EthereumClient {
             ApiType::BlockExplorer => {
                 let result = self.get_balance_explorer(address).await;
                 // Fallback to RPC when Etherscan V2 free tier blocks the chain (e.g. BSC).
-                if let (Err(e), Some(rpc_url)) =
-                    (&result, &self.rpc_fallback_url)
-                {
+                if let (Err(e), Some(rpc_url)) = (&result, &self.rpc_fallback_url) {
                     let msg = e.to_string();
                     if msg.contains("Free API access is not supported for this chain") {
                         tracing::debug!(
@@ -890,9 +888,7 @@ impl EthereumClient {
         }
 
         let response: CodeResponse = self.client.get(&url).send().await?.json().await?;
-        Ok(response
-            .result
-            .unwrap_or_else(|| "0x".to_string()))
+        Ok(response.result.unwrap_or_else(|| "0x".to_string()))
     }
 
     /// Fetches ERC-20 token balances for an address.
@@ -1678,12 +1674,16 @@ mod tests {
 
     #[test]
     fn test_format_token_balance_large() {
-        assert!(crate::display::format_token_balance("1000000000000000000000000000", 18).contains("B"));
+        assert!(
+            crate::display::format_token_balance("1000000000000000000000000000", 18).contains("B")
+        );
     }
 
     #[test]
     fn test_format_token_balance_millions() {
-        assert!(crate::display::format_token_balance("5000000000000000000000000", 18).contains("M"));
+        assert!(
+            crate::display::format_token_balance("5000000000000000000000000", 18).contains("M")
+        );
     }
 
     #[test]
@@ -1786,10 +1786,8 @@ mod tests {
             .create_async()
             .await;
 
-        let client = EthereumClient::with_base_url_and_rpc_fallback(
-            &server.url(),
-            Some(server.url()),
-        );
+        let client =
+            EthereumClient::with_base_url_and_rpc_fallback(&server.url(), Some(server.url()));
         let balance = client.get_balance(VALID_ADDRESS).await.unwrap();
         assert_eq!(balance.symbol, "BNB");
         assert!(balance.formatted.contains("1.000000"));

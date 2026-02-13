@@ -297,9 +297,7 @@ async fn run_command(command: Commands, config: &Config) -> Result<()> {
         Commands::Discover(args) => scope::cli::discover::run(args, config.output.format)
             .await
             .map_err(|e| scope::error::ScopeError::Other(e.to_string())),
-        Commands::Insights(args) => {
-            scope::cli::insights::run(args, config, &factory).await
-        }
+        Commands::Insights(args) => scope::cli::insights::run(args, config, &factory).await,
         // Web command is handled in main() before factory creation
         Commands::Web(_) => unreachable!("Web command handled before dispatch"),
     };
@@ -370,15 +368,17 @@ fn error_suggestion(e: &ScopeError) -> Option<&'static str> {
              EVM: 0x followed by 64 hex characters\n      \
              Solana: base58 encoded signature",
         ),
-        ScopeError::Config(_) => {
-            Some("Run `scope setup` to create or repair your configuration.")
-        }
+        ScopeError::Config(_) => Some("Run `scope setup` to create or repair your configuration."),
         ScopeError::Request(_) | ScopeError::Network(_) => Some(
             "Check your network connection and try again.\n      \
              Use -v for more details on the failing request.",
         ),
-        ScopeError::Api(msg) if msg.contains("401") || msg.contains("403") || msg.contains("key") => {
-            Some("Your API key may be missing or invalid.\n      Run `scope setup --key <provider>` to configure it.")
+        ScopeError::Api(msg)
+            if msg.contains("401") || msg.contains("403") || msg.contains("key") =>
+        {
+            Some(
+                "Your API key may be missing or invalid.\n      Run `scope setup --key <provider>` to configure it.",
+            )
         }
         ScopeError::NotFound(_) => Some(
             "The resource was not found. Verify the address, hash, or token exists on the specified chain.",

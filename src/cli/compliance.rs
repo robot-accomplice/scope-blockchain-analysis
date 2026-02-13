@@ -1103,7 +1103,7 @@ mod tests {
 
     #[test]
     fn test_format_compliance_report_summary() {
-        use crate::compliance::risk::{RiskAssessment, RiskLevel, RiskFactor, RiskCategory};
+        use crate::compliance::risk::{RiskAssessment, RiskCategory, RiskFactor, RiskLevel};
         let assessment = RiskAssessment {
             address: "0xabc".to_string(),
             chain: "ethereum".to_string(),
@@ -1120,7 +1120,11 @@ mod tests {
             recommendations: vec!["Continue monitoring".to_string()],
             assessed_at: chrono::Utc::now(),
         };
-        let patterns: Vec<(String, String, Option<crate::compliance::datasource::PatternAnalysis>)> = vec![];
+        let patterns: Vec<(
+            String,
+            String,
+            Option<crate::compliance::datasource::PatternAnalysis>,
+        )> = vec![];
         let report = format_compliance_report(
             &[assessment],
             &patterns,
@@ -1138,7 +1142,7 @@ mod tests {
 
     #[test]
     fn test_format_compliance_report_detailed() {
-        use crate::compliance::risk::{RiskAssessment, RiskLevel, RiskFactor, RiskCategory};
+        use crate::compliance::risk::{RiskAssessment, RiskCategory, RiskFactor, RiskLevel};
         let assessment = RiskAssessment {
             address: "0xdef".to_string(),
             chain: "ethereum".to_string(),
@@ -1168,7 +1172,11 @@ mod tests {
             ],
             assessed_at: chrono::Utc::now(),
         };
-        let patterns: Vec<(String, String, Option<crate::compliance::datasource::PatternAnalysis>)> = vec![];
+        let patterns: Vec<(
+            String,
+            String,
+            Option<crate::compliance::datasource::PatternAnalysis>,
+        )> = vec![];
         let report = format_compliance_report(
             &[assessment],
             &patterns,
@@ -1190,8 +1198,8 @@ mod tests {
 
     #[test]
     fn test_format_compliance_report_with_pattern_analysis() {
-        use crate::compliance::risk::{RiskAssessment, RiskLevel, RiskFactor, RiskCategory};
         use crate::compliance::datasource::PatternAnalysis;
+        use crate::compliance::risk::{RiskAssessment, RiskCategory, RiskFactor, RiskLevel};
         let assessment = RiskAssessment {
             address: "0x123".to_string(),
             chain: "ethereum".to_string(),

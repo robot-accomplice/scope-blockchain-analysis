@@ -3,10 +3,10 @@
 use crate::chains::ChainClientFactory;
 use crate::cli::insights::{self, InsightsArgs};
 use crate::web::AppState;
+use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::Json;
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -70,16 +70,17 @@ pub async fn handle(
                 report: None,
                 dossier: false,
             };
-            let client: Box<dyn crate::chains::ChainClient> = match state.factory.create_chain_client(chain) {
-                Ok(c) => c,
-                Err(e) => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({ "error": e.to_string() })),
-                    )
-                        .into_response();
-                }
-            };
+            let client: Box<dyn crate::chains::ChainClient> =
+                match state.factory.create_chain_client(chain) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(serde_json::json!({ "error": e.to_string() })),
+                        )
+                            .into_response();
+                    }
+                };
             match crate::cli::address::analyze_address(&addr_args, client.as_ref()).await {
                 Ok(report) => Json(serde_json::json!({
                     "target_info": target_type,
@@ -216,11 +217,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_insights_address() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
         use axum::extract::State;
         use axum::response::IntoResponse;
-        use crate::config::Config;
-        use crate::chains::DefaultClientFactory;
-        use crate::web::AppState;
 
         let config = Config::default();
         let factory = DefaultClientFactory {
@@ -240,11 +241,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_insights_token() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
         use axum::extract::State;
         use axum::response::IntoResponse;
-        use crate::config::Config;
-        use crate::chains::DefaultClientFactory;
-        use crate::web::AppState;
 
         let config = Config::default();
         let factory = DefaultClientFactory {
@@ -264,11 +265,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_insights_tx() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
         use axum::extract::State;
         use axum::response::IntoResponse;
-        use crate::config::Config;
-        use crate::chains::DefaultClientFactory;
-        use crate::web::AppState;
 
         let config = Config::default();
         let factory = DefaultClientFactory {
@@ -276,7 +277,8 @@ mod tests {
         };
         let state = std::sync::Arc::new(AppState { config, factory });
         let req = InsightsRequest {
-            target: "0xabc123def456789012345678901234567890123456789012345678901234abcd".to_string(),
+            target: "0xabc123def456789012345678901234567890123456789012345678901234abcd"
+                .to_string(),
             chain: None,
             decode: true,
             trace: false,

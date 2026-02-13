@@ -2,10 +2,10 @@
 
 use crate::cli::tx;
 use crate::web::AppState;
+use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::Json;
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -59,7 +59,10 @@ mod tests {
             "trace": true
         });
         let req: TxRequest = serde_json::from_value(json).unwrap();
-        assert_eq!(req.hash, "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
+        assert_eq!(
+            req.hash,
+            "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+        );
         assert_eq!(req.chain, "polygon");
         assert!(req.decode);
         assert!(req.trace);
@@ -71,7 +74,10 @@ mod tests {
             "hash": "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
         });
         let req: TxRequest = serde_json::from_value(json).unwrap();
-        assert_eq!(req.hash, "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890");
+        assert_eq!(
+            req.hash,
+            "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+        );
         assert_eq!(req.chain, "ethereum");
         assert!(!req.decode);
         assert!(!req.trace);
@@ -105,11 +111,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_tx_direct() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
         use axum::extract::State;
         use axum::response::IntoResponse;
-        use crate::config::Config;
-        use crate::chains::DefaultClientFactory;
-        use crate::web::AppState;
 
         let config = Config::default();
         let factory = DefaultClientFactory {

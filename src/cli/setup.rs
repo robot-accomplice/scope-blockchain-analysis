@@ -626,10 +626,16 @@ fn run_setup_wizard_impl(
         "  scope address 0x...           # Analyze an address"
     )
     .map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(writer, "  scope insights <target>       # Auto-detect and analyze")
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(writer, "  scope monitor USDC            # Live TUI dashboard")
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(
+        writer,
+        "  scope insights <target>       # Auto-detect and analyze"
+    )
+    .map_err(|e| ScopeError::Io(e.to_string()))?;
+    writeln!(
+        writer,
+        "  scope monitor USDC            # Live TUI dashboard"
+    )
+    .map_err(|e| ScopeError::Io(e.to_string()))?;
     writeln!(writer, "  scope interactive             # Interactive mode")
         .map_err(|e| ScopeError::Io(e.to_string()))?;
     writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;

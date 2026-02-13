@@ -55,10 +55,10 @@
 pub mod address;
 pub mod address_report;
 pub mod compliance;
-pub mod insights;
 pub mod crawl;
 pub mod discover;
 pub mod export;
+pub mod insights;
 pub mod interactive;
 pub mod market;
 pub mod monitor;

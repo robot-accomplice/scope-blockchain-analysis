@@ -82,7 +82,7 @@ async fn run_batch(
 
     for (address, chain) in &targets {
         let short_addr = if address.len() > 12 {
-            format!("{}...{}", &address[..6], &address[address.len()-4..])
+            format!("{}...{}", &address[..6], &address[address.len() - 4..])
         } else {
             address.clone()
         };
@@ -413,7 +413,7 @@ mod tests {
 
     #[test]
     fn test_batch_report_to_markdown_with_risk_data() {
-        use crate::compliance::risk::{RiskAssessment, RiskLevel, RiskFactor};
+        use crate::compliance::risk::{RiskAssessment, RiskFactor, RiskLevel};
 
         let reports = vec![minimal_report()];
         let risk = RiskAssessment {
@@ -493,9 +493,7 @@ mod tests {
         let output_path = temp_dir.path().join("batch_report.md");
 
         let args = BatchArgs {
-            addresses: vec![
-                "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
-            ],
+            addresses: vec!["0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string()],
             from_file: None,
             output: output_path.clone(),
             chain: "ethereum".to_string(),
@@ -523,9 +521,7 @@ mod tests {
         let output_path = temp_dir.path().join("batch_risk_report.md");
 
         let args = BatchArgs {
-            addresses: vec![
-                "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
-            ],
+            addresses: vec!["0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string()],
             from_file: None,
             output: output_path.clone(),
             chain: "ethereum".to_string(),

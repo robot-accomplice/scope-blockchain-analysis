@@ -231,19 +231,11 @@ pub async fn run(
     // Validate transaction hash
     validate_tx_hash(&args.hash, &args.chain)?;
 
-    let sp = crate::cli::progress::Spinner::new(&format!(
-        "Analyzing transaction on {}...",
-        args.chain
-    ));
+    let sp =
+        crate::cli::progress::Spinner::new(&format!("Analyzing transaction on {}...", args.chain));
 
-    let report = fetch_transaction_report(
-        &args.hash,
-        &args.chain,
-        args.decode,
-        args.trace,
-        clients,
-    )
-    .await?;
+    let report =
+        fetch_transaction_report(&args.hash, &args.chain, args.decode, args.trace, clients).await?;
 
     sp.finish("Transaction loaded.");
 
@@ -901,41 +893,79 @@ mod tests {
     // Mock-based tests for fetch_transaction_report
     // ========================================================================
 
-    use crate::chains::{Balance as ChainBalance, ChainClient, ChainClientFactory, DexDataSource, TokenBalance as ChainTokenBalance, Transaction as ChainTransaction};
+    use crate::chains::{
+        Balance as ChainBalance, ChainClient, ChainClientFactory, DexDataSource,
+        TokenBalance as ChainTokenBalance, Transaction as ChainTransaction,
+    };
     use async_trait::async_trait;
 
     struct MockTxClient;
 
     #[async_trait]
     impl ChainClient for MockTxClient {
-        fn chain_name(&self) -> &str { "ethereum" }
-        fn native_token_symbol(&self) -> &str { "ETH" }
+        fn chain_name(&self) -> &str {
+            "ethereum"
+        }
+        fn native_token_symbol(&self) -> &str {
+            "ETH"
+        }
         async fn get_balance(&self, _a: &str) -> crate::error::Result<ChainBalance> {
-            Ok(ChainBalance { raw: "0".into(), formatted: "0 ETH".into(), decimals: 18, symbol: "ETH".into(), usd_value: None })
+            Ok(ChainBalance {
+                raw: "0".into(),
+                formatted: "0 ETH".into(),
+                decimals: 18,
+                symbol: "ETH".into(),
+                usd_value: None,
+            })
         }
         async fn enrich_balance_usd(&self, _b: &mut ChainBalance) {}
         async fn get_transaction(&self, _h: &str) -> crate::error::Result<ChainTransaction> {
             Ok(ChainTransaction {
                 hash: "0xabc123def456789012345678901234567890123456789012345678901234abcd".into(),
-                block_number: Some(12345678), timestamp: Some(1700000000),
-                from: "0xfrom".into(), to: Some("0xto".into()),
+                block_number: Some(12345678),
+                timestamp: Some(1700000000),
+                from: "0xfrom".into(),
+                to: Some("0xto".into()),
                 value: "1000000000000000000".into(),
-                gas_limit: 21000, gas_used: Some(21000), gas_price: "20000000000".into(),
-                nonce: 42, input: "0xa9059cbb0000000000000000000000001234".into(),
+                gas_limit: 21000,
+                gas_used: Some(21000),
+                gas_price: "20000000000".into(),
+                nonce: 42,
+                input: "0xa9059cbb0000000000000000000000001234".into(),
                 status: Some(true),
             })
         }
-        async fn get_transactions(&self, _a: &str, _l: u32) -> crate::error::Result<Vec<ChainTransaction>> { Ok(vec![]) }
-        async fn get_block_number(&self) -> crate::error::Result<u64> { Ok(12345678) }
-        async fn get_token_balances(&self, _a: &str) -> crate::error::Result<Vec<ChainTokenBalance>> { Ok(vec![]) }
-        async fn get_code(&self, _addr: &str) -> crate::error::Result<String> { Ok("0x".into()) }
+        async fn get_transactions(
+            &self,
+            _a: &str,
+            _l: u32,
+        ) -> crate::error::Result<Vec<ChainTransaction>> {
+            Ok(vec![])
+        }
+        async fn get_block_number(&self) -> crate::error::Result<u64> {
+            Ok(12345678)
+        }
+        async fn get_token_balances(
+            &self,
+            _a: &str,
+        ) -> crate::error::Result<Vec<ChainTokenBalance>> {
+            Ok(vec![])
+        }
+        async fn get_code(&self, _addr: &str) -> crate::error::Result<String> {
+            Ok("0x".into())
+        }
     }
 
     struct MockTxFactory;
     impl ChainClientFactory for MockTxFactory {
-        fn create_chain_client(&self, _chain: &str) -> crate::error::Result<Box<dyn ChainClient>> { Ok(Box::new(MockTxClient)) }
+        fn create_chain_client(&self, _chain: &str) -> crate::error::Result<Box<dyn ChainClient>> {
+            Ok(Box::new(MockTxClient))
+        }
         fn create_dex_client(&self) -> Box<dyn DexDataSource> {
-            crate::chains::DefaultClientFactory { chains_config: Default::default() }.create_dex_client()
+            crate::chains::DefaultClientFactory {
+                chains_config: Default::default(),
+            }
+            .create_dex_client()
         }
     }
 
@@ -948,7 +978,8 @@ mod tests {
             false,
             false,
             &factory,
-        ).await;
+        )
+        .await;
         assert!(result.is_ok());
         let report = result.unwrap();
         assert_eq!(report.transaction.from, "0xfrom");
@@ -964,7 +995,8 @@ mod tests {
             true,
             false,
             &factory,
-        ).await;
+        )
+        .await;
         assert!(result.is_ok());
     }
 

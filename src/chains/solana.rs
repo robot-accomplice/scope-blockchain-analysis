@@ -404,12 +404,9 @@ impl SolanaClient {
             )));
         }
 
-        let account = response
-            .result
-            .and_then(|r| r.value)
-            .ok_or_else(|| {
-                ScopeError::NotFound(format!("Mint account not found: {}", mint_address))
-            })?;
+        let account = response.result.and_then(|r| r.value).ok_or_else(|| {
+            ScopeError::NotFound(format!("Mint account not found: {}", mint_address))
+        })?;
 
         let data_b64 = account
             .data
@@ -418,11 +415,8 @@ impl SolanaClient {
                 ScopeError::Chain(format!("No account data for mint: {}", mint_address))
             })?;
 
-        let data = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            &data_b64,
-        )
-        .map_err(|e| ScopeError::Chain(format!("Failed to decode mint data: {}", e)))?;
+        let data = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &data_b64)
+            .map_err(|e| ScopeError::Chain(format!("Failed to decode mint data: {}", e)))?;
 
         // SPL Token mint layout: 32 (mint_authority) + 8 (supply) + 1 (decimals) + ...
         const DECIMALS_OFFSET: usize = 40;

@@ -974,7 +974,9 @@ mod tests {
         assert!(result.is_ok());
         let content = std::fs::read_to_string(tmp.path()).unwrap();
         assert!(content.contains("# Transaction Export"));
-        assert!(content.contains("| Hash | Block | Timestamp | From | To | Value | Gas | Status |"));
+        assert!(
+            content.contains("| Hash | Block | Timestamp | From | To | Value | Gas | Status |")
+        );
         assert!(content.contains("0xexport1"));
     }
 

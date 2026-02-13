@@ -2,25 +2,21 @@
 
 use crate::cli::portfolio::{Portfolio, WatchedAddress};
 use crate::web::AppState;
+use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::Json;
 use serde::Deserialize;
 use std::sync::Arc;
 
 /// GET /api/portfolio/list — List portfolio addresses.
-pub async fn handle_list(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub async fn handle_list(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let data_dir = state.config.data_dir();
     match Portfolio::load(&data_dir) {
-        Ok(portfolio) => {
-            Json(serde_json::json!({
-                "addresses": portfolio.addresses,
-            }))
-            .into_response()
-        }
+        Ok(portfolio) => Json(serde_json::json!({
+            "addresses": portfolio.addresses,
+        }))
+        .into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),
@@ -156,11 +152,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_portfolio_list_direct() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
         use axum::extract::State;
         use axum::response::IntoResponse;
-        use crate::config::Config;
-        use crate::chains::DefaultClientFactory;
-        use crate::web::AppState;
 
         let config = Config::default();
         let factory = DefaultClientFactory {
@@ -174,11 +170,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_portfolio_add_direct() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
         use axum::extract::State;
         use axum::response::IntoResponse;
-        use crate::config::Config;
-        use crate::chains::DefaultClientFactory;
-        use crate::web::AppState;
 
         let config = Config::default();
         let factory = DefaultClientFactory {
@@ -191,7 +187,9 @@ mod tests {
             label: Some("Test".to_string()),
             tags: vec!["test".to_string()],
         };
-        let response = handle_add(State(state), axum::Json(req)).await.into_response();
+        let response = handle_add(State(state), axum::Json(req))
+            .await
+            .into_response();
         let status = response.status();
         assert!(status.is_success() || status.is_client_error() || status.is_server_error());
     }

@@ -778,11 +778,17 @@ fn output_table_with_dex(analytics: &TokenAnalytics, args: &CrawlArgs) -> Result
     );
 
     if let Some(mc) = analytics.market_cap {
-        println!("Market Cap:      ${}", crate::display::format_large_number(mc));
+        println!(
+            "Market Cap:      ${}",
+            crate::display::format_large_number(mc)
+        );
     }
 
     if let Some(fdv) = analytics.fdv {
-        println!("FDV:             ${}", crate::display::format_large_number(fdv));
+        println!(
+            "FDV:             ${}",
+            crate::display::format_large_number(fdv)
+        );
     }
 
     // Trading pairs
@@ -1032,8 +1038,14 @@ mod tests {
 
     #[test]
     fn test_format_large_number_boundary_b() {
-        assert_eq!(crate::display::format_large_number(999_999_999.0), "1000.00M");
-        assert_eq!(crate::display::format_large_number(1_000_000_000.0), "1.00B");
+        assert_eq!(
+            crate::display::format_large_number(999_999_999.0),
+            "1000.00M"
+        );
+        assert_eq!(
+            crate::display::format_large_number(1_000_000_000.0),
+            "1.00B"
+        );
     }
 
     #[test]

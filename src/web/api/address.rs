@@ -3,10 +3,10 @@
 use crate::chains::ChainClientFactory;
 use crate::cli::address::{self, AddressArgs};
 use crate::web::AppState;
+use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::Json;
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -56,16 +56,17 @@ pub async fn handle(
         dossier: req.dossier,
     };
 
-    let client: Box<dyn crate::chains::ChainClient> = match state.factory.create_chain_client(&args.chain) {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response();
-        }
-    };
+    let client: Box<dyn crate::chains::ChainClient> =
+        match state.factory.create_chain_client(&args.chain) {
+            Ok(c) => c,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": e.to_string() })),
+                )
+                    .into_response();
+            }
+        };
 
     match address::analyze_address(&args, client.as_ref()).await {
         Ok(report) => Json(serde_json::json!(report)).into_response(),
@@ -138,11 +139,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_address_direct() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
         use axum::extract::State;
         use axum::response::IntoResponse;
-        use crate::config::Config;
-        use crate::chains::DefaultClientFactory;
-        use crate::web::AppState;
 
         let config = Config::default();
         let factory = DefaultClientFactory {

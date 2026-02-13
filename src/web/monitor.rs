@@ -3,8 +3,8 @@
 //! Streams real-time token price, volume, and transaction data
 //! to connected browser clients via WebSocket.
 
-use crate::chains::{ChainClientFactory, DexDataSource};
 use crate::chains::dex::DexTokenData;
+use crate::chains::{ChainClientFactory, DexDataSource};
 use crate::web::AppState;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
@@ -62,13 +62,18 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, params: Moni
         "chain": chain,
         "refresh_secs": params.refresh,
     });
-    if socket.send(Message::Text(init_msg.to_string().into())).await.is_err() {
+    if socket
+        .send(Message::Text(init_msg.to_string()))
+        .await
+        .is_err()
+    {
         return;
     }
 
     loop {
         // Fetch latest token data
-        let data: crate::error::Result<DexTokenData> = dex_client.get_token_data(&chain, &token_input).await;
+        let data: crate::error::Result<DexTokenData> =
+            dex_client.get_token_data(&chain, &token_input).await;
 
         let msg = match data {
             Ok(token_data) => {
@@ -113,7 +118,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, params: Moni
             }
         };
 
-        if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
+        if socket.send(Message::Text(msg.to_string())).await.is_err() {
             // Client disconnected
             break;
         }
@@ -126,11 +131,11 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, params: Moni
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(Message::Text(text))) => {
                         // Handle client commands (e.g., change token)
-                        if let Ok(cmd) = serde_json::from_str::<serde_json::Value>(&text) {
-                            if cmd.get("type").and_then(|t| t.as_str()) == Some("ping") {
-                                let pong = serde_json::json!({"type": "pong"});
-                                let _ = socket.send(Message::Text(pong.to_string().into())).await;
-                            }
+                        if let Ok(cmd) = serde_json::from_str::<serde_json::Value>(&text)
+                            && cmd.get("type").and_then(|t| t.as_str()) == Some("ping")
+                        {
+                            let pong = serde_json::json!({"type": "pong"});
+                            let _ = socket.send(Message::Text(pong.to_string())).await;
                         }
                     }
                     _ => {}

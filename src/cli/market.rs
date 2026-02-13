@@ -668,7 +668,7 @@ mod tests {
 
     #[test]
     fn test_market_summary_to_markdown_basic() {
-        use crate::market::{MarketSummary, HealthCheck};
+        use crate::market::{HealthCheck, MarketSummary};
         let summary = MarketSummary {
             pair: "USDCUSDT".to_string(),
             peg_target: 1.0,
@@ -682,9 +682,7 @@ mod tests {
             bid_outliers: 0,
             ask_outliers: 0,
             healthy: true,
-            checks: vec![
-                HealthCheck::Pass("Spread within range".to_string()),
-            ],
+            checks: vec![HealthCheck::Pass("Spread within range".to_string())],
             execution_10k_buy: None,
             execution_10k_sell: None,
             asks: vec![],
@@ -701,7 +699,7 @@ mod tests {
 
     #[test]
     fn test_market_summary_to_markdown_no_prices() {
-        use crate::market::{MarketSummary, HealthCheck};
+        use crate::market::{HealthCheck, MarketSummary};
         let summary = MarketSummary {
             pair: "TESTUSDT".to_string(),
             peg_target: 1.0,
@@ -715,9 +713,7 @@ mod tests {
             bid_outliers: 0,
             ask_outliers: 0,
             healthy: false,
-            checks: vec![
-                HealthCheck::Fail("No data".to_string()),
-            ],
+            checks: vec![HealthCheck::Fail("No data".to_string())],
             execution_10k_buy: None,
             execution_10k_sell: None,
             asks: vec![],
@@ -807,7 +803,7 @@ mod tests {
 
     #[test]
     fn test_market_summary_to_markdown_with_execution_estimates() {
-        use crate::market::{MarketSummary, HealthCheck, ExecutionEstimate, ExecutionSide};
+        use crate::market::{ExecutionEstimate, ExecutionSide, HealthCheck, MarketSummary};
         let summary = MarketSummary {
             pair: "TESTUSDT".to_string(),
             peg_target: 1.0,
@@ -821,9 +817,7 @@ mod tests {
             bid_outliers: 0,
             ask_outliers: 0,
             healthy: true,
-            checks: vec![
-                HealthCheck::Pass("Spread within range".to_string()),
-            ],
+            checks: vec![HealthCheck::Pass("Spread within range".to_string())],
             execution_10k_buy: Some(ExecutionEstimate {
                 notional_usdt: 10_000.0,
                 side: ExecutionSide::Buy,

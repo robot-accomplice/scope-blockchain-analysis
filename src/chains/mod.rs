@@ -1420,7 +1420,10 @@ mod tests {
         assert_eq!(meta.chain_id, "optimism");
         assert_eq!(meta.native_symbol, "ETH");
         assert_eq!(meta.native_decimals, 18);
-        assert_eq!(meta.explorer_token_base, "https://optimistic.etherscan.io/token");
+        assert_eq!(
+            meta.explorer_token_base,
+            "https://optimistic.etherscan.io/token"
+        );
     }
 
     #[test]

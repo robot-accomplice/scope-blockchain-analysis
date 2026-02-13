@@ -205,10 +205,7 @@ pub async fn run(
         analysis_args.include_tokens = true;
     }
 
-    let sp = crate::cli::progress::Spinner::new(&format!(
-        "Analyzing address on {}...",
-        args.chain
-    ));
+    let sp = crate::cli::progress::Spinner::new(&format!("Analyzing address on {}...", args.chain));
 
     let client = clients.create_chain_client(&args.chain)?;
     let report = analyze_address(&analysis_args, client.as_ref()).await?;
@@ -751,36 +748,79 @@ mod tests {
     // Mock-based tests for analyze_address
     // ========================================================================
 
-    use crate::chains::{Balance as ChainBalance, ChainClient, Token as ChainToken, TokenBalance as ChainTokenBalance, Transaction as ChainTransaction};
+    use crate::chains::{
+        Balance as ChainBalance, ChainClient, Token as ChainToken,
+        TokenBalance as ChainTokenBalance, Transaction as ChainTransaction,
+    };
     use async_trait::async_trait;
 
     struct MockClient;
 
     #[async_trait]
     impl ChainClient for MockClient {
-        fn chain_name(&self) -> &str { "ethereum" }
-        fn native_token_symbol(&self) -> &str { "ETH" }
+        fn chain_name(&self) -> &str {
+            "ethereum"
+        }
+        fn native_token_symbol(&self) -> &str {
+            "ETH"
+        }
         async fn get_balance(&self, _addr: &str) -> crate::error::Result<ChainBalance> {
-            Ok(ChainBalance { raw: "1000000000000000000".into(), formatted: "1.0 ETH".into(), decimals: 18, symbol: "ETH".into(), usd_value: Some(2500.0) })
+            Ok(ChainBalance {
+                raw: "1000000000000000000".into(),
+                formatted: "1.0 ETH".into(),
+                decimals: 18,
+                symbol: "ETH".into(),
+                usd_value: Some(2500.0),
+            })
         }
-        async fn enrich_balance_usd(&self, b: &mut ChainBalance) { b.usd_value = Some(2500.0); }
-        async fn get_transaction(&self, _h: &str) -> crate::error::Result<ChainTransaction> { Err(crate::error::ScopeError::NotFound("mock".into())) }
-        async fn get_transactions(&self, _addr: &str, _lim: u32) -> crate::error::Result<Vec<ChainTransaction>> {
+        async fn enrich_balance_usd(&self, b: &mut ChainBalance) {
+            b.usd_value = Some(2500.0);
+        }
+        async fn get_transaction(&self, _h: &str) -> crate::error::Result<ChainTransaction> {
+            Err(crate::error::ScopeError::NotFound("mock".into()))
+        }
+        async fn get_transactions(
+            &self,
+            _addr: &str,
+            _lim: u32,
+        ) -> crate::error::Result<Vec<ChainTransaction>> {
             Ok(vec![ChainTransaction {
-                hash: "0x1234".into(), block_number: Some(100), timestamp: Some(1700000000),
-                from: "0xfrom".into(), to: Some("0xto".into()), value: "1000000000000000000".into(),
-                gas_limit: 21000, gas_used: Some(21000), gas_price: "20000000000".into(),
-                nonce: 1, input: "0x".into(), status: Some(true),
+                hash: "0x1234".into(),
+                block_number: Some(100),
+                timestamp: Some(1700000000),
+                from: "0xfrom".into(),
+                to: Some("0xto".into()),
+                value: "1000000000000000000".into(),
+                gas_limit: 21000,
+                gas_used: Some(21000),
+                gas_price: "20000000000".into(),
+                nonce: 1,
+                input: "0x".into(),
+                status: Some(true),
             }])
         }
-        async fn get_block_number(&self) -> crate::error::Result<u64> { Ok(12345678) }
-        async fn get_token_balances(&self, _addr: &str) -> crate::error::Result<Vec<ChainTokenBalance>> {
+        async fn get_block_number(&self) -> crate::error::Result<u64> {
+            Ok(12345678)
+        }
+        async fn get_token_balances(
+            &self,
+            _addr: &str,
+        ) -> crate::error::Result<Vec<ChainTokenBalance>> {
             Ok(vec![ChainTokenBalance {
-                token: ChainToken { contract_address: "0xtoken".into(), symbol: "USDC".into(), name: "USD Coin".into(), decimals: 6 },
-                balance: "1000000".into(), formatted_balance: "1.0".into(), usd_value: Some(1.0),
+                token: ChainToken {
+                    contract_address: "0xtoken".into(),
+                    symbol: "USDC".into(),
+                    name: "USD Coin".into(),
+                    decimals: 6,
+                },
+                balance: "1000000".into(),
+                formatted_balance: "1.0".into(),
+                usd_value: Some(1.0),
             }])
         }
-        async fn get_code(&self, _addr: &str) -> crate::error::Result<String> { Ok("0x".into()) }
+        async fn get_code(&self, _addr: &str) -> crate::error::Result<String> {
+            Ok("0x".into())
+        }
     }
 
     #[tokio::test]

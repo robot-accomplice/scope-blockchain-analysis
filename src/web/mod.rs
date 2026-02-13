@@ -26,8 +26,8 @@ pub mod monitor;
 
 use crate::chains::DefaultClientFactory;
 use crate::config::Config;
-use axum::response::IntoResponse;
 use axum::Router;
+use axum::response::IntoResponse;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
@@ -63,7 +63,9 @@ async fn serve_ui(uri: axum::http::Uri) -> impl axum::response::IntoResponse {
 
     // Serve specific static assets
     match path {
-        "" | "index.html" => axum::response::Html(include_str!("static/index.html")).into_response(),
+        "" | "index.html" => {
+            axum::response::Html(include_str!("static/index.html")).into_response()
+        }
         "app.js" => (
             [(axum::http::header::CONTENT_TYPE, "application/javascript")],
             include_str!("static/app.js"),
@@ -122,9 +124,10 @@ pub fn stop_daemon() -> anyhow::Result<()> {
     }
 
     let pid_str = std::fs::read_to_string(&pid_path)?;
-    let pid: u32 = pid_str.trim().parse().map_err(|e| {
-        anyhow::anyhow!("Invalid PID in {}: {}", pid_path.display(), e)
-    })?;
+    let pid: u32 = pid_str
+        .trim()
+        .parse()
+        .map_err(|e| anyhow::anyhow!("Invalid PID in {}: {}", pid_path.display(), e))?;
 
     eprintln!("Stopping Scope web daemon (PID {})...", pid);
 
@@ -180,7 +183,13 @@ pub fn start_daemon(addr: SocketAddr, config: Config) -> anyhow::Result<()> {
 
     let current_exe = std::env::current_exe()?;
     let child = std::process::Command::new(current_exe)
-        .args(["web", "--port", &addr.port().to_string(), "--bind", &addr.ip().to_string()])
+        .args([
+            "web",
+            "--port",
+            &addr.port().to_string(),
+            "--bind",
+            &addr.ip().to_string(),
+        ])
         .env("SCOPE_WEB_DAEMON_CHILD", "1")
         .stdout(log_file)
         .stderr(log_file_err)
@@ -253,9 +262,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_serve_ui_index() {
-        let response = serve_ui(axum::http::Uri::from_static("/")).await.into_response();
+        let response = serve_ui(axum::http::Uri::from_static("/"))
+            .await
+            .into_response();
         assert_eq!(response.status(), axum::http::StatusCode::OK);
-        let body = body::to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        let body = body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .unwrap();
         let html = String::from_utf8(body.to_vec()).unwrap();
         assert!(html.contains("<!DOCTYPE html>"));
         assert!(html.contains("Scope"));
@@ -263,24 +276,34 @@ mod tests {
 
     #[tokio::test]
     async fn test_serve_ui_index_html() {
-        let response = serve_ui(axum::http::Uri::from_static("/index.html")).await.into_response();
+        let response = serve_ui(axum::http::Uri::from_static("/index.html"))
+            .await
+            .into_response();
         assert_eq!(response.status(), axum::http::StatusCode::OK);
     }
 
     #[tokio::test]
     async fn test_serve_ui_app_js() {
-        let response = serve_ui(axum::http::Uri::from_static("/app.js")).await.into_response();
+        let response = serve_ui(axum::http::Uri::from_static("/app.js"))
+            .await
+            .into_response();
         assert_eq!(response.status(), axum::http::StatusCode::OK);
-        let body = body::to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        let body = body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .unwrap();
         let js = String::from_utf8(body.to_vec()).unwrap();
         assert!(js.contains("function") || js.contains("const") || js.contains("var"));
     }
 
     #[tokio::test]
     async fn test_serve_ui_style_css() {
-        let response = serve_ui(axum::http::Uri::from_static("/style.css")).await.into_response();
+        let response = serve_ui(axum::http::Uri::from_static("/style.css"))
+            .await
+            .into_response();
         assert_eq!(response.status(), axum::http::StatusCode::OK);
-        let body = body::to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        let body = body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .unwrap();
         let css = String::from_utf8(body.to_vec()).unwrap();
         assert!(css.contains(":root") || css.contains("body") || css.contains("nav"));
     }
@@ -288,9 +311,13 @@ mod tests {
     #[tokio::test]
     async fn test_serve_ui_spa_fallback() {
         // Unknown paths should return index.html (SPA routing)
-        let response = serve_ui(axum::http::Uri::from_static("/some/random/path")).await.into_response();
+        let response = serve_ui(axum::http::Uri::from_static("/some/random/path"))
+            .await
+            .into_response();
         assert_eq!(response.status(), axum::http::StatusCode::OK);
-        let body = body::to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        let body = body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .unwrap();
         let html = String::from_utf8(body.to_vec()).unwrap();
         assert!(html.contains("<!DOCTYPE html>"));
     }
@@ -360,7 +387,9 @@ mod tests {
         let response = app.oneshot(req).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
 
-        let body = body::to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        let body = body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(json.get("config_path").is_some());
         assert!(json.get("api_keys").is_some());
@@ -416,7 +445,11 @@ mod tests {
         let response = app.oneshot(req).await.unwrap();
         // Will likely fail due to no API key, but exercises the handler
         let status = response.status();
-        assert!(status == StatusCode::OK || status == StatusCode::BAD_REQUEST || status == StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            status == StatusCode::OK
+                || status == StatusCode::BAD_REQUEST
+                || status == StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
     #[tokio::test]
@@ -441,7 +474,11 @@ mod tests {
 
         let response = app.oneshot(req).await.unwrap();
         let status = response.status();
-        assert!(status == StatusCode::OK || status == StatusCode::BAD_REQUEST || status == StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            status == StatusCode::OK
+                || status == StatusCode::BAD_REQUEST
+                || status == StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
     #[tokio::test]
@@ -466,7 +503,11 @@ mod tests {
 
         let response = app.oneshot(req).await.unwrap();
         let status = response.status();
-        assert!(status == StatusCode::OK || status == StatusCode::BAD_REQUEST || status == StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            status == StatusCode::OK
+                || status == StatusCode::BAD_REQUEST
+                || status == StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
     #[tokio::test]
@@ -509,7 +550,11 @@ mod tests {
 
         let response = app.oneshot(req).await.unwrap();
         let status = response.status();
-        assert!(status == StatusCode::OK || status == StatusCode::BAD_REQUEST || status == StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            status == StatusCode::OK
+                || status == StatusCode::BAD_REQUEST
+                || status == StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
     #[tokio::test]
@@ -535,7 +580,11 @@ mod tests {
 
         let response = app.oneshot(req).await.unwrap();
         let status = response.status();
-        assert!(status == StatusCode::OK || status == StatusCode::BAD_REQUEST || status == StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            status == StatusCode::OK
+                || status == StatusCode::BAD_REQUEST
+                || status == StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
     #[tokio::test]
@@ -561,7 +610,11 @@ mod tests {
 
         let response = app.oneshot(req).await.unwrap();
         let status = response.status();
-        assert!(status == StatusCode::OK || status == StatusCode::BAD_REQUEST || status == StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            status == StatusCode::OK
+                || status == StatusCode::BAD_REQUEST
+                || status == StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
     #[tokio::test]
@@ -587,7 +640,11 @@ mod tests {
 
         let response = app.oneshot(req).await.unwrap();
         let status = response.status();
-        assert!(status == StatusCode::OK || status == StatusCode::BAD_REQUEST || status == StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            status == StatusCode::OK
+                || status == StatusCode::BAD_REQUEST
+                || status == StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
     #[tokio::test]
@@ -612,7 +669,11 @@ mod tests {
 
         let response = app.oneshot(req).await.unwrap();
         let status = response.status();
-        assert!(status == StatusCode::OK || status == StatusCode::BAD_REQUEST || status == StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            status == StatusCode::OK
+                || status == StatusCode::BAD_REQUEST
+                || status == StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
     #[tokio::test]
@@ -657,7 +718,11 @@ mod tests {
 
         let response = app.oneshot(req).await.unwrap();
         let status = response.status();
-        assert!(status == StatusCode::OK || status == StatusCode::BAD_REQUEST || status == StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            status == StatusCode::OK
+                || status == StatusCode::BAD_REQUEST
+                || status == StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
     #[tokio::test]

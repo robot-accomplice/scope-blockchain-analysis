@@ -457,14 +457,12 @@ impl TronClient {
         }
 
         let response = request.send().await?;
-        let json: serde_json::Value = response.json().await.map_err(|e| {
-            ScopeError::Api(format!("Failed to parse Tronscan response: {}", e))
-        })?;
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| ScopeError::Api(format!("Failed to parse Tronscan response: {}", e)))?;
 
-        let count = json
-            .get("rangeTotal")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
+        let count = json.get("rangeTotal").and_then(|v| v.as_u64()).unwrap_or(0);
 
         Ok(count)
     }

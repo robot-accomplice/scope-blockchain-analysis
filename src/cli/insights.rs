@@ -4,11 +4,11 @@
 //! auto-detects chain, and runs relevant Scope analyses to produce unified insights.
 
 use crate::chains::{
-    infer_chain_from_address, infer_chain_from_hash, native_symbol, ChainClientFactory,
+    ChainClientFactory, infer_chain_from_address, infer_chain_from_hash, native_symbol,
 };
 use crate::cli::address::{self, AddressArgs};
-use crate::cli::crawl::{fetch_analytics_for_input, Period};
-use crate::cli::tx::{format_tx_markdown, fetch_transaction_report};
+use crate::cli::crawl::{Period, fetch_analytics_for_input};
+use crate::cli::tx::{fetch_transaction_report, format_tx_markdown};
 use crate::config::Config;
 use crate::display::report;
 use crate::error::Result;
@@ -135,7 +135,9 @@ pub async fn run(
 
             // Contract vs EOA (EVM chains support get_code)
             let code_result = client.get_code(&args.target).await;
-            let is_contract = code_result.as_ref().map_or(false, |c| !c.is_empty() && c != "0x");
+            let is_contract = code_result
+                .as_ref()
+                .is_ok_and(|c| !c.is_empty() && c != "0x");
             if code_result.is_ok() {
                 output.push_str(&format!(
                     "- **Type:** {}\n",
@@ -159,22 +161,22 @@ pub async fn run(
                 "- **Transaction count:** {}\n",
                 report.transaction_count
             ));
-            if let Some(ref tokens) = report.tokens {
-                if !tokens.is_empty() {
+            if let Some(ref tokens) = report.tokens
+                && !tokens.is_empty()
+            {
+                output.push_str(&format!(
+                    "- **Token holdings:** {} different tokens\n",
+                    tokens.len()
+                ));
+                output.push_str("\n### Token Balances\n\n");
+                for tb in tokens.iter().take(10) {
                     output.push_str(&format!(
-                        "- **Token holdings:** {} different tokens\n",
-                        tokens.len()
+                        "- {}: {} ({})\n",
+                        tb.symbol, tb.formatted_balance, tb.contract_address
                     ));
-                    output.push_str("\n### Token Balances\n\n");
-                    for tb in tokens.iter().take(10) {
-                        output.push_str(&format!(
-                            "- {}: {} ({})\n",
-                            tb.symbol, tb.formatted_balance, tb.contract_address
-                        ));
-                    }
-                    if tokens.len() > 10 {
-                        output.push_str(&format!("\n*...and {} more*\n", tokens.len() - 10));
-                    }
+                }
+                if tokens.len() > 10 {
+                    output.push_str(&format!("\n*...and {} more*\n", tokens.len() - 10));
                 }
             }
 
@@ -229,14 +231,9 @@ pub async fn run(
         }
         InferredTarget::Transaction { chain } => {
             output.push_str("## Observations\n\n");
-            let tx_report = fetch_transaction_report(
-                &args.target,
-                chain,
-                args.decode,
-                args.trace,
-                clients,
-            )
-            .await?;
+            let tx_report =
+                fetch_transaction_report(&args.target, chain, args.decode, args.trace, clients)
+                    .await?;
 
             let tx_type = classify_tx_type(
                 &tx_report.transaction.input,
@@ -252,10 +249,7 @@ pub async fn run(
                     "Failed"
                 }
             ));
-            output.push_str(&format!(
-                "- **From:** `{}`\n",
-                tx_report.transaction.from
-            ));
+            output.push_str(&format!("- **From:** `{}`\n", tx_report.transaction.from));
             output.push_str(&format!(
                 "- **To:** `{}`\n",
                 tx_report
@@ -265,10 +259,8 @@ pub async fn run(
                     .unwrap_or("Contract Creation")
             ));
 
-            let (formatted_value, high_value) = format_tx_value(
-                &tx_report.transaction.value,
-                chain,
-            );
+            let (formatted_value, high_value) =
+                format_tx_value(&tx_report.transaction.value, chain);
             output.push_str(&format!("- **Value:** {}\n", formatted_value));
             if high_value {
                 output.push_str("- ⚠️ **High-value transfer**\n");
@@ -298,22 +290,14 @@ pub async fn run(
         }
         InferredTarget::Token { chain } => {
             output.push_str("## Observations\n\n");
-            let analytics = fetch_analytics_for_input(
-                &args.target,
-                chain,
-                Period::Hour24,
-                10,
-                clients,
-            )
-            .await?;
+            let analytics =
+                fetch_analytics_for_input(&args.target, chain, Period::Hour24, 10, clients).await?;
 
             // Token risk summary (interpretive bullets)
             let risk_summary = report::token_risk_summary(&analytics);
             output.push_str(&format!(
                 "- **Risk:** {} {}/10 ({})\n",
-                risk_summary.emoji,
-                risk_summary.score,
-                risk_summary.level
+                risk_summary.emoji, risk_summary.score, risk_summary.level
             ));
             if !risk_summary.concerns.is_empty() {
                 for c in &risk_summary.concerns {
@@ -363,10 +347,7 @@ pub async fn run(
             let mut peg_healthy: Option<bool> = None;
             if is_stablecoin(&analytics.token.symbol) {
                 let pair = format!("{}USDT", analytics.token.symbol);
-                if let Ok(book) = BinanceClient::default_url()
-                    .fetch_order_book(&pair)
-                    .await
-                {
+                if let Ok(book) = BinanceClient::default_url().fetch_order_book(&pair).await {
                     let thresholds = HealthThresholds {
                         peg_target: 1.0,
                         peg_range: 0.001,
@@ -380,12 +361,8 @@ pub async fn run(
                         .await
                         .ok()
                         .flatten();
-                    let summary = MarketSummary::from_order_book(
-                        &book,
-                        1.0,
-                        &thresholds,
-                        volume_24h,
-                    );
+                    let summary =
+                        MarketSummary::from_order_book(&book, 1.0, &thresholds, volume_24h);
                     let deviation_bps = summary
                         .mid_price
                         .map(|m| (m - 1.0) * 10_000.0)
@@ -454,7 +431,11 @@ fn classify_tx_type(input: &str, to: Option<&str>) -> &'static str {
     if to.is_none() {
         return "Contract Creation";
     }
-    let selector = input.trim_start_matches("0x").chars().take(8).collect::<String>();
+    let selector = input
+        .trim_start_matches("0x")
+        .chars()
+        .take(8)
+        .collect::<String>();
     let sel = selector.to_lowercase();
     match sel.as_str() {
         "a9059cbb" => "ERC-20 Transfer",
@@ -486,7 +467,7 @@ fn format_tx_value(value_str: &str, chain: &str) -> (String, bool) {
         "tron" => 6,
         _ => 18,
     };
-    let divisor = 10_f64.powi(decimals as i32);
+    let divisor = 10_f64.powi(decimals);
     let human = wei as f64 / divisor;
     let symbol = native_symbol(chain);
     let formatted = format!("≈ {:.6} {}", human, symbol);
@@ -557,12 +538,12 @@ fn meta_analysis_address(
 
     let key_takeaway = if let (Some(score), Some(level)) = (risk_score, risk_level) {
         if score >= 7.0 {
-            format!("Risk assessment warrants closer scrutiny ({:.1}/10).", score)
-        } else {
             format!(
-                "Overall risk: {:?} ({:.1}/10).",
-                level, score
+                "Risk assessment warrants closer scrutiny ({:.1}/10).",
+                score
             )
+        } else {
+            format!("Overall risk: {:?} ({:.1}/10).", level, score)
         }
     } else if is_contract {
         "Contract address — verify intended interaction before use.".to_string()
@@ -656,13 +637,12 @@ fn meta_analysis_token(
         synthesis_parts.push("Moderate risk — mixed signals.".to_string());
     }
 
-    if is_stablecoin {
-        if let Some(healthy) = peg_healthy {
-            if healthy {
-                synthesis_parts.push("Stablecoin peg is healthy on observed venue.".to_string());
-            } else {
-                synthesis_parts.push("Stablecoin peg deviation detected — verify on multiple venues.".to_string());
-            }
+    if is_stablecoin && let Some(healthy) = peg_healthy {
+        if healthy {
+            synthesis_parts.push("Stablecoin peg is healthy on observed venue.".to_string());
+        } else {
+            synthesis_parts
+                .push("Stablecoin peg deviation detected — verify on multiple venues.".to_string());
         }
     }
 
@@ -682,7 +662,11 @@ fn meta_analysis_token(
         format!(
             "High risk ({}): {} — exercise caution.",
             risk_summary.score,
-            risk_summary.concerns.first().cloned().unwrap_or_else(|| "multiple factors".to_string())
+            risk_summary
+                .concerns
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "multiple factors".to_string())
         )
     } else if is_stablecoin && peg_healthy == Some(false) {
         "Stablecoin deviating from peg — check additional venues before trading.".to_string()
@@ -697,7 +681,8 @@ fn meta_analysis_token(
 
     let mut recommendations = Vec::new();
     if risk_summary.score >= 6 {
-        recommendations.push("Consider smaller position sizes or avoid until risk clears.".to_string());
+        recommendations
+            .push("Consider smaller position sizes or avoid until risk clears.".to_string());
     }
     if top_holder_pct.map(|p| p > 25.0).unwrap_or(false) {
         recommendations.push("Monitor top holder movements for distribution changes.".to_string());
@@ -720,8 +705,8 @@ fn meta_analysis_token(
 mod tests {
     use super::*;
     use crate::chains::{
-        Balance as ChainBalance, ChainClient, ChainClientFactory, DexDataSource, Token as ChainToken,
-        TokenBalance as ChainTokenBalance, Transaction as ChainTransaction,
+        Balance as ChainBalance, ChainClient, ChainClientFactory, DexDataSource,
+        Token as ChainToken, TokenBalance as ChainTokenBalance, Transaction as ChainTransaction,
     };
     use async_trait::async_trait;
 
@@ -785,8 +770,7 @@ mod tests {
             Ok(vec![
                 ChainTokenBalance {
                     token: ChainToken {
-                        contract_address: "0xdAC17F958D2ee523a2206206994597C13D831ec7"
-                            .to_string(),
+                        contract_address: "0xdAC17F958D2ee523a2206206994597C13D831ec7".to_string(),
                         symbol: "USDT".to_string(),
                         name: "Tether USD".to_string(),
                         decimals: 6,
@@ -797,8 +781,7 @@ mod tests {
                 },
                 ChainTokenBalance {
                     token: ChainToken {
-                        contract_address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
-                            .to_string(),
+                        contract_address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
                         symbol: "USDC".to_string(),
                         name: "USD Coin".to_string(),
                         decimals: 6,
@@ -817,10 +800,7 @@ mod tests {
     struct MockFactory;
 
     impl ChainClientFactory for MockFactory {
-        fn create_chain_client(
-            &self,
-            _chain: &str,
-        ) -> crate::error::Result<Box<dyn ChainClient>> {
+        fn create_chain_client(&self, _chain: &str) -> crate::error::Result<Box<dyn ChainClient>> {
             Ok(Box::new(MockChainClient))
         }
         fn create_dex_client(&self) -> Box<dyn DexDataSource> {
@@ -892,10 +872,7 @@ mod tests {
     struct MockContractFactory;
 
     impl ChainClientFactory for MockContractFactory {
-        fn create_chain_client(
-            &self,
-            _chain: &str,
-        ) -> crate::error::Result<Box<dyn ChainClient>> {
+        fn create_chain_client(&self, _chain: &str) -> crate::error::Result<Box<dyn ChainClient>> {
             Ok(Box::new(MockContractClient))
         }
         fn create_dex_client(&self) -> Box<dyn DexDataSource> {
@@ -1092,10 +1069,7 @@ mod tests {
     struct MockTokenFactory;
 
     impl ChainClientFactory for MockTokenFactory {
-        fn create_chain_client(
-            &self,
-            _chain: &str,
-        ) -> crate::error::Result<Box<dyn ChainClient>> {
+        fn create_chain_client(&self, _chain: &str) -> crate::error::Result<Box<dyn ChainClient>> {
             Ok(Box::new(MockTokenChainClient))
         }
         fn create_dex_client(&self) -> Box<dyn DexDataSource> {
@@ -1213,10 +1187,7 @@ mod tests {
 
     #[test]
     fn test_infer_target_evm_address() {
-        let t = infer_target(
-            "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
-            None,
-        );
+        let t = infer_target("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2", None);
         assert!(matches!(t, InferredTarget::Address { chain } if chain == "ethereum"));
     }
 
@@ -1228,10 +1199,7 @@ mod tests {
 
     #[test]
     fn test_infer_target_solana_address() {
-        let t = infer_target(
-            "DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy",
-            None,
-        );
+        let t = infer_target("DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy", None);
         assert!(matches!(t, InferredTarget::Address { chain } if chain == "solana"));
     }
 
@@ -1261,7 +1229,10 @@ mod tests {
 
     #[test]
     fn test_infer_target_chain_override() {
-        let t = infer_target("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2", Some("polygon"));
+        let t = infer_target(
+            "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
+            Some("polygon"),
+        );
         assert!(matches!(t, InferredTarget::Address { chain } if chain == "polygon"));
     }
 
@@ -1317,37 +1288,49 @@ mod tests {
 
     #[test]
     fn test_target_type_label_address() {
-        let t = InferredTarget::Address { chain: "ethereum".to_string() };
+        let t = InferredTarget::Address {
+            chain: "ethereum".to_string(),
+        };
         assert_eq!(target_type_label(&t), "Address");
     }
 
     #[test]
     fn test_target_type_label_transaction() {
-        let t = InferredTarget::Transaction { chain: "ethereum".to_string() };
+        let t = InferredTarget::Transaction {
+            chain: "ethereum".to_string(),
+        };
         assert_eq!(target_type_label(&t), "Transaction");
     }
 
     #[test]
     fn test_target_type_label_token() {
-        let t = InferredTarget::Token { chain: "ethereum".to_string() };
+        let t = InferredTarget::Token {
+            chain: "ethereum".to_string(),
+        };
         assert_eq!(target_type_label(&t), "Token");
     }
 
     #[test]
     fn test_chain_label_address() {
-        let t = InferredTarget::Address { chain: "polygon".to_string() };
+        let t = InferredTarget::Address {
+            chain: "polygon".to_string(),
+        };
         assert_eq!(chain_label(&t), "polygon");
     }
 
     #[test]
     fn test_chain_label_transaction() {
-        let t = InferredTarget::Transaction { chain: "tron".to_string() };
+        let t = InferredTarget::Transaction {
+            chain: "tron".to_string(),
+        };
         assert_eq!(chain_label(&t), "tron");
     }
 
     #[test]
     fn test_chain_label_token() {
-        let t = InferredTarget::Token { chain: "solana".to_string() };
+        let t = InferredTarget::Token {
+            chain: "solana".to_string(),
+        };
         assert_eq!(chain_label(&t), "solana");
     }
 
@@ -1357,30 +1340,66 @@ mod tests {
 
     #[test]
     fn test_classify_tx_type_dex_swaps() {
-        assert_eq!(classify_tx_type("0x38ed173900000...", Some("0xrouter")), "DEX Swap");
-        assert_eq!(classify_tx_type("0x5c11d79500000...", Some("0xrouter")), "DEX Swap");
-        assert_eq!(classify_tx_type("0x4a25d94a00000...", Some("0xrouter")), "DEX Swap");
-        assert_eq!(classify_tx_type("0x8803dbee00000...", Some("0xrouter")), "DEX Swap");
-        assert_eq!(classify_tx_type("0x7ff36ab500000...", Some("0xrouter")), "DEX Swap");
-        assert_eq!(classify_tx_type("0x18cbafe500000...", Some("0xrouter")), "DEX Swap");
-        assert_eq!(classify_tx_type("0xfb3bdb4100000...", Some("0xrouter")), "DEX Swap");
-        assert_eq!(classify_tx_type("0xb6f9de9500000...", Some("0xrouter")), "DEX Swap");
+        assert_eq!(
+            classify_tx_type("0x38ed173900000...", Some("0xrouter")),
+            "DEX Swap"
+        );
+        assert_eq!(
+            classify_tx_type("0x5c11d79500000...", Some("0xrouter")),
+            "DEX Swap"
+        );
+        assert_eq!(
+            classify_tx_type("0x4a25d94a00000...", Some("0xrouter")),
+            "DEX Swap"
+        );
+        assert_eq!(
+            classify_tx_type("0x8803dbee00000...", Some("0xrouter")),
+            "DEX Swap"
+        );
+        assert_eq!(
+            classify_tx_type("0x7ff36ab500000...", Some("0xrouter")),
+            "DEX Swap"
+        );
+        assert_eq!(
+            classify_tx_type("0x18cbafe500000...", Some("0xrouter")),
+            "DEX Swap"
+        );
+        assert_eq!(
+            classify_tx_type("0xfb3bdb4100000...", Some("0xrouter")),
+            "DEX Swap"
+        );
+        assert_eq!(
+            classify_tx_type("0xb6f9de9500000...", Some("0xrouter")),
+            "DEX Swap"
+        );
     }
 
     #[test]
     fn test_classify_tx_type_multicall() {
-        assert_eq!(classify_tx_type("0xac9650d800000...", Some("0xcontract")), "Multicall");
-        assert_eq!(classify_tx_type("0x5ae401dc00000...", Some("0xcontract")), "Multicall");
+        assert_eq!(
+            classify_tx_type("0xac9650d800000...", Some("0xcontract")),
+            "Multicall"
+        );
+        assert_eq!(
+            classify_tx_type("0x5ae401dc00000...", Some("0xcontract")),
+            "Multicall"
+        );
     }
 
     #[test]
     fn test_classify_tx_type_transfer_from() {
-        assert_eq!(classify_tx_type("0x23b872dd00000...", Some("0xtoken")), "ERC-20 Transfer From");
+        assert_eq!(
+            classify_tx_type("0x23b872dd00000...", Some("0xtoken")),
+            "ERC-20 Transfer From"
+        );
     }
 
     #[test]
     fn test_classify_tx_type_contract_call() {
-        assert_eq!(classify_tx_type("0xdeadbeef00000...", Some("0xcontract")), "Contract Call");
+        assert_eq!(
+            classify_tx_type("0xdeadbeef00000...", Some("0xcontract")),
+            "Contract Call"
+        );
     }
 
     #[test]
@@ -1491,7 +1510,11 @@ mod tests {
         let meta = meta_analysis_address(false, None, 0, Some(8.5), Some(&level));
         assert!(meta.synthesis.contains("Elevated risk"));
         assert!(meta.key_takeaway.contains("scrutiny"));
-        assert!(meta.recommendations.iter().any(|r| r.contains("unusual transaction")));
+        assert!(
+            meta.recommendations
+                .iter()
+                .any(|r| r.contains("unusual transaction"))
+        );
     }
 
     #[test]
@@ -1506,7 +1529,11 @@ mod tests {
     fn test_meta_analysis_address_contract_no_value() {
         let meta = meta_analysis_address(true, None, 0, None, None);
         assert!(meta.key_takeaway.contains("Contract address"));
-        assert!(meta.recommendations.iter().any(|r| r.contains("Confirm contract")));
+        assert!(
+            meta.recommendations
+                .iter()
+                .any(|r| r.contains("Confirm contract"))
+        );
     }
 
     #[test]
@@ -1524,7 +1551,11 @@ mod tests {
     #[test]
     fn test_meta_analysis_address_with_tokens_recommendation() {
         let meta = meta_analysis_address(false, None, 3, None, None);
-        assert!(meta.recommendations.iter().any(|r| r.contains("Verify token contracts")));
+        assert!(
+            meta.recommendations
+                .iter()
+                .any(|r| r.contains("Verify token contracts"))
+        );
     }
 
     // ====================================================================
@@ -1607,7 +1638,11 @@ mod tests {
         assert!(meta.synthesis.contains("Elevated risk"));
         assert!(meta.synthesis.contains("Limited liquidity"));
         assert!(meta.key_takeaway.contains("High risk"));
-        assert!(meta.recommendations.iter().any(|r| r.contains("smaller position")));
+        assert!(
+            meta.recommendations
+                .iter()
+                .any(|r| r.contains("smaller position"))
+        );
     }
 
     #[test]
@@ -1663,7 +1698,11 @@ mod tests {
         };
         let meta = meta_analysis_token(&summary, false, None, Some(45.0), 500_000.0);
         assert!(meta.synthesis.contains("Concentration risk"));
-        assert!(meta.recommendations.iter().any(|r| r.contains("top holder")));
+        assert!(
+            meta.recommendations
+                .iter()
+                .any(|r| r.contains("top holder"))
+        );
     }
 
     #[test]
@@ -1676,7 +1715,11 @@ mod tests {
             positives: vec![],
         };
         let meta = meta_analysis_token(&summary, false, None, None, 50_000.0);
-        assert!(meta.recommendations.iter().any(|r| r.contains("limit orders") || r.contains("slippage")));
+        assert!(
+            meta.recommendations
+                .iter()
+                .any(|r| r.contains("limit orders") || r.contains("slippage"))
+        );
     }
 
     #[test]

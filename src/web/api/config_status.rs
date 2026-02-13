@@ -2,17 +2,15 @@
 
 use crate::config::Config;
 use crate::web::AppState;
+use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::Json;
 use serde::Deserialize;
 use std::sync::Arc;
 
 /// GET /api/config/status — Returns config status (which keys are set).
-pub async fn handle(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub async fn handle(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let config = &state.config;
     let config_path = Config::config_path()
         .map(|p| p.display().to_string())
@@ -101,14 +99,14 @@ pub async fn handle_save(
     };
 
     // Ensure parent directory exists
-    if let Some(parent) = config_path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": format!("Failed to create config dir: {}", e) })),
-            )
-                .into_response();
-        }
+    if let Some(parent) = config_path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("Failed to create config dir: {}", e) })),
+        )
+            .into_response();
     }
 
     match serde_yaml::to_string(&config) {
@@ -152,11 +150,23 @@ mod tests {
         });
         let req: SaveConfigRequest = serde_json::from_value(json).unwrap();
         assert_eq!(req.api_keys.len(), 2);
-        assert_eq!(req.api_keys.get("etherscan"), Some(&"test_key_123".to_string()));
-        assert_eq!(req.api_keys.get("polygonscan"), Some(&"test_key_456".to_string()));
+        assert_eq!(
+            req.api_keys.get("etherscan"),
+            Some(&"test_key_123".to_string())
+        );
+        assert_eq!(
+            req.api_keys.get("polygonscan"),
+            Some(&"test_key_456".to_string())
+        );
         assert_eq!(req.rpc_endpoints.len(), 2);
-        assert_eq!(req.rpc_endpoints.get("ethereum_rpc"), Some(&"https://eth.example.com".to_string()));
-        assert_eq!(req.rpc_endpoints.get("bsc_rpc"), Some(&"https://bsc.example.com".to_string()));
+        assert_eq!(
+            req.rpc_endpoints.get("ethereum_rpc"),
+            Some(&"https://eth.example.com".to_string())
+        );
+        assert_eq!(
+            req.rpc_endpoints.get("bsc_rpc"),
+            Some(&"https://bsc.example.com".to_string())
+        );
     }
 
     #[test]
@@ -176,17 +186,20 @@ mod tests {
         });
         let req: SaveConfigRequest = serde_json::from_value(json).unwrap();
         assert_eq!(req.api_keys.len(), 1);
-        assert_eq!(req.api_keys.get("etherscan"), Some(&"test_key_123".to_string()));
+        assert_eq!(
+            req.api_keys.get("etherscan"),
+            Some(&"test_key_123".to_string())
+        );
         assert_eq!(req.rpc_endpoints.len(), 0);
     }
 
     #[tokio::test]
     async fn test_handle_config_status() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
         use axum::extract::State;
         use axum::response::IntoResponse;
-        use crate::config::Config;
-        use crate::chains::DefaultClientFactory;
-        use crate::web::AppState;
 
         let config = Config::default();
         let factory = DefaultClientFactory {
@@ -196,7 +209,9 @@ mod tests {
         let response = handle(State(state)).await.into_response();
         assert_eq!(response.status(), axum::http::StatusCode::OK);
 
-        let body = axum::body::to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(json.get("config_path").is_some());
         assert!(json.get("api_keys").is_some());
@@ -206,11 +221,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_save_config() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
         use axum::extract::State;
         use axum::response::IntoResponse;
-        use crate::config::Config;
-        use crate::chains::DefaultClientFactory;
-        use crate::web::AppState;
 
         let config = Config::default();
         let factory = DefaultClientFactory {
@@ -221,19 +236,24 @@ mod tests {
             api_keys: std::collections::HashMap::new(),
             rpc_endpoints: std::collections::HashMap::new(),
         };
-        let response = handle_save(State(state), axum::Json(req)).await.into_response();
+        let response = handle_save(State(state), axum::Json(req))
+            .await
+            .into_response();
         // May succeed or fail depending on filesystem
         let status = response.status();
-        assert!(status == axum::http::StatusCode::OK || status == axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            status == axum::http::StatusCode::OK
+                || status == axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
     #[tokio::test]
     async fn test_handle_save_config_with_api_keys_and_rpc() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
         use axum::extract::State;
         use axum::response::IntoResponse;
-        use crate::config::Config;
-        use crate::chains::DefaultClientFactory;
-        use crate::web::AppState;
 
         let config = Config::default();
         let factory = DefaultClientFactory {
@@ -247,11 +267,23 @@ mod tests {
         api_keys.insert("empty_key".to_string(), "".to_string()); // empty value - should be skipped
 
         let mut rpc_endpoints = std::collections::HashMap::new();
-        rpc_endpoints.insert("ethereum_rpc".to_string(), "https://eth.example.com".to_string());
+        rpc_endpoints.insert(
+            "ethereum_rpc".to_string(),
+            "https://eth.example.com".to_string(),
+        );
         rpc_endpoints.insert("bsc_rpc".to_string(), "https://bsc.example.com".to_string());
-        rpc_endpoints.insert("solana_rpc".to_string(), "https://sol.example.com".to_string());
-        rpc_endpoints.insert("tron_api".to_string(), "https://tron.example.com".to_string());
-        rpc_endpoints.insert("unknown_key".to_string(), "https://unknown.example.com".to_string());
+        rpc_endpoints.insert(
+            "solana_rpc".to_string(),
+            "https://sol.example.com".to_string(),
+        );
+        rpc_endpoints.insert(
+            "tron_api".to_string(),
+            "https://tron.example.com".to_string(),
+        );
+        rpc_endpoints.insert(
+            "unknown_key".to_string(),
+            "https://unknown.example.com".to_string(),
+        );
         rpc_endpoints.insert("empty_rpc".to_string(), "".to_string()); // empty value
 
         let req = SaveConfigRequest {
@@ -259,9 +291,14 @@ mod tests {
             rpc_endpoints,
         };
 
-        let response = handle_save(State(state), axum::Json(req)).await.into_response();
+        let response = handle_save(State(state), axum::Json(req))
+            .await
+            .into_response();
         let status = response.status();
         // May succeed or fail depending on filesystem permissions, but we cover the code paths
-        assert!(status == axum::http::StatusCode::OK || status == axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            status == axum::http::StatusCode::OK
+                || status == axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 }

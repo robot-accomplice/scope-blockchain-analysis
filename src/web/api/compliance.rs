@@ -3,10 +3,10 @@
 use crate::compliance::datasource::{BlockchainDataClient, DataSources};
 use crate::compliance::risk::RiskEngine;
 use crate::web::AppState;
+use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::Json;
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -79,7 +79,7 @@ mod tests {
         let req: ComplianceRiskRequest = serde_json::from_value(json).unwrap();
         assert_eq!(req.address, "0x1234567890123456789012345678901234567890");
         assert_eq!(req.chain, "polygon");
-        assert_eq!(req.detailed, true);
+        assert!(req.detailed);
     }
 
     #[test]
@@ -90,7 +90,7 @@ mod tests {
         let req: ComplianceRiskRequest = serde_json::from_value(json).unwrap();
         assert_eq!(req.address, "0x1234567890123456789012345678901234567890");
         assert_eq!(req.chain, "ethereum");
-        assert_eq!(req.detailed, false);
+        assert!(!req.detailed);
     }
 
     #[test]
@@ -105,23 +105,23 @@ mod tests {
             "detailed": true
         });
         let req: ComplianceRiskRequest = serde_json::from_value(json).unwrap();
-        assert_eq!(req.detailed, true);
+        assert!(req.detailed);
 
         let json_false = serde_json::json!({
             "address": "0x1234567890123456789012345678901234567890",
             "detailed": false
         });
         let req_false: ComplianceRiskRequest = serde_json::from_value(json_false).unwrap();
-        assert_eq!(req_false.detailed, false);
+        assert!(!req_false.detailed);
     }
 
     #[tokio::test]
     async fn test_handle_risk_direct() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
         use axum::extract::State;
         use axum::response::IntoResponse;
-        use crate::config::Config;
-        use crate::chains::DefaultClientFactory;
-        use crate::web::AppState;
 
         let config = Config::default();
         let factory = DefaultClientFactory {
@@ -133,7 +133,9 @@ mod tests {
             chain: "ethereum".to_string(),
             detailed: true,
         };
-        let response = handle_risk(State(state), axum::Json(req)).await.into_response();
+        let response = handle_risk(State(state), axum::Json(req))
+            .await
+            .into_response();
         let status = response.status();
         assert!(status.is_success() || status.is_client_error() || status.is_server_error());
     }

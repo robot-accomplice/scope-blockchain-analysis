@@ -291,7 +291,10 @@ fn output_token_health_table(
         crate::display::format_large_number(analytics.liquidity_usd)
     );
     if let Some(mc) = analytics.market_cap {
-        println!("Market Cap:      ${}", crate::display::format_large_number(mc));
+        println!(
+            "Market Cap:      ${}",
+            crate::display::format_large_number(mc)
+        );
     }
     if let Some(top10) = analytics.top_10_concentration {
         println!("Top 10 Holders:  {:.1}%", top10);
@@ -465,7 +468,10 @@ mod tests {
 
     #[test]
     fn test_format_large_number() {
-        assert_eq!(crate::display::format_large_number(1_500_000_000.0), "1.50B");
+        assert_eq!(
+            crate::display::format_large_number(1_500_000_000.0),
+            "1.50B"
+        );
         assert_eq!(crate::display::format_large_number(2_500_000.0), "2.50M");
         assert_eq!(crate::display::format_large_number(3_500.0), "3.50K");
         assert_eq!(crate::display::format_large_number(99.99), "99.99");

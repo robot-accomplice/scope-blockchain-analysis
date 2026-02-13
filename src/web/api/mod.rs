@@ -29,10 +29,16 @@ pub fn routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/discover", axum::routing::get(discover::handle))
         .route("/token-health", axum::routing::post(token_health::handle))
         .route("/market/summary", axum::routing::post(market::handle))
-        .route("/portfolio/list", axum::routing::get(portfolio::handle_list))
+        .route(
+            "/portfolio/list",
+            axum::routing::get(portfolio::handle_list),
+        )
         .route("/portfolio/add", axum::routing::post(portfolio::handle_add))
         .route("/export", axum::routing::post(export::handle))
-        .route("/compliance/risk", axum::routing::post(compliance::handle_risk))
+        .route(
+            "/compliance/risk",
+            axum::routing::post(compliance::handle_risk),
+        )
         .route("/config/status", axum::routing::get(config_status::handle))
         .route("/config", axum::routing::post(config_status::handle_save))
         .with_state(state)
@@ -41,8 +47,8 @@ pub fn routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
     use crate::chains::DefaultClientFactory;
+    use crate::config::Config;
 
     #[test]
     fn test_routes_construction() {

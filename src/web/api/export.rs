@@ -2,10 +2,10 @@
 
 use crate::chains::ChainClientFactory;
 use crate::web::AppState;
+use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::Json;
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -42,16 +42,17 @@ pub async fn handle(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ExportRequest>,
 ) -> impl IntoResponse {
-    let client: Box<dyn crate::chains::ChainClient> = match state.factory.create_chain_client(&req.chain) {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response();
-        }
-    };
+    let client: Box<dyn crate::chains::ChainClient> =
+        match state.factory.create_chain_client(&req.chain) {
+            Ok(c) => c,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": e.to_string() })),
+                )
+                    .into_response();
+            }
+        };
 
     // Fetch balance
     let mut balance = match client.get_balance(&req.address).await {
@@ -144,11 +145,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_export_direct() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
         use axum::extract::State;
         use axum::response::IntoResponse;
-        use crate::config::Config;
-        use crate::chains::DefaultClientFactory;
-        use crate::web::AppState;
 
         let config = Config::default();
         let factory = DefaultClientFactory {

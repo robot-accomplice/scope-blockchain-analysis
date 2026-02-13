@@ -1,12 +1,14 @@
 //! Token health API handler.
 
 use crate::cli::crawl::{self, Period};
-use crate::market::{BinanceClient, HealthThresholds, MarketSummary, MarketVenue, order_book_from_analytics};
+use crate::market::{
+    BinanceClient, HealthThresholds, MarketSummary, MarketVenue, order_book_from_analytics,
+};
 use crate::web::AppState;
+use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::Json;
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -90,7 +92,12 @@ pub async fn handle(
                                 .flatten(),
                             _ => None,
                         };
-                        Some(MarketSummary::from_order_book(&book, 1.0, &thresholds, volume_24h))
+                        Some(MarketSummary::from_order_book(
+                            &book,
+                            1.0,
+                            &thresholds,
+                            volume_24h,
+                        ))
                     }
                     Err(_) => None,
                 }
@@ -104,15 +111,26 @@ pub async fn handle(
                 MarketVenue::Solana => "solana",
                 _ => &analytics.chain,
             };
-            if analytics.chain.eq_ignore_ascii_case(venue_chain) && !analytics.dex_pairs.is_empty() {
+            if analytics.chain.eq_ignore_ascii_case(venue_chain) && !analytics.dex_pairs.is_empty()
+            {
                 let best_pair = analytics
                     .dex_pairs
                     .iter()
-                    .max_by(|a, b| a.liquidity_usd.partial_cmp(&b.liquidity_usd).unwrap_or(std::cmp::Ordering::Equal))
+                    .max_by(|a, b| {
+                        a.liquidity_usd
+                            .partial_cmp(&b.liquidity_usd)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
                     .unwrap();
-                let book = order_book_from_analytics(&analytics.chain, best_pair, &analytics.token.symbol);
+                let book =
+                    order_book_from_analytics(&analytics.chain, best_pair, &analytics.token.symbol);
                 let volume_24h = Some(best_pair.volume_24h);
-                Some(MarketSummary::from_order_book(&book, 1.0, &thresholds, volume_24h))
+                Some(MarketSummary::from_order_book(
+                    &book,
+                    1.0,
+                    &thresholds,
+                    volume_24h,
+                ))
             } else {
                 None
             }
@@ -163,7 +181,7 @@ mod tests {
         let req: TokenHealthRequest = serde_json::from_value(json).unwrap();
         assert_eq!(req.token, "USDC");
         assert_eq!(req.chain, "polygon");
-        assert_eq!(req.with_market, true);
+        assert!(req.with_market);
         assert_eq!(req.market_venue, "biconomy");
     }
 
@@ -175,7 +193,7 @@ mod tests {
         let req: TokenHealthRequest = serde_json::from_value(json).unwrap();
         assert_eq!(req.token, "USDC");
         assert_eq!(req.chain, "ethereum");
-        assert_eq!(req.with_market, false);
+        assert!(!req.with_market);
         assert_eq!(req.market_venue, "binance");
     }
 
@@ -192,23 +210,23 @@ mod tests {
             "with_market": true
         });
         let req: TokenHealthRequest = serde_json::from_value(json).unwrap();
-        assert_eq!(req.with_market, true);
+        assert!(req.with_market);
 
         let json_false = serde_json::json!({
             "token": "USDC",
             "with_market": false
         });
         let req_false: TokenHealthRequest = serde_json::from_value(json_false).unwrap();
-        assert_eq!(req_false.with_market, false);
+        assert!(!req_false.with_market);
     }
 
     #[tokio::test]
     async fn test_handle_token_health_direct() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
         use axum::extract::State;
         use axum::response::IntoResponse;
-        use crate::config::Config;
-        use crate::chains::DefaultClientFactory;
-        use crate::web::AppState;
 
         let config = Config::default();
         let factory = DefaultClientFactory {
@@ -228,11 +246,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_token_health_with_market() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
         use axum::extract::State;
         use axum::response::IntoResponse;
-        use crate::config::Config;
-        use crate::chains::DefaultClientFactory;
-        use crate::web::AppState;
 
         let config = Config::default();
         let factory = DefaultClientFactory {

@@ -219,7 +219,10 @@ fn generate_executive_summary(analytics: &TokenAnalytics) -> String {
     ));
 
     if let Some(mc) = analytics.market_cap {
-        summary.push_str(&format!("| Market Cap | {} |\n", crate::display::format_usd(mc)));
+        summary.push_str(&format!(
+            "| Market Cap | {} |\n",
+            crate::display::format_usd(mc)
+        ));
     }
 
     if let Some(fdv) = analytics.fdv {
@@ -2568,7 +2571,12 @@ mod tests {
             pair.liquidity_usd = 5_000.0;
         }
         let summary = token_risk_summary(&analytics);
-        assert!(summary.concerns.iter().any(|c| c.contains("low liquidity") || c.contains("Low liquidity")));
+        assert!(
+            summary
+                .concerns
+                .iter()
+                .any(|c| c.contains("low liquidity") || c.contains("Low liquidity"))
+        );
     }
 
     #[test]
@@ -2577,7 +2585,12 @@ mod tests {
         // Very new token triggers concern (line 150)
         analytics.token_age_hours = Some(12.0); // Less than 24 hours
         let summary = token_risk_summary(&analytics);
-        assert!(summary.concerns.iter().any(|c| c.contains("new token") || c.contains("New token")));
+        assert!(
+            summary
+                .concerns
+                .iter()
+                .any(|c| c.contains("new token") || c.contains("New token"))
+        );
     }
 
     #[test]
@@ -2587,17 +2600,20 @@ mod tests {
         analytics.top_10_concentration = Some(15.0);
         analytics.top_50_concentration = Some(30.0);
         analytics.top_100_concentration = Some(40.0);
-        analytics.holders = vec![
-            TokenHolder {
-                address: "0x1111".to_string(),
-                balance: "1000".to_string(),
-                formatted_balance: "1000".to_string(),
-                percentage: 3.0,
-                rank: 1,
-            },
-        ];
+        analytics.holders = vec![TokenHolder {
+            address: "0x1111".to_string(),
+            balance: "1000".to_string(),
+            formatted_balance: "1000".to_string(),
+            percentage: 3.0,
+            rank: 1,
+        }];
         let summary = token_risk_summary(&analytics);
-        assert!(summary.positives.iter().any(|p| p.contains("holder distribution") || p.contains("distribution")));
+        assert!(
+            summary
+                .positives
+                .iter()
+                .any(|p| p.contains("holder distribution") || p.contains("distribution"))
+        );
     }
 
     #[test]

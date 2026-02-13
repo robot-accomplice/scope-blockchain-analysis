@@ -19,7 +19,7 @@
 //! scope portfolio summary
 //! ```
 
-use crate::chains::{native_symbol, ChainClientFactory};
+use crate::chains::{ChainClientFactory, native_symbol};
 use crate::config::{Config, OutputFormat};
 use crate::error::{Result, ScopeError};
 use clap::{Args, Subcommand};
@@ -1573,10 +1573,12 @@ mod tests {
         let result = p.add_address(addr2);
         // Should error on duplicate
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("already in portfolio"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("already in portfolio")
+        );
     }
 
     #[test]
