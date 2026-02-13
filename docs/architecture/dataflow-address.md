@@ -5,7 +5,7 @@ Dataflow for `scope address [ADDRESS] [OPTIONS]`.
 ```mermaid
 flowchart TB
     subgraph Input
-        A[CLI: address + chain + --include-txs --include-tokens --report]
+        A[CLI: address + chain + --include-txs --include-tokens --report --dossier]
         A --> B[Auto-detect chain if default]
         B --> C[validate_address]
     end
@@ -25,21 +25,26 @@ flowchart TB
         J --> L[AddressReport]
         K --> L
         H --> L
+        I -->|dossier| M[RiskEngine.assess_address]
+        M --> N[RiskAssessment]
     end
 
     subgraph Output
-        L --> M{format}
-        M -->|json| N[println JSON]
-        M -->|csv| O[println CSV]
-        M -->|table| P[println table]
-        L --> Q{--report?}
-        Q -->|Some path| R[address_report::generate_address_report]
-        R --> S[save_report]
+        L --> O{format}
+        N -.->|dossier| O
+        O -->|json| P[println JSON]
+        O -->|csv| Q[println CSV]
+        O -->|table| R[println table]
+        O -->|markdown| S[generate_address_report or generate_dossier_report]
+        S --> T[println]
+        L --> U{--report?}
+        U -->|Some path| V[address_report::generate_address_report]
+        V --> W[save_report]
     end
 
     subgraph External
-        F --> T[EVM RPC / Solana RPC / TronGrid]
-        H --> U[DexScreener: native token price]
+        F --> X1[EVM RPC / Solana RPC / TronGrid]
+        H --> X2[DexScreener: native token price]
     end
 
     D -.-> F
@@ -50,7 +55,7 @@ flowchart TB
 
 | Stage | Type | Description |
 |-------|------|-------------|
-| Input | `AddressArgs` | address, chain, format, include_txs, include_tokens, limit, report |
+| Input | `AddressArgs` | address, chain, format, include_txs, include_tokens, limit, report, dossier |
 | Fetch | `Balance` | raw, formatted, usd_value |
 | Fetch | `Transaction[]` | hash, block, timestamp, from, to, value, status |
 | Fetch | `TokenBalance[]` | contract, symbol, name, balance |

@@ -13,6 +13,7 @@
 //!   address      Analyze a blockchain address
 //!   tx           Analyze a transaction
 //!   crawl        Crawl a token for analytics data
+//!   discover     Browse trending and boosted tokens (alias: disc)
 //!   monitor      Live token monitor with real-time TUI dashboard
 //!   market       Peg and order book health for stablecoin markets
 //!   token-health Token health suite (DEX + optional market; alias: health)
@@ -36,6 +37,7 @@ pub mod address;
 pub mod address_report;
 pub mod compliance;
 pub mod crawl;
+pub mod discover;
 pub mod export;
 pub mod interactive;
 pub mod market;
@@ -187,6 +189,13 @@ pub enum Commands {
     /// Batch and combined report generation.
     #[command(subcommand)]
     Report(report::ReportCommands),
+
+    /// Discover trending and boosted tokens from DexScreener.
+    ///
+    /// Browse featured token profiles, recently boosted tokens,
+    /// or top boosted tokens by activity.
+    #[command(visible_alias = "disc")]
+    Discover(discover::DiscoverArgs),
 }
 
 impl Cli {

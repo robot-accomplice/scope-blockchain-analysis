@@ -127,9 +127,12 @@ async fn main() -> Result<()> {
                     .map_err(|e| scope::error::ScopeError::Other(e.to_string()))
             }
         },
-        Commands::Market(cmd) => scope::cli::market::run(cmd, &config).await,
+        Commands::Market(cmd) => scope::cli::market::run(cmd, &config, &factory).await,
         Commands::TokenHealth(args) => scope::cli::token_health::run(args, &config, &factory).await,
         Commands::Report(cmd) => scope::cli::report::run(cmd, &config, &factory).await,
+        Commands::Discover(args) => scope::cli::discover::run(args, config.output.format)
+            .await
+            .map_err(|e| scope::error::ScopeError::Other(e.to_string())),
     };
 
     // Handle errors gracefully
@@ -207,9 +210,12 @@ async fn run_command(command: Commands, config: &Config) -> Result<()> {
                     .map_err(|e| scope::error::ScopeError::Other(e.to_string()))
             }
         },
-        Commands::Market(cmd) => scope::cli::market::run(cmd, config).await,
+        Commands::Market(cmd) => scope::cli::market::run(cmd, config, &factory).await,
         Commands::TokenHealth(args) => scope::cli::token_health::run(args, config, &factory).await,
         Commands::Report(cmd) => scope::cli::report::run(cmd, config, &factory).await,
+        Commands::Discover(args) => scope::cli::discover::run(args, config.output.format)
+            .await
+            .map_err(|e| scope::error::ScopeError::Other(e.to_string())),
     };
 
     if let Err(e) = result {

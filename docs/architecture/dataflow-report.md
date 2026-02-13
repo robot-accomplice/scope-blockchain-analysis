@@ -51,11 +51,15 @@ flowchart TB
         D --> E[ChainClient from factory]
         E --> F[get_balance, get_transactions, get_token_balances]
         F --> G[AddressReport]
+        C --> R{--with-risk?}
+        R -->|Yes| S[RiskEngine.assess_address]
+        S --> T[RiskAssessment]
     end
 
     subgraph Combine
         G --> H[batch_report_to_markdown]
-        H --> I[Header + each address_report::generate_address_report_section]
+        T -.->|per address| H
+        H --> I[Header + address_report_section + Risk if --with-risk]
         I --> J[report_footer]
         J --> K[std::fs::write]
     end

@@ -20,23 +20,27 @@ flowchart TB
         F -->|chain| L[Update context.chain]
         F -->|format| M[Update context.format]
         F -->|limit| N[Update context.limit]
-        F -->|+tokens| O[Toggle context.include_tokens]
-        F -->|+txs| P[Toggle context.include_txs]
+        F -->|decode| O[Toggle context.decode]
+        F -->|+tokens| P[Toggle context.include_tokens]
+        F -->|+txs| Q[Toggle context.include_txs]
+        F -->|setup| R[setup::run]
     end
 
     subgraph Context
-        C -.-> Q[Injected into address/tx/crawl args]
+        C -.-> S[Injected into address/tx/crawl/portfolio args]
         L --> C
         M --> C
         N --> C
         O --> C
         P --> C
+        Q --> C
     end
 
     subgraph Dispatch
-        G --> R[Uses context for chain, format, etc.]
-        H --> R
-        I --> R
+        G --> T[Uses context for chain, format, etc.]
+        H --> T
+        I --> T
+        K --> T
     end
 ```
 
@@ -47,6 +51,7 @@ flowchart TB
 | chain | ethereum | address, tx, crawl, monitor |
 | format | table | address, tx, crawl, portfolio |
 | limit | 100 | address (tx count) |
+| decode | false | tx |
 | include_txs | false | address |
 | include_tokens | false | address |
 | last_address | — | address (when no arg) |

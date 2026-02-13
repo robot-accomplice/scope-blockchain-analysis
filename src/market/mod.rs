@@ -21,7 +21,7 @@
 //! async fn main() -> scope::Result<()> {
 //!     let client = scope::market::BiconomyClient::new("https://api.biconomy.com");
 //!     let book = client.fetch_order_book("PUSD_USDT").await?;
-//!     let summary = MarketSummary::from_order_book(&book, 1.0, &HealthThresholds::default());
+//!     let summary = MarketSummary::from_order_book(&book, 1.0, &HealthThresholds::default(), None);
 //!     print!("{}", summary.format_text(Some("biconomy")));
 //!     Ok(())
 //! }
@@ -30,6 +30,7 @@
 mod orderbook;
 
 pub use orderbook::{
-    BiconomyClient, BinanceClient, HealthCheck, HealthThresholds, MarketSummary, MarketVenue,
-    OrderBook, OrderBookClient, OrderBookLevel, order_book_from_analytics,
+    BiconomyClient, BinanceClient, ExecutionEstimate, ExecutionSide, HealthCheck, HealthThresholds,
+    MarketSummary, MarketVenue, OrderBook, OrderBookClient, OrderBookLevel,
+    order_book_from_analytics,
 };

@@ -32,6 +32,11 @@ This plan combines:
 | Label/entity database | No address tagging (exchange, mixer, scam) | Medium |
 | Cross-chain flow | No bridge/L2 flow tracing | Low |
 
+### Discovery
+| Gap | Current State | Priority |
+|-----|---------------|----------|
+| Token browse / trending | ~~No browse mode~~ `scope discover` (profiles, boosts, top-boosts) | Done |
+
 ### Advanced
 | Gap | Priority |
 |-----|----------|
@@ -125,6 +130,7 @@ This plan combines:
 - [x] `scope report batch --with-risk` includes risk per address ✅
 - [x] `scope token-health USDC` (or `scope health USDC`) combines DEX + market ✅
 - [x] `scope --ai` outputs markdown to console for agent parsing ✅
+- [x] `scope discover` browses trending/boosted tokens from DexScreener ✅
 - [ ] Tx trace returns real internal transactions (Ethereum)
 - [ ] Compliance supports Polygon (min) for tx fetching
 - [x] Documentation and architecture diagrams updated ✅

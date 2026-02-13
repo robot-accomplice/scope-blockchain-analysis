@@ -28,8 +28,10 @@ flowchart TB
         M --> N{format}
         N -->|json| O[serde_json::to_string_pretty]
         N -->|csv| P[CSV: address, label, chain, tags, added_at]
+        N -->|markdown| P2[Markdown table]
         O --> K
         P --> K
+        P2 --> K
     end
 
     subgraph External

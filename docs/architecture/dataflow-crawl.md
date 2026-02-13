@@ -7,17 +7,19 @@ flowchart TB
     subgraph Input
         A[CLI: token or address]
         A --> B{Address format?}
-        B -->|No| C[DexClient.search_tokens]
-        C --> D[Token search results]
-        D --> E[User pick or --yes first]
         B -->|Yes| F[infer_chain_from_address]
-        E --> G[Resolved: address + chain]
+        B -->|No| C{Saved alias?}
+        C -->|Yes| G[Resolved: address + chain]
+        C -->|No| D[DexDataSource.search_tokens]
+        D --> E[Token search results]
+        E --> H[User pick or --yes first]
+        H --> G
         F --> G
     end
 
     subgraph DexFetch
-        G --> H[DexClient.get_token_data]
-        H --> I{DEX result}
+        G --> I1[DexClient.get_token_data]
+        I1 --> I{DEX result}
         I -->|OK| J[fetch_analytics_with_dex]
         I -->|NotFound| K[fetch_analytics_from_explorer]
         I -->|Err| L[Return error]
@@ -41,6 +43,7 @@ flowchart TB
         S -->|json| T[println]
         S -->|csv| U[output_csv]
         S -->|table| V[output_table]
+        S -->|markdown| V2[report::generate_report + println]
         P --> W{--report?}
         R --> W
         W -->|Some path| X[report::generate_report]
@@ -48,7 +51,7 @@ flowchart TB
     end
 
     subgraph External
-        H --> Z[DexScreener API]
+        I1 --> Z[DexScreener API]
         N --> AA[Etherscan/Polygonscan/etc]
         Q --> AA
     end
@@ -61,6 +64,10 @@ flowchart TB
 | **DexScreener** | price, volume (1h/6h/24h), liquidity, pairs, price_history, volume_history |
 | **Block Explorer** | token holders, holder percentages |
 | **Fallback** | When no DEX pairs: explorer-only TokenAnalytics |
+
+## Architecture Note
+
+Token resolution uses `DexDataSource` from the factory for search, enabling dependency injection and testability. Both `crawl::run` and `crawl::fetch_analytics_for_input` pass the factory's dex client to `resolve_token_input`.
 
 ## TokenAnalytics Fields
 

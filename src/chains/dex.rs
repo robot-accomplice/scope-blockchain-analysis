@@ -335,6 +335,23 @@ pub struct TokenSearchResult {
     pub market_cap: Option<f64>,
 }
 
+/// A discovered token from DexScreener (profiles, boosts, etc.)
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DiscoverToken {
+    pub chain_id: String,
+    pub token_address: String,
+    pub url: String,
+    pub description: Option<String>,
+    pub links: Vec<DiscoverLink>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DiscoverLink {
+    pub label: Option<String>,
+    pub link_type: Option<String>,
+    pub url: String,
+}
+
 /// Response from DexScreener search endpoint.
 #[derive(Debug, Deserialize)]
 struct DexScreenerSearchResponse {
@@ -812,6 +829,98 @@ impl DexClient {
         results.truncate(20);
 
         Ok(results)
+    }
+
+    /// Fetches latest token profiles (featured tokens) from DexScreener.
+    pub async fn get_token_profiles(&self) -> Result<Vec<DiscoverToken>> {
+        let url = format!("{}/token-profiles/latest/v1", self.base_url);
+        self.fetch_discover_tokens(&url).await
+    }
+
+    /// Fetches latest boosted tokens from DexScreener.
+    pub async fn get_token_boosts(&self) -> Result<Vec<DiscoverToken>> {
+        let url = format!("{}/token-boosts/latest/v1", self.base_url);
+        self.fetch_discover_tokens(&url).await
+    }
+
+    /// Fetches top boosted tokens (most active boosts) from DexScreener.
+    pub async fn get_token_boosts_top(&self) -> Result<Vec<DiscoverToken>> {
+        let url = format!("{}/token-boosts/top/v1", self.base_url);
+        self.fetch_discover_tokens(&url).await
+    }
+
+    async fn fetch_discover_tokens(&self, url: &str) -> Result<Vec<DiscoverToken>> {
+        let response = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| ScopeError::Network(e.to_string()))?;
+
+        if !response.status().is_success() {
+            return Err(ScopeError::Api(format!(
+                "DexScreener API error: {}",
+                response.status()
+            )));
+        }
+
+        #[derive(Deserialize)]
+        struct TokenProfileRaw {
+            url: Option<String>,
+            #[serde(rename = "chainId")]
+            chain_id: Option<String>,
+            #[serde(rename = "tokenAddress")]
+            token_address: Option<String>,
+            description: Option<String>,
+            links: Option<Vec<LinkRaw>>,
+        }
+
+        #[derive(Deserialize)]
+        struct LinkRaw {
+            label: Option<String>,
+            #[serde(rename = "type")]
+            link_type: Option<String>,
+            url: Option<String>,
+        }
+
+        let raw: Vec<TokenProfileRaw> = response
+            .json()
+            .await
+            .map_err(|e| ScopeError::Api(format!("Failed to parse response: {}", e)))?;
+
+        let tokens: Vec<DiscoverToken> = raw
+            .into_iter()
+            .filter_map(|r| {
+                let token_address = r.token_address?;
+                let chain_id = r.chain_id.clone().unwrap_or_else(|| "unknown".to_string());
+                let url = r.url.clone().unwrap_or_else(|| {
+                    format!("https://dexscreener.com/{}/{}", chain_id, token_address)
+                });
+                let links: Vec<DiscoverLink> = r
+                    .links
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|l| {
+                        let url = l.url?;
+                        Some(DiscoverLink {
+                            label: l.label,
+                            link_type: l.link_type,
+                            url,
+                        })
+                    })
+                    .collect();
+
+                Some(DiscoverToken {
+                    chain_id,
+                    token_address,
+                    url,
+                    description: r.description,
+                    links,
+                })
+            })
+            .collect();
+
+        Ok(tokens)
     }
 
     /// Generates synthetic price history from change percentages.

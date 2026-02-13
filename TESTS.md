@@ -16,6 +16,7 @@
 
 ### Priority 2: CLI Commands (0-15% Coverage — URGENT)
 
+- [ ] `src/cli/discover.rs` — Token discovery (DexScreener profiles/boosts); mock API responses
 - [x] `src/cli/market.rs` — parse_duration tested; run_summary has mockito integration tests (text + JSON)
 - [x] `src/cli/compliance.rs` — path fix applied; resolve_targets, parse_address_line, export md/yaml, trace Err path
 - [ ] `src/cli/address.rs` — 15.8% coverage

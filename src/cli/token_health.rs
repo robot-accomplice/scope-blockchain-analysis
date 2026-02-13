@@ -9,7 +9,9 @@ use crate::cli::crawl::{self, Period};
 use crate::config::Config;
 use crate::display::report;
 use crate::error::{Result, ScopeError};
-use crate::market::{HealthThresholds, MarketSummary, MarketVenue, order_book_from_analytics};
+use crate::market::{
+    BinanceClient, HealthThresholds, MarketSummary, MarketVenue, order_book_from_analytics,
+};
 use clap::Args;
 
 /// Arguments for the token-health command.
@@ -67,7 +69,22 @@ pub async fn run(
             let pair = args.market_venue.format_pair(&analytics.token.symbol);
             if let Some(client) = args.market_venue.create_client() {
                 match client.fetch_order_book(&pair).await {
-                    Ok(book) => Some(MarketSummary::from_order_book(&book, 1.0, &thresholds)),
+                    Ok(book) => {
+                        let volume_24h = match args.market_venue {
+                            MarketVenue::Binance => BinanceClient::default_url()
+                                .fetch_24h_volume(&pair)
+                                .await
+                                .ok()
+                                .flatten(),
+                            _ => None,
+                        };
+                        Some(MarketSummary::from_order_book(
+                            &book,
+                            1.0,
+                            &thresholds,
+                            volume_24h,
+                        ))
+                    }
                     Err(e) => {
                         tracing::warn!(
                             "Market data unavailable for {} on {:?}: {}",
@@ -101,7 +118,13 @@ pub async fn run(
                     .unwrap(); // safe: we checked !is_empty
                 let book =
                     order_book_from_analytics(&analytics.chain, best_pair, &analytics.token.symbol);
-                Some(MarketSummary::from_order_book(&book, 1.0, &thresholds))
+                let volume_24h = Some(best_pair.volume_24h);
+                Some(MarketSummary::from_order_book(
+                    &book,
+                    1.0,
+                    &thresholds,
+                    volume_24h,
+                ))
             } else {
                 if analytics.chain.ne(venue_chain) {
                     tracing::warn!(
@@ -315,5 +338,331 @@ fn format_large_number(value: f64) -> String {
         format!("{:.2}K", value / 1_000.0)
     } else {
         format!("{:.2}", value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chains::dex::DexTokenData;
+    use crate::chains::mocks::MockClientFactory;
+    use crate::chains::{DexPair, Token, TokenAnalytics, TokenHolder, TokenSocial};
+    use crate::config::OutputFormat;
+    use crate::market::{HealthCheck, MarketSummary};
+
+    fn make_test_analytics(with_dex_pairs: bool) -> TokenAnalytics {
+        TokenAnalytics {
+            token: Token {
+                contract_address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+                symbol: "USDC".to_string(),
+                name: "USD Coin".to_string(),
+                decimals: 6,
+            },
+            chain: "ethereum".to_string(),
+            holders: vec![TokenHolder {
+                address: "0x1234".to_string(),
+                balance: "1000000".to_string(),
+                formatted_balance: "1.0".to_string(),
+                percentage: 10.0,
+                rank: 1,
+            }],
+            total_holders: 1000,
+            volume_24h: 5_000_000.0,
+            volume_7d: 25_000_000.0,
+            price_usd: 0.9999,
+            price_change_24h: -0.01,
+            price_change_7d: 0.02,
+            liquidity_usd: 100_000_000.0,
+            market_cap: Some(30_000_000_000.0),
+            fdv: None,
+            total_supply: None,
+            circulating_supply: None,
+            price_history: vec![],
+            volume_history: vec![],
+            holder_history: vec![],
+            dex_pairs: if with_dex_pairs {
+                vec![DexPair {
+                    dex_name: "Uniswap V3".to_string(),
+                    pair_address: "0xpair".to_string(),
+                    base_token: "USDC".to_string(),
+                    quote_token: "WETH".to_string(),
+                    price_usd: 0.9999,
+                    volume_24h: 5_000_000.0,
+                    liquidity_usd: 50_000_000.0,
+                    price_change_24h: -0.01,
+                    buys_24h: 1000,
+                    sells_24h: 900,
+                    buys_6h: 300,
+                    sells_6h: 250,
+                    buys_1h: 50,
+                    sells_1h: 45,
+                    pair_created_at: Some(1600000000),
+                    url: Some("https://dexscreener.com/ethereum/0xpair".to_string()),
+                }]
+            } else {
+                vec![]
+            },
+            fetched_at: 1700003600,
+            top_10_concentration: Some(35.5),
+            top_50_concentration: Some(55.0),
+            top_100_concentration: Some(65.0),
+            price_change_6h: 0.01,
+            price_change_1h: -0.005,
+            total_buys_24h: 1000,
+            total_sells_24h: 900,
+            total_buys_6h: 300,
+            total_sells_6h: 250,
+            total_buys_1h: 50,
+            total_sells_1h: 45,
+            token_age_hours: Some(25000.0),
+            image_url: None,
+            websites: vec!["https://centre.io".to_string()],
+            socials: vec![TokenSocial {
+                platform: "twitter".to_string(),
+                url: "https://twitter.com/circle".to_string(),
+            }],
+            dexscreener_url: Some("https://dexscreener.com/ethereum/0xpair".to_string()),
+        }
+    }
+
+    fn make_test_market_summary() -> MarketSummary {
+        use crate::market::{ExecutionEstimate, ExecutionSide};
+        MarketSummary {
+            pair: "USDC/USDT".to_string(),
+            peg_target: 1.0,
+            best_bid: Some(0.9999),
+            best_ask: Some(1.0001),
+            mid_price: Some(1.0),
+            spread: Some(0.0002),
+            volume_24h: Some(1_000_000.0),
+            execution_10k_buy: Some(ExecutionEstimate {
+                notional_usdt: 10_000.0,
+                side: ExecutionSide::Buy,
+                vwap: 1.0001,
+                slippage_bps: 1.0,
+                fillable: true,
+            }),
+            execution_10k_sell: Some(ExecutionEstimate {
+                notional_usdt: 10_000.0,
+                side: ExecutionSide::Sell,
+                vwap: 0.9999,
+                slippage_bps: 1.0,
+                fillable: true,
+            }),
+            asks: vec![],
+            bids: vec![],
+            ask_outliers: 0,
+            bid_outliers: 0,
+            ask_depth: 5000.0,
+            bid_depth: 6000.0,
+            checks: vec![
+                HealthCheck::Pass("No sells below peg".to_string()),
+                HealthCheck::Pass("Bid/Ask ratio: 1.20x".to_string()),
+            ],
+            healthy: true,
+        }
+    }
+
+    #[test]
+    fn test_format_venue() {
+        assert_eq!(format_venue(MarketVenue::Binance), "Binance Spot");
+        assert_eq!(format_venue(MarketVenue::Biconomy), "Biconomy");
+        assert_eq!(format_venue(MarketVenue::Ethereum), "Ethereum DEX");
+        assert_eq!(format_venue(MarketVenue::Solana), "Solana DEX");
+    }
+
+    #[test]
+    fn test_format_large_number() {
+        assert_eq!(format_large_number(1_500_000_000.0), "1.50B");
+        assert_eq!(format_large_number(2_500_000.0), "2.50M");
+        assert_eq!(format_large_number(3_500.0), "3.50K");
+        assert_eq!(format_large_number(99.99), "99.99");
+    }
+
+    #[test]
+    fn test_token_health_to_markdown_without_market() {
+        let analytics = make_test_analytics(false);
+        let md = token_health_to_markdown(&analytics, None, None);
+        assert!(md.contains("USDC"));
+        assert!(md.contains("USD Coin"));
+        assert!(!md.contains("Market / Order Book"));
+    }
+
+    #[test]
+    fn test_token_health_to_markdown_with_market() {
+        let analytics = make_test_analytics(false);
+        let market = make_test_market_summary();
+        let md = token_health_to_markdown(&analytics, Some(&market), Some(MarketVenue::Binance));
+        assert!(md.contains("Market / Order Book"));
+        assert!(md.contains("Binance Spot"));
+        assert!(md.contains("0.9999"));
+        assert!(md.contains("Yes"));
+        assert!(md.contains("Health Checks"));
+    }
+
+    #[test]
+    fn test_token_health_to_json_without_market() {
+        let analytics = make_test_analytics(false);
+        let json = token_health_to_json(&analytics, None).unwrap();
+        assert!(json.contains("\"analytics\""));
+        assert!(json.contains("\"market\": null"));
+        assert!(json.contains("USDC"));
+    }
+
+    #[test]
+    fn test_token_health_to_json_with_market() {
+        let analytics = make_test_analytics(false);
+        let market = make_test_market_summary();
+        let json = token_health_to_json(&analytics, Some(&market)).unwrap();
+        assert!(json.contains("\"market\""));
+        assert!(json.contains("\"peg_target\": 1.0"));
+        assert!(json.contains("\"healthy\": true"));
+    }
+
+    #[test]
+    fn test_output_token_health_table_without_market() {
+        let analytics = make_test_analytics(false);
+        let result = output_token_health_table(&analytics, None, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_token_health_table_with_market() {
+        let analytics = make_test_analytics(false);
+        let market = make_test_market_summary();
+        let result =
+            output_token_health_table(&analytics, Some(&market), Some(MarketVenue::Biconomy));
+        assert!(result.is_ok());
+    }
+
+    fn make_test_dex_token_data(pairs: Vec<DexPair>) -> DexTokenData {
+        DexTokenData {
+            address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+            symbol: "USDC".to_string(),
+            name: "USD Coin".to_string(),
+            price_usd: 0.9999,
+            price_change_24h: -0.01,
+            price_change_6h: 0.01,
+            price_change_1h: -0.005,
+            price_change_5m: 0.0,
+            volume_24h: 5_000_000.0,
+            volume_6h: 1_250_000.0,
+            volume_1h: 250_000.0,
+            liquidity_usd: 100_000_000.0,
+            market_cap: Some(30_000_000_000.0),
+            fdv: Some(30_000_000_000.0),
+            pairs,
+            price_history: vec![],
+            volume_history: vec![],
+            total_buys_24h: 1000,
+            total_sells_24h: 900,
+            total_buys_6h: 300,
+            total_sells_6h: 250,
+            total_buys_1h: 50,
+            total_sells_1h: 45,
+            earliest_pair_created_at: Some(1600000000),
+            image_url: None,
+            websites: vec![],
+            socials: vec![crate::chains::dex::TokenSocial {
+                platform: "twitter".to_string(),
+                url: "https://twitter.com/circle".to_string(),
+            }],
+            dexscreener_url: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_token_health_table() {
+        let mut factory = MockClientFactory::new();
+        factory.mock_dex.token_data = Some(make_test_dex_token_data(vec![]));
+
+        let config = Config::default();
+        let args = TokenHealthArgs {
+            token: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+            chain: "ethereum".to_string(),
+            with_market: false,
+            market_venue: MarketVenue::Binance,
+            format: OutputFormat::Table,
+        };
+
+        let result = run(args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_token_health_json() {
+        let mut factory = MockClientFactory::new();
+        let mut data = make_test_dex_token_data(vec![]);
+        data.price_usd = 1.0;
+        data.volume_24h = 1_000_000.0;
+        data.liquidity_usd = 5_000_000.0;
+        factory.mock_dex.token_data = Some(data);
+
+        let config = Config::default();
+        let args = TokenHealthArgs {
+            token: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+            chain: "ethereum".to_string(),
+            with_market: false,
+            market_venue: MarketVenue::Binance,
+            format: OutputFormat::Json,
+        };
+
+        let result = run(args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_token_health_markdown() {
+        let mut factory = MockClientFactory::new();
+        factory.mock_dex.token_data = Some(make_test_dex_token_data(vec![]));
+
+        let config = Config::default();
+        let args = TokenHealthArgs {
+            token: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+            chain: "ethereum".to_string(),
+            with_market: false,
+            market_venue: MarketVenue::Binance,
+            format: OutputFormat::Markdown,
+        };
+
+        let result = run(args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    /// Test DEX venue with dex_pairs: synthesizes order book from analytics.
+    #[tokio::test]
+    async fn test_run_token_health_dex_market() {
+        let mut factory = MockClientFactory::new();
+        let pair = DexPair {
+            dex_name: "Uniswap V3".to_string(),
+            pair_address: "0xpair".to_string(),
+            base_token: "USDC".to_string(),
+            quote_token: "WETH".to_string(),
+            price_usd: 0.9999,
+            volume_24h: 5_000_000.0,
+            liquidity_usd: 50_000_000.0,
+            price_change_24h: -0.01,
+            buys_24h: 1000,
+            sells_24h: 900,
+            buys_6h: 300,
+            sells_6h: 250,
+            buys_1h: 50,
+            sells_1h: 45,
+            pair_created_at: Some(1600000000),
+            url: Some("https://dexscreener.com/ethereum/0xpair".to_string()),
+        };
+        factory.mock_dex.token_data = Some(make_test_dex_token_data(vec![pair]));
+
+        let config = Config::default();
+        let args = TokenHealthArgs {
+            token: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+            chain: "ethereum".to_string(),
+            with_market: true,
+            market_venue: MarketVenue::Ethereum,
+            format: OutputFormat::Table,
+        };
+
+        let result = run(args, &config, &factory).await;
+        assert!(result.is_ok());
     }
 }

@@ -17,6 +17,7 @@ A production-grade command-line tool for blockchain data analysis, portfolio tra
 - **Portfolio Management**: Track multiple addresses across chains with labels, tags, and aggregated balance views
 - **Compliance & Risk Assessment**: Risk scoring, transaction pattern detection, taint analysis, and compliance reporting
 - **Data Export**: Export address history and portfolio data to JSON or CSV with date range filtering
+- **Token Discovery**: Browse trending and boosted tokens from DexScreener (`scope discover`)
 - **Reporting**: Markdown reports for address, token, portfolio, and market commands; batch reports for multiple addresses
 - **Interactive Mode**: REPL with preserved context between commands for faster workflow
 - **Setup Wizard**: Guided first-run configuration with `scope setup` for API keys and preferences
@@ -83,6 +84,10 @@ scope export --address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --output data.
 # Token health (DEX + optional market)
 scope token-health USDC
 scope health USDC --with-market --market-venue binance
+
+# Discover trending and boosted tokens
+scope discover
+scope discover --source boosts --chain ethereum --limit 10
 
 # Batch report for multiple addresses
 scope report batch --addresses 0x742d...,0xabc... --output batch-report.md
@@ -178,6 +183,31 @@ scope crawl USDC --yes
 # Save the selected token as an alias for future use
 scope crawl USDC --save
 ```
+
+## Token Discovery
+
+Browse trending and boosted tokens from DexScreener without knowing a symbol or address:
+
+```bash
+# Featured token profiles (default)
+scope discover
+
+# Recently boosted tokens
+scope discover --source boosts
+
+# Top boosted tokens (most active)
+scope discover --source top-boosts
+
+# Filter by chain
+scope discover --chain ethereum --limit 10
+scope disc --source boosts -c solana
+
+# JSON or CSV output
+scope discover --format json
+scope discover --format csv --limit 5
+```
+
+Sources: `profiles` (featured), `boosts` (recent), `top-boosts` (most active). No API key required.
 
 ## Data Export
 
@@ -377,7 +407,7 @@ Dataflow and C4 architecture diagrams are in [`docs/architecture/`](docs/archite
 
 - **C4 Context** — Scope and external systems (Etherscan, DexScreener, RPCs, Biconomy)
 - **C4 Containers** — CLI, Chains, Compliance, Market, Display, Config
-- **Dataflow** — Per-command diagrams for address, crawl, compliance, market, portfolio, export, report, monitor, interactive
+- **Dataflow** — Per-command diagrams for address, crawl, discover, compliance, market, token-health, portfolio, export, report, monitor, interactive
 
 ## Development
 
@@ -402,22 +432,25 @@ just test      # Run all tests
 just ci-test   # Full CI workflow
 just format    # Format code
 just lint      # Run lints
-just summary   # PUSD/USDT market summary (peg, spread, orderbook, health checks)
+just summary   # USDC market summary (peg, spread, volume, execution, health checks)
 ```
 
 ### Peg & Order Book Health (`scope market`)
 
-The `scope market summary` command fetches level-2 order book data from exchange APIs (Biconomy) and reports peg and book health at a granular level:
+The `scope market summary` command fetches level-2 order book data from CEX (Binance, Biconomy) or DEX (Ethereum, Solana) venues and reports peg, book health, volume, and execution checks:
 
 - **Peg**: Target, best bid/ask deviation (%), mid price, spread
+- **Volume**: 24h quote volume (Binance ticker, DEX analytics; omitted for Biconomy)
+- **Execution**: Simulated 10k USDT buy/sell slippage or "insufficient liquidity"
 - **Order book**: Ask/bid levels with depth (base and quote amounts)
 - **Health checks**: No sells below peg, bid/ask ratio, minimum levels and depth per side
 - **Output**: Text (default) or JSON
 - **Tunable thresholds**: All health-check thresholds are configurable. Defaults (min-levels=6, min-depth=3000, peg-range=0.001, bid/ask ratio 0.2–5.0x) originated from the PUSD Hummingbot config—override for other markets.
 
 ```bash
-scope market summary                    # PUSD/USDT (default, one shot)
-scope market summary XYZ_USDT           # Other pair
+scope market summary                    # USDC on Binance (default, one shot)
+scope market summary PUSD               # PUSD on default venue
+scope market summary USDC --market-venue biconomy   # USDC on Biconomy
 scope market summary --peg 1.0 --min-depth 5000
 scope market summary --peg-range 0.002 --min-bid-ask-ratio 0.1   # Loosen thresholds
 scope market summary --format json     # Machine-readable output
@@ -452,11 +485,12 @@ Use `--ai` to emit markdown-formatted output to stdout instead of tables or JSON
 ```bash
 scope --ai address 0x742d35Cc...
 scope --ai crawl USDC
+scope --ai discover --limit 5
 scope --ai portfolio list
 scope --ai token-health USDC
 ```
 
-`--ai` affects all commands that support output formatting (address, tx, crawl, portfolio, export, token-health).
+`--ai` affects all commands that support output formatting (address, tx, crawl, discover, portfolio, export, token-health).
 
 Additional market options:
 

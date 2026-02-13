@@ -40,7 +40,7 @@ C4Container
 
 | Container | Description |
 |-----------|-------------|
-| **CLI** | `clap` argument parsing, `Commands` dispatch, command handlers (address, tx, crawl, monitor, portfolio, export, compliance, market, report) |
+| **CLI** | `clap` argument parsing, `Commands` dispatch, command handlers (address, tx, crawl, discover, monitor, token-health, portfolio, export, compliance, market, report, interactive, setup) |
 | **Chains** | `ChainClient` (Ethereum, Solana, Tron), `DexClient`, `ChainClientFactory`, balance/tx/token fetch |
 | **Compliance** | `RiskEngine`, `BlockchainDataClient`, pattern analysis, transaction tracing |
 | **Market** | `BiconomyClient`, `OrderBook`, `MarketSummary`, health checks |

@@ -26,6 +26,9 @@ flowchart TB
         H --> I8[market::run]
         H --> I9[report::run]
         H --> I10[interactive::run]
+        H --> I11[token_health::run]
+        H --> I12[discover::run]
+        H --> I13[setup::run]
     end
 
     subgraph Factory

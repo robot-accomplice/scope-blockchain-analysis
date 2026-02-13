@@ -16,6 +16,9 @@
 //! - **Token Crawling**: Crawl DEX data for any token with price, volume,
 //!   liquidity, holder analysis, and risk scoring. Markdown report generation.
 //!
+//! - **Token Discovery**: Browse trending and boosted tokens from DexScreener
+//!   (`scope discover`) — featured profiles, recent boosts, top boosts. No API key.
+//!
 //! - **Live Monitoring**: Real-time TUI dashboard with price/volume/candlestick
 //!   charts, buy/sell gauges, activity logs, and Unicode-rich visualization.
 //!

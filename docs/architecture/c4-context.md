@@ -20,7 +20,7 @@ C4Context
 
     Rel(analyst, scope, "Runs commands")
     Rel(scope, etherscan, "Balance, txs, holders (API key)")
-    Rel(scope, dexscreener, "Token data, prices")
+    Rel(scope, dexscreener, "Token data, prices, discovery")
     Rel(scope, rpc_evm, "Balance, txs, tokens")
     Rel(scope, rpc_solana, "Balance, txs, SPL tokens")
     Rel(scope, trongrid, "Balance, txs, TRC-20")
@@ -33,7 +33,7 @@ C4Context
 | System | Purpose |
 |--------|---------|
 | **Etherscan API** | EVM block explorer data; requires API key for compliance features |
-| **DexScreener** | DEX token data; no key required |
+| **DexScreener** | DEX token data, prices, search, trending/boosted discovery; no key required |
 | **EVM RPC** | Direct chain queries (Infura, Alchemy, public RPC) |
 | **Solana RPC** | Solana chain queries |
 | **TronGrid** | Tron chain queries |

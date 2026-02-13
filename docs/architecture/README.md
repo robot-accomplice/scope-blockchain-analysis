@@ -19,8 +19,10 @@ Architecture and dataflow diagrams for the Scope blockchain analysis tool.
 | [dataflow-address.md](dataflow-address.md) | `scope address` | Balance, transactions, tokens, report |
 | [dataflow-tx.md](dataflow-tx.md) | `scope tx` | Transaction lookup by hash |
 | [dataflow-crawl.md](dataflow-crawl.md) | `scope crawl` | Token analytics from DEX + explorer |
+| [dataflow-discover.md](dataflow-discover.md) | `scope discover` | Trending/boosted tokens from DexScreener |
 | [dataflow-compliance.md](dataflow-compliance.md) | `scope compliance` | Risk, analyze, trace, compliance-report |
 | [dataflow-market.md](dataflow-market.md) | `scope market summary` | Peg and order book health |
+| [dataflow-token-health.md](dataflow-token-health.md) | `scope token-health` / `scope health` | DEX + optional market composite |
 | [dataflow-portfolio.md](dataflow-portfolio.md) | `scope portfolio` | Add, remove, list, summary |
 | [dataflow-export.md](dataflow-export.md) | `scope export` | Address history, portfolio data |
 | [dataflow-report.md](dataflow-report.md) | Report generation | All `--report` / `--output` flows |

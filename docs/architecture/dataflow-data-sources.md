@@ -55,6 +55,18 @@ flowchart LR
     J --> K[TokenSearchResult[]]
 ```
 
+## DexScreener Discovery (scope discover)
+
+```mermaid
+flowchart LR
+    A[get_token_profiles] --> B[GET /token-profiles/latest/v1]
+    C[get_token_boosts] --> D[GET /token-boosts/latest/v1]
+    E[get_token_boosts_top] --> F[GET /token-boosts/top/v1]
+    B --> G[DiscoverToken[]]
+    D --> G
+    F --> G
+```
+
 ## Compliance Data Source (Etherscan)
 
 ```mermaid

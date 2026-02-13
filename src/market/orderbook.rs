@@ -77,6 +77,104 @@ impl OrderBook {
     pub fn ask_depth(&self) -> f64 {
         self.asks.iter().map(OrderBookLevel::value).sum()
     }
+
+    /// Estimate slippage for buying a given USDT notional by walking the ask side.
+    /// Returns (vwap, slippage_bps) if fillable, or None if insufficient liquidity.
+    pub fn estimate_buy_execution(&self, notional_usdt: f64) -> Option<ExecutionEstimate> {
+        let mid = self.mid_price()?;
+        if mid <= 0.0 {
+            return None;
+        }
+        let mut remaining = notional_usdt;
+        let mut filled_value = 0.0;
+        let mut filled_qty = 0.0;
+        for level in &self.asks {
+            let level_value = level.value();
+            if remaining <= 0.0 {
+                break;
+            }
+            let take_value = level_value.min(remaining);
+            let take_qty = if level.price > 0.0 {
+                take_value / level.price
+            } else {
+                0.0
+            };
+            filled_value += take_value;
+            filled_qty += take_qty;
+            remaining -= take_value;
+        }
+        let fillable = remaining <= 0.01;
+        let vwap = if filled_qty > 0.0 {
+            filled_value / filled_qty
+        } else {
+            mid
+        };
+        let slippage_bps = (vwap - mid) / mid * 10_000.0;
+        Some(ExecutionEstimate {
+            notional_usdt,
+            side: ExecutionSide::Buy,
+            vwap,
+            slippage_bps,
+            fillable,
+        })
+    }
+
+    /// Estimate slippage for selling (hitting bids) a given USDT notional.
+    pub fn estimate_sell_execution(&self, notional_usdt: f64) -> Option<ExecutionEstimate> {
+        let mid = self.mid_price()?;
+        if mid <= 0.0 {
+            return None;
+        }
+        let mut remaining = notional_usdt;
+        let mut filled_value = 0.0;
+        let mut filled_qty = 0.0;
+        for level in &self.bids {
+            if remaining <= 0.0 {
+                break;
+            }
+            let level_value = level.value();
+            let take_value = level_value.min(remaining);
+            let take_qty = if level.price > 0.0 {
+                take_value / level.price
+            } else {
+                0.0
+            };
+            filled_value += take_value;
+            filled_qty += take_qty;
+            remaining -= take_value;
+        }
+        let fillable = remaining <= 0.01;
+        let vwap = if filled_qty > 0.0 {
+            filled_value / filled_qty
+        } else {
+            mid
+        };
+        let slippage_bps = (mid - vwap) / mid * 10_000.0;
+        Some(ExecutionEstimate {
+            notional_usdt,
+            side: ExecutionSide::Sell,
+            vwap,
+            slippage_bps,
+            fillable,
+        })
+    }
+}
+
+/// Side of execution (buy = hit asks, sell = hit bids).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ExecutionSide {
+    Buy,
+    Sell,
+}
+
+/// Result of execution simulation for a given notional size.
+#[derive(Debug, Clone)]
+pub struct ExecutionEstimate {
+    pub notional_usdt: f64,
+    pub side: ExecutionSide,
+    pub vwap: f64,
+    pub slippage_bps: f64,
+    pub fillable: bool,
 }
 
 /// Health check thresholds for order book validation.
@@ -135,6 +233,12 @@ pub struct MarketSummary {
     pub mid_price: Option<f64>,
     /// Spread.
     pub spread: Option<f64>,
+    /// 24h volume in quote (e.g. USDT) if available.
+    pub volume_24h: Option<f64>,
+    /// Execution estimate for 10k USDT buy (slippage).
+    pub execution_10k_buy: Option<ExecutionEstimate>,
+    /// Execution estimate for 10k USDT sell (slippage).
+    pub execution_10k_sell: Option<ExecutionEstimate>,
     /// Asks within peg range (for display).
     pub asks: Vec<OrderBookLevel>,
     /// Bids within peg range.
@@ -155,10 +259,12 @@ pub struct MarketSummary {
 
 impl MarketSummary {
     /// Build summary from order book with given peg and thresholds.
+    /// Optionally includes 24h volume (from venue ticker) and execution estimates for 10k USDT.
     pub fn from_order_book(
         book: &OrderBook,
         peg_target: f64,
         thresholds: &HealthThresholds,
+        volume_24h: Option<f64>,
     ) -> Self {
         let price_lo = peg_target - thresholds.peg_range * 5.0;
         let price_hi = peg_target + thresholds.peg_range * 5.0;
@@ -245,6 +351,9 @@ impl MarketSummary {
 
         let healthy = checks.iter().all(|c| matches!(c, HealthCheck::Pass(_)));
 
+        let execution_10k_buy = book.estimate_buy_execution(10_000.0);
+        let execution_10k_sell = book.estimate_sell_execution(10_000.0);
+
         Self {
             pair: book.pair.clone(),
             peg_target,
@@ -252,6 +361,9 @@ impl MarketSummary {
             best_ask: book.best_ask(),
             mid_price: book.mid_price(),
             spread: book.spread(),
+            volume_24h,
+            execution_10k_buy,
+            execution_10k_sell,
             asks,
             bids,
             ask_outliers,
@@ -264,18 +376,18 @@ impl MarketSummary {
     }
 
     /// Format as human-readable text report.
-    /// When `chain` is provided, it is displayed in the header.
-    pub fn format_text(&self, chain: Option<&str>) -> String {
+    /// When `venue_or_chain` is provided, it is displayed in the header (e.g. binance, ethereum).
+    pub fn format_text(&self, venue_or_chain: Option<&str>) -> String {
         let mut out = String::new();
 
-        let title = match chain {
+        let title = match venue_or_chain {
             Some(c) => format!("{} Market Summary ({})", self.pair, c),
             None => format!("{} Market Summary", self.pair),
         };
         out.push_str(&format!("\n  {}\n", title));
         out.push_str(&format!("  {}\n", "─".repeat(44)));
-        if let Some(c) = chain {
-            out.push_str(&format!("  Chain:          {}\n", c));
+        if let Some(c) = venue_or_chain {
+            out.push_str(&format!("  Venue:          {}\n", c));
         }
         out.push_str(&format!("  Peg Target:     {:.4}\n", self.peg_target));
 
@@ -305,6 +417,27 @@ impl MarketSummary {
                 spread,
                 spread / mid * 100.0
             ));
+        }
+
+        if let Some(v) = self.volume_24h {
+            out.push_str(&format!("  Volume (24h):   {:>12.0} USDT\n", v));
+        }
+
+        if let Some(e) = &self.execution_10k_buy {
+            let msg = if e.fillable {
+                format!("10k buy:  ~{:.2} bps slippage", e.slippage_bps)
+            } else {
+                "10k buy:  insufficient liquidity".to_string()
+            };
+            out.push_str(&format!("  Execution:      {}\n", msg));
+        }
+        if let Some(e) = &self.execution_10k_sell {
+            let msg = if e.fillable {
+                format!("10k sell: ~{:.2} bps slippage", e.slippage_bps)
+            } else {
+                "10k sell: insufficient liquidity".to_string()
+            };
+            out.push_str(&format!("  Execution:      {}\n", msg));
         }
 
         out.push('\n');
@@ -539,6 +672,29 @@ impl BinanceClient {
     /// Create client with default Binance API URL.
     pub fn default_url() -> Self {
         Self::new("https://api.binance.com")
+    }
+
+    /// Fetch 24h quote volume (USDT) for the given symbol (e.g. USDCUSDT).
+    pub async fn fetch_24h_volume(&self, pair_symbol: &str) -> Result<Option<f64>> {
+        let url = format!(
+            "{}/api/v3/ticker/24hr?symbol={}",
+            self.base_url,
+            urlencoding::encode(pair_symbol)
+        );
+        let resp = self.client.get(&url).send().await?;
+        if !resp.status().is_success() {
+            return Ok(None);
+        }
+        #[derive(serde::Deserialize)]
+        struct Ticker24hr {
+            #[serde(rename = "quoteVolume")]
+            quote_volume: Option<String>,
+        }
+        let ticker: Ticker24hr = resp
+            .json()
+            .await
+            .map_err(|e| ScopeError::Chain(format!("Binance ticker parse error: {}", e)))?;
+        Ok(ticker.quote_volume.and_then(|s| s.parse::<f64>().ok()))
     }
 }
 
@@ -826,7 +982,7 @@ mod tests {
         };
 
         let thresholds = HealthThresholds::default();
-        let summary = MarketSummary::from_order_book(&book, 1.0, &thresholds);
+        let summary = MarketSummary::from_order_book(&book, 1.0, &thresholds, None);
 
         assert!(summary.healthy);
         assert_eq!(summary.bids.len(), 6);
@@ -848,10 +1004,11 @@ mod tests {
                 quantity: 100.0,
             }],
         };
-        let summary = MarketSummary::from_order_book(&book, 1.0, &HealthThresholds::default());
+        let summary =
+            MarketSummary::from_order_book(&book, 1.0, &HealthThresholds::default(), None);
         let out = summary.format_text(Some("biconomy"));
         assert!(out.contains("biconomy"));
-        assert!(out.contains("Chain:"));
+        assert!(out.contains("Venue:"));
     }
 
     #[test]
@@ -864,10 +1021,11 @@ mod tests {
             }],
             asks: vec![],
         };
-        let summary = MarketSummary::from_order_book(&book, 1.0, &HealthThresholds::default());
+        let summary =
+            MarketSummary::from_order_book(&book, 1.0, &HealthThresholds::default(), None);
         let out = summary.format_text(None);
         assert!(out.contains("X/Y Market Summary"));
-        assert!(!out.contains("Chain:"));
+        assert!(!out.contains("Venue:"));
     }
 
     #[test]
@@ -890,7 +1048,8 @@ mod tests {
             ],
         };
 
-        let summary = MarketSummary::from_order_book(&book, 1.0, &HealthThresholds::default());
+        let summary =
+            MarketSummary::from_order_book(&book, 1.0, &HealthThresholds::default(), None);
 
         assert!(!summary.healthy);
         let has_fail = summary

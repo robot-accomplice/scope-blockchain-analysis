@@ -1,12 +1,18 @@
 //! # Market Command
 //!
 //! Reports peg and order book health for stablecoin markets.
-//! Fetches level-2 depth from exchange APIs and runs configurable health checks.
+//! Fetches level-2 depth from CEX (Binance, Biconomy) or DEX (Ethereum, Solana) venues
+//! and runs configurable health checks including volume and execution estimates.
 //! Supports one-shot or repeated runs with configurable frequency and duration.
 
+use crate::chains::ChainClientFactory;
+use crate::cli::crawl::{self, Period};
 use crate::config::Config;
 use crate::error::{Result, ScopeError};
-use crate::market::{BiconomyClient, HealthThresholds, MarketSummary, OrderBookClient};
+use crate::market::{
+    BiconomyClient, BinanceClient, HealthThresholds, MarketSummary, MarketVenue, OrderBook,
+    OrderBookClient, order_book_from_analytics,
+};
 use clap::{Args, Subcommand};
 use std::time::Duration;
 
@@ -34,17 +40,21 @@ pub enum MarketCommands {
 /// PUSD Hummingbot market-making config and are tunable for other markets.
 #[derive(Debug, Args)]
 pub struct SummaryArgs {
-    /// Trading pair symbol (e.g., PUSD_USDT).
-    #[arg(default_value = "PUSD_USDT", value_name = "PAIR")]
+    /// Base token symbol (e.g., USDC, PUSD). Quote is USDT.
+    #[arg(default_value = "USDC", value_name = "SYMBOL")]
     pub pair: String,
 
-    /// Chain or venue (e.g., biconomy, ethereum).
-    #[arg(short, long, default_value = "biconomy", value_name = "CHAIN")]
+    /// Market venue: binance, biconomy, eth, solana.
+    #[arg(long, default_value = "binance", value_name = "VENUE")]
+    pub market_venue: MarketVenue,
+
+    /// Chain for DEX venues (ethereum or solana). Ignored for CEX.
+    #[arg(long, default_value = "ethereum", value_name = "CHAIN")]
     pub chain: String,
 
-    /// Exchange API base URL.
-    #[arg(long, default_value = "https://api.biconomy.com", value_name = "URL")]
-    pub api_url: String,
+    /// Biconomy API URL (only when venue is biconomy; for testing or custom deployment).
+    #[arg(long, value_name = "URL")]
+    pub biconomy_api_url: Option<String>,
 
     /// Peg target (e.g., 1.0 for USD stablecoins).
     #[arg(long, default_value = "1.0", value_name = "TARGET")]
@@ -104,13 +114,35 @@ pub enum SummaryFormat {
 }
 
 /// Run the market command.
-pub async fn run(args: MarketCommands, _config: &Config) -> Result<()> {
+pub async fn run(
+    args: MarketCommands,
+    _config: &Config,
+    factory: &dyn ChainClientFactory,
+) -> Result<()> {
     match args {
-        MarketCommands::Summary(summary_args) => run_summary(summary_args).await,
+        MarketCommands::Summary(summary_args) => run_summary(summary_args, factory).await,
     }
 }
 
 /// Parse duration strings like "30s", "5m", "1h", "24h" into seconds.
+/// Extract base symbol from pair (e.g. "PUSD_USDT" -> "PUSD", "USDCUSDT" -> "USDC", "USDC" -> "USDC").
+fn base_symbol_from_pair(pair: &str) -> &str {
+    let p = pair.trim();
+    if let Some(i) = p.find("_USDT") {
+        return &p[..i];
+    }
+    if let Some(i) = p.find("_usdt") {
+        return &p[..i];
+    }
+    if let Some(i) = p.find("/USDT") {
+        return &p[..i];
+    }
+    if p.to_uppercase().ends_with("USDT") && p.len() > 4 {
+        return &p[..p.len() - 4];
+    }
+    p
+}
+
 fn parse_duration(s: &str) -> Result<u64> {
     let s = s.trim();
     if s.is_empty() {
@@ -147,16 +179,42 @@ fn parse_duration(s: &str) -> Result<u64> {
 }
 
 /// Builds markdown report content for a market summary.
-fn market_summary_to_markdown(summary: &MarketSummary, chain: &str, pair: &str) -> String {
+fn market_summary_to_markdown(summary: &MarketSummary, venue: &str, pair: &str) -> String {
     let bid_dev = summary
         .best_bid
         .map(|b| (b - summary.peg_target) / summary.peg_target * 100.0);
     let ask_dev = summary
         .best_ask
         .map(|a| (a - summary.peg_target) / summary.peg_target * 100.0);
+    let volume_row = summary
+        .volume_24h
+        .map(|v| format!("| Volume (24h) | {:.0} USDT |  \n", v))
+        .unwrap_or_default();
+    let exec_buy = summary
+        .execution_10k_buy
+        .as_ref()
+        .map(|e| {
+            if e.fillable {
+                format!("{:.2} bps", e.slippage_bps)
+            } else {
+                "insufficient".to_string()
+            }
+        })
+        .unwrap_or_else(|| "-".to_string());
+    let exec_sell = summary
+        .execution_10k_sell
+        .as_ref()
+        .map(|e| {
+            if e.fillable {
+                format!("{:.2} bps", e.slippage_bps)
+            } else {
+                "insufficient".to_string()
+            }
+        })
+        .unwrap_or_else(|| "-".to_string());
     let mut md = format!(
         "# Market Health Report: {}  \n\
-        **Chain:** {}  \n\
+        **Venue:** {}  \n\
         **Generated:** {}  \n\n\
         ## Peg & Spread  \n\
         | Metric | Value |  \n\
@@ -166,12 +224,15 @@ fn market_summary_to_markdown(summary: &MarketSummary, chain: &str, pair: &str) 
         | Best Ask | {} |  \n\
         | Mid Price | {} |  \n\
         | Spread | {} |  \n\
+        {}\
+        | 10k Buy Slippage | {} |  \n\
+        | 10k Sell Slippage | {} |  \n\
         | Bid Depth | {:.0} |  \n\
         | Ask Depth | {:.0} |  \n\
         | Healthy | {} |  \n\n\
         ## Health Checks  \n",
         pair,
-        chain,
+        venue,
         chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC"),
         summary.peg_target,
         summary
@@ -190,6 +251,9 @@ fn market_summary_to_markdown(summary: &MarketSummary, chain: &str, pair: &str) 
             .spread
             .map(|s| format!("{:.4}", s))
             .unwrap_or_else(|| "-".to_string()),
+        volume_row,
+        exec_buy,
+        exec_sell,
         summary.bid_depth,
         summary.ask_depth,
         if summary.healthy { "✓" } else { "✗" }
@@ -205,9 +269,66 @@ fn market_summary_to_markdown(summary: &MarketSummary, chain: &str, pair: &str) 
     md
 }
 
-async fn run_summary_once(
-    client: &BiconomyClient,
+async fn fetch_book_and_volume(
     args: &SummaryArgs,
+    factory: &dyn ChainClientFactory,
+) -> Result<(OrderBook, Option<f64>)> {
+    let base = base_symbol_from_pair(&args.pair).to_string();
+
+    if args.market_venue.is_cex() {
+        let client: Box<dyn OrderBookClient> = match args.market_venue {
+            MarketVenue::Biconomy if args.biconomy_api_url.is_some() => {
+                Box::new(BiconomyClient::new(args.biconomy_api_url.as_ref().unwrap()))
+            }
+            _ => args
+                .market_venue
+                .create_client()
+                .ok_or_else(|| ScopeError::Chain("No CEX client for venue".to_string()))?,
+        };
+        let pair = args.market_venue.format_pair(&base);
+        let book = client.fetch_order_book(&pair).await?;
+
+        let volume = match args.market_venue {
+            MarketVenue::Binance => {
+                let binance = BinanceClient::default_url();
+                binance.fetch_24h_volume(&pair).await.ok().flatten()
+            }
+            MarketVenue::Biconomy => None,
+            _ => None,
+        };
+        Ok((book, volume))
+    } else {
+        let chain = match args.market_venue {
+            MarketVenue::Ethereum => "ethereum",
+            MarketVenue::Solana => "solana",
+            _ => &args.chain,
+        };
+        let analytics =
+            crawl::fetch_analytics_for_input(&base, chain, Period::Hour24, 10, factory).await?;
+        if analytics.dex_pairs.is_empty() {
+            return Err(ScopeError::Chain(format!(
+                "No DEX pairs found for {} on {}",
+                base, chain
+            )));
+        }
+        let best_pair = analytics
+            .dex_pairs
+            .iter()
+            .max_by(|a, b| {
+                a.liquidity_usd
+                    .partial_cmp(&b.liquidity_usd)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .unwrap();
+        let book = order_book_from_analytics(chain, best_pair, &analytics.token.symbol);
+        let volume = Some(best_pair.volume_24h);
+        Ok((book, volume))
+    }
+}
+
+async fn run_summary_once(
+    args: &SummaryArgs,
+    factory: &dyn ChainClientFactory,
     thresholds: &HealthThresholds,
     run_num: Option<u64>,
 ) -> Result<MarketSummary> {
@@ -216,23 +337,34 @@ async fn run_summary_once(
         eprintln!("  --- Run #{} at {} ---\n", n, ts);
     }
 
-    let book = client.fetch_order_book(&args.pair).await?;
-    let summary = MarketSummary::from_order_book(&book, args.peg, thresholds);
+    let (book, volume_24h) = fetch_book_and_volume(args, factory).await?;
+    let summary = MarketSummary::from_order_book(&book, args.peg, thresholds, volume_24h);
+
+    let venue_label = format!("{:?}", args.market_venue).to_lowercase();
 
     match args.format {
         SummaryFormat::Text => {
-            print!("{}", summary.format_text(Some(&args.chain)));
+            print!("{}", summary.format_text(Some(&venue_label)));
         }
         SummaryFormat::Json => {
             let json = serde_json::json!({
                 "run": run_num,
-                "chain": &args.chain,
+                "venue": venue_label,
                 "pair": summary.pair,
                 "peg_target": summary.peg_target,
                 "best_bid": summary.best_bid,
                 "best_ask": summary.best_ask,
                 "mid_price": summary.mid_price,
                 "spread": summary.spread,
+                "volume_24h": summary.volume_24h,
+                "execution_10k_buy": summary.execution_10k_buy.as_ref().map(|e| serde_json::json!({
+                    "fillable": e.fillable,
+                    "slippage_bps": e.slippage_bps
+                })),
+                "execution_10k_sell": summary.execution_10k_sell.as_ref().map(|e| serde_json::json!({
+                    "fillable": e.fillable,
+                    "slippage_bps": e.slippage_bps
+                })),
                 "ask_depth": summary.ask_depth,
                 "bid_depth": summary.bid_depth,
                 "ask_levels": summary.asks.len(),
@@ -250,8 +382,7 @@ async fn run_summary_once(
     Ok(summary)
 }
 
-async fn run_summary(args: SummaryArgs) -> Result<()> {
-    let client = BiconomyClient::new(&args.api_url);
+async fn run_summary(args: SummaryArgs, factory: &dyn ChainClientFactory) -> Result<()> {
     let thresholds = HealthThresholds {
         peg_target: args.peg,
         peg_range: args.peg_range,
@@ -264,9 +395,10 @@ async fn run_summary(args: SummaryArgs) -> Result<()> {
     let repeat_mode = args.every.is_some() || args.duration.is_some();
 
     if !repeat_mode {
-        let summary = run_summary_once(&client, &args, &thresholds, None).await?;
+        let summary = run_summary_once(&args, factory, &thresholds, None).await?;
         if let Some(ref report_path) = args.report {
-            let md = market_summary_to_markdown(&summary, &args.chain, &args.pair);
+            let venue_label = format!("{:?}", args.market_venue).to_lowercase();
+            let md = market_summary_to_markdown(&summary, &venue_label, &args.pair);
             std::fs::write(report_path, md)?;
             eprintln!("\nReport saved to: {}", report_path.display());
         }
@@ -312,7 +444,7 @@ async fn run_summary(args: SummaryArgs) -> Result<()> {
     }
 
     loop {
-        let summary = run_summary_once(&client, &args, &thresholds, Some(run_num)).await?;
+        let summary = run_summary_once(&args, factory, &thresholds, Some(run_num)).await?;
         last_summary = Some(summary.clone());
 
         // Append CSV row
@@ -365,7 +497,8 @@ async fn run_summary(args: SummaryArgs) -> Result<()> {
 
     // Save final report if requested (last_summary always set when loop runs)
     if let (Some(ref report_path), Some(summary)) = (args.report, last_summary.as_ref()) {
-        let md = market_summary_to_markdown(summary, &args.chain, &args.pair);
+        let venue_label = format!("{:?}", args.market_venue).to_lowercase();
+        let md = market_summary_to_markdown(summary, &venue_label, &args.pair);
         std::fs::write(report_path, md)?;
         eprintln!("Report saved to: {}", report_path.display());
     }
@@ -379,6 +512,7 @@ async fn run_summary(args: SummaryArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chains::DefaultClientFactory;
 
     #[tokio::test]
     async fn test_run_summary_with_mock_orderbook() {
@@ -395,9 +529,10 @@ mod tests {
             .create();
 
         let args = SummaryArgs {
-            pair: "PUSD_USDT".to_string(),
-            chain: "biconomy".to_string(),
-            api_url: server.url(),
+            pair: "PUSD".to_string(),
+            market_venue: MarketVenue::Biconomy,
+            chain: "ethereum".to_string(),
+            biconomy_api_url: Some(server.url()),
             peg: 1.0,
             min_levels: 2,
             min_depth: 100.0,
@@ -411,7 +546,10 @@ mod tests {
             csv: None,
         };
 
-        let result = run_summary(args).await;
+        let factory = DefaultClientFactory {
+            chains_config: Default::default(),
+        };
+        let result = run_summary(args, &factory).await;
         assert!(result.is_ok());
     }
 
@@ -430,9 +568,10 @@ mod tests {
             .create();
 
         let args = SummaryArgs {
-            pair: "PUSD_USDT".to_string(),
-            chain: "test".to_string(),
-            api_url: server.url(),
+            pair: "PUSD".to_string(),
+            market_venue: MarketVenue::Biconomy,
+            chain: "ethereum".to_string(),
+            biconomy_api_url: Some(server.url()),
             peg: 1.0,
             min_levels: 1,
             min_depth: 50.0,
@@ -446,7 +585,10 @@ mod tests {
             csv: None,
         };
 
-        let result = run_summary(args).await;
+        let factory = DefaultClientFactory {
+            chains_config: Default::default(),
+        };
+        let result = run_summary(args, &factory).await;
         assert!(result.is_ok());
     }
 
