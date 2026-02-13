@@ -265,7 +265,7 @@ mod tests {
             .map(|i| TransactionSummary {
                 hash: format!("0x{:064x}", i),
                 block_number: 12345 + i,
-                timestamp: 1700000000 + i as u64 * 60,
+                timestamp: 1700000000 + i * 60,
                 from: "0xfrom".to_string(),
                 to: Some("0xto".to_string()),
                 value: "0.1 ETH".to_string(),
