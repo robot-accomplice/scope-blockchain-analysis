@@ -1512,4 +1512,298 @@ mod tests {
         let result = super::run(list_args, &config, &factory).await;
         assert!(result.is_ok());
     }
+
+    #[test]
+    fn test_portfolio_new() {
+        let p = Portfolio::default();
+        assert!(p.addresses.is_empty());
+    }
+
+    #[test]
+    fn test_portfolio_load_missing_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let p = Portfolio::load(temp.path());
+        assert!(p.is_ok());
+        assert!(p.unwrap().addresses.is_empty());
+    }
+
+    #[test]
+    fn test_portfolio_add_and_save_roundtrip() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut p = Portfolio::default();
+        let addr = WatchedAddress {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            label: Some("Test".to_string()),
+            chain: "ethereum".to_string(),
+            tags: vec!["tag1".to_string()],
+            added_at: 1234567890,
+        };
+        p.add_address(addr).unwrap();
+        assert_eq!(p.addresses.len(), 1);
+
+        let data_dir = temp.path().to_path_buf();
+        p.save(&data_dir).unwrap();
+        let loaded = Portfolio::load(temp.path()).unwrap();
+        assert_eq!(loaded.addresses.len(), 1);
+        assert_eq!(
+            loaded.addresses[0].address,
+            "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2"
+        );
+        assert_eq!(loaded.addresses[0].label, Some("Test".to_string()));
+    }
+
+    #[test]
+    fn test_portfolio_add_duplicate() {
+        let mut p = Portfolio::default();
+        let addr1 = WatchedAddress {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            label: None,
+            chain: "ethereum".to_string(),
+            tags: vec![],
+            added_at: 0,
+        };
+        let addr2 = WatchedAddress {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            label: None,
+            chain: "ethereum".to_string(),
+            tags: vec![],
+            added_at: 0,
+        };
+        p.add_address(addr1).unwrap();
+        let result = p.add_address(addr2);
+        // Should error on duplicate
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("already in portfolio"));
+    }
+
+    #[test]
+    fn test_watched_address_debug() {
+        let addr = WatchedAddress {
+            address: "0xtest".to_string(),
+            label: Some("My Wallet".to_string()),
+            chain: "ethereum".to_string(),
+            tags: vec!["defi".to_string(), "staking".to_string()],
+            added_at: 1700000000,
+        };
+        let debug = format!("{:?}", addr);
+        assert!(debug.contains("WatchedAddress"));
+        assert!(debug.contains("0xtest"));
+    }
+
+    // ========================================================================
+    // portfolio_summary_to_markdown tests
+    // ========================================================================
+
+    #[test]
+    fn test_portfolio_summary_to_markdown_basic() {
+        let mut balances_by_chain = HashMap::new();
+        balances_by_chain.insert(
+            "ethereum".to_string(),
+            ChainBalance {
+                native_balance: "1.5".to_string(),
+                symbol: "ETH".to_string(),
+                usd: None,
+            },
+        );
+
+        let summary = PortfolioSummary {
+            address_count: 2,
+            balances_by_chain,
+            total_usd: None,
+            addresses: vec![
+                AddressSummary {
+                    address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+                    label: Some("Main Wallet".to_string()),
+                    chain: "ethereum".to_string(),
+                    balance: "1.5".to_string(),
+                    usd: None,
+                    tokens: vec![],
+                },
+                AddressSummary {
+                    address: "0xABCdef1234567890abcdef1234567890ABCDEF12".to_string(),
+                    label: None,
+                    chain: "polygon".to_string(),
+                    balance: "100.0".to_string(),
+                    usd: None,
+                    tokens: vec![],
+                },
+            ],
+        };
+
+        let md = portfolio_summary_to_markdown(&summary);
+
+        // Check header elements
+        assert!(md.contains("# Portfolio Report"));
+        assert!(md.contains("**Addresses:** 2"));
+        assert!(md.contains("Allocation by Chain"));
+        assert!(md.contains("## Addresses"));
+
+        // Check chain balance table
+        assert!(md.contains("ethereum"));
+        assert!(md.contains("1.5"));
+        assert!(md.contains("ETH"));
+
+        // Check address table
+        assert!(md.contains("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2"));
+        assert!(md.contains("Main Wallet"));
+        assert!(md.contains("0xABCdef1234567890abcdef1234567890ABCDEF12"));
+        assert!(md.contains("polygon"));
+        assert!(md.contains("100.0"));
+
+        // Check footer
+        assert!(md.contains("Report generated by Scope"));
+    }
+
+    #[test]
+    fn test_portfolio_summary_to_markdown_with_usd() {
+        let mut balances_by_chain = HashMap::new();
+        balances_by_chain.insert(
+            "ethereum".to_string(),
+            ChainBalance {
+                native_balance: "2.0".to_string(),
+                symbol: "ETH".to_string(),
+                usd: Some(3000.0),
+            },
+        );
+
+        let summary = PortfolioSummary {
+            address_count: 2,
+            balances_by_chain,
+            total_usd: Some(5000.0),
+            addresses: vec![
+                AddressSummary {
+                    address: "0x1234567890123456789012345678901234567890".to_string(),
+                    label: Some("Wallet 1".to_string()),
+                    chain: "ethereum".to_string(),
+                    balance: "2.0".to_string(),
+                    usd: Some(3000.0),
+                    tokens: vec![],
+                },
+                AddressSummary {
+                    address: "0x0987654321098765432109876543210987654321".to_string(),
+                    label: Some("Wallet 2".to_string()),
+                    chain: "ethereum".to_string(),
+                    balance: "1.0".to_string(),
+                    usd: Some(2000.0),
+                    tokens: vec![],
+                },
+            ],
+        };
+
+        let md = portfolio_summary_to_markdown(&summary);
+
+        // Check total USD
+        assert!(md.contains("**Total Value (USD):** $5000.00"));
+
+        // Check chain USD value
+        assert!(md.contains("$3000.00"));
+
+        // Check address USD values
+        assert!(md.contains("$3000.00"));
+        assert!(md.contains("$2000.00"));
+    }
+
+    #[test]
+    fn test_portfolio_summary_to_markdown_with_tokens() {
+        let mut balances_by_chain = HashMap::new();
+        balances_by_chain.insert(
+            "ethereum".to_string(),
+            ChainBalance {
+                native_balance: "1.0".to_string(),
+                symbol: "ETH".to_string(),
+                usd: None,
+            },
+        );
+
+        // Create more than 3 tokens to test truncation
+        let tokens = vec![
+            TokenSummary {
+                contract_address: "0xToken1".to_string(),
+                balance: "100.0".to_string(),
+                decimals: 18,
+                symbol: Some("USDC".to_string()),
+            },
+            TokenSummary {
+                contract_address: "0xToken2".to_string(),
+                balance: "50.0".to_string(),
+                decimals: 18,
+                symbol: Some("DAI".to_string()),
+            },
+            TokenSummary {
+                contract_address: "0xToken3".to_string(),
+                balance: "25.0".to_string(),
+                decimals: 18,
+                symbol: Some("WBTC".to_string()),
+            },
+            TokenSummary {
+                contract_address: "0xToken4".to_string(),
+                balance: "10.0".to_string(),
+                decimals: 18,
+                symbol: Some("UNI".to_string()),
+            },
+            TokenSummary {
+                contract_address: "0xToken5".to_string(),
+                balance: "5.0".to_string(),
+                decimals: 18,
+                symbol: None, // Test token without symbol
+            },
+        ];
+
+        let summary = PortfolioSummary {
+            address_count: 1,
+            balances_by_chain,
+            total_usd: None,
+            addresses: vec![AddressSummary {
+                address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+                label: Some("Token Wallet".to_string()),
+                chain: "ethereum".to_string(),
+                balance: "1.0".to_string(),
+                usd: None,
+                tokens,
+            }],
+        };
+
+        let md = portfolio_summary_to_markdown(&summary);
+
+        // Check that first 3 tokens are shown
+        assert!(md.contains("USDC"));
+        assert!(md.contains("DAI"));
+        assert!(md.contains("WBTC"));
+
+        // Check truncation indicator (+2 for 5 tokens - 3 shown)
+        assert!(md.contains("+2"));
+
+        // Check that token without symbol uses contract address
+        // The first 3 tokens have symbols, so we should see USDC, DAI, WBTC
+        // Token 4 (UNI) and Token 5 (no symbol) should be truncated
+        // But we need to verify the truncation logic shows "+2"
+    }
+
+    #[test]
+    fn test_portfolio_summary_to_markdown_empty() {
+        let summary = PortfolioSummary {
+            address_count: 0,
+            balances_by_chain: HashMap::new(),
+            total_usd: None,
+            addresses: vec![],
+        };
+
+        let md = portfolio_summary_to_markdown(&summary);
+
+        // Check header
+        assert!(md.contains("# Portfolio Report"));
+        assert!(md.contains("**Addresses:** 0"));
+
+        // Check that chain allocation section exists (even if empty)
+        assert!(md.contains("Allocation by Chain"));
+
+        // Check that addresses section exists (even if empty)
+        assert!(md.contains("## Addresses"));
+
+        // Check footer
+        assert!(md.contains("Report generated by Scope"));
+    }
 }

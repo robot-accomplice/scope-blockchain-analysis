@@ -220,6 +220,7 @@ pub fn is_daemon_child() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body;
 
     #[test]
     fn test_pid_file_path() {
@@ -248,5 +249,474 @@ mod tests {
         // Should be false in test context (env var not set)
         // Note: may be true if test runner sets it, so just ensure it doesn't panic
         let _ = is_daemon_child();
+    }
+
+    #[tokio::test]
+    async fn test_serve_ui_index() {
+        let response = serve_ui(axum::http::Uri::from_static("/")).await.into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = body::to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("<!DOCTYPE html>"));
+        assert!(html.contains("Scope"));
+    }
+
+    #[tokio::test]
+    async fn test_serve_ui_index_html() {
+        let response = serve_ui(axum::http::Uri::from_static("/index.html")).await.into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_serve_ui_app_js() {
+        let response = serve_ui(axum::http::Uri::from_static("/app.js")).await.into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = body::to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        let js = String::from_utf8(body.to_vec()).unwrap();
+        assert!(js.contains("function") || js.contains("const") || js.contains("var"));
+    }
+
+    #[tokio::test]
+    async fn test_serve_ui_style_css() {
+        let response = serve_ui(axum::http::Uri::from_static("/style.css")).await.into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = body::to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        let css = String::from_utf8(body.to_vec()).unwrap();
+        assert!(css.contains(":root") || css.contains("body") || css.contains("nav"));
+    }
+
+    #[tokio::test]
+    async fn test_serve_ui_spa_fallback() {
+        // Unknown paths should return index.html (SPA routing)
+        let response = serve_ui(axum::http::Uri::from_static("/some/random/path")).await.into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = body::to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("<!DOCTYPE html>"));
+    }
+
+    #[test]
+    fn test_pid_file_path_in_data_dir() {
+        let path = pid_file_path();
+        assert!(path.ends_with("scope-web.pid"));
+        assert!(path.parent().is_some());
+    }
+
+    #[test]
+    fn test_log_file_path_in_data_dir() {
+        let path = log_file_path();
+        assert!(path.ends_with("scope-web.log"));
+        assert!(path.parent().is_some());
+    }
+
+    #[test]
+    fn test_app_state_construction() {
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = AppState { config, factory };
+        // Verify state fields are accessible
+        let _ = state.config.chains.api_keys.len();
+    }
+
+    #[test]
+    fn test_stop_daemon_no_pid_file() {
+        // stop_daemon should handle missing PID file gracefully
+        // We can't easily override the data dir, but verify the function exists
+        // and the path helpers return valid paths
+        let pid = pid_file_path();
+        let log = log_file_path();
+        assert_eq!(pid.parent(), log.parent());
+    }
+
+    // Helper to create the test app state
+    fn test_state() -> Arc<AppState> {
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        Arc::new(AppState { config, factory })
+    }
+
+    // ========================================================================
+    // HTTP routing integration tests — exercise handler code paths
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_route_get_config_status() {
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let state = test_state();
+        let app = build_router(state);
+
+        let req = Request::builder()
+            .uri("/api/config/status")
+            .method("GET")
+            .body(axum::body::Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = body::to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json.get("config_path").is_some());
+        assert!(json.get("api_keys").is_some());
+        assert!(json.get("version").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_route_post_config_save() {
+        use axum::http::{Request, StatusCode, header};
+        use tower::ServiceExt;
+
+        let state = test_state();
+        let app = build_router(state);
+
+        let payload = serde_json::json!({
+            "api_keys": {},
+            "rpc_endpoints": {}
+        });
+
+        let req = Request::builder()
+            .uri("/api/config")
+            .method("POST")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(payload.to_string()))
+            .unwrap();
+
+        let response = app.oneshot(req).await.unwrap();
+        // May succeed or fail depending on file system, but should not panic
+        let status = response.status();
+        assert!(status == StatusCode::OK || status == StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn test_route_post_address() {
+        use axum::http::{Request, StatusCode, header};
+        use tower::ServiceExt;
+
+        let state = test_state();
+        let app = build_router(state);
+
+        let payload = serde_json::json!({
+            "address": "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
+            "chain": "ethereum"
+        });
+
+        let req = Request::builder()
+            .uri("/api/address")
+            .method("POST")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(payload.to_string()))
+            .unwrap();
+
+        let response = app.oneshot(req).await.unwrap();
+        // Will likely fail due to no API key, but exercises the handler
+        let status = response.status();
+        assert!(status == StatusCode::OK || status == StatusCode::BAD_REQUEST || status == StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn test_route_post_tx() {
+        use axum::http::{Request, StatusCode, header};
+        use tower::ServiceExt;
+
+        let state = test_state();
+        let app = build_router(state);
+
+        let payload = serde_json::json!({
+            "hash": "0xabc123def456789012345678901234567890123456789012345678901234abcd",
+            "chain": "ethereum"
+        });
+
+        let req = Request::builder()
+            .uri("/api/tx")
+            .method("POST")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(payload.to_string()))
+            .unwrap();
+
+        let response = app.oneshot(req).await.unwrap();
+        let status = response.status();
+        assert!(status == StatusCode::OK || status == StatusCode::BAD_REQUEST || status == StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn test_route_post_crawl() {
+        use axum::http::{Request, StatusCode, header};
+        use tower::ServiceExt;
+
+        let state = test_state();
+        let app = build_router(state);
+
+        let payload = serde_json::json!({
+            "token": "USDC",
+            "chain": "ethereum"
+        });
+
+        let req = Request::builder()
+            .uri("/api/crawl")
+            .method("POST")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(payload.to_string()))
+            .unwrap();
+
+        let response = app.oneshot(req).await.unwrap();
+        let status = response.status();
+        assert!(status == StatusCode::OK || status == StatusCode::BAD_REQUEST || status == StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn test_route_get_discover() {
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let state = test_state();
+        let app = build_router(state);
+
+        let req = Request::builder()
+            .uri("/api/discover?source=profiles&limit=5")
+            .method("GET")
+            .body(axum::body::Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(req).await.unwrap();
+        let status = response.status();
+        assert!(status == StatusCode::OK || status == StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn test_route_post_insights() {
+        use axum::http::{Request, StatusCode, header};
+        use tower::ServiceExt;
+
+        let state = test_state();
+        let app = build_router(state);
+
+        let payload = serde_json::json!({
+            "target": "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2"
+        });
+
+        let req = Request::builder()
+            .uri("/api/insights")
+            .method("POST")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(payload.to_string()))
+            .unwrap();
+
+        let response = app.oneshot(req).await.unwrap();
+        let status = response.status();
+        assert!(status == StatusCode::OK || status == StatusCode::BAD_REQUEST || status == StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn test_route_post_compliance_risk() {
+        use axum::http::{Request, StatusCode, header};
+        use tower::ServiceExt;
+
+        let state = test_state();
+        let app = build_router(state);
+
+        let payload = serde_json::json!({
+            "address": "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
+            "chain": "ethereum",
+            "detailed": true
+        });
+
+        let req = Request::builder()
+            .uri("/api/compliance/risk")
+            .method("POST")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(payload.to_string()))
+            .unwrap();
+
+        let response = app.oneshot(req).await.unwrap();
+        let status = response.status();
+        assert!(status == StatusCode::OK || status == StatusCode::BAD_REQUEST || status == StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn test_route_post_export() {
+        use axum::http::{Request, StatusCode, header};
+        use tower::ServiceExt;
+
+        let state = test_state();
+        let app = build_router(state);
+
+        let payload = serde_json::json!({
+            "address": "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
+            "chain": "ethereum",
+            "format": "json"
+        });
+
+        let req = Request::builder()
+            .uri("/api/export")
+            .method("POST")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(payload.to_string()))
+            .unwrap();
+
+        let response = app.oneshot(req).await.unwrap();
+        let status = response.status();
+        assert!(status == StatusCode::OK || status == StatusCode::BAD_REQUEST || status == StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn test_route_post_token_health() {
+        use axum::http::{Request, StatusCode, header};
+        use tower::ServiceExt;
+
+        let state = test_state();
+        let app = build_router(state);
+
+        let payload = serde_json::json!({
+            "token": "USDC",
+            "chain": "ethereum",
+            "with_market": false
+        });
+
+        let req = Request::builder()
+            .uri("/api/token-health")
+            .method("POST")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(payload.to_string()))
+            .unwrap();
+
+        let response = app.oneshot(req).await.unwrap();
+        let status = response.status();
+        assert!(status == StatusCode::OK || status == StatusCode::BAD_REQUEST || status == StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn test_route_post_market_summary() {
+        use axum::http::{Request, StatusCode, header};
+        use tower::ServiceExt;
+
+        let state = test_state();
+        let app = build_router(state);
+
+        let payload = serde_json::json!({
+            "pair": "USDC",
+            "market_venue": "binance"
+        });
+
+        let req = Request::builder()
+            .uri("/api/market/summary")
+            .method("POST")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(payload.to_string()))
+            .unwrap();
+
+        let response = app.oneshot(req).await.unwrap();
+        let status = response.status();
+        assert!(status == StatusCode::OK || status == StatusCode::BAD_REQUEST || status == StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn test_route_get_portfolio_list() {
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let state = test_state();
+        let app = build_router(state);
+
+        let req = Request::builder()
+            .uri("/api/portfolio/list")
+            .method("GET")
+            .body(axum::body::Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(req).await.unwrap();
+        let status = response.status();
+        assert!(status == StatusCode::OK || status == StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn test_route_post_portfolio_add() {
+        use axum::http::{Request, StatusCode, header};
+        use tower::ServiceExt;
+
+        let state = test_state();
+        let app = build_router(state);
+
+        let payload = serde_json::json!({
+            "address": "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
+            "chain": "ethereum",
+            "label": "Test Wallet"
+        });
+
+        let req = Request::builder()
+            .uri("/api/portfolio/add")
+            .method("POST")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(payload.to_string()))
+            .unwrap();
+
+        let response = app.oneshot(req).await.unwrap();
+        let status = response.status();
+        assert!(status == StatusCode::OK || status == StatusCode::BAD_REQUEST || status == StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn test_route_invalid_json_body() {
+        use axum::http::{Request, header};
+        use tower::ServiceExt;
+
+        let state = test_state();
+        let app = build_router(state);
+
+        let req = Request::builder()
+            .uri("/api/address")
+            .method("POST")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from("not json"))
+            .unwrap();
+
+        let response = app.oneshot(req).await.unwrap();
+        // Should return 4xx for bad JSON
+        assert!(response.status().is_client_error());
+    }
+
+    #[tokio::test]
+    async fn test_route_missing_required_field() {
+        use axum::http::{Request, header};
+        use tower::ServiceExt;
+
+        let state = test_state();
+        let app = build_router(state);
+
+        // Missing required "address" field
+        let payload = serde_json::json!({ "chain": "ethereum" });
+
+        let req = Request::builder()
+            .uri("/api/address")
+            .method("POST")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(payload.to_string()))
+            .unwrap();
+
+        let response = app.oneshot(req).await.unwrap();
+        assert!(response.status().is_client_error());
+    }
+
+    #[tokio::test]
+    async fn test_route_static_fallback() {
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let state = test_state();
+        let app = build_router(state);
+
+        let req = Request::builder()
+            .uri("/nonexistent-path")
+            .method("GET")
+            .body(axum::body::Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }

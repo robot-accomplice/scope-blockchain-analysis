@@ -89,6 +89,7 @@ libc = "0.2"
 [dev-dependencies]
 # Async test utilities
 tokio-test = "0.4"
+tower = { version = "0.5", features = ["util"] }
 
 # Temporary files for testing
 tempfile = "3.10"

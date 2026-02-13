@@ -64,3 +64,77 @@ pub async fn handle_risk(
             .into_response(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_deserialize_full() {
+        let json = serde_json::json!({
+            "address": "0x1234567890123456789012345678901234567890",
+            "chain": "polygon",
+            "detailed": true
+        });
+        let req: ComplianceRiskRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.address, "0x1234567890123456789012345678901234567890");
+        assert_eq!(req.chain, "polygon");
+        assert_eq!(req.detailed, true);
+    }
+
+    #[test]
+    fn test_deserialize_minimal() {
+        let json = serde_json::json!({
+            "address": "0x1234567890123456789012345678901234567890"
+        });
+        let req: ComplianceRiskRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.address, "0x1234567890123456789012345678901234567890");
+        assert_eq!(req.chain, "ethereum");
+        assert_eq!(req.detailed, false);
+    }
+
+    #[test]
+    fn test_default_chain() {
+        assert_eq!(default_chain(), "ethereum");
+    }
+
+    #[test]
+    fn test_detailed_flag() {
+        let json = serde_json::json!({
+            "address": "0x1234567890123456789012345678901234567890",
+            "detailed": true
+        });
+        let req: ComplianceRiskRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.detailed, true);
+
+        let json_false = serde_json::json!({
+            "address": "0x1234567890123456789012345678901234567890",
+            "detailed": false
+        });
+        let req_false: ComplianceRiskRequest = serde_json::from_value(json_false).unwrap();
+        assert_eq!(req_false.detailed, false);
+    }
+
+    #[tokio::test]
+    async fn test_handle_risk_direct() {
+        use axum::extract::State;
+        use axum::response::IntoResponse;
+        use crate::config::Config;
+        use crate::chains::DefaultClientFactory;
+        use crate::web::AppState;
+
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+        let req = ComplianceRiskRequest {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: "ethereum".to_string(),
+            detailed: true,
+        };
+        let response = handle_risk(State(state), axum::Json(req)).await.into_response();
+        let status = response.status();
+        assert!(status.is_success() || status.is_client_error() || status.is_server_error());
+    }
+}

@@ -139,3 +139,54 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, params: Moni
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_chain() {
+        assert_eq!(default_chain(), "ethereum");
+    }
+
+    #[test]
+    fn test_default_refresh() {
+        assert_eq!(default_refresh(), 5);
+    }
+
+    #[test]
+    fn test_deserialize_monitor_query_full() {
+        let json = serde_json::json!({
+            "token": "USDC",
+            "chain": "solana",
+            "refresh": 10
+        });
+        let query: MonitorQuery = serde_json::from_value(json).unwrap();
+        assert_eq!(query.token, "USDC");
+        assert_eq!(query.chain, "solana");
+        assert_eq!(query.refresh, 10);
+    }
+
+    #[test]
+    fn test_deserialize_monitor_query_minimal() {
+        let json = serde_json::json!({
+            "token": "ETH"
+        });
+        let query: MonitorQuery = serde_json::from_value(json).unwrap();
+        assert_eq!(query.token, "ETH");
+        assert_eq!(query.chain, "ethereum");
+        assert_eq!(query.refresh, 5);
+    }
+
+    #[test]
+    fn test_deserialize_monitor_query_custom_refresh() {
+        let json = serde_json::json!({
+            "token": "BTC",
+            "refresh": 30
+        });
+        let query: MonitorQuery = serde_json::from_value(json).unwrap();
+        assert_eq!(query.token, "BTC");
+        assert_eq!(query.chain, "ethereum");
+        assert_eq!(query.refresh, 30);
+    }
+}

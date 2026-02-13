@@ -748,6 +748,81 @@ mod tests {
     }
 
     // ========================================================================
+    // Mock-based tests for analyze_address
+    // ========================================================================
+
+    use crate::chains::{Balance as ChainBalance, ChainClient, Token as ChainToken, TokenBalance as ChainTokenBalance, Transaction as ChainTransaction};
+    use async_trait::async_trait;
+
+    struct MockClient;
+
+    #[async_trait]
+    impl ChainClient for MockClient {
+        fn chain_name(&self) -> &str { "ethereum" }
+        fn native_token_symbol(&self) -> &str { "ETH" }
+        async fn get_balance(&self, _addr: &str) -> crate::error::Result<ChainBalance> {
+            Ok(ChainBalance { raw: "1000000000000000000".into(), formatted: "1.0 ETH".into(), decimals: 18, symbol: "ETH".into(), usd_value: Some(2500.0) })
+        }
+        async fn enrich_balance_usd(&self, b: &mut ChainBalance) { b.usd_value = Some(2500.0); }
+        async fn get_transaction(&self, _h: &str) -> crate::error::Result<ChainTransaction> { Err(crate::error::ScopeError::NotFound("mock".into())) }
+        async fn get_transactions(&self, _addr: &str, _lim: u32) -> crate::error::Result<Vec<ChainTransaction>> {
+            Ok(vec![ChainTransaction {
+                hash: "0x1234".into(), block_number: Some(100), timestamp: Some(1700000000),
+                from: "0xfrom".into(), to: Some("0xto".into()), value: "1000000000000000000".into(),
+                gas_limit: 21000, gas_used: Some(21000), gas_price: "20000000000".into(),
+                nonce: 1, input: "0x".into(), status: Some(true),
+            }])
+        }
+        async fn get_block_number(&self) -> crate::error::Result<u64> { Ok(12345678) }
+        async fn get_token_balances(&self, _addr: &str) -> crate::error::Result<Vec<ChainTokenBalance>> {
+            Ok(vec![ChainTokenBalance {
+                token: ChainToken { contract_address: "0xtoken".into(), symbol: "USDC".into(), name: "USD Coin".into(), decimals: 6 },
+                balance: "1000000".into(), formatted_balance: "1.0".into(), usd_value: Some(1.0),
+            }])
+        }
+        async fn get_code(&self, _addr: &str) -> crate::error::Result<String> { Ok("0x".into()) }
+    }
+
+    #[tokio::test]
+    async fn test_analyze_address_with_mock() {
+        let args = AddressArgs {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: "ethereum".to_string(),
+            format: None,
+            include_txs: true,
+            include_tokens: true,
+            limit: 10,
+            report: None,
+            dossier: false,
+        };
+        let client = MockClient;
+        let result = analyze_address(&args, &client).await;
+        assert!(result.is_ok());
+        let report = result.unwrap();
+        assert_eq!(report.address, "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2");
+        assert_eq!(report.chain, "ethereum");
+        assert!(report.tokens.is_some());
+        assert!(report.transactions.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_analyze_address_no_txs_no_tokens() {
+        let args = AddressArgs {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: "ethereum".to_string(),
+            format: None,
+            include_txs: false,
+            include_tokens: false,
+            limit: 10,
+            report: None,
+            dossier: false,
+        };
+        let client = MockClient;
+        let result = analyze_address(&args, &client).await;
+        assert!(result.is_ok());
+    }
+
+    // ========================================================================
     // End-to-end tests using MockClientFactory
     // ========================================================================
 

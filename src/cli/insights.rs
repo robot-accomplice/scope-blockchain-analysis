@@ -719,6 +719,497 @@ fn meta_analysis_token(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chains::{
+        Balance as ChainBalance, ChainClient, ChainClientFactory, DexDataSource, Token as ChainToken,
+        TokenBalance as ChainTokenBalance, Transaction as ChainTransaction,
+    };
+    use async_trait::async_trait;
+
+    // ====================================================================
+    // Mock Chain Client for testing run() paths
+    // ====================================================================
+
+    struct MockChainClient;
+
+    #[async_trait]
+    impl ChainClient for MockChainClient {
+        fn chain_name(&self) -> &str {
+            "ethereum"
+        }
+        fn native_token_symbol(&self) -> &str {
+            "ETH"
+        }
+        async fn get_balance(&self, _address: &str) -> crate::error::Result<ChainBalance> {
+            Ok(ChainBalance {
+                raw: "1000000000000000000".to_string(),
+                formatted: "1.0 ETH".to_string(),
+                decimals: 18,
+                symbol: "ETH".to_string(),
+                usd_value: Some(2500.0),
+            })
+        }
+        async fn enrich_balance_usd(&self, balance: &mut ChainBalance) {
+            balance.usd_value = Some(2500.0);
+        }
+        async fn get_transaction(&self, _hash: &str) -> crate::error::Result<ChainTransaction> {
+            Ok(ChainTransaction {
+                hash: "0xabc123def456789012345678901234567890123456789012345678901234abcd"
+                    .to_string(),
+                block_number: Some(12345678),
+                timestamp: Some(1700000000),
+                from: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+                to: Some("0xdAC17F958D2ee523a2206206994597C13D831ec7".to_string()),
+                value: "1000000000000000000".to_string(),
+                gas_limit: 21000,
+                gas_used: Some(21000),
+                gas_price: "20000000000".to_string(),
+                nonce: 42,
+                input: "0xa9059cbb0000000000000000000000001234".to_string(),
+                status: Some(true),
+            })
+        }
+        async fn get_transactions(
+            &self,
+            _address: &str,
+            _limit: u32,
+        ) -> crate::error::Result<Vec<ChainTransaction>> {
+            Ok(vec![])
+        }
+        async fn get_block_number(&self) -> crate::error::Result<u64> {
+            Ok(12345678)
+        }
+        async fn get_token_balances(
+            &self,
+            _address: &str,
+        ) -> crate::error::Result<Vec<ChainTokenBalance>> {
+            Ok(vec![
+                ChainTokenBalance {
+                    token: ChainToken {
+                        contract_address: "0xdAC17F958D2ee523a2206206994597C13D831ec7"
+                            .to_string(),
+                        symbol: "USDT".to_string(),
+                        name: "Tether USD".to_string(),
+                        decimals: 6,
+                    },
+                    balance: "1000000".to_string(),
+                    formatted_balance: "1.0".to_string(),
+                    usd_value: Some(1.0),
+                },
+                ChainTokenBalance {
+                    token: ChainToken {
+                        contract_address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+                            .to_string(),
+                        symbol: "USDC".to_string(),
+                        name: "USD Coin".to_string(),
+                        decimals: 6,
+                    },
+                    balance: "5000000".to_string(),
+                    formatted_balance: "5.0".to_string(),
+                    usd_value: Some(5.0),
+                },
+            ])
+        }
+        async fn get_code(&self, _address: &str) -> crate::error::Result<String> {
+            Ok("0x".to_string()) // EOA
+        }
+    }
+
+    struct MockFactory;
+
+    impl ChainClientFactory for MockFactory {
+        fn create_chain_client(
+            &self,
+            _chain: &str,
+        ) -> crate::error::Result<Box<dyn ChainClient>> {
+            Ok(Box::new(MockChainClient))
+        }
+        fn create_dex_client(&self) -> Box<dyn DexDataSource> {
+            crate::chains::DefaultClientFactory {
+                chains_config: Default::default(),
+            }
+            .create_dex_client()
+        }
+    }
+
+    // Mock that returns a contract address
+    struct MockContractClient;
+
+    #[async_trait]
+    impl ChainClient for MockContractClient {
+        fn chain_name(&self) -> &str {
+            "ethereum"
+        }
+        fn native_token_symbol(&self) -> &str {
+            "ETH"
+        }
+        async fn get_balance(&self, _address: &str) -> crate::error::Result<ChainBalance> {
+            Ok(ChainBalance {
+                raw: "0".to_string(),
+                formatted: "0.0 ETH".to_string(),
+                decimals: 18,
+                symbol: "ETH".to_string(),
+                usd_value: Some(0.0),
+            })
+        }
+        async fn enrich_balance_usd(&self, _balance: &mut ChainBalance) {}
+        async fn get_transaction(&self, hash: &str) -> crate::error::Result<ChainTransaction> {
+            Ok(ChainTransaction {
+                hash: hash.to_string(),
+                block_number: Some(100),
+                timestamp: Some(1700000000),
+                from: "0xfrom".to_string(),
+                to: None, // contract creation
+                value: "0".to_string(),
+                gas_limit: 100000,
+                gas_used: Some(80000),
+                gas_price: "10000000000".to_string(),
+                nonce: 0,
+                input: "0x60806040".to_string(),
+                status: Some(false), // failed tx
+            })
+        }
+        async fn get_transactions(
+            &self,
+            _address: &str,
+            _limit: u32,
+        ) -> crate::error::Result<Vec<ChainTransaction>> {
+            Ok(vec![])
+        }
+        async fn get_block_number(&self) -> crate::error::Result<u64> {
+            Ok(100)
+        }
+        async fn get_token_balances(
+            &self,
+            _address: &str,
+        ) -> crate::error::Result<Vec<ChainTokenBalance>> {
+            Ok(vec![])
+        }
+        async fn get_code(&self, _address: &str) -> crate::error::Result<String> {
+            Ok("0x6080604052".to_string()) // contract
+        }
+    }
+
+    struct MockContractFactory;
+
+    impl ChainClientFactory for MockContractFactory {
+        fn create_chain_client(
+            &self,
+            _chain: &str,
+        ) -> crate::error::Result<Box<dyn ChainClient>> {
+            Ok(Box::new(MockContractClient))
+        }
+        fn create_dex_client(&self) -> Box<dyn DexDataSource> {
+            crate::chains::DefaultClientFactory {
+                chains_config: Default::default(),
+            }
+            .create_dex_client()
+        }
+    }
+
+    // Mock DexDataSource for token tests
+    struct MockDexDataSource;
+
+    #[async_trait]
+    impl DexDataSource for MockDexDataSource {
+        async fn get_token_price(&self, _chain: &str, _address: &str) -> Option<f64> {
+            Some(1.0)
+        }
+
+        async fn get_native_token_price(&self, _chain: &str) -> Option<f64> {
+            Some(2500.0)
+        }
+
+        async fn get_token_data(
+            &self,
+            _chain: &str,
+            address: &str,
+        ) -> crate::error::Result<crate::chains::dex::DexTokenData> {
+            use crate::chains::{DexPair, PricePoint, VolumePoint};
+            Ok(crate::chains::dex::DexTokenData {
+                address: address.to_string(),
+                symbol: "TEST".to_string(),
+                name: "Test Token".to_string(),
+                price_usd: 1.5,
+                price_change_24h: 5.2,
+                price_change_6h: 2.1,
+                price_change_1h: 0.5,
+                price_change_5m: 0.1,
+                volume_24h: 1_000_000.0,
+                volume_6h: 250_000.0,
+                volume_1h: 50_000.0,
+                liquidity_usd: 500_000.0,
+                market_cap: Some(10_000_000.0),
+                fdv: Some(12_000_000.0),
+                pairs: vec![DexPair {
+                    dex_name: "Uniswap V3".to_string(),
+                    pair_address: "0xpair123".to_string(),
+                    base_token: "TEST".to_string(),
+                    quote_token: "USDC".to_string(),
+                    price_usd: 1.5,
+                    liquidity_usd: 500_000.0,
+                    volume_24h: 1_000_000.0,
+                    price_change_24h: 5.2,
+                    buys_24h: 100,
+                    sells_24h: 80,
+                    buys_6h: 20,
+                    sells_6h: 15,
+                    buys_1h: 5,
+                    sells_1h: 3,
+                    pair_created_at: Some(1690000000),
+                    url: Some("https://dexscreener.com/ethereum/0xpair123".to_string()),
+                }],
+                price_history: vec![PricePoint {
+                    timestamp: 1690000000,
+                    price: 1.5,
+                }],
+                volume_history: vec![VolumePoint {
+                    timestamp: 1690000000,
+                    volume: 1_000_000.0,
+                }],
+                total_buys_24h: 100,
+                total_sells_24h: 80,
+                total_buys_6h: 20,
+                total_sells_6h: 15,
+                total_buys_1h: 5,
+                total_sells_1h: 3,
+                earliest_pair_created_at: Some(1690000000),
+                image_url: None,
+                websites: Vec::new(),
+                socials: Vec::new(),
+                dexscreener_url: Some("https://dexscreener.com/ethereum/test".to_string()),
+            })
+        }
+
+        async fn search_tokens(
+            &self,
+            _query: &str,
+            _chain: Option<&str>,
+        ) -> crate::error::Result<Vec<crate::chains::TokenSearchResult>> {
+            Ok(vec![crate::chains::TokenSearchResult {
+                address: "0xTEST1234567890123456789012345678901234567".to_string(),
+                symbol: "TEST".to_string(),
+                name: "Test Token".to_string(),
+                chain: "ethereum".to_string(),
+                price_usd: Some(1.5),
+                volume_24h: 1_000_000.0,
+                liquidity_usd: 500_000.0,
+                market_cap: Some(10_000_000.0),
+            }])
+        }
+    }
+
+    // Mock ChainClient that returns holders with high concentration
+    struct MockTokenChainClient;
+
+    #[async_trait]
+    impl ChainClient for MockTokenChainClient {
+        fn chain_name(&self) -> &str {
+            "ethereum"
+        }
+        fn native_token_symbol(&self) -> &str {
+            "ETH"
+        }
+        async fn get_balance(&self, _address: &str) -> crate::error::Result<ChainBalance> {
+            Ok(ChainBalance {
+                raw: "1000000000000000000".to_string(),
+                formatted: "1.0 ETH".to_string(),
+                decimals: 18,
+                symbol: "ETH".to_string(),
+                usd_value: Some(2500.0),
+            })
+        }
+        async fn enrich_balance_usd(&self, balance: &mut ChainBalance) {
+            balance.usd_value = Some(2500.0);
+        }
+        async fn get_transaction(&self, _hash: &str) -> crate::error::Result<ChainTransaction> {
+            Ok(ChainTransaction {
+                hash: "0xabc123".to_string(),
+                block_number: Some(12345678),
+                timestamp: Some(1700000000),
+                from: "0xfrom".to_string(),
+                to: Some("0xto".to_string()),
+                value: "0".to_string(),
+                gas_limit: 21000,
+                gas_used: Some(21000),
+                gas_price: "20000000000".to_string(),
+                nonce: 42,
+                input: "0x".to_string(),
+                status: Some(true),
+            })
+        }
+        async fn get_transactions(
+            &self,
+            _address: &str,
+            _limit: u32,
+        ) -> crate::error::Result<Vec<ChainTransaction>> {
+            Ok(vec![])
+        }
+        async fn get_block_number(&self) -> crate::error::Result<u64> {
+            Ok(12345678)
+        }
+        async fn get_token_balances(
+            &self,
+            _address: &str,
+        ) -> crate::error::Result<Vec<ChainTokenBalance>> {
+            Ok(vec![])
+        }
+        async fn get_code(&self, _address: &str) -> crate::error::Result<String> {
+            Ok("0x".to_string())
+        }
+        async fn get_token_holders(
+            &self,
+            _address: &str,
+            _limit: u32,
+        ) -> crate::error::Result<Vec<crate::chains::TokenHolder>> {
+            // Return holders with high concentration (>30%) to trigger warning
+            Ok(vec![
+                crate::chains::TokenHolder {
+                    address: "0x1111111111111111111111111111111111111111".to_string(),
+                    balance: "3500000000000000000000000".to_string(),
+                    formatted_balance: "3500000.0".to_string(),
+                    percentage: 35.0, // >30% triggers concentration warning
+                    rank: 1,
+                },
+                crate::chains::TokenHolder {
+                    address: "0x2222222222222222222222222222222222222222".to_string(),
+                    balance: "1500000000000000000000000".to_string(),
+                    formatted_balance: "1500000.0".to_string(),
+                    percentage: 15.0,
+                    rank: 2,
+                },
+                crate::chains::TokenHolder {
+                    address: "0x3333333333333333333333333333333333333333".to_string(),
+                    balance: "1000000000000000000000000".to_string(),
+                    formatted_balance: "1000000.0".to_string(),
+                    percentage: 10.0,
+                    rank: 3,
+                },
+            ])
+        }
+    }
+
+    // Factory for token tests with mocks
+    struct MockTokenFactory;
+
+    impl ChainClientFactory for MockTokenFactory {
+        fn create_chain_client(
+            &self,
+            _chain: &str,
+        ) -> crate::error::Result<Box<dyn ChainClient>> {
+            Ok(Box::new(MockTokenChainClient))
+        }
+        fn create_dex_client(&self) -> Box<dyn DexDataSource> {
+            Box::new(MockDexDataSource)
+        }
+    }
+
+    // ====================================================================
+    // run() function tests with mocks
+    // ====================================================================
+
+    #[tokio::test]
+    async fn test_run_address_eoa() {
+        let config = Config::default();
+        let factory = MockFactory;
+        let args = InsightsArgs {
+            target: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: None,
+            decode: false,
+            trace: false,
+        };
+        let result = run(args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_address_contract() {
+        let config = Config::default();
+        let factory = MockContractFactory;
+        let args = InsightsArgs {
+            target: "0xdAC17F958D2ee523a2206206994597C13D831ec7".to_string(),
+            chain: None,
+            decode: false,
+            trace: false,
+        };
+        let result = run(args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_transaction() {
+        let config = Config::default();
+        let factory = MockFactory;
+        let args = InsightsArgs {
+            target: "0xabc123def456789012345678901234567890123456789012345678901234abcd"
+                .to_string(),
+            chain: None,
+            decode: false,
+            trace: false,
+        };
+        let result = run(args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_transaction_failed() {
+        let config = Config::default();
+        let factory = MockContractFactory;
+        let args = InsightsArgs {
+            target: "0xabc123def456789012345678901234567890123456789012345678901234abcd"
+                .to_string(),
+            chain: Some("ethereum".to_string()),
+            decode: true,
+            trace: false,
+        };
+        let result = run(args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_address_with_chain_override() {
+        let config = Config::default();
+        let factory = MockFactory;
+        let args = InsightsArgs {
+            target: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: Some("polygon".to_string()),
+            decode: false,
+            trace: false,
+        };
+        let result = run(args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_insights_run_token() {
+        let config = Config::default();
+        let factory = MockTokenFactory;
+        let args = InsightsArgs {
+            target: "TEST".to_string(),
+            chain: Some("ethereum".to_string()),
+            decode: false,
+            trace: false,
+        };
+        let result = run(args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_insights_run_token_with_concentration_warning() {
+        let config = Config::default();
+        let factory = MockTokenFactory;
+        let args = InsightsArgs {
+            target: "0xTEST1234567890123456789012345678901234567".to_string(),
+            chain: Some("ethereum".to_string()),
+            decode: false,
+            trace: false,
+        };
+        let result = run(args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    // ====================================================================
+    // Existing tests below
+    // ====================================================================
 
     #[test]
     fn test_infer_target_evm_address() {
@@ -808,7 +1299,439 @@ mod tests {
         assert!(is_stablecoin("USDC"));
         assert!(is_stablecoin("usdt"));
         assert!(is_stablecoin("DAI"));
+        assert!(is_stablecoin("BUSD"));
+        assert!(is_stablecoin("TUSD"));
+        assert!(is_stablecoin("USDP"));
+        assert!(is_stablecoin("FRAX"));
+        assert!(is_stablecoin("LUSD"));
+        assert!(is_stablecoin("PUSD"));
+        assert!(is_stablecoin("GUSD"));
         assert!(!is_stablecoin("ETH"));
         assert!(!is_stablecoin("PEPE"));
+        assert!(!is_stablecoin("WBTC"));
+    }
+
+    // ====================================================================
+    // target_type_label and chain_label tests
+    // ====================================================================
+
+    #[test]
+    fn test_target_type_label_address() {
+        let t = InferredTarget::Address { chain: "ethereum".to_string() };
+        assert_eq!(target_type_label(&t), "Address");
+    }
+
+    #[test]
+    fn test_target_type_label_transaction() {
+        let t = InferredTarget::Transaction { chain: "ethereum".to_string() };
+        assert_eq!(target_type_label(&t), "Transaction");
+    }
+
+    #[test]
+    fn test_target_type_label_token() {
+        let t = InferredTarget::Token { chain: "ethereum".to_string() };
+        assert_eq!(target_type_label(&t), "Token");
+    }
+
+    #[test]
+    fn test_chain_label_address() {
+        let t = InferredTarget::Address { chain: "polygon".to_string() };
+        assert_eq!(chain_label(&t), "polygon");
+    }
+
+    #[test]
+    fn test_chain_label_transaction() {
+        let t = InferredTarget::Transaction { chain: "tron".to_string() };
+        assert_eq!(chain_label(&t), "tron");
+    }
+
+    #[test]
+    fn test_chain_label_token() {
+        let t = InferredTarget::Token { chain: "solana".to_string() };
+        assert_eq!(chain_label(&t), "solana");
+    }
+
+    // ====================================================================
+    // classify_tx_type — expanded edge cases
+    // ====================================================================
+
+    #[test]
+    fn test_classify_tx_type_dex_swaps() {
+        assert_eq!(classify_tx_type("0x38ed173900000...", Some("0xrouter")), "DEX Swap");
+        assert_eq!(classify_tx_type("0x5c11d79500000...", Some("0xrouter")), "DEX Swap");
+        assert_eq!(classify_tx_type("0x4a25d94a00000...", Some("0xrouter")), "DEX Swap");
+        assert_eq!(classify_tx_type("0x8803dbee00000...", Some("0xrouter")), "DEX Swap");
+        assert_eq!(classify_tx_type("0x7ff36ab500000...", Some("0xrouter")), "DEX Swap");
+        assert_eq!(classify_tx_type("0x18cbafe500000...", Some("0xrouter")), "DEX Swap");
+        assert_eq!(classify_tx_type("0xfb3bdb4100000...", Some("0xrouter")), "DEX Swap");
+        assert_eq!(classify_tx_type("0xb6f9de9500000...", Some("0xrouter")), "DEX Swap");
+    }
+
+    #[test]
+    fn test_classify_tx_type_multicall() {
+        assert_eq!(classify_tx_type("0xac9650d800000...", Some("0xcontract")), "Multicall");
+        assert_eq!(classify_tx_type("0x5ae401dc00000...", Some("0xcontract")), "Multicall");
+    }
+
+    #[test]
+    fn test_classify_tx_type_transfer_from() {
+        assert_eq!(classify_tx_type("0x23b872dd00000...", Some("0xtoken")), "ERC-20 Transfer From");
+    }
+
+    #[test]
+    fn test_classify_tx_type_contract_call() {
+        assert_eq!(classify_tx_type("0xdeadbeef00000...", Some("0xcontract")), "Contract Call");
+    }
+
+    #[test]
+    fn test_classify_tx_type_native_transfer_empty() {
+        assert_eq!(classify_tx_type("", Some("0xrecipient")), "Native Transfer");
+    }
+
+    // ====================================================================
+    // format_tx_value — expanded edge cases
+    // ====================================================================
+
+    #[test]
+    fn test_format_tx_value_zero() {
+        let (fmt, high) = format_tx_value("0x0", "ethereum");
+        assert!(fmt.contains("0.000000"));
+        assert!(fmt.contains("ETH"));
+        assert!(!high);
+    }
+
+    #[test]
+    fn test_format_tx_value_empty_hex() {
+        let (fmt, high) = format_tx_value("0x", "ethereum");
+        assert!(fmt.contains("0.000000"));
+        assert!(!high);
+    }
+
+    #[test]
+    fn test_format_tx_value_decimal_string() {
+        let (fmt, high) = format_tx_value("1000000000000000000", "ethereum"); // 1 ETH
+        assert!(fmt.contains("1.0"));
+        assert!(fmt.contains("ETH"));
+        assert!(!high);
+    }
+
+    #[test]
+    fn test_format_tx_value_solana() {
+        let (fmt, high) = format_tx_value("1000000000", "solana"); // 1 SOL (9 decimals)
+        assert!(fmt.contains("1.0"));
+        assert!(fmt.contains("SOL"));
+        assert!(!high);
+    }
+
+    #[test]
+    fn test_format_tx_value_tron() {
+        let (fmt, high) = format_tx_value("1000000", "tron"); // 1 TRX (6 decimals)
+        assert!(fmt.contains("1.0"));
+        assert!(fmt.contains("TRX"));
+        assert!(!high);
+    }
+
+    #[test]
+    fn test_format_tx_value_polygon() {
+        let (fmt, _) = format_tx_value("1000000000000000000", "polygon");
+        assert!(fmt.contains("MATIC") || fmt.contains("POL"));
+    }
+
+    #[test]
+    fn test_format_tx_value_bsc() {
+        let (fmt, _) = format_tx_value("1000000000000000000", "bsc");
+        assert!(fmt.contains("BNB"));
+    }
+
+    #[test]
+    fn test_format_tx_value_high_value_threshold() {
+        // > 10 native units = high value
+        let (_, high) = format_tx_value("11000000000000000000", "ethereum"); // 11 ETH
+        assert!(high);
+        let (_, high2) = format_tx_value("10000000000000000000", "ethereum"); // 10 ETH
+        assert!(!high2); // exactly 10 is not > 10
+    }
+
+    // ====================================================================
+    // meta_analysis_address tests
+    // ====================================================================
+
+    #[test]
+    fn test_meta_analysis_address_contract_high_value() {
+        let meta = meta_analysis_address(true, Some(2_000_000.0), 10, None, None);
+        assert!(meta.synthesis.contains("contract"));
+        assert!(meta.synthesis.contains("Significant value"));
+        assert!(meta.synthesis.contains("Diversified"));
+        assert!(meta.recommendations.iter().any(|r| r.contains("contract")));
+    }
+
+    #[test]
+    fn test_meta_analysis_address_eoa_moderate_value() {
+        let meta = meta_analysis_address(false, Some(50_000.0), 3, None, None);
+        assert!(meta.synthesis.contains("wallet (EOA)"));
+        assert!(meta.synthesis.contains("Moderate value"));
+    }
+
+    #[test]
+    fn test_meta_analysis_address_minimal_value() {
+        let meta = meta_analysis_address(false, Some(0.5), 0, None, None);
+        assert!(meta.synthesis.contains("Minimal value"));
+    }
+
+    #[test]
+    fn test_meta_analysis_address_single_token() {
+        let meta = meta_analysis_address(false, None, 1, None, None);
+        assert!(meta.synthesis.contains("Concentrated in a single token"));
+    }
+
+    #[test]
+    fn test_meta_analysis_address_high_risk() {
+        use crate::compliance::risk::RiskLevel;
+        let level = RiskLevel::High;
+        let meta = meta_analysis_address(false, None, 0, Some(8.5), Some(&level));
+        assert!(meta.synthesis.contains("Elevated risk"));
+        assert!(meta.key_takeaway.contains("scrutiny"));
+        assert!(meta.recommendations.iter().any(|r| r.contains("unusual transaction")));
+    }
+
+    #[test]
+    fn test_meta_analysis_address_low_risk() {
+        use crate::compliance::risk::RiskLevel;
+        let level = RiskLevel::Low;
+        let meta = meta_analysis_address(false, None, 0, Some(2.0), Some(&level));
+        assert!(meta.synthesis.contains("Low risk"));
+    }
+
+    #[test]
+    fn test_meta_analysis_address_contract_no_value() {
+        let meta = meta_analysis_address(true, None, 0, None, None);
+        assert!(meta.key_takeaway.contains("Contract address"));
+        assert!(meta.recommendations.iter().any(|r| r.contains("Confirm contract")));
+    }
+
+    #[test]
+    fn test_meta_analysis_address_high_value_wallet() {
+        let meta = meta_analysis_address(false, Some(150_000.0), 0, None, None);
+        assert!(meta.key_takeaway.contains("High-value wallet"));
+    }
+
+    #[test]
+    fn test_meta_analysis_address_default_takeaway() {
+        let meta = meta_analysis_address(false, Some(5_000.0), 0, None, None);
+        assert!(meta.key_takeaway.contains("Review full report"));
+    }
+
+    #[test]
+    fn test_meta_analysis_address_with_tokens_recommendation() {
+        let meta = meta_analysis_address(false, None, 3, None, None);
+        assert!(meta.recommendations.iter().any(|r| r.contains("Verify token contracts")));
+    }
+
+    // ====================================================================
+    // meta_analysis_tx tests
+    // ====================================================================
+
+    #[test]
+    fn test_meta_analysis_tx_successful_native_transfer() {
+        let meta = meta_analysis_tx("Native Transfer", true, false, "0xfrom", Some("0xto"));
+        assert!(meta.synthesis.contains("Native Transfer"));
+        assert!(meta.key_takeaway.contains("Routine"));
+        assert!(meta.recommendations.is_empty());
+    }
+
+    #[test]
+    fn test_meta_analysis_tx_failed() {
+        let meta = meta_analysis_tx("Contract Call", false, false, "0xfrom", Some("0xto"));
+        assert!(meta.synthesis.contains("failed"));
+        assert!(meta.key_takeaway.contains("Failed transaction"));
+        assert!(meta.recommendations.iter().any(|r| r.contains("revert")));
+    }
+
+    #[test]
+    fn test_meta_analysis_tx_high_value_native() {
+        let meta = meta_analysis_tx("Native Transfer", true, true, "0xfrom", Some("0xto"));
+        assert!(meta.synthesis.contains("High-value"));
+        assert!(meta.key_takeaway.contains("Large native transfer"));
+        assert!(meta.recommendations.iter().any(|r| r.contains("recipient")));
+    }
+
+    #[test]
+    fn test_meta_analysis_tx_high_value_contract_call() {
+        let meta = meta_analysis_tx("DEX Swap", true, true, "0xfrom", Some("0xto"));
+        assert!(meta.key_takeaway.contains("High-value operation"));
+    }
+
+    #[test]
+    fn test_meta_analysis_tx_erc20_approve() {
+        let meta = meta_analysis_tx("ERC-20 Approval", true, false, "0xfrom", Some("0xto"));
+        assert!(meta.recommendations.iter().any(|r| r.contains("spender")));
+    }
+
+    #[test]
+    fn test_meta_analysis_tx_failed_high_value() {
+        let meta = meta_analysis_tx("Contract Call", false, true, "0xfrom", Some("0xto"));
+        assert!(meta.synthesis.contains("failed"));
+        assert!(meta.synthesis.contains("High-value"));
+        assert!(meta.recommendations.len() >= 2);
+    }
+
+    // ====================================================================
+    // meta_analysis_token tests
+    // ====================================================================
+
+    #[test]
+    fn test_meta_analysis_token_low_risk() {
+        let summary = report::TokenRiskSummary {
+            score: 2,
+            level: "Low",
+            emoji: "🟢",
+            concerns: vec![],
+            positives: vec!["Good liquidity".to_string()],
+        };
+        let meta = meta_analysis_token(&summary, false, None, None, 2_000_000.0);
+        assert!(meta.synthesis.contains("Low-risk"));
+        assert!(meta.synthesis.contains("Strong liquidity"));
+        assert!(meta.key_takeaway.contains("Favorable"));
+    }
+
+    #[test]
+    fn test_meta_analysis_token_high_risk() {
+        let summary = report::TokenRiskSummary {
+            score: 8,
+            level: "High",
+            emoji: "🔴",
+            concerns: vec!["Low liquidity".to_string()],
+            positives: vec![],
+        };
+        let meta = meta_analysis_token(&summary, false, None, None, 10_000.0);
+        assert!(meta.synthesis.contains("Elevated risk"));
+        assert!(meta.synthesis.contains("Limited liquidity"));
+        assert!(meta.key_takeaway.contains("High risk"));
+        assert!(meta.recommendations.iter().any(|r| r.contains("smaller position")));
+    }
+
+    #[test]
+    fn test_meta_analysis_token_moderate_risk() {
+        let summary = report::TokenRiskSummary {
+            score: 5,
+            level: "Medium",
+            emoji: "🟡",
+            concerns: vec!["Some concern".to_string()],
+            positives: vec!["Some positive".to_string()],
+        };
+        let meta = meta_analysis_token(&summary, false, None, None, 500_000.0);
+        assert!(meta.synthesis.contains("Moderate risk"));
+        assert!(meta.key_takeaway.contains("Risk 5/10"));
+    }
+
+    #[test]
+    fn test_meta_analysis_token_stablecoin_healthy_peg() {
+        let summary = report::TokenRiskSummary {
+            score: 2,
+            level: "Low",
+            emoji: "🟢",
+            concerns: vec![],
+            positives: vec!["Stable peg".to_string()],
+        };
+        let meta = meta_analysis_token(&summary, true, Some(true), None, 5_000_000.0);
+        assert!(meta.synthesis.contains("Stablecoin peg is healthy"));
+    }
+
+    #[test]
+    fn test_meta_analysis_token_stablecoin_unhealthy_peg() {
+        let summary = report::TokenRiskSummary {
+            score: 4,
+            level: "Medium",
+            emoji: "🟡",
+            concerns: vec![],
+            positives: vec![],
+        };
+        let meta = meta_analysis_token(&summary, true, Some(false), None, 500_000.0);
+        assert!(meta.synthesis.contains("peg deviation"));
+        assert!(meta.key_takeaway.contains("deviating from peg"));
+        assert!(meta.recommendations.iter().any(|r| r.contains("peg")));
+    }
+
+    #[test]
+    fn test_meta_analysis_token_concentration_risk() {
+        let summary = report::TokenRiskSummary {
+            score: 5,
+            level: "Medium",
+            emoji: "🟡",
+            concerns: vec![],
+            positives: vec![],
+        };
+        let meta = meta_analysis_token(&summary, false, None, Some(45.0), 500_000.0);
+        assert!(meta.synthesis.contains("Concentration risk"));
+        assert!(meta.recommendations.iter().any(|r| r.contains("top holder")));
+    }
+
+    #[test]
+    fn test_meta_analysis_token_low_liquidity_low_risk() {
+        let summary = report::TokenRiskSummary {
+            score: 3,
+            level: "Low",
+            emoji: "🟢",
+            concerns: vec![],
+            positives: vec![],
+        };
+        let meta = meta_analysis_token(&summary, false, None, None, 50_000.0);
+        assert!(meta.recommendations.iter().any(|r| r.contains("limit orders") || r.contains("slippage")));
+    }
+
+    #[test]
+    fn test_meta_analysis_token_stablecoin_no_peg_data() {
+        let summary = report::TokenRiskSummary {
+            score: 3,
+            level: "Low",
+            emoji: "🟢",
+            concerns: vec![],
+            positives: vec![],
+        };
+        let meta = meta_analysis_token(&summary, true, None, None, 1_000_000.0);
+        // When peg_healthy is None, recommendation should still suggest verifying peg
+        assert!(meta.recommendations.iter().any(|r| r.contains("peg")));
+    }
+
+    // ====================================================================
+    // infer_target — additional edge cases
+    // ====================================================================
+
+    #[test]
+    fn test_infer_target_tx_hash_with_chain_override() {
+        let t = infer_target(
+            "0xabc123def456789012345678901234567890123456789012345678901234abcd",
+            Some("polygon"),
+        );
+        assert!(matches!(t, InferredTarget::Transaction { chain } if chain == "polygon"));
+    }
+
+    #[test]
+    fn test_infer_target_whitespace_trimming() {
+        let t = infer_target("  USDC  ", None);
+        assert!(matches!(t, InferredTarget::Token { .. }));
+    }
+
+    #[test]
+    fn test_infer_target_long_token_name() {
+        let t = infer_target("some-random-token-name", None);
+        assert!(matches!(t, InferredTarget::Token { chain } if chain == "ethereum"));
+    }
+
+    // ====================================================================
+    // InsightsArgs struct validation
+    // ====================================================================
+
+    #[test]
+    fn test_insights_args_debug() {
+        let args = InsightsArgs {
+            target: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: Some("ethereum".to_string()),
+            decode: true,
+            trace: false,
+        };
+        let debug_str = format!("{:?}", args);
+        assert!(debug_str.contains("InsightsArgs"));
+        assert!(debug_str.contains("0x742d"));
     }
 }

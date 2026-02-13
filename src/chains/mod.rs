@@ -1334,6 +1334,186 @@ mod tests {
         let count = client.get_token_holder_count("0xtest").await.unwrap();
         assert_eq!(count, 0);
     }
+
+    // ============================================================================
+    // Chain Metadata Tests
+    // ============================================================================
+
+    #[test]
+    fn test_chain_metadata_ethereum() {
+        let meta = chain_metadata("ethereum").unwrap();
+        assert_eq!(meta.chain_id, "ethereum");
+        assert_eq!(meta.native_symbol, "ETH");
+        assert_eq!(meta.native_decimals, 18);
+        assert_eq!(meta.explorer_token_base, "https://etherscan.io/token");
+    }
+
+    #[test]
+    fn test_chain_metadata_ethereum_alias() {
+        let meta = chain_metadata("eth").unwrap();
+        assert_eq!(meta.chain_id, "ethereum");
+        assert_eq!(meta.native_symbol, "ETH");
+    }
+
+    #[test]
+    fn test_chain_metadata_polygon() {
+        let meta = chain_metadata("polygon").unwrap();
+        assert_eq!(meta.chain_id, "polygon");
+        assert_eq!(meta.native_symbol, "MATIC");
+        assert_eq!(meta.native_decimals, 18);
+        assert_eq!(meta.explorer_token_base, "https://polygonscan.com/token");
+    }
+
+    #[test]
+    fn test_chain_metadata_bsc() {
+        let meta = chain_metadata("bsc").unwrap();
+        assert_eq!(meta.chain_id, "bsc");
+        assert_eq!(meta.native_symbol, "BNB");
+        assert_eq!(meta.native_decimals, 18);
+        assert_eq!(meta.explorer_token_base, "https://bscscan.com/token");
+    }
+
+    #[test]
+    fn test_chain_metadata_solana() {
+        let meta = chain_metadata("solana").unwrap();
+        assert_eq!(meta.chain_id, "solana");
+        assert_eq!(meta.native_symbol, "SOL");
+        assert_eq!(meta.native_decimals, 9);
+        assert_eq!(meta.explorer_token_base, "https://solscan.io/token");
+    }
+
+    #[test]
+    fn test_chain_metadata_solana_alias() {
+        let meta = chain_metadata("sol").unwrap();
+        assert_eq!(meta.chain_id, "solana");
+        assert_eq!(meta.native_symbol, "SOL");
+    }
+
+    #[test]
+    fn test_chain_metadata_tron() {
+        let meta = chain_metadata("tron").unwrap();
+        assert_eq!(meta.chain_id, "tron");
+        assert_eq!(meta.native_symbol, "TRX");
+        assert_eq!(meta.native_decimals, 6);
+        assert_eq!(meta.explorer_token_base, "https://tronscan.org/#/token20");
+    }
+
+    #[test]
+    fn test_chain_metadata_tron_alias() {
+        let meta = chain_metadata("trx").unwrap();
+        assert_eq!(meta.chain_id, "tron");
+        assert_eq!(meta.native_symbol, "TRX");
+    }
+
+    #[test]
+    fn test_chain_metadata_arbitrum() {
+        let meta = chain_metadata("arbitrum").unwrap();
+        assert_eq!(meta.chain_id, "arbitrum");
+        assert_eq!(meta.native_symbol, "ETH");
+        assert_eq!(meta.native_decimals, 18);
+        assert_eq!(meta.explorer_token_base, "https://arbiscan.io/token");
+    }
+
+    #[test]
+    fn test_chain_metadata_optimism() {
+        let meta = chain_metadata("optimism").unwrap();
+        assert_eq!(meta.chain_id, "optimism");
+        assert_eq!(meta.native_symbol, "ETH");
+        assert_eq!(meta.native_decimals, 18);
+        assert_eq!(meta.explorer_token_base, "https://optimistic.etherscan.io/token");
+    }
+
+    #[test]
+    fn test_chain_metadata_base() {
+        let meta = chain_metadata("base").unwrap();
+        assert_eq!(meta.chain_id, "base");
+        assert_eq!(meta.native_symbol, "ETH");
+        assert_eq!(meta.native_decimals, 18);
+        assert_eq!(meta.explorer_token_base, "https://basescan.org/token");
+    }
+
+    #[test]
+    fn test_chain_metadata_case_insensitive() {
+        let meta1 = chain_metadata("ETHEREUM").unwrap();
+        let meta2 = chain_metadata("Ethereum").unwrap();
+        let meta3 = chain_metadata("ethereum").unwrap();
+        assert_eq!(meta1.chain_id, meta2.chain_id);
+        assert_eq!(meta2.chain_id, meta3.chain_id);
+    }
+
+    #[test]
+    fn test_chain_metadata_unknown() {
+        assert!(chain_metadata("bitcoin").is_none());
+        assert!(chain_metadata("litecoin").is_none());
+        assert!(chain_metadata("unknown").is_none());
+        assert!(chain_metadata("").is_none());
+    }
+
+    #[test]
+    fn test_native_symbol_ethereum() {
+        assert_eq!(native_symbol("ethereum"), "ETH");
+        assert_eq!(native_symbol("eth"), "ETH");
+    }
+
+    #[test]
+    fn test_native_symbol_polygon() {
+        assert_eq!(native_symbol("polygon"), "MATIC");
+    }
+
+    #[test]
+    fn test_native_symbol_bsc() {
+        assert_eq!(native_symbol("bsc"), "BNB");
+    }
+
+    #[test]
+    fn test_native_symbol_solana() {
+        assert_eq!(native_symbol("solana"), "SOL");
+        assert_eq!(native_symbol("sol"), "SOL");
+    }
+
+    #[test]
+    fn test_native_symbol_tron() {
+        assert_eq!(native_symbol("tron"), "TRX");
+        assert_eq!(native_symbol("trx"), "TRX");
+    }
+
+    #[test]
+    fn test_native_symbol_arbitrum() {
+        assert_eq!(native_symbol("arbitrum"), "ETH");
+    }
+
+    #[test]
+    fn test_native_symbol_optimism() {
+        assert_eq!(native_symbol("optimism"), "ETH");
+    }
+
+    #[test]
+    fn test_native_symbol_base() {
+        assert_eq!(native_symbol("base"), "ETH");
+    }
+
+    #[test]
+    fn test_native_symbol_unknown() {
+        assert_eq!(native_symbol("unknown"), "???");
+        assert_eq!(native_symbol("bitcoin"), "???");
+        assert_eq!(native_symbol(""), "???");
+    }
+
+    #[test]
+    fn test_native_symbol_case_insensitive() {
+        assert_eq!(native_symbol("ETHEREUM"), "ETH");
+        assert_eq!(native_symbol("Ethereum"), "ETH");
+        assert_eq!(native_symbol("ethereum"), "ETH");
+    }
+
+    #[tokio::test]
+    async fn test_chain_client_default_get_code() {
+        let client = MinimalChainClient;
+        let result = client.get_code("0x1234").await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("not supported"));
+    }
 }
 
 // ============================================================================

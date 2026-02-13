@@ -37,3 +37,21 @@ pub fn routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/config", axum::routing::post(config_status::handle_save))
         .with_state(state)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::chains::DefaultClientFactory;
+
+    #[test]
+    fn test_routes_construction() {
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = Arc::new(AppState { config, factory });
+        let _router = routes(state);
+        // If this doesn't panic, routes are properly constructed
+    }
+}

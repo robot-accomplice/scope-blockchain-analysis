@@ -6,6 +6,7 @@
 
 use assert_cmd::Command;
 use predicates::prelude::*;
+use tempfile;
 
 /// Returns a Command for the Scope binary.
 #[allow(deprecated)] // TODO: Migrate to cargo::cargo_bin_cmd! when stable
@@ -576,4 +577,194 @@ fn test_ai_flag_with_setup_status() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Scope Configuration"));
+}
+
+// ============================================================================
+// Web Command Tests
+// ============================================================================
+
+#[test]
+fn test_web_help() {
+    scope_cmd()
+        .args(["web", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("web"))
+        .stdout(predicate::str::contains("--port"))
+        .stdout(predicate::str::contains("--daemon"))
+        .stdout(predicate::str::contains("--stop"));
+}
+
+#[test]
+fn test_serve_alias() {
+    scope_cmd()
+        .args(["serve", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("web").or(predicate::str::contains("serve")))
+        .stdout(predicate::str::contains("--port"));
+}
+
+#[test]
+fn test_web_stop_no_daemon() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    scope_cmd()
+        .env("HOME", temp_dir.path())
+        .args(["web", "--stop"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn test_web_default_port() {
+    // Verify help shows default port
+    scope_cmd()
+        .args(["web", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("8080"));
+}
+
+#[test]
+fn test_web_default_bind() {
+    scope_cmd()
+        .args(["web", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("127.0.0.1"));
+}
+
+// ============================================================================
+// Report Command Tests
+// ============================================================================
+
+#[test]
+fn test_report_batch_help() {
+    scope_cmd()
+        .args(["report", "batch", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("batch"));
+}
+
+// ============================================================================
+// Compliance Subcommand Tests
+// ============================================================================
+
+#[test]
+fn test_compliance_risk_help() {
+    scope_cmd()
+        .args(["compliance", "risk", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("risk"))
+        .stdout(predicate::str::contains("address"));
+}
+
+#[test]
+fn test_compliance_trace_help() {
+    scope_cmd()
+        .args(["compliance", "trace", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("trace"));
+}
+
+#[test]
+fn test_compliance_analyze_help() {
+    scope_cmd()
+        .args(["compliance", "analyze", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("analyze"));
+}
+
+// ============================================================================
+// Monitor Command Tests
+// ============================================================================
+
+#[test]
+fn test_monitor_help() {
+    scope_cmd()
+        .args(["monitor", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("monitor").or(predicate::str::contains("Monitor")))
+        .stdout(predicate::str::contains("--chain"));
+}
+
+#[test]
+fn test_mon_alias() {
+    scope_cmd()
+        .args(["mon", "--help"])
+        .assert()
+        .success();
+}
+
+// ============================================================================
+// Additional Alias Tests
+// ============================================================================
+
+#[test]
+fn test_disc_alias() {
+    scope_cmd()
+        .args(["disc", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("discover").or(predicate::str::contains("Discover")));
+}
+
+#[test]
+fn test_health_alias() {
+    scope_cmd()
+        .args(["health", "--help"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn test_config_alias() {
+    scope_cmd()
+        .args(["config", "--help"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("setup")
+                .or(predicate::str::contains("Setup"))
+                .or(predicate::str::contains("Configure")),
+        );
+}
+
+// ============================================================================
+// Version in Help Tests
+// ============================================================================
+
+#[test]
+fn test_help_shows_version() {
+    scope_cmd()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!("v{}", env!("CARGO_PKG_VERSION"))));
+}
+
+// ============================================================================
+// Interactive Command Tests
+// ============================================================================
+
+#[test]
+fn test_interactive_help() {
+    scope_cmd()
+        .args(["interactive", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("interactive").or(predicate::str::contains("Interactive")));
+}
+
+#[test]
+fn test_shell_alias() {
+    scope_cmd()
+        .args(["shell", "--help"])
+        .assert()
+        .success();
 }

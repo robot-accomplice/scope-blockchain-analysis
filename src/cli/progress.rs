@@ -150,4 +150,60 @@ mod tests {
         prog.inc("Step 3");
         prog.finish("Done");
     }
+
+    #[test]
+    fn test_spinner_multiple_set_message() {
+        let sp = Spinner::new("Initial");
+        sp.set_message("First update");
+        sp.set_message("Second update");
+        sp.set_message("Third update");
+        sp.finish("Complete");
+    }
+
+    #[test]
+    fn test_step_progress_multiple_inc() {
+        let prog = StepProgress::new(5, "Processing");
+        prog.inc("Step 1");
+        prog.inc("Step 2");
+        prog.inc("Step 3");
+        prog.inc("Step 4");
+        prog.inc("Step 5");
+        prog.finish("Done");
+    }
+
+    #[test]
+    fn test_step_progress_single_step() {
+        let prog = StepProgress::new(1, "Single");
+        prog.inc("Only step");
+        prog.finish("Complete");
+    }
+
+    #[test]
+    fn test_step_progress_large_total() {
+        let prog = StepProgress::new(100, "Large");
+        for i in 1..=100 {
+            prog.inc(&format!("Step {}", i));
+        }
+        prog.finish("Complete");
+    }
+
+    #[test]
+    fn test_step_progress_zero_total() {
+        let prog = StepProgress::new(0, "Empty");
+        prog.finish("Complete");
+    }
+
+    #[test]
+    fn test_spinner_finish_warn_with_message() {
+        let sp = Spinner::new("Warning test");
+        sp.finish_warn("Something went wrong");
+    }
+
+    #[test]
+    fn test_spinner_finish_warn_multiple_calls() {
+        let sp = Spinner::new("Test");
+        sp.finish_warn("First warning");
+        // finish_warn can be called multiple times (though unusual)
+        sp.finish_warn("Second warning");
+    }
 }

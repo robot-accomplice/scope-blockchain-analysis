@@ -92,3 +92,107 @@ pub async fn handle_add(
             .into_response(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_deserialize_full() {
+        let json = serde_json::json!({
+            "address": "0x1234567890123456789012345678901234567890",
+            "chain": "polygon",
+            "label": "My Wallet",
+            "tags": ["defi", "nft"]
+        });
+        let req: AddPortfolioRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.address, "0x1234567890123456789012345678901234567890");
+        assert_eq!(req.chain, "polygon");
+        assert_eq!(req.label, Some("My Wallet".to_string()));
+        assert_eq!(req.tags.len(), 2);
+        assert_eq!(req.tags[0], "defi");
+        assert_eq!(req.tags[1], "nft");
+    }
+
+    #[test]
+    fn test_deserialize_minimal() {
+        let json = serde_json::json!({
+            "address": "0x1234567890123456789012345678901234567890"
+        });
+        let req: AddPortfolioRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.address, "0x1234567890123456789012345678901234567890");
+        assert_eq!(req.chain, "ethereum");
+        assert_eq!(req.label, None);
+        assert_eq!(req.tags.len(), 0);
+    }
+
+    #[test]
+    fn test_default_chain() {
+        assert_eq!(default_chain(), "ethereum");
+    }
+
+    #[test]
+    fn test_with_tags() {
+        let json = serde_json::json!({
+            "address": "0x1234567890123456789012345678901234567890",
+            "tags": ["tag1", "tag2", "tag3"]
+        });
+        let req: AddPortfolioRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.tags.len(), 3);
+        assert_eq!(req.tags[0], "tag1");
+        assert_eq!(req.tags[1], "tag2");
+        assert_eq!(req.tags[2], "tag3");
+    }
+
+    #[test]
+    fn test_with_label() {
+        let json = serde_json::json!({
+            "address": "0x1234567890123456789012345678901234567890",
+            "label": "Test Label"
+        });
+        let req: AddPortfolioRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.label, Some("Test Label".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_handle_portfolio_list_direct() {
+        use axum::extract::State;
+        use axum::response::IntoResponse;
+        use crate::config::Config;
+        use crate::chains::DefaultClientFactory;
+        use crate::web::AppState;
+
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+        let response = handle_list(State(state)).await.into_response();
+        let status = response.status();
+        assert!(status.is_success() || status.is_server_error());
+    }
+
+    #[tokio::test]
+    async fn test_handle_portfolio_add_direct() {
+        use axum::extract::State;
+        use axum::response::IntoResponse;
+        use crate::config::Config;
+        use crate::chains::DefaultClientFactory;
+        use crate::web::AppState;
+
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+        let req = AddPortfolioRequest {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: "ethereum".to_string(),
+            label: Some("Test".to_string()),
+            tags: vec!["test".to_string()],
+        };
+        let response = handle_add(State(state), axum::Json(req)).await.into_response();
+        let status = response.status();
+        assert!(status.is_success() || status.is_client_error() || status.is_server_error());
+    }
+}

@@ -1463,6 +1463,48 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_eth_address_too_long() {
+        let addr = "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2extra";
+        let result = validate_eth_address(addr);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("42 characters"));
+    }
+
+    #[test]
+    fn test_validate_eth_address_empty() {
+        let result = validate_eth_address("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_eth_address_only_prefix() {
+        let result = validate_eth_address("0x");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("42 characters"));
+    }
+
+    #[test]
+    fn test_validate_tx_hash_too_long() {
+        let hash = "0xabc123def456789012345678901234567890123456789012345678901234abcdextra";
+        let result = validate_tx_hash(hash);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("66 characters"));
+    }
+
+    #[test]
+    fn test_validate_tx_hash_empty() {
+        let result = validate_tx_hash("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_tx_hash_only_prefix() {
+        let result = validate_tx_hash("0x");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("66 characters"));
+    }
+
+    #[test]
     fn test_ethereum_client_default() {
         let client = EthereumClient::default();
         assert_eq!(client.chain_name(), "ethereum");

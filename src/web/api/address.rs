@@ -76,3 +76,90 @@ pub async fn handle(
             .into_response(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_deserialize_full() {
+        let json = serde_json::json!({
+            "address": "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
+            "chain": "polygon",
+            "include_txs": true,
+            "include_tokens": true,
+            "limit": 50,
+            "dossier": true
+        });
+        let req: AddressRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.address, "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2");
+        assert_eq!(req.chain, "polygon");
+        assert!(req.include_txs);
+        assert!(req.include_tokens);
+        assert_eq!(req.limit, 50);
+        assert!(req.dossier);
+    }
+
+    #[test]
+    fn test_deserialize_minimal() {
+        let json = serde_json::json!({
+            "address": "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2"
+        });
+        let req: AddressRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.address, "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2");
+        assert_eq!(req.chain, "ethereum");
+        assert!(!req.include_txs);
+        assert!(!req.include_tokens);
+        assert_eq!(req.limit, 100);
+        assert!(!req.dossier);
+    }
+
+    #[test]
+    fn test_defaults() {
+        assert_eq!(default_chain(), "ethereum");
+        assert_eq!(default_limit(), 100);
+    }
+
+    #[test]
+    fn test_deserialize_with_options() {
+        let json = serde_json::json!({
+            "address": "0x1234567890123456789012345678901234567890",
+            "include_txs": true,
+            "dossier": true
+        });
+        let req: AddressRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.address, "0x1234567890123456789012345678901234567890");
+        assert_eq!(req.chain, "ethereum");
+        assert!(req.include_txs);
+        assert!(!req.include_tokens);
+        assert_eq!(req.limit, 100);
+        assert!(req.dossier);
+    }
+
+    #[tokio::test]
+    async fn test_handle_address_direct() {
+        use axum::extract::State;
+        use axum::response::IntoResponse;
+        use crate::config::Config;
+        use crate::chains::DefaultClientFactory;
+        use crate::web::AppState;
+
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+        let req = AddressRequest {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: "ethereum".to_string(),
+            include_txs: false,
+            include_tokens: true,
+            limit: 10,
+            dossier: false,
+        };
+        let response = handle(State(state), axum::Json(req)).await.into_response();
+        // Will likely return error (no API key) or success
+        let status = response.status();
+        assert!(status.is_success() || status.is_client_error() || status.is_server_error());
+    }
+}

@@ -2539,4 +2539,125 @@ mod tests {
         assert_eq!(format_number(500_000.0), "500K");
         assert_eq!(format_number(42.0), "42");
     }
+
+    #[test]
+    fn test_token_risk_summary_honeypot_concern() {
+        let mut analytics = create_test_analytics();
+        // Very high buy/sell ratio triggers honeypot concern (line 125)
+        analytics.total_buys_24h = 500;
+        analytics.total_sells_24h = 5;
+        analytics.total_buys_6h = 100;
+        analytics.total_sells_6h = 1;
+        analytics.total_buys_1h = 20;
+        analytics.total_sells_1h = 0;
+        // Also set in dex_pairs
+        if let Some(pair) = analytics.dex_pairs.first_mut() {
+            pair.buys_24h = 500;
+            pair.sells_24h = 5;
+        }
+        let summary = token_risk_summary(&analytics);
+        assert!(summary.concerns.iter().any(|c| c.contains("honeypot")));
+    }
+
+    #[test]
+    fn test_token_risk_summary_low_liquidity_concern() {
+        let mut analytics = create_test_analytics();
+        // Very low liquidity triggers concern (line 144)
+        analytics.liquidity_usd = 5_000.0;
+        if let Some(pair) = analytics.dex_pairs.first_mut() {
+            pair.liquidity_usd = 5_000.0;
+        }
+        let summary = token_risk_summary(&analytics);
+        assert!(summary.concerns.iter().any(|c| c.contains("low liquidity") || c.contains("Low liquidity")));
+    }
+
+    #[test]
+    fn test_token_risk_summary_new_token_concern() {
+        let mut analytics = create_test_analytics();
+        // Very new token triggers concern (line 150)
+        analytics.token_age_hours = Some(12.0); // Less than 24 hours
+        let summary = token_risk_summary(&analytics);
+        assert!(summary.concerns.iter().any(|c| c.contains("new token") || c.contains("New token")));
+    }
+
+    #[test]
+    fn test_token_risk_summary_reasonable_distribution() {
+        let mut analytics = create_test_analytics();
+        // Low concentration triggers positive (line 140)
+        analytics.top_10_concentration = Some(15.0);
+        analytics.top_50_concentration = Some(30.0);
+        analytics.top_100_concentration = Some(40.0);
+        analytics.holders = vec![
+            TokenHolder {
+                address: "0x1111".to_string(),
+                balance: "1000".to_string(),
+                formatted_balance: "1000".to_string(),
+                percentage: 3.0,
+                rank: 1,
+            },
+        ];
+        let summary = token_risk_summary(&analytics);
+        assert!(summary.positives.iter().any(|p| p.contains("holder distribution") || p.contains("distribution")));
+    }
+
+    #[test]
+    fn test_risk_factors_no_buys_no_sells() {
+        let mut analytics = create_test_analytics();
+        analytics.total_buys_24h = 0;
+        analytics.total_sells_24h = 0;
+        let factors = RiskFactors::from_analytics(&analytics);
+        // Unknown honeypot risk = 5
+        assert_eq!(factors.honeypot, 5);
+    }
+
+    #[test]
+    fn test_risk_factors_zero_sells_positive_buys() {
+        let mut analytics = create_test_analytics();
+        analytics.total_buys_24h = 50;
+        analytics.total_sells_24h = 0;
+        let factors = RiskFactors::from_analytics(&analytics);
+        assert_eq!(factors.honeypot, 10); // Maximum honeypot risk
+    }
+
+    #[test]
+    fn test_risk_factors_unknown_age() {
+        let mut analytics = create_test_analytics();
+        analytics.token_age_hours = None;
+        let factors = RiskFactors::from_analytics(&analytics);
+        assert_eq!(factors.age, 5); // Unknown = moderate risk
+    }
+
+    #[test]
+    fn test_risk_factors_very_low_liquidity() {
+        let mut analytics = create_test_analytics();
+        analytics.liquidity_usd = 8_000.0;
+        let factors = RiskFactors::from_analytics(&analytics);
+        assert_eq!(factors.liquidity, 10); // Maximum liquidity risk
+    }
+
+    #[test]
+    fn test_risk_factors_moderate_liquidity() {
+        let mut analytics = create_test_analytics();
+        analytics.liquidity_usd = 75_000.0;
+        let factors = RiskFactors::from_analytics(&analytics);
+        assert_eq!(factors.liquidity, 6);
+    }
+
+    #[test]
+    fn test_security_analysis_zero_buys_sells() {
+        let mut analytics = create_test_analytics();
+        analytics.total_buys_24h = 0;
+        analytics.total_sells_24h = 0;
+        let section = generate_security_analysis(&analytics);
+        assert!(section.contains("UNKNOWN") || section.contains("No transaction data"));
+    }
+
+    #[test]
+    fn test_security_analysis_sells_zero_buys_positive() {
+        let mut analytics = create_test_analytics();
+        analytics.total_buys_24h = 100;
+        analytics.total_sells_24h = 0;
+        let section = generate_security_analysis(&analytics);
+        assert!(section.contains("HIGH") || section.contains("honeypot"));
+    }
 }

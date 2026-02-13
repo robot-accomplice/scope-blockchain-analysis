@@ -493,6 +493,36 @@ mod tests {
     }
 
     #[test]
+    fn test_token_health_to_markdown_without_venue() {
+        let analytics = make_test_analytics(false);
+        let market = make_test_market_summary();
+        let md = token_health_to_markdown(&analytics, Some(&market), None);
+        assert!(md.contains("Market / Order Book"));
+        assert!(!md.contains("Venue:")); // Should not include venue when None
+        assert!(md.contains("0.9999"));
+        assert!(md.contains("Yes"));
+    }
+
+    #[test]
+    fn test_token_health_to_markdown_unhealthy_market() {
+        let analytics = make_test_analytics(false);
+        let mut market = make_test_market_summary();
+        market.healthy = false;
+        market.checks = vec![
+            HealthCheck::Pass("Some check passed".to_string()),
+            HealthCheck::Fail("Peg deviation too high".to_string()),
+            HealthCheck::Fail("Insufficient bid depth".to_string()),
+        ];
+        let md = token_health_to_markdown(&analytics, Some(&market), Some(MarketVenue::Binance));
+        assert!(md.contains("Market / Order Book"));
+        assert!(md.contains("No")); // Should show unhealthy
+        assert!(md.contains("Health Checks"));
+        assert!(md.contains("✗")); // Should show fail checks
+        assert!(md.contains("Peg deviation too high"));
+        assert!(md.contains("Insufficient bid depth"));
+    }
+
+    #[test]
     fn test_token_health_to_json_without_market() {
         let analytics = make_test_analytics(false);
         let json = token_health_to_json(&analytics, None).unwrap();
@@ -512,6 +542,25 @@ mod tests {
     }
 
     #[test]
+    fn test_token_health_to_json_with_fail_checks() {
+        let analytics = make_test_analytics(false);
+        let mut market = make_test_market_summary();
+        market.healthy = false;
+        market.checks = vec![
+            HealthCheck::Pass("Bid/Ask ratio OK".to_string()),
+            HealthCheck::Fail("Peg deviation exceeds threshold".to_string()),
+            HealthCheck::Fail("Ask depth below minimum".to_string()),
+        ];
+        let json = token_health_to_json(&analytics, Some(&market)).unwrap();
+        assert!(json.contains("\"market\""));
+        assert!(json.contains("\"healthy\": false"));
+        assert!(json.contains("\"status\": \"pass\""));
+        assert!(json.contains("\"status\": \"fail\""));
+        assert!(json.contains("Peg deviation exceeds threshold"));
+        assert!(json.contains("Ask depth below minimum"));
+    }
+
+    #[test]
     fn test_output_token_health_table_without_market() {
         let analytics = make_test_analytics(false);
         let result = output_token_health_table(&analytics, None, None);
@@ -525,6 +574,16 @@ mod tests {
         let result =
             output_token_health_table(&analytics, Some(&market), Some(MarketVenue::Biconomy));
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_token_health_table_no_market_cap() {
+        let mut analytics = make_test_analytics(false);
+        analytics.market_cap = None;
+        analytics.top_10_concentration = None;
+        let result = output_token_health_table(&analytics, None, None);
+        assert!(result.is_ok());
+        // Should not panic when market_cap and top_10_concentration are None
     }
 
     fn make_test_dex_token_data(pairs: Vec<DexPair>) -> DexTokenData {

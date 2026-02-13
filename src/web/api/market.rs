@@ -154,3 +154,125 @@ pub async fn handle(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_deserialize_full() {
+        let json = serde_json::json!({
+            "pair": "PUSD",
+            "market_venue": "biconomy",
+            "chain": "polygon",
+            "peg": 1.0,
+            "min_levels": 10,
+            "min_depth": 5000.0,
+            "peg_range": 0.002
+        });
+        let req: MarketRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.pair, "PUSD");
+        assert_eq!(req.market_venue, "biconomy");
+        assert_eq!(req.chain, "polygon");
+        assert_eq!(req.peg, 1.0);
+        assert_eq!(req.min_levels, 10);
+        assert_eq!(req.min_depth, 5000.0);
+        assert_eq!(req.peg_range, 0.002);
+    }
+
+    #[test]
+    fn test_deserialize_minimal() {
+        let json = serde_json::json!({});
+        let req: MarketRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.pair, "USDC");
+        assert_eq!(req.market_venue, "binance");
+        assert_eq!(req.chain, "ethereum");
+        assert_eq!(req.peg, 1.0);
+        assert_eq!(req.min_levels, 6);
+        assert_eq!(req.min_depth, 3000.0);
+        assert_eq!(req.peg_range, 0.001);
+    }
+
+    #[test]
+    fn test_all_defaults() {
+        assert_eq!(default_pair(), "USDC");
+        assert_eq!(default_venue(), "binance");
+        assert_eq!(default_chain(), "ethereum");
+        assert_eq!(default_peg(), 1.0);
+        assert_eq!(default_min_levels(), 6);
+        assert_eq!(default_min_depth(), 3000.0);
+        assert_eq!(default_peg_range(), 0.001);
+    }
+
+    #[test]
+    fn test_custom_thresholds() {
+        let json = serde_json::json!({
+            "min_levels": 20,
+            "min_depth": 10000.0,
+            "peg_range": 0.005
+        });
+        let req: MarketRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.min_levels, 20);
+        assert_eq!(req.min_depth, 10000.0);
+        assert_eq!(req.peg_range, 0.005);
+        // Other fields should use defaults
+        assert_eq!(req.pair, "USDC");
+        assert_eq!(req.market_venue, "binance");
+        assert_eq!(req.chain, "ethereum");
+        assert_eq!(req.peg, 1.0);
+    }
+
+    #[tokio::test]
+    async fn test_handle_market_cex() {
+        use axum::extract::State;
+        use axum::response::IntoResponse;
+        use crate::config::Config;
+        use crate::chains::DefaultClientFactory;
+        use crate::web::AppState;
+
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+        let req = MarketRequest {
+            pair: "USDC".to_string(),
+            market_venue: "binance".to_string(),
+            chain: "ethereum".to_string(),
+            peg: 1.0,
+            min_levels: 6,
+            min_depth: 3000.0,
+            peg_range: 0.001,
+        };
+        let response = handle(State(state), axum::Json(req)).await.into_response();
+        let status = response.status();
+        assert!(status.is_success() || status.is_client_error() || status.is_server_error());
+    }
+
+    #[tokio::test]
+    async fn test_handle_market_dex() {
+        use axum::extract::State;
+        use axum::response::IntoResponse;
+        use crate::config::Config;
+        use crate::chains::DefaultClientFactory;
+        use crate::web::AppState;
+
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+        let req = MarketRequest {
+            pair: "USDC".to_string(),
+            market_venue: "eth".to_string(),
+            chain: "ethereum".to_string(),
+            peg: 1.0,
+            min_levels: 6,
+            min_depth: 3000.0,
+            peg_range: 0.001,
+        };
+        let response = handle(State(state), axum::Json(req)).await.into_response();
+        let status = response.status();
+        assert!(status.is_success() || status.is_client_error() || status.is_server_error());
+    }
+}

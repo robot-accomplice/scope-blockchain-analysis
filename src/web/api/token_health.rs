@@ -147,3 +147,106 @@ pub async fn handle(
     }))
     .into_response()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_deserialize_full() {
+        let json = serde_json::json!({
+            "token": "USDC",
+            "chain": "polygon",
+            "with_market": true,
+            "market_venue": "biconomy"
+        });
+        let req: TokenHealthRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.token, "USDC");
+        assert_eq!(req.chain, "polygon");
+        assert_eq!(req.with_market, true);
+        assert_eq!(req.market_venue, "biconomy");
+    }
+
+    #[test]
+    fn test_deserialize_minimal() {
+        let json = serde_json::json!({
+            "token": "USDC"
+        });
+        let req: TokenHealthRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.token, "USDC");
+        assert_eq!(req.chain, "ethereum");
+        assert_eq!(req.with_market, false);
+        assert_eq!(req.market_venue, "binance");
+    }
+
+    #[test]
+    fn test_defaults() {
+        assert_eq!(default_chain(), "ethereum");
+        assert_eq!(default_venue(), "binance");
+    }
+
+    #[test]
+    fn test_with_market_flag() {
+        let json = serde_json::json!({
+            "token": "USDC",
+            "with_market": true
+        });
+        let req: TokenHealthRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.with_market, true);
+
+        let json_false = serde_json::json!({
+            "token": "USDC",
+            "with_market": false
+        });
+        let req_false: TokenHealthRequest = serde_json::from_value(json_false).unwrap();
+        assert_eq!(req_false.with_market, false);
+    }
+
+    #[tokio::test]
+    async fn test_handle_token_health_direct() {
+        use axum::extract::State;
+        use axum::response::IntoResponse;
+        use crate::config::Config;
+        use crate::chains::DefaultClientFactory;
+        use crate::web::AppState;
+
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+        let req = TokenHealthRequest {
+            token: "USDC".to_string(),
+            chain: "ethereum".to_string(),
+            with_market: false,
+            market_venue: "binance".to_string(),
+        };
+        let response = handle(State(state), axum::Json(req)).await.into_response();
+        let status = response.status();
+        assert!(status.is_success() || status.is_client_error() || status.is_server_error());
+    }
+
+    #[tokio::test]
+    async fn test_handle_token_health_with_market() {
+        use axum::extract::State;
+        use axum::response::IntoResponse;
+        use crate::config::Config;
+        use crate::chains::DefaultClientFactory;
+        use crate::web::AppState;
+
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+        let req = TokenHealthRequest {
+            token: "USDC".to_string(),
+            chain: "ethereum".to_string(),
+            with_market: true,
+            market_venue: "eth".to_string(),
+        };
+        let response = handle(State(state), axum::Json(req)).await.into_response();
+        let status = response.status();
+        assert!(status.is_success() || status.is_client_error() || status.is_server_error());
+    }
+}

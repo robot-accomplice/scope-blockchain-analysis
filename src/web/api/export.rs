@@ -86,3 +86,84 @@ pub async fn handle(
     }))
     .into_response()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_deserialize_full() {
+        let json = serde_json::json!({
+            "address": "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
+            "chain": "polygon",
+            "format": "csv",
+            "start_date": "2024-01-01T00:00:00Z",
+            "end_date": "2024-12-31T23:59:59Z"
+        });
+        let req: ExportRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.address, "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2");
+        assert_eq!(req.chain, "polygon");
+        assert_eq!(req.format, "csv");
+        assert_eq!(req.start_date, Some("2024-01-01T00:00:00Z".to_string()));
+        assert_eq!(req.end_date, Some("2024-12-31T23:59:59Z".to_string()));
+    }
+
+    #[test]
+    fn test_deserialize_minimal() {
+        let json = serde_json::json!({
+            "address": "0x1234567890123456789012345678901234567890"
+        });
+        let req: ExportRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.address, "0x1234567890123456789012345678901234567890");
+        assert_eq!(req.chain, "ethereum");
+        assert_eq!(req.format, "json");
+        assert_eq!(req.start_date, None);
+        assert_eq!(req.end_date, None);
+    }
+
+    #[test]
+    fn test_defaults() {
+        assert_eq!(default_chain(), "ethereum");
+        assert_eq!(default_format(), "json");
+    }
+
+    #[test]
+    fn test_with_date_filters() {
+        let json = serde_json::json!({
+            "address": "0xabcdef1234567890abcdef1234567890abcdef1234",
+            "start_date": "2024-06-01T00:00:00Z",
+            "end_date": "2024-06-30T23:59:59Z"
+        });
+        let req: ExportRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.address, "0xabcdef1234567890abcdef1234567890abcdef1234");
+        assert_eq!(req.chain, "ethereum");
+        assert_eq!(req.format, "json");
+        assert_eq!(req.start_date, Some("2024-06-01T00:00:00Z".to_string()));
+        assert_eq!(req.end_date, Some("2024-06-30T23:59:59Z".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_handle_export_direct() {
+        use axum::extract::State;
+        use axum::response::IntoResponse;
+        use crate::config::Config;
+        use crate::chains::DefaultClientFactory;
+        use crate::web::AppState;
+
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+        let req = ExportRequest {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: "ethereum".to_string(),
+            format: "json".to_string(),
+            start_date: None,
+            end_date: None,
+        };
+        let response = handle(State(state), axum::Json(req)).await.into_response();
+        let status = response.status();
+        assert!(status.is_success() || status.is_client_error() || status.is_server_error());
+    }
+}

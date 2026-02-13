@@ -64,3 +64,48 @@ pub async fn handle(
             .into_response(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_deserialize_full() {
+        let json = serde_json::json!({
+            "source": "boosts",
+            "chain": "ethereum",
+            "limit": 25
+        });
+        let req: DiscoverQuery = serde_json::from_value(json).unwrap();
+        assert_eq!(req.source, "boosts");
+        assert_eq!(req.chain, Some("ethereum".to_string()));
+        assert_eq!(req.limit, 25);
+    }
+
+    #[test]
+    fn test_deserialize_minimal() {
+        let json = serde_json::json!({});
+        let req: DiscoverQuery = serde_json::from_value(json).unwrap();
+        assert_eq!(req.source, "profiles");
+        assert_eq!(req.chain, None);
+        assert_eq!(req.limit, 15);
+    }
+
+    #[test]
+    fn test_defaults() {
+        assert_eq!(default_source(), "profiles");
+        assert_eq!(default_limit(), 15);
+    }
+
+    #[test]
+    fn test_with_chain_filter() {
+        let json = serde_json::json!({
+            "chain": "polygon",
+            "limit": 10
+        });
+        let req: DiscoverQuery = serde_json::from_value(json).unwrap();
+        assert_eq!(req.source, "profiles");
+        assert_eq!(req.chain, Some("polygon".to_string()));
+        assert_eq!(req.limit, 10);
+    }
+}

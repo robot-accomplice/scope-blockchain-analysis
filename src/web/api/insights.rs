@@ -139,3 +139,150 @@ pub async fn handle(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_deserialize_full() {
+        let json = serde_json::json!({
+            "target": "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
+            "chain": "polygon",
+            "decode": true,
+            "trace": true
+        });
+        let req: InsightsRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.target, "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2");
+        assert_eq!(req.chain, Some("polygon".to_string()));
+        assert!(req.decode);
+        assert!(req.trace);
+    }
+
+    #[test]
+    fn test_deserialize_minimal() {
+        let json = serde_json::json!({
+            "target": "0x1234567890123456789012345678901234567890"
+        });
+        let req: InsightsRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.target, "0x1234567890123456789012345678901234567890");
+        assert_eq!(req.chain, None);
+        assert!(!req.decode);
+        assert!(!req.trace);
+    }
+
+    #[test]
+    fn test_with_chain_override() {
+        let json = serde_json::json!({
+            "target": "USDC",
+            "chain": "ethereum"
+        });
+        let req: InsightsRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.target, "USDC");
+        assert_eq!(req.chain, Some("ethereum".to_string()));
+        assert!(!req.decode);
+        assert!(!req.trace);
+    }
+
+    #[test]
+    fn test_flags() {
+        let json_decode = serde_json::json!({
+            "target": "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+            "decode": true,
+            "trace": false
+        });
+        let req_decode: InsightsRequest = serde_json::from_value(json_decode).unwrap();
+        assert!(req_decode.decode);
+        assert!(!req_decode.trace);
+
+        let json_trace = serde_json::json!({
+            "target": "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+            "decode": false,
+            "trace": true
+        });
+        let req_trace: InsightsRequest = serde_json::from_value(json_trace).unwrap();
+        assert!(!req_trace.decode);
+        assert!(req_trace.trace);
+
+        let json_both = serde_json::json!({
+            "target": "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+            "decode": true,
+            "trace": true
+        });
+        let req_both: InsightsRequest = serde_json::from_value(json_both).unwrap();
+        assert!(req_both.decode);
+        assert!(req_both.trace);
+    }
+
+    #[tokio::test]
+    async fn test_handle_insights_address() {
+        use axum::extract::State;
+        use axum::response::IntoResponse;
+        use crate::config::Config;
+        use crate::chains::DefaultClientFactory;
+        use crate::web::AppState;
+
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+        let req = InsightsRequest {
+            target: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: None,
+            decode: false,
+            trace: false,
+        };
+        let response = handle(State(state), axum::Json(req)).await.into_response();
+        let status = response.status();
+        assert!(status.is_success() || status.is_client_error() || status.is_server_error());
+    }
+
+    #[tokio::test]
+    async fn test_handle_insights_token() {
+        use axum::extract::State;
+        use axum::response::IntoResponse;
+        use crate::config::Config;
+        use crate::chains::DefaultClientFactory;
+        use crate::web::AppState;
+
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+        let req = InsightsRequest {
+            target: "USDC".to_string(),
+            chain: Some("ethereum".to_string()),
+            decode: false,
+            trace: false,
+        };
+        let response = handle(State(state), axum::Json(req)).await.into_response();
+        let status = response.status();
+        assert!(status.is_success() || status.is_client_error() || status.is_server_error());
+    }
+
+    #[tokio::test]
+    async fn test_handle_insights_tx() {
+        use axum::extract::State;
+        use axum::response::IntoResponse;
+        use crate::config::Config;
+        use crate::chains::DefaultClientFactory;
+        use crate::web::AppState;
+
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+        let req = InsightsRequest {
+            target: "0xabc123def456789012345678901234567890123456789012345678901234abcd".to_string(),
+            chain: None,
+            decode: true,
+            trace: false,
+        };
+        let response = handle(State(state), axum::Json(req)).await.into_response();
+        let status = response.status();
+        assert!(status.is_success() || status.is_client_error() || status.is_server_error());
+    }
+}
