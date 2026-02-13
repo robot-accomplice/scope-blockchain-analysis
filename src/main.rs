@@ -6,6 +6,7 @@
 //! - Address analysis (`scope address`)
 //! - Transaction analysis (`scope tx`)
 //! - Live token monitoring (`scope monitor`)
+//! - Market peg/order book health (`scope market summary`)
 //! - Portfolio management (`scope portfolio`)
 //! - Data export (`scope export`)
 //!
@@ -117,6 +118,8 @@ async fn main() -> Result<()> {
                     .map_err(|e| scope::error::ScopeError::Other(e.to_string()))
             }
         },
+        Commands::Market(cmd) => scope::cli::market::run(cmd, &config).await,
+        Commands::Report(cmd) => scope::cli::report::run(cmd, &config, &factory).await,
     };
 
     // Handle errors gracefully
@@ -194,6 +197,8 @@ async fn run_command(command: Commands, config: &Config) -> Result<()> {
                     .map_err(|e| scope::error::ScopeError::Other(e.to_string()))
             }
         },
+        Commands::Market(cmd) => scope::cli::market::run(cmd, config).await,
+        Commands::Report(cmd) => scope::cli::report::run(cmd, config, &factory).await,
     };
 
     if let Err(e) = result {

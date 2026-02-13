@@ -416,6 +416,7 @@ async fn execute_input(
                 include_txs: context.include_txs,
                 include_tokens: context.include_tokens,
                 limit: context.limit,
+                report: None,
             };
 
             // Check for other inline overrides
@@ -855,6 +856,7 @@ async fn execute_portfolio(
                     chain,
                     tag,
                     include_tokens,
+                    report: None,
                 }),
                 format: Some(context.format),
             }

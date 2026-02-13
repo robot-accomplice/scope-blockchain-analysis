@@ -17,6 +17,7 @@ A production-grade command-line tool for blockchain data analysis, portfolio tra
 - **Portfolio Management**: Track multiple addresses across chains with labels, tags, and aggregated balance views
 - **Compliance & Risk Assessment**: Risk scoring, transaction pattern detection, taint analysis, and compliance reporting
 - **Data Export**: Export address history and portfolio data to JSON or CSV with date range filtering
+- **Reporting**: Markdown reports for address, token, portfolio, and market commands; batch reports for multiple addresses
 - **Interactive Mode**: REPL with preserved context between commands for faster workflow
 - **Setup Wizard**: Guided first-run configuration with `scope setup` for API keys and preferences
 - **USD Valuation**: Native token balances enriched with real-time USD prices via DexScreener
@@ -48,6 +49,9 @@ scope address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
 # Include transaction history and token balances
 scope address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --include-txs --include-tokens
 
+# Save address report to markdown
+scope address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --report report.md
+
 # Analyze addresses on other chains (auto-detected or explicit)
 scope address DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy --chain solana
 scope address TDqSquXBgUCLYvYC4XZgrprLK589dkhSCf --chain tron
@@ -72,6 +76,9 @@ scope mon PEPE --chain ethereum --layout chart-focus  # short alias with options
 # Export data
 scope export --address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --output data.json
 
+# Batch report for multiple addresses
+scope report batch --addresses 0x742d...,0xabc... --output batch-report.md
+
 # Interactive mode (includes live monitor, portfolio, and all commands)
 scope interactive
 ```
@@ -89,8 +96,9 @@ scope compliance risk 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
 # Detailed breakdown with evidence
 scope compliance risk 0xabc... --detailed --format markdown
 
-# Export for compliance records
+# Export for compliance records (format auto-detected from extension: .json, .yaml, .md)
 scope compliance risk 0xabc... --output risk-report.json
+scope compliance risk 0xabc... --output risk-report.md
 ```
 
 ### Pattern Detection
@@ -115,11 +123,11 @@ scope compliance trace 0xtxhash... --depth 5 --flag-suspicious
 ### Compliance Reporting
 
 ```bash
-# Generate a compliance report for a specific jurisdiction
-scope compliance compliance-report 0xabc... --jurisdiction us --output report.json
+# Generate a compliance report for a specific jurisdiction (output: markdown)
+scope compliance compliance-report 0xabc... --jurisdiction us --output report.md
 
 # Detailed SAR report
-scope compliance compliance-report 0xabc... --jurisdiction eu --report-type sar --output sar.json
+scope compliance compliance-report 0xabc... --jurisdiction eu --report-type sar --output sar.md
 ```
 
 Available jurisdictions: `us`, `eu`, `uk`, `switzerland`, `singapore`.
@@ -206,8 +214,8 @@ Available interactive commands:
 - `chain` -- Set or show current chain
 - `format` -- Set or show output format (table, json, csv)
 - `limit` -- Set or show transaction limit
-- `+tokens` / `+txs` -- Toggle token/transaction display flags
-- `trace` / `decode` -- Toggle trace/decode flags
+- `+tokens` / `+txs` -- Toggle token/transaction display flags for address command
+- `trace` / `decode` -- Toggle trace/decode flags for tx command
 - `ctx` / `context` -- Show current session context
 - `clear` / `reset` -- Reset context to defaults
 - `help` / `?` -- Show help
@@ -232,7 +240,7 @@ scope> monitor USDC
 The monitor supports four layout presets that can be switched at runtime or configured in `config.yaml`:
 
 | Preset | Description |
-|---|---|
+| --- | --- |
 | **Dashboard** | Charts top, gauges middle, transaction feed bottom (default) |
 | **Chart** | Full-width candles (~85%), minimal stats overlay |
 | **Feed** | Transaction log takes priority, small metrics + buy/sell on top |
@@ -255,7 +263,7 @@ The monitor automatically selects the best layout for your terminal size (respon
 **Monitor keybindings:**
 
 | Key | Action |
-|---|---|
+| --- | --- |
 | `Q` / `Esc` | Quit monitor |
 | `R` | Force refresh |
 | `P` / `Space` | Pause/resume |
@@ -350,6 +358,14 @@ monitor:
 - `SCOPE_CONFIG` - Custom config file path (overrides default location)
 - `RUST_LOG` - Log level override
 
+## Architecture
+
+Dataflow and C4 architecture diagrams are in [`docs/architecture/`](docs/architecture/README.md):
+
+- **C4 Context** — Scope and external systems (Etherscan, DexScreener, RPCs, Biconomy)
+- **C4 Containers** — CLI, Chains, Compliance, Market, Display, Config
+- **Dataflow** — Per-command diagrams for address, crawl, compliance, market, portfolio, export, report, monitor, interactive
+
 ## Development
 
 ```bash
@@ -373,7 +389,56 @@ just test      # Run all tests
 just ci-test   # Full CI workflow
 just format    # Format code
 just lint      # Run lints
+just summary   # PUSD/USDT market summary (peg, spread, orderbook, health checks)
 ```
+
+### Peg & Order Book Health (`scope market`)
+
+The `scope market summary` command fetches level-2 order book data from exchange APIs (Biconomy) and reports peg and book health at a granular level:
+
+- **Peg**: Target, best bid/ask deviation (%), mid price, spread
+- **Order book**: Ask/bid levels with depth (base and quote amounts)
+- **Health checks**: No sells below peg, bid/ask ratio, minimum levels and depth per side
+- **Output**: Text (default) or JSON
+- **Tunable thresholds**: All health-check thresholds are configurable. Defaults (min-levels=6, min-depth=3000, peg-range=0.001, bid/ask ratio 0.2–5.0x) originated from the PUSD Hummingbot config—override for other markets.
+
+```bash
+scope market summary                    # PUSD/USDT (default, one shot)
+scope market summary XYZ_USDT           # Other pair
+scope market summary --peg 1.0 --min-depth 5000
+scope market summary --peg-range 0.002 --min-bid-ask-ratio 0.1   # Loosen thresholds
+scope market summary --format json     # Machine-readable output
+
+# Repeated runs (default: every 60s for 1h)
+scope market summary --every 30s --duration 10m   # Every 30s for 10 min
+scope market summary --every 5m --duration 1h     # Every 5 min for 1 hour
+scope market summary --duration 24h               # Every 60s for 24h (default interval)
+scope market summary --every 1m                   # Every 1 min for 1h (default duration)
+```
+
+`just summary` invokes `scope market summary` under the hood.
+
+Additional market options:
+
+- `--report path.md`: Save markdown report to file (one-shot or final report in repeat mode)
+- `--csv path.csv`: Append time-series of peg/spread/depth to CSV (repeat mode only)
+
+## Reporting & Analytics
+
+Scope supports markdown and structured report generation across commands:
+
+| Command | Report Option | Description |
+| --------- | --------------- | -------------- |
+| `scope address` | `--report report.md` | Address analysis (balance, transactions, tokens) |
+| `scope crawl` | `--report report.md` | Token analytics with risk scoring |
+| `scope portfolio summary` | `--report report.md` | Portfolio allocations by chain and address |
+| `scope market summary` | `--report report.md` | Peg and order book health |
+| `scope market summary` | `--csv data.csv` | Time-series of peg/spread (repeat mode) |
+| `scope compliance risk` | `--output file` | Risk assessment (format from extension: .json, .yaml, .md) |
+| `scope compliance compliance-report` | `--output file` | Unified risk + pattern analysis (markdown) |
+| `scope report batch` | `--addresses a,b,c` or `--from-file path` + `--output report.md` | Combined report for multiple addresses |
+
+All reports include version and timestamp metadata for audit trail.
 
 ## Supported Chains
 

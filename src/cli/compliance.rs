@@ -172,10 +172,21 @@ pub async fn handle_risk_with_client(
     let output = format_risk_report(&assessment, args.format, args.detailed);
     println!("{}", output);
 
-    // Export to file if requested
+    // Export to file if requested (respects format: json, yaml, markdown from path extension)
     if let Some(path) = args.output {
-        let json = serde_json::to_string_pretty(&assessment)?;
-        std::fs::write(&path, json)?;
+        let content = match std::path::Path::new(&path)
+            .extension()
+            .and_then(|e| e.to_str())
+        {
+            Some("md") | Some("markdown") => {
+                format_risk_report(&assessment, OutputFormat::Markdown, args.detailed)
+            }
+            Some("yaml") | Some("yml") => {
+                format_risk_report(&assessment, OutputFormat::Yaml, args.detailed)
+            }
+            _ => format_risk_report(&assessment, OutputFormat::Json, args.detailed),
+        };
+        std::fs::write(&path, content)?;
         println!("\nReport exported to: {}", path);
     }
 
@@ -289,15 +300,177 @@ pub async fn handle_analyze_with_client(
 
 /// Handle compliance report generation
 pub async fn handle_compliance_report(args: ComplianceReportArgs) -> anyhow::Result<()> {
-    println!("Compliance report generation is not yet implemented.");
+    let addresses = resolve_compliance_targets(&args.target)?;
+    if addresses.is_empty() {
+        anyhow::bail!("No addresses to analyze");
+    }
+
     println!(
-        "Planned features: {} report for {:?} jurisdiction",
-        format!("{:?}", args.report_type).to_lowercase(),
+        "Generating {:?} compliance report for {} address(es) ({:?} jurisdiction)...",
+        args.report_type,
+        addresses.len(),
         args.jurisdiction
     );
-    println!("\nFor now, use 'scope risk' and 'scope analyze' for compliance checks.");
+
+    let client = std::env::var("ETHERSCAN_API_KEY").ok().map(|key| {
+        let sources = DataSources::new(key);
+        BlockchainDataClient::new(sources)
+    });
+
+    let engine = match &client {
+        Some(c) => {
+            println!("Using Etherscan API for enhanced analysis");
+            RiskEngine::with_data_client(c.clone())
+        }
+        None => {
+            println!("Note: Set ETHERSCAN_API_KEY for enhanced analysis");
+            RiskEngine::new()
+        }
+    };
+
+    let mut risk_assessments = Vec::new();
+    let mut pattern_results: Vec<(
+        String,
+        String,
+        Option<crate::compliance::datasource::PatternAnalysis>,
+    )> = Vec::new();
+
+    for (addr, chain) in &addresses {
+        let assessment = engine.assess_address(addr, chain).await?;
+        risk_assessments.push(assessment.clone());
+
+        let pat = if let Some(ref c) = client {
+            c.get_transactions(addr, chain)
+                .await
+                .ok()
+                .map(|txs| crate::compliance::datasource::analyze_patterns(&txs))
+        } else {
+            None
+        };
+        pattern_results.push((addr.clone(), chain.clone(), pat));
+    }
+
+    let content = format_compliance_report(
+        &risk_assessments,
+        &pattern_results,
+        &args.jurisdiction,
+        &args.report_type,
+    );
+
+    std::fs::write(&args.output, &content)?;
+    println!("\nCompliance report saved to: {}", args.output);
 
     Ok(())
+}
+
+/// Resolve target to (address, chain) pairs. Target can be a single address or path to file.
+fn resolve_compliance_targets(target: &str) -> anyhow::Result<Vec<(String, String)>> {
+    let path = std::path::Path::new(target);
+    if path.exists() && path.is_file() {
+        let content = std::fs::read_to_string(path)?;
+        let mut out = Vec::new();
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let (addr, chain) = parse_address_line(line);
+            out.push((addr.to_string(), chain.to_string()));
+        }
+        Ok(out)
+    } else {
+        let chain = detect_chain(target).unwrap_or_else(|_| "ethereum".to_string());
+        Ok(vec![(target.to_string(), chain)])
+    }
+}
+
+fn parse_address_line(line: &str) -> (&str, &str) {
+    if let Some((addr, rest)) = line.split_once(',') {
+        (addr.trim(), rest.trim())
+    } else {
+        (line, "ethereum")
+    }
+}
+
+fn format_compliance_report(
+    assessments: &[crate::compliance::risk::RiskAssessment],
+    patterns: &[(
+        String,
+        String,
+        Option<crate::compliance::datasource::PatternAnalysis>,
+    )],
+    jurisdiction: &Jurisdiction,
+    report_type: &ReportType,
+) -> String {
+    let mut md = format!(
+        "# Compliance Report\n\n\
+        **Jurisdiction:** {:?}  \n\
+        **Report Type:** {:?}  \n\
+        **Generated:** {}  \n\
+        **Addresses:** {}  \n\n",
+        jurisdiction,
+        report_type,
+        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC"),
+        assessments.len()
+    );
+
+    for (i, assessment) in assessments.iter().enumerate() {
+        md.push_str(&format!(
+            "---\n\n## Address {}: `{}`\n\n",
+            i + 1,
+            assessment.address
+        ));
+        md.push_str(&format!(
+            "**Chain:** {}  \n**Risk Score:** {:.1}/10  \n**Risk Level:** {} {:?}  \n\n",
+            assessment.chain,
+            assessment.overall_score,
+            assessment.risk_level.emoji(),
+            assessment.risk_level
+        ));
+
+        if matches!(report_type, ReportType::Detailed | ReportType::SAR) {
+            md.push_str("### Risk Factor Breakdown\n\n");
+            for f in &assessment.factors {
+                md.push_str(&format!(
+                    "- **{}**: {:.1}/10 - {}\n",
+                    f.name, f.score, f.description
+                ));
+            }
+            if !assessment.recommendations.is_empty() {
+                md.push_str("\n### Recommendations\n\n");
+                for r in &assessment.recommendations {
+                    md.push_str(&format!("- {}\n", r));
+                }
+            }
+        }
+
+        if let Some((_, _, Some(pat))) = patterns
+            .iter()
+            .find(|(a, c, _)| a == &assessment.address && c == &assessment.chain)
+        {
+            md.push_str("\n### Pattern Analysis\n\n");
+            md.push_str(&format!(
+                "- Total transactions: {}\n",
+                pat.total_transactions
+            ));
+            md.push_str(&format!("- Velocity: {:.2} tx/day\n", pat.velocity_score));
+            md.push_str(&format!(
+                "- Structuring detected: {}\n",
+                pat.structuring_detected
+            ));
+            md.push_str(&format!(
+                "- Round number pattern: {}\n",
+                pat.round_number_pattern
+            ));
+            md.push_str(&format!(
+                "- Unusual hour transactions: {}\n",
+                pat.unusual_hours
+            ));
+        }
+    }
+
+    md.push_str(&crate::display::report::report_footer());
+    md
 }
 
 /// Auto-detect blockchain from address format
@@ -379,6 +552,48 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_address_line_with_chain() {
+        let (addr, chain) = parse_address_line("0xabc, polygon");
+        assert_eq!(addr, "0xabc");
+        assert_eq!(chain, "polygon");
+    }
+
+    #[test]
+    fn test_parse_address_line_no_chain() {
+        let (addr, chain) = parse_address_line("0xabc");
+        assert_eq!(addr, "0xabc");
+        assert_eq!(chain, "ethereum");
+    }
+
+    #[test]
+    fn test_resolve_compliance_targets_single_address() {
+        let result =
+            resolve_compliance_targets("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2").unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2");
+        assert_eq!(result[0].1, "ethereum");
+    }
+
+    #[test]
+    fn test_resolve_compliance_targets_from_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("addresses.txt");
+        std::fs::write(
+            &path,
+            "0xabc123, ethereum\n0xdef456, polygon\n# comment\n\n0x789,solana",
+        )
+        .unwrap();
+        let result = resolve_compliance_targets(path.to_str().unwrap()).unwrap();
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].0, "0xabc123");
+        assert_eq!(result[0].1, "ethereum");
+        assert_eq!(result[1].0, "0xdef456");
+        assert_eq!(result[1].1, "polygon");
+        assert_eq!(result[2].0, "0x789");
+        assert_eq!(result[2].1, "solana");
+    }
+
+    #[test]
     fn test_detect_chain_unknown() {
         let result = detect_chain("unknown_address_format_xyz");
         assert!(result.is_err());
@@ -428,6 +643,44 @@ mod tests {
         let result = handle_risk(args).await;
         assert!(result.is_ok());
         assert!(std::path::Path::new(&path).exists());
+    }
+
+    #[tokio::test]
+    async fn test_handle_risk_export_markdown_extension() {
+        unsafe { std::env::remove_var("ETHERSCAN_API_KEY") };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("report.md");
+        let path_str = path.to_string_lossy().to_string();
+        let args = RiskArgs {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: Some("ethereum".to_string()),
+            format: OutputFormat::Table,
+            detailed: false,
+            output: Some(path_str.clone()),
+        };
+        let result = handle_risk(args).await;
+        assert!(result.is_ok());
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("Risk") || content.contains("risk"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_risk_export_yaml_extension() {
+        unsafe { std::env::remove_var("ETHERSCAN_API_KEY") };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("report.yaml");
+        let path_str = path.to_string_lossy().to_string();
+        let args = RiskArgs {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: Some("ethereum".to_string()),
+            format: OutputFormat::Table,
+            detailed: false,
+            output: Some(path_str.clone()),
+        };
+        let result = handle_risk(args).await;
+        assert!(result.is_ok());
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("address") || content.contains("chain"));
     }
 
     #[tokio::test]
@@ -640,6 +893,20 @@ mod tests {
         };
         let result = handle_trace_with_client(args, Some(client)).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_trace_with_api_client_connection_refused() {
+        // Use invalid URL to trigger connection error so trace_transaction returns Err
+        let client = make_mock_client("http://127.0.0.1:1");
+        let args = TraceArgs {
+            tx_hash: "0xabc123".to_string(),
+            depth: 2,
+            flag_suspicious: false,
+            format: OutputFormat::Table,
+        };
+        let result = handle_trace_with_client(args, Some(client)).await;
+        assert!(result.is_ok()); // Handler catches error, prints to stderr
     }
 
     #[tokio::test]

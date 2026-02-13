@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Market command** (`scope market summary`): Peg and order book health for stablecoin markets
+  - Fetches level-2 depth from exchange APIs (Biconomy)
+  - Configurable health checks: peg safety, bid/ask ratio, min levels, min depth
+  - All thresholds configurable via CLI (--peg-range, --min-bid-ask-ratio, --max-bid-ask-ratio, etc.)
+  - Optional repeated runs (--every, --duration)
+  - Text and JSON output; chain/venue display
+- **Reporting and analytics**:
+  - `scope address --report report.md`: Markdown report for address analysis
+  - `scope market summary --report path.md`: Save peg/orderbook report to file
+  - `scope market summary --csv path.csv`: Time-series CSV of peg/spread/depth (repeat mode)
+  - `scope portfolio summary --report report.md`: Portfolio markdown report (allocations, addresses)
+  - `scope compliance risk --output file`: Export respects format (.json, .yaml, .md)
+  - `scope compliance compliance-report`: Unified compliance report (risk + pattern analysis) for addresses
+  - `scope report batch`: Batch report for multiple addresses (--addresses, --from-file)
+  - Report versioning: All reports include Scope version and timestamp footer
+
 ## [0.2.2] - 2026-02-08
 
 ## [0.2.1] - 2026-02-08

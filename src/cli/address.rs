@@ -56,6 +56,10 @@ pub struct AddressArgs {
     /// Maximum number of transactions to retrieve.
     #[arg(long, default_value = "100")]
     pub limit: u32,
+
+    /// Generate and save a markdown report to the specified path.
+    #[arg(long, value_name = "PATH")]
+    pub report: Option<std::path::PathBuf>,
 }
 
 /// Result of an address analysis.
@@ -191,11 +195,22 @@ pub async fn run(
     let format = args.format.unwrap_or(config.output.format);
     output_report(&report, format)?;
 
+    // Generate report if requested
+    if let Some(ref report_path) = args.report {
+        let markdown_report = crate::cli::address_report::generate_address_report(&report);
+        crate::cli::address_report::save_address_report(&markdown_report, report_path)?;
+        println!("\nReport saved to: {}", report_path.display());
+    }
+
     Ok(())
 }
 
 /// Analyzes an address using a unified chain client.
-async fn analyze_address(args: &AddressArgs, client: &dyn ChainClient) -> Result<AddressReport> {
+/// Exposed for use by batch report and other commands.
+pub async fn analyze_address(
+    args: &AddressArgs,
+    client: &dyn ChainClient,
+) -> Result<AddressReport> {
     // Fetch balance
     let mut chain_balance = client.get_balance(&args.address).await?;
     client.enrich_balance_usd(&mut chain_balance).await;
@@ -682,6 +697,7 @@ mod tests {
             include_txs: false,
             include_tokens: false,
             limit: 10,
+            report: None,
         };
         let result = super::run(args, &config, &factory).await;
         assert!(result.is_ok());
@@ -699,6 +715,7 @@ mod tests {
             include_txs: true,
             include_tokens: false,
             limit: 10,
+            report: None,
         };
         let result = super::run(args, &config, &factory).await;
         assert!(result.is_ok());
@@ -726,6 +743,7 @@ mod tests {
             include_txs: false,
             include_tokens: true,
             limit: 10,
+            report: None,
         };
         let result = super::run(args, &config, &factory).await;
         assert!(result.is_ok());
@@ -744,6 +762,7 @@ mod tests {
             include_txs: false,
             include_tokens: false,
             limit: 10,
+            report: None,
         };
         let result = super::run(args, &config, &factory).await;
         assert!(result.is_ok());
@@ -760,6 +779,7 @@ mod tests {
             include_txs: false,
             include_tokens: false,
             limit: 10,
+            report: None,
         };
         let result = super::run(args, &config, &factory).await;
         assert!(result.is_ok());
@@ -788,6 +808,7 @@ mod tests {
             include_txs: true,
             include_tokens: true,
             limit: 50,
+            report: None,
         };
         let result = super::run(args, &config, &factory).await;
         assert!(result.is_ok());

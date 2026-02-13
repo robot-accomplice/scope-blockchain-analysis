@@ -14,6 +14,7 @@
 //!   tx           Analyze a transaction
 //!   crawl        Crawl a token for analytics data
 //!   monitor      Live token monitor with real-time TUI dashboard
+//!   market       Peg and order book health for stablecoin markets
 //!   portfolio    Portfolio management commands
 //!   export       Export analysis data
 //!   interactive  Interactive mode with preserved context
@@ -28,12 +29,15 @@
 //! ```
 
 pub mod address;
+pub mod address_report;
 pub mod compliance;
 pub mod crawl;
 pub mod export;
 pub mod interactive;
+pub mod market;
 pub mod monitor;
 pub mod portfolio;
+pub mod report;
 pub mod setup;
 pub mod tx;
 
@@ -153,6 +157,17 @@ pub enum Commands {
     /// compliance reports for blockchain addresses.
     #[command(subcommand)]
     Compliance(compliance::ComplianceCommands),
+
+    /// Peg and order book health for stablecoin markets.
+    ///
+    /// Fetches level-2 depth from exchange APIs and reports
+    /// peg deviation, spread, depth, and configurable health checks.
+    #[command(subcommand)]
+    Market(market::MarketCommands),
+
+    /// Batch and combined report generation.
+    #[command(subcommand)]
+    Report(report::ReportCommands),
 }
 
 impl Cli {
@@ -582,5 +597,59 @@ mod tests {
     fn test_cli_parse_monitor_invalid_scale_fails() {
         let result = Cli::try_parse_from(["scope", "monitor", "USDC", "--scale", "quadratic"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cli_parse_market_summary() {
+        let cli = Cli::try_parse_from(["scope", "market", "summary"]).unwrap();
+        assert!(matches!(cli.command, Commands::Market(_)));
+    }
+
+    #[test]
+    fn test_cli_parse_market_summary_with_pair() {
+        let cli = Cli::try_parse_from(["scope", "market", "summary", "PUSD_USDT"]).unwrap();
+        if let Commands::Market(market::MarketCommands::Summary(args)) = cli.command {
+            assert_eq!(args.pair, "PUSD_USDT");
+        } else {
+            panic!("Expected Market Summary command");
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_report_batch() {
+        let cli = Cli::try_parse_from([
+            "scope",
+            "report",
+            "batch",
+            "--addresses",
+            "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
+            "--output",
+            "report.md",
+        ])
+        .unwrap();
+        assert!(matches!(cli.command, Commands::Report(_)));
+    }
+
+    #[test]
+    fn test_cli_parse_market_summary_with_thresholds() {
+        let cli = Cli::try_parse_from([
+            "scope",
+            "market",
+            "summary",
+            "--peg-range",
+            "0.002",
+            "--min-bid-ask-ratio",
+            "0.1",
+            "--max-bid-ask-ratio",
+            "10",
+        ])
+        .unwrap();
+        if let Commands::Market(market::MarketCommands::Summary(args)) = cli.command {
+            assert_eq!(args.peg_range, 0.002);
+            assert_eq!(args.min_bid_ask_ratio, 0.1);
+            assert_eq!(args.max_bid_ask_ratio, 10.0);
+        } else {
+            panic!("Expected Market Summary command");
+        }
     }
 }

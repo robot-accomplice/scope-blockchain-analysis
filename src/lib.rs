@@ -26,6 +26,10 @@
 //! - **Data Export**: Export transaction history in JSON or CSV with date range
 //!   filtering. Chain auto-detection for addresses.
 //!
+//! - **Market Health**: Peg and order book health for stablecoin markets. Fetches
+//!   level-2 depth from exchange APIs, runs configurable health checks (peg safety,
+//!   bid/ask ratio, depth thresholds), supports one-shot or repeated runs.
+//!
 //! - **USD Valuation**: Native token prices via DexScreener for all supported
 //!   chains (ETH, SOL, BNB, MATIC, etc.).
 //!
@@ -147,8 +151,9 @@
 //! ## Modules
 //!
 //! - [`chains`]: Blockchain client implementations (Ethereum/EVM, Solana, Tron, DexScreener)
-//! - [`cli`]: Command-line interface definitions (address, tx, crawl, monitor, portfolio, export)
+//! - [`cli`]: Command-line interface definitions (address, tx, crawl, monitor, market, portfolio, export)
 //! - [`config`]: Configuration management
+//! - [`market`]: Peg and order book health for stablecoin markets
 //! - [`display`]: Terminal output utilities and markdown report generation
 //! - [`error`]: Error types and result aliases
 //! - [`tokens`]: Token alias storage for friendly name lookups
@@ -201,6 +206,12 @@ pub mod tokens;
 /// Provides risk scoring, transaction taint analysis, pattern detection,
 /// and compliance reporting for blockchain addresses.
 pub mod compliance;
+
+/// Market module for peg and order book health analysis.
+///
+/// Fetches level-2 order book data from exchange APIs and runs
+/// configurable health checks for stablecoin markets.
+pub mod market;
 
 /// Library version string.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
