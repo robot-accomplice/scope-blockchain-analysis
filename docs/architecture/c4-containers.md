@@ -9,6 +9,7 @@ C4Container
     Person(analyst, "Analyst")
     Container_Boundary(scope, "Scope CLI") {
         Container(cli, "CLI", "Rust", "Command parsing and dispatch")
+        Container(web, "Web", "Rust/Axum", "HTTP server, REST API, WebSocket, SPA UI")
         Container(chains, "Chains", "Rust", "ChainClient, DexClient, ChainClientFactory")
         Container(compliance, "Compliance", "Rust", "RiskEngine, pattern detection, taint trace")
         Container(market, "Market", "Rust", "Order book fetch, peg health, Biconomy client")
@@ -23,7 +24,10 @@ C4Container
     Container_Ext(biconomy, "Biconomy")
 
     Rel(analyst, cli, "Commands")
+    Rel(analyst, web, "Browser")
     Rel(cli, config, "Load config")
+    Rel(web, config, "Load config")
+    Rel(web, chains, "Create clients")
     Rel(cli, chains, "Create clients")
     Rel(cli, compliance, "Risk, trace, analyze")
     Rel(cli, market, "Summary")
@@ -40,7 +44,8 @@ C4Container
 
 | Container | Description |
 |-----------|-------------|
-| **CLI** | `clap` argument parsing, `Commands` dispatch, command handlers (address, tx, crawl, discover, monitor, token-health, portfolio, export, compliance, market, report, interactive, setup) |
+| **CLI** | `clap` argument parsing, `Commands` dispatch, command handlers (address, tx, crawl, discover, monitor, token-health, portfolio, export, compliance, market, report, interactive, setup, web) |
+| **Web** | Axum HTTP server, REST API handlers (`/api/*`), WebSocket live monitor (`/ws/monitor`), embedded SPA UI, daemon mode |
 | **Chains** | `ChainClient` (Ethereum, Solana, Tron), `DexClient`, `ChainClientFactory`, balance/tx/token fetch |
 | **Compliance** | `RiskEngine`, `BlockchainDataClient`, pattern analysis, transaction tracing |
 | **Market** | `BiconomyClient`, `OrderBook`, `MarketSummary`, health checks |

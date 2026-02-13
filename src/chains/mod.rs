@@ -199,6 +199,15 @@ pub trait ChainClient: Send + Sync {
     async fn get_token_holder_count(&self, _address: &str) -> Result<u64> {
         Ok(0)
     }
+
+    /// Fetches bytecode at address (EVM: eth_getCode).
+    /// Returns "0x" for EOA, non-empty hex for contracts.
+    /// Default: not supported.
+    async fn get_code(&self, _address: &str) -> Result<String> {
+        Err(crate::error::ScopeError::Chain(
+            "Code lookup not supported on this chain".to_string(),
+        ))
+    }
 }
 
 /// Factory trait for creating chain clients and DEX data sources.

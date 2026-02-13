@@ -259,7 +259,7 @@ mod tests {
 
         let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "access denied");
         let config_err = ConfigError::Read {
-            path: PathBuf::from("/etc/bca/config.yaml"),
+            path: PathBuf::from("/etc/scope/config.yaml"),
             source: io_err,
         };
 

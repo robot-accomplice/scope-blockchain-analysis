@@ -4,38 +4,58 @@
 //! It provides the main `Cli` struct and `Commands` enum that define all
 //! available commands and their arguments.
 //!
+//! ## UX Features
+//!
+//! - **Progress indicators** — Spinners and step counters via [`progress`] module
+//! - **Help with examples** — `after_help` blocks with example invocations
+//! - **Command grouping** — Commands ordered by task (entity lookup, token
+//!   analysis, compliance, data/export, config)
+//! - **Shell completion** — `scope completions bash|zsh|fish` via `clap_complete`
+//! - **Typo suggestions** — Built-in clap fuzzy matching for misspelled commands
+//!
 //! ## Command Structure
 //!
 //! ```text
 //! scope [OPTIONS] <COMMAND>
 //!
-//! Commands:
-//!   address      Analyze a blockchain address
-//!   tx           Analyze a transaction
-//!   crawl        Crawl a token for analytics data
-//!   discover     Browse trending and boosted tokens (alias: disc)
-//!   monitor      Live token monitor with real-time TUI dashboard
-//!   market       Peg and order book health for stablecoin markets
-//!   token-health Token health suite (DEX + optional market; alias: health)
-//!   portfolio    Portfolio management commands
-//!   export       Export analysis data
-//!   interactive  Interactive mode with preserved context
-//!   report       Batch and combined report generation
-//!   setup        Configure settings and API keys
-//!   compliance   Compliance and risk analysis commands
+//! Entity lookup:
+//!   address      Analyze a blockchain address (alias: addr)
+//!   tx           Analyze a transaction (alias: transaction)
+//!   insights     Auto-detect target type and run analyses (alias: insight)
+//!
+//! Token analysis:
+//!   crawl        Crawl a token for DEX analytics (alias: token)
+//!   token-health DEX analytics + optional order book (alias: health)
+//!   discover     Browse trending/boosted tokens (alias: disc)
+//!   monitor      Live TUI dashboard (alias: mon)
+//!   market       Peg and order book health for stablecoins
+//!
+//! Compliance:
+//!   compliance   Risk, trace, analyze, compliance-report
+//!
+//! Data & export:
+//!   portfolio    Add, remove, list, summary (alias: port)
+//!   export       Export to JSON/CSV
+//!   report       Batch and combined reports
+//!
+//! Config & interactive:
+//!   interactive  REPL with preserved context (alias: shell)
+//!   setup        Configure API keys and preferences (alias: config)
+//!   completions  Generate shell completions for bash/zsh/fish
 //!
 //! Options:
 //!   --config <PATH>   Path to configuration file
 //!   -v, --verbose...  Increase logging verbosity
 //!   --ai              Markdown output for agent parsing
 //!   --no-color        Disable colored output
-//!   -h, --help        Print help
+//!   -h, --help        Print help (with examples)
 //!   -V, --version     Print version
 //! ```
 
 pub mod address;
 pub mod address_report;
 pub mod compliance;
+pub mod insights;
 pub mod crawl;
 pub mod discover;
 pub mod export;
@@ -43,6 +63,7 @@ pub mod interactive;
 pub mod market;
 pub mod monitor;
 pub mod portfolio;
+pub mod progress;
 pub mod report;
 pub mod setup;
 pub mod token_health;
@@ -70,9 +91,23 @@ pub use tx::TxArgs;
     name = "scope",
     version,
     about = "Scope Blockchain Analysis - A tool for blockchain data analysis",
-    long_about = "Scope Blockchain Analysis is a production-grade tool for \
-                  blockchain data analysis, portfolio tracking, and transaction investigation.\n\n\
-                  Use --help with any subcommand for detailed usage information."
+    long_about = format!(
+        "Scope Blockchain Analysis v{}\n\n\
+         A production-grade tool for blockchain data analysis, portfolio tracking,\n\
+         and transaction investigation.\n\n\
+         Use --help with any subcommand for detailed usage information.",
+        env!("CARGO_PKG_VERSION")
+    ),
+    after_help = "\x1b[1mExamples:\x1b[0m\n  \
+                  scope address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2\n  \
+                  scope crawl USDC --chain ethereum\n  \
+                  scope insights 0xabc123...\n  \
+                  scope monitor USDC\n  \
+                  scope compliance risk 0x742d...\n  \
+                  scope setup\n\n\
+                  \x1b[1mDocumentation:\x1b[0m\n  \
+                  https://github.com/robot-accomplice/scope-blockchain-analysis\n  \
+                  Quickstart guide: docs/QUICKSTART.md"
 )]
 pub struct Cli {
     /// Subcommand to execute.
@@ -109,6 +144,7 @@ pub struct Cli {
 /// Available CLI subcommands.
 #[derive(Debug, Subcommand)]
 pub enum Commands {
+    // -- Entity lookup --------------------------------------------------------
     /// Analyze a blockchain address.
     ///
     /// Retrieves balance, transaction history, and token holdings
@@ -123,6 +159,14 @@ pub enum Commands {
     #[command(visible_alias = "transaction")]
     Tx(TxArgs),
 
+    /// Unified insights: infer chain and type, run relevant analyses.
+    ///
+    /// Provide any target (address, tx hash, or token) and Scope will
+    /// detect it, run the appropriate analyses, and present observations.
+    #[command(visible_alias = "insight")]
+    Insights(insights::InsightsArgs),
+
+    // -- Token analysis -------------------------------------------------------
     /// Crawl a token for analytics data.
     ///
     /// Retrieves comprehensive token information including top holders,
@@ -131,6 +175,43 @@ pub enum Commands {
     #[command(visible_alias = "token")]
     Crawl(CrawlArgs),
 
+    /// Token health suite: DEX analytics + optional order book (crawl + market).
+    ///
+    /// Combines liquidity, volume, and holder data with optional market/peg
+    /// summary for stablecoins. Use --with-market for order book data.
+    #[command(visible_alias = "health")]
+    TokenHealth(token_health::TokenHealthArgs),
+
+    /// Discover trending and boosted tokens from DexScreener.
+    ///
+    /// Browse featured token profiles, recently boosted tokens,
+    /// or top boosted tokens by activity.
+    #[command(visible_alias = "disc")]
+    Discover(discover::DiscoverArgs),
+
+    /// Live token monitor with real-time TUI dashboard.
+    ///
+    /// Launches a terminal UI with price/volume charts, buy/sell gauges,
+    /// transaction feed, and more. Shortcut for `scope interactive` + `monitor <token>`.
+    #[command(visible_alias = "mon")]
+    Monitor(MonitorArgs),
+
+    /// Peg and order book health for stablecoin markets.
+    ///
+    /// Fetches level-2 depth from exchange APIs and reports
+    /// peg deviation, spread, depth, and configurable health checks.
+    #[command(subcommand)]
+    Market(market::MarketCommands),
+
+    // -- Compliance -----------------------------------------------------------
+    /// Compliance and risk analysis commands.
+    ///
+    /// Assess risk, trace taint, detect patterns, and generate
+    /// compliance reports for blockchain addresses.
+    #[command(subcommand)]
+    Compliance(compliance::ComplianceCommands),
+
+    // -- Data & export --------------------------------------------------------
     /// Portfolio management commands.
     ///
     /// Add, remove, and list watched addresses. View aggregated
@@ -144,19 +225,17 @@ pub enum Commands {
     /// to various formats (JSON, CSV).
     Export(ExportArgs),
 
+    /// Batch and combined report generation.
+    #[command(subcommand)]
+    Report(report::ReportCommands),
+
+    // -- Config & interactive -------------------------------------------------
     /// Interactive mode with preserved context.
     ///
     /// Launch a REPL where chain, format, and other settings persist
     /// between commands for faster workflow.
     #[command(visible_alias = "shell")]
     Interactive(InteractiveArgs),
-
-    /// Live token monitor with real-time TUI dashboard.
-    ///
-    /// Launches a terminal UI with price/volume charts, buy/sell gauges,
-    /// transaction feed, and more. Shortcut for `scope interactive` + `monitor <token>`.
-    #[command(visible_alias = "mon")]
-    Monitor(MonitorArgs),
 
     /// Configure Scope settings and API keys.
     ///
@@ -165,37 +244,49 @@ pub enum Commands {
     #[command(visible_alias = "config")]
     Setup(SetupArgs),
 
-    /// Compliance and risk analysis commands.
+    /// Generate shell completions for bash, zsh, or fish.
     ///
-    /// Assess risk, trace taint, detect patterns, and generate
-    /// compliance reports for blockchain addresses.
-    #[command(subcommand)]
-    Compliance(compliance::ComplianceCommands),
+    /// Output shell completion script to stdout for the specified shell.
+    /// Source the output in your shell profile for tab completion.
+    Completions(CompletionsArgs),
 
-    /// Peg and order book health for stablecoin markets.
+    /// Start the web UI server (localhost).
     ///
-    /// Fetches level-2 depth from exchange APIs and reports
-    /// peg deviation, spread, depth, and configurable health checks.
-    #[command(subcommand)]
-    Market(market::MarketCommands),
+    /// Serves the same Scope features as the CLI via a local web interface
+    /// at http://127.0.0.1:8080 (default). Use --daemon to run in the
+    /// background, --stop to halt a running daemon.
+    #[command(visible_alias = "serve")]
+    Web(WebArgs),
+}
 
-    /// Token health suite: DEX analytics + optional order book (crawl + market).
+/// Arguments for the web server command.
+#[derive(Debug, Clone, clap::Args)]
+pub struct WebArgs {
+    /// Port to listen on.
+    #[arg(long, short, default_value = "8080")]
+    pub port: u16,
+
+    /// Address to bind to.
     ///
-    /// Combines liquidity, volume, and holder data with optional market/peg
-    /// summary for stablecoins. Use --with-market for order book data.
-    #[command(visible_alias = "health")]
-    TokenHealth(token_health::TokenHealthArgs),
+    /// Use 127.0.0.1 for local-only (default) or 0.0.0.0 for LAN access.
+    #[arg(long, default_value = "127.0.0.1")]
+    pub bind: String,
 
-    /// Batch and combined report generation.
-    #[command(subcommand)]
-    Report(report::ReportCommands),
+    /// Run as a background daemon.
+    #[arg(long, short)]
+    pub daemon: bool,
 
-    /// Discover trending and boosted tokens from DexScreener.
-    ///
-    /// Browse featured token profiles, recently boosted tokens,
-    /// or top boosted tokens by activity.
-    #[command(visible_alias = "disc")]
-    Discover(discover::DiscoverArgs),
+    /// Stop a running daemon.
+    #[arg(long)]
+    pub stop: bool,
+}
+
+/// Arguments for the completions command.
+#[derive(Debug, Clone, clap::Args)]
+pub struct CompletionsArgs {
+    /// The shell to generate completions for.
+    #[arg(value_enum)]
+    pub shell: clap_complete::Shell,
 }
 
 impl Cli {

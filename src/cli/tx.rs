@@ -1,6 +1,6 @@
 //! # Transaction Analysis Command
 //!
-//! This module implements the `bca tx` command for analyzing
+//! This module implements the `scope tx` command for analyzing
 //! blockchain transactions. It decodes transaction data, traces
 //! execution, and displays detailed transaction information.
 //!
@@ -8,13 +8,13 @@
 //!
 //! ```bash
 //! # Basic transaction analysis
-//! bca tx 0xabc123...
+//! scope tx 0xabc123...
 //!
 //! # Specify chain
-//! bca tx 0xabc123... --chain polygon
+//! scope tx 0xabc123... --chain polygon
 //!
 //! # Include internal transactions
-//! bca tx 0xabc123... --trace
+//! scope tx 0xabc123... --trace
 //! ```
 
 use crate::chains::{ChainClientFactory, validate_solana_signature, validate_tron_tx_hash};
@@ -24,6 +24,10 @@ use clap::Args;
 
 /// Arguments for the transaction analysis command.
 #[derive(Debug, Clone, Args)]
+#[command(after_help = "\x1b[1mExamples:\x1b[0m
+  scope tx 0xabc123def456...
+  scope tx 0xabc123... --chain polygon --trace
+  scope tx 0xabc123... --decode --format json")]
 pub struct TxArgs {
     /// The transaction hash to analyze.
     ///
@@ -227,18 +231,48 @@ pub async fn run(
     // Validate transaction hash
     validate_tx_hash(&args.hash, &args.chain)?;
 
-    println!("Analyzing transaction on {}...", args.chain);
+    let sp = crate::cli::progress::Spinner::new(&format!(
+        "Analyzing transaction on {}...",
+        args.chain
+    ));
 
-    let client = clients.create_chain_client(&args.chain)?;
-    let tx = client.get_transaction(&args.hash).await?;
+    let report = fetch_transaction_report(
+        &args.hash,
+        &args.chain,
+        args.decode,
+        args.trace,
+        clients,
+    )
+    .await?;
 
-    // Calculate transaction fee
+    sp.finish("Transaction loaded.");
+
+    // Output based on format
+    let format = args.format.unwrap_or(config.output.format);
+    output_report(&report, format)?;
+
+    Ok(())
+}
+
+/// Fetches and builds a transaction report for programmatic use.
+///
+/// Used by the insights command and batch reporting.
+pub async fn fetch_transaction_report(
+    hash: &str,
+    chain: &str,
+    decode: bool,
+    trace: bool,
+    clients: &dyn ChainClientFactory,
+) -> Result<TransactionReport> {
+    validate_tx_hash(hash, chain)?;
+    let client = clients.create_chain_client(chain)?;
+    let tx = client.get_transaction(hash).await?;
+
     let gas_price_val: u128 = tx.gas_price.parse().unwrap_or(0);
     let gas_used_val = tx.gas_used.unwrap_or(0) as u128;
     let fee_wei = gas_price_val * gas_used_val;
-    let chain_lower = args.chain.to_lowercase();
+    let chain_lower = chain.to_lowercase();
     let fee_str = if chain_lower == "solana" || chain_lower == "sol" {
-        // For Solana, gas_price already contains the fee in lamports
         let fee_sol = tx.gas_price.parse::<f64>().unwrap_or(0.0) / 1_000_000_000.0;
         format!("{:.9}", fee_sol)
     } else {
@@ -247,11 +281,11 @@ pub async fn run(
 
     let report = TransactionReport {
         hash: tx.hash.clone(),
-        chain: args.chain.clone(),
+        chain: chain.to_string(),
         block: BlockInfo {
             number: tx.block_number.unwrap_or(0),
             timestamp: tx.timestamp.unwrap_or(0),
-            hash: String::new(), // Block hash not available from tx data
+            hash: String::new(),
         },
         transaction: TransactionDetails {
             from: tx.from.clone(),
@@ -269,8 +303,7 @@ pub async fn run(
             transaction_fee: fee_str,
             effective_gas_price: None,
         },
-        decoded_input: if args.decode && !tx.input.is_empty() && tx.input != "0x" {
-            // Basic decode: show function selector (first 4 bytes)
+        decoded_input: if decode && !tx.input.is_empty() && tx.input != "0x" {
             let selector = if tx.input.len() >= 10 {
                 &tx.input[..10]
             } else {
@@ -281,7 +314,7 @@ pub async fn run(
                 function_name: selector.to_string(),
                 parameters: vec![],
             })
-        } else if args.decode {
+        } else if decode {
             Some(DecodedInput {
                 function_signature: "transfer()".to_string(),
                 function_name: "Native Transfer".to_string(),
@@ -290,14 +323,9 @@ pub async fn run(
         } else {
             None
         },
-        internal_transactions: if args.trace { Some(vec![]) } else { None },
+        internal_transactions: if trace { Some(vec![]) } else { None },
     };
-
-    // Output based on format
-    let format = args.format.unwrap_or(config.output.format);
-    output_report(&report, format)?;
-
-    Ok(())
+    Ok(report)
 }
 
 /// Validates a transaction hash format for the given chain.
@@ -429,7 +457,8 @@ fn output_report(report: &TransactionReport, format: OutputFormat) -> Result<()>
 }
 
 /// Formats a transaction report as markdown for agent consumption.
-fn format_tx_markdown(report: &TransactionReport) -> String {
+/// Exposed for use by insights and report generation.
+pub fn format_tx_markdown(report: &TransactionReport) -> String {
     let mut md = String::new();
     md.push_str("# Transaction Analysis\n\n");
     md.push_str("| Field | Value |\n|-------|-------|\n");

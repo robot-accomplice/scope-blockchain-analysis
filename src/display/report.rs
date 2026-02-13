@@ -110,6 +110,64 @@ pub fn generate_report(analytics: &TokenAnalytics) -> String {
     report
 }
 
+/// Summary of token risk for insights: score, level, key concerns, and positives.
+/// Used by the insights command to show interpretive bullets at the top.
+pub fn token_risk_summary(analytics: &TokenAnalytics) -> TokenRiskSummary {
+    let factors = RiskFactors::from_analytics(analytics);
+    let score = factors.overall_score();
+    let level = factors.risk_level();
+    let emoji = factors.risk_emoji();
+
+    let mut concerns = Vec::new();
+    let mut positives = Vec::new();
+
+    if factors.honeypot >= 7 {
+        concerns.push("Possible honeypot (buys >> sells)".to_string());
+    } else if factors.honeypot <= 3 {
+        positives.push("Normal buy/sell activity".to_string());
+    }
+
+    if factors.concentration >= 7 {
+        concerns.push(format!(
+            "High holder concentration (top holder {:.0}%+)",
+            analytics
+                .holders
+                .first()
+                .map(|h| h.percentage)
+                .unwrap_or(0.0)
+        ));
+    } else if factors.concentration <= 3 {
+        positives.push("Reasonable holder distribution".to_string());
+    }
+
+    if factors.liquidity >= 7 {
+        concerns.push("Very low liquidity".to_string());
+    } else if factors.liquidity <= 3 {
+        positives.push("Good liquidity".to_string());
+    }
+
+    if factors.age >= 7 {
+        concerns.push("Very new token (elevated risk)".to_string());
+    }
+
+    TokenRiskSummary {
+        score,
+        level,
+        emoji,
+        concerns,
+        positives,
+    }
+}
+
+/// Risk summary for token insights.
+pub struct TokenRiskSummary {
+    pub score: u8,
+    pub level: &'static str,
+    pub emoji: &'static str,
+    pub concerns: Vec<String>,
+    pub positives: Vec<String>,
+}
+
 /// Generates the report header.
 fn generate_header(analytics: &TokenAnalytics) -> String {
     let timestamp = DateTime::<Utc>::from_timestamp(analytics.fetched_at, 0)
@@ -1427,6 +1485,15 @@ mod tests {
         assert!(report.contains("## Top Holders"));
         assert!(report.contains("## Concentration Analysis"));
         assert!(report.contains("## Data Sources"));
+    }
+
+    #[test]
+    fn test_token_risk_summary() {
+        let analytics = create_test_analytics();
+        let summary = token_risk_summary(&analytics);
+        assert!(summary.score >= 1 && summary.score <= 10);
+        assert!(!summary.level.is_empty());
+        assert!(!summary.emoji.is_empty());
     }
 
     #[test]

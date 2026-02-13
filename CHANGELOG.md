@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Shell completion** (`scope completions bash|zsh|fish`): Generate tab-completion scripts for bash, zsh, and fish shells via `clap_complete`
+- **Progress indicators**: Spinners and step-progress bars for all long-running operations (address, tx, crawl, compliance risk, insights, discover, export, token-health, report batch) via `indicatif`
+- **Error remediation hints**: Actionable suggestions for common errors (invalid address/hash, missing config, network failures, API auth issues)
+- **Help with examples**: `after_help` example invocations in top-level help and subcommands (address, tx, crawl)
+- **Command map**: Decision tree in README and QUICKSTART showing which command to use for each task
+- **Output Formats section**: Documentation of `--format json` vs `--ai` usage in README and QUICKSTART
+
+### Changed
+- **Command grouping**: Commands in `--help` now ordered by task category (entity lookup → token analysis → compliance → data/export → config) instead of alphabetically
+- **Documentation link**: Top-level `--help` now shows GitHub repository URL and quickstart guide path
+- **Typo suggestions**: Verified clap built-in fuzzy matching ("Did you mean: ...") for misspelled subcommands
+- **Setup hints expanded**: Post-setup wizard now suggests `insights`, `monitor`, and `completions` commands
+- **Web module feature-gated**: `scope web` / `scope serve` now requires `--features web` to compile (resolves pre-existing build failures)
+
+### Fixed
+- **Docstring consistency**: Replaced all `bca` references with `scope` in module docs (crawl, tx, address, setup, portfolio, export) and runtime strings (config file comments, empty portfolio messages)
+
 ## [0.3.1] - 2026-02-13
 
 ### Added

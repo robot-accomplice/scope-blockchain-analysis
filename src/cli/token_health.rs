@@ -51,12 +51,14 @@ pub async fn run(
         args.format
     };
     // 1. Fetch DEX analytics (crawl)
+    let sp = crate::cli::progress::Spinner::new("Fetching token health data...");
     let analytics =
         crawl::fetch_analytics_for_input(&args.token, &args.chain, Period::Hour24, 10, clients)
             .await?;
 
     // 2. Optionally fetch market summary for stablecoin
     let market_summary = if args.with_market {
+        sp.set_message("Fetching market data...");
         let thresholds = HealthThresholds {
             peg_target: 1.0,
             peg_range: 0.001,
@@ -146,6 +148,8 @@ pub async fn run(
     } else {
         None
     };
+
+    sp.finish("Token health data loaded.");
 
     // 3. Output combined report
     match format {

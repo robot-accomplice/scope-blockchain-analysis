@@ -13,6 +13,22 @@ scope setup --status           # Check what's configured
 
 **Minimum for most workflows:** No keys needed for address lookup, token crawl, discover, or monitor. Add `ETHERSCAN_API_KEY` for risk assessment and pattern detection.
 
+### Shell Tab-Completion
+
+Set up tab-completion for your shell so you can complete commands and flags with `<Tab>`:
+
+```bash
+# Bash
+scope completions bash > ~/.local/share/bash-completion/completions/scope
+
+# Zsh (add to fpath, then reload)
+scope completions zsh > ~/.zfunc/_scope
+# Add to .zshrc: fpath=(~/.zfunc $fpath); autoload -Uz compinit && compinit
+
+# Fish
+scope completions fish > ~/.config/fish/completions/scope.fish
+```
+
 ---
 
 ## Workflow 1: Due Diligence on an Address
@@ -191,18 +207,56 @@ scope:solana> exit
 |------|-------|
 | `address` | `addr` |
 | `transaction` | `tx` |
+| `insights` | `insight` |
 | `crawl` | `token` |
 | `portfolio` | `port` |
 | `monitor` | `mon` |
 | `token-health` | `health` |
 | `discover` | `disc` |
 | `interactive` | `shell` |
+| `setup` | `config` |
+
+---
+
+## Command Map
+
+Not sure which command to use? Here's a quick decision tree:
+
+| I want to... | Command |
+|--------------|---------|
+| Look up an address (balance, txs, tokens) | `scope address <addr>` |
+| Look up a transaction | `scope tx <hash>` |
+| Auto-detect input and run everything | `scope insights <target>` |
+| Get token DEX data (price, volume, holders) | `scope crawl <token>` |
+| Token DEX + order book health (stablecoins) | `scope token-health <token> --with-market` |
+| Live real-time dashboard for a token | `scope monitor <token>` |
+| Browse trending/boosted tokens | `scope discover` |
+| Check market peg/depth for a stablecoin | `scope market summary <symbol>` |
+| Assess compliance risk for an address | `scope compliance risk <addr>` |
+| Manage a portfolio of watched addresses | `scope portfolio add/remove/list/summary` |
+| Export data to JSON/CSV | `scope export --address <addr> --output file.json` |
+| Generate a report for multiple addresses | `scope report batch --addresses <...>` |
 
 ---
 
 ## Output Formats
 
-Most commands support `--format table|json|csv`. Use `--ai` for markdown to stdout (agent-friendly):
+Scope supports multiple output formats:
+
+| Flag | Format | Use case |
+|------|--------|----------|
+| *(default)* | Table | Human-readable terminal output |
+| `--format json` | JSON | Programmatic consumption, piping to `jq` |
+| `--format csv` | CSV | Spreadsheet import |
+| `--ai` | Markdown | LLM/agent parsing (global flag, all commands) |
+
+Use `--format json` when piping output to other tools or scripts:
+
+```bash
+scope address 0x742d... --format json | jq '.balance'
+```
+
+Use `--ai` when feeding output to an LLM or agent:
 
 ```bash
 scope --ai address 0x742d...
@@ -211,8 +265,42 @@ scope --ai portfolio list
 
 ---
 
+## Error Hints
+
+When something goes wrong, Scope provides remediation hints for common errors:
+
+```text
+Error: Invalid address format: 0x123
+
+Hint: Ensure the address format matches the target chain.
+      EVM: 0x followed by 40 hex characters
+      Solana: base58 encoded public key
+      Tron: T followed by base58 characters
+```
+
+For config issues: `scope setup` will repair missing configuration.  
+For network issues: use `-v` for more details on failing requests.
+
+---
+
+## Progress Indicators
+
+Long-running operations show spinners or progress bars. These automatically hide when output is piped:
+
+```bash
+# Terminal: shows animated spinner
+scope address 0x742d... --include-txs
+
+# Pipe: no spinner, clean output
+scope address 0x742d... --format json | jq '.'
+```
+
+---
+
 ## Next Steps
 
 - **Configuration:** `scope setup --status` and `~/.config/scope/config.yaml`
+- **Shell completion:** `scope completions zsh > ~/.zfunc/_scope`
 - **Architecture:** [docs/architecture/](architecture/README.md) for dataflow diagrams
-- **Full reference:** `scope <command> --help` for subcommand options
+- **Full reference:** `scope <command> --help` for subcommand options with examples
+- **Usability guidelines:** [docs/architecture/cli-usability-guidelines.md](architecture/cli-usability-guidelines.md)

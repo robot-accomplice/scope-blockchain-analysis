@@ -146,10 +146,13 @@ pub async fn handle_risk_with_client(
         None => detect_chain(&args.address)?,
     };
 
-    println!("Assessing risk for {} on {}...", args.address, chain);
+    let sp = crate::cli::progress::Spinner::new(&format!(
+        "Assessing risk for {} on {}...",
+        args.address, chain
+    ));
 
     let engine = if let Some(c) = client {
-        println!("Using Etherscan API for enhanced analysis");
+        sp.set_message("Using Etherscan API for enhanced analysis...");
         RiskEngine::with_data_client(c)
     } else {
         // Try to load API key from environment
@@ -158,15 +161,16 @@ pub async fn handle_risk_with_client(
         if let Some(key) = etherscan_key {
             let sources = DataSources::new(key);
             let client = BlockchainDataClient::new(sources);
-            println!("Using Etherscan API for enhanced analysis");
+            sp.set_message("Using Etherscan API for enhanced analysis...");
             RiskEngine::with_data_client(client)
         } else {
-            println!("Note: Set ETHERSCAN_API_KEY for enhanced analysis");
+            eprintln!("Note: Set ETHERSCAN_API_KEY for enhanced analysis");
             RiskEngine::new()
         }
     };
 
     let assessment = engine.assess_address(&args.address, &chain).await?;
+    sp.finish("Risk assessment complete.");
 
     // Format and display output
     let output = format_risk_report(&assessment, args.format, args.detailed);

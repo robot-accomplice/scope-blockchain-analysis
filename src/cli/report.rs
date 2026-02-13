@@ -65,10 +65,12 @@ async fn run_batch(
         ));
     }
 
-    println!(
-        "Generating batch report for {} address(es){}...",
-        targets.len(),
-        if args.with_risk { " (with risk)" } else { "" }
+    let prog = crate::cli::progress::StepProgress::new(
+        targets.len() as u64,
+        &format!(
+            "Batch report{}",
+            if args.with_risk { " (with risk)" } else { "" }
+        ),
     );
     let mut reports = Vec::new();
     let mut risk_assessments: Vec<Option<crate::compliance::risk::RiskAssessment>> = Vec::new();
@@ -79,6 +81,13 @@ async fn run_batch(
     };
 
     for (address, chain) in &targets {
+        let short_addr = if address.len() > 12 {
+            format!("{}...{}", &address[..6], &address[address.len()-4..])
+        } else {
+            address.clone()
+        };
+        prog.inc(&short_addr);
+
         let addr_args = AddressArgs {
             address: address.clone(),
             chain: chain.clone(),
@@ -107,9 +116,10 @@ async fn run_batch(
         }
     }
 
+    prog.finish("All addresses analyzed.");
     let md = batch_report_to_markdown(&reports, &risk_assessments, args.with_risk);
     std::fs::write(&args.output, &md)?;
-    println!("\nBatch report saved to: {}", args.output.display());
+    println!("Batch report saved to: {}", args.output.display());
     Ok(())
 }
 

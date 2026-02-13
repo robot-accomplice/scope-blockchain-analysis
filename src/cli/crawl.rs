@@ -8,20 +8,20 @@
 //!
 //! ```bash
 //! # Basic crawl by address
-//! bca crawl 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
+//! scope crawl 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
 //!
 //! # Search by token name/symbol
-//! bca crawl USDC
-//! bca crawl "wrapped ether"
+//! scope crawl USDC
+//! scope crawl "wrapped ether"
 //!
 //! # Specify chain and period
-//! bca crawl USDC --chain ethereum --period 7d
+//! scope crawl USDC --chain ethereum --period 7d
 //!
 //! # Generate markdown report
-//! bca crawl USDC --report report.md
+//! scope crawl USDC --report report.md
 //!
 //! # Output as JSON
-//! bca crawl USDC --format json
+//! scope crawl USDC --format json
 //! ```
 
 use crate::chains::{
@@ -78,6 +78,11 @@ impl Period {
 
 /// Arguments for the crawl command.
 #[derive(Debug, Args)]
+#[command(after_help = "\x1b[1mExamples:\x1b[0m
+  scope crawl USDC
+  scope crawl 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --chain ethereum
+  scope crawl USDC --period 7d --report usdc_report.md
+  scope crawl PEPE --format json --no-charts")]
 pub struct CrawlArgs {
     /// Token address or name/symbol to analyze.
     ///
@@ -392,14 +397,16 @@ pub async fn run(
         "Starting token crawl"
     );
 
-    println!(
+    let sp = crate::cli::progress::Spinner::new(&format!(
         "Crawling token {} on {}...",
         resolved.address, resolved.chain
-    );
+    ));
 
     // Fetch token analytics from multiple sources
     let mut analytics =
         fetch_token_analytics(&resolved.address, &resolved.chain, &args, clients).await?;
+
+    sp.finish("Token data loaded.");
 
     // If we have alias info and the fetched token info is unknown, use alias info
     if (analytics.token.symbol == "UNKNOWN" || analytics.token.name == "Unknown Token")

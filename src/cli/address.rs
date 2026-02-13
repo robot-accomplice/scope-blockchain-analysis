@@ -1,6 +1,6 @@
 //! # Address Analysis Command
 //!
-//! This module implements the `bca address` command for analyzing
+//! This module implements the `scope address` command for analyzing
 //! blockchain addresses. It retrieves balance information, transaction
 //! history, and token holdings.
 //!
@@ -8,13 +8,13 @@
 //!
 //! ```bash
 //! # Basic address analysis
-//! bca address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
+//! scope address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
 //!
 //! # Specify chain
-//! bca address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --chain ethereum
+//! scope address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --chain ethereum
 //!
 //! # Output as JSON
-//! bca address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --format json
+//! scope address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --format json
 //! ```
 
 use crate::chains::{
@@ -26,6 +26,11 @@ use clap::Args;
 
 /// Arguments for the address analysis command.
 #[derive(Debug, Clone, Args)]
+#[command(after_help = "\x1b[1mExamples:\x1b[0m
+  scope address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
+  scope address 0x742d... --include-txs --include-tokens
+  scope address 0x742d... --dossier --report dossier.md
+  scope address DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy --chain solana")]
 pub struct AddressArgs {
     /// The blockchain address to analyze.
     ///
@@ -200,13 +205,17 @@ pub async fn run(
         analysis_args.include_tokens = true;
     }
 
-    println!("Analyzing address on {}...", args.chain);
+    let sp = crate::cli::progress::Spinner::new(&format!(
+        "Analyzing address on {}...",
+        args.chain
+    ));
 
     let client = clients.create_chain_client(&args.chain)?;
     let report = analyze_address(&analysis_args, client.as_ref()).await?;
 
     // Dossier: fetch risk assessment (uses ETHERSCAN_API_KEY for Ethereum)
     let risk_assessment = if args.dossier {
+        sp.set_message("Running risk assessment...");
         let engine = match crate::compliance::datasource::BlockchainDataClient::from_env_opt() {
             Some(client) => crate::compliance::risk::RiskEngine::with_data_client(client),
             None => crate::compliance::risk::RiskEngine::new(),
@@ -215,6 +224,8 @@ pub async fn run(
     } else {
         None
     };
+
+    sp.finish("Analysis complete.");
 
     // Output based on format
     let format = args.format.unwrap_or(config.output.format);

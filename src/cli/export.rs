@@ -1,19 +1,19 @@
 //! # Export Command
 //!
-//! This module implements the `bca export` command for exporting
+//! This module implements the `scope export` command for exporting
 //! analysis data to various formats (JSON, CSV).
 //!
 //! ## Usage
 //!
 //! ```bash
 //! # Export address history to JSON
-//! bca export --address 0x742d... --output history.json
+//! scope export --address 0x742d... --output history.json
 //!
 //! # Export to CSV
-//! bca export --address 0x742d... --output history.csv --format csv
+//! scope export --address 0x742d... --output history.csv --format csv
 //!
 //! # Export portfolio data
-//! bca export --portfolio --output portfolio.json
+//! scope export --portfolio --output portfolio.json
 //! ```
 
 use crate::chains::{ChainClientFactory, infer_chain_from_address};
@@ -106,7 +106,8 @@ pub async fn run(
         "Starting export"
     );
 
-    if args.portfolio {
+    let sp = crate::cli::progress::Spinner::new("Exporting data...");
+    let result = if args.portfolio {
         export_portfolio(&args, format, config).await
     } else if let Some(ref address) = args.address {
         export_address(address, &args, format, clients).await
@@ -114,7 +115,9 @@ pub async fn run(
         Err(ScopeError::Export(
             "Must specify either --address or --portfolio".to_string(),
         ))
-    }
+    };
+    sp.finish_and_clear();
+    result
 }
 
 /// Detects output format from file extension.

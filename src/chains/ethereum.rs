@@ -875,6 +875,26 @@ impl EthereumClient {
         Ok(block_number)
     }
 
+    /// Fetches bytecode at address (eth_getCode). Returns "0x" for EOA, non-empty for contracts.
+    pub async fn get_code(&self, address: &str) -> Result<String> {
+        validate_eth_address(address)?;
+
+        let url = self.build_api_url(&format!(
+            "module=proxy&action=eth_getCode&address={}&tag=latest",
+            address
+        ));
+
+        #[derive(Deserialize)]
+        struct CodeResponse {
+            result: Option<String>,
+        }
+
+        let response: CodeResponse = self.client.get(&url).send().await?.json().await?;
+        Ok(response
+            .result
+            .unwrap_or_else(|| "0x".to_string()))
+    }
+
     /// Fetches ERC-20 token balances for an address.
     ///
     /// Uses Etherscan's tokentx endpoint to find unique tokens the address
@@ -1368,6 +1388,10 @@ impl ChainClient for EthereumClient {
 
     async fn get_token_holder_count(&self, address: &str) -> Result<u64> {
         self.get_token_holder_count(address).await
+    }
+
+    async fn get_code(&self, address: &str) -> Result<String> {
+        self.get_code(address).await
     }
 }
 

@@ -1,22 +1,22 @@
 //! # Portfolio Management Command
 //!
-//! This module implements the `bca portfolio` command for managing
+//! This module implements the `scope portfolio` command for managing
 //! watched addresses and viewing aggregated portfolio data.
 //!
 //! ## Usage
 //!
 //! ```bash
 //! # Add an address to portfolio
-//! bca portfolio add 0x742d... --label "Main Wallet"
+//! scope portfolio add 0x742d... --label "Main Wallet"
 //!
 //! # List watched addresses
-//! bca portfolio list
+//! scope portfolio list
 //!
 //! # Remove an address
-//! bca portfolio remove 0x742d...
+//! scope portfolio remove 0x742d...
 //!
 //! # View portfolio summary
-//! bca portfolio summary
+//! scope portfolio summary
 //! ```
 
 use crate::chains::{native_symbol, ChainClientFactory};
@@ -333,7 +333,7 @@ async fn run_list(data_dir: &std::path::Path, format: OutputFormat) -> Result<()
     let portfolio = Portfolio::load(data_dir)?;
 
     if portfolio.addresses.is_empty() {
-        println!("Portfolio is empty. Add addresses with 'bca portfolio add <address>'");
+        println!("Portfolio is empty. Add addresses with 'scope portfolio add <address>'");
         return Ok(());
     }
 
@@ -409,7 +409,7 @@ async fn run_summary(
     let portfolio = Portfolio::load(data_dir)?;
 
     if portfolio.addresses.is_empty() {
-        println!("Portfolio is empty. Add addresses with 'bca portfolio add <address>'");
+        println!("Portfolio is empty. Add addresses with 'scope portfolio add <address>'");
         return Ok(());
     }
 
