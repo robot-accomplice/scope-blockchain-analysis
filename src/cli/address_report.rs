@@ -240,6 +240,44 @@ mod tests {
     }
 
     #[test]
+    fn test_capitalize_chain_empty() {
+        // Covers line 156: capitalize_chain with empty string → None branch
+        assert_eq!(capitalize_chain(""), "");
+    }
+
+    #[test]
+    fn test_save_address_report_to_file() {
+        // Covers lines 162-163: save_address_report delegates to save_report
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_addr_report.md");
+        let result = save_address_report("# Test Report\n\nSome content", &path);
+        assert!(result.is_ok());
+        assert!(path.exists());
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("Test Report"));
+    }
+
+    #[test]
+    fn test_report_transactions_more_than_20() {
+        // Covers line 127: "Showing 20 of N transactions" when > 20 txs
+        let mut report = minimal_report();
+        let txs: Vec<TransactionSummary> = (0..25)
+            .map(|i| TransactionSummary {
+                hash: format!("0x{:064x}", i),
+                block_number: 12345 + i,
+                timestamp: 1700000000 + i as u64 * 60,
+                from: "0xfrom".to_string(),
+                to: Some("0xto".to_string()),
+                value: "0.1 ETH".to_string(),
+                status: true,
+            })
+            .collect();
+        report.transactions = Some(txs);
+        let md = generate_address_report_section(&report);
+        assert!(md.contains("Showing 20 of 25 transactions"));
+    }
+
+    #[test]
     fn test_generate_dossier_report() {
         use crate::compliance::risk::{RiskAssessment, RiskCategory, RiskFactor, RiskLevel};
         use chrono::Utc;

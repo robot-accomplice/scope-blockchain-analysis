@@ -2676,4 +2676,97 @@ mod tests {
         let section = generate_security_analysis(&analytics);
         assert!(section.contains("HIGH") || section.contains("honeypot"));
     }
+
+    // ========================================================================
+    // Coverage gap tests
+    // ========================================================================
+
+    #[test]
+    fn test_risk_factors_liquidity_10k_to_50k() {
+        // Covers line 837: liquidity between 10k and 50k → score 8
+        let mut analytics = create_test_analytics();
+        analytics.liquidity_usd = 25_000.0;
+        let factors = RiskFactors::from_analytics(&analytics);
+        assert_eq!(factors.liquidity, 8);
+    }
+
+    #[test]
+    fn test_price_chart_all_zeros_no_history() {
+        // Covers line 1175: all price changes 0, no price history → return empty
+        let mut analytics = create_test_analytics();
+        analytics.price_change_1h = 0.0;
+        analytics.price_change_6h = 0.0;
+        analytics.price_change_24h = 0.0;
+        analytics.price_change_7d = 0.0;
+        analytics.price_history = vec![];
+        let chart = generate_price_chart(&analytics);
+        assert!(chart.is_empty());
+    }
+
+    #[test]
+    fn test_price_history_chart_too_few_points() {
+        // Covers line 1205: price_history.len() < 2 → return empty
+        let mut analytics = create_test_analytics();
+        analytics.price_history = vec![crate::chains::PricePoint {
+            timestamp: 1700000000,
+            price: 1.0,
+        }];
+        let chart = generate_price_history_chart(&analytics);
+        assert!(chart.is_empty());
+    }
+
+    #[test]
+    fn test_concentration_chart_top50_fallback_calculation() {
+        // Covers lines 1354-1359: top_50_concentration is None, falls back
+        // to summing holder percentages for top 50
+        let mut analytics = create_test_analytics();
+        analytics.top_10_concentration = Some(20.0);
+        analytics.top_50_concentration = None; // force the fallback closure
+        // Create 15 holders: 10 at 2% each (=20%), 5 more at 4% each (=20%)
+        // Top 10 sum = 20%, top 50 sum = 40%, diff = 20% > 5% → triggers 3-segment chart
+        analytics.holders = (0..10)
+            .map(|i| TokenHolder {
+                address: format!("0xholder{:02}", i),
+                balance: "100".to_string(),
+                formatted_balance: "100".to_string(),
+                percentage: 2.0,
+                rank: i as u32 + 1,
+            })
+            .chain((10..15).map(|i| TokenHolder {
+                address: format!("0xholder{:02}", i),
+                balance: "200".to_string(),
+                formatted_balance: "200".to_string(),
+                percentage: 4.0,
+                rank: i as u32 + 1,
+            }))
+            .collect();
+        let chart = generate_concentration_chart(&analytics);
+        assert!(chart.contains("Holder Concentration"));
+        assert!(chart.contains("Rank 11-50")); // 3-segment chart
+        assert!(chart.contains("Top 10"));
+        assert!(chart.contains("Others"));
+    }
+
+    #[test]
+    fn test_price_chart_all_zeros_with_history() {
+        // Covers line 1172-1173: all price changes 0, but has price history
+        // → falls through to generate_price_history_chart
+        let mut analytics = create_test_analytics();
+        analytics.price_change_1h = 0.0;
+        analytics.price_change_6h = 0.0;
+        analytics.price_change_24h = 0.0;
+        analytics.price_change_7d = 0.0;
+        analytics.price_history = vec![
+            crate::chains::PricePoint {
+                timestamp: 1700000000,
+                price: 1.0,
+            },
+            crate::chains::PricePoint {
+                timestamp: 1700003600,
+                price: 1.01,
+            },
+        ];
+        let chart = generate_price_chart(&analytics);
+        assert!(chart.contains("Price History"));
+    }
 }
