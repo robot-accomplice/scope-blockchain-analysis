@@ -335,6 +335,23 @@ pub struct TokenSearchResult {
     pub market_cap: Option<f64>,
 }
 
+/// A discovered token from DexScreener (profiles, boosts, etc.)
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DiscoverToken {
+    pub chain_id: String,
+    pub token_address: String,
+    pub url: String,
+    pub description: Option<String>,
+    pub links: Vec<DiscoverLink>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DiscoverLink {
+    pub label: Option<String>,
+    pub link_type: Option<String>,
+    pub url: String,
+}
+
 /// Response from DexScreener search endpoint.
 #[derive(Debug, Deserialize)]
 struct DexScreenerSearchResponse {
@@ -357,7 +374,7 @@ impl DexClient {
 
     /// Creates a new DEX client with a custom base URL (for testing).
     #[cfg(test)]
-    fn with_base_url(base_url: &str) -> Self {
+    pub(crate) fn with_base_url(base_url: &str) -> Self {
         Self {
             http: Client::new(),
             base_url: base_url.to_string(),
@@ -812,6 +829,98 @@ impl DexClient {
         results.truncate(20);
 
         Ok(results)
+    }
+
+    /// Fetches latest token profiles (featured tokens) from DexScreener.
+    pub async fn get_token_profiles(&self) -> Result<Vec<DiscoverToken>> {
+        let url = format!("{}/token-profiles/latest/v1", self.base_url);
+        self.fetch_discover_tokens(&url).await
+    }
+
+    /// Fetches latest boosted tokens from DexScreener.
+    pub async fn get_token_boosts(&self) -> Result<Vec<DiscoverToken>> {
+        let url = format!("{}/token-boosts/latest/v1", self.base_url);
+        self.fetch_discover_tokens(&url).await
+    }
+
+    /// Fetches top boosted tokens (most active boosts) from DexScreener.
+    pub async fn get_token_boosts_top(&self) -> Result<Vec<DiscoverToken>> {
+        let url = format!("{}/token-boosts/top/v1", self.base_url);
+        self.fetch_discover_tokens(&url).await
+    }
+
+    async fn fetch_discover_tokens(&self, url: &str) -> Result<Vec<DiscoverToken>> {
+        let response = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| ScopeError::Network(e.to_string()))?;
+
+        if !response.status().is_success() {
+            return Err(ScopeError::Api(format!(
+                "DexScreener API error: {}",
+                response.status()
+            )));
+        }
+
+        #[derive(Deserialize)]
+        struct TokenProfileRaw {
+            url: Option<String>,
+            #[serde(rename = "chainId")]
+            chain_id: Option<String>,
+            #[serde(rename = "tokenAddress")]
+            token_address: Option<String>,
+            description: Option<String>,
+            links: Option<Vec<LinkRaw>>,
+        }
+
+        #[derive(Deserialize)]
+        struct LinkRaw {
+            label: Option<String>,
+            #[serde(rename = "type")]
+            link_type: Option<String>,
+            url: Option<String>,
+        }
+
+        let raw: Vec<TokenProfileRaw> = response
+            .json()
+            .await
+            .map_err(|e| ScopeError::Api(format!("Failed to parse response: {}", e)))?;
+
+        let tokens: Vec<DiscoverToken> = raw
+            .into_iter()
+            .filter_map(|r| {
+                let token_address = r.token_address?;
+                let chain_id = r.chain_id.clone().unwrap_or_else(|| "unknown".to_string());
+                let url = r.url.clone().unwrap_or_else(|| {
+                    format!("https://dexscreener.com/{}/{}", chain_id, token_address)
+                });
+                let links: Vec<DiscoverLink> = r
+                    .links
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|l| {
+                        let url = l.url?;
+                        Some(DiscoverLink {
+                            label: l.label,
+                            link_type: l.link_type,
+                            url,
+                        })
+                    })
+                    .collect();
+
+                Some(DiscoverToken {
+                    chain_id,
+                    token_address,
+                    url,
+                    description: r.description,
+                    links,
+                })
+            })
+            .collect();
+
+        Ok(tokens)
     }
 
     /// Generates synthetic price history from change percentages.
@@ -1704,5 +1813,114 @@ mod tests {
         let midpoints: Vec<_> = history.iter().filter(|p| p.timestamp == 1500).collect();
         assert!(!midpoints.is_empty());
         assert!((midpoints[0].price - 15.0).abs() < 0.01);
+    }
+
+    fn discover_token_json() -> &'static str {
+        r#"[
+            {"chainId":"ethereum","tokenAddress":"0xabc","url":"https://dexscreener.com/ethereum/0xabc","description":"Test token","links":[{"label":"Twitter","type":"twitter","url":"https://twitter.com/test"}]},
+            {"chainId":"solana","tokenAddress":"So11111111111111111111111111111111111111112","url":"https://dexscreener.com/solana/So11","links":[]}
+        ]"#
+    }
+
+    #[tokio::test]
+    async fn test_get_token_profiles() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/token-profiles/latest/v1")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(discover_token_json())
+            .create_async()
+            .await;
+
+        let client = DexClient::with_base_url(&server.url());
+        let tokens = client.get_token_profiles().await.unwrap();
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[0].chain_id, "ethereum");
+        assert_eq!(tokens[0].token_address, "0xabc");
+        assert_eq!(tokens[0].description.as_deref(), Some("Test token"));
+        assert_eq!(tokens[0].links.len(), 1);
+        assert_eq!(tokens[1].chain_id, "solana");
+    }
+
+    #[tokio::test]
+    async fn test_get_token_boosts() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/token-boosts/latest/v1")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(discover_token_json())
+            .create_async()
+            .await;
+
+        let client = DexClient::with_base_url(&server.url());
+        let tokens = client.get_token_boosts().await.unwrap();
+        assert_eq!(tokens.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_get_token_boosts_top() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/token-boosts/top/v1")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(discover_token_json())
+            .create_async()
+            .await;
+
+        let client = DexClient::with_base_url(&server.url());
+        let tokens = client.get_token_boosts_top().await.unwrap();
+        assert_eq!(tokens.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_discover_tokens_api_error() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(500)
+            .create_async()
+            .await;
+
+        let client = DexClient::with_base_url(&server.url());
+        let result = client.get_token_profiles().await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_fetch_discover_tokens_empty_array() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/token-profiles/latest/v1")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("[]")
+            .create_async()
+            .await;
+
+        let client = DexClient::with_base_url(&server.url());
+        let tokens = client.get_token_profiles().await.unwrap();
+        assert!(tokens.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_fetch_discover_tokens_filters_invalid_entries() {
+        // Entries without tokenAddress are filtered out
+        let body = r#"[{"chainId":"ethereum","url":"https://example.com"},{"chainId":"solana","tokenAddress":"0xvalid","url":"https://dexscreener.com/solana/0xvalid"}]"#;
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/token-profiles/latest/v1")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(body)
+            .create_async()
+            .await;
+
+        let client = DexClient::with_base_url(&server.url());
+        let tokens = client.get_token_profiles().await.unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].token_address, "0xvalid");
     }
 }

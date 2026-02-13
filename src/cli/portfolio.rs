@@ -97,6 +97,10 @@ pub struct SummaryArgs {
     /// Include token balances.
     #[arg(long)]
     pub include_tokens: bool,
+
+    /// Generate and save a markdown report to the specified path.
+    #[arg(long, value_name = "PATH")]
+    pub report: Option<std::path::PathBuf>,
 }
 
 /// A watched address in the portfolio.
@@ -368,6 +372,29 @@ async fn run_list(data_dir: &std::path::Path, format: OutputFormat) -> Result<()
             }
             println!("\nTotal: {} addresses", portfolio.addresses.len());
         }
+        OutputFormat::Markdown => {
+            let mut md = "# Portfolio Addresses\n\n".to_string();
+            md.push_str("| Address | Chain | Label | Tags |\n|---------|-------|-------|------|\n");
+            for addr in &portfolio.addresses {
+                let tags = if addr.tags.is_empty() {
+                    "-".to_string()
+                } else {
+                    addr.tags.join(", ")
+                };
+                md.push_str(&format!(
+                    "| `{}` | {} | {} | {} |\n",
+                    addr.address,
+                    addr.chain,
+                    addr.label.as_deref().unwrap_or("-"),
+                    tags
+                ));
+            }
+            md.push_str(&format!(
+                "\n**Total:** {} addresses\n",
+                portfolio.addresses.len()
+            ));
+            println!("{}", md);
+        }
     }
 
     Ok(())
@@ -490,9 +517,89 @@ async fn run_summary(
                 println!("Total Value: ${:.2}", total);
             }
         }
+        OutputFormat::Markdown => {
+            let md = portfolio_summary_to_markdown(&summary);
+            println!("{}", md);
+        }
+    }
+
+    // Generate report if requested
+    if let Some(ref report_path) = args.report {
+        let md = portfolio_summary_to_markdown(&summary);
+        std::fs::write(report_path, md)?;
+        println!("\nReport saved to: {}", report_path.display());
     }
 
     Ok(())
+}
+
+/// Generates a markdown report for portfolio summary.
+fn portfolio_summary_to_markdown(summary: &PortfolioSummary) -> String {
+    let mut md = format!(
+        "# Portfolio Report\n\n\
+        **Generated:** {}  \n\
+        **Addresses:** {}  \n\n",
+        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC"),
+        summary.address_count
+    );
+
+    if let Some(total) = summary.total_usd {
+        md.push_str(&format!("**Total Value (USD):** ${:.2}  \n\n", total));
+    }
+
+    md.push_str("## Allocation by Chain\n\n");
+    md.push_str(
+        "| Chain | Native Balance | Symbol | USD |\n|-------|----------------|--------|-----|\n",
+    );
+    for (chain, bal) in &summary.balances_by_chain {
+        let usd = bal
+            .usd
+            .map(|u| format!("${:.2}", u))
+            .unwrap_or_else(|| "-".to_string());
+        md.push_str(&format!(
+            "| {} | {} | {} | {} |\n",
+            chain, bal.native_balance, bal.symbol, usd
+        ));
+    }
+
+    md.push_str("\n## Addresses\n\n");
+    md.push_str("| Address | Label | Chain | Balance | USD | Tokens |\n");
+    md.push_str("|---------|-------|-------|---------|-----|--------|\n");
+    for addr in &summary.addresses {
+        let label = addr.label.as_deref().unwrap_or("-");
+        let usd = addr
+            .usd
+            .map(|u| format!("${:.2}", u))
+            .unwrap_or_else(|| "-".to_string());
+        let token_list: String = addr
+            .tokens
+            .iter()
+            .map(|t| t.symbol.as_deref().unwrap_or(&t.mint))
+            .take(3)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let tokens_display = if addr.tokens.len() > 3 {
+            format!("{} (+{})", token_list, addr.tokens.len() - 3)
+        } else {
+            token_list
+        };
+        md.push_str(&format!(
+            "| `{}` | {} | {} | {} | {} | {} |\n",
+            addr.address,
+            label,
+            addr.chain,
+            addr.balance,
+            usd,
+            if tokens_display.is_empty() {
+                "-"
+            } else {
+                &tokens_display
+            }
+        ));
+    }
+
+    md.push_str(&crate::display::report::report_footer());
+    md
 }
 
 /// Fetches the balance for an address on the specified chain using the factory.
@@ -923,6 +1030,7 @@ mod tests {
                 chain: None,
                 tag: None,
                 include_tokens: false,
+                report: None,
             }),
             format: Some(OutputFormat::Json),
         };
@@ -992,6 +1100,7 @@ mod tests {
                 chain: None,
                 tag: None,
                 include_tokens: false,
+                report: None,
             }),
             format: Some(OutputFormat::Csv),
         };
@@ -1028,6 +1137,7 @@ mod tests {
                 chain: None,
                 tag: None,
                 include_tokens: true,
+                report: None,
             }),
             format: Some(OutputFormat::Table),
         };
@@ -1075,6 +1185,7 @@ mod tests {
                 chain: Some("ethereum".to_string()),
                 tag: None,
                 include_tokens: false,
+                report: None,
             }),
             format: Some(OutputFormat::Json),
         };
@@ -1111,6 +1222,7 @@ mod tests {
                 chain: None,
                 tag: Some("defi".to_string()),
                 include_tokens: false,
+                report: None,
             }),
             format: Some(OutputFormat::Json),
         };
@@ -1145,6 +1257,7 @@ mod tests {
                 chain: None,
                 tag: None,
                 include_tokens: false,
+                report: None,
             }),
             format: None, // Default format
         };
@@ -1169,6 +1282,7 @@ mod tests {
                 chain: None,
                 tag: None,
                 include_tokens: false,
+                report: None,
             }),
             format: Some(OutputFormat::Table),
         };
@@ -1314,6 +1428,7 @@ mod tests {
                 chain: None,
                 tag: None,
                 include_tokens: true,
+                report: None,
             }),
             format: Some(OutputFormat::Table),
         };
@@ -1361,6 +1476,7 @@ mod tests {
                 chain: None,
                 tag: None,
                 include_tokens: false,
+                report: None,
             }),
             format: Some(OutputFormat::Table),
         };

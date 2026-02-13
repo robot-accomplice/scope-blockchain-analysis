@@ -13,28 +13,39 @@
 //!   address      Analyze a blockchain address
 //!   tx           Analyze a transaction
 //!   crawl        Crawl a token for analytics data
+//!   discover     Browse trending and boosted tokens (alias: disc)
 //!   monitor      Live token monitor with real-time TUI dashboard
+//!   market       Peg and order book health for stablecoin markets
+//!   token-health Token health suite (DEX + optional market; alias: health)
 //!   portfolio    Portfolio management commands
 //!   export       Export analysis data
 //!   interactive  Interactive mode with preserved context
+//!   report       Batch and combined report generation
 //!   setup        Configure settings and API keys
 //!   compliance   Compliance and risk analysis commands
 //!
 //! Options:
 //!   --config <PATH>   Path to configuration file
 //!   -v, --verbose...  Increase logging verbosity
+//!   --ai              Markdown output for agent parsing
+//!   --no-color        Disable colored output
 //!   -h, --help        Print help
 //!   -V, --version     Print version
 //! ```
 
 pub mod address;
+pub mod address_report;
 pub mod compliance;
 pub mod crawl;
+pub mod discover;
 pub mod export;
 pub mod interactive;
+pub mod market;
 pub mod monitor;
 pub mod portfolio;
+pub mod report;
 pub mod setup;
+pub mod token_health;
 pub mod tx;
 
 use clap::{Parser, Subcommand};
@@ -86,6 +97,13 @@ pub struct Cli {
     /// Disable colored output.
     #[arg(long, global = true)]
     pub no_color: bool,
+
+    /// Output markdown to console for agent parsing.
+    ///
+    /// Forces all commands to emit markdown-formatted output to stdout
+    /// instead of tables or JSON. Useful for LLM/agent consumption.
+    #[arg(long, global = true)]
+    pub ai: bool,
 }
 
 /// Available CLI subcommands.
@@ -153,6 +171,31 @@ pub enum Commands {
     /// compliance reports for blockchain addresses.
     #[command(subcommand)]
     Compliance(compliance::ComplianceCommands),
+
+    /// Peg and order book health for stablecoin markets.
+    ///
+    /// Fetches level-2 depth from exchange APIs and reports
+    /// peg deviation, spread, depth, and configurable health checks.
+    #[command(subcommand)]
+    Market(market::MarketCommands),
+
+    /// Token health suite: DEX analytics + optional order book (crawl + market).
+    ///
+    /// Combines liquidity, volume, and holder data with optional market/peg
+    /// summary for stablecoins. Use --with-market for order book data.
+    #[command(visible_alias = "health")]
+    TokenHealth(token_health::TokenHealthArgs),
+
+    /// Batch and combined report generation.
+    #[command(subcommand)]
+    Report(report::ReportCommands),
+
+    /// Discover trending and boosted tokens from DexScreener.
+    ///
+    /// Browse featured token profiles, recently boosted tokens,
+    /// or top boosted tokens by activity.
+    #[command(visible_alias = "disc")]
+    Discover(discover::DiscoverArgs),
 }
 
 impl Cli {
@@ -582,5 +625,160 @@ mod tests {
     fn test_cli_parse_monitor_invalid_scale_fails() {
         let result = Cli::try_parse_from(["scope", "monitor", "USDC", "--scale", "quadratic"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cli_parse_market_summary() {
+        let cli = Cli::try_parse_from(["scope", "market", "summary"]).unwrap();
+        assert!(matches!(cli.command, Commands::Market(_)));
+    }
+
+    #[test]
+    fn test_cli_parse_market_summary_with_pair() {
+        let cli = Cli::try_parse_from(["scope", "market", "summary", "PUSD_USDT"]).unwrap();
+        if let Commands::Market(market::MarketCommands::Summary(args)) = cli.command {
+            assert_eq!(args.pair, "PUSD_USDT");
+        } else {
+            panic!("Expected Market Summary command");
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_report_batch() {
+        let cli = Cli::try_parse_from([
+            "scope",
+            "report",
+            "batch",
+            "--addresses",
+            "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
+            "--output",
+            "report.md",
+        ])
+        .unwrap();
+        assert!(matches!(cli.command, Commands::Report(_)));
+    }
+
+    #[test]
+    fn test_cli_parse_market_summary_with_thresholds() {
+        let cli = Cli::try_parse_from([
+            "scope",
+            "market",
+            "summary",
+            "--peg-range",
+            "0.002",
+            "--min-bid-ask-ratio",
+            "0.1",
+            "--max-bid-ask-ratio",
+            "10",
+        ])
+        .unwrap();
+        if let Commands::Market(market::MarketCommands::Summary(args)) = cli.command {
+            assert_eq!(args.peg_range, 0.002);
+            assert_eq!(args.min_bid_ask_ratio, 0.1);
+            assert_eq!(args.max_bid_ask_ratio, 10.0);
+        } else {
+            panic!("Expected Market Summary command");
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_token_health() {
+        let cli = Cli::try_parse_from(["scope", "token-health", "USDC"]).unwrap();
+        if let Commands::TokenHealth(args) = cli.command {
+            assert_eq!(args.token, "USDC");
+            assert!(!args.with_market);
+        } else {
+            panic!("Expected TokenHealth command");
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_token_health_alias() {
+        let cli = Cli::try_parse_from(["scope", "health", "USDC", "--with-market"]).unwrap();
+        if let Commands::TokenHealth(args) = cli.command {
+            assert_eq!(args.token, "USDC");
+            assert!(args.with_market);
+            assert!(matches!(
+                args.market_venue,
+                crate::market::MarketVenue::Binance
+            ));
+        } else {
+            panic!("Expected TokenHealth command");
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_token_health_market_venue_biconomy() {
+        let cli = Cli::try_parse_from([
+            "scope",
+            "token-health",
+            "USDC",
+            "--with-market",
+            "--market-venue",
+            "biconomy",
+        ])
+        .unwrap();
+        if let Commands::TokenHealth(args) = cli.command {
+            assert!(matches!(
+                args.market_venue,
+                crate::market::MarketVenue::Biconomy
+            ));
+        } else {
+            panic!("Expected TokenHealth command");
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_token_health_market_venue_eth() {
+        let cli = Cli::try_parse_from([
+            "scope",
+            "token-health",
+            "USDC",
+            "--with-market",
+            "--market-venue",
+            "eth",
+        ])
+        .unwrap();
+        if let Commands::TokenHealth(args) = cli.command {
+            assert!(matches!(
+                args.market_venue,
+                crate::market::MarketVenue::Ethereum
+            ));
+        } else {
+            panic!("Expected TokenHealth command");
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_token_health_market_venue_solana() {
+        let cli = Cli::try_parse_from([
+            "scope",
+            "token-health",
+            "USDC",
+            "--with-market",
+            "--market-venue",
+            "solana",
+        ])
+        .unwrap();
+        if let Commands::TokenHealth(args) = cli.command {
+            assert!(matches!(
+                args.market_venue,
+                crate::market::MarketVenue::Solana
+            ));
+        } else {
+            panic!("Expected TokenHealth command");
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_ai_flag() {
+        let cli = Cli::try_parse_from([
+            "scope",
+            "--ai",
+            "address",
+            "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
+        ])
+        .unwrap();
+        assert!(cli.ai);
     }
 }

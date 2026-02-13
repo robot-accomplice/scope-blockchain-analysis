@@ -47,7 +47,7 @@ use serde::Deserialize;
 /// endpoint with a `chainid` query parameter to select the network.
 const ETHERSCAN_V2_API: &str = "https://api.etherscan.io/v2/api";
 
-/// Default JSON-RPC fallback URL for Aegis/Wraith chain.
+/// Default JSON-RPC fallback for custom EVM chain.
 const DEFAULT_AEGIS_RPC: &str = "http://localhost:8545";
 
 /// API type for the client endpoint.
@@ -256,7 +256,7 @@ impl EthereumClient {
     ///
     /// # Arguments
     ///
-    /// * `chain` - Chain identifier (ethereum, polygon, arbitrum, optimism, base, bsc, aegis)
+    /// * `chain` - Chain identifier (ethereum, polygon, arbitrum, optimism, base, bsc)
     /// * `config` - Chain configuration
     ///
     /// # Supported Chains
@@ -267,7 +267,6 @@ impl EthereumClient {
     /// - `optimism` - Optimism via Etherscan
     /// - `base` - Base via Basescan
     /// - `bsc` - BNB Smart Chain (BSC) via BscScan
-    /// - `aegis` - Aegis/Wraith chain (EVM-compatible, uses JSON-RPC directly)
     ///
     /// # API Version
     ///
@@ -311,15 +310,12 @@ impl EthereumClient {
         })
     }
 
-    /// Creates a client for the Aegis/Wraith chain using JSON-RPC.
-    ///
-    /// Aegis is an EVM-compatible chain that doesn't have a block explorer API,
-    /// so it uses direct JSON-RPC calls for balance queries.
+    /// Creates a client for a custom EVM chain using JSON-RPC.
     ///
     /// # Arguments
     ///
     /// * `rpc_url` - The JSON-RPC endpoint URL
-    /// * `_config` - Chain configuration (unused for Aegis, reserved for future use)
+    /// * `_config` - Chain configuration (reserved for future use)
     fn for_aegis(rpc_url: &str, _config: &ChainsConfig) -> Result<Self> {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(30))

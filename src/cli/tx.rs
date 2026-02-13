@@ -34,7 +34,7 @@ pub struct TxArgs {
 
     /// Target blockchain network.
     ///
-    /// EVM chains: ethereum, polygon, arbitrum, optimism, base, bsc, aegis
+    /// EVM chains: ethereum, polygon, arbitrum, optimism, base, bsc
     /// Non-EVM chains: solana, tron
     #[arg(short, long, default_value = "ethereum")]
     pub chain: String,
@@ -334,7 +334,7 @@ fn validate_tx_hash(hash: &str, chain: &str) -> Result<()> {
         }
         _ => {
             return Err(ScopeError::Chain(format!(
-                "Unsupported chain: {}. Supported: ethereum, polygon, arbitrum, optimism, base, bsc, aegis, solana, tron",
+                "Unsupported chain: {}. Supported: ethereum, polygon, arbitrum, optimism, base, bsc, solana, tron",
                 chain
             )));
         }
@@ -420,8 +420,75 @@ fn output_report(report: &TransactionReport, format: OutputFormat) -> Result<()>
                 }
             }
         }
+        OutputFormat::Markdown => {
+            let md = format_tx_markdown(report);
+            println!("{}", md);
+        }
     }
     Ok(())
+}
+
+/// Formats a transaction report as markdown for agent consumption.
+fn format_tx_markdown(report: &TransactionReport) -> String {
+    let mut md = String::new();
+    md.push_str("# Transaction Analysis\n\n");
+    md.push_str("| Field | Value |\n|-------|-------|\n");
+    md.push_str(&format!("| Hash | `{}` |\n", report.hash));
+    md.push_str(&format!("| Chain | {} |\n", report.chain));
+    md.push_str(&format!("| Block | {} |\n", report.block.number));
+    md.push_str(&format!(
+        "| Status | {} |\n",
+        if report.transaction.status {
+            "Success"
+        } else {
+            "Failed"
+        }
+    ));
+    md.push_str(&format!("| From | `{}` |\n", report.transaction.from));
+    md.push_str(&format!(
+        "| To | `{}` |\n",
+        report
+            .transaction
+            .to
+            .as_deref()
+            .unwrap_or("Contract Creation")
+    ));
+    md.push_str(&format!("| Value | {} |\n", report.transaction.value));
+    md.push_str(&format!("| Gas Used | {} |\n", report.gas.gas_used));
+    md.push_str(&format!("| Fee | {} |\n", report.gas.transaction_fee));
+    if let Some(ref decoded) = report.decoded_input {
+        md.push_str("\n## Decoded Input\n\n");
+        md.push_str(&format!("- **Function:** {}\n", decoded.function_name));
+        md.push_str(&format!(
+            "- **Signature:** `{}`\n",
+            decoded.function_signature
+        ));
+        if !decoded.parameters.is_empty() {
+            md.push_str("\n| Parameter | Type | Value |\n|-----------|------|-------|\n");
+            for param in &decoded.parameters {
+                md.push_str(&format!(
+                    "| {} | {} | {} |\n",
+                    param.name, param.param_type, param.value
+                ));
+            }
+        }
+    }
+    if let Some(ref traces) = report.internal_transactions
+        && !traces.is_empty()
+    {
+        md.push_str("\n## Internal Transactions\n\n");
+        md.push_str("| # | Type | From | To |\n|---|---|---|---|\n");
+        for (i, trace) in traces.iter().enumerate() {
+            md.push_str(&format!(
+                "| {} | {} | `{}` | `{}` |\n",
+                i + 1,
+                trace.call_type,
+                trace.from,
+                trace.to
+            ));
+        }
+    }
+    md
 }
 
 // ============================================================================

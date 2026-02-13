@@ -17,11 +17,16 @@ A production-grade command-line tool for blockchain data analysis, portfolio tra
 - **Portfolio Management**: Track multiple addresses across chains with labels, tags, and aggregated balance views
 - **Compliance & Risk Assessment**: Risk scoring, transaction pattern detection, taint analysis, and compliance reporting
 - **Data Export**: Export address history and portfolio data to JSON or CSV with date range filtering
+- **Token Discovery**: Browse trending and boosted tokens from DexScreener (`scope discover` / `scope disc`)
+- **Market Command** (`scope market summary`): Peg and order book health for stablecoin markets; CEX (Binance, Biconomy) or DEX (Ethereum, Solana) venues; repeat mode with `--every`/`--duration`; `--report` and `--csv` export
+- **Token Health Suite** (`scope token-health` / `scope health`): DEX analytics with optional order book summary; venues: binance, biconomy, eth, solana
+- **Agent Output** (`scope --ai`): Global flag for markdown output to stdout (address, tx, crawl, discover, portfolio, export, token-health)
+- **Reporting**: Markdown reports for address, token, portfolio, and market commands; batch reports for multiple addresses (`scope report batch`); address dossier (address + risk combined)
 - **Interactive Mode**: REPL with preserved context between commands for faster workflow
 - **Setup Wizard**: Guided first-run configuration with `scope setup` for API keys and preferences
 - **USD Valuation**: Native token balances enriched with real-time USD prices via DexScreener
 - **Multi-Chain Support**:
-  - EVM chains: Ethereum, Polygon, Arbitrum, Optimism, Base, BSC, Aegis
+  - EVM chains: Ethereum, Polygon, Arbitrum, Optimism, Base, BSC
   - Non-EVM chains: Solana, Tron
 
 ## Installation
@@ -48,6 +53,13 @@ scope address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
 # Include transaction history and token balances
 scope address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --include-txs --include-tokens
 
+# Save address report to markdown
+scope address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --report report.md
+
+# Wallet dossier: address + risk assessment in one view
+scope address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --dossier
+scope address 0x742d... --dossier --report dossier.md
+
 # Analyze addresses on other chains (auto-detected or explicit)
 scope address DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy --chain solana
 scope address TDqSquXBgUCLYvYC4XZgrprLK589dkhSCf --chain tron
@@ -72,8 +84,157 @@ scope mon PEPE --chain ethereum --layout chart-focus  # short alias with options
 # Export data
 scope export --address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --output data.json
 
+# Token health (DEX + optional market)
+scope token-health USDC
+scope health USDC --with-market --market-venue binance
+
+# Market peg and order book health
+scope market summary USDC
+scope market summary PUSD --market-venue biconomy --format json
+
+# Discover trending and boosted tokens
+scope discover
+scope discover --source boosts --chain ethereum --limit 10
+
+# Batch report for multiple addresses
+scope report batch --addresses 0x742d...,0xabc... --output batch-report.md
+
+# Batch report with risk assessment per address
+scope report batch --addresses 0x742d...,0xabc... --output batch-report.md --with-risk
+
+# Agent-friendly markdown output
+scope --ai address 0x742d...
+
 # Interactive mode (includes live monitor, portfolio, and all commands)
 scope interactive
+```
+
+## Output Examples
+
+Representative output for key commands:
+
+### Discover (table)
+
+```bash
+> scope discover --limit 2
+```
+
+```text
+Featured Token Profiles (2) — limit 2
+--------------------------------------------------------------------------------
+  1. solana | 8dAsTqYBjG...h5Acpump | 8dAsTqYBjG9jyy7RkRhH8KkwmmZA7mFViWneh5Acpump...
+     https://dexscreener.com/solana/8dastqybjg9jyy7rkrhh8kkwmmza7mfviwneh5acpump
+  2. solana | BrRhmR14uo...cc4Xpump | -
+     https://dexscreener.com/solana/brrhmr14uohppfeuw6dcnxlpabsv5yz56zmpcc4xpump
+```
+
+### Discover (JSON)
+
+```bash
+> scope discover --format json --limit 1
+```
+
+```json
+[
+  {
+    "chain": "solana",
+    "address": "2CQfZ9wH3E4vCqKuGUkCzpZyXnhu7iwVbYc7ZAGfpump",
+    "description": "Token description...",
+    "url": "https://dexscreener.com/solana/2cqfz9wh3e4vcqkugukczpzyxnhu7iwvbyc7zagfpump"
+  }
+]
+```
+
+### Market summary (text)
+
+```bash
+> scope market summary USDC
+```
+
+```text
+  USDC/USDT Market Summary (binance)
+  ────────────────────────────────────────────
+  Venue:          binance
+  Peg Target:     1.0000
+  Best Bid:       1.0006  (+0.060%)
+  Best Ask:       1.0007  (+0.070%)
+  Mid Price:      1.0006  (+0.065%)
+  Spread:         0.0001  (0.010%)
+  Volume (24h):   ~2B USDT
+  Execution:      10k buy:  ~0.50 bps slippage
+  Execution:      10k sell: ~0.50 bps slippage
+
+  Ask Side:   40 levels    ... USDT depth
+  Bid Side:   52 levels    ... USDT depth
+```
+
+### Market summary (JSON)
+
+```bash
+> scope market summary USDC --format json
+```
+
+```json
+{
+  "pair": "USDC/USDT",
+  "venue": "binance",
+  "peg_target": 1.0,
+  "best_bid": 1.0006,
+  "best_ask": 1.0007,
+  "mid_price": 1.0006,
+  "spread": 0.0001,
+  "volume_24h": 2027214951.6,
+  "healthy": true,
+  "checks": [
+    {"status": "pass", "message": "No sells below peg"},
+    {"status": "pass", "message": "Bid/Ask ratio: 1.62x"}
+  ],
+  "execution_10k_buy": {"fillable": true, "slippage_bps": 0.5},
+  "execution_10k_sell": {"fillable": true, "slippage_bps": 0.5}
+}
+```
+
+### Token health
+
+```bash
+scope token-health USDC
+```
+
+```text
+Searching for 'USDC'...
+Selected: USDC (USDC) on ethereum - $1.00
+
+# Token Health: USDC (USDC)
+
+## DEX Analytics
+==================================================
+Price:           $1.00
+24h Change:      -0.02%
+24h Volume:      $75.47M
+Liquidity:       $13.36M
+Market Cap:      $73.24B
+```
+
+### Compliance risk
+
+```bash
+scope compliance risk 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
+```
+
+```text
+Assessing risk for 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 on ethereum...
+
+🟢 Risk Assessment Report
+════════════════════════════════════════════════════════════
+Address:             0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
+Chain:               ethereum
+Risk Score:          1.9/10
+Risk Level:          🟢 Low
+Assessed At:         2026-02-13 13:40 UTC
+
+💡 Recommendations
+────────────────────────────────────────────────────────────
+1. Standard monitoring
 ```
 
 ## Compliance Features
@@ -82,6 +243,8 @@ Scope includes enterprise-grade compliance and risk analysis. All compliance com
 
 ### Risk Assessment
 
+See [Output Examples](#output-examples) for sample output.
+
 ```bash
 # Basic risk score
 scope compliance risk 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
@@ -89,8 +252,9 @@ scope compliance risk 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
 # Detailed breakdown with evidence
 scope compliance risk 0xabc... --detailed --format markdown
 
-# Export for compliance records
+# Export for compliance records (format auto-detected from extension: .json, .yaml, .md)
 scope compliance risk 0xabc... --output risk-report.json
+scope compliance risk 0xabc... --output risk-report.md
 ```
 
 ### Pattern Detection
@@ -115,11 +279,11 @@ scope compliance trace 0xtxhash... --depth 5 --flag-suspicious
 ### Compliance Reporting
 
 ```bash
-# Generate a compliance report for a specific jurisdiction
-scope compliance compliance-report 0xabc... --jurisdiction us --output report.json
+# Generate a compliance report for a specific jurisdiction (output: markdown)
+scope compliance compliance-report 0xabc... --jurisdiction us --output report.md
 
 # Detailed SAR report
-scope compliance compliance-report 0xabc... --jurisdiction eu --report-type sar --output sar.json
+scope compliance compliance-report 0xabc... --jurisdiction eu --report-type sar --output sar.md
 ```
 
 Available jurisdictions: `us`, `eu`, `uk`, `switzerland`, `singapore`.
@@ -131,7 +295,7 @@ Compliance output formats: `table` (default), `json`, `yaml`, `markdown`.
 
 ## Token Crawling
 
-Crawl DEX data for any token by address or name. Supports searching by symbol, displaying ASCII charts, and generating markdown reports:
+Crawl DEX data for any token by address or name. Supports searching by symbol, displaying ASCII charts, and generating markdown reports. Token health output format is similar — see [Output Examples](#output-examples).
 
 ```bash
 # Crawl by contract address
@@ -155,6 +319,38 @@ scope crawl USDC --yes
 
 # Save the selected token as an alias for future use
 scope crawl USDC --save
+```
+
+## Token Discovery
+
+Browse trending and boosted tokens from DexScreener without knowing a symbol or address:
+
+```bash
+# Featured token profiles (default)
+scope discover
+
+# Recently boosted tokens
+scope discover --source boosts
+
+# Top boosted tokens (most active)
+scope discover --source top-boosts
+
+# Filter by chain
+scope discover --chain ethereum --limit 10
+scope disc --source boosts -c solana
+
+# JSON or CSV output
+scope discover --format json
+scope discover --format csv --limit 5
+```
+
+Sources: `profiles` (featured), `boosts` (recent), `top-boosts` (most active). No API key required.
+
+Example output:
+
+```text
+  1. solana | 8dAsTqYBjG...h5Acpump | Token description...
+     https://dexscreener.com/solana/8dastqybjg9jyy7rkrhh8kkwmmza7mfviwneh5acpump
 ```
 
 ## Data Export
@@ -206,8 +402,8 @@ Available interactive commands:
 - `chain` -- Set or show current chain
 - `format` -- Set or show output format (table, json, csv)
 - `limit` -- Set or show transaction limit
-- `+tokens` / `+txs` -- Toggle token/transaction display flags
-- `trace` / `decode` -- Toggle trace/decode flags
+- `+tokens` / `+txs` -- Toggle token/transaction display flags for address command
+- `trace` / `decode` -- Toggle trace/decode flags for tx command
 - `ctx` / `context` -- Show current session context
 - `clear` / `reset` -- Reset context to defaults
 - `help` / `?` -- Show help
@@ -232,7 +428,7 @@ scope> monitor USDC
 The monitor supports four layout presets that can be switched at runtime or configured in `config.yaml`:
 
 | Preset | Description |
-|---|---|
+| --- | --- |
 | **Dashboard** | Charts top, gauges middle, transaction feed bottom (default) |
 | **Chart** | Full-width candles (~85%), minimal stats overlay |
 | **Feed** | Transaction log takes priority, small metrics + buy/sell on top |
@@ -255,7 +451,7 @@ The monitor automatically selects the best layout for your terminal size (respon
 **Monitor keybindings:**
 
 | Key | Action |
-|---|---|
+| --- | --- |
 | `Q` / `Esc` | Quit monitor |
 | `R` | Force refresh |
 | `P` / `Space` | Pause/resume |
@@ -300,7 +496,6 @@ chains:
   # EVM-compatible chains
   ethereum_rpc: "https://mainnet.infura.io/v3/YOUR_KEY"
   bsc_rpc: "https://bsc-dataseed.binance.org"
-  aegis_rpc: "http://localhost:8545"
 
   # Non-EVM chains
   solana_rpc: "https://api.mainnet-beta.solana.com"
@@ -314,7 +509,7 @@ chains:
     tronscan: "YOUR_API_KEY"
 
 output:
-  format: table  # table, json, or csv
+  format: table  # table, json, csv, or markdown
   color: true
 
 portfolio:
@@ -350,6 +545,14 @@ monitor:
 - `SCOPE_CONFIG` - Custom config file path (overrides default location)
 - `RUST_LOG` - Log level override
 
+## Architecture
+
+Dataflow and C4 architecture diagrams are in [`docs/architecture/`](docs/architecture/README.md):
+
+- **C4 Context** — Scope and external systems (Etherscan, DexScreener, RPCs, Biconomy)
+- **C4 Containers** — CLI, Chains, Compliance, Market, Display, Config
+- **Dataflow** — Per-command diagrams for address, crawl, discover, compliance, market, token-health, portfolio, export, report, monitor, interactive
+
 ## Development
 
 ```bash
@@ -373,7 +576,93 @@ just test      # Run all tests
 just ci-test   # Full CI workflow
 just format    # Format code
 just lint      # Run lints
+just summary   # USDC market summary (peg, spread, volume, execution, health checks)
 ```
+
+**Git hooks**: A pre-push hook runs the coverage check (80% minimum, no regression) before allowing a push. Install with `just install-hooks`. Requires `cargo install cargo-tarpaulin`.
+
+### Peg & Order Book Health (`scope market`)
+
+The `scope market summary` command fetches level-2 order book data from CEX (Binance, Biconomy) or DEX (Ethereum, Solana) venues and reports peg, book health, volume, and execution checks:
+
+- **Peg**: Target, best bid/ask deviation (%), mid price, spread
+- **Volume**: 24h quote volume (Binance ticker, DEX analytics; omitted for Biconomy)
+- **Execution**: Simulated 10k USDT buy/sell slippage or "insufficient liquidity"
+- **Order book**: Ask/bid levels with depth (base and quote amounts)
+- **Health checks**: No sells below peg, bid/ask ratio, minimum levels and depth per side
+- **Output**: Text (default) or JSON — see [Output Examples](#output-examples) for sample
+- **Tunable thresholds**: All health-check thresholds are configurable. Defaults (min-levels=6, min-depth=3000, peg-range=0.001, bid/ask ratio 0.2–5.0x) originated from the PUSD Hummingbot config—override for other markets.
+
+```bash
+scope market summary                    # USDC on Binance (default, one shot)
+scope market summary PUSD               # PUSD on default venue
+scope market summary USDC --market-venue biconomy   # USDC on Biconomy
+scope market summary --peg 1.0 --min-depth 5000
+scope market summary --peg-range 0.002 --min-bid-ask-ratio 0.1   # Loosen thresholds
+scope market summary --format json     # Machine-readable output
+
+# Repeated runs (default: every 60s for 1h)
+scope market summary --every 30s --duration 10m   # Every 30s for 10 min
+scope market summary --every 5m --duration 1h     # Every 5 min for 1 hour
+scope market summary --duration 24h               # Every 60s for 24h (default interval)
+scope market summary --every 1m                   # Every 1 min for 1h (default duration)
+```
+
+`just summary` invokes `scope market summary` under the hood.
+
+### Token Health Suite (`scope token-health` / `scope health`)
+
+Combines DEX analytics (crawl) with optional market/order book summary for stablecoins:
+
+```bash
+scope token-health USDC              # DEX liquidity, volume, holders (table)
+scope health USDC --with-market      # + order book/peg (default: Binance)
+scope token-health USDC --with-market --market-venue biconomy
+scope token-health USDC --format json
+scope token-health USDC --ai         # Markdown to console for agent parsing
+```
+
+With `--with-market`, order book data is fetched from the selected venue (`--market-venue`): **binance** (default), **biconomy**, **eth** (Ethereum DEX), **solana** (Solana DEX). CEX pair format: binance=USDCUSDT, biconomy=USDC_USDT. DEX venues use on-chain liquidity from the selected chain.
+
+### Agent-Oriented Output (`--ai`)
+
+Use `--ai` to emit markdown-formatted output to stdout instead of tables or JSON. Useful for LLM/agent consumption and parsing:
+
+```bash
+scope --ai address 0x742d35Cc...
+scope --ai crawl USDC
+scope --ai discover --limit 5
+scope --ai portfolio list
+scope --ai token-health USDC
+```
+
+`--ai` affects all commands that support output formatting (address, tx, crawl, discover, portfolio, export, token-health).
+
+Additional market options:
+
+- `--report path.md`: Save markdown report to file (one-shot or final report in repeat mode)
+- `--csv path.csv`: Append time-series of peg/spread/depth to CSV (repeat mode only)
+
+## Reporting & Analytics
+
+Scope supports markdown and structured report generation across commands:
+
+| Command | Report Option | Description |
+| --------- | --------------- | -------------- |
+| `scope address` | `--report report.md` | Address analysis (balance, transactions, tokens) |
+| `scope address` | `--dossier` / `--dossier --report dossier.md` | Address + risk assessment combined |
+| `scope crawl` | `--report report.md` | Token analytics with risk scoring |
+| `scope portfolio summary` | `--report report.md` | Portfolio allocations by chain and address |
+| `scope market summary` | `--report report.md` | Peg and order book health |
+| `scope market summary` | `--csv data.csv` | Time-series of peg/spread (repeat mode) |
+| `scope compliance risk` | `--output file` | Risk assessment (format from extension: .json, .yaml, .md) |
+| `scope compliance compliance-report` | `--output file` | Unified risk + pattern analysis (markdown) |
+| `scope report batch` | `--addresses a,b,c` or `--from-file path` + `--output report.md` | Combined report for multiple addresses |
+| `scope report batch` | `--with-risk` | Include risk assessment per address (uses ETHERSCAN_API_KEY) |
+| `scope token-health` | `USDC`, `--with-market`, `--market-venue binance\|biconomy\|eth\|solana` | DEX + optional market composite |
+| `scope` | `--ai` (global) | Markdown console output for agent parsing |
+
+All reports include version and timestamp metadata for audit trail.
 
 ## Supported Chains
 
@@ -385,7 +674,6 @@ just lint      # Run lints
 | Optimism | EVM | 0x... | Optimistic Etherscan |
 | Base | EVM | 0x... | Basescan |
 | BSC | EVM | 0x... | BscScan |
-| Aegis | EVM | 0x... | JSON-RPC |
 | Solana | Non-EVM | Base58 | Solscan |
 | Tron | Non-EVM | T... | Tronscan |
 
