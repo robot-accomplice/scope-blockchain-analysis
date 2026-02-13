@@ -20,8 +20,13 @@ A production-grade command-line tool for blockchain data analysis, portfolio tra
 - **Token Discovery**: Browse trending and boosted tokens from DexScreener (`scope discover` / `scope disc`)
 - **Market Command** (`scope market summary`): Peg and order book health for stablecoin markets; CEX (Binance, Biconomy) or DEX (Ethereum, Solana) venues; repeat mode with `--every`/`--duration`; `--report` and `--csv` export
 - **Token Health Suite** (`scope token-health` / `scope health`): DEX analytics with optional order book summary; venues: binance, biconomy, eth, solana
+- **Insights** (`scope insights` / `insight`): Infer chain and type (address, tx, token) from input; run relevant analyses and present unified observations
 - **Agent Output** (`scope --ai`): Global flag for markdown output to stdout (address, tx, crawl, discover, portfolio, export, token-health)
 - **Reporting**: Markdown reports for address, token, portfolio, and market commands; batch reports for multiple addresses (`scope report batch`); address dossier (address + risk combined)
+- **Shell Completion**: Tab-completion for bash, zsh, and fish (`scope completions <shell>`)
+- **Progress Indicators**: Spinners and progress bars for all long-running operations; auto-hidden in pipes
+- **Error Remediation**: Actionable hints for common errors (invalid format, missing config, network, auth)
+- **Browser Mode** (`scope web` / `scope serve`): Locally hosted web UI (feature-gated; build with `--features web`)
 - **Interactive Mode**: REPL with preserved context between commands for faster workflow
 - **Setup Wizard**: Guided first-run configuration with `scope setup` for API keys and preferences
 - **USD Valuation**: Native token balances enriched with real-time USD prices via DexScreener
@@ -43,6 +48,35 @@ git clone https://github.com/robot-accomplice/scope-blockchain-analysis.git
 cd scope-blockchain-analysis
 cargo install --path .
 ```
+
+## Shell Completion
+
+Generate tab-completion scripts for your shell:
+
+```bash
+# Bash
+scope completions bash > ~/.local/share/bash-completion/completions/scope
+
+# Zsh (add to your fpath)
+scope completions zsh > ~/.zfunc/_scope
+# Then add to .zshrc: fpath=(~/.zfunc $fpath); autoload -Uz compinit && compinit
+
+# Fish
+scope completions fish > ~/.config/fish/completions/scope.fish
+```
+
+## Output Formats
+
+Scope supports multiple output formats via `--format` or the global `--ai` flag:
+
+| Flag | Format | Use case |
+|------|--------|----------|
+| *(default)* | Table | Human-readable terminal output |
+| `--format json` | JSON | Programmatic consumption, piping to `jq` |
+| `--format csv` | CSV | Spreadsheet import |
+| `--ai` | Markdown | LLM/agent parsing (global flag, all commands) |
+
+Use `--format json` when piping output to other tools or scripts. Use `--ai` when feeding output to an LLM or agent for analysis.
 
 ## Quick Start
 
@@ -94,6 +128,11 @@ scope health USDC --with-market --market-venue binance
 scope market summary USDC
 scope market summary PUSD --market-venue biconomy --format json
 
+# Unified insights — infer type and chain from any target
+scope insights 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2   # address → balance, tokens
+scope insights 0xabc123...                                 # tx hash → decoded tx
+scope insights USDC                                        # token symbol → DEX analytics
+
 # Discover trending and boosted tokens
 scope discover
 scope discover --source boosts --chain ethereum --limit 10
@@ -110,6 +149,52 @@ scope --ai address 0x742d...
 # Interactive mode (includes live monitor, portfolio, and all commands)
 scope interactive
 ```
+
+### Browser Mode
+
+Launch a local web UI with the same features as the CLI:
+
+```bash
+# Start web server (default: http://127.0.0.1:8080)
+scope web
+
+# Custom port
+scope web --port 3000
+
+# Run as background daemon
+scope web --daemon
+
+# Stop running daemon
+scope web --stop
+
+# Alias: 'serve'
+scope serve --port 9090
+```
+
+The web UI provides:
+- All CLI commands accessible via browser forms
+- JSON REST API at `/api/*` for programmatic access
+- Live WebSocket monitor with real-time price charts
+- Configuration status and setup page
+
+### Command Map
+
+Not sure which command to use? Here's a quick decision tree:
+
+| I want to... | Command |
+|--------------|---------|
+| Look up an address (balance, txs, tokens) | `scope address <addr>` |
+| Look up a transaction | `scope tx <hash>` |
+| Auto-detect input and run everything | `scope insights <target>` |
+| Get token DEX data (price, volume, holders) | `scope crawl <token>` |
+| Token DEX + order book health (stablecoins) | `scope token-health <token> --with-market` |
+| Live real-time dashboard for a token | `scope monitor <token>` |
+| Browse trending/boosted tokens | `scope discover` |
+| Check market peg/depth for a stablecoin | `scope market summary <symbol>` |
+| Assess compliance risk for an address | `scope compliance risk <addr>` |
+| Manage a portfolio of watched addresses | `scope portfolio add/remove/list/summary` |
+| Export data to JSON/CSV | `scope export --address <addr> --output file.json` |
+| Generate a report for multiple addresses | `scope report batch --addresses <...>` |
 
 ## Output Examples
 
@@ -540,6 +625,24 @@ monitor:
   export:
     path: null                # base directory (default: ./scope-exports/)
 ```
+
+### Free Tiers: Solana & BSC
+
+You can use Scope with **Solana** and **BSC** without paying for APIs.
+
+**BSC (Binance Smart Chain)**
+
+- **RPC:** Default `bsc-dataseed.binance.org` is free. Scope automatically falls back to BSC RPC for **balance** when the block explorer returns "Free API access is not supported" (Etherscan V2 free tier limits).
+- **BscScan API:** Etherscan V2 free tier does not support BSC (chainid=56). Balance works via RPC fallback; transactions and token lists require a paid API plan.
+- **Setup:** No API key needed for balance. For transactions and tokens, a paid Etherscan plan is required. Set `bsc_rpc` in config to override the RPC endpoint.
+
+**Solana**
+
+- **RPC:** Default `api.mainnet-beta.solana.com` is free (public Solana endpoint, rate limited).
+- **Solscan:** Scope uses the public RPC for balance, transactions, and tokens. A Solscan key is optional and not required for normal use.
+- **Setup:** No API key needed for basic Solana support. Use the default RPC in config, or set `solana_rpc` to a custom endpoint if needed.
+
+**Summary:** For BSC, balance works without any API key (RPC fallback). For full BSC support (transactions, tokens), a paid Etherscan plan is required. For Solana, the default public RPC is sufficient.
 
 ### Environment Variables
 

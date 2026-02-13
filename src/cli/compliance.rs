@@ -146,10 +146,13 @@ pub async fn handle_risk_with_client(
         None => detect_chain(&args.address)?,
     };
 
-    println!("Assessing risk for {} on {}...", args.address, chain);
+    let sp = crate::cli::progress::Spinner::new(&format!(
+        "Assessing risk for {} on {}...",
+        args.address, chain
+    ));
 
     let engine = if let Some(c) = client {
-        println!("Using Etherscan API for enhanced analysis");
+        sp.set_message("Using Etherscan API for enhanced analysis...");
         RiskEngine::with_data_client(c)
     } else {
         // Try to load API key from environment
@@ -158,15 +161,16 @@ pub async fn handle_risk_with_client(
         if let Some(key) = etherscan_key {
             let sources = DataSources::new(key);
             let client = BlockchainDataClient::new(sources);
-            println!("Using Etherscan API for enhanced analysis");
+            sp.set_message("Using Etherscan API for enhanced analysis...");
             RiskEngine::with_data_client(client)
         } else {
-            println!("Note: Set ETHERSCAN_API_KEY for enhanced analysis");
+            eprintln!("Note: Set ETHERSCAN_API_KEY for enhanced analysis");
             RiskEngine::new()
         }
     };
 
     let assessment = engine.assess_address(&args.address, &chain).await?;
+    sp.finish("Risk assessment complete.");
 
     // Format and display output
     let output = format_risk_report(&assessment, args.format, args.detailed);
@@ -1095,5 +1099,141 @@ mod tests {
             let debug = format!("{:?}", t);
             assert!(!debug.is_empty());
         }
+    }
+
+    #[test]
+    fn test_format_compliance_report_summary() {
+        use crate::compliance::risk::{RiskAssessment, RiskLevel, RiskFactor, RiskCategory};
+        let assessment = RiskAssessment {
+            address: "0xabc".to_string(),
+            chain: "ethereum".to_string(),
+            overall_score: 3.5,
+            risk_level: RiskLevel::Low,
+            factors: vec![RiskFactor {
+                name: "Address Age".to_string(),
+                category: RiskCategory::Behavioral,
+                score: 2.0,
+                weight: 1.0,
+                description: "Address is well-established".to_string(),
+                evidence: vec![],
+            }],
+            recommendations: vec!["Continue monitoring".to_string()],
+            assessed_at: chrono::Utc::now(),
+        };
+        let patterns: Vec<(String, String, Option<crate::compliance::datasource::PatternAnalysis>)> = vec![];
+        let report = format_compliance_report(
+            &[assessment],
+            &patterns,
+            &Jurisdiction::US,
+            &ReportType::Summary,
+        );
+        assert!(report.contains("Compliance Report"));
+        assert!(report.contains("0xabc"));
+        assert!(report.contains("ethereum"));
+        assert!(report.contains("3.5"));
+        assert!(report.contains("Low"));
+        // Summary report should not include risk factor breakdown
+        assert!(!report.contains("Risk Factor Breakdown"));
+    }
+
+    #[test]
+    fn test_format_compliance_report_detailed() {
+        use crate::compliance::risk::{RiskAssessment, RiskLevel, RiskFactor, RiskCategory};
+        let assessment = RiskAssessment {
+            address: "0xdef".to_string(),
+            chain: "ethereum".to_string(),
+            overall_score: 5.5,
+            risk_level: RiskLevel::Medium,
+            factors: vec![
+                RiskFactor {
+                    name: "Address Age".to_string(),
+                    category: RiskCategory::Behavioral,
+                    score: 2.0,
+                    weight: 1.0,
+                    description: "Address is well-established".to_string(),
+                    evidence: vec![],
+                },
+                RiskFactor {
+                    name: "Transaction Velocity".to_string(),
+                    category: RiskCategory::Behavioral,
+                    score: 7.0,
+                    weight: 0.8,
+                    description: "High transaction frequency detected".to_string(),
+                    evidence: vec![],
+                },
+            ],
+            recommendations: vec![
+                "Continue monitoring".to_string(),
+                "Review transaction patterns".to_string(),
+            ],
+            assessed_at: chrono::Utc::now(),
+        };
+        let patterns: Vec<(String, String, Option<crate::compliance::datasource::PatternAnalysis>)> = vec![];
+        let report = format_compliance_report(
+            &[assessment],
+            &patterns,
+            &Jurisdiction::EU,
+            &ReportType::Detailed,
+        );
+        assert!(report.contains("Compliance Report"));
+        assert!(report.contains("0xdef"));
+        assert!(report.contains("5.5"));
+        assert!(report.contains("Medium"));
+        // Detailed report should include risk factor breakdown
+        assert!(report.contains("Risk Factor Breakdown"));
+        assert!(report.contains("Address Age"));
+        assert!(report.contains("Transaction Velocity"));
+        assert!(report.contains("Recommendations"));
+        assert!(report.contains("Continue monitoring"));
+        assert!(report.contains("Review transaction patterns"));
+    }
+
+    #[test]
+    fn test_format_compliance_report_with_pattern_analysis() {
+        use crate::compliance::risk::{RiskAssessment, RiskLevel, RiskFactor, RiskCategory};
+        use crate::compliance::datasource::PatternAnalysis;
+        let assessment = RiskAssessment {
+            address: "0x123".to_string(),
+            chain: "ethereum".to_string(),
+            overall_score: 3.5,
+            risk_level: RiskLevel::Low,
+            factors: vec![RiskFactor {
+                name: "Address Age".to_string(),
+                category: RiskCategory::Behavioral,
+                score: 2.0,
+                weight: 1.0,
+                description: "Address is well-established".to_string(),
+                evidence: vec![],
+            }],
+            recommendations: vec!["Continue monitoring".to_string()],
+            assessed_at: chrono::Utc::now(),
+        };
+        let patterns: Vec<(String, String, Option<PatternAnalysis>)> = vec![(
+            "0x123".to_string(),
+            "ethereum".to_string(),
+            Some(PatternAnalysis {
+                total_transactions: 100,
+                velocity_score: 2.5,
+                structuring_detected: false,
+                round_number_pattern: false,
+                time_clustering: false,
+                unusual_hours: 3,
+            }),
+        )];
+        let report = format_compliance_report(
+            &[assessment],
+            &patterns,
+            &Jurisdiction::UK,
+            &ReportType::Detailed,
+        );
+        assert!(report.contains("Compliance Report"));
+        assert!(report.contains("0x123"));
+        // Check for pattern analysis section
+        assert!(report.contains("Pattern Analysis"));
+        assert!(report.contains("Total transactions: 100"));
+        assert!(report.contains("Velocity: 2.50 tx/day"));
+        assert!(report.contains("Structuring detected: false"));
+        assert!(report.contains("Round number pattern: false"));
+        assert!(report.contains("Unusual hour transactions: 3"));
     }
 }

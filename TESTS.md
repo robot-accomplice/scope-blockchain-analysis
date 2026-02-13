@@ -77,9 +77,47 @@ async fn test_etherscan_fetch() {
 ### Test Organization
 
 - Unit tests in same file: `#[cfg(test)] mod tests { }`
-- Integration tests in `tests/` directory
+- Integration tests in `tests/` directory (`tests/cli_integration.rs`)
 - Use `tempfile` crate for file operations
 - Use `assert_cmd` for CLI testing
+
+### CLI Output Tests (`tests/cli_integration.rs`)
+
+Covers terminal output for:
+
+- Help/version (main, subcommands: address, tx, portfolio, export, discover, market, token-health, crawl, report, compliance, insights, completions)
+- Setup `--status` output (Scope Configuration Status, Config file, API Keys)
+- Error handling (missing args, invalid formats, unsupported chain)
+- Global flags (`--ai`, `--no-color`, `-v`, `--config`)
+- Insights command: `insights --help`, `insight` alias, requires target
+- Shell completions: `completions --help`, `completions bash/zsh/fish`
+
+### Progress Indicators (`src/cli/progress.rs`)
+
+Unit tests for:
+
+- `Spinner` creation, message update, and finish variants (success, warning, clear)
+- `StepProgress` creation, increment, and finish
+- Non-TTY fallback behavior (hidden progress bars in test/piped contexts)
+
+### Error Remediation Hints (`src/main.rs`)
+
+Unit tests for `error_suggestion()`:
+
+- `InvalidAddress` → format hint (EVM, Solana, Tron)
+- `InvalidHash` → hash format hint
+- `Config(NotFound)` → `scope setup` suggestion
+- `Network` → network/retry hint
+- `Api` with 401/403 → API key hint
+- `NotFound` → verify resource hint
+- `Other` → returns `None` (no hint)
+
+### Help Display & Typo Suggestion Tests (`tests/cli_integration.rs`)
+
+- `test_help_shows_examples` — Top-level help contains "Examples:" and "Documentation:" sections
+- `test_address_help_shows_examples` — Address help contains example invocations
+- `test_typo_suggestion` — Misspelled command ("adress") shows "similar" suggestion
+- `test_cli_completions_parsing` — Completions subcommand parses correctly
 
 ### Coverage Quick Wins
 
@@ -143,3 +181,5 @@ Target: Block release if coverage < 80%.
 
 Last updated: 2026-02-13  
 Project exceeds 80% coverage target; priority files above still have room to improve.
+
+**Test counts:** 1303 lib + 12 binary + 49 integration + 28 doc = **1392 total tests** (0 failures).

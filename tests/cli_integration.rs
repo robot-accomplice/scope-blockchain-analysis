@@ -6,6 +6,7 @@
 
 use assert_cmd::Command;
 use predicates::prelude::*;
+use tempfile;
 
 /// Returns a Command for the Scope binary.
 #[allow(deprecated)] // TODO: Migrate to cargo::cargo_bin_cmd! when stable
@@ -28,7 +29,8 @@ fn test_help_output() {
         .stdout(predicate::str::contains("tx"))
         .stdout(predicate::str::contains("portfolio"))
         .stdout(predicate::str::contains("export"))
-        .stdout(predicate::str::contains("setup"));
+        .stdout(predicate::str::contains("setup"))
+        .stdout(predicate::str::contains("insights"));
 }
 
 #[test]
@@ -324,6 +326,89 @@ fn test_export_requires_source() {
 }
 
 // ============================================================================
+// Setup Command Output Tests
+// ============================================================================
+
+#[test]
+fn test_setup_status_output() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    scope_cmd()
+        .env("HOME", temp_dir.path())
+        .args(["setup", "--status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Scope Configuration Status"))
+        .stdout(predicate::str::contains("Config file"))
+        .stdout(predicate::str::contains("API Keys"));
+}
+
+// ============================================================================
+// Subcommand Help Output Tests (coverage for discover, market, token-health, etc.)
+// ============================================================================
+
+#[test]
+fn test_discover_help() {
+    scope_cmd()
+        .args(["discover", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Discover").or(predicate::str::contains("discover")))
+        .stdout(predicate::str::contains("--chain").or(predicate::str::contains("--source")));
+}
+
+#[test]
+fn test_market_help() {
+    scope_cmd()
+        .args(["market", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("market"))
+        .stdout(predicate::str::contains("summary"));
+}
+
+#[test]
+fn test_token_health_help() {
+    scope_cmd()
+        .args(["token-health", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("token"))
+        .stdout(predicate::str::contains("--chain"))
+        .stdout(predicate::str::contains("--with-market"));
+}
+
+#[test]
+fn test_crawl_help() {
+    scope_cmd()
+        .args(["crawl", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Crawl").or(predicate::str::contains("crawl")))
+        .stdout(predicate::str::contains("--chain"));
+}
+
+#[test]
+fn test_report_help() {
+    scope_cmd()
+        .args(["report", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("report"))
+        .stdout(predicate::str::contains("batch"));
+}
+
+#[test]
+fn test_compliance_help() {
+    scope_cmd()
+        .args(["compliance", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("risk"))
+        .stdout(predicate::str::contains("trace"))
+        .stdout(predicate::str::contains("analyze"));
+}
+
+// ============================================================================
 // Output Format Tests
 // ============================================================================
 
@@ -351,6 +436,335 @@ fn test_address_csv_format_option() {
             "csv",
             "--help",
         ])
+        .assert()
+        .success();
+}
+
+// ============================================================================
+// Global --ai Flag Tests (markdown output for agent consumption)
+// ============================================================================
+
+#[test]
+fn test_ai_flag_accepted() {
+    // --ai should be accepted by the CLI; portfolio list emits to stdout
+    let temp_dir = tempfile::tempdir().unwrap();
+    scope_cmd()
+        .env("HOME", temp_dir.path())
+        .args(["--ai", "portfolio", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Portfolio").or(predicate::str::contains("empty")));
+}
+
+// ============================================================================
+// Insights Command Tests
+// ============================================================================
+
+#[test]
+fn test_insights_help() {
+    scope_cmd()
+        .args(["insights", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("insights").or(predicate::str::contains("insight")))
+        .stdout(predicate::str::contains("target"))
+        .stdout(predicate::str::contains("chain"));
+}
+
+#[test]
+fn test_insights_requires_target() {
+    scope_cmd()
+        .arg("insights")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("required"));
+}
+
+#[test]
+fn test_insight_alias() {
+    scope_cmd()
+        .args(["insight", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("target"));
+}
+
+// ============================================================================
+// Help Display & Typo Suggestion Tests
+// ============================================================================
+
+#[test]
+fn test_help_shows_examples() {
+    scope_cmd()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Examples:"))
+        .stdout(predicate::str::contains("scope address"))
+        .stdout(predicate::str::contains("Documentation:"));
+}
+
+#[test]
+fn test_address_help_shows_examples() {
+    scope_cmd()
+        .args(["address", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Examples:"))
+        .stdout(predicate::str::contains("scope address 0x742d"));
+}
+
+#[test]
+fn test_typo_suggestion() {
+    scope_cmd()
+        .arg("adress")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("similar"));
+}
+
+// ============================================================================
+// Shell Completions Tests
+// ============================================================================
+
+#[test]
+fn test_completions_help() {
+    scope_cmd()
+        .args(["completions", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("shell"))
+        .stdout(predicate::str::contains("completions"));
+}
+
+#[test]
+fn test_completions_bash() {
+    scope_cmd()
+        .args(["completions", "bash"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("scope"));
+}
+
+#[test]
+fn test_completions_zsh() {
+    scope_cmd()
+        .args(["completions", "zsh"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("compdef"));
+}
+
+#[test]
+fn test_completions_fish() {
+    scope_cmd()
+        .args(["completions", "fish"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("complete"));
+}
+
+// ============================================================================
+// Global --ai Flag Tests (markdown output for agent consumption)
+// ============================================================================
+
+#[test]
+fn test_ai_flag_with_setup_status() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    scope_cmd()
+        .env("HOME", temp_dir.path())
+        .args(["--ai", "setup", "--status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Scope Configuration"));
+}
+
+// ============================================================================
+// Web Command Tests
+// ============================================================================
+
+#[test]
+fn test_web_help() {
+    scope_cmd()
+        .args(["web", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("web"))
+        .stdout(predicate::str::contains("--port"))
+        .stdout(predicate::str::contains("--daemon"))
+        .stdout(predicate::str::contains("--stop"));
+}
+
+#[test]
+fn test_serve_alias() {
+    scope_cmd()
+        .args(["serve", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("web").or(predicate::str::contains("serve")))
+        .stdout(predicate::str::contains("--port"));
+}
+
+#[test]
+fn test_web_stop_no_daemon() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    scope_cmd()
+        .env("HOME", temp_dir.path())
+        .args(["web", "--stop"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn test_web_default_port() {
+    // Verify help shows default port
+    scope_cmd()
+        .args(["web", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("8080"));
+}
+
+#[test]
+fn test_web_default_bind() {
+    scope_cmd()
+        .args(["web", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("127.0.0.1"));
+}
+
+// ============================================================================
+// Report Command Tests
+// ============================================================================
+
+#[test]
+fn test_report_batch_help() {
+    scope_cmd()
+        .args(["report", "batch", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("batch"));
+}
+
+// ============================================================================
+// Compliance Subcommand Tests
+// ============================================================================
+
+#[test]
+fn test_compliance_risk_help() {
+    scope_cmd()
+        .args(["compliance", "risk", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("risk"))
+        .stdout(predicate::str::contains("address"));
+}
+
+#[test]
+fn test_compliance_trace_help() {
+    scope_cmd()
+        .args(["compliance", "trace", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("trace"));
+}
+
+#[test]
+fn test_compliance_analyze_help() {
+    scope_cmd()
+        .args(["compliance", "analyze", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("analyze"));
+}
+
+// ============================================================================
+// Monitor Command Tests
+// ============================================================================
+
+#[test]
+fn test_monitor_help() {
+    scope_cmd()
+        .args(["monitor", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("monitor").or(predicate::str::contains("Monitor")))
+        .stdout(predicate::str::contains("--chain"));
+}
+
+#[test]
+fn test_mon_alias() {
+    scope_cmd()
+        .args(["mon", "--help"])
+        .assert()
+        .success();
+}
+
+// ============================================================================
+// Additional Alias Tests
+// ============================================================================
+
+#[test]
+fn test_disc_alias() {
+    scope_cmd()
+        .args(["disc", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("discover").or(predicate::str::contains("Discover")));
+}
+
+#[test]
+fn test_health_alias() {
+    scope_cmd()
+        .args(["health", "--help"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn test_config_alias() {
+    scope_cmd()
+        .args(["config", "--help"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("setup")
+                .or(predicate::str::contains("Setup"))
+                .or(predicate::str::contains("Configure")),
+        );
+}
+
+// ============================================================================
+// Version in Help Tests
+// ============================================================================
+
+#[test]
+fn test_help_shows_version() {
+    scope_cmd()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!("v{}", env!("CARGO_PKG_VERSION"))));
+}
+
+// ============================================================================
+// Interactive Command Tests
+// ============================================================================
+
+#[test]
+fn test_interactive_help() {
+    scope_cmd()
+        .args(["interactive", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("interactive").or(predicate::str::contains("Interactive")));
+}
+
+#[test]
+fn test_shell_alias() {
+    scope_cmd()
+        .args(["shell", "--help"])
         .assert()
         .success();
 }

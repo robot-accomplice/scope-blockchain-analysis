@@ -273,7 +273,7 @@ impl Config {
     /// Returns the default data directory for portfolio storage.
     ///
     /// On Linux/macOS: `~/.local/share/scope`
-    /// On Windows: `%LOCALAPPDATA%\bca`
+    /// On Windows: `%LOCALAPPDATA%\scope`
     pub fn default_data_dir() -> PathBuf {
         dirs::data_local_dir()
             .unwrap_or_else(|| PathBuf::from("."))

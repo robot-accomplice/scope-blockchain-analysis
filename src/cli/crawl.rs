@@ -8,20 +8,20 @@
 //!
 //! ```bash
 //! # Basic crawl by address
-//! bca crawl 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
+//! scope crawl 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
 //!
 //! # Search by token name/symbol
-//! bca crawl USDC
-//! bca crawl "wrapped ether"
+//! scope crawl USDC
+//! scope crawl "wrapped ether"
 //!
 //! # Specify chain and period
-//! bca crawl USDC --chain ethereum --period 7d
+//! scope crawl USDC --chain ethereum --period 7d
 //!
 //! # Generate markdown report
-//! bca crawl USDC --report report.md
+//! scope crawl USDC --report report.md
 //!
 //! # Output as JSON
-//! bca crawl USDC --format json
+//! scope crawl USDC --format json
 //! ```
 
 use crate::chains::{
@@ -78,6 +78,11 @@ impl Period {
 
 /// Arguments for the crawl command.
 #[derive(Debug, Args)]
+#[command(after_help = "\x1b[1mExamples:\x1b[0m
+  scope crawl USDC
+  scope crawl 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --chain ethereum
+  scope crawl USDC --period 7d --report usdc_report.md
+  scope crawl PEPE --format json --no-charts")]
 pub struct CrawlArgs {
     /// Token address or name/symbol to analyze.
     ///
@@ -262,7 +267,7 @@ fn select_token_impl<'a>(
             .map(|p| format!("${:.6}", p))
             .unwrap_or_else(|| "N/A".to_string());
 
-        let liquidity = format_large_number(token.liquidity_usd);
+        let liquidity = crate::display::format_large_number(token.liquidity_usd);
         let addr = abbreviate_address(&token.address);
 
         // Truncate name if too long
@@ -392,14 +397,16 @@ pub async fn run(
         "Starting token crawl"
     );
 
-    println!(
+    let sp = crate::cli::progress::Spinner::new(&format!(
         "Crawling token {} on {}...",
         resolved.address, resolved.chain
-    );
+    ));
 
     // Fetch token analytics from multiple sources
     let mut analytics =
         fetch_token_analytics(&resolved.address, &resolved.chain, &args, clients).await?;
+
+    sp.finish("Token data loaded.");
 
     // If we have alias info and the fetched token info is unknown, use alias info
     if (analytics.token.symbol == "UNKNOWN" || analytics.token.name == "Unknown Token")
@@ -586,13 +593,13 @@ async fn fetch_analytics_from_explorer(
     args: &CrawlArgs,
     clients: &dyn ChainClientFactory,
 ) -> Result<TokenAnalytics> {
-    // Only EVM chains support block explorer data
-    let is_evm = matches!(
+    // EVM chains, Solana (token info via RPC), and Tron support block explorer data
+    let has_explorer = matches!(
         chain,
-        "ethereum" | "polygon" | "arbitrum" | "optimism" | "base" | "bsc"
+        "ethereum" | "polygon" | "arbitrum" | "optimism" | "base" | "bsc" | "solana" | "tron"
     );
 
-    if !is_evm {
+    if !has_explorer {
         return Err(ScopeError::NotFound(format!(
             "No DEX data found for token {} on {} and block explorer fallback not supported for this chain",
             token_address, chain
@@ -698,9 +705,9 @@ async fn fetch_holders(
     limit: u32,
     clients: &dyn ChainClientFactory,
 ) -> Result<Vec<TokenHolder>> {
-    // Only EVM chains support holder data via block explorers
+    // EVM chains and Tron support holder data; Solana uses default (empty) until Solscan Pro
     match chain {
-        "ethereum" | "polygon" | "arbitrum" | "optimism" | "base" | "bsc" => {
+        "ethereum" | "polygon" | "arbitrum" | "optimism" | "base" | "bsc" | "solana" | "tron" => {
             let client = clients.create_chain_client(chain)?;
             match client.get_token_holders(token_address, limit).await {
                 Ok(holders) => Ok(holders),
@@ -763,19 +770,19 @@ fn output_table_with_dex(analytics: &TokenAnalytics, args: &CrawlArgs) -> Result
     println!("24h Change:      {:+.2}%", analytics.price_change_24h);
     println!(
         "24h Volume:      ${}",
-        format_large_number(analytics.volume_24h)
+        crate::display::format_large_number(analytics.volume_24h)
     );
     println!(
         "Liquidity:       ${}",
-        format_large_number(analytics.liquidity_usd)
+        crate::display::format_large_number(analytics.liquidity_usd)
     );
 
     if let Some(mc) = analytics.market_cap {
-        println!("Market Cap:      ${}", format_large_number(mc));
+        println!("Market Cap:      ${}", crate::display::format_large_number(mc));
     }
 
     if let Some(fdv) = analytics.fdv {
-        println!("FDV:             ${}", format_large_number(fdv));
+        println!("FDV:             ${}", crate::display::format_large_number(fdv));
     }
 
     // Trading pairs
@@ -791,8 +798,8 @@ fn output_table_with_dex(analytics: &TokenAnalytics, args: &CrawlArgs) -> Result
                 pair.dex_name,
                 pair.base_token,
                 pair.quote_token,
-                format_large_number(pair.volume_24h),
-                format_large_number(pair.liquidity_usd)
+                crate::display::format_large_number(pair.volume_24h),
+                crate::display::format_large_number(pair.liquidity_usd)
             );
         }
     }
@@ -939,19 +946,6 @@ fn abbreviate_address(addr: &str) -> String {
     }
 }
 
-/// Formats a large number with K, M, B suffixes.
-fn format_large_number(value: f64) -> String {
-    if value >= 1_000_000_000.0 {
-        format!("{:.2}B", value / 1_000_000_000.0)
-    } else if value >= 1_000_000.0 {
-        format!("{:.2}M", value / 1_000_000.0)
-    } else if value >= 1_000.0 {
-        format!("{:.2}K", value / 1_000.0)
-    } else {
-        format!("{:.2}", value)
-    }
-}
-
 // ============================================================================
 // Unit Tests
 // ============================================================================
@@ -978,10 +972,10 @@ mod tests {
 
     #[test]
     fn test_format_large_number() {
-        assert_eq!(format_large_number(500.0), "500.00");
-        assert_eq!(format_large_number(1500.0), "1.50K");
-        assert_eq!(format_large_number(1500000.0), "1.50M");
-        assert_eq!(format_large_number(1500000000.0), "1.50B");
+        assert_eq!(crate::display::format_large_number(500.0), "500.00");
+        assert_eq!(crate::display::format_large_number(1500.0), "1.50K");
+        assert_eq!(crate::display::format_large_number(1500000.0), "1.50M");
+        assert_eq!(crate::display::format_large_number(1500000000.0), "1.50B");
     }
 
     #[test]
@@ -1016,35 +1010,35 @@ mod tests {
 
     #[test]
     fn test_format_large_number_zero() {
-        assert_eq!(format_large_number(0.0), "0.00");
+        assert_eq!(crate::display::format_large_number(0.0), "0.00");
     }
 
     #[test]
     fn test_format_large_number_small() {
-        assert_eq!(format_large_number(0.12), "0.12");
+        assert_eq!(crate::display::format_large_number(0.12), "0.12");
     }
 
     #[test]
     fn test_format_large_number_boundary_k() {
-        assert_eq!(format_large_number(999.99), "999.99");
-        assert_eq!(format_large_number(1000.0), "1.00K");
+        assert_eq!(crate::display::format_large_number(999.99), "999.99");
+        assert_eq!(crate::display::format_large_number(1000.0), "1.00K");
     }
 
     #[test]
     fn test_format_large_number_boundary_m() {
-        assert_eq!(format_large_number(999_999.0), "1000.00K");
-        assert_eq!(format_large_number(1_000_000.0), "1.00M");
+        assert_eq!(crate::display::format_large_number(999_999.0), "1000.00K");
+        assert_eq!(crate::display::format_large_number(1_000_000.0), "1.00M");
     }
 
     #[test]
     fn test_format_large_number_boundary_b() {
-        assert_eq!(format_large_number(999_999_999.0), "1000.00M");
-        assert_eq!(format_large_number(1_000_000_000.0), "1.00B");
+        assert_eq!(crate::display::format_large_number(999_999_999.0), "1000.00M");
+        assert_eq!(crate::display::format_large_number(1_000_000_000.0), "1.00B");
     }
 
     #[test]
     fn test_format_large_number_very_large() {
-        let result = format_large_number(1_500_000_000_000.0);
+        let result = crate::display::format_large_number(1_500_000_000_000.0);
         assert!(result.contains("B"));
     }
 
@@ -1767,7 +1761,7 @@ mod tests {
 
     #[test]
     fn test_format_large_number_negative() {
-        let result = format_large_number(-1_000_000.0);
+        let result = crate::display::format_large_number(-1_000_000.0);
         assert!(result.contains("M") || result.contains("-"));
     }
 

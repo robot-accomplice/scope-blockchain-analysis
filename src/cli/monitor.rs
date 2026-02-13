@@ -1219,8 +1219,8 @@ impl MonitorState {
                 self.active_alerts.push(ActiveAlert {
                     message: format!(
                         "🐋 Avg tx size {} ≥ whale threshold {}",
-                        format_usd(avg_tx_size),
-                        format_usd(whale_min)
+                        crate::display::format_usd(avg_tx_size),
+                        crate::display::format_usd(whale_min)
                     ),
                     triggered_at: Instant::now(),
                 });
@@ -2754,7 +2754,7 @@ fn render_volume_chart(f: &mut Frame, area: Rect, state: &MonitorState) {
 
     // Get current volume for display
     let current_volume = state.volume_24h;
-    let volume_str = format_usd(current_volume);
+    let volume_str = crate::display::format_usd(current_volume);
 
     // Count synthetic vs real points for the legend
     let has_synthetic = is_real.iter().any(|r| !r);
@@ -2987,7 +2987,7 @@ fn render_liquidity_depth(f: &mut Frame, area: Rect, state: &MonitorState) {
         .map(|(name, liq)| {
             let bar_width = ((liq / max_liquidity) * inner_width as f64 * 0.6).round() as usize;
             let bar_str = "█".repeat(bar_width);
-            let label = format!(" {} {}", format_usd(*liq), name);
+            let label = format!(" {} {}", crate::display::format_usd(*liq), name);
             Line::from(vec![
                 Span::styled(bar_str, Style::new().fg(pal.volume_bar)),
                 Span::styled(label, Style::new().fg(pal.neutral)),
@@ -3092,7 +3092,7 @@ fn render_metrics_panel(f: &mut Frame, area: Rect, state: &MonitorState) {
 
     let market_cap_str = state
         .market_cap
-        .map(format_usd)
+        .map(crate::display::format_usd)
         .unwrap_or_else(|| "N/A".to_string());
 
     let mut rows = vec![
@@ -3114,11 +3114,11 @@ fn render_metrics_panel(f: &mut Frame, area: Rect, state: &MonitorState) {
         ]),
         Row::new(vec![
             Span::styled("Liq", Style::new().gray()),
-            Span::raw(format_usd(state.liquidity_usd)),
+            Span::raw(crate::display::format_usd(state.liquidity_usd)),
         ]),
         Row::new(vec![
             Span::styled("Vol 24h", Style::new().gray()),
-            Span::raw(format_usd(state.volume_24h)),
+            Span::raw(crate::display::format_usd(state.volume_24h)),
         ]),
         Row::new(vec![
             Span::styled("Mkt Cap", Style::new().gray()),
@@ -3250,19 +3250,6 @@ fn format_number(n: f64) -> String {
         format!("{:.2}K", n / 1_000.0)
     } else {
         format!("{:.2}", n)
-    }
-}
-
-/// Formats a USD amount with appropriate suffix.
-fn format_usd(n: f64) -> String {
-    if n >= 1_000_000_000.0 {
-        format!("${:.2}B", n / 1_000_000_000.0)
-    } else if n >= 1_000_000.0 {
-        format!("${:.2}M", n / 1_000_000.0)
-    } else if n >= 1_000.0 {
-        format!("${:.2}K", n / 1_000.0)
-    } else {
-        format!("${:.2}", n)
     }
 }
 
@@ -3634,10 +3621,10 @@ mod tests {
 
     #[test]
     fn test_format_usd() {
-        assert_eq!(format_usd(500.0), "$500.00");
-        assert_eq!(format_usd(1_500.0), "$1.50K");
-        assert_eq!(format_usd(1_500_000.0), "$1.50M");
-        assert_eq!(format_usd(1_500_000_000.0), "$1.50B");
+        assert_eq!(crate::display::format_usd(500.0), "$500.00");
+        assert_eq!(crate::display::format_usd(1_500.0), "$1.50K");
+        assert_eq!(crate::display::format_usd(1_500_000.0), "$1.50M");
+        assert_eq!(crate::display::format_usd(1_500_000_000.0), "$1.50B");
     }
 
     #[test]
@@ -4540,12 +4527,12 @@ mod tests {
 
     #[test]
     fn test_format_usd_various() {
-        assert!(!format_usd(0.0).is_empty());
-        assert!(!format_usd(999.0).is_empty());
-        assert!(!format_usd(1500.0).is_empty());
-        assert!(!format_usd(1_500_000.0).is_empty());
-        assert!(!format_usd(1_500_000_000.0).is_empty());
-        assert!(!format_usd(1_500_000_000_000.0).is_empty());
+        assert!(!crate::display::format_usd(0.0).is_empty());
+        assert!(!crate::display::format_usd(999.0).is_empty());
+        assert!(!crate::display::format_usd(1500.0).is_empty());
+        assert!(!crate::display::format_usd(1_500_000.0).is_empty());
+        assert!(!crate::display::format_usd(1_500_000_000.0).is_empty());
+        assert!(!crate::display::format_usd(1_500_000_000_000.0).is_empty());
     }
 
     #[test]

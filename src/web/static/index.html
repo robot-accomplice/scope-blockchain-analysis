@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Scope — Blockchain Analysis</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1><span>scope</span> blockchain analysis</h1>
+    <span class="version" id="version"></span>
+  </header>
+
+  <nav id="nav">
+    <button class="active" data-panel="insights">Insights</button>
+    <button data-panel="address">Address</button>
+    <button data-panel="tx">Transaction</button>
+    <button data-panel="crawl">Token Crawl</button>
+    <button data-panel="discover">Discover</button>
+    <button data-panel="token-health">Token Health</button>
+    <button data-panel="market">Market</button>
+    <button data-panel="monitor">Monitor</button>
+    <button data-panel="portfolio">Portfolio</button>
+    <button data-panel="compliance">Compliance</button>
+    <button data-panel="export">Export</button>
+    <button data-panel="setup">Setup</button>
+  </nav>
+
+  <!-- Insights -->
+  <div class="panel active" id="panel-insights">
+    <h2>Unified Insights</h2>
+    <p style="color:var(--text-muted);margin-bottom:12px;">
+      Enter any target — address, tx hash, or token — and Scope will detect the type and run relevant analyses.
+    </p>
+    <div class="form-row">
+      <div class="form-group" style="flex:3">
+        <label>Target</label>
+        <input type="text" id="insights-target" placeholder="0x742d... or USDC or tx hash">
+      </div>
+      <div class="form-group" style="flex:1">
+        <label>Chain (optional)</label>
+        <select id="insights-chain">
+          <option value="">Auto-detect</option>
+          <option value="ethereum">Ethereum</option>
+          <option value="polygon">Polygon</option>
+          <option value="arbitrum">Arbitrum</option>
+          <option value="optimism">Optimism</option>
+          <option value="base">Base</option>
+          <option value="bsc">BSC</option>
+          <option value="solana">Solana</option>
+          <option value="tron">Tron</option>
+        </select>
+      </div>
+      <button class="btn" onclick="runInsights()">Analyze</button>
+    </div>
+    <div id="insights-results"></div>
+  </div>
+
+  <!-- Address -->
+  <div class="panel" id="panel-address">
+    <h2>Address Analysis</h2>
+    <div class="form-row">
+      <div class="form-group" style="flex:3">
+        <label>Address</label>
+        <input type="text" id="addr-address" placeholder="0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2">
+      </div>
+      <div class="form-group" style="flex:1">
+        <label>Chain</label>
+        <select id="addr-chain">
+          <option value="ethereum">Ethereum</option>
+          <option value="polygon">Polygon</option>
+          <option value="arbitrum">Arbitrum</option>
+          <option value="optimism">Optimism</option>
+          <option value="base">Base</option>
+          <option value="bsc">BSC</option>
+          <option value="solana">Solana</option>
+          <option value="tron">Tron</option>
+        </select>
+      </div>
+      <button class="btn" onclick="runAddress()">Analyze</button>
+    </div>
+    <div class="form-row">
+      <div class="checkbox-group">
+        <input type="checkbox" id="addr-tokens" checked>
+        <label for="addr-tokens">Include Tokens</label>
+      </div>
+      <div class="checkbox-group">
+        <input type="checkbox" id="addr-txs">
+        <label for="addr-txs">Include Transactions</label>
+      </div>
+      <div class="checkbox-group">
+        <input type="checkbox" id="addr-dossier">
+        <label for="addr-dossier">Dossier (+ Risk)</label>
+      </div>
+    </div>
+    <div id="address-results"></div>
+  </div>
+
+  <!-- Transaction -->
+  <div class="panel" id="panel-tx">
+    <h2>Transaction Analysis</h2>
+    <div class="form-row">
+      <div class="form-group" style="flex:3">
+        <label>Transaction Hash</label>
+        <input type="text" id="tx-hash" placeholder="0xabc123...">
+      </div>
+      <div class="form-group" style="flex:1">
+        <label>Chain</label>
+        <select id="tx-chain">
+          <option value="ethereum">Ethereum</option>
+          <option value="polygon">Polygon</option>
+          <option value="arbitrum">Arbitrum</option>
+          <option value="optimism">Optimism</option>
+          <option value="base">Base</option>
+          <option value="bsc">BSC</option>
+          <option value="solana">Solana</option>
+          <option value="tron">Tron</option>
+        </select>
+      </div>
+      <button class="btn" onclick="runTx()">Analyze</button>
+    </div>
+    <div class="form-row">
+      <div class="checkbox-group">
+        <input type="checkbox" id="tx-decode">
+        <label for="tx-decode">Decode Input</label>
+      </div>
+      <div class="checkbox-group">
+        <input type="checkbox" id="tx-trace">
+        <label for="tx-trace">Trace Internals</label>
+      </div>
+    </div>
+    <div id="tx-results"></div>
+  </div>
+
+  <!-- Token Crawl -->
+  <div class="panel" id="panel-crawl">
+    <h2>Token Crawl</h2>
+    <div class="form-row">
+      <div class="form-group" style="flex:2">
+        <label>Token (address or symbol)</label>
+        <input type="text" id="crawl-token" placeholder="USDC or 0xA0b86991...">
+      </div>
+      <div class="form-group">
+        <label>Chain</label>
+        <select id="crawl-chain">
+          <option value="ethereum">Ethereum</option>
+          <option value="solana">Solana</option>
+          <option value="bsc">BSC</option>
+          <option value="polygon">Polygon</option>
+          <option value="arbitrum">Arbitrum</option>
+          <option value="base">Base</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Period</label>
+        <select id="crawl-period">
+          <option value="24h">24 Hours</option>
+          <option value="1h">1 Hour</option>
+          <option value="7d">7 Days</option>
+          <option value="30d">30 Days</option>
+        </select>
+      </div>
+      <button class="btn" onclick="runCrawl()">Crawl</button>
+    </div>
+    <div id="crawl-results"></div>
+  </div>
+
+  <!-- Discover -->
+  <div class="panel" id="panel-discover">
+    <h2>Token Discovery</h2>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Source</label>
+        <select id="disc-source">
+          <option value="profiles">Featured Profiles</option>
+          <option value="boosts">Recent Boosts</option>
+          <option value="top-boosts">Top Boosts</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Chain (optional)</label>
+        <select id="disc-chain">
+          <option value="">All Chains</option>
+          <option value="ethereum">Ethereum</option>
+          <option value="solana">Solana</option>
+          <option value="bsc">BSC</option>
+        </select>
+      </div>
+      <div class="form-group" style="flex:0.5">
+        <label>Limit</label>
+        <input type="number" id="disc-limit" value="15" min="1" max="50">
+      </div>
+      <button class="btn" onclick="runDiscover()">Discover</button>
+    </div>
+    <div id="discover-results"></div>
+  </div>
+
+  <!-- Token Health -->
+  <div class="panel" id="panel-token-health">
+    <h2>Token Health Suite</h2>
+    <div class="form-row">
+      <div class="form-group" style="flex:2">
+        <label>Token</label>
+        <input type="text" id="th-token" placeholder="USDC">
+      </div>
+      <div class="form-group">
+        <label>Chain</label>
+        <select id="th-chain">
+          <option value="ethereum">Ethereum</option>
+          <option value="solana">Solana</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Market Venue</label>
+        <select id="th-venue">
+          <option value="binance">Binance</option>
+          <option value="biconomy">Biconomy</option>
+          <option value="eth">Ethereum DEX</option>
+          <option value="solana">Solana DEX</option>
+        </select>
+      </div>
+      <button class="btn" onclick="runTokenHealth()">Analyze</button>
+    </div>
+    <div class="form-row">
+      <div class="checkbox-group">
+        <input type="checkbox" id="th-market">
+        <label for="th-market">Include Market/Order Book</label>
+      </div>
+    </div>
+    <div id="th-results"></div>
+  </div>
+
+  <!-- Market -->
+  <div class="panel" id="panel-market">
+    <h2>Market Summary</h2>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Token Symbol</label>
+        <input type="text" id="mkt-pair" placeholder="USDC" value="USDC">
+      </div>
+      <div class="form-group">
+        <label>Venue</label>
+        <select id="mkt-venue">
+          <option value="binance">Binance</option>
+          <option value="biconomy">Biconomy</option>
+          <option value="eth">Ethereum DEX</option>
+          <option value="solana">Solana DEX</option>
+        </select>
+      </div>
+      <div class="form-group" style="flex:0.5">
+        <label>Peg Target</label>
+        <input type="number" id="mkt-peg" value="1.0" step="0.001">
+      </div>
+      <button class="btn" onclick="runMarket()">Fetch</button>
+    </div>
+    <div id="market-results"></div>
+  </div>
+
+  <!-- Monitor -->
+  <div class="panel" id="panel-monitor">
+    <h2>Live Monitor</h2>
+    <div class="form-row">
+      <div class="form-group" style="flex:2">
+        <label>Token</label>
+        <input type="text" id="mon-token" placeholder="USDC">
+      </div>
+      <div class="form-group">
+        <label>Chain</label>
+        <select id="mon-chain">
+          <option value="ethereum">Ethereum</option>
+          <option value="solana">Solana</option>
+        </select>
+      </div>
+      <div class="form-group" style="flex:0.5">
+        <label>Refresh (s)</label>
+        <input type="number" id="mon-refresh" value="5" min="1" max="60">
+      </div>
+      <button class="btn" id="mon-btn" onclick="toggleMonitor()">Start</button>
+    </div>
+    <div id="monitor-display" style="margin-top:16px;">
+      <div class="monitor-container" style="display:none;" id="mon-container">
+        <div class="monitor-chart" id="mon-chart">
+          <canvas id="price-canvas" width="600" height="300"></canvas>
+        </div>
+        <div class="monitor-stats" id="mon-stats"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Portfolio -->
+  <div class="panel" id="panel-portfolio">
+    <h2>Portfolio</h2>
+    <div class="form-row">
+      <button class="btn" onclick="loadPortfolio()">Refresh List</button>
+      <button class="btn btn-secondary" onclick="showAddPortfolio()">+ Add Address</button>
+    </div>
+    <div id="portfolio-add" style="display:none;margin-top:12px;">
+      <div class="form-row">
+        <div class="form-group" style="flex:2">
+          <label>Address</label>
+          <input type="text" id="port-address" placeholder="0x...">
+        </div>
+        <div class="form-group">
+          <label>Chain</label>
+          <select id="port-chain">
+            <option value="ethereum">Ethereum</option>
+            <option value="solana">Solana</option>
+            <option value="tron">Tron</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Label</label>
+          <input type="text" id="port-label" placeholder="My Wallet">
+        </div>
+        <button class="btn" onclick="addPortfolio()">Add</button>
+      </div>
+    </div>
+    <div id="portfolio-results"></div>
+  </div>
+
+  <!-- Compliance -->
+  <div class="panel" id="panel-compliance">
+    <h2>Compliance Risk Assessment</h2>
+    <div class="form-row">
+      <div class="form-group" style="flex:3">
+        <label>Address</label>
+        <input type="text" id="comp-address" placeholder="0x742d35Cc...">
+      </div>
+      <div class="form-group">
+        <label>Chain</label>
+        <select id="comp-chain">
+          <option value="ethereum">Ethereum</option>
+          <option value="polygon">Polygon</option>
+          <option value="bsc">BSC</option>
+          <option value="solana">Solana</option>
+        </select>
+      </div>
+      <button class="btn" onclick="runCompliance()">Assess Risk</button>
+    </div>
+    <div class="form-row">
+      <div class="checkbox-group">
+        <input type="checkbox" id="comp-detailed">
+        <label for="comp-detailed">Detailed Breakdown</label>
+      </div>
+    </div>
+    <div id="compliance-results"></div>
+  </div>
+
+  <!-- Export -->
+  <div class="panel" id="panel-export">
+    <h2>Data Export</h2>
+    <div class="form-row">
+      <div class="form-group" style="flex:3">
+        <label>Address</label>
+        <input type="text" id="exp-address" placeholder="0x742d35Cc...">
+      </div>
+      <div class="form-group">
+        <label>Chain</label>
+        <select id="exp-chain">
+          <option value="ethereum">Ethereum</option>
+          <option value="solana">Solana</option>
+          <option value="tron">Tron</option>
+        </select>
+      </div>
+      <button class="btn" onclick="runExport()">Export</button>
+    </div>
+    <div id="export-results"></div>
+  </div>
+
+  <!-- Setup -->
+  <div class="panel" id="panel-setup">
+    <h2>Configuration</h2>
+    <div id="setup-status"></div>
+    <div id="setup-form" style="margin-top:16px;">
+      <h3 style="color:var(--text-bright);margin-bottom:12px;">Update API Keys</h3>
+      <div class="setup-grid">
+        <div class="setup-card">
+          <h3>Etherscan</h3>
+          <input type="text" id="key-etherscan" placeholder="API Key" style="width:100%">
+        </div>
+        <div class="setup-card">
+          <h3>Polygonscan</h3>
+          <input type="text" id="key-polygonscan" placeholder="API Key" style="width:100%">
+        </div>
+        <div class="setup-card">
+          <h3>BscScan</h3>
+          <input type="text" id="key-bscscan" placeholder="API Key" style="width:100%">
+        </div>
+        <div class="setup-card">
+          <h3>Solscan</h3>
+          <input type="text" id="key-solscan" placeholder="API Key" style="width:100%">
+        </div>
+        <div class="setup-card">
+          <h3>TronScan</h3>
+          <input type="text" id="key-tronscan" placeholder="API Key" style="width:100%">
+        </div>
+      </div>
+      <div style="margin-top:16px;">
+        <button class="btn" onclick="saveConfig()">Save Configuration</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

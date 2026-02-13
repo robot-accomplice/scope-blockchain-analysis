@@ -1,6 +1,6 @@
 //! # Address Analysis Command
 //!
-//! This module implements the `bca address` command for analyzing
+//! This module implements the `scope address` command for analyzing
 //! blockchain addresses. It retrieves balance information, transaction
 //! history, and token holdings.
 //!
@@ -8,13 +8,13 @@
 //!
 //! ```bash
 //! # Basic address analysis
-//! bca address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
+//! scope address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
 //!
 //! # Specify chain
-//! bca address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --chain ethereum
+//! scope address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --chain ethereum
 //!
 //! # Output as JSON
-//! bca address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --format json
+//! scope address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --format json
 //! ```
 
 use crate::chains::{
@@ -26,6 +26,11 @@ use clap::Args;
 
 /// Arguments for the address analysis command.
 #[derive(Debug, Clone, Args)]
+#[command(after_help = "\x1b[1mExamples:\x1b[0m
+  scope address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
+  scope address 0x742d... --include-txs --include-tokens
+  scope address 0x742d... --dossier --report dossier.md
+  scope address DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy --chain solana")]
 pub struct AddressArgs {
     /// The blockchain address to analyze.
     ///
@@ -200,13 +205,17 @@ pub async fn run(
         analysis_args.include_tokens = true;
     }
 
-    println!("Analyzing address on {}...", args.chain);
+    let sp = crate::cli::progress::Spinner::new(&format!(
+        "Analyzing address on {}...",
+        args.chain
+    ));
 
     let client = clients.create_chain_client(&args.chain)?;
     let report = analyze_address(&analysis_args, client.as_ref()).await?;
 
     // Dossier: fetch risk assessment (uses ETHERSCAN_API_KEY for Ethereum)
     let risk_assessment = if args.dossier {
+        sp.set_message("Running risk assessment...");
         let engine = match crate::compliance::datasource::BlockchainDataClient::from_env_opt() {
             Some(client) => crate::compliance::risk::RiskEngine::with_data_client(client),
             None => crate::compliance::risk::RiskEngine::new(),
@@ -215,6 +224,8 @@ pub async fn run(
     } else {
         None
     };
+
+    sp.finish("Analysis complete.");
 
     // Output based on format
     let format = args.format.unwrap_or(config.output.format);
@@ -733,6 +744,81 @@ mod tests {
         let mut report = make_test_report();
         report.tokens = Some(vec![]);
         let result = output_report(&report, OutputFormat::Table);
+        assert!(result.is_ok());
+    }
+
+    // ========================================================================
+    // Mock-based tests for analyze_address
+    // ========================================================================
+
+    use crate::chains::{Balance as ChainBalance, ChainClient, Token as ChainToken, TokenBalance as ChainTokenBalance, Transaction as ChainTransaction};
+    use async_trait::async_trait;
+
+    struct MockClient;
+
+    #[async_trait]
+    impl ChainClient for MockClient {
+        fn chain_name(&self) -> &str { "ethereum" }
+        fn native_token_symbol(&self) -> &str { "ETH" }
+        async fn get_balance(&self, _addr: &str) -> crate::error::Result<ChainBalance> {
+            Ok(ChainBalance { raw: "1000000000000000000".into(), formatted: "1.0 ETH".into(), decimals: 18, symbol: "ETH".into(), usd_value: Some(2500.0) })
+        }
+        async fn enrich_balance_usd(&self, b: &mut ChainBalance) { b.usd_value = Some(2500.0); }
+        async fn get_transaction(&self, _h: &str) -> crate::error::Result<ChainTransaction> { Err(crate::error::ScopeError::NotFound("mock".into())) }
+        async fn get_transactions(&self, _addr: &str, _lim: u32) -> crate::error::Result<Vec<ChainTransaction>> {
+            Ok(vec![ChainTransaction {
+                hash: "0x1234".into(), block_number: Some(100), timestamp: Some(1700000000),
+                from: "0xfrom".into(), to: Some("0xto".into()), value: "1000000000000000000".into(),
+                gas_limit: 21000, gas_used: Some(21000), gas_price: "20000000000".into(),
+                nonce: 1, input: "0x".into(), status: Some(true),
+            }])
+        }
+        async fn get_block_number(&self) -> crate::error::Result<u64> { Ok(12345678) }
+        async fn get_token_balances(&self, _addr: &str) -> crate::error::Result<Vec<ChainTokenBalance>> {
+            Ok(vec![ChainTokenBalance {
+                token: ChainToken { contract_address: "0xtoken".into(), symbol: "USDC".into(), name: "USD Coin".into(), decimals: 6 },
+                balance: "1000000".into(), formatted_balance: "1.0".into(), usd_value: Some(1.0),
+            }])
+        }
+        async fn get_code(&self, _addr: &str) -> crate::error::Result<String> { Ok("0x".into()) }
+    }
+
+    #[tokio::test]
+    async fn test_analyze_address_with_mock() {
+        let args = AddressArgs {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: "ethereum".to_string(),
+            format: None,
+            include_txs: true,
+            include_tokens: true,
+            limit: 10,
+            report: None,
+            dossier: false,
+        };
+        let client = MockClient;
+        let result = analyze_address(&args, &client).await;
+        assert!(result.is_ok());
+        let report = result.unwrap();
+        assert_eq!(report.address, "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2");
+        assert_eq!(report.chain, "ethereum");
+        assert!(report.tokens.is_some());
+        assert!(report.transactions.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_analyze_address_no_txs_no_tokens() {
+        let args = AddressArgs {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: "ethereum".to_string(),
+            format: None,
+            include_txs: false,
+            include_tokens: false,
+            limit: 10,
+            report: None,
+            dossier: false,
+        };
+        let client = MockClient;
+        let result = analyze_address(&args, &client).await;
         assert!(result.is_ok());
     }
 

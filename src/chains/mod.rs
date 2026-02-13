@@ -199,6 +199,15 @@ pub trait ChainClient: Send + Sync {
     async fn get_token_holder_count(&self, _address: &str) -> Result<u64> {
         Ok(0)
     }
+
+    /// Fetches bytecode at address (EVM: eth_getCode).
+    /// Returns "0x" for EOA, non-empty hex for contracts.
+    /// Default: not supported.
+    async fn get_code(&self, _address: &str) -> Result<String> {
+        Err(crate::error::ScopeError::Chain(
+            "Code lookup not supported on this chain".to_string(),
+        ))
+    }
 }
 
 /// Factory trait for creating chain clients and DEX data sources.
@@ -575,6 +584,89 @@ pub struct TokenSocial {
     pub platform: String,
     /// URL or handle for the social account.
     pub url: String,
+}
+
+// ============================================================================
+// Chain Metadata
+// ============================================================================
+
+/// Metadata for a blockchain network (symbol, decimals, explorer URLs).
+///
+/// Used for normalized presentation across all chains.
+#[derive(Debug, Clone)]
+pub struct ChainMetadata {
+    /// Canonical chain identifier.
+    pub chain_id: &'static str,
+    /// Native token symbol (e.g., ETH, SOL, TRX).
+    pub native_symbol: &'static str,
+    /// Native token decimals.
+    pub native_decimals: u8,
+    /// Block explorer base URL for token pages.
+    pub explorer_token_base: &'static str,
+}
+
+/// Returns chain metadata for display and formatting.
+///
+/// Returns `None` for unknown chains.
+pub fn chain_metadata(chain: &str) -> Option<ChainMetadata> {
+    match chain.to_lowercase().as_str() {
+        "ethereum" | "eth" => Some(ChainMetadata {
+            chain_id: "ethereum",
+            native_symbol: "ETH",
+            native_decimals: 18,
+            explorer_token_base: "https://etherscan.io/token",
+        }),
+        "polygon" => Some(ChainMetadata {
+            chain_id: "polygon",
+            native_symbol: "MATIC",
+            native_decimals: 18,
+            explorer_token_base: "https://polygonscan.com/token",
+        }),
+        "arbitrum" => Some(ChainMetadata {
+            chain_id: "arbitrum",
+            native_symbol: "ETH",
+            native_decimals: 18,
+            explorer_token_base: "https://arbiscan.io/token",
+        }),
+        "optimism" => Some(ChainMetadata {
+            chain_id: "optimism",
+            native_symbol: "ETH",
+            native_decimals: 18,
+            explorer_token_base: "https://optimistic.etherscan.io/token",
+        }),
+        "base" => Some(ChainMetadata {
+            chain_id: "base",
+            native_symbol: "ETH",
+            native_decimals: 18,
+            explorer_token_base: "https://basescan.org/token",
+        }),
+        "bsc" => Some(ChainMetadata {
+            chain_id: "bsc",
+            native_symbol: "BNB",
+            native_decimals: 18,
+            explorer_token_base: "https://bscscan.com/token",
+        }),
+        "solana" | "sol" => Some(ChainMetadata {
+            chain_id: "solana",
+            native_symbol: "SOL",
+            native_decimals: 9,
+            explorer_token_base: "https://solscan.io/token",
+        }),
+        "tron" | "trx" => Some(ChainMetadata {
+            chain_id: "tron",
+            native_symbol: "TRX",
+            native_decimals: 6,
+            explorer_token_base: "https://tronscan.org/#/token20",
+        }),
+        _ => None,
+    }
+}
+
+/// Returns the native token symbol for a chain, or "???" if unknown.
+pub fn native_symbol(chain: &str) -> &'static str {
+    chain_metadata(chain)
+        .map(|m| m.native_symbol)
+        .unwrap_or("???")
 }
 
 // ============================================================================
@@ -1241,6 +1333,186 @@ mod tests {
         let client = MinimalChainClient;
         let count = client.get_token_holder_count("0xtest").await.unwrap();
         assert_eq!(count, 0);
+    }
+
+    // ============================================================================
+    // Chain Metadata Tests
+    // ============================================================================
+
+    #[test]
+    fn test_chain_metadata_ethereum() {
+        let meta = chain_metadata("ethereum").unwrap();
+        assert_eq!(meta.chain_id, "ethereum");
+        assert_eq!(meta.native_symbol, "ETH");
+        assert_eq!(meta.native_decimals, 18);
+        assert_eq!(meta.explorer_token_base, "https://etherscan.io/token");
+    }
+
+    #[test]
+    fn test_chain_metadata_ethereum_alias() {
+        let meta = chain_metadata("eth").unwrap();
+        assert_eq!(meta.chain_id, "ethereum");
+        assert_eq!(meta.native_symbol, "ETH");
+    }
+
+    #[test]
+    fn test_chain_metadata_polygon() {
+        let meta = chain_metadata("polygon").unwrap();
+        assert_eq!(meta.chain_id, "polygon");
+        assert_eq!(meta.native_symbol, "MATIC");
+        assert_eq!(meta.native_decimals, 18);
+        assert_eq!(meta.explorer_token_base, "https://polygonscan.com/token");
+    }
+
+    #[test]
+    fn test_chain_metadata_bsc() {
+        let meta = chain_metadata("bsc").unwrap();
+        assert_eq!(meta.chain_id, "bsc");
+        assert_eq!(meta.native_symbol, "BNB");
+        assert_eq!(meta.native_decimals, 18);
+        assert_eq!(meta.explorer_token_base, "https://bscscan.com/token");
+    }
+
+    #[test]
+    fn test_chain_metadata_solana() {
+        let meta = chain_metadata("solana").unwrap();
+        assert_eq!(meta.chain_id, "solana");
+        assert_eq!(meta.native_symbol, "SOL");
+        assert_eq!(meta.native_decimals, 9);
+        assert_eq!(meta.explorer_token_base, "https://solscan.io/token");
+    }
+
+    #[test]
+    fn test_chain_metadata_solana_alias() {
+        let meta = chain_metadata("sol").unwrap();
+        assert_eq!(meta.chain_id, "solana");
+        assert_eq!(meta.native_symbol, "SOL");
+    }
+
+    #[test]
+    fn test_chain_metadata_tron() {
+        let meta = chain_metadata("tron").unwrap();
+        assert_eq!(meta.chain_id, "tron");
+        assert_eq!(meta.native_symbol, "TRX");
+        assert_eq!(meta.native_decimals, 6);
+        assert_eq!(meta.explorer_token_base, "https://tronscan.org/#/token20");
+    }
+
+    #[test]
+    fn test_chain_metadata_tron_alias() {
+        let meta = chain_metadata("trx").unwrap();
+        assert_eq!(meta.chain_id, "tron");
+        assert_eq!(meta.native_symbol, "TRX");
+    }
+
+    #[test]
+    fn test_chain_metadata_arbitrum() {
+        let meta = chain_metadata("arbitrum").unwrap();
+        assert_eq!(meta.chain_id, "arbitrum");
+        assert_eq!(meta.native_symbol, "ETH");
+        assert_eq!(meta.native_decimals, 18);
+        assert_eq!(meta.explorer_token_base, "https://arbiscan.io/token");
+    }
+
+    #[test]
+    fn test_chain_metadata_optimism() {
+        let meta = chain_metadata("optimism").unwrap();
+        assert_eq!(meta.chain_id, "optimism");
+        assert_eq!(meta.native_symbol, "ETH");
+        assert_eq!(meta.native_decimals, 18);
+        assert_eq!(meta.explorer_token_base, "https://optimistic.etherscan.io/token");
+    }
+
+    #[test]
+    fn test_chain_metadata_base() {
+        let meta = chain_metadata("base").unwrap();
+        assert_eq!(meta.chain_id, "base");
+        assert_eq!(meta.native_symbol, "ETH");
+        assert_eq!(meta.native_decimals, 18);
+        assert_eq!(meta.explorer_token_base, "https://basescan.org/token");
+    }
+
+    #[test]
+    fn test_chain_metadata_case_insensitive() {
+        let meta1 = chain_metadata("ETHEREUM").unwrap();
+        let meta2 = chain_metadata("Ethereum").unwrap();
+        let meta3 = chain_metadata("ethereum").unwrap();
+        assert_eq!(meta1.chain_id, meta2.chain_id);
+        assert_eq!(meta2.chain_id, meta3.chain_id);
+    }
+
+    #[test]
+    fn test_chain_metadata_unknown() {
+        assert!(chain_metadata("bitcoin").is_none());
+        assert!(chain_metadata("litecoin").is_none());
+        assert!(chain_metadata("unknown").is_none());
+        assert!(chain_metadata("").is_none());
+    }
+
+    #[test]
+    fn test_native_symbol_ethereum() {
+        assert_eq!(native_symbol("ethereum"), "ETH");
+        assert_eq!(native_symbol("eth"), "ETH");
+    }
+
+    #[test]
+    fn test_native_symbol_polygon() {
+        assert_eq!(native_symbol("polygon"), "MATIC");
+    }
+
+    #[test]
+    fn test_native_symbol_bsc() {
+        assert_eq!(native_symbol("bsc"), "BNB");
+    }
+
+    #[test]
+    fn test_native_symbol_solana() {
+        assert_eq!(native_symbol("solana"), "SOL");
+        assert_eq!(native_symbol("sol"), "SOL");
+    }
+
+    #[test]
+    fn test_native_symbol_tron() {
+        assert_eq!(native_symbol("tron"), "TRX");
+        assert_eq!(native_symbol("trx"), "TRX");
+    }
+
+    #[test]
+    fn test_native_symbol_arbitrum() {
+        assert_eq!(native_symbol("arbitrum"), "ETH");
+    }
+
+    #[test]
+    fn test_native_symbol_optimism() {
+        assert_eq!(native_symbol("optimism"), "ETH");
+    }
+
+    #[test]
+    fn test_native_symbol_base() {
+        assert_eq!(native_symbol("base"), "ETH");
+    }
+
+    #[test]
+    fn test_native_symbol_unknown() {
+        assert_eq!(native_symbol("unknown"), "???");
+        assert_eq!(native_symbol("bitcoin"), "???");
+        assert_eq!(native_symbol(""), "???");
+    }
+
+    #[test]
+    fn test_native_symbol_case_insensitive() {
+        assert_eq!(native_symbol("ETHEREUM"), "ETH");
+        assert_eq!(native_symbol("Ethereum"), "ETH");
+        assert_eq!(native_symbol("ethereum"), "ETH");
+    }
+
+    #[tokio::test]
+    async fn test_chain_client_default_get_code() {
+        let client = MinimalChainClient;
+        let result = client.get_code("0x1234").await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("not supported"));
     }
 }
 

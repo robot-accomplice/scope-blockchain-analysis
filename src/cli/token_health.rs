@@ -51,12 +51,14 @@ pub async fn run(
         args.format
     };
     // 1. Fetch DEX analytics (crawl)
+    let sp = crate::cli::progress::Spinner::new("Fetching token health data...");
     let analytics =
         crawl::fetch_analytics_for_input(&args.token, &args.chain, Period::Hour24, 10, clients)
             .await?;
 
     // 2. Optionally fetch market summary for stablecoin
     let market_summary = if args.with_market {
+        sp.set_message("Fetching market data...");
         let thresholds = HealthThresholds {
             peg_target: 1.0,
             peg_range: 0.001,
@@ -146,6 +148,8 @@ pub async fn run(
     } else {
         None
     };
+
+    sp.finish("Token health data loaded.");
 
     // 3. Output combined report
     match format {
@@ -280,14 +284,14 @@ fn output_token_health_table(
     println!("24h Change:      {:+.2}%", analytics.price_change_24h);
     println!(
         "24h Volume:      ${}",
-        format_large_number(analytics.volume_24h)
+        crate::display::format_large_number(analytics.volume_24h)
     );
     println!(
         "Liquidity:       ${}",
-        format_large_number(analytics.liquidity_usd)
+        crate::display::format_large_number(analytics.liquidity_usd)
     );
     if let Some(mc) = analytics.market_cap {
-        println!("Market Cap:      ${}", format_large_number(mc));
+        println!("Market Cap:      ${}", crate::display::format_large_number(mc));
     }
     if let Some(top10) = analytics.top_10_concentration {
         println!("Top 10 Holders:  {:.1}%", top10);
@@ -327,18 +331,6 @@ fn output_token_health_table(
 
     println!();
     Ok(())
-}
-
-fn format_large_number(value: f64) -> String {
-    if value >= 1_000_000_000.0 {
-        format!("{:.2}B", value / 1_000_000_000.0)
-    } else if value >= 1_000_000.0 {
-        format!("{:.2}M", value / 1_000_000.0)
-    } else if value >= 1_000.0 {
-        format!("{:.2}K", value / 1_000.0)
-    } else {
-        format!("{:.2}", value)
-    }
 }
 
 #[cfg(test)]
@@ -473,10 +465,10 @@ mod tests {
 
     #[test]
     fn test_format_large_number() {
-        assert_eq!(format_large_number(1_500_000_000.0), "1.50B");
-        assert_eq!(format_large_number(2_500_000.0), "2.50M");
-        assert_eq!(format_large_number(3_500.0), "3.50K");
-        assert_eq!(format_large_number(99.99), "99.99");
+        assert_eq!(crate::display::format_large_number(1_500_000_000.0), "1.50B");
+        assert_eq!(crate::display::format_large_number(2_500_000.0), "2.50M");
+        assert_eq!(crate::display::format_large_number(3_500.0), "3.50K");
+        assert_eq!(crate::display::format_large_number(99.99), "99.99");
     }
 
     #[test]
@@ -501,6 +493,36 @@ mod tests {
     }
 
     #[test]
+    fn test_token_health_to_markdown_without_venue() {
+        let analytics = make_test_analytics(false);
+        let market = make_test_market_summary();
+        let md = token_health_to_markdown(&analytics, Some(&market), None);
+        assert!(md.contains("Market / Order Book"));
+        assert!(!md.contains("Venue:")); // Should not include venue when None
+        assert!(md.contains("0.9999"));
+        assert!(md.contains("Yes"));
+    }
+
+    #[test]
+    fn test_token_health_to_markdown_unhealthy_market() {
+        let analytics = make_test_analytics(false);
+        let mut market = make_test_market_summary();
+        market.healthy = false;
+        market.checks = vec![
+            HealthCheck::Pass("Some check passed".to_string()),
+            HealthCheck::Fail("Peg deviation too high".to_string()),
+            HealthCheck::Fail("Insufficient bid depth".to_string()),
+        ];
+        let md = token_health_to_markdown(&analytics, Some(&market), Some(MarketVenue::Binance));
+        assert!(md.contains("Market / Order Book"));
+        assert!(md.contains("No")); // Should show unhealthy
+        assert!(md.contains("Health Checks"));
+        assert!(md.contains("✗")); // Should show fail checks
+        assert!(md.contains("Peg deviation too high"));
+        assert!(md.contains("Insufficient bid depth"));
+    }
+
+    #[test]
     fn test_token_health_to_json_without_market() {
         let analytics = make_test_analytics(false);
         let json = token_health_to_json(&analytics, None).unwrap();
@@ -520,6 +542,25 @@ mod tests {
     }
 
     #[test]
+    fn test_token_health_to_json_with_fail_checks() {
+        let analytics = make_test_analytics(false);
+        let mut market = make_test_market_summary();
+        market.healthy = false;
+        market.checks = vec![
+            HealthCheck::Pass("Bid/Ask ratio OK".to_string()),
+            HealthCheck::Fail("Peg deviation exceeds threshold".to_string()),
+            HealthCheck::Fail("Ask depth below minimum".to_string()),
+        ];
+        let json = token_health_to_json(&analytics, Some(&market)).unwrap();
+        assert!(json.contains("\"market\""));
+        assert!(json.contains("\"healthy\": false"));
+        assert!(json.contains("\"status\": \"pass\""));
+        assert!(json.contains("\"status\": \"fail\""));
+        assert!(json.contains("Peg deviation exceeds threshold"));
+        assert!(json.contains("Ask depth below minimum"));
+    }
+
+    #[test]
     fn test_output_token_health_table_without_market() {
         let analytics = make_test_analytics(false);
         let result = output_token_health_table(&analytics, None, None);
@@ -533,6 +574,16 @@ mod tests {
         let result =
             output_token_health_table(&analytics, Some(&market), Some(MarketVenue::Biconomy));
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_token_health_table_no_market_cap() {
+        let mut analytics = make_test_analytics(false);
+        analytics.market_cap = None;
+        analytics.top_10_concentration = None;
+        let result = output_token_health_table(&analytics, None, None);
+        assert!(result.is_ok());
+        // Should not panic when market_cap and top_10_concentration are None
     }
 
     fn make_test_dex_token_data(pairs: Vec<DexPair>) -> DexTokenData {

@@ -1,6 +1,6 @@
 //! # Transaction Analysis Command
 //!
-//! This module implements the `bca tx` command for analyzing
+//! This module implements the `scope tx` command for analyzing
 //! blockchain transactions. It decodes transaction data, traces
 //! execution, and displays detailed transaction information.
 //!
@@ -8,13 +8,13 @@
 //!
 //! ```bash
 //! # Basic transaction analysis
-//! bca tx 0xabc123...
+//! scope tx 0xabc123...
 //!
 //! # Specify chain
-//! bca tx 0xabc123... --chain polygon
+//! scope tx 0xabc123... --chain polygon
 //!
 //! # Include internal transactions
-//! bca tx 0xabc123... --trace
+//! scope tx 0xabc123... --trace
 //! ```
 
 use crate::chains::{ChainClientFactory, validate_solana_signature, validate_tron_tx_hash};
@@ -24,6 +24,10 @@ use clap::Args;
 
 /// Arguments for the transaction analysis command.
 #[derive(Debug, Clone, Args)]
+#[command(after_help = "\x1b[1mExamples:\x1b[0m
+  scope tx 0xabc123def456...
+  scope tx 0xabc123... --chain polygon --trace
+  scope tx 0xabc123... --decode --format json")]
 pub struct TxArgs {
     /// The transaction hash to analyze.
     ///
@@ -227,18 +231,48 @@ pub async fn run(
     // Validate transaction hash
     validate_tx_hash(&args.hash, &args.chain)?;
 
-    println!("Analyzing transaction on {}...", args.chain);
+    let sp = crate::cli::progress::Spinner::new(&format!(
+        "Analyzing transaction on {}...",
+        args.chain
+    ));
 
-    let client = clients.create_chain_client(&args.chain)?;
-    let tx = client.get_transaction(&args.hash).await?;
+    let report = fetch_transaction_report(
+        &args.hash,
+        &args.chain,
+        args.decode,
+        args.trace,
+        clients,
+    )
+    .await?;
 
-    // Calculate transaction fee
+    sp.finish("Transaction loaded.");
+
+    // Output based on format
+    let format = args.format.unwrap_or(config.output.format);
+    output_report(&report, format)?;
+
+    Ok(())
+}
+
+/// Fetches and builds a transaction report for programmatic use.
+///
+/// Used by the insights command and batch reporting.
+pub async fn fetch_transaction_report(
+    hash: &str,
+    chain: &str,
+    decode: bool,
+    trace: bool,
+    clients: &dyn ChainClientFactory,
+) -> Result<TransactionReport> {
+    validate_tx_hash(hash, chain)?;
+    let client = clients.create_chain_client(chain)?;
+    let tx = client.get_transaction(hash).await?;
+
     let gas_price_val: u128 = tx.gas_price.parse().unwrap_or(0);
     let gas_used_val = tx.gas_used.unwrap_or(0) as u128;
     let fee_wei = gas_price_val * gas_used_val;
-    let chain_lower = args.chain.to_lowercase();
+    let chain_lower = chain.to_lowercase();
     let fee_str = if chain_lower == "solana" || chain_lower == "sol" {
-        // For Solana, gas_price already contains the fee in lamports
         let fee_sol = tx.gas_price.parse::<f64>().unwrap_or(0.0) / 1_000_000_000.0;
         format!("{:.9}", fee_sol)
     } else {
@@ -247,11 +281,11 @@ pub async fn run(
 
     let report = TransactionReport {
         hash: tx.hash.clone(),
-        chain: args.chain.clone(),
+        chain: chain.to_string(),
         block: BlockInfo {
             number: tx.block_number.unwrap_or(0),
             timestamp: tx.timestamp.unwrap_or(0),
-            hash: String::new(), // Block hash not available from tx data
+            hash: String::new(),
         },
         transaction: TransactionDetails {
             from: tx.from.clone(),
@@ -269,8 +303,7 @@ pub async fn run(
             transaction_fee: fee_str,
             effective_gas_price: None,
         },
-        decoded_input: if args.decode && !tx.input.is_empty() && tx.input != "0x" {
-            // Basic decode: show function selector (first 4 bytes)
+        decoded_input: if decode && !tx.input.is_empty() && tx.input != "0x" {
             let selector = if tx.input.len() >= 10 {
                 &tx.input[..10]
             } else {
@@ -281,7 +314,7 @@ pub async fn run(
                 function_name: selector.to_string(),
                 parameters: vec![],
             })
-        } else if args.decode {
+        } else if decode {
             Some(DecodedInput {
                 function_signature: "transfer()".to_string(),
                 function_name: "Native Transfer".to_string(),
@@ -290,14 +323,9 @@ pub async fn run(
         } else {
             None
         },
-        internal_transactions: if args.trace { Some(vec![]) } else { None },
+        internal_transactions: if trace { Some(vec![]) } else { None },
     };
-
-    // Output based on format
-    let format = args.format.unwrap_or(config.output.format);
-    output_report(&report, format)?;
-
-    Ok(())
+    Ok(report)
 }
 
 /// Validates a transaction hash format for the given chain.
@@ -429,7 +457,8 @@ fn output_report(report: &TransactionReport, format: OutputFormat) -> Result<()>
 }
 
 /// Formats a transaction report as markdown for agent consumption.
-fn format_tx_markdown(report: &TransactionReport) -> String {
+/// Exposed for use by insights and report generation.
+pub fn format_tx_markdown(report: &TransactionReport) -> String {
     let mut md = String::new();
     md.push_str("# Transaction Analysis\n\n");
     md.push_str("| Field | Value |\n|-------|-------|\n");
@@ -545,7 +574,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_tx_hash_invalid_hex() {
+    fn test_validate_tx_hash_invalid_hex_cli() {
         let hash = "0xabc123def456789012345678901234567890123456789012345678901234GHIJ";
         let result = validate_tx_hash(hash, "ethereum");
         assert!(result.is_err());
@@ -869,6 +898,77 @@ mod tests {
     }
 
     // ========================================================================
+    // Mock-based tests for fetch_transaction_report
+    // ========================================================================
+
+    use crate::chains::{Balance as ChainBalance, ChainClient, ChainClientFactory, DexDataSource, TokenBalance as ChainTokenBalance, Transaction as ChainTransaction};
+    use async_trait::async_trait;
+
+    struct MockTxClient;
+
+    #[async_trait]
+    impl ChainClient for MockTxClient {
+        fn chain_name(&self) -> &str { "ethereum" }
+        fn native_token_symbol(&self) -> &str { "ETH" }
+        async fn get_balance(&self, _a: &str) -> crate::error::Result<ChainBalance> {
+            Ok(ChainBalance { raw: "0".into(), formatted: "0 ETH".into(), decimals: 18, symbol: "ETH".into(), usd_value: None })
+        }
+        async fn enrich_balance_usd(&self, _b: &mut ChainBalance) {}
+        async fn get_transaction(&self, _h: &str) -> crate::error::Result<ChainTransaction> {
+            Ok(ChainTransaction {
+                hash: "0xabc123def456789012345678901234567890123456789012345678901234abcd".into(),
+                block_number: Some(12345678), timestamp: Some(1700000000),
+                from: "0xfrom".into(), to: Some("0xto".into()),
+                value: "1000000000000000000".into(),
+                gas_limit: 21000, gas_used: Some(21000), gas_price: "20000000000".into(),
+                nonce: 42, input: "0xa9059cbb0000000000000000000000001234".into(),
+                status: Some(true),
+            })
+        }
+        async fn get_transactions(&self, _a: &str, _l: u32) -> crate::error::Result<Vec<ChainTransaction>> { Ok(vec![]) }
+        async fn get_block_number(&self) -> crate::error::Result<u64> { Ok(12345678) }
+        async fn get_token_balances(&self, _a: &str) -> crate::error::Result<Vec<ChainTokenBalance>> { Ok(vec![]) }
+        async fn get_code(&self, _addr: &str) -> crate::error::Result<String> { Ok("0x".into()) }
+    }
+
+    struct MockTxFactory;
+    impl ChainClientFactory for MockTxFactory {
+        fn create_chain_client(&self, _chain: &str) -> crate::error::Result<Box<dyn ChainClient>> { Ok(Box::new(MockTxClient)) }
+        fn create_dex_client(&self) -> Box<dyn DexDataSource> {
+            crate::chains::DefaultClientFactory { chains_config: Default::default() }.create_dex_client()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_transaction_report_mock() {
+        let factory = MockTxFactory;
+        let result = fetch_transaction_report(
+            "0xabc123def456789012345678901234567890123456789012345678901234abcd",
+            "ethereum",
+            false,
+            false,
+            &factory,
+        ).await;
+        assert!(result.is_ok());
+        let report = result.unwrap();
+        assert_eq!(report.transaction.from, "0xfrom");
+        assert!(report.transaction.status);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_transaction_report_with_decode() {
+        let factory = MockTxFactory;
+        let result = fetch_transaction_report(
+            "0xabc123def456789012345678901234567890123456789012345678901234abcd",
+            "ethereum",
+            true,
+            false,
+            &factory,
+        ).await;
+        assert!(result.is_ok());
+    }
+
+    // ========================================================================
     // End-to-end tests using MockClientFactory
     // ========================================================================
 
@@ -953,5 +1053,77 @@ mod tests {
         };
         let result = super::run(args, &config, &factory).await;
         assert!(result.is_ok());
+    }
+
+    // ========================================================================
+    // Markdown formatting tests
+    // ========================================================================
+
+    #[test]
+    fn test_format_tx_markdown_basic() {
+        let report = make_test_tx_report();
+        let md = format_tx_markdown(&report);
+        assert!(md.contains("# Transaction Analysis"));
+        assert!(md.contains(&report.hash));
+        assert!(md.contains(&report.chain));
+        assert!(md.contains("Success"));
+        assert!(md.contains(&report.transaction.from));
+    }
+
+    #[test]
+    fn test_format_tx_markdown_contract_creation() {
+        let mut report = make_test_tx_report();
+        report.transaction.to = None;
+        let md = format_tx_markdown(&report);
+        assert!(md.contains("Contract Creation"));
+    }
+
+    #[test]
+    fn test_format_tx_markdown_failed_tx() {
+        let mut report = make_test_tx_report();
+        report.transaction.status = false;
+        let md = format_tx_markdown(&report);
+        assert!(md.contains("Failed"));
+    }
+
+    #[test]
+    fn test_format_tx_markdown_with_decoded_input() {
+        let report = make_test_tx_report();
+        let md = format_tx_markdown(&report);
+        assert!(md.contains("## Decoded Input"));
+        assert!(md.contains("transfer"));
+        assert!(md.contains("transfer(address,uint256)"));
+    }
+
+    #[test]
+    fn test_format_tx_markdown_with_internal_transactions() {
+        let report = make_test_tx_report();
+        let md = format_tx_markdown(&report);
+        assert!(md.contains("## Internal Transactions"));
+        assert!(md.contains("call"));
+    }
+
+    #[test]
+    fn test_format_tx_markdown_no_decoded_input() {
+        let mut report = make_test_tx_report();
+        report.decoded_input = None;
+        let md = format_tx_markdown(&report);
+        assert!(!md.contains("## Decoded Input"));
+    }
+
+    #[test]
+    fn test_format_tx_markdown_no_internal_transactions() {
+        let mut report = make_test_tx_report();
+        report.internal_transactions = None;
+        let md = format_tx_markdown(&report);
+        assert!(!md.contains("## Internal Transactions"));
+    }
+
+    #[test]
+    fn test_format_tx_markdown_empty_internal_transactions() {
+        let mut report = make_test_tx_report();
+        report.internal_transactions = Some(vec![]);
+        let md = format_tx_markdown(&report);
+        assert!(!md.contains("## Internal Transactions"));
     }
 }
