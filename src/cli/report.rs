@@ -203,3 +203,160 @@ fn batch_report_to_markdown(
     md.push_str(&crate::display::report::report_footer());
     md
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::address::{AddressReport, Balance, TokenBalance, TransactionSummary};
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_resolve_targets_addresses_only() {
+        let args = BatchArgs {
+            addresses: vec!["0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string()],
+            from_file: None,
+            output: std::path::PathBuf::from("/tmp/out.md"),
+            chain: "ethereum".to_string(),
+            with_risk: false,
+        };
+        let targets = resolve_targets(&args).unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].0, "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2");
+        assert_eq!(targets[0].1, "ethereum");
+    }
+
+    #[test]
+    fn test_resolve_targets_multiple_addresses() {
+        let args = BatchArgs {
+            addresses: vec![
+                "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+                "0x0000000000000000000000000000000000000001".to_string(),
+            ],
+            from_file: None,
+            output: std::path::PathBuf::from("/tmp/out.md"),
+            chain: "ethereum".to_string(),
+            with_risk: false,
+        };
+        let targets = resolve_targets(&args).unwrap();
+        assert_eq!(targets.len(), 2);
+    }
+
+    #[test]
+    fn test_resolve_targets_from_file() {
+        let file = NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2\n# comment\n\n0x0000000000000000000000000000000000000001",
+        )
+        .unwrap();
+
+        let args = BatchArgs {
+            addresses: vec![],
+            from_file: Some(file.path().to_path_buf()),
+            output: std::path::PathBuf::from("/tmp/out.md"),
+            chain: "ethereum".to_string(),
+            with_risk: false,
+        };
+        let targets = resolve_targets(&args).unwrap();
+        assert_eq!(targets.len(), 2);
+    }
+
+    #[test]
+    fn test_resolve_targets_from_file_with_chain_override() {
+        let file = NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            "0x1234567890123456789012345678901234567890,polygon\n",
+        )
+        .unwrap();
+
+        let args = BatchArgs {
+            addresses: vec![],
+            from_file: Some(file.path().to_path_buf()),
+            output: std::path::PathBuf::from("/tmp/out.md"),
+            chain: "ethereum".to_string(),
+            with_risk: false,
+        };
+        let targets = resolve_targets(&args).unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].1, "polygon");
+    }
+
+    #[test]
+    fn test_resolve_targets_file_not_found() {
+        let args = BatchArgs {
+            addresses: vec![],
+            from_file: Some(std::path::PathBuf::from("/nonexistent/path/12345")),
+            output: std::path::PathBuf::from("/tmp/out.md"),
+            chain: "ethereum".to_string(),
+            with_risk: false,
+        };
+        let result = resolve_targets(&args);
+        assert!(result.is_err());
+    }
+
+    fn minimal_report() -> AddressReport {
+        AddressReport {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: "ethereum".to_string(),
+            balance: Balance {
+                raw: "1000000000000000000".to_string(),
+                formatted: "1.0 ETH".to_string(),
+                usd: Some(3500.0),
+            },
+            transaction_count: 42,
+            transactions: None,
+            tokens: None,
+        }
+    }
+
+    #[test]
+    fn test_batch_report_to_markdown_single_report() {
+        let reports = vec![minimal_report()];
+        let risks = vec![None];
+        let md = batch_report_to_markdown(&reports, &risks, false);
+        assert!(md.contains("Batch Address Report"));
+        assert!(md.contains("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2"));
+        assert!(md.contains("Balance Summary"));
+        assert!(md.contains("1.0 ETH"));
+        assert!(!md.contains("Risk Assessment"));
+    }
+
+    #[test]
+    fn test_batch_report_to_markdown_with_risk_placeholder() {
+        let reports = vec![minimal_report()];
+        let risks = vec![None];
+        let md = batch_report_to_markdown(&reports, &risks, true);
+        assert!(md.contains("Risk Assessment"));
+        assert!(md.contains("unavailable"));
+    }
+
+    #[test]
+    fn test_batch_report_to_markdown_with_transactions_and_tokens() {
+        let mut report = minimal_report();
+        report.transactions = Some(vec![TransactionSummary {
+            hash: "0xabc123".to_string(),
+            block_number: 12345,
+            timestamp: 1700000000,
+            from: "0xfrom".to_string(),
+            to: Some("0xto".to_string()),
+            value: "1 ETH".to_string(),
+            status: true,
+        }]);
+        report.tokens = Some(vec![TokenBalance {
+            contract_address: "0xusdc".to_string(),
+            symbol: "USDC".to_string(),
+            name: "USD Coin".to_string(),
+            decimals: 6,
+            balance: "1000000".to_string(),
+            formatted_balance: "1.0 USDC".to_string(),
+        }]);
+
+        let reports = vec![report];
+        let risks = vec![None];
+        let md = batch_report_to_markdown(&reports, &risks, false);
+        assert!(md.contains("Recent Transactions"));
+        assert!(md.contains("Token Balances"));
+        assert!(md.contains("USDC"));
+    }
+}

@@ -57,6 +57,14 @@ coverage:
     cargo tarpaulin --out Html --all-features
     @echo "Coverage report: tarpaulin-report.html"
 
+# Check coverage (80% min + no regression); used by pre-push hook
+coverage-check:
+    ./scripts/check-coverage.sh
+
+# Install git hooks (pre-push runs coverage check before push)
+install-hooks:
+    ./scripts/install-hooks.sh
+
 # -----------------------------------------------------------------------------
 # Building
 # -----------------------------------------------------------------------------

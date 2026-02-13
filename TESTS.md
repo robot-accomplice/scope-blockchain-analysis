@@ -16,8 +16,10 @@
 
 ### Priority 2: CLI Commands (0-15% Coverage — URGENT)
 
-- [ ] `src/cli/discover.rs` — Token discovery (DexScreener profiles/boosts); mock API responses
+- [x] `src/cli/discover.rs` — Token discovery; mock DexScreener profiles/boosts/top-boosts; run_with_client, truncate_address
 - [x] `src/cli/market.rs` — parse_duration tested; run_summary has mockito integration tests (text + JSON)
+- [x] `src/cli/report.rs` — resolve_targets, batch_report_to_markdown; addresses, from_file, chain filter
+- [x] `src/cli/address_report.rs` — generate_address_report_section, generate_address_report, generate_dossier_report
 - [x] `src/cli/compliance.rs` — path fix applied; resolve_targets, parse_address_line, export md/yaml, trace Err path
 - [ ] `src/cli/address.rs` — 15.8% coverage
   - Mock chain clients
@@ -45,9 +47,7 @@
   - Test SPL token parsing
 - [ ] `src/chains/tron.rs` — 28.2% coverage
   - Mock TronGrid API
-- [ ] `src/chains/dex.rs` — 13.7% coverage
-  - Mock DexScreener API
-  - Test price caching
+- [x] `src/chains/dex.rs` — Discovery methods tested (get_token_profiles, get_token_boosts, get_token_boosts_top); mock DexScreener API
 
 ### Priority 4: Display & Utils (DONE or LOW PRIORITY)
 
@@ -93,6 +93,13 @@ async fn test_etherscan_fetch() {
 ```bash
 # Run tests with coverage
 cargo tarpaulin --out html
+
+# Check coverage (80% min + no regression); used by pre-push hook
+just coverage-check
+# or: ./scripts/check-coverage.sh
+
+# Install pre-push hook (runs coverage check before every push)
+just install-hooks
 
 # Run specific test
 cargo test test_name -- --nocapture

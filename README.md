@@ -17,8 +17,11 @@ A production-grade command-line tool for blockchain data analysis, portfolio tra
 - **Portfolio Management**: Track multiple addresses across chains with labels, tags, and aggregated balance views
 - **Compliance & Risk Assessment**: Risk scoring, transaction pattern detection, taint analysis, and compliance reporting
 - **Data Export**: Export address history and portfolio data to JSON or CSV with date range filtering
-- **Token Discovery**: Browse trending and boosted tokens from DexScreener (`scope discover`)
-- **Reporting**: Markdown reports for address, token, portfolio, and market commands; batch reports for multiple addresses
+- **Token Discovery**: Browse trending and boosted tokens from DexScreener (`scope discover` / `scope disc`)
+- **Market Command** (`scope market summary`): Peg and order book health for stablecoin markets; CEX (Binance, Biconomy) or DEX (Ethereum, Solana) venues; repeat mode with `--every`/`--duration`; `--report` and `--csv` export
+- **Token Health Suite** (`scope token-health` / `scope health`): DEX analytics with optional order book summary; venues: binance, biconomy, eth, solana
+- **Agent Output** (`scope --ai`): Global flag for markdown output to stdout (address, tx, crawl, discover, portfolio, export, token-health)
+- **Reporting**: Markdown reports for address, token, portfolio, and market commands; batch reports for multiple addresses (`scope report batch`); address dossier (address + risk combined)
 - **Interactive Mode**: REPL with preserved context between commands for faster workflow
 - **Setup Wizard**: Guided first-run configuration with `scope setup` for API keys and preferences
 - **USD Valuation**: Native token balances enriched with real-time USD prices via DexScreener
@@ -85,6 +88,10 @@ scope export --address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --output data.
 scope token-health USDC
 scope health USDC --with-market --market-venue binance
 
+# Market peg and order book health
+scope market summary USDC
+scope market summary PUSD --market-venue biconomy --format json
+
 # Discover trending and boosted tokens
 scope discover
 scope discover --source boosts --chain ethereum --limit 10
@@ -102,11 +109,141 @@ scope --ai address 0x742d...
 scope interactive
 ```
 
+## Output Examples
+
+Representative output for key commands:
+
+### Discover (table)
+
+```bash
+> scope discover --limit 2
+```
+
+```text
+Featured Token Profiles (2) — limit 2
+--------------------------------------------------------------------------------
+  1. solana | 8dAsTqYBjG...h5Acpump | 8dAsTqYBjG9jyy7RkRhH8KkwmmZA7mFViWneh5Acpump...
+     https://dexscreener.com/solana/8dastqybjg9jyy7rkrhh8kkwmmza7mfviwneh5acpump
+  2. solana | BrRhmR14uo...cc4Xpump | -
+     https://dexscreener.com/solana/brrhmr14uohppfeuw6dcnxlpabsv5yz56zmpcc4xpump
+```
+
+### Discover (JSON)
+
+```bash
+> scope discover --format json --limit 1
+```
+
+```json
+[
+  {
+    "chain": "solana",
+    "address": "2CQfZ9wH3E4vCqKuGUkCzpZyXnhu7iwVbYc7ZAGfpump",
+    "description": "Token description...",
+    "url": "https://dexscreener.com/solana/2cqfz9wh3e4vcqkugukczpzyxnhu7iwvbyc7zagfpump"
+  }
+]
+```
+
+### Market summary (text)
+
+```bash
+> scope market summary USDC
+```
+
+```text
+  USDC/USDT Market Summary (binance)
+  ────────────────────────────────────────────
+  Venue:          binance
+  Peg Target:     1.0000
+  Best Bid:       1.0006  (+0.060%)
+  Best Ask:       1.0007  (+0.070%)
+  Mid Price:      1.0006  (+0.065%)
+  Spread:         0.0001  (0.010%)
+  Volume (24h):   ~2B USDT
+  Execution:      10k buy:  ~0.50 bps slippage
+  Execution:      10k sell: ~0.50 bps slippage
+
+  Ask Side:   40 levels    ... USDT depth
+  Bid Side:   52 levels    ... USDT depth
+```
+
+### Market summary (JSON)
+
+```bash
+> scope market summary USDC --format json
+```
+
+```json
+{
+  "pair": "USDC/USDT",
+  "venue": "binance",
+  "peg_target": 1.0,
+  "best_bid": 1.0006,
+  "best_ask": 1.0007,
+  "mid_price": 1.0006,
+  "spread": 0.0001,
+  "volume_24h": 2027214951.6,
+  "healthy": true,
+  "checks": [
+    {"status": "pass", "message": "No sells below peg"},
+    {"status": "pass", "message": "Bid/Ask ratio: 1.62x"}
+  ],
+  "execution_10k_buy": {"fillable": true, "slippage_bps": 0.5},
+  "execution_10k_sell": {"fillable": true, "slippage_bps": 0.5}
+}
+```
+
+### Token health
+
+```bash
+scope token-health USDC
+```
+
+```text
+Searching for 'USDC'...
+Selected: USDC (USDC) on ethereum - $1.00
+
+# Token Health: USDC (USDC)
+
+## DEX Analytics
+==================================================
+Price:           $1.00
+24h Change:      -0.02%
+24h Volume:      $75.47M
+Liquidity:       $13.36M
+Market Cap:      $73.24B
+```
+
+### Compliance risk
+
+```bash
+scope compliance risk 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
+```
+
+```text
+Assessing risk for 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 on ethereum...
+
+🟢 Risk Assessment Report
+════════════════════════════════════════════════════════════
+Address:             0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
+Chain:               ethereum
+Risk Score:          1.9/10
+Risk Level:          🟢 Low
+Assessed At:         2026-02-13 13:40 UTC
+
+💡 Recommendations
+────────────────────────────────────────────────────────────
+1. Standard monitoring
+```
+
 ## Compliance Features
 
 Scope includes enterprise-grade compliance and risk analysis. All compliance commands live under `scope compliance`:
 
 ### Risk Assessment
+
+See [Output Examples](#output-examples) for sample output.
 
 ```bash
 # Basic risk score
@@ -158,7 +295,7 @@ Compliance output formats: `table` (default), `json`, `yaml`, `markdown`.
 
 ## Token Crawling
 
-Crawl DEX data for any token by address or name. Supports searching by symbol, displaying ASCII charts, and generating markdown reports:
+Crawl DEX data for any token by address or name. Supports searching by symbol, displaying ASCII charts, and generating markdown reports. Token health output format is similar — see [Output Examples](#output-examples).
 
 ```bash
 # Crawl by contract address
@@ -208,6 +345,13 @@ scope discover --format csv --limit 5
 ```
 
 Sources: `profiles` (featured), `boosts` (recent), `top-boosts` (most active). No API key required.
+
+Example output:
+
+```text
+  1. solana | 8dAsTqYBjG...h5Acpump | Token description...
+     https://dexscreener.com/solana/8dastqybjg9jyy7rkrhh8kkwmmza7mfviwneh5acpump
+```
 
 ## Data Export
 
@@ -435,6 +579,8 @@ just lint      # Run lints
 just summary   # USDC market summary (peg, spread, volume, execution, health checks)
 ```
 
+**Git hooks**: A pre-push hook runs the coverage check (80% minimum, no regression) before allowing a push. Install with `just install-hooks`. Requires `cargo install cargo-tarpaulin`.
+
 ### Peg & Order Book Health (`scope market`)
 
 The `scope market summary` command fetches level-2 order book data from CEX (Binance, Biconomy) or DEX (Ethereum, Solana) venues and reports peg, book health, volume, and execution checks:
@@ -444,7 +590,7 @@ The `scope market summary` command fetches level-2 order book data from CEX (Bin
 - **Execution**: Simulated 10k USDT buy/sell slippage or "insufficient liquidity"
 - **Order book**: Ask/bid levels with depth (base and quote amounts)
 - **Health checks**: No sells below peg, bid/ask ratio, minimum levels and depth per side
-- **Output**: Text (default) or JSON
+- **Output**: Text (default) or JSON — see [Output Examples](#output-examples) for sample
 - **Tunable thresholds**: All health-check thresholds are configurable. Defaults (min-levels=6, min-depth=3000, peg-range=0.001, bid/ask ratio 0.2–5.0x) originated from the PUSD Hummingbot config—override for other markets.
 
 ```bash

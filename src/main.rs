@@ -3,12 +3,20 @@
 //! Entry point for the blockchain analysis command-line tool.
 //!
 //! This binary provides commands for:
-//! - Address analysis (`scope address`)
+//! - Address analysis (`scope address`) with `--report` and `--dossier`
 //! - Transaction analysis (`scope tx`)
+//! - Token crawling (`scope crawl`) with report generation
+//! - Token discovery (`scope discover` / `scope disc`)
 //! - Live token monitoring (`scope monitor`)
 //! - Market peg/order book health (`scope market summary`)
+//! - Token health suite (`scope token-health` / `scope health`)
 //! - Portfolio management (`scope portfolio`)
 //! - Data export (`scope export`)
+//! - Batch reporting (`scope report batch`)
+//! - Compliance (`scope compliance` risk, trace, analyze, compliance-report)
+//! - Interactive mode (`scope interactive`) and setup (`scope setup`)
+//!
+//! Global `--ai` flag forces markdown output for agent/LLM parsing.
 //!
 //! ## Usage
 //!
@@ -16,8 +24,12 @@
 //! scope --help
 //! scope address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
 //! scope tx 0xabc123...
+//! scope discover --source boosts --chain ethereum
+//! scope market summary USDC --format json
+//! scope token-health USDC --with-market
 //! scope monitor USDC --chain ethereum
 //! scope portfolio list
+//! scope report batch --addresses 0x... --output report.md --with-risk
 //! ```
 
 use anyhow::Result;

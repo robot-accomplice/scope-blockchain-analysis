@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Pre-push hook: run coverage check before allowing push
+# Install with: ./scripts/install-hooks.sh
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+exec "$REPO_ROOT/scripts/check-coverage.sh"

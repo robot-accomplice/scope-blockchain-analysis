@@ -7,6 +7,7 @@
 cobertura.xml
 tarpaulin-report.html
 lcov.info
+.coverage-last
 
 # IDE and editor files
 .idea/

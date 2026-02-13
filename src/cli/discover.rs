@@ -52,8 +52,15 @@ struct DiscoverRow {
 
 /// Run the discover command.
 pub async fn run(args: DiscoverArgs, format: OutputFormat) -> Result<()> {
-    let client = DexClient::new();
+    run_with_client(args, format, &DexClient::new()).await
+}
 
+/// Run the discover command with a provided DEX client (for testing).
+pub async fn run_with_client(
+    args: DiscoverArgs,
+    format: OutputFormat,
+    client: &DexClient,
+) -> Result<()> {
     let tokens = match args.source {
         DiscoverSource::Profiles => client.get_token_profiles().await?,
         DiscoverSource::Boosts => client.get_token_boosts().await?,
@@ -143,5 +150,171 @@ fn truncate_address(addr: &str) -> String {
         format!("{}...{}", &addr[..10], &addr[addr.len() - 8..])
     } else {
         addr.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chains::DexClient;
+    use crate::config::OutputFormat;
+
+    fn discover_json_body() -> String {
+        r#"[
+            {
+                "chainId": "ethereum",
+                "tokenAddress": "0x1234567890123456789012345678901234567890",
+                "url": "https://dexscreener.com/ethereum/0x1234",
+                "description": "A test token"
+            },
+            {
+                "chainId": "solana",
+                "tokenAddress": "So11111111111111111111111111111111111111112",
+                "url": "https://dexscreener.com/solana/So11",
+                "description": null
+            }
+        ]"#
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn test_discover_profiles_table() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/token-profiles/latest/v1")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(discover_json_body())
+            .create_async()
+            .await;
+
+        let client = DexClient::with_base_url(&server.url());
+        let args = DiscoverArgs {
+            source: DiscoverSource::Profiles,
+            chain: None,
+            limit: 15,
+            format: None,
+        };
+        let result = run_with_client(args, OutputFormat::Table, &client).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_discover_boosts_with_chain_filter() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/token-boosts/latest/v1")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(discover_json_body())
+            .create_async()
+            .await;
+
+        let client = DexClient::with_base_url(&server.url());
+        let args = DiscoverArgs {
+            source: DiscoverSource::Boosts,
+            chain: Some("ethereum".to_string()),
+            limit: 5,
+            format: None,
+        };
+        let result = run_with_client(args, OutputFormat::Table, &client).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_discover_top_boosts_json() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/token-boosts/top/v1")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(discover_json_body())
+            .create_async()
+            .await;
+
+        let client = DexClient::with_base_url(&server.url());
+        let args = DiscoverArgs {
+            source: DiscoverSource::TopBoosts,
+            chain: None,
+            limit: 10,
+            format: Some(OutputFormat::Json),
+        };
+        let result = run_with_client(args, OutputFormat::Json, &client).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_discover_empty_response() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/token-profiles/latest/v1")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("[]")
+            .create_async()
+            .await;
+
+        let client = DexClient::with_base_url(&server.url());
+        let args = DiscoverArgs {
+            source: DiscoverSource::Profiles,
+            chain: None,
+            limit: 15,
+            format: None,
+        };
+        let result = run_with_client(args, OutputFormat::Table, &client).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_discover_csv_format() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/token-profiles/latest/v1")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(discover_json_body())
+            .create_async()
+            .await;
+
+        let client = DexClient::with_base_url(&server.url());
+        let args = DiscoverArgs {
+            source: DiscoverSource::Profiles,
+            chain: None,
+            limit: 15,
+            format: Some(OutputFormat::Csv),
+        };
+        let result = run_with_client(args, OutputFormat::Csv, &client).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_discover_api_error() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/token-profiles/latest/v1")
+            .with_status(500)
+            .create_async()
+            .await;
+
+        let client = DexClient::with_base_url(&server.url());
+        let args = DiscoverArgs {
+            source: DiscoverSource::Profiles,
+            chain: None,
+            limit: 15,
+            format: None,
+        };
+        let result = run_with_client(args, OutputFormat::Table, &client).await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_truncate_address_short() {
+        assert_eq!(truncate_address("0x1234"), "0x1234");
+    }
+
+    #[test]
+    fn test_truncate_address_long() {
+        let addr = "0x1234567890123456789012345678901234567890";
+        assert_eq!(truncate_address(addr), "0x12345678...34567890");
     }
 }

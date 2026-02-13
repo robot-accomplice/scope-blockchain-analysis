@@ -162,3 +162,108 @@ fn capitalize_chain(chain: &str) -> String {
 pub fn save_address_report(report: &str, path: impl AsRef<Path>) -> Result<()> {
     save_report(report, path)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::address::{AddressReport, Balance, TokenBalance, TransactionSummary};
+
+    fn minimal_report() -> AddressReport {
+        AddressReport {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: "ethereum".to_string(),
+            balance: Balance {
+                raw: "1000000000000000000".to_string(),
+                formatted: "1.0 ETH".to_string(),
+                usd: Some(3500.0),
+            },
+            transaction_count: 10,
+            transactions: None,
+            tokens: None,
+        }
+    }
+
+    #[test]
+    fn test_generate_address_report_section_minimal() {
+        let report = minimal_report();
+        let md = generate_address_report_section(&report);
+        assert!(md.contains("Balance Summary"));
+        assert!(md.contains("1.0 ETH"));
+        assert!(md.contains("$3500.00"));
+        assert!(md.contains("Transaction Count"));
+        assert!(md.contains("No transaction data available"));
+        assert!(md.contains("No token balance data available"));
+    }
+
+    #[test]
+    fn test_generate_address_report_section_with_transactions() {
+        let mut report = minimal_report();
+        report.transactions = Some(vec![TransactionSummary {
+            hash: "0xabc123def456".to_string(),
+            block_number: 12345,
+            timestamp: 1700000000,
+            from: "0xfrom123".to_string(),
+            to: Some("0xto456".to_string()),
+            value: "1 ETH".to_string(),
+            status: true,
+        }]);
+        let md = generate_address_report_section(&report);
+        assert!(md.contains("Recent Transactions"));
+        assert!(md.contains("0xabc1"));
+        assert!(md.contains("12345"));
+    }
+
+    #[test]
+    fn test_generate_address_report_section_with_tokens() {
+        let mut report = minimal_report();
+        report.tokens = Some(vec![TokenBalance {
+            contract_address: "0xusdc".to_string(),
+            symbol: "USDC".to_string(),
+            name: "USD Coin".to_string(),
+            decimals: 6,
+            balance: "1000000".to_string(),
+            formatted_balance: "1.0 USDC".to_string(),
+        }]);
+        let md = generate_address_report_section(&report);
+        assert!(md.contains("Token Balances"));
+        assert!(md.contains("USDC"));
+        assert!(md.contains("USD Coin"));
+    }
+
+    #[test]
+    fn test_generate_address_report_full() {
+        let report = minimal_report();
+        let md = generate_address_report(&report);
+        assert!(md.contains("Address Analysis Report"));
+        assert!(md.contains("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2"));
+        assert!(md.contains("Ethereum"));
+    }
+
+    #[test]
+    fn test_generate_dossier_report() {
+        use crate::compliance::risk::{RiskAssessment, RiskCategory, RiskFactor, RiskLevel};
+        use chrono::Utc;
+
+        let report = minimal_report();
+        let risk = RiskAssessment {
+            address: report.address.clone(),
+            chain: report.chain.clone(),
+            overall_score: 3.5,
+            risk_level: RiskLevel::Low,
+            factors: vec![RiskFactor {
+                name: "Test factor".to_string(),
+                category: RiskCategory::Behavioral,
+                score: 3.0,
+                weight: 0.5,
+                description: "A test risk factor".to_string(),
+                evidence: vec!["evidence".to_string()],
+            }],
+            assessed_at: Utc::now(),
+            recommendations: vec!["Be cautious".to_string()],
+        };
+        let md = generate_dossier_report(&report, &risk);
+        assert!(md.contains("Wallet Dossier"));
+        assert!(md.contains("Risk Assessment"));
+        assert!(md.contains("Test factor"));
+    }
+}

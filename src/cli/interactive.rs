@@ -2050,7 +2050,7 @@ mod tests {
     #[tokio::test]
     async fn test_address_with_explicit_chain() {
         let config = test_config();
-        let factory = test_factory();
+        let factory = mock_factory();
         let mut context = SessionContext {
             chain: "polygon".to_string(),
             chain_explicit: true,
@@ -2072,7 +2072,7 @@ mod tests {
     #[tokio::test]
     async fn test_tx_with_explicit_chain() {
         let config = test_config();
-        let factory = test_factory();
+        let factory = mock_factory();
         let mut context = SessionContext {
             chain: "polygon".to_string(),
             chain_explicit: true,

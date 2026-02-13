@@ -26,9 +26,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Market command** (`scope market summary`): Peg and order book health for stablecoin markets
-- **Token Health Suite** (`scope token-health` / `scope health`): DEX + market composite
-- **Agent output** (`scope --ai`): Markdown to stdout for agent parsing
-- **Reporting**: address --report, market --report/--csv, portfolio --report, compliance compliance-report, report batch (--with-risk), address --dossier
+  - Venues: Binance, Biconomy (CEX); Ethereum DEX, Solana DEX
+  - Repeat mode: `--every` and `--duration` for periodic snapshots
+  - `--report` and `--csv` for time-series export
+- **Token Health Suite** (`scope token-health` / `scope health`): DEX analytics + optional order book
+  - `--with-market` and `--market-venue` (binance, biconomy, eth, solana)
+- **Agent output** (`scope --ai`): Markdown to stdout for agent/LLM parsing
+  - Affects: address, tx, crawl, discover, portfolio, export, token-health
+- **Reporting**: address --report/--dossier, market --report/--csv, portfolio summary --report, compliance risk --output, compliance compliance-report, report batch (--addresses, --from-file, --with-risk)
 - Report versioning footer on all reports
 
 ## [0.2.2] - 2026-02-08
