@@ -15,15 +15,19 @@
 //!   crawl        Crawl a token for analytics data
 //!   monitor      Live token monitor with real-time TUI dashboard
 //!   market       Peg and order book health for stablecoin markets
+//!   token-health Token health suite (DEX + optional market; alias: health)
 //!   portfolio    Portfolio management commands
 //!   export       Export analysis data
 //!   interactive  Interactive mode with preserved context
+//!   report       Batch and combined report generation
 //!   setup        Configure settings and API keys
 //!   compliance   Compliance and risk analysis commands
 //!
 //! Options:
 //!   --config <PATH>   Path to configuration file
 //!   -v, --verbose...  Increase logging verbosity
+//!   --ai              Markdown output for agent parsing
+//!   --no-color        Disable colored output
 //!   -h, --help        Print help
 //!   -V, --version     Print version
 //! ```
@@ -39,6 +43,7 @@ pub mod monitor;
 pub mod portfolio;
 pub mod report;
 pub mod setup;
+pub mod token_health;
 pub mod tx;
 
 use clap::{Parser, Subcommand};
@@ -90,6 +95,13 @@ pub struct Cli {
     /// Disable colored output.
     #[arg(long, global = true)]
     pub no_color: bool,
+
+    /// Output markdown to console for agent parsing.
+    ///
+    /// Forces all commands to emit markdown-formatted output to stdout
+    /// instead of tables or JSON. Useful for LLM/agent consumption.
+    #[arg(long, global = true)]
+    pub ai: bool,
 }
 
 /// Available CLI subcommands.
@@ -164,6 +176,13 @@ pub enum Commands {
     /// peg deviation, spread, depth, and configurable health checks.
     #[command(subcommand)]
     Market(market::MarketCommands),
+
+    /// Token health suite: DEX analytics + optional order book (crawl + market).
+    ///
+    /// Combines liquidity, volume, and holder data with optional market/peg
+    /// summary for stablecoins. Use --with-market for order book data.
+    #[command(visible_alias = "health")]
+    TokenHealth(token_health::TokenHealthArgs),
 
     /// Batch and combined report generation.
     #[command(subcommand)]
@@ -651,5 +670,106 @@ mod tests {
         } else {
             panic!("Expected Market Summary command");
         }
+    }
+
+    #[test]
+    fn test_cli_parse_token_health() {
+        let cli = Cli::try_parse_from(["scope", "token-health", "USDC"]).unwrap();
+        if let Commands::TokenHealth(args) = cli.command {
+            assert_eq!(args.token, "USDC");
+            assert!(!args.with_market);
+        } else {
+            panic!("Expected TokenHealth command");
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_token_health_alias() {
+        let cli = Cli::try_parse_from(["scope", "health", "USDC", "--with-market"]).unwrap();
+        if let Commands::TokenHealth(args) = cli.command {
+            assert_eq!(args.token, "USDC");
+            assert!(args.with_market);
+            assert!(matches!(
+                args.market_venue,
+                crate::market::MarketVenue::Binance
+            ));
+        } else {
+            panic!("Expected TokenHealth command");
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_token_health_market_venue_biconomy() {
+        let cli = Cli::try_parse_from([
+            "scope",
+            "token-health",
+            "USDC",
+            "--with-market",
+            "--market-venue",
+            "biconomy",
+        ])
+        .unwrap();
+        if let Commands::TokenHealth(args) = cli.command {
+            assert!(matches!(
+                args.market_venue,
+                crate::market::MarketVenue::Biconomy
+            ));
+        } else {
+            panic!("Expected TokenHealth command");
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_token_health_market_venue_eth() {
+        let cli = Cli::try_parse_from([
+            "scope",
+            "token-health",
+            "USDC",
+            "--with-market",
+            "--market-venue",
+            "eth",
+        ])
+        .unwrap();
+        if let Commands::TokenHealth(args) = cli.command {
+            assert!(matches!(
+                args.market_venue,
+                crate::market::MarketVenue::Ethereum
+            ));
+        } else {
+            panic!("Expected TokenHealth command");
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_token_health_market_venue_solana() {
+        let cli = Cli::try_parse_from([
+            "scope",
+            "token-health",
+            "USDC",
+            "--with-market",
+            "--market-venue",
+            "solana",
+        ])
+        .unwrap();
+        if let Commands::TokenHealth(args) = cli.command {
+            assert!(matches!(
+                args.market_venue,
+                crate::market::MarketVenue::Solana
+            ));
+        } else {
+            panic!("Expected TokenHealth command");
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_ai_flag() {
+        let cli = Cli::try_parse_from([
+            "scope",
+            "--ai",
+            "address",
+            "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
+        ])
+        .unwrap();
+        assert!(cli.ai);
     }
 }

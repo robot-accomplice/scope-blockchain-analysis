@@ -89,6 +89,15 @@ impl BlockchainDataClient {
         }
     }
 
+    /// Create client from ETHERSCAN_API_KEY env var if set.
+    /// Returns None if the key is not set (use RiskEngine::new() for basic scoring).
+    pub fn from_env_opt() -> Option<Self> {
+        std::env::var("ETHERSCAN_API_KEY").ok().map(|key| {
+            let sources = DataSources::new(key);
+            Self::new(sources)
+        })
+    }
+
     /// Fetch transaction history for an address
     pub async fn get_transactions(
         &self,

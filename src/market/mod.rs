@@ -7,7 +7,10 @@
 //!
 //! ## Supported Exchanges
 //!
+//! - **Binance**: Spot REST depth API (public, no auth)
 //! - **Biconomy**: CEX-style REST depth API
+//! - **Ethereum DEX**: Synthesized from DexScreener liquidity
+//! - **Solana DEX**: Synthesized from DexScreener liquidity
 //!
 //! ## Usage
 //!
@@ -27,6 +30,6 @@
 mod orderbook;
 
 pub use orderbook::{
-    BiconomyClient, HealthCheck, HealthThresholds, MarketSummary, OrderBook, OrderBookClient,
-    OrderBookLevel,
+    BiconomyClient, BinanceClient, HealthCheck, HealthThresholds, MarketSummary, MarketVenue,
+    OrderBook, OrderBookClient, OrderBookLevel, order_book_from_analytics,
 };

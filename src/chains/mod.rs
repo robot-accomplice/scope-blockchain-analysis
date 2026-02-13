@@ -22,7 +22,6 @@
 //! - **Optimism** - Optimism Mainnet
 //! - **Base** - Base (Coinbase L2)
 //! - **BSC** - BNB Smart Chain (Binance)
-//! - **Aegis** - Aegis/Wraith blockchain (JSON-RPC)
 //!
 //! ### Non-EVM Chains
 //!

@@ -280,8 +280,7 @@ async fn execute_input(
                 let new_chain = args[0].to_lowercase();
                 // Validate chain name
                 let valid_chains = [
-                    "ethereum", "polygon", "arbitrum", "optimism", "base", "bsc", "aegis",
-                    "solana", "tron",
+                    "ethereum", "polygon", "arbitrum", "optimism", "base", "bsc", "solana", "tron",
                 ];
                 if valid_chains.contains(&new_chain.as_str()) {
                     context.chain = new_chain.clone();
@@ -417,6 +416,7 @@ async fn execute_input(
                 include_tokens: context.include_tokens,
                 limit: context.limit,
                 report: None,
+                dossier: false,
             };
 
             // Check for other inline overrides
@@ -888,7 +888,7 @@ Navigation & Control:
 
 Context Settings:
   chain [name]      Set or show current chain
-                    Valid: ethereum, polygon, arbitrum, optimism, base, bsc, aegis, solana, tron
+                    Valid: ethereum, polygon, arbitrum, optimism, base, bsc, solana, tron
   format [fmt]      Set or show output format (table, json, csv)
   limit [n]         Set or show transaction limit
   +tokens           Toggle include_tokens flag for address analysis
@@ -1447,7 +1447,7 @@ mod tests {
     async fn test_all_valid_chains() {
         let config = test_config();
         let valid_chains = [
-            "ethereum", "polygon", "arbitrum", "optimism", "base", "bsc", "aegis", "solana", "tron",
+            "ethereum", "polygon", "arbitrum", "optimism", "base", "bsc", "solana", "tron",
         ];
         for chain in valid_chains {
             let mut ctx = SessionContext::default();

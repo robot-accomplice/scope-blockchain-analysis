@@ -18,6 +18,37 @@ pub fn generate_address_report_section(report: &AddressReport) -> String {
     generate_address_report_core(report, false, false)
 }
 
+/// Generates a combined dossier report: address analysis + risk assessment.
+/// Used when `scope address --dossier` is run with `--report`.
+pub fn generate_dossier_report(
+    report: &AddressReport,
+    risk: &crate::compliance::risk::RiskAssessment,
+) -> String {
+    let mut md = String::new();
+    md.push_str("# Wallet Dossier\n\n");
+    md.push_str(&format!(
+        "**Address:** `{}`  \n**Chain:** {}  \n**Generated:** {}  \n\n",
+        report.address,
+        capitalize_chain(&report.chain),
+        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+    ));
+    md.push_str("---\n\n");
+    md.push_str(&report_balance(report));
+    md.push_str("\n---\n\n");
+    md.push_str(&report_transactions(report));
+    md.push_str("\n---\n\n");
+    md.push_str(&report_tokens(report));
+    md.push_str("\n---\n\n");
+    md.push_str("## Risk Assessment\n\n");
+    md.push_str(&crate::display::format_risk_report(
+        risk,
+        crate::display::OutputFormat::Markdown,
+        true,
+    ));
+    md.push_str(&report_footer());
+    md
+}
+
 fn generate_address_report_core(
     report: &AddressReport,
     include_header: bool,

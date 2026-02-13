@@ -25,6 +25,7 @@ use clap::Parser;
 use scope::Config;
 use scope::chains::DefaultClientFactory;
 use scope::cli::{Cli, Commands};
+use scope::config::OutputFormat;
 use std::io::{self, Write};
 use tracing_subscriber::EnvFilter;
 
@@ -60,10 +61,15 @@ async fn main() -> Result<()> {
     let is_setup_command = matches!(cli.command, Commands::Setup(_));
 
     // Load configuration
-    let config = Config::load(cli.config.as_deref()).unwrap_or_else(|e| {
+    let mut config = Config::load(cli.config.as_deref()).unwrap_or_else(|e| {
         tracing::warn!("Failed to load config: {}, using defaults", e);
         Config::default()
     });
+
+    // --ai forces markdown output to console for agent parsing
+    if cli.ai {
+        config.output.format = OutputFormat::Markdown;
+    }
 
     // Check if config file exists and prompt for setup if needed
     if !is_setup_command && !config_file_exists(&cli) && prompt_for_setup() {
@@ -77,7 +83,10 @@ async fn main() -> Result<()> {
             eprintln!("Setup failed: {}", e);
         }
         // Reload config after setup
-        let config = Config::load(cli.config.as_deref()).unwrap_or_default();
+        let mut config = Config::load(cli.config.as_deref()).unwrap_or_default();
+        if cli.ai {
+            config.output.format = OutputFormat::Markdown;
+        }
         return run_command(cli.command, &config).await;
     }
 
@@ -119,6 +128,7 @@ async fn main() -> Result<()> {
             }
         },
         Commands::Market(cmd) => scope::cli::market::run(cmd, &config).await,
+        Commands::TokenHealth(args) => scope::cli::token_health::run(args, &config, &factory).await,
         Commands::Report(cmd) => scope::cli::report::run(cmd, &config, &factory).await,
     };
 
@@ -198,6 +208,7 @@ async fn run_command(command: Commands, config: &Config) -> Result<()> {
             }
         },
         Commands::Market(cmd) => scope::cli::market::run(cmd, config).await,
+        Commands::TokenHealth(args) => scope::cli::token_health::run(args, config, &factory).await,
         Commands::Report(cmd) => scope::cli::report::run(cmd, config, &factory).await,
     };
 

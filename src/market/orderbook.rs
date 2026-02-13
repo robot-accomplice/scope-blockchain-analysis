@@ -510,6 +510,202 @@ impl OrderBookClient for BiconomyClient {
     }
 }
 
+// =============================================================================
+// Binance Client
+// =============================================================================
+
+/// Binance Spot order book client.
+///
+/// Uses the public depth API: `GET /api/v3/depth?symbol=SYMBOL`
+/// Symbol format: base + quote with no separator (e.g., USDCUSDT).
+#[derive(Debug, Clone)]
+pub struct BinanceClient {
+    base_url: String,
+    client: Client,
+}
+
+impl BinanceClient {
+    /// Create a new Binance client with the given API base URL.
+    pub fn new(base_url: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into().trim_end_matches('/').to_string(),
+            client: Client::builder()
+                .timeout(Duration::from_secs(15))
+                .build()
+                .expect("reqwest client build"),
+        }
+    }
+
+    /// Create client with default Binance API URL.
+    pub fn default_url() -> Self {
+        Self::new("https://api.binance.com")
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct BinanceDepthResponse {
+    asks: Option<Vec<[String; 2]>>,
+    bids: Option<Vec<[String; 2]>>,
+}
+
+#[async_trait]
+impl OrderBookClient for BinanceClient {
+    async fn fetch_order_book(&self, pair_symbol: &str) -> Result<OrderBook> {
+        let url = format!(
+            "{}/api/v3/depth?symbol={}&limit=100",
+            self.base_url,
+            urlencoding::encode(pair_symbol)
+        );
+
+        let resp = self.client.get(&url).send().await?;
+        if !resp.status().is_success() {
+            return Err(ScopeError::Chain(format!(
+                "Binance API error: HTTP {}",
+                resp.status()
+            )));
+        }
+
+        let raw: BinanceDepthResponse = resp
+            .json()
+            .await
+            .map_err(|e| ScopeError::Chain(format!("Binance depth parse error: {}", e)))?;
+
+        let asks = raw.asks.unwrap_or_default();
+        let bids = raw.bids.unwrap_or_default();
+
+        let parse_level = |p: &str, q: &str| -> Result<OrderBookLevel> {
+            let price = p
+                .parse::<f64>()
+                .map_err(|_| ScopeError::Chain(format!("Invalid price: {}", p)))?;
+            let quantity = q
+                .parse::<f64>()
+                .map_err(|_| ScopeError::Chain(format!("Invalid quantity: {}", q)))?;
+            Ok(OrderBookLevel { price, quantity })
+        };
+
+        let mut ask_levels = Vec::with_capacity(asks.len());
+        for [p, q] in &asks {
+            ask_levels.push(parse_level(p, q)?);
+        }
+        ask_levels.sort_by(|a, b| {
+            a.price
+                .partial_cmp(&b.price)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let mut bid_levels = Vec::with_capacity(bids.len());
+        for [p, q] in &bids {
+            bid_levels.push(parse_level(p, q)?);
+        }
+        bid_levels.sort_by(|a, b| {
+            b.price
+                .partial_cmp(&a.price)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Binance symbols are concatenated (USDCUSDT); display as base/quote
+        let pair = if pair_symbol.len() > 4 && pair_symbol.ends_with("USDT") {
+            format!("{}/USDT", &pair_symbol[..pair_symbol.len() - 4])
+        } else {
+            pair_symbol.to_string()
+        };
+
+        Ok(OrderBook {
+            pair,
+            bids: bid_levels,
+            asks: ask_levels,
+        })
+    }
+}
+
+// =============================================================================
+// Venue abstraction
+// =============================================================================
+
+/// Supported market venues for order book data.
+///
+/// CEX venues (Binance, Biconomy) use REST depth APIs.
+/// DEX venues (Ethereum, Solana) synthesize depth from DEX liquidity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum MarketVenue {
+    /// Binance Spot (symbol format: USDCUSDT).
+    #[default]
+    Binance,
+
+    /// Biconomy exchange (symbol format: USDC_USDT).
+    Biconomy,
+
+    /// Ethereum DEX liquidity (Uniswap, etc.) via DexScreener.
+    #[value(name = "eth")]
+    Ethereum,
+
+    /// Solana DEX liquidity (Raydium, Orca, etc.) via DexScreener.
+    Solana,
+}
+
+impl MarketVenue {
+    /// Whether this venue uses a CEX REST API (needs pair symbol).
+    pub fn is_cex(&self) -> bool {
+        matches!(self, MarketVenue::Binance | MarketVenue::Biconomy)
+    }
+
+    /// Format the trading pair for CEX venues (base + USDT quote).
+    pub fn format_pair(&self, base_symbol: &str) -> String {
+        match self {
+            MarketVenue::Binance => format!("{}USDT", base_symbol),
+            MarketVenue::Biconomy => format!("{}_USDT", base_symbol),
+            MarketVenue::Ethereum | MarketVenue::Solana => format!("{}/USDT", base_symbol),
+        }
+    }
+
+    /// Create an OrderBookClient for CEX venues.
+    /// Returns None for DEX venues (use `order_book_from_analytics` instead).
+    pub fn create_client(&self) -> Option<Box<dyn OrderBookClient>> {
+        match self {
+            MarketVenue::Binance => Some(Box::new(BinanceClient::default_url())),
+            MarketVenue::Biconomy => {
+                Some(Box::new(BiconomyClient::new("https://api.biconomy.com")))
+            }
+            MarketVenue::Ethereum | MarketVenue::Solana => None,
+        }
+    }
+}
+
+/// Builds a synthetic order book from DEX analytics (used for Ethereum/Solana venues).
+pub fn order_book_from_analytics(
+    _chain: &str,
+    pair: &crate::chains::DexPair,
+    symbol: &str,
+) -> OrderBook {
+    let price = pair.price_usd;
+    let liquidity = pair.liquidity_usd;
+    // Synthetic bid/ask spread ±0.1% around mid
+    let bid_price = price * 0.999;
+    let ask_price = price * 1.001;
+    let half_liq = liquidity / 2.0;
+    let bid_qty = if bid_price > 0.0 {
+        half_liq / bid_price
+    } else {
+        0.0
+    };
+    let ask_qty = if ask_price > 0.0 {
+        half_liq / ask_price
+    } else {
+        0.0
+    };
+    OrderBook {
+        pair: format!("{}/USDT", symbol),
+        bids: vec![OrderBookLevel {
+            price: bid_price,
+            quantity: bid_qty,
+        }],
+        asks: vec![OrderBookLevel {
+            price: ask_price,
+            quantity: ask_qty,
+        }],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

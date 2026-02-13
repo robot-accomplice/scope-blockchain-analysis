@@ -27,8 +27,11 @@
 //!   filtering. Chain auto-detection for addresses.
 //!
 //! - **Market Health**: Peg and order book health for stablecoin markets. Fetches
-//!   level-2 depth from exchange APIs, runs configurable health checks (peg safety,
-//!   bid/ask ratio, depth thresholds), supports one-shot or repeated runs.
+//!   level-2 depth from Binance, Biconomy, or DEX liquidity (Ethereum/Solana via DexScreener).
+//!   Configurable health checks (peg safety, bid/ask ratio, depth thresholds).
+//!
+//! - **Token Health Suite**: Composite command (`scope token-health`) combining DEX analytics
+//!   with optional market/order book summary. Venues: binance, biconomy, eth, solana.
 //!
 //! - **USD Valuation**: Native token prices via DexScreener for all supported
 //!   chains (ETH, SOL, BNB, MATIC, etc.).
@@ -43,7 +46,6 @@
 //! - Optimism
 //! - Base
 //! - BSC (BNB Smart Chain)
-//! - Aegis (Wraith)
 //!
 //! ### Non-EVM
 //!
@@ -110,7 +112,6 @@
 //!   # EVM chains
 //!   ethereum_rpc: "https://mainnet.infura.io/v3/YOUR_KEY"
 //!   bsc_rpc: "https://bsc-dataseed.binance.org"
-//!   aegis_rpc: "http://localhost:8545"
 //!
 //!   # Non-EVM chains
 //!   solana_rpc: "https://api.mainnet-beta.solana.com"
@@ -124,7 +125,7 @@
 //!     tronscan: "YOUR_TRONSCAN_KEY"
 //!
 //! output:
-//!   format: table  # table, json, csv
+//!   format: table  # table, json, csv, markdown
 //!   color: true
 //!
 //! portfolio:

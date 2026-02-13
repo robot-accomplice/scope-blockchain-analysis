@@ -2,6 +2,8 @@
 
 Dataflow for `scope market summary [PAIR] [OPTIONS]` — peg and order book health.
 
+**Venues:** Biconomy (shown below), Binance Spot, and via `scope token-health`: Ethereum DEX / Solana DEX (synthesized from DexScreener liquidity).
+
 ```mermaid
 flowchart TB
     subgraph Input

@@ -9,11 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Market command** (`scope market summary`): Peg and order book health for stablecoin markets
-  - Fetches level-2 depth from exchange APIs (Biconomy)
+  - Fetches level-2 depth from Binance, Biconomy, or DEX liquidity (Ethereum/Solana)
   - Configurable health checks: peg safety, bid/ask ratio, min levels, min depth
   - All thresholds configurable via CLI (--peg-range, --min-bid-ask-ratio, --max-bid-ask-ratio, etc.)
   - Optional repeated runs (--every, --duration)
   - Text and JSON output; chain/venue display
+- **Token Health Suite** (`scope token-health` / `scope health`): Composite DEX + market command
+  - DEX analytics (crawl) with optional order book summary
+  - Market venues: binance (default), biconomy, eth, solana
+  - CEX: Binance Spot and Biconomy REST APIs; DEX: synthesized from DexScreener liquidity
+- **Agent output** (`scope --ai`): Markdown to stdout for all supported commands (address, tx, crawl, portfolio, export, token-health)
 - **Reporting and analytics**:
   - `scope address --report report.md`: Markdown report for address analysis
   - `scope market summary --report path.md`: Save peg/orderbook report to file
@@ -22,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `scope compliance risk --output file`: Export respects format (.json, .yaml, .md)
   - `scope compliance compliance-report`: Unified compliance report (risk + pattern analysis) for addresses
   - `scope report batch`: Batch report for multiple addresses (--addresses, --from-file)
+  - `scope report batch --with-risk`: Include risk assessment per address
+  - `scope address --dossier`: Combined address analysis + risk assessment (implies --include-txs, --include-tokens)
   - Report versioning: All reports include Scope version and timestamp footer
 
 ## [0.2.2] - 2026-02-08
@@ -34,7 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Initial release of Scope Blockchain Analysis
-- Multi-chain support: Ethereum, Polygon, Arbitrum, Optimism, Base, BSC, Aegis, Solana, Tron
+- Multi-chain support: Ethereum, Polygon, Arbitrum, Optimism, Base, BSC, Solana, Tron
 - Address analysis with USD valuation via DexScreener
 - Transaction decoding and tracing
 - Token crawling with risk reports

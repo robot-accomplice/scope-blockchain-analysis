@@ -36,6 +36,10 @@ pub struct BatchArgs {
     /// Default chain for addresses (when not specified per-address).
     #[arg(short, long, default_value = "ethereum")]
     pub chain: String,
+
+    /// Include risk assessment per address (uses ETHERSCAN_API_KEY for Ethereum).
+    #[arg(long, default_value_t = false)]
+    pub with_risk: bool,
 }
 
 /// Run the report command.
@@ -62,10 +66,17 @@ async fn run_batch(
     }
 
     println!(
-        "Generating batch report for {} address(es)...",
-        targets.len()
+        "Generating batch report for {} address(es){}...",
+        targets.len(),
+        if args.with_risk { " (with risk)" } else { "" }
     );
     let mut reports = Vec::new();
+    let mut risk_assessments: Vec<Option<crate::compliance::risk::RiskAssessment>> = Vec::new();
+
+    let engine = match crate::compliance::datasource::BlockchainDataClient::from_env_opt() {
+        Some(client) => crate::compliance::risk::RiskEngine::with_data_client(client),
+        None => crate::compliance::risk::RiskEngine::new(),
+    };
 
     for (address, chain) in &targets {
         let addr_args = AddressArgs {
@@ -76,18 +87,27 @@ async fn run_batch(
             include_tokens: true,
             limit: 50,
             report: None,
+            dossier: false,
         };
 
         let client = clients.create_chain_client(chain)?;
         match address::analyze_address(&addr_args, client.as_ref()).await {
-            Ok(report) => reports.push(report),
+            Ok(report) => {
+                let risk = if args.with_risk {
+                    engine.assess_address(address, chain).await.ok()
+                } else {
+                    None
+                };
+                reports.push(report);
+                risk_assessments.push(risk);
+            }
             Err(e) => {
                 eprintln!("Warning: Failed to analyze {}: {}", address, e);
             }
         }
     }
 
-    let md = batch_report_to_markdown(&reports);
+    let md = batch_report_to_markdown(&reports, &risk_assessments, args.with_risk);
     std::fs::write(&args.output, &md)?;
     println!("\nBatch report saved to: {}", args.output.display());
     Ok(())
@@ -139,11 +159,20 @@ fn resolve_targets(args: &BatchArgs) -> Result<Vec<(String, String)>> {
     Ok(targets)
 }
 
-fn batch_report_to_markdown(reports: &[AddressReport]) -> String {
+fn batch_report_to_markdown(
+    reports: &[AddressReport],
+    risks: &[Option<crate::compliance::risk::RiskAssessment>],
+    with_risk: bool,
+) -> String {
     let mut md = format!(
-        "# Batch Address Report\n\n\
+        "# Batch Address Report{}\n\n\
         **Generated:** {}  \n\
         **Addresses:** {}  \n\n",
+        if with_risk {
+            " (with Risk Assessment)"
+        } else {
+            ""
+        },
         chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC"),
         reports.len()
     );
@@ -155,6 +184,19 @@ fn batch_report_to_markdown(reports: &[AddressReport]) -> String {
             report.address
         ));
         md.push_str(&address_report::generate_address_report_section(report));
+
+        if with_risk {
+            if let Some(risk) = risks.get(i).and_then(|r| r.as_ref()) {
+                md.push_str("\n### Risk Assessment\n\n");
+                md.push_str(&crate::display::format_risk_report(
+                    risk,
+                    crate::display::OutputFormat::Markdown,
+                    false,
+                ));
+            } else {
+                md.push_str("\n### Risk Assessment\n\n*Risk assessment unavailable for this address/chain.*\n");
+            }
+        }
         md.push('\n');
     }
 

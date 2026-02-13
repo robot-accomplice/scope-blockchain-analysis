@@ -22,7 +22,7 @@ A production-grade command-line tool for blockchain data analysis, portfolio tra
 - **Setup Wizard**: Guided first-run configuration with `scope setup` for API keys and preferences
 - **USD Valuation**: Native token balances enriched with real-time USD prices via DexScreener
 - **Multi-Chain Support**:
-  - EVM chains: Ethereum, Polygon, Arbitrum, Optimism, Base, BSC, Aegis
+  - EVM chains: Ethereum, Polygon, Arbitrum, Optimism, Base, BSC
   - Non-EVM chains: Solana, Tron
 
 ## Installation
@@ -52,6 +52,10 @@ scope address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --include-txs --include
 # Save address report to markdown
 scope address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --report report.md
 
+# Wallet dossier: address + risk assessment in one view
+scope address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --dossier
+scope address 0x742d... --dossier --report dossier.md
+
 # Analyze addresses on other chains (auto-detected or explicit)
 scope address DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy --chain solana
 scope address TDqSquXBgUCLYvYC4XZgrprLK589dkhSCf --chain tron
@@ -76,8 +80,18 @@ scope mon PEPE --chain ethereum --layout chart-focus  # short alias with options
 # Export data
 scope export --address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --output data.json
 
+# Token health (DEX + optional market)
+scope token-health USDC
+scope health USDC --with-market --market-venue binance
+
 # Batch report for multiple addresses
 scope report batch --addresses 0x742d...,0xabc... --output batch-report.md
+
+# Batch report with risk assessment per address
+scope report batch --addresses 0x742d...,0xabc... --output batch-report.md --with-risk
+
+# Agent-friendly markdown output
+scope --ai address 0x742d...
 
 # Interactive mode (includes live monitor, portfolio, and all commands)
 scope interactive
@@ -308,7 +322,6 @@ chains:
   # EVM-compatible chains
   ethereum_rpc: "https://mainnet.infura.io/v3/YOUR_KEY"
   bsc_rpc: "https://bsc-dataseed.binance.org"
-  aegis_rpc: "http://localhost:8545"
 
   # Non-EVM chains
   solana_rpc: "https://api.mainnet-beta.solana.com"
@@ -322,7 +335,7 @@ chains:
     tronscan: "YOUR_API_KEY"
 
 output:
-  format: table  # table, json, or csv
+  format: table  # table, json, csv, or markdown
   color: true
 
 portfolio:
@@ -418,6 +431,33 @@ scope market summary --every 1m                   # Every 1 min for 1h (default 
 
 `just summary` invokes `scope market summary` under the hood.
 
+### Token Health Suite (`scope token-health` / `scope health`)
+
+Combines DEX analytics (crawl) with optional market/order book summary for stablecoins:
+
+```bash
+scope token-health USDC              # DEX liquidity, volume, holders (table)
+scope health USDC --with-market      # + order book/peg (default: Binance)
+scope token-health USDC --with-market --market-venue biconomy
+scope token-health USDC --format json
+scope token-health USDC --ai         # Markdown to console for agent parsing
+```
+
+With `--with-market`, order book data is fetched from the selected venue (`--market-venue`): **binance** (default), **biconomy**, **eth** (Ethereum DEX), **solana** (Solana DEX). CEX pair format: binance=USDCUSDT, biconomy=USDC_USDT. DEX venues use on-chain liquidity from the selected chain.
+
+### Agent-Oriented Output (`--ai`)
+
+Use `--ai` to emit markdown-formatted output to stdout instead of tables or JSON. Useful for LLM/agent consumption and parsing:
+
+```bash
+scope --ai address 0x742d35Cc...
+scope --ai crawl USDC
+scope --ai portfolio list
+scope --ai token-health USDC
+```
+
+`--ai` affects all commands that support output formatting (address, tx, crawl, portfolio, export, token-health).
+
 Additional market options:
 
 - `--report path.md`: Save markdown report to file (one-shot or final report in repeat mode)
@@ -430,6 +470,7 @@ Scope supports markdown and structured report generation across commands:
 | Command | Report Option | Description |
 | --------- | --------------- | -------------- |
 | `scope address` | `--report report.md` | Address analysis (balance, transactions, tokens) |
+| `scope address` | `--dossier` / `--dossier --report dossier.md` | Address + risk assessment combined |
 | `scope crawl` | `--report report.md` | Token analytics with risk scoring |
 | `scope portfolio summary` | `--report report.md` | Portfolio allocations by chain and address |
 | `scope market summary` | `--report report.md` | Peg and order book health |
@@ -437,6 +478,9 @@ Scope supports markdown and structured report generation across commands:
 | `scope compliance risk` | `--output file` | Risk assessment (format from extension: .json, .yaml, .md) |
 | `scope compliance compliance-report` | `--output file` | Unified risk + pattern analysis (markdown) |
 | `scope report batch` | `--addresses a,b,c` or `--from-file path` + `--output report.md` | Combined report for multiple addresses |
+| `scope report batch` | `--with-risk` | Include risk assessment per address (uses ETHERSCAN_API_KEY) |
+| `scope token-health` | `USDC`, `--with-market`, `--market-venue binance\|biconomy\|eth\|solana` | DEX + optional market composite |
+| `scope` | `--ai` (global) | Markdown console output for agent parsing |
 
 All reports include version and timestamp metadata for audit trail.
 
@@ -450,7 +494,6 @@ All reports include version and timestamp metadata for audit trail.
 | Optimism | EVM | 0x... | Optimistic Etherscan |
 | Base | EVM | 0x... | Basescan |
 | BSC | EVM | 0x... | BscScan |
-| Aegis | EVM | 0x... | JSON-RPC |
 | Solana | Non-EVM | Base58 | Solscan |
 | Tron | Non-EVM | T... | Tronscan |
 

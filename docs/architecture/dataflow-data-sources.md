@@ -79,3 +79,15 @@ flowchart LR
     E --> F[MarketSummary::from_order_book]
     F --> G[Health checks]
 ```
+
+## Binance Spot Order Book
+
+```mermaid
+flowchart LR
+    A[BinanceClient] --> B[fetch_order_book]
+    B --> C[GET api.binance.com/api/v3/depth?symbol=PAIR]
+    C --> D[Parse: asks, bids]
+    D --> E[OrderBook]
+    E --> F[MarketSummary::from_order_book]
+    F --> G[Health checks]
+```

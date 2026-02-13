@@ -372,6 +372,29 @@ async fn run_list(data_dir: &std::path::Path, format: OutputFormat) -> Result<()
             }
             println!("\nTotal: {} addresses", portfolio.addresses.len());
         }
+        OutputFormat::Markdown => {
+            let mut md = "# Portfolio Addresses\n\n".to_string();
+            md.push_str("| Address | Chain | Label | Tags |\n|---------|-------|-------|------|\n");
+            for addr in &portfolio.addresses {
+                let tags = if addr.tags.is_empty() {
+                    "-".to_string()
+                } else {
+                    addr.tags.join(", ")
+                };
+                md.push_str(&format!(
+                    "| `{}` | {} | {} | {} |\n",
+                    addr.address,
+                    addr.chain,
+                    addr.label.as_deref().unwrap_or("-"),
+                    tags
+                ));
+            }
+            md.push_str(&format!(
+                "\n**Total:** {} addresses\n",
+                portfolio.addresses.len()
+            ));
+            println!("{}", md);
+        }
     }
 
     Ok(())
@@ -493,6 +516,10 @@ async fn run_summary(
                 println!();
                 println!("Total Value: ${:.2}", total);
             }
+        }
+        OutputFormat::Markdown => {
+            let md = portfolio_summary_to_markdown(&summary);
+            println!("{}", md);
         }
     }
 
