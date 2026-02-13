@@ -84,6 +84,5 @@ jobs:
       - name: Verify package
         run: cargo publish --dry-run
       
-      # Uncomment to enable actual publishing
-      # - name: Publish to crates.io
-      #   run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - name: Publish to crates.io
+        run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
