@@ -209,4 +209,55 @@ mod tests {
         assert!(debug.contains("OFAC"));
         assert!(debug.contains("0.85"));
     }
+
+    #[test]
+    fn test_sanctions_check_result_empty_lists() {
+        let result = SanctionsCheckResult {
+            is_sanctioned: false,
+            lists_checked: vec![],
+            matches: vec![],
+        };
+        let summary = result.summary();
+        assert!(summary.contains("No sanctions matches"));
+        assert!(summary.contains("Checked: "));
+    }
+
+    #[test]
+    fn test_sanctions_check_result_sanctioned_summary() {
+        let result = SanctionsCheckResult {
+            is_sanctioned: true,
+            lists_checked: vec!["OFAC".to_string(), "EU".to_string()],
+            matches: vec![
+                SanctionsMatch {
+                    list_name: "OFAC".to_string(),
+                    entity_name: "Entity A".to_string(),
+                    match_type: MatchType::Exact,
+                    confidence: 1.0,
+                },
+                SanctionsMatch {
+                    list_name: "EU".to_string(),
+                    entity_name: "Entity B".to_string(),
+                    match_type: MatchType::Partial,
+                    confidence: 0.9,
+                },
+            ],
+        };
+        let summary = result.summary();
+        assert!(summary.contains("SANCTIONS MATCH"));
+        assert!(summary.contains("2 lists"));
+        assert!(summary.contains("2 matches"));
+    }
+
+    #[test]
+    fn test_sanctions_match_clone() {
+        let m = SanctionsMatch {
+            list_name: "OFAC".to_string(),
+            entity_name: "Test".to_string(),
+            match_type: MatchType::Associated,
+            confidence: 0.75,
+        };
+        let cloned = m.clone();
+        assert_eq!(cloned.list_name, "OFAC");
+        assert_eq!(cloned.confidence, 0.75);
+    }
 }

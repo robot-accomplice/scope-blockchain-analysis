@@ -154,6 +154,21 @@ async fn export_portfolio(args: &ExportArgs, format: OutputFormat, config: &Conf
                 "Table format not supported for file export".to_string(),
             ));
         }
+        OutputFormat::Markdown => {
+            let mut md = "# Portfolio Export\n\n".to_string();
+            md.push_str("| Address | Label | Chain | Tags | Added |\n|---------|-------|-------|------|-------|\n");
+            for addr in &portfolio.addresses {
+                md.push_str(&format!(
+                    "| `{}` | {} | {} | {} | {} |\n",
+                    addr.address,
+                    addr.label.as_deref().unwrap_or("-"),
+                    addr.chain,
+                    addr.tags.join(", "),
+                    addr.added_at
+                ));
+            }
+            md
+        }
     };
 
     std::fs::write(&args.output, &content)?;
@@ -268,6 +283,30 @@ async fn export_address(
             return Err(ScopeError::Export(
                 "Table format not supported for file export".to_string(),
             ));
+        }
+        OutputFormat::Markdown => {
+            let mut md = format!(
+                "# Transaction Export\n\n**Address:** `{}`  \n**Chain:** {}  \n**Transactions:** {}  \n\n",
+                address,
+                chain,
+                transactions.len()
+            );
+            md.push_str("| Hash | Block | Timestamp | From | To | Value | Gas | Status |\n");
+            md.push_str("|------|-------|-----------|------|----|-------|-----|--------|\n");
+            for tx in &transactions {
+                md.push_str(&format!(
+                    "| `{}` | {} | {} | `{}` | `{}` | {} | {} | {} |\n",
+                    tx.hash,
+                    tx.block_number,
+                    tx.timestamp,
+                    tx.from,
+                    tx.to.as_deref().unwrap_or("-"),
+                    tx.value,
+                    tx.gas_used,
+                    tx.status
+                ));
+            }
+            md
         }
     };
 

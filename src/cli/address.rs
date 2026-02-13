@@ -36,7 +36,7 @@ pub struct AddressArgs {
 
     /// Target blockchain network.
     ///
-    /// EVM chains: ethereum, polygon, arbitrum, optimism, base, bsc, aegis
+    /// EVM chains: ethereum, polygon, arbitrum, optimism, base, bsc
     /// Non-EVM chains: solana, tron
     #[arg(short, long, default_value = "ethereum")]
     pub chain: String,
@@ -56,6 +56,17 @@ pub struct AddressArgs {
     /// Maximum number of transactions to retrieve.
     #[arg(long, default_value = "100")]
     pub limit: u32,
+
+    /// Generate and save a markdown report to the specified path.
+    #[arg(long, value_name = "PATH")]
+    pub report: Option<std::path::PathBuf>,
+
+    /// Produce a combined dossier: address analysis + risk assessment.
+    ///
+    /// Implies --include-txs and --include-tokens. Uses ETHERSCAN_API_KEY
+    /// for enhanced risk analysis on Ethereum.
+    #[arg(long, default_value_t = false)]
+    pub dossier: bool,
 }
 
 /// Result of an address analysis.
@@ -182,20 +193,78 @@ pub async fn run(
     // Validate address format
     validate_address(&args.address, &args.chain)?;
 
+    // Dossier implies full picture: txs + tokens
+    let mut analysis_args = args.clone();
+    if args.dossier {
+        analysis_args.include_txs = true;
+        analysis_args.include_tokens = true;
+    }
+
     println!("Analyzing address on {}...", args.chain);
 
     let client = clients.create_chain_client(&args.chain)?;
-    let report = analyze_address(&args, client.as_ref()).await?;
+    let report = analyze_address(&analysis_args, client.as_ref()).await?;
+
+    // Dossier: fetch risk assessment (uses ETHERSCAN_API_KEY for Ethereum)
+    let risk_assessment = if args.dossier {
+        let engine = match crate::compliance::datasource::BlockchainDataClient::from_env_opt() {
+            Some(client) => crate::compliance::risk::RiskEngine::with_data_client(client),
+            None => crate::compliance::risk::RiskEngine::new(),
+        };
+        engine.assess_address(&args.address, &args.chain).await.ok()
+    } else {
+        None
+    };
 
     // Output based on format
     let format = args.format.unwrap_or(config.output.format);
-    output_report(&report, format)?;
+    if format == OutputFormat::Markdown {
+        if args.dossier && risk_assessment.as_ref().is_some() {
+            let risk = risk_assessment.as_ref().unwrap();
+            println!(
+                "{}",
+                crate::cli::address_report::generate_dossier_report(&report, risk)
+            );
+        } else {
+            println!(
+                "{}",
+                crate::cli::address_report::generate_address_report(&report)
+            );
+        }
+    } else if args.dossier && risk_assessment.is_some() {
+        let risk = risk_assessment.as_ref().unwrap();
+        output_report(&report, format)?;
+        println!();
+        let risk_output =
+            crate::display::format_risk_report(risk, crate::display::OutputFormat::Table, true);
+        println!("{}", risk_output);
+    } else {
+        output_report(&report, format)?;
+    }
+
+    // Generate report if requested
+    if let Some(ref report_path) = args.report {
+        let markdown_report = if args.dossier {
+            risk_assessment
+                .as_ref()
+                .map(|r| crate::cli::address_report::generate_dossier_report(&report, r))
+                .unwrap_or_else(|| crate::cli::address_report::generate_address_report(&report))
+        } else {
+            crate::cli::address_report::generate_address_report(&report)
+        };
+        crate::cli::address_report::save_address_report(&markdown_report, report_path)?;
+        println!("\nReport saved to: {}", report_path.display());
+    }
 
     Ok(())
 }
 
 /// Analyzes an address using a unified chain client.
-async fn analyze_address(args: &AddressArgs, client: &dyn ChainClient) -> Result<AddressReport> {
+/// Exposed for use by batch report and other commands.
+pub async fn analyze_address(
+    args: &AddressArgs,
+    client: &dyn ChainClient,
+) -> Result<AddressReport> {
     // Fetch balance
     let mut chain_balance = client.get_balance(&args.address).await?;
     client.enrich_balance_usd(&mut chain_balance).await;
@@ -304,7 +373,7 @@ fn validate_address(address: &str, chain: &str) -> Result<()> {
         }
         _ => {
             return Err(crate::error::ScopeError::Chain(format!(
-                "Unsupported chain: {}. Supported: ethereum, polygon, arbitrum, optimism, base, bsc, aegis, solana, tron",
+                "Unsupported chain: {}. Supported: ethereum, polygon, arbitrum, optimism, base, bsc, solana, tron",
                 chain
             )));
         }
@@ -349,6 +418,12 @@ fn output_report(report: &AddressReport, format: OutputFormat) -> Result<()> {
                     );
                 }
             }
+        }
+        OutputFormat::Markdown => {
+            println!(
+                "{}",
+                crate::cli::address_report::generate_address_report(report)
+            );
         }
     }
     Ok(())
@@ -682,6 +757,8 @@ mod tests {
             include_txs: false,
             include_tokens: false,
             limit: 10,
+            report: None,
+            dossier: false,
         };
         let result = super::run(args, &config, &factory).await;
         assert!(result.is_ok());
@@ -699,6 +776,8 @@ mod tests {
             include_txs: true,
             include_tokens: false,
             limit: 10,
+            report: None,
+            dossier: false,
         };
         let result = super::run(args, &config, &factory).await;
         assert!(result.is_ok());
@@ -726,6 +805,8 @@ mod tests {
             include_txs: false,
             include_tokens: true,
             limit: 10,
+            report: None,
+            dossier: false,
         };
         let result = super::run(args, &config, &factory).await;
         assert!(result.is_ok());
@@ -744,6 +825,8 @@ mod tests {
             include_txs: false,
             include_tokens: false,
             limit: 10,
+            report: None,
+            dossier: false,
         };
         let result = super::run(args, &config, &factory).await;
         assert!(result.is_ok());
@@ -760,6 +843,8 @@ mod tests {
             include_txs: false,
             include_tokens: false,
             limit: 10,
+            report: None,
+            dossier: false,
         };
         let result = super::run(args, &config, &factory).await;
         assert!(result.is_ok());
@@ -788,6 +873,8 @@ mod tests {
             include_txs: true,
             include_tokens: true,
             limit: 50,
+            report: None,
+            dossier: false,
         };
         let result = super::run(args, &config, &factory).await;
         assert!(result.is_ok());

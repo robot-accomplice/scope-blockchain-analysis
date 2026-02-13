@@ -1,0 +1,12 @@
+---
+description: Personal project - no Linear, simplified workflow
+alwaysApply: true
+---
+
+# scope-blockchain-analysis Project Context
+
+This is a **personal project**. It does not use Linear.
+
+- Do not require or suggest Linear issue links in PRs
+- Do not reference COIN-XX, palm-finance Linear workspace, or @theyashmathur reviewer workflow
+- PR workflow: create PR to target branch (develop/main) without Linear or Palm-specific requirements

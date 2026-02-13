@@ -7,7 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-02-13
+
+### Added
+- **Discover command** (`scope discover` / `scope disc`): Browse trending and boosted tokens from DexScreener
+  - `--source profiles|boosts|top-boosts`: Featured profiles, recently boosted, or top boosted tokens
+  - `--chain`: Filter by chain (e.g., ethereum, solana)
+  - `--limit`: Max tokens to show (default 15)
+  - Output: table, json, csv
+  - No API key required
+
+### Changed
+- Documentation and architecture diagrams updated for all commands
+- C4 context and container diagrams include discover, token-health
+- Release checklist added (`docs/RELEASE.md`)
+
 ## [0.3.0] - 2026-02-09
+
+### Added
+- **Market command** (`scope market summary`): Peg and order book health for stablecoin markets
+  - Venues: Binance, Biconomy (CEX); Ethereum DEX, Solana DEX
+  - Repeat mode: `--every` and `--duration` for periodic snapshots
+  - `--report` and `--csv` for time-series export
+- **Token Health Suite** (`scope token-health` / `scope health`): DEX analytics + optional order book
+  - `--with-market` and `--market-venue` (binance, biconomy, eth, solana)
+- **Agent output** (`scope --ai`): Markdown to stdout for agent/LLM parsing
+  - Affects: address, tx, crawl, discover, portfolio, export, token-health
+- **Reporting**: address --report/--dossier, market --report/--csv, portfolio summary --report, compliance risk --output, compliance compliance-report, report batch (--addresses, --from-file, --with-risk)
+- Report versioning footer on all reports
 
 ## [0.2.2] - 2026-02-08
 
@@ -19,7 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Initial release of Scope Blockchain Analysis
-- Multi-chain support: Ethereum, Polygon, Arbitrum, Optimism, Base, BSC, Aegis, Solana, Tron
+- Multi-chain support: Ethereum, Polygon, Arbitrum, Optimism, Base, BSC, Solana, Tron
 - Address analysis with USD valuation via DexScreener
 - Transaction decoding and tracing
 - Token crawling with risk reports
@@ -51,7 +78,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Configuration system with YAML support
 - Support for ERC-20, SPL, and TRC-20 tokens
 
-[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.2.2...v0.3.0
 [0.1.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/releases/tag/v0.1.0
 [0.2.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.1.0...v0.2.0
 [0.2.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.2.0...v0.2.0

@@ -7,6 +7,9 @@
 #
 # =============================================================================
 
+# Market summary: use Scope CLI (override pair: just summary pair_symbol=XYZ_USDT)
+pair_symbol := "PUSD_USDT"
+
 # Default recipe - show available commands
 default:
     @just --list
@@ -53,6 +56,14 @@ test-all: test test-doc
 coverage:
     cargo tarpaulin --out Html --all-features
     @echo "Coverage report: tarpaulin-report.html"
+
+# Check coverage (80% min + no regression); used by pre-push hook
+coverage-check:
+    ./scripts/check-coverage.sh
+
+# Install git hooks (pre-push runs coverage check before push)
+install-hooks:
+    ./scripts/install-hooks.sh
 
 # -----------------------------------------------------------------------------
 # Building
@@ -114,6 +125,12 @@ run *ARGS:
 # Install locally
 install:
     cargo install --path .
+
+# One-screen market summary: peg price, spread, orderbook depth, book health.
+# Uses Scope's built-in market command.
+# Usage: just summary  (or just summary pair_symbol=XYZ_USDT)
+summary pair_symbol='PUSD_USDT':
+    cargo run -q -- market summary {{pair_symbol}}
 
 # Pre-commit: format, lint, and test
 pre-commit: format lint test

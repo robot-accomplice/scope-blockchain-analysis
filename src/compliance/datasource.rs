@@ -54,6 +54,7 @@ pub struct EtherscanResponse<T> {
 }
 
 /// Client for fetching blockchain data
+#[derive(Clone)]
 pub struct BlockchainDataClient {
     sources: DataSources,
     http_client: reqwest::Client,
@@ -86,6 +87,15 @@ impl BlockchainDataClient {
             http_client: reqwest::Client::new(),
             base_url: base_url.to_string(),
         }
+    }
+
+    /// Create client from ETHERSCAN_API_KEY env var if set.
+    /// Returns None if the key is not set (use RiskEngine::new() for basic scoring).
+    pub fn from_env_opt() -> Option<Self> {
+        std::env::var("ETHERSCAN_API_KEY").ok().map(|key| {
+            let sources = DataSources::new(key);
+            Self::new(sources)
+        })
     }
 
     /// Fetch transaction history for an address
@@ -776,5 +786,137 @@ mod tests {
         // "mainnet" should work as an alias for "ethereum"
         let txs = client.get_transactions("0xabc", "mainnet").await.unwrap();
         assert!(txs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_etherscan_transactions_http_500() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(500)
+            .with_body("Internal Server Error")
+            .create_async()
+            .await;
+
+        let sources = DataSources::new("test_key".to_string());
+        let client = BlockchainDataClient::with_base_url(sources, &server.url());
+        let result = client.get_transactions("0xabc", "ethereum").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_etherscan_transactions_malformed_json() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"status":"1","message":"OK","result":not valid json}"#)
+            .create_async()
+            .await;
+
+        let sources = DataSources::new("test_key".to_string());
+        let client = BlockchainDataClient::with_base_url(sources, &server.url());
+        let result = client.get_transactions("0xabc", "ethereum").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_internal_transactions_null_result() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"status":"1","message":"OK","result":null}"#)
+            .create_async()
+            .await;
+
+        let sources = DataSources::new("test_key".to_string());
+        let client = BlockchainDataClient::with_base_url(sources, &server.url());
+        let txs = client.get_internal_transactions("0xabc").await.unwrap();
+        assert!(txs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_internal_transactions_api_error() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"status":"0","message":"Rate limit exceeded","result":null}"#)
+            .create_async()
+            .await;
+
+        let sources = DataSources::new("test_key".to_string());
+        let client = BlockchainDataClient::with_base_url(sources, &server.url());
+        // Note: get_internal_transactions does NOT check status != "1" unlike get_transactions
+        // It only unwraps result. So status 0 with null result returns empty vec.
+        let txs = client.get_internal_transactions("0xabc").await.unwrap();
+        assert!(txs.is_empty());
+    }
+
+    #[test]
+    fn test_analyze_patterns_invalid_timestamps_skipped() {
+        // Transactions with invalid timestamps are filtered out by filter_map
+        let txs = vec![
+            EtherscanTransaction {
+                block_number: "1".to_string(),
+                timestamp: "invalid".to_string(),
+                hash: "0x1".to_string(),
+                from: "0xa".to_string(),
+                to: "0xb".to_string(),
+                value: "1000000000000000000".to_string(),
+                gas: "21000".to_string(),
+                gas_price: "20000000000".to_string(),
+                is_error: "0".to_string(),
+                txreceipt_status: "1".to_string(),
+                input: "0x".to_string(),
+                contract_address: "".to_string(),
+                cumulative_gas_used: "21000".to_string(),
+                gas_used: "21000".to_string(),
+                confirmations: "100".to_string(),
+            },
+            create_test_tx("1609459200", "1.0"),
+        ];
+        let analysis = analyze_patterns(&txs);
+        assert_eq!(analysis.total_transactions, 2);
+        // Only 1 valid timestamp, so velocity won't compute (needs 2+)
+        assert_eq!(analysis.velocity_score, 0.0);
+    }
+
+    #[test]
+    fn test_analyze_patterns_single_transaction_no_velocity() {
+        let txs = vec![create_test_tx("1609459200", "1.0")];
+        let analysis = analyze_patterns(&txs);
+        assert_eq!(analysis.total_transactions, 1);
+        assert_eq!(analysis.velocity_score, 0.0);
+    }
+
+    #[test]
+    fn test_analyze_patterns_invalid_value_skipped() {
+        let txs = vec![EtherscanTransaction {
+            block_number: "1".to_string(),
+            timestamp: "1609459200".to_string(),
+            hash: "0x1".to_string(),
+            from: "0xa".to_string(),
+            to: "0xb".to_string(),
+            value: "not_a_number".to_string(),
+            gas: "21000".to_string(),
+            gas_price: "20000000000".to_string(),
+            is_error: "0".to_string(),
+            txreceipt_status: "1".to_string(),
+            input: "0x".to_string(),
+            contract_address: "".to_string(),
+            cumulative_gas_used: "21000".to_string(),
+            gas_used: "21000".to_string(),
+            confirmations: "100".to_string(),
+        }];
+        let analysis = analyze_patterns(&txs);
+        assert_eq!(analysis.total_transactions, 1);
+        // amounts filter_map will yield None for unparseable value, so amounts is empty
+        assert!(!analysis.structuring_detected);
+        assert!(!analysis.round_number_pattern);
     }
 }

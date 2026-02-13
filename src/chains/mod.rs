@@ -22,7 +22,6 @@
 //! - **Optimism** - Optimism Mainnet
 //! - **Base** - Base (Coinbase L2)
 //! - **BSC** - BNB Smart Chain (Binance)
-//! - **Aegis** - Aegis/Wraith blockchain (JSON-RPC)
 //!
 //! ### Non-EVM Chains
 //!
@@ -91,7 +90,7 @@ pub mod ethereum;
 pub mod solana;
 pub mod tron;
 
-pub use dex::{DexClient, DexDataSource, TokenSearchResult};
+pub use dex::{DexClient, DexDataSource, DiscoverToken, TokenSearchResult};
 pub use ethereum::{ApiType, EthereumClient};
 pub use solana::{SolanaClient, validate_solana_address, validate_solana_signature};
 pub use tron::{TronClient, validate_tron_address, validate_tron_tx_hash};

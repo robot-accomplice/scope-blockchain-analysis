@@ -25,8 +25,8 @@
 //! ```
 
 use crate::chains::{
-    ChainClientFactory, DexClient, DexPair, Token, TokenAnalytics, TokenHolder, TokenSearchResult,
-    infer_chain_from_address,
+    ChainClientFactory, DexClient, DexDataSource, DexPair, Token, TokenAnalytics, TokenHolder,
+    TokenSearchResult, infer_chain_from_address,
 };
 use crate::config::{Config, OutputFormat};
 use crate::display::{charts, report};
@@ -137,9 +137,12 @@ struct ResolvedToken {
 /// 1. Direct addresses (0x...) - used as-is
 /// 2. Saved aliases - looked up from storage
 /// 3. Token names/symbols - searched via DEX API with interactive selection
+///
+/// Uses `dex_client` for search to enable dependency injection and testing.
 async fn resolve_token_input(
     args: &CrawlArgs,
     aliases: &mut TokenAliases,
+    dex_client: &dyn DexDataSource,
 ) -> Result<ResolvedToken> {
     let input = args.token.trim();
 
@@ -181,7 +184,6 @@ async fn resolve_token_input(
     // Search for tokens by name/symbol
     println!("Searching for '{}'...", input);
 
-    let dex_client = DexClient::new();
     let search_results = dex_client.search_tokens(input, chain_filter).await?;
 
     if search_results.is_empty() {
@@ -333,6 +335,40 @@ fn prompt_save_alias_impl(reader: &mut impl BufRead, writer: &mut impl Write) ->
     matches!(input.trim().to_lowercase().as_str(), "y" | "yes")
 }
 
+/// Fetches token analytics for composite commands (e.g., token-health).
+/// Resolves token input (address or symbol) and returns full analytics.
+pub async fn fetch_analytics_for_input(
+    token_input: &str,
+    chain: &str,
+    period: Period,
+    holders_limit: u32,
+    clients: &dyn ChainClientFactory,
+) -> Result<TokenAnalytics> {
+    let args = CrawlArgs {
+        token: token_input.to_string(),
+        chain: chain.to_string(),
+        period,
+        holders_limit,
+        format: OutputFormat::Table,
+        no_charts: true,
+        report: None,
+        yes: true,
+        save: false,
+    };
+    let mut aliases = TokenAliases::load();
+    let dex_client = clients.create_dex_client();
+    let resolved = resolve_token_input(&args, &mut aliases, dex_client.as_ref()).await?;
+    let mut analytics =
+        fetch_token_analytics(&resolved.address, &resolved.chain, &args, clients).await?;
+    if let Some((symbol, name)) = &resolved.alias_info
+        && (analytics.token.symbol == "UNKNOWN" || analytics.token.name == "Unknown Token")
+    {
+        analytics.token.symbol = symbol.clone();
+        analytics.token.name = name.clone();
+    }
+    Ok(analytics)
+}
+
 /// Runs the crawl command.
 ///
 /// Fetches comprehensive token analytics and displays them with ASCII charts
@@ -345,8 +381,9 @@ pub async fn run(
     // Load token aliases
     let mut aliases = TokenAliases::load();
 
-    // Resolve the token input to an address
-    let resolved = resolve_token_input(&args, &mut aliases).await?;
+    // Resolve the token input to an address (uses factory's dex client for search)
+    let dex_client = clients.create_dex_client();
+    let resolved = resolve_token_input(&args, &mut aliases, dex_client.as_ref()).await?;
 
     tracing::info!(
         token = %resolved.address,
@@ -383,6 +420,10 @@ pub async fn run(
         }
         OutputFormat::Table => {
             output_table(&analytics, &args)?;
+        }
+        OutputFormat::Markdown => {
+            let md = report::generate_report(&analytics);
+            println!("{}", md);
         }
     }
 
@@ -1439,6 +1480,41 @@ mod tests {
             period: Period::Hour24,
             holders_limit: 5,
             format: OutputFormat::Csv,
+            no_charts: true,
+            report: None,
+            yes: true,
+            save: false,
+        };
+        let result = super::run(args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_crawl_symbol_resolution_via_factory_dex() {
+        // Verifies resolve_token_input uses DexDataSource from factory (not DexClient::new)
+        let mut factory = MockClientFactory::new();
+        factory.mock_dex.search_results = vec![TokenSearchResult {
+            address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+            symbol: "MOCK".to_string(),
+            name: "Mock Token".to_string(),
+            chain: "ethereum".to_string(),
+            price_usd: Some(1.0),
+            volume_24h: 1_000_000.0,
+            liquidity_usd: 5_000_000.0,
+            market_cap: Some(100_000_000.0),
+        }];
+        // Make token_data use the same address so fetch succeeds
+        if let Some(ref mut td) = factory.mock_dex.token_data {
+            td.address = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string();
+        }
+
+        let config = Config::default();
+        let args = CrawlArgs {
+            token: "MOCK".to_string(),
+            chain: "ethereum".to_string(),
+            period: Period::Hour24,
+            holders_limit: 5,
+            format: OutputFormat::Json,
             no_charts: true,
             report: None,
             yes: true,

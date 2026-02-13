@@ -3,11 +3,20 @@
 //! Entry point for the blockchain analysis command-line tool.
 //!
 //! This binary provides commands for:
-//! - Address analysis (`scope address`)
+//! - Address analysis (`scope address`) with `--report` and `--dossier`
 //! - Transaction analysis (`scope tx`)
+//! - Token crawling (`scope crawl`) with report generation
+//! - Token discovery (`scope discover` / `scope disc`)
 //! - Live token monitoring (`scope monitor`)
+//! - Market peg/order book health (`scope market summary`)
+//! - Token health suite (`scope token-health` / `scope health`)
 //! - Portfolio management (`scope portfolio`)
 //! - Data export (`scope export`)
+//! - Batch reporting (`scope report batch`)
+//! - Compliance (`scope compliance` risk, trace, analyze, compliance-report)
+//! - Interactive mode (`scope interactive`) and setup (`scope setup`)
+//!
+//! Global `--ai` flag forces markdown output for agent/LLM parsing.
 //!
 //! ## Usage
 //!
@@ -15,8 +24,12 @@
 //! scope --help
 //! scope address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
 //! scope tx 0xabc123...
+//! scope discover --source boosts --chain ethereum
+//! scope market summary USDC --format json
+//! scope token-health USDC --with-market
 //! scope monitor USDC --chain ethereum
 //! scope portfolio list
+//! scope report batch --addresses 0x... --output report.md --with-risk
 //! ```
 
 use anyhow::Result;
@@ -24,6 +37,7 @@ use clap::Parser;
 use scope::Config;
 use scope::chains::DefaultClientFactory;
 use scope::cli::{Cli, Commands};
+use scope::config::OutputFormat;
 use std::io::{self, Write};
 use tracing_subscriber::EnvFilter;
 
@@ -59,10 +73,15 @@ async fn main() -> Result<()> {
     let is_setup_command = matches!(cli.command, Commands::Setup(_));
 
     // Load configuration
-    let config = Config::load(cli.config.as_deref()).unwrap_or_else(|e| {
+    let mut config = Config::load(cli.config.as_deref()).unwrap_or_else(|e| {
         tracing::warn!("Failed to load config: {}, using defaults", e);
         Config::default()
     });
+
+    // --ai forces markdown output to console for agent parsing
+    if cli.ai {
+        config.output.format = OutputFormat::Markdown;
+    }
 
     // Check if config file exists and prompt for setup if needed
     if !is_setup_command && !config_file_exists(&cli) && prompt_for_setup() {
@@ -76,7 +95,10 @@ async fn main() -> Result<()> {
             eprintln!("Setup failed: {}", e);
         }
         // Reload config after setup
-        let config = Config::load(cli.config.as_deref()).unwrap_or_default();
+        let mut config = Config::load(cli.config.as_deref()).unwrap_or_default();
+        if cli.ai {
+            config.output.format = OutputFormat::Markdown;
+        }
         return run_command(cli.command, &config).await;
     }
 
@@ -117,6 +139,12 @@ async fn main() -> Result<()> {
                     .map_err(|e| scope::error::ScopeError::Other(e.to_string()))
             }
         },
+        Commands::Market(cmd) => scope::cli::market::run(cmd, &config, &factory).await,
+        Commands::TokenHealth(args) => scope::cli::token_health::run(args, &config, &factory).await,
+        Commands::Report(cmd) => scope::cli::report::run(cmd, &config, &factory).await,
+        Commands::Discover(args) => scope::cli::discover::run(args, config.output.format)
+            .await
+            .map_err(|e| scope::error::ScopeError::Other(e.to_string())),
     };
 
     // Handle errors gracefully
@@ -194,6 +222,12 @@ async fn run_command(command: Commands, config: &Config) -> Result<()> {
                     .map_err(|e| scope::error::ScopeError::Other(e.to_string()))
             }
         },
+        Commands::Market(cmd) => scope::cli::market::run(cmd, config, &factory).await,
+        Commands::TokenHealth(args) => scope::cli::token_health::run(args, config, &factory).await,
+        Commands::Report(cmd) => scope::cli::report::run(cmd, config, &factory).await,
+        Commands::Discover(args) => scope::cli::discover::run(args, config.output.format)
+            .await
+            .map_err(|e| scope::error::ScopeError::Other(e.to_string())),
     };
 
     if let Err(e) = result {

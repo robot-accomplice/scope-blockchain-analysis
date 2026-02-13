@@ -15,7 +15,6 @@
 //!   # EVM-compatible chains
 //!   ethereum_rpc: "https://mainnet.infura.io/v3/YOUR_KEY"
 //!   bsc_rpc: "https://bsc-dataseed.binance.org"
-//!   aegis_rpc: "http://localhost:8545"
 //!
 //!   # Non-EVM chains
 //!   solana_rpc: "https://api.mainnet-beta.solana.com"
@@ -28,7 +27,7 @@
 //!     tronscan: "YOUR_API_KEY"
 //!
 //! output:
-//!   format: table  # table, json, csv
+//!   format: table  # table, json, csv, markdown
 //!   color: true
 //!
 //! portfolio:
@@ -95,9 +94,8 @@ pub struct ChainsConfig {
     /// Example: `https://bsc-dataseed.binance.org`
     pub bsc_rpc: Option<String>,
 
-    /// Aegis (Wraith) blockchain JSON-RPC endpoint URL.
-    ///
-    /// Example: `http://localhost:8545`
+    /// Custom EVM chain JSON-RPC endpoint (reserved for internal use).
+    #[doc(hidden)]
     pub aegis_rpc: Option<String>,
 
     // =========================================================================
@@ -157,6 +155,10 @@ pub enum OutputFormat {
 
     /// CSV format for spreadsheet import.
     Csv,
+
+    /// Markdown format for agent parsing (console output).
+    #[value(name = "markdown")]
+    Markdown,
 }
 
 impl Default for OutputConfig {
@@ -293,6 +295,7 @@ impl std::fmt::Display for OutputFormat {
             OutputFormat::Table => write!(f, "table"),
             OutputFormat::Json => write!(f, "json"),
             OutputFormat::Csv => write!(f, "csv"),
+            OutputFormat::Markdown => write!(f, "markdown"),
         }
     }
 }
@@ -328,7 +331,6 @@ mod tests {
 chains:
   ethereum_rpc: "https://example.com/rpc"
   bsc_rpc: "https://bsc-dataseed.binance.org"
-  aegis_rpc: "http://localhost:8545"
   solana_rpc: "https://api.mainnet-beta.solana.com"
   tron_api: "https://api.trongrid.io"
   api_keys:
@@ -359,10 +361,6 @@ portfolio:
         assert_eq!(
             config.chains.bsc_rpc,
             Some("https://bsc-dataseed.binance.org".into())
-        );
-        assert_eq!(
-            config.chains.aegis_rpc,
-            Some("http://localhost:8545".into())
         );
 
         // Non-EVM chains
@@ -469,6 +467,7 @@ chains:
         assert_eq!(OutputFormat::Table.to_string(), "table");
         assert_eq!(OutputFormat::Json.to_string(), "json");
         assert_eq!(OutputFormat::Csv.to_string(), "csv");
+        assert_eq!(OutputFormat::Markdown.to_string(), "markdown");
     }
 
     #[test]

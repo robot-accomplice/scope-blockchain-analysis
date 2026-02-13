@@ -16,6 +16,9 @@
 //! - **Token Crawling**: Crawl DEX data for any token with price, volume,
 //!   liquidity, holder analysis, and risk scoring. Markdown report generation.
 //!
+//! - **Token Discovery**: Browse trending and boosted tokens from DexScreener
+//!   (`scope discover`) — featured profiles, recent boosts, top boosts. No API key.
+//!
 //! - **Live Monitoring**: Real-time TUI dashboard with price/volume/candlestick
 //!   charts, buy/sell gauges, activity logs, and Unicode-rich visualization.
 //!
@@ -25,6 +28,13 @@
 //!
 //! - **Data Export**: Export transaction history in JSON or CSV with date range
 //!   filtering. Chain auto-detection for addresses.
+//!
+//! - **Market Health**: Peg and order book health for stablecoin markets. Fetches
+//!   level-2 depth from Binance, Biconomy, or DEX liquidity (Ethereum/Solana via DexScreener).
+//!   Configurable health checks (peg safety, bid/ask ratio, depth thresholds).
+//!
+//! - **Token Health Suite**: Composite command (`scope token-health`) combining DEX analytics
+//!   with optional market/order book summary. Venues: binance, biconomy, eth, solana.
 //!
 //! - **USD Valuation**: Native token prices via DexScreener for all supported
 //!   chains (ETH, SOL, BNB, MATIC, etc.).
@@ -39,7 +49,6 @@
 //! - Optimism
 //! - Base
 //! - BSC (BNB Smart Chain)
-//! - Aegis (Wraith)
 //!
 //! ### Non-EVM
 //!
@@ -106,7 +115,6 @@
 //!   # EVM chains
 //!   ethereum_rpc: "https://mainnet.infura.io/v3/YOUR_KEY"
 //!   bsc_rpc: "https://bsc-dataseed.binance.org"
-//!   aegis_rpc: "http://localhost:8545"
 //!
 //!   # Non-EVM chains
 //!   solana_rpc: "https://api.mainnet-beta.solana.com"
@@ -120,7 +128,7 @@
 //!     tronscan: "YOUR_TRONSCAN_KEY"
 //!
 //! output:
-//!   format: table  # table, json, csv
+//!   format: table  # table, json, csv, markdown
 //!   color: true
 //!
 //! portfolio:
@@ -147,8 +155,9 @@
 //! ## Modules
 //!
 //! - [`chains`]: Blockchain client implementations (Ethereum/EVM, Solana, Tron, DexScreener)
-//! - [`cli`]: Command-line interface definitions (address, tx, crawl, monitor, portfolio, export)
+//! - [`cli`]: Command-line interface definitions (address, tx, crawl, monitor, market, portfolio, export)
 //! - [`config`]: Configuration management
+//! - [`market`]: Peg and order book health for stablecoin markets
 //! - [`display`]: Terminal output utilities and markdown report generation
 //! - [`error`]: Error types and result aliases
 //! - [`tokens`]: Token alias storage for friendly name lookups
@@ -201,6 +210,12 @@ pub mod tokens;
 /// Provides risk scoring, transaction taint analysis, pattern detection,
 /// and compliance reporting for blockchain addresses.
 pub mod compliance;
+
+/// Market module for peg and order book health analysis.
+///
+/// Fetches level-2 order book data from exchange APIs and runs
+/// configurable health checks for stablecoin markets.
+pub mod market;
 
 /// Library version string.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
