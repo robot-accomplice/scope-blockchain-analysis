@@ -46,6 +46,8 @@ cargo install --path .
 
 ## Quick Start
 
+**→ [Full Quickstart Guide](docs/QUICKSTART.md)** — workflow-oriented guide for due diligence, token research, compliance, monitoring, and more.
+
 ```bash
 # Analyze an Ethereum address (auto-detects chain from address format)
 scope address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
