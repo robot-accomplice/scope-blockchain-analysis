@@ -1,6 +1,6 @@
 [package]
 name = "scope-bca"
-version = "0.3.1"
+version = "1.0.0"
 edition = "2024"
 authors = ["Jon Machen <jon@palmusd.com>"]
 description = "Scope Blockchain Analysis - A production-grade tool for blockchain data analysis, portfolio tracking, and transaction investigation"
@@ -13,7 +13,9 @@ categories = ["command-line-utilities", "cryptography::cryptocurrencies"]
 exclude = [
     ".github/",
     "tests/fixtures/",
-    "*.md",
+    "CHANGELOG.md",
+    "TESTS.md",
+    "PR_BODY.md",
     "justfile",
 ]
 

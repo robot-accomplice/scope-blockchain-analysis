@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-02-13
+
 ### Added
 - **Shell completion** (`scope completions bash|zsh|fish`): Generate tab-completion scripts for bash, zsh, and fish shells via `clap_complete`
 - **Progress indicators**: Spinners and step-progress bars for all long-running operations (address, tx, crawl, compliance risk, insights, discover, export, token-health, report batch) via `indicatif`
@@ -96,7 +98,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Configuration system with YAML support
 - Support for ERC-20, SPL, and TRC-20 tokens
 
-[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.3.1...v1.0.0
 [0.3.1]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.2.2...v0.3.0
 [0.1.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/releases/tag/v0.1.0

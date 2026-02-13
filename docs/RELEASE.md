@@ -17,7 +17,7 @@ Steps for cutting a new release and publishing to crates.io.
 Edit `Cargo.toml`:
 
 ```toml
-version = "0.3.1"  # Use semver: patch for fixes, minor for features
+version = "1.0.0"  # Use semver: patch for fixes, minor for features, major for breaking
 ```
 
 Edit `CHANGELOG.md`:
@@ -30,8 +30,8 @@ Edit `CHANGELOG.md`:
 
 ```bash
 # Create and push tag
-git tag -a v0.3.1 -m "Release v0.3.1"
-git push origin v0.3.1
+git tag -a vX.Y.Z -m "Release vX.Y.Z"
+git push origin vX.Y.Z
 ```
 
 Optionally create a GitHub Release from the tag with release notes from CHANGELOG.
