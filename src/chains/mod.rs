@@ -10,7 +10,7 @@
 //! - **Balance queries** with optional USD valuation via DexScreener
 //! - **Transaction lookup** by hash/signature with full details
 //! - **Transaction history** for addresses with pagination
-//! - **Token balances** (ERC-20, SPL, TRC-20) for portfolio tracking
+//! - **Token balances** (ERC-20, SPL, TRC-20) for address book tracking
 //!
 //! ## Supported Chains
 //!

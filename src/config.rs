@@ -30,7 +30,7 @@
 //!   format: table  # table, json, csv, markdown
 //!   color: true
 //!
-//! portfolio:
+//! address_book:
 //!   data_dir: "~/.local/share/scope"
 //! ```
 //!
@@ -47,7 +47,7 @@ use std::path::{Path, PathBuf};
 /// Application configuration.
 ///
 /// Contains all settings for blockchain clients, output formatting,
-/// and portfolio management. Use [`Config::load`] to load from file
+/// and address book management. Use [`Config::load`] to load from file
 /// or [`Config::default`] for sensible defaults.
 ///
 /// # Examples
@@ -68,8 +68,9 @@ pub struct Config {
     /// Output formatting configuration.
     pub output: OutputConfig,
 
-    /// Portfolio management configuration.
-    pub portfolio: PortfolioConfig,
+    /// Address book configuration (label → address mapping storage).
+    #[serde(alias = "portfolio")]
+    pub address_book: AddressBookConfig,
 
     /// Monitor TUI configuration (layout, widgets, refresh rate).
     pub monitor: crate::cli::monitor::MonitorConfig,
@@ -132,11 +133,11 @@ pub struct OutputConfig {
     pub color: bool,
 }
 
-/// Portfolio management configuration.
+/// Address book configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
-pub struct PortfolioConfig {
-    /// Directory for storing portfolio data.
+pub struct AddressBookConfig {
+    /// Directory for storing address book data.
     ///
     /// Defaults to `~/.local/share/scope` on Linux/macOS.
     pub data_dir: Option<PathBuf>,
@@ -270,7 +271,7 @@ impl Config {
         dirs::home_dir().map(|h| h.join(".config").join("scope").join("config.yaml"))
     }
 
-    /// Returns the default data directory for portfolio storage.
+    /// Returns the default data directory for address book storage.
     ///
     /// On Linux/macOS: `~/.local/share/scope`
     /// On Windows: `%LOCALAPPDATA%\scope`
@@ -282,7 +283,7 @@ impl Config {
 
     /// Returns the effective data directory, using config or default.
     pub fn data_dir(&self) -> PathBuf {
-        self.portfolio
+        self.address_book
             .data_dir
             .clone()
             .unwrap_or_else(Self::default_data_dir)
@@ -322,7 +323,7 @@ mod tests {
         assert!(config.chains.tron_api.is_none());
         assert_eq!(config.output.format, OutputFormat::Table);
         assert!(config.output.color);
-        assert!(config.portfolio.data_dir.is_none());
+        assert!(config.address_book.data_dir.is_none());
     }
 
     #[test]
@@ -344,7 +345,7 @@ output:
   format: json
   color: false
 
-portfolio:
+address_book:
   data_dir: "/custom/data"
 "#;
 
@@ -398,7 +399,7 @@ portfolio:
         assert_eq!(config.output.format, OutputFormat::Json);
         assert!(!config.output.color);
         assert_eq!(
-            config.portfolio.data_dir,
+            config.address_book.data_dir,
             Some(PathBuf::from("/custom/data"))
         );
     }
@@ -486,7 +487,7 @@ chains:
     #[test]
     fn test_data_dir_uses_config_value() {
         let config = Config {
-            portfolio: PortfolioConfig {
+            address_book: AddressBookConfig {
                 data_dir: Some(PathBuf::from("/custom/path")),
             },
             ..Default::default()
@@ -540,7 +541,7 @@ chains:
             .insert("etherscan".to_string(), "test_key".to_string());
         config.output.format = OutputFormat::Json;
         config.output.color = false;
-        config.portfolio.data_dir = Some(PathBuf::from("/custom"));
+        config.address_book.data_dir = Some(PathBuf::from("/custom"));
 
         let yaml = serde_yaml::to_string(&config).unwrap();
         let deserialized: Config = serde_yaml::from_str(&yaml).unwrap();
@@ -596,8 +597,8 @@ output:
     }
 
     #[test]
-    fn test_portfolio_config_default() {
-        let port = PortfolioConfig::default();
+    fn test_address_book_config_default() {
+        let port = AddressBookConfig::default();
         assert!(port.data_dir.is_none());
     }
 

@@ -1,19 +1,27 @@
 //! # Interactive Mode
 //!
 //! This module implements an interactive REPL for the Scope CLI where
-//! context is preserved between commands. Users can set a chain once
-//! and subsequent commands will use it automatically.
+//! context is preserved between commands. The chain defaults to `auto`,
+//! meaning the CLI will infer the relevant chain from each input (e.g.,
+//! `0x…` → Ethereum/EVM, `T…` → Tron, base58 → Solana). Users can pin
+//! a chain with `chain solana` and unlock with `chain auto`.
 //!
 //! ## Usage
 //!
 //! ```bash
 //! scope interactive
 //!
-//! scope> chain solana
-//! Chain set to: solana
+//! scope:auto> address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
+//! # Chain: ethereum (auto-detected)
 //!
-//! scope> address 7xKXtg...
-//! # Uses solana chain automatically
+//! scope:auto> address DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy
+//! # Chain: solana (auto-detected)
+//!
+//! scope:auto> chain solana
+//! # Chain pinned to: solana
+//!
+//! scope:solana> address 7xKXtg...
+//! # Uses solana chain
 //! ```
 
 use crate::chains::ChainClientFactory;
@@ -26,8 +34,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::PathBuf;
 
-use super::{AddressArgs, CrawlArgs, PortfolioArgs, TxArgs};
-use super::{address, crawl, monitor, portfolio, tx};
+use super::{AddressArgs, AddressBookArgs, CrawlArgs, TxArgs};
+use super::{address, address_book, crawl, monitor, tx};
 
 /// Arguments for the interactive command.
 #[derive(Debug, Clone, Args)]
@@ -40,12 +48,8 @@ pub struct InteractiveArgs {
 /// Session context that persists between commands in interactive mode.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionContext {
-    /// Current blockchain network (default: "ethereum").
+    /// Current blockchain network. `"auto"` means infer from input at command time.
     pub chain: String,
-
-    /// Whether the chain was explicitly set by the user (vs. default or auto-inferred).
-    #[serde(default)]
-    pub chain_explicit: bool,
 
     /// Current output format.
     pub format: OutputFormat,
@@ -72,11 +76,17 @@ pub struct SessionContext {
     pub limit: u32,
 }
 
+impl SessionContext {
+    /// Returns `true` when chain is in auto-detect mode (not pinned to a specific chain).
+    pub fn is_auto_chain(&self) -> bool {
+        self.chain == "auto"
+    }
+}
+
 impl Default for SessionContext {
     fn default() -> Self {
         Self {
-            chain: "ethereum".to_string(),
-            chain_explicit: false,
+            chain: "auto".to_string(),
             format: OutputFormat::Table,
             last_address: None,
             last_tx: None,
@@ -92,8 +102,11 @@ impl Default for SessionContext {
 impl fmt::Display for SessionContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "Current Context:")?;
-        let chain_status = if self.chain_explicit { "" } else { " (auto)" };
-        writeln!(f, "  Chain:          {}{}", self.chain, chain_status)?;
+        if self.is_auto_chain() {
+            writeln!(f, "  Chain:          auto (inferred from input)")?;
+        } else {
+            writeln!(f, "  Chain:          {} (pinned)", self.chain)?;
+        }
         writeln!(f, "  Format:         {:?}", self.format)?;
         writeln!(f, "  Include Tokens: {}", self.include_tokens)?;
         writeln!(f, "  Include TXs:    {}", self.include_txs)?;
@@ -156,8 +169,8 @@ pub async fn run(
     // Load previous session context or start fresh
     let mut context = SessionContext::load();
 
-    // Apply config defaults if context is fresh (default chain)
-    if context.chain == "ethereum" && context.format == OutputFormat::Table {
+    // Apply config defaults if context is fresh
+    if context.is_auto_chain() && context.format == OutputFormat::Table {
         context.format = config.output.format;
     }
 
@@ -222,7 +235,7 @@ pub async fn run(
 
     // Save session context for next time
     if let Err(e) = context.save() {
-        tracing::warn!("Failed to save session context: {}", e);
+        tracing::debug!("Failed to save session context: {}", e);
     }
 
     println!("Goodbye!");
@@ -270,30 +283,28 @@ async fn execute_input(
         // Set chain
         "chain" | ".chain" => {
             if args.is_empty() {
-                let status = if context.chain_explicit {
-                    " (explicit)"
+                if context.is_auto_chain() {
+                    println!("Current chain: auto (inferred from input)");
                 } else {
-                    " (auto-detect enabled)"
-                };
-                println!("Current chain: {}{}", context.chain, status);
+                    println!("Current chain: {} (pinned)", context.chain);
+                }
             } else {
                 let new_chain = args[0].to_lowercase();
-                // Validate chain name
                 let valid_chains = [
                     "ethereum", "polygon", "arbitrum", "optimism", "base", "bsc", "solana", "tron",
                 ];
-                if valid_chains.contains(&new_chain.as_str()) {
+                if new_chain == "auto" {
+                    context.chain = "auto".to_string();
+                    println!("Chain set to auto — will infer from each input");
+                } else if valid_chains.contains(&new_chain.as_str()) {
                     context.chain = new_chain.clone();
-                    context.chain_explicit = true;
-                    println!("Chain set to: {} (auto-detect disabled)", new_chain);
-                } else if new_chain == "auto" {
-                    // Special value to re-enable auto-detection
-                    context.chain = "ethereum".to_string();
-                    context.chain_explicit = false;
-                    println!("Chain auto-detection enabled (default: ethereum)");
+                    println!(
+                        "Chain pinned to: {}  (use `chain auto` to unlock)",
+                        new_chain
+                    );
                 } else {
                     eprintln!(
-                        "Unknown chain: {}. Valid chains: {}, auto",
+                        "  ✗ Unknown chain: {}. Valid: auto, {}",
                         new_chain,
                         valid_chains.join(", ")
                     );
@@ -388,20 +399,16 @@ async fn execute_input(
                 }
             }
 
-            // If no explicit chain set (context or inline), try to infer from address
+            // Resolve chain: inline override > pinned context > auto-detect from address
             let effective_chain = if let Some(chain) = chain_override {
                 chain
-            } else if !context.chain_explicit {
-                // Try auto-detection
+            } else if context.is_auto_chain() {
                 if let Some(inferred) = crate::chains::infer_chain_from_address(&addr) {
-                    if inferred != context.chain {
-                        println!("Auto-detected chain: {}", inferred);
-                        // Update context chain (but keep chain_explicit = false)
-                        context.chain = inferred.to_string();
-                    }
+                    eprintln!("  Chain: {} (auto-detected)", inferred);
                     inferred.to_string()
                 } else {
-                    context.chain.clone()
+                    // Default fallback when auto can't infer
+                    "ethereum".to_string()
                 }
             } else {
                 context.chain.clone()
@@ -458,20 +465,15 @@ async fn execute_input(
                 }
             }
 
-            // If no explicit chain set (context or inline), try to infer from hash
+            // Resolve chain: inline override > pinned context > auto-detect from hash
             let effective_chain = if let Some(chain) = chain_override {
                 chain
-            } else if !context.chain_explicit {
-                // Try auto-detection
+            } else if context.is_auto_chain() {
                 if let Some(inferred) = crate::chains::infer_chain_from_hash(&hash) {
-                    if inferred != context.chain {
-                        println!("Auto-detected chain: {}", inferred);
-                        // Update context chain (but keep chain_explicit = false)
-                        context.chain = inferred.to_string();
-                    }
+                    eprintln!("  Chain: {} (auto-detected)", inferred);
                     inferred.to_string()
                 } else {
-                    context.chain.clone()
+                    "ethereum".to_string()
                 }
             } else {
                 context.chain.clone()
@@ -556,18 +558,15 @@ async fn execute_input(
                 i += 1;
             }
 
-            // If no explicit chain set, try to infer from token address
+            // Resolve chain: inline override > pinned context > auto-detect from token address
             let effective_chain = if let Some(chain) = chain_override {
                 chain
-            } else if !context.chain_explicit {
+            } else if context.is_auto_chain() {
                 if let Some(inferred) = crate::chains::infer_chain_from_address(&token) {
-                    if inferred != context.chain {
-                        println!("Auto-detected chain: {}", inferred);
-                        context.chain = inferred.to_string();
-                    }
+                    eprintln!("  Chain: {} (auto-detected)", inferred);
                     inferred.to_string()
                 } else {
-                    context.chain.clone()
+                    "ethereum".to_string()
                 }
             } else {
                 context.chain.clone()
@@ -588,11 +587,10 @@ async fn execute_input(
             crawl::run(crawl_args, config, clients).await?;
         }
 
-        // Portfolio command (pass through to existing)
-        "portfolio" | "port" => {
-            // Build portfolio args from remaining input
-            let portfolio_input = args.join(" ");
-            execute_portfolio(&portfolio_input, context, config, clients).await?;
+        // Address book command (pass through to existing; portfolio/port as aliases)
+        "address-book" | "address_book" | "portfolio" | "port" => {
+            let input = args.join(" ");
+            execute_address_book(&input, context, config, clients).await?;
         }
 
         // Token alias management
@@ -761,8 +759,8 @@ async fn execute_tokens_command(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-/// Execute portfolio subcommand
-async fn execute_portfolio(
+/// Execute address book subcommand
+async fn execute_address_book(
     input: &str,
     context: &SessionContext,
     config: &Config,
@@ -770,18 +768,18 @@ async fn execute_portfolio(
 ) -> Result<()> {
     let parts: Vec<&str> = input.split_whitespace().collect();
     if parts.is_empty() {
-        eprintln!("Portfolio subcommand required: add, remove, list, summary");
+        eprintln!("Address book subcommand required: add, remove, list, summary");
         return Ok(());
     }
 
-    use super::portfolio::{AddArgs, PortfolioCommands, RemoveArgs, SummaryArgs};
+    use super::address_book::{AddArgs, AddressBookCommands, RemoveArgs, SummaryArgs};
 
     let subcommand = parts[0].to_lowercase();
 
-    let portfolio_args = match subcommand.as_str() {
+    let address_book_args = match subcommand.as_str() {
         "add" => {
             if parts.len() < 2 {
-                eprintln!("Usage: portfolio add <address> [--label <label>] [--tags <tags>]");
+                eprintln!("Usage: address-book add <address> [--label <label>] [--tags <tags>]");
                 return Ok(());
             }
             let address = parts[1].to_string();
@@ -804,11 +802,17 @@ async fn execute_portfolio(
                 }
             }
 
-            PortfolioArgs {
-                command: PortfolioCommands::Add(AddArgs {
+            AddressBookArgs {
+                command: AddressBookCommands::Add(AddArgs {
+                    chain: if context.is_auto_chain() {
+                        crate::chains::infer_chain_from_address(&address)
+                            .unwrap_or("ethereum")
+                            .to_string()
+                    } else {
+                        context.chain.clone()
+                    },
                     address,
                     label,
-                    chain: context.chain.clone(),
                     tags,
                 }),
                 format: Some(context.format),
@@ -816,18 +820,18 @@ async fn execute_portfolio(
         }
         "remove" | "rm" => {
             if parts.len() < 2 {
-                eprintln!("Usage: portfolio remove <address>");
+                eprintln!("Usage: address-book remove <address>");
                 return Ok(());
             }
-            PortfolioArgs {
-                command: PortfolioCommands::Remove(RemoveArgs {
+            AddressBookArgs {
+                command: AddressBookCommands::Remove(RemoveArgs {
                     address: parts[1].to_string(),
                 }),
                 format: Some(context.format),
             }
         }
-        "list" | "ls" => PortfolioArgs {
-            command: PortfolioCommands::List,
+        "list" | "ls" => AddressBookArgs {
+            command: AddressBookCommands::List,
             format: Some(context.format),
         },
         "summary" => {
@@ -851,8 +855,8 @@ async fn execute_portfolio(
                 }
             }
 
-            PortfolioArgs {
-                command: PortfolioCommands::Summary(SummaryArgs {
+            AddressBookArgs {
+                command: AddressBookCommands::Summary(SummaryArgs {
                     chain,
                     tag,
                     include_tokens,
@@ -863,14 +867,14 @@ async fn execute_portfolio(
         }
         _ => {
             eprintln!(
-                "Unknown portfolio subcommand: {}. Use: add, remove, list, summary",
+                "Unknown address book subcommand: {}. Use: add, remove, list, summary",
                 subcommand
             );
             return Ok(());
         }
     };
 
-    portfolio::run(portfolio_args, config, clients).await
+    address_book::run(address_book_args, config, clients).await
 }
 
 /// Print help message for interactive mode.
@@ -887,8 +891,9 @@ Navigation & Control:
   clear, reset      Reset context to defaults
 
 Context Settings:
-  chain [name]      Set or show current chain
-                    Valid: ethereum, polygon, arbitrum, optimism, base, bsc, solana, tron
+  chain [name]      Set or show current chain (default: auto)
+                    auto = infer chain from each input
+                    Valid: auto, ethereum, polygon, arbitrum, optimism, base, bsc, solana, tron
   format [fmt]      Set or show output format (table, json, csv)
   limit [n]         Set or show transaction limit
   +tokens           Toggle include_tokens flag for address analysis
@@ -913,11 +918,11 @@ Token Search:
   tokens add <sym> <chain> <addr> [name]    Add a token alias
   tokens remove <sym> [--chain <chain>]     Remove a token alias
 
-Portfolio Commands:
-  portfolio add <addr> [--label <name>] [--tags <t1,t2>]
-  portfolio remove <addr>
-  portfolio list
-  portfolio summary [--chain <name>] [--tag <tag>] [--tokens]
+Address Book Commands:
+  address-book add <addr> [--label <name>] [--tags <t1,t2>]
+  address-book remove <addr>
+  address-book list
+  address-book summary [--chain <name>] [--tag <tag>] [--tokens]
 
 Configuration:
   setup             Run the setup wizard to configure API keys
@@ -958,7 +963,7 @@ mod tests {
     #[test]
     fn test_session_context_default() {
         let ctx = SessionContext::default();
-        assert_eq!(ctx.chain, "ethereum");
+        assert_eq!(ctx.chain, "auto");
         assert_eq!(ctx.format, OutputFormat::Table);
         assert!(!ctx.include_tokens);
         assert!(!ctx.include_txs);
@@ -973,7 +978,7 @@ mod tests {
     fn test_session_context_display() {
         let ctx = SessionContext::default();
         let display = format!("{}", ctx);
-        assert!(display.contains("ethereum"));
+        assert!(display.contains("auto"));
         assert!(display.contains("Table"));
     }
 
@@ -991,7 +996,6 @@ mod tests {
     fn test_session_context_serialization() {
         let ctx = SessionContext {
             chain: "polygon".to_string(),
-            chain_explicit: true,
             format: OutputFormat::Json,
             last_address: Some("0xabc".to_string()),
             last_tx: Some("0xdef".to_string()),
@@ -1005,7 +1009,7 @@ mod tests {
         let yaml = serde_yaml::to_string(&ctx).unwrap();
         let deserialized: SessionContext = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(deserialized.chain, "polygon");
-        assert!(deserialized.chain_explicit);
+        assert!(!deserialized.is_auto_chain());
         assert_eq!(deserialized.format, OutputFormat::Json);
         assert_eq!(deserialized.last_address.as_deref(), Some("0xabc"));
         assert_eq!(deserialized.last_tx.as_deref(), Some("0xdef"));
@@ -1019,7 +1023,7 @@ mod tests {
     #[test]
     fn test_session_context_display_with_address_and_tx() {
         let ctx = SessionContext {
-            chain_explicit: true,
+            chain: "polygon".to_string(),
             last_address: Some("0x1234".to_string()),
             last_tx: Some("0xabcd".to_string()),
             ..Default::default()
@@ -1027,15 +1031,15 @@ mod tests {
         let display = format!("{}", ctx);
         assert!(display.contains("0x1234"));
         assert!(display.contains("0xabcd"));
-        // chain_explicit → no "(auto)" suffix
-        assert!(!display.contains("(auto)"));
+        assert!(display.contains("(pinned)"));
     }
 
     #[test]
     fn test_session_context_display_auto_chain() {
         let ctx = SessionContext::default();
         let display = format!("{}", ctx);
-        assert!(display.contains("(auto)"));
+        assert!(display.contains("auto"));
+        assert!(display.contains("inferred from input"));
     }
 
     // ========================================================================
@@ -1098,7 +1102,7 @@ mod tests {
             .await
             .unwrap();
         assert!(!result);
-        assert_eq!(ctx.chain, "ethereum");
+        assert_eq!(ctx.chain, "auto");
         assert!(!ctx.include_tokens);
         assert_eq!(ctx.limit, 100);
     }
@@ -1112,7 +1116,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ctx.chain, "polygon");
-        assert!(ctx.chain_explicit);
+        assert!(!ctx.is_auto_chain());
     }
 
     #[tokio::test]
@@ -1124,7 +1128,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ctx.chain, "solana");
-        assert!(ctx.chain_explicit);
+        assert!(!ctx.is_auto_chain());
     }
 
     #[tokio::test]
@@ -1132,15 +1136,14 @@ mod tests {
         let config = test_config();
         let mut ctx = SessionContext {
             chain: "polygon".to_string(),
-            chain_explicit: true,
             ..Default::default()
         };
 
         execute_input("chain auto", &mut ctx, &config, &test_factory())
             .await
             .unwrap();
-        assert_eq!(ctx.chain, "ethereum");
-        assert!(!ctx.chain_explicit);
+        assert_eq!(ctx.chain, "auto");
+        assert!(ctx.is_auto_chain());
     }
 
     #[tokio::test]
@@ -1151,8 +1154,8 @@ mod tests {
         execute_input("chain foobar", &mut ctx, &config, &test_factory())
             .await
             .unwrap();
-        assert_eq!(ctx.chain, "ethereum");
-        assert!(!ctx.chain_explicit);
+        assert_eq!(ctx.chain, "auto");
+        assert!(ctx.is_auto_chain());
     }
 
     #[tokio::test]
@@ -1164,7 +1167,7 @@ mod tests {
             .await
             .unwrap();
         assert!(!result);
-        assert_eq!(ctx.chain, "ethereum");
+        assert_eq!(ctx.chain, "auto");
     }
 
     #[tokio::test]
@@ -1405,7 +1408,7 @@ mod tests {
         execute_input("clear", &mut ctx, &config, &test_factory())
             .await
             .unwrap();
-        assert_eq!(ctx.chain, "ethereum");
+        assert_eq!(ctx.chain, "auto");
         assert!(!ctx.include_tokens);
         assert!(!ctx.trace);
         assert_eq!(ctx.limit, 100);
@@ -1460,7 +1463,7 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(ctx.chain, chain);
-            assert!(ctx.chain_explicit);
+            assert!(!ctx.is_auto_chain());
         }
     }
 
@@ -1578,8 +1581,8 @@ mod tests {
         )
         .await;
         assert!(result.is_ok());
-        // Chain should be auto-detected
-        assert_eq!(ctx.chain, "solana");
+        // Context chain stays "auto" (inferred per command, not stored)
+        assert_eq!(ctx.chain, "auto");
     }
 
     #[tokio::test]
@@ -1658,7 +1661,8 @@ mod tests {
         )
         .await;
         assert!(result.is_ok());
-        assert_eq!(ctx.chain, "tron");
+        // Context chain stays "auto" (inferred per command, not stored)
+        assert_eq!(ctx.chain, "auto");
     }
 
     #[tokio::test]
@@ -1744,7 +1748,7 @@ mod tests {
     async fn test_portfolio_list_command() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let config = Config {
-            portfolio: crate::config::PortfolioConfig {
+            address_book: crate::config::AddressBookConfig {
                 data_dir: Some(tmp_dir.path().to_path_buf()),
             },
             ..Default::default()
@@ -1759,7 +1763,7 @@ mod tests {
     async fn test_portfolio_add_command() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let config = Config {
-            portfolio: crate::config::PortfolioConfig {
+            address_book: crate::config::AddressBookConfig {
                 data_dir: Some(tmp_dir.path().to_path_buf()),
             },
             ..Default::default()
@@ -1780,7 +1784,7 @@ mod tests {
     async fn test_portfolio_summary_command() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let config = Config {
-            portfolio: crate::config::PortfolioConfig {
+            address_book: crate::config::AddressBookConfig {
                 data_dir: Some(tmp_dir.path().to_path_buf()),
             },
             ..Default::default()
@@ -1800,7 +1804,7 @@ mod tests {
     async fn test_portfolio_remove_command() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let config = Config {
-            portfolio: crate::config::PortfolioConfig {
+            address_book: crate::config::AddressBookConfig {
                 data_dir: Some(tmp_dir.path().to_path_buf()),
             },
             ..Default::default()
@@ -1824,7 +1828,7 @@ mod tests {
     async fn test_portfolio_unknown_subcommand() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let config = Config {
-            portfolio: crate::config::PortfolioConfig {
+            address_book: crate::config::AddressBookConfig {
                 data_dir: Some(tmp_dir.path().to_path_buf()),
             },
             ..Default::default()
@@ -1932,7 +1936,7 @@ mod tests {
     async fn test_port_alias_for_portfolio() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let config = Config {
-            portfolio: crate::config::PortfolioConfig {
+            address_book: crate::config::AddressBookConfig {
                 data_dir: Some(tmp_dir.path().to_path_buf()),
             },
             ..Default::default()
@@ -2037,11 +2041,10 @@ mod tests {
         let factory = test_factory();
         let mut context = SessionContext {
             chain: "polygon".to_string(),
-            chain_explicit: true,
             ..Default::default()
         };
 
-        // Just showing chain status when chain_explicit is set
+        // Just showing chain status when chain is pinned
         let result = execute_input("chain", &mut context, &config, &factory).await;
         assert!(result.is_ok());
         assert!(!result.unwrap()); // Should not exit
@@ -2053,7 +2056,6 @@ mod tests {
         let factory = mock_factory();
         let mut context = SessionContext {
             chain: "polygon".to_string(),
-            chain_explicit: true,
             ..Default::default()
         };
 
@@ -2075,7 +2077,6 @@ mod tests {
         let factory = mock_factory();
         let mut context = SessionContext {
             chain: "polygon".to_string(),
-            chain_explicit: true,
             ..Default::default()
         };
 
@@ -2190,7 +2191,6 @@ mod tests {
         let config = test_config();
         let factory = test_factory();
         let mut context = SessionContext {
-            chain_explicit: true,
             chain: "arbitrum".to_string(),
             ..Default::default()
         };
@@ -2203,7 +2203,7 @@ mod tests {
     async fn test_portfolio_add_with_label_and_tags() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let config = Config {
-            portfolio: crate::config::PortfolioConfig {
+            address_book: crate::config::AddressBookConfig {
                 data_dir: Some(tmp_dir.path().to_path_buf()),
             },
             ..Default::default()
@@ -2225,7 +2225,7 @@ mod tests {
     async fn test_portfolio_remove_no_args() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let config = Config {
-            portfolio: crate::config::PortfolioConfig {
+            address_book: crate::config::AddressBookConfig {
                 data_dir: Some(tmp_dir.path().to_path_buf()),
             },
             ..Default::default()
@@ -2241,7 +2241,7 @@ mod tests {
     async fn test_portfolio_summary_with_chain_and_tag() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let config = Config {
-            portfolio: crate::config::PortfolioConfig {
+            address_book: crate::config::AddressBookConfig {
                 data_dir: Some(tmp_dir.path().to_path_buf()),
             },
             ..Default::default()

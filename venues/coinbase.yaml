@@ -1,0 +1,47 @@
+id: coinbase
+name: Coinbase
+base_url: https://api.coinbase.com
+timeout_secs: 15
+rate_limit_per_sec: 10
+
+symbol:
+  template: "{base}-{quote}"
+  default_quote: USD
+
+capabilities:
+  order_book:
+    path: /api/v3/brokerage/market/product_book
+    params:
+      product_id: "{pair}"
+      limit: "100"
+    response_root: pricebook
+    response:
+      asks_key: asks
+      bids_key: bids
+      level_format: object
+      level_price_field: price
+      level_size_field: size
+
+  ticker:
+    path: /api/v3/brokerage/market/products/{pair}
+    response:
+      last_price: price
+      volume_24h: volume_24h
+      best_bid: bid
+      best_ask: ask
+
+  trades:
+    path: /api/v3/brokerage/market/products/{pair}/ticker
+    params:
+      limit: "{limit}"
+    response_root: trades
+    response:
+      price: price
+      quantity: size
+      timestamp_ms: time
+      id: trade_id
+      side:
+        field: side
+        mapping:
+          BUY: buy
+          SELL: sell

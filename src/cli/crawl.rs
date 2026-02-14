@@ -175,8 +175,8 @@ async fn resolve_token_input(
     };
 
     if let Some(token_info) = aliases.get(input, chain_filter) {
-        println!(
-            "Using saved token: {} ({}) on {}",
+        eprintln!(
+            "  Using saved token: {} ({}) on {}",
             token_info.symbol, token_info.name, token_info.chain
         );
         return Ok(ResolvedToken {
@@ -187,7 +187,7 @@ async fn resolve_token_input(
     }
 
     // Search for tokens by name/symbol
-    println!("Searching for '{}'...", input);
+    eprintln!("  Searching for '{}'...", input);
 
     let search_results = dex_client.search_tokens(input, chain_filter).await?;
 
@@ -210,7 +210,7 @@ async fn resolve_token_input(
             &selected.name,
         );
         if let Err(e) = aliases.save() {
-            tracing::warn!("Failed to save token alias: {}", e);
+            tracing::debug!("Failed to save token alias: {}", e);
         } else {
             println!("Saved {} as alias for future use.", selected.symbol);
         }
@@ -379,10 +379,20 @@ pub async fn fetch_analytics_for_input(
 /// Fetches comprehensive token analytics and displays them with ASCII charts
 /// or generates a markdown report.
 pub async fn run(
-    args: CrawlArgs,
-    _config: &Config,
+    mut args: CrawlArgs,
+    config: &Config,
     clients: &dyn ChainClientFactory,
 ) -> Result<()> {
+    // Resolve address book label → address + chain before token resolution
+    if let Some((address, chain)) =
+        crate::cli::address_book::resolve_address_book_input(&args.token, config)?
+    {
+        args.token = address;
+        if args.chain == "ethereum" {
+            args.chain = chain;
+        }
+    }
+
     // Load token aliases
     let mut aliases = TokenAliases::load();
 
@@ -455,7 +465,6 @@ async fn fetch_token_analytics(
     let dex_client = clients.create_dex_client();
 
     // Try to fetch DEX data (price, volume, liquidity)
-    println!("  Fetching DEX data...");
     let dex_result = dex_client.get_token_data(chain, token_address).await;
 
     // Handle DEX data - either use it or fall back to block explorer only
@@ -466,7 +475,7 @@ async fn fetch_token_analytics(
         }
         Err(ScopeError::NotFound(_)) => {
             // No DEX data - fall back to block explorer only
-            println!("  No DEX data found, fetching from block explorer...");
+            tracing::debug!("No DEX data, falling back to block explorer");
             fetch_analytics_from_explorer(token_address, chain, args, clients).await
         }
         Err(e) => Err(e),
@@ -482,7 +491,6 @@ async fn fetch_analytics_with_dex(
     dex_data: crate::chains::dex::DexTokenData,
 ) -> Result<TokenAnalytics> {
     // Fetch holder data from block explorer (if available)
-    println!("  Fetching holder data...");
     let holders = fetch_holders(token_address, chain, args.holders_limit, clients).await?;
 
     // Get token info
@@ -610,11 +618,10 @@ async fn fetch_analytics_from_explorer(
     let client = clients.create_chain_client(chain)?;
 
     // Fetch token info
-    println!("  Fetching token info...");
     let token = match client.get_token_info(token_address).await {
         Ok(t) => t,
         Err(e) => {
-            tracing::warn!("Failed to fetch token info: {}", e);
+            tracing::debug!("Failed to fetch token info: {}", e);
             // Use placeholder token info
             Token {
                 contract_address: token_address.to_string(),
@@ -626,15 +633,13 @@ async fn fetch_analytics_from_explorer(
     };
 
     // Fetch holder data
-    println!("  Fetching holder data...");
     let holders = fetch_holders(token_address, chain, args.holders_limit, clients).await?;
 
     // Fetch holder count
-    println!("  Fetching holder count...");
     let total_holders = match client.get_token_holder_count(token_address).await {
         Ok(count) => count,
         Err(e) => {
-            tracing::warn!("Failed to fetch holder count: {}", e);
+            tracing::debug!("Failed to fetch holder count: {}", e);
             0
         }
     };
@@ -712,7 +717,7 @@ async fn fetch_holders(
             match client.get_token_holders(token_address, limit).await {
                 Ok(holders) => Ok(holders),
                 Err(e) => {
-                    tracing::warn!("Failed to fetch holders: {}", e);
+                    tracing::debug!("Failed to fetch holders: {}", e);
                     Ok(Vec::new())
                 }
             }

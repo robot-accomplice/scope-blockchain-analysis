@@ -179,6 +179,16 @@ pub async fn run(
     config: &Config,
     clients: &dyn ChainClientFactory,
 ) -> Result<()> {
+    // Resolve address book label → address + chain
+    if let Some((address, chain)) =
+        crate::cli::address_book::resolve_address_book_input(&args.address, config)?
+    {
+        args.address = address;
+        if args.chain == "ethereum" {
+            args.chain = chain;
+        }
+    }
+
     // Auto-infer chain if using default and address format is recognizable
     if args.chain == "ethereum"
         && let Some(inferred) = crate::chains::infer_chain_from_address(&args.address)
@@ -300,7 +310,8 @@ pub async fn analyze_address(
                     .collect(),
             ),
             Err(e) => {
-                tracing::warn!("Failed to fetch transactions: {}", e);
+                eprintln!("  ⚠ Transaction history unavailable (use -v for details)");
+                tracing::debug!("Failed to fetch transactions: {}", e);
                 Some(vec![])
             }
         }
@@ -328,7 +339,8 @@ pub async fn analyze_address(
                     .collect(),
             ),
             Err(e) => {
-                tracing::warn!("Failed to fetch token balances: {}", e);
+                eprintln!("  ⚠ Token balances unavailable (use -v for details)");
+                tracing::debug!("Failed to fetch token balances: {}", e);
                 Some(vec![])
             }
         }

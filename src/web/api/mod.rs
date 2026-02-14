@@ -4,16 +4,18 @@
 //! request bodies matching CLI argument structures and returns JSON responses.
 
 pub mod address;
+pub mod address_book;
 pub mod compliance;
 pub mod config_status;
 pub mod crawl;
 pub mod discover;
+pub mod exchange;
 pub mod export;
 pub mod insights;
 pub mod market;
-pub mod portfolio;
 pub mod token_health;
 pub mod tx;
+pub mod venues;
 
 use crate::web::AppState;
 use axum::Router;
@@ -30,10 +32,13 @@ pub fn routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/token-health", axum::routing::post(token_health::handle))
         .route("/market/summary", axum::routing::post(market::handle))
         .route(
-            "/portfolio/list",
-            axum::routing::get(portfolio::handle_list),
+            "/address-book/list",
+            axum::routing::get(address_book::handle_list),
         )
-        .route("/portfolio/add", axum::routing::post(portfolio::handle_add))
+        .route(
+            "/address-book/add",
+            axum::routing::post(address_book::handle_add),
+        )
         .route("/export", axum::routing::post(export::handle))
         .route(
             "/compliance/risk",
@@ -41,6 +46,8 @@ pub fn routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         )
         .route("/config/status", axum::routing::get(config_status::handle))
         .route("/config", axum::routing::post(config_status::handle_save))
+        .route("/venues", axum::routing::get(venues::handle))
+        .route("/exchange/snapshot", axum::routing::post(exchange::handle))
         .with_state(state)
 }
 

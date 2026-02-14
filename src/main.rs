@@ -20,7 +20,7 @@
 //! - Risk, trace, analyze, and compliance-report (`scope compliance`)
 //!
 //! **Data & export:**
-//! - Portfolio management (`scope portfolio` / `port`)
+//! - Address book management (`scope address-book` / `ab`, alias: `portfolio` / `port`)
 //! - Data export (`scope export`)
 //! - Batch reporting (`scope report batch`)
 //!
@@ -49,7 +49,7 @@
 //! scope market summary USDC --format json
 //! scope token-health USDC --with-market
 //! scope monitor USDC --chain ethereum
-//! scope portfolio list
+//! scope address-book list
 //! scope report batch --addresses 0x... --output report.md --with-risk
 //! scope completions zsh > ~/.zfunc/_scope
 //! ```
@@ -98,7 +98,8 @@ async fn main() -> Result<()> {
 
     // Load configuration
     let mut config = Config::load(cli.config.as_deref()).unwrap_or_else(|e| {
-        tracing::warn!("Failed to load config: {}, using defaults", e);
+        eprintln!("  ⚠ Could not load config, using defaults (use -v for details)");
+        tracing::debug!("Failed to load config: {}", e);
         Config::default()
     });
 
@@ -173,13 +174,21 @@ async fn main() -> Result<()> {
         Commands::Address(args) => scope::cli::address::run(args, &config, &factory).await,
         Commands::Tx(args) => scope::cli::tx::run(args, &config, &factory).await,
         Commands::Crawl(args) => scope::cli::crawl::run(args, &config, &factory).await,
-        Commands::Portfolio(args) => scope::cli::portfolio::run(args, &config, &factory).await,
+        Commands::AddressBook(args) => scope::cli::address_book::run(args, &config, &factory).await,
         Commands::Export(args) => scope::cli::export::run(args, &config, &factory).await,
         Commands::Interactive(args) => scope::cli::interactive::run(args, &config, &factory).await,
         Commands::Monitor(args) => scope::cli::monitor::run_direct(args, &config, &factory).await,
         Commands::Setup(args) => scope::cli::setup::run(args, &config).await,
         Commands::Compliance(compliance_cmd) => match compliance_cmd {
-            scope::cli::compliance::ComplianceCommands::Risk(args) => {
+            scope::cli::compliance::ComplianceCommands::Risk(mut args) => {
+                if let Some((addr, chain)) =
+                    scope::cli::address_book::resolve_address_book_input(&args.address, &config)?
+                {
+                    args.address = addr;
+                    if args.chain.is_none() {
+                        args.chain = Some(chain);
+                    }
+                }
                 scope::cli::compliance::handle_risk(args)
                     .await
                     .map_err(|e| scope::error::ScopeError::Other(e.to_string()))
@@ -189,12 +198,23 @@ async fn main() -> Result<()> {
                     .await
                     .map_err(|e| scope::error::ScopeError::Other(e.to_string()))
             }
-            scope::cli::compliance::ComplianceCommands::Analyze(args) => {
+            scope::cli::compliance::ComplianceCommands::Analyze(mut args) => {
+                if let Some((addr, _chain)) =
+                    scope::cli::address_book::resolve_address_book_input(&args.address, &config)?
+                {
+                    args.address = addr;
+                }
                 scope::cli::compliance::handle_analyze(args)
                     .await
                     .map_err(|e| scope::error::ScopeError::Other(e.to_string()))
             }
-            scope::cli::compliance::ComplianceCommands::ComplianceReport(args) => {
+            scope::cli::compliance::ComplianceCommands::ComplianceReport(mut args) => {
+                if !std::path::Path::new(&args.target).exists()
+                    && let Some((addr, _chain)) =
+                        scope::cli::address_book::resolve_address_book_input(&args.target, &config)?
+                {
+                    args.target = addr;
+                }
                 scope::cli::compliance::handle_compliance_report(args)
                     .await
                     .map_err(|e| scope::error::ScopeError::Other(e.to_string()))
@@ -202,6 +222,7 @@ async fn main() -> Result<()> {
         },
         Commands::Market(cmd) => scope::cli::market::run(cmd, &config, &factory).await,
         Commands::TokenHealth(args) => scope::cli::token_health::run(args, &config, &factory).await,
+        Commands::Venues(cmd) => scope::cli::venues::run(cmd),
         Commands::Report(cmd) => scope::cli::report::run(cmd, &config, &factory).await,
         Commands::Discover(args) => scope::cli::discover::run(args, config.output.format)
             .await
@@ -213,7 +234,7 @@ async fn main() -> Result<()> {
 
     // Handle errors gracefully with remediation hints
     if let Err(e) = result {
-        tracing::error!("{}", e);
+        tracing::debug!("Command failed: {}", e);
         display_error(&e);
         std::process::exit(1);
     }
@@ -264,13 +285,21 @@ async fn run_command(command: Commands, config: &Config) -> Result<()> {
         Commands::Address(args) => scope::cli::address::run(args, config, &factory).await,
         Commands::Tx(args) => scope::cli::tx::run(args, config, &factory).await,
         Commands::Crawl(args) => scope::cli::crawl::run(args, config, &factory).await,
-        Commands::Portfolio(args) => scope::cli::portfolio::run(args, config, &factory).await,
+        Commands::AddressBook(args) => scope::cli::address_book::run(args, config, &factory).await,
         Commands::Export(args) => scope::cli::export::run(args, config, &factory).await,
         Commands::Interactive(args) => scope::cli::interactive::run(args, config, &factory).await,
         Commands::Monitor(args) => scope::cli::monitor::run_direct(args, config, &factory).await,
         Commands::Setup(args) => scope::cli::setup::run(args, config).await,
         Commands::Compliance(compliance_cmd) => match compliance_cmd {
-            scope::cli::compliance::ComplianceCommands::Risk(args) => {
+            scope::cli::compliance::ComplianceCommands::Risk(mut args) => {
+                if let Some((addr, chain)) =
+                    scope::cli::address_book::resolve_address_book_input(&args.address, config)?
+                {
+                    args.address = addr;
+                    if args.chain.is_none() {
+                        args.chain = Some(chain);
+                    }
+                }
                 scope::cli::compliance::handle_risk(args)
                     .await
                     .map_err(|e| scope::error::ScopeError::Other(e.to_string()))
@@ -280,12 +309,23 @@ async fn run_command(command: Commands, config: &Config) -> Result<()> {
                     .await
                     .map_err(|e| scope::error::ScopeError::Other(e.to_string()))
             }
-            scope::cli::compliance::ComplianceCommands::Analyze(args) => {
+            scope::cli::compliance::ComplianceCommands::Analyze(mut args) => {
+                if let Some((addr, _chain)) =
+                    scope::cli::address_book::resolve_address_book_input(&args.address, config)?
+                {
+                    args.address = addr;
+                }
                 scope::cli::compliance::handle_analyze(args)
                     .await
                     .map_err(|e| scope::error::ScopeError::Other(e.to_string()))
             }
-            scope::cli::compliance::ComplianceCommands::ComplianceReport(args) => {
+            scope::cli::compliance::ComplianceCommands::ComplianceReport(mut args) => {
+                if !std::path::Path::new(&args.target).exists()
+                    && let Some((addr, _chain)) =
+                        scope::cli::address_book::resolve_address_book_input(&args.target, config)?
+                {
+                    args.target = addr;
+                }
                 scope::cli::compliance::handle_compliance_report(args)
                     .await
                     .map_err(|e| scope::error::ScopeError::Other(e.to_string()))
@@ -293,6 +333,7 @@ async fn run_command(command: Commands, config: &Config) -> Result<()> {
         },
         Commands::Market(cmd) => scope::cli::market::run(cmd, config, &factory).await,
         Commands::TokenHealth(args) => scope::cli::token_health::run(args, config, &factory).await,
+        Commands::Venues(cmd) => scope::cli::venues::run(cmd),
         Commands::Report(cmd) => scope::cli::report::run(cmd, config, &factory).await,
         Commands::Discover(args) => scope::cli::discover::run(args, config.output.format)
             .await
@@ -303,7 +344,7 @@ async fn run_command(command: Commands, config: &Config) -> Result<()> {
     };
 
     if let Err(e) = result {
-        tracing::error!("{}", e);
+        tracing::debug!("Command failed: {}", e);
         display_error(&e);
         std::process::exit(1);
     }
@@ -334,11 +375,18 @@ fn init_logging(verbosity: u8) {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(format!("scope={},warn", level)));
 
-    tracing_subscriber::fmt()
+    let builder = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
-        .with_thread_ids(false)
-        .init();
+        .with_thread_ids(false);
+
+    // At low verbosity, use a compact format without timestamps so output
+    // looks like normal CLI messages rather than log entries.
+    if verbosity < 2 {
+        builder.without_time().with_level(false).init();
+    } else {
+        builder.init();
+    }
 }
 
 /// Displays an error with a remediation hint when available.
@@ -346,12 +394,18 @@ fn init_logging(verbosity: u8) {
 /// Maps common error types to actionable suggestions so users
 /// know how to recover without consulting documentation.
 fn display_error(e: &ScopeError) {
-    eprintln!("Error: {}", e);
+    // Extract the user-facing message, stripping redundant "Not found: " etc. prefixes
+    let msg = match e {
+        ScopeError::NotFound(inner) => inner.clone(),
+        other => format!("{}", other),
+    };
+
+    eprintln!("\n  ✗ {}", msg);
 
     if let Some(hint) = error_suggestion(e) {
-        eprintln!();
-        eprintln!("Hint: {}", hint);
+        eprintln!("\n  {}", hint);
     }
+    eprintln!();
 }
 
 /// Returns a user-facing suggestion for common error types.

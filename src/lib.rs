@@ -1,7 +1,7 @@
 //! # Scope Blockchain Analysis
 //!
 //! A command-line tool and library for blockchain data analysis,
-//! portfolio tracking, and transaction investigation.
+//! address book management, and transaction investigation.
 //!
 //! ## Features
 //!
@@ -22,7 +22,7 @@
 //! - **Live Monitoring**: Real-time TUI dashboard with price/volume/candlestick
 //!   charts, buy/sell gauges, activity logs, and Unicode-rich visualization.
 //!
-//! - **Portfolio Management**: Track multiple addresses across chains with
+//! - **Address Book**: Track multiple addresses (wallets, contracts) across chains with
 //!   labels, tags, and aggregated balance views including ERC-20, SPL, and
 //!   TRC-20 token balances.
 //!
@@ -85,9 +85,9 @@
 //! # Token DEX data
 //! scope crawl USDC --chain ethereum
 //!
-//! # Manage portfolio
-//! scope portfolio add 0x742d... --label "Main Wallet"
-//! scope portfolio list
+//! # Manage address book
+//! scope address-book add 0x742d... --label "Main Wallet"
+//! scope address-book list
 //!
 //! # Export data
 //! scope export --address 0x742d... --output history.json
@@ -155,7 +155,7 @@
 //!   format: table  # table, json, csv, markdown
 //!   color: true
 //!
-//! portfolio:
+//! address_book:
 //!   data_dir: "~/.local/share/scope"
 //! ```
 //!
@@ -179,7 +179,7 @@
 //! ## Modules
 //!
 //! - [`chains`]: Blockchain client implementations (Ethereum/EVM, Solana, Tron, DexScreener)
-//! - [`cli`]: Command-line interface definitions (address, tx, crawl, monitor, market, portfolio, export)
+//! - [`cli`]: Command-line interface definitions (address, tx, crawl, monitor, market, address-book, export)
 //! - [`config`]: Configuration management
 //! - [`market`]: Peg and order book health for stablecoin markets
 //! - [`display`]: Terminal output utilities and markdown report generation

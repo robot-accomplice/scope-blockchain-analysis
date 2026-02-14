@@ -1,0 +1,52 @@
+id: bitget
+name: Bitget
+base_url: https://api.bitget.com
+timeout_secs: 15
+rate_limit_per_sec: 10
+
+symbol:
+  template: "{base}{quote}"
+  default_quote: USDT
+
+capabilities:
+  order_book:
+    path: /api/v2/spot/market/orderbook
+    params:
+      symbol: "{pair}"
+      limit: "100"
+    response_root: data
+    response:
+      asks_key: asks
+      bids_key: bids
+      level_format: positional
+
+  ticker:
+    path: /api/v2/spot/market/tickers
+    params:
+      symbol: "{pair}"
+    response_root: data.0
+    response:
+      last_price: lastPr
+      high_24h: high24h
+      low_24h: low24h
+      volume_24h: baseVolume
+      quote_volume_24h: quoteVolume
+      best_bid: bidPr
+      best_ask: askPr
+
+  trades:
+    path: /api/v2/spot/market/fills
+    params:
+      symbol: "{pair}"
+      limit: "{limit}"
+    response_root: data
+    response:
+      price: price
+      quantity: size
+      timestamp_ms: ts
+      id: tradeId
+      side:
+        field: side
+        mapping:
+          buy: buy
+          sell: sell

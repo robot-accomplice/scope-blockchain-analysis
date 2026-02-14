@@ -1,0 +1,53 @@
+id: gateio
+name: Gate.io
+base_url: https://api.gateio.ws
+timeout_secs: 15
+rate_limit_per_sec: 10
+
+symbol:
+  template: "{base}_{quote}"
+  default_quote: USDT
+
+capabilities:
+  order_book:
+    path: /api/v4/spot/order_book
+    params:
+      currency_pair: "{pair}"
+      limit: "100"
+    response:
+      asks_key: asks
+      bids_key: bids
+      level_format: positional
+
+  ticker:
+    path: /api/v4/spot/tickers
+    params:
+      currency_pair: "{pair}"
+    response:
+      items_key: ""
+      filter:
+        field: currency_pair
+        value: "{pair}"
+      last_price: last
+      high_24h: high_24h
+      low_24h: low_24h
+      volume_24h: base_volume
+      quote_volume_24h: quote_volume
+      best_bid: highest_bid
+      best_ask: lowest_ask
+
+  trades:
+    path: /api/v4/spot/trades
+    params:
+      currency_pair: "{pair}"
+      limit: "{limit}"
+    response:
+      price: price
+      quantity: amount
+      timestamp_ms: create_time_ms
+      id: id
+      side:
+        field: side
+        mapping:
+          buy: buy
+          sell: sell

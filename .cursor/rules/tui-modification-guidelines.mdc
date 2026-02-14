@@ -1,0 +1,17 @@
+---
+description: Enforces consulting CLI usability guidelines before any TUI or CLI display changes
+globs: src/cli/monitor.rs,src/display/**/*.rs,src/cli/*.rs
+alwaysApply: false
+---
+
+# TUI Modification Guard
+
+Before modifying any TUI (monitor mode) or CLI display code, you MUST read and consult the CLI usability guidelines:
+
+1. **Read first**: `docs/architecture/cli-usability-guidelines.md` -- covers human-first design, composability, output formatting, progress patterns, error handling, and the new-command checklist.
+2. **TUI color rules**: Use `ColorPalette` from `monitor.rs` -- never hardcode colors. Green/red for buy/sell and up/down. Support all three `ColorScheme` variants (GreenRed, BlueOrange, Monochrome).
+3. **CLI output helpers**: Use `display::terminal` helpers (`section_header`, `kv_row`, `check_pass`, `check_fail`, `separator`, `section_footer`) -- never hand-roll box-drawing or formatting.
+4. **Formatting functions**: Use `display::format::format_usd` and `format_large_number` for monetary and numeric display.
+5. **TTY awareness**: All colored output must respect `is_tty()`, `--no-color`, and `NO_COLOR`.
+
+Do not skip this step. Changes that bypass these guidelines create visual inconsistency across the interface.

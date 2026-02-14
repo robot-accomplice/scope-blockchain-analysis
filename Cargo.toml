@@ -1,9 +1,9 @@
 [package]
 name = "scope-bca"
-version = "1.0.0"
+version = "0.4.0"
 edition = "2024"
 authors = ["Jon Machen <jon@palmusd.com>"]
-description = "Scope Blockchain Analysis - A production-grade tool for blockchain data analysis, portfolio tracking, and transaction investigation"
+description = "Scope Blockchain Analysis - A production-grade tool for blockchain data analysis, address management, and transaction investigation"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/robot-accomplice/scope-blockchain-analysis"
@@ -83,6 +83,7 @@ sha2 = "0.10.9"
 # Web server for browser mode
 axum = { version = "0.7", features = ["json", "ws", "macros"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
+owo-colors = "4.2.3"
 
 # Daemon support (Unix signal handling)
 [target.'cfg(unix)'.dependencies]

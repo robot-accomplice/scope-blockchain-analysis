@@ -1,9 +1,7 @@
 //! Token health API handler.
 
 use crate::cli::crawl::{self, Period};
-use crate::market::{
-    BinanceClient, HealthThresholds, MarketSummary, MarketVenue, order_book_from_analytics,
-};
+use crate::market::{HealthThresholds, MarketSummary, VenueRegistry, order_book_from_analytics};
 use crate::web::AppState;
 use axum::Json;
 use axum::extract::State;
@@ -62,14 +60,8 @@ pub async fn handle(
     };
 
     // Optionally fetch market data
+    let venue_id = &req.market_venue;
     let market_summary = if req.with_market {
-        let venue: MarketVenue = match req.market_venue.as_str() {
-            "biconomy" => MarketVenue::Biconomy,
-            "eth" | "ethereum" => MarketVenue::Ethereum,
-            "solana" | "sol" => MarketVenue::Solana,
-            _ => MarketVenue::Binance,
-        };
-
         let thresholds = HealthThresholds {
             peg_target: 1.0,
             peg_range: 0.001,
@@ -79,38 +71,41 @@ pub async fn handle(
             max_bid_ask_ratio: 5.0,
         };
 
-        if venue.is_cex() {
-            let pair = venue.format_pair(&analytics.token.symbol);
-            if let Some(client) = venue.create_client() {
-                match client.fetch_order_book(&pair).await {
-                    Ok(book) => {
-                        let volume_24h = match venue {
-                            MarketVenue::Binance => BinanceClient::default_url()
-                                .fetch_24h_volume(&pair)
-                                .await
-                                .ok()
-                                .flatten(),
-                            _ => None,
-                        };
-                        Some(MarketSummary::from_order_book(
-                            &book,
-                            1.0,
-                            &thresholds,
-                            volume_24h,
-                        ))
+        if !is_dex_venue(venue_id) {
+            // CEX venue — use venue registry
+            let summary = if let Ok(registry) = VenueRegistry::load() {
+                if let Ok(exchange) = registry.create_exchange_client(venue_id) {
+                    let pair = exchange.format_pair(&analytics.token.symbol);
+                    match exchange.fetch_order_book(&pair).await {
+                        Ok(book) => {
+                            let volume_24h = if exchange.has_ticker() {
+                                exchange
+                                    .fetch_ticker(&pair)
+                                    .await
+                                    .ok()
+                                    .and_then(|t| t.quote_volume_24h.or(t.volume_24h))
+                            } else {
+                                None
+                            };
+                            Some(MarketSummary::from_order_book(
+                                &book,
+                                1.0,
+                                &thresholds,
+                                volume_24h,
+                            ))
+                        }
+                        Err(_) => None,
                     }
-                    Err(_) => None,
+                } else {
+                    None
                 }
             } else {
                 None
-            }
+            };
+            summary
         } else {
             // DEX venue
-            let venue_chain = match venue {
-                MarketVenue::Ethereum => "ethereum",
-                MarketVenue::Solana => "solana",
-                _ => &analytics.chain,
-            };
+            let venue_chain = dex_venue_to_chain(venue_id);
             if analytics.chain.eq_ignore_ascii_case(venue_chain) && !analytics.dex_pairs.is_empty()
             {
                 let best_pair = analytics
@@ -164,6 +159,20 @@ pub async fn handle(
         "market": market_json,
     }))
     .into_response()
+}
+
+/// Whether the venue string refers to a DEX venue.
+fn is_dex_venue(venue: &str) -> bool {
+    matches!(venue.to_lowercase().as_str(), "ethereum" | "eth" | "solana")
+}
+
+/// Resolve DEX venue name to a canonical chain name.
+fn dex_venue_to_chain(venue: &str) -> &str {
+    match venue.to_lowercase().as_str() {
+        "ethereum" | "eth" => "ethereum",
+        "solana" => "solana",
+        _ => "ethereum",
+    }
 }
 
 #[cfg(test)]

@@ -1,0 +1,50 @@
+id: binance
+name: Binance Spot
+base_url: https://api.binance.com
+timeout_secs: 15
+rate_limit_per_sec: 10
+
+symbol:
+  template: "{base}{quote}"
+  default_quote: USDT
+
+capabilities:
+  order_book:
+    path: /api/v3/depth
+    params:
+      symbol: "{pair}"
+      limit: "100"
+    response:
+      asks_key: asks
+      bids_key: bids
+      level_format: positional
+
+  ticker:
+    path: /api/v3/ticker/24hr
+    params:
+      symbol: "{pair}"
+    response:
+      last_price: lastPrice
+      high_24h: highPrice
+      low_24h: lowPrice
+      volume_24h: volume
+      quote_volume_24h: quoteVolume
+      best_bid: bidPrice
+      best_ask: askPrice
+
+  trades:
+    path: /api/v3/trades
+    params:
+      symbol: "{pair}"
+      limit: "{limit}"
+    response:
+      price: price
+      quantity: qty
+      quote_quantity: quoteQty
+      timestamp_ms: time
+      id: id
+      side:
+        field: isBuyerMaker
+        mapping:
+          "true": sell
+          "false": buy

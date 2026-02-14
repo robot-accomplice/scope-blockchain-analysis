@@ -21,15 +21,15 @@ pub fn create_test_config(dir: &TempDir, content: &str) -> PathBuf {
     config_path
 }
 
-/// Creates a test portfolio file.
-pub fn create_test_portfolio(dir: &TempDir, content: &str) -> PathBuf {
+/// Creates a test address book file.
+pub fn create_test_address_book(dir: &TempDir, content: &str) -> PathBuf {
     let data_dir = dir.path().join(".local").join("share").join("scope");
     std::fs::create_dir_all(&data_dir).expect("Failed to create data directory");
     
-    let portfolio_path = data_dir.join("portfolio.yaml");
-    std::fs::write(&portfolio_path, content).expect("Failed to write portfolio file");
+    let address_book_path = data_dir.join("address_book.yaml");
+    std::fs::write(&address_book_path, content).expect("Failed to write address book file");
     
-    portfolio_path
+    address_book_path
 }
 
 /// Valid Ethereum address for testing.
@@ -59,12 +59,12 @@ mod tests {
     }
 
     #[test]
-    fn test_create_test_portfolio() {
+    fn test_create_test_address_book() {
         let temp_dir = create_temp_dir();
-        let portfolio_path = create_test_portfolio(&temp_dir, "addresses: []");
+        let address_book_path = create_test_address_book(&temp_dir, "addresses: []");
         
-        assert!(portfolio_path.exists());
-        let content = std::fs::read_to_string(&portfolio_path).unwrap();
+        assert!(address_book_path.exists());
+        let content = std::fs::read_to_string(&address_book_path).unwrap();
         assert_eq!(content, "addresses: []");
     }
 

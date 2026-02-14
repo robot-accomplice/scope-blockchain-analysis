@@ -1,0 +1,52 @@
+id: okx
+name: OKX
+base_url: https://www.okx.com
+timeout_secs: 15
+rate_limit_per_sec: 10
+
+symbol:
+  template: "{base}-{quote}"
+  default_quote: USDT
+
+capabilities:
+  order_book:
+    path: /api/v5/market/books
+    params:
+      instId: "{pair}"
+      sz: "100"
+    response_root: "data.0"
+    response:
+      asks_key: asks
+      bids_key: bids
+      level_format: positional
+
+  ticker:
+    path: /api/v5/market/ticker
+    params:
+      instId: "{pair}"
+    response_root: "data.0"
+    response:
+      last_price: last
+      high_24h: high24h
+      low_24h: low24h
+      volume_24h: vol24h
+      quote_volume_24h: volCcy24h
+      best_bid: bidPx
+      best_ask: askPx
+
+  trades:
+    path: /api/v5/market/trades
+    params:
+      instId: "{pair}"
+      limit: "{limit}"
+    response_root: data
+    response:
+      price: px
+      quantity: sz
+      timestamp_ms: ts
+      id: tradeId
+      side:
+        field: side
+        mapping:
+          buy: buy
+          sell: sell

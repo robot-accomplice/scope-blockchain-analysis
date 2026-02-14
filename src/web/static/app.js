@@ -197,24 +197,313 @@ function runExport() {
   }, document.getElementById('export-results'));
 }
 
-// ===== Portfolio =====
-function loadPortfolio() {
-  apiGet('/api/portfolio/list', document.getElementById('portfolio-results'));
+// ===== Address Book =====
+function loadAddressBook() {
+  apiGet('/api/address-book/list', document.getElementById('ab-results'));
 }
 
-function showAddPortfolio() {
-  var el = document.getElementById('portfolio-add');
+function showAddAddress() {
+  var el = document.getElementById('ab-add');
   el.style.display = el.style.display === 'none' ? 'block' : 'none';
 }
 
-function addPortfolio() {
-  var address = document.getElementById('port-address').value.trim();
+function addAddressBookEntry() {
+  var address = document.getElementById('ab-address').value.trim();
   if (!address) return;
-  apiPost('/api/portfolio/add', {
+  apiPost('/api/address-book/add', {
     address: address,
-    chain: document.getElementById('port-chain').value,
-    label: document.getElementById('port-label').value || undefined,
-  }, document.getElementById('portfolio-results'));
+    chain: document.getElementById('ab-chain').value,
+    label: document.getElementById('ab-label').value || undefined,
+  }, document.getElementById('ab-results'));
+}
+
+// ===== Venue Loading =====
+var venuesCache = null;
+
+async function loadVenues() {
+  try {
+    var res = await fetch(API + '/api/venues');
+    var data = await res.json();
+    if (data.venues) {
+      venuesCache = data.venues;
+      populateVenueSelects(data.venues);
+    }
+  } catch (e) {
+    // Silently fall back to hardcoded options
+  }
+}
+
+function populateVenueSelects(venues) {
+  document.querySelectorAll('.venue-select').forEach(function(sel) {
+    // Preserve the first option if it's a "None" placeholder
+    var hasNone = sel.options.length > 0 && sel.options[0].value === '';
+    var currentValue = sel.value;
+
+    while (sel.options.length > (hasNone ? 1 : 0)) {
+      sel.remove(hasNone ? 1 : 0);
+    }
+
+    // Add CEX venues from registry
+    venues.forEach(function(v) {
+      var opt = document.createElement('option');
+      opt.value = v.id;
+      opt.textContent = v.name;
+      sel.appendChild(opt);
+    });
+
+    // Add DEX venues (not from registry)
+    var dexVenues = [
+      { id: 'eth', name: 'Ethereum DEX' },
+      { id: 'solana', name: 'Solana DEX' },
+    ];
+    dexVenues.forEach(function(d) {
+      var opt = document.createElement('option');
+      opt.value = d.id;
+      opt.textContent = d.name;
+      sel.appendChild(opt);
+    });
+
+    // Restore selection
+    if (currentValue) sel.value = currentValue;
+  });
+}
+
+// ===== Exchange Snapshot =====
+function runExchange() {
+  var venue = document.getElementById('ex-venue').value;
+  var pair = document.getElementById('ex-pair').value.trim() || 'BTC';
+  var resultEl = document.getElementById('exchange-results');
+  showLoading(resultEl);
+
+  fetch(API + '/api/exchange/snapshot', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ venue: venue, pair: pair }),
+  }).then(function(res) { return res.json(); })
+    .then(function(data) {
+      if (data.error) {
+        showError(resultEl, 'Error: ' + data.error);
+        return;
+      }
+      renderExchangeSnapshot(resultEl, data);
+    })
+    .catch(function(e) {
+      showError(resultEl, 'Request failed: ' + e.message);
+    });
+}
+
+function renderExchangeSnapshot(el, data) {
+  clearElement(el);
+
+  var grid = document.createElement('div');
+  grid.className = 'exchange-grid';
+
+  // Left column: Ticker + Order Book
+  var leftCol = document.createElement('div');
+  leftCol.className = 'exchange-col';
+
+  // Ticker
+  if (data.ticker) {
+    var tickerH3 = document.createElement('h3');
+    tickerH3.textContent = 'Ticker — ' + (data.pair || '');
+    leftCol.appendChild(tickerH3);
+    renderTicker(leftCol, data.ticker);
+  }
+
+  // Order Book
+  if (data.order_book) {
+    var obH3 = document.createElement('h3');
+    obH3.style.marginTop = '12px';
+    obH3.textContent = 'Order Book';
+    leftCol.appendChild(obH3);
+    renderOrderBook(leftCol, data.order_book);
+  }
+
+  grid.appendChild(leftCol);
+
+  // Right column: Trade History
+  var rightCol = document.createElement('div');
+  rightCol.className = 'exchange-col';
+  var trH3 = document.createElement('h3');
+  trH3.textContent = 'Recent Trades';
+  rightCol.appendChild(trH3);
+
+  if (data.recent_trades && data.recent_trades.length > 0) {
+    renderTradeHistory(rightCol, data.recent_trades);
+  } else {
+    var empty = document.createElement('div');
+    empty.style.color = 'var(--text-muted)';
+    empty.style.fontFamily = 'var(--font-mono)';
+    empty.style.fontSize = '12px';
+    empty.textContent = 'No trade data available for this venue.';
+    rightCol.appendChild(empty);
+  }
+
+  grid.appendChild(rightCol);
+  el.appendChild(grid);
+}
+
+function renderTicker(parent, ticker) {
+  var fields = [
+    ['Last Price', formatPrice(ticker.last_price)],
+    ['24h High', formatPrice(ticker.high_24h)],
+    ['24h Low', formatPrice(ticker.low_24h)],
+    ['24h Volume', fmtCompact(ticker.volume_24h)],
+    ['Quote Volume', fmtCompact(ticker.quote_volume_24h)],
+    ['Best Bid', formatPrice(ticker.best_bid)],
+    ['Best Ask', formatPrice(ticker.best_ask)],
+  ];
+  fields.forEach(function(f) {
+    var row = document.createElement('div');
+    row.className = 'ticker-row';
+    var lbl = document.createElement('span');
+    lbl.className = 'ticker-label';
+    lbl.textContent = f[0];
+    var val = document.createElement('span');
+    val.className = 'ticker-value';
+    val.textContent = f[1];
+    row.appendChild(lbl);
+    row.appendChild(val);
+    parent.appendChild(row);
+  });
+}
+
+function renderOrderBook(parent, ob) {
+  var table = document.createElement('table');
+  table.className = 'ob-table';
+
+  // Header
+  var thead = document.createElement('thead');
+  var hr = document.createElement('tr');
+  ['Price', 'Quantity', 'Value'].forEach(function(h) {
+    var th = document.createElement('th');
+    th.textContent = h;
+    hr.appendChild(th);
+  });
+  thead.appendChild(hr);
+  table.appendChild(thead);
+
+  var tbody = document.createElement('tbody');
+
+  // Asks (reversed so lowest ask is at bottom, closest to spread)
+  var asks = (ob.asks || []).slice(0, 10).reverse();
+  asks.forEach(function(level) {
+    var tr = document.createElement('tr');
+    tr.className = 'ob-ask';
+    addOBCell(tr, formatPrice(level.price));
+    addOBCell(tr, fmtQty(level.quantity));
+    addOBCell(tr, fmtCompact(level.value));
+    tbody.appendChild(tr);
+  });
+
+  // Spread row
+  if (ob.spread !== null && ob.spread !== undefined) {
+    var sr = document.createElement('tr');
+    sr.className = 'ob-spread';
+    var sd = document.createElement('td');
+    sd.colSpan = 3;
+    sd.textContent = 'Spread: ' + formatPrice(ob.spread) +
+      (ob.mid_price ? ' | Mid: ' + formatPrice(ob.mid_price) : '');
+    sr.appendChild(sd);
+    tbody.appendChild(sr);
+  }
+
+  // Bids
+  var bids = (ob.bids || []).slice(0, 10);
+  bids.forEach(function(level) {
+    var tr = document.createElement('tr');
+    tr.className = 'ob-bid';
+    addOBCell(tr, formatPrice(level.price));
+    addOBCell(tr, fmtQty(level.quantity));
+    addOBCell(tr, fmtCompact(level.value));
+    tbody.appendChild(tr);
+  });
+
+  table.appendChild(tbody);
+  parent.appendChild(table);
+}
+
+function addOBCell(row, text) {
+  var td = document.createElement('td');
+  td.textContent = text;
+  row.appendChild(td);
+}
+
+function renderTradeHistory(parent, trades) {
+  // Header row
+  var hdr = document.createElement('div');
+  hdr.className = 'trade-row';
+  hdr.style.fontWeight = '600';
+  hdr.style.color = 'var(--text-muted)';
+  hdr.style.fontSize = '10px';
+  hdr.style.textTransform = 'uppercase';
+  ['Side', 'Price', 'Qty', 'Time'].forEach(function(h) {
+    var sp = document.createElement('span');
+    sp.className = h === 'Side' ? 'trade-side' :
+                   h === 'Price' ? 'trade-price' :
+                   h === 'Qty' ? 'trade-qty' : 'trade-time';
+    sp.textContent = h;
+    hdr.appendChild(sp);
+  });
+  parent.appendChild(hdr);
+
+  trades.slice(0, 50).forEach(function(t) {
+    var row = document.createElement('div');
+    row.className = 'trade-row ' + (t.side === 'buy' ? 'trade-buy' : 'trade-sell');
+
+    var side = document.createElement('span');
+    side.className = 'trade-side';
+    side.textContent = t.side === 'buy' ? 'B' : 'S';
+    row.appendChild(side);
+
+    var price = document.createElement('span');
+    price.className = 'trade-price';
+    price.textContent = formatPrice(t.price);
+    row.appendChild(price);
+
+    var qty = document.createElement('span');
+    qty.className = 'trade-qty';
+    qty.textContent = fmtQty(t.quantity);
+    row.appendChild(qty);
+
+    var time = document.createElement('span');
+    time.className = 'trade-time';
+    time.textContent = formatTradeTime(t.timestamp_ms);
+    row.appendChild(time);
+
+    parent.appendChild(row);
+  });
+}
+
+// ===== Formatting Helpers =====
+function formatPrice(n) {
+  if (n === null || n === undefined) return '-';
+  if (n >= 1000) return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  if (n >= 1) return n.toFixed(4);
+  if (n >= 0.01) return n.toFixed(6);
+  return n.toFixed(8);
+}
+
+function fmtCompact(n) {
+  if (n === null || n === undefined) return '-';
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(2) + 'K';
+  return n.toFixed(2);
+}
+
+function fmtQty(n) {
+  if (n === null || n === undefined) return '-';
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(2) + 'K';
+  if (n >= 1) return n.toFixed(4);
+  return n.toFixed(6);
+}
+
+function formatTradeTime(ms) {
+  if (!ms) return '-';
+  var d = new Date(ms);
+  return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
 // ===== Monitor (WebSocket) =====
@@ -227,6 +516,7 @@ function toggleMonitor() {
     monitorWs = null;
     document.getElementById('mon-btn').textContent = 'Start';
     document.getElementById('mon-container').style.display = 'none';
+    document.getElementById('mon-exchange').style.display = 'none';
     return;
   }
 
@@ -235,13 +525,22 @@ function toggleMonitor() {
 
   var chain = document.getElementById('mon-chain').value;
   var refresh = document.getElementById('mon-refresh').value || 5;
+  var venue = document.getElementById('mon-venue').value || '';
+  var pair = document.getElementById('mon-pair').value.trim() || '';
   var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   var url = proto + '//' + location.host + '/ws/monitor?token=' + encodeURIComponent(token) + '&chain=' + chain + '&refresh=' + refresh;
+  if (venue) url += '&venue=' + encodeURIComponent(venue);
+  if (pair) url += '&pair=' + encodeURIComponent(pair);
 
   priceHistory = [];
   monitorWs = new WebSocket(url);
   document.getElementById('mon-btn').textContent = 'Stop';
   document.getElementById('mon-container').style.display = 'grid';
+
+  // Show exchange panel if venue is set
+  if (venue) {
+    document.getElementById('mon-exchange').style.display = 'grid';
+  }
 
   monitorWs.onmessage = function(event) {
     var data = JSON.parse(event.data);
@@ -257,6 +556,10 @@ function toggleMonitor() {
       val.textContent = data.message;
       card.appendChild(val);
       statsEl.appendChild(card);
+      // Still render exchange data if present
+      if (data.exchange_order_book || data.exchange_trades) {
+        updateMonitorExchange(data);
+      }
     }
   };
 
@@ -315,14 +618,6 @@ function updateMonitorDisplay(data) {
   var changeClass = change24 >= 0 ? 'positive' : 'negative';
   var changeSign = change24 >= 0 ? '+' : '';
 
-  function fmtNum(n) {
-    if (n === null || n === undefined) return '-';
-    if (n >= 1e9) return '$' + (n / 1e9).toFixed(2) + 'B';
-    if (n >= 1e6) return '$' + (n / 1e6).toFixed(2) + 'M';
-    if (n >= 1e3) return '$' + (n / 1e3).toFixed(2) + 'K';
-    return '$' + n.toFixed(2);
-  }
-
   function addStat(label, value, extra) {
     var card = document.createElement('div');
     card.className = 'stat-card';
@@ -334,7 +629,7 @@ function updateMonitorDisplay(data) {
 
     var val = document.createElement('div');
     val.className = 'stat-value';
-    if (typeof value === 'object') {
+    if (typeof value === 'object' && value !== null) {
       val.appendChild(value);
     } else {
       val.textContent = value;
@@ -354,9 +649,9 @@ function updateMonitorDisplay(data) {
   addStat((data.token ? data.token.symbol : '') + ' Price',
     '$' + (data.price_usd ? data.price_usd.toFixed(6) : '-'),
     { cls: changeClass, text: changeSign + change24.toFixed(2) + '% (24h)' });
-  addStat('Volume (24h)', fmtNum(data.volume_24h));
-  addStat('Liquidity', fmtNum(data.liquidity_usd));
-  addStat('Market Cap', fmtNum(data.market_cap));
+  addStat('Volume (24h)', fmtCompact(data.volume_24h));
+  addStat('Liquidity', fmtCompact(data.liquidity_usd));
+  addStat('Market Cap', fmtCompact(data.market_cap));
 
   // Buys/Sells as a compound element
   var bsSpan = document.createElement('span');
@@ -373,6 +668,44 @@ function updateMonitorDisplay(data) {
   addStat('Buys / Sells (24h)', bsSpan);
 
   addStat('Last Update', data.timestamp || '-');
+
+  // Exchange ticker as stat card (if available)
+  if (data.exchange_ticker) {
+    var t = data.exchange_ticker;
+    addStat('CEX Price', formatPrice(t.last_price));
+    if (t.volume_24h) addStat('CEX Volume', fmtCompact(t.volume_24h));
+  }
+
+  // Render exchange data (order book / trades)
+  if (data.exchange_order_book || data.exchange_trades) {
+    updateMonitorExchange(data);
+  }
+}
+
+function updateMonitorExchange(data) {
+  var panel = document.getElementById('mon-exchange');
+  if (!panel) return;
+  panel.style.display = 'grid';
+
+  // Order book
+  var obEl = document.getElementById('mon-orderbook');
+  clearElement(obEl);
+  if (data.exchange_order_book) {
+    var h4 = document.createElement('h4');
+    h4.textContent = 'Order Book';
+    obEl.appendChild(h4);
+    renderOrderBook(obEl, data.exchange_order_book);
+  }
+
+  // Trades
+  var trEl = document.getElementById('mon-trades');
+  clearElement(trEl);
+  if (data.exchange_trades && data.exchange_trades.length > 0) {
+    var h4t = document.createElement('h4');
+    h4t.textContent = 'Recent Trades';
+    trEl.appendChild(h4t);
+    renderTradeHistory(trEl, data.exchange_trades);
+  }
 }
 
 // ===== Setup =====
@@ -502,4 +835,5 @@ document.querySelectorAll('input[type="text"]').forEach(function(input) {
 
 // ===== Init =====
 loadConfigStatus();
-loadPortfolio();
+loadAddressBook();
+loadVenues();

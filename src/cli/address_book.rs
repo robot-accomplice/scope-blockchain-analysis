@@ -1,22 +1,22 @@
-//! # Portfolio Management Command
+//! # Address Book Command
 //!
-//! This module implements the `scope portfolio` command for managing
-//! watched addresses and viewing aggregated portfolio data.
+//! This module implements the `scope address-book` command for managing
+//! watched addresses and viewing aggregated address book data.
 //!
 //! ## Usage
 //!
 //! ```bash
-//! # Add an address to portfolio
-//! scope portfolio add 0x742d... --label "Main Wallet"
+//! # Add an address to address book
+//! scope address-book add 0x742d... --label "Main Wallet"
 //!
 //! # List watched addresses
-//! scope portfolio list
+//! scope address-book list
 //!
 //! # Remove an address
-//! scope portfolio remove 0x742d...
+//! scope address-book remove 0x742d...
 //!
-//! # View portfolio summary
-//! scope portfolio summary
+//! # View address book summary
+//! scope address-book summary
 //! ```
 
 use crate::chains::{ChainClientFactory, native_symbol};
@@ -27,31 +27,31 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-/// Arguments for the portfolio management command.
+/// Arguments for the address book management command.
 #[derive(Debug, Clone, Args)]
-pub struct PortfolioArgs {
-    /// Portfolio subcommand to execute.
+pub struct AddressBookArgs {
+    /// AddressBook subcommand to execute.
     #[command(subcommand)]
-    pub command: PortfolioCommands,
+    pub command: AddressBookCommands,
 
     /// Override output format.
     #[arg(short, long, global = true, value_name = "FORMAT")]
     pub format: Option<OutputFormat>,
 }
 
-/// Portfolio subcommands.
+/// AddressBook subcommands.
 #[derive(Debug, Clone, Subcommand)]
-pub enum PortfolioCommands {
-    /// Add an address to the portfolio.
+pub enum AddressBookCommands {
+    /// Add an address to the address book.
     Add(AddArgs),
 
-    /// Remove an address from the portfolio.
+    /// Remove an address from the address book.
     Remove(RemoveArgs),
 
     /// List all watched addresses.
     List,
 
-    /// Show portfolio summary with balances.
+    /// Show address book summary with balances.
     Summary(SummaryArgs),
 }
 
@@ -83,7 +83,7 @@ pub struct RemoveArgs {
     pub address: String,
 }
 
-/// Arguments for portfolio summary.
+/// Arguments for address book summary.
 #[derive(Debug, Clone, Args)]
 pub struct SummaryArgs {
     /// Filter by chain.
@@ -103,7 +103,7 @@ pub struct SummaryArgs {
     pub report: Option<std::path::PathBuf>,
 }
 
-/// A watched address in the portfolio.
+/// A watched address in the address book.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WatchedAddress {
     /// The blockchain address.
@@ -124,23 +124,23 @@ pub struct WatchedAddress {
     pub added_at: u64,
 }
 
-/// Portfolio data storage.
+/// AddressBook data storage.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct Portfolio {
+pub struct AddressBook {
     /// All watched addresses.
     pub addresses: Vec<WatchedAddress>,
 }
 
-/// Portfolio summary report.
+/// AddressBook summary report.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PortfolioSummary {
+pub struct AddressBookSummary {
     /// Total number of addresses.
     pub address_count: usize,
 
     /// Balances by chain.
     pub balances_by_chain: HashMap<String, ChainBalance>,
 
-    /// Total portfolio value in USD (if available).
+    /// Total address book value in USD (if available).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_usd: Option<f64>,
 
@@ -201,35 +201,35 @@ pub struct TokenSummary {
     pub symbol: Option<String>,
 }
 
-impl Portfolio {
-    /// Loads the portfolio from the data directory.
+impl AddressBook {
+    /// Loads the address book from the data directory.
     pub fn load(data_dir: &std::path::Path) -> Result<Self> {
-        let path = data_dir.join("portfolio.yaml");
+        let path = data_dir.join("address_book.yaml");
 
         if !path.exists() {
             return Ok(Self::default());
         }
 
         let contents = std::fs::read_to_string(&path)?;
-        let portfolio: Portfolio = serde_yaml::from_str(&contents)
+        let address_book: AddressBook = serde_yaml::from_str(&contents)
             .map_err(|e| ScopeError::Config(crate::error::ConfigError::Parse { source: e }))?;
 
-        Ok(portfolio)
+        Ok(address_book)
     }
 
-    /// Saves the portfolio to the data directory.
+    /// Saves the address book to the data directory.
     pub fn save(&self, data_dir: &PathBuf) -> Result<()> {
         std::fs::create_dir_all(data_dir)?;
 
-        let path = data_dir.join("portfolio.yaml");
+        let path = data_dir.join("address_book.yaml");
         let contents = serde_yaml::to_string(self)
-            .map_err(|e| ScopeError::Export(format!("Failed to serialize portfolio: {}", e)))?;
+            .map_err(|e| ScopeError::Export(format!("Failed to serialize address book: {}", e)))?;
 
         std::fs::write(&path, contents)?;
         Ok(())
     }
 
-    /// Adds an address to the portfolio.
+    /// Adds an address to the address book.
     pub fn add_address(&mut self, watched: WatchedAddress) -> Result<()> {
         // Check for duplicates
         if self
@@ -238,7 +238,7 @@ impl Portfolio {
             .any(|a| a.address.to_lowercase() == watched.address.to_lowercase())
         {
             return Err(ScopeError::Chain(format!(
-                "Address already in portfolio: {}",
+                "Address already in address book: {}",
                 watched.address
             )));
         }
@@ -247,7 +247,7 @@ impl Portfolio {
         Ok(())
     }
 
-    /// Removes an address from the portfolio.
+    /// Removes an address from the address book.
     pub fn remove_address(&mut self, address: &str) -> Result<bool> {
         let original_len = self.addresses.len();
         self.addresses
@@ -256,17 +256,101 @@ impl Portfolio {
         Ok(self.addresses.len() < original_len)
     }
 
-    /// Finds an address in the portfolio.
+    /// Finds an address in the address book by address string.
     pub fn find_address(&self, address: &str) -> Option<&WatchedAddress> {
         self.addresses
             .iter()
             .find(|a| a.address.to_lowercase() == address.to_lowercase())
     }
+
+    /// Finds an address in the address book by its label (case-insensitive).
+    ///
+    /// Returns the first matching entry. Labels are compared after
+    /// lowercasing and trimming whitespace.
+    pub fn find_by_label(&self, label: &str) -> Option<&WatchedAddress> {
+        let needle = label.trim().to_lowercase();
+        self.addresses.iter().find(|a| {
+            a.label
+                .as_ref()
+                .is_some_and(|l| l.trim().to_lowercase() == needle)
+        })
+    }
 }
 
-/// Executes the portfolio command.
+/// Resolves a user-supplied input string against the address book.
+///
+/// **Label lookup (requires `@` prefix):** If the input starts with `@`, the remainder
+/// is looked up as a label. Example: `@main-wallet` resolves to the address with
+/// label "main-wallet". This convention distinguishes label lookups from raw addresses.
+///
+/// **Address match (no `@`):** If the input does not start with `@`, only direct
+/// address matching is attempted (to inject chain info from the address book).
+/// Raw addresses and token identifiers are not treated as labels.
+///
+/// Returns `Ok(Some((address, chain)))` when resolved, `Ok(None)` when no `@` prefix
+/// and no address match, or `Err` when the `@` prefix was used but the label wasn't found.
+pub fn resolve_address_book_input(
+    input: &str,
+    config: &Config,
+) -> crate::error::Result<Option<(String, String)>> {
+    let data_dir = config.data_dir();
+    let address_book = match AddressBook::load(&data_dir) {
+        Ok(ab) => ab,
+        Err(_) => return Ok(None),
+    };
+
+    // If input starts with @, strip it and look up remainder as label
+    if let Some(label) = input.strip_prefix('@') {
+        if let Some(watched) = address_book.find_by_label(label) {
+            let label_display = watched.label.as_deref().unwrap_or(label);
+            eprintln!(
+                "  Using '{}' → {} ({})",
+                label_display, watched.address, watched.chain
+            );
+            return Ok(Some((watched.address.clone(), watched.chain.clone())));
+        }
+        // List available labels to help the user
+        let available: Vec<String> = address_book
+            .addresses
+            .iter()
+            .filter_map(|a| a.label.clone())
+            .collect();
+        let suggestion = if available.is_empty() {
+            "Your address book is empty. Add entries with `scope address-book add`.".to_string()
+        } else {
+            format!(
+                "Available labels: {}",
+                available
+                    .iter()
+                    .map(|l| format!("@{}", l))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        return Err(crate::error::ScopeError::NotFound(format!(
+            "No address book entry matching '@{}'.\n      {}",
+            label, suggestion
+        )));
+    }
+
+    // No @ prefix: only try address match (inject chain info from address book)
+    if let Some(watched) = address_book.find_address(input) {
+        if let Some(ref label) = watched.label {
+            tracing::debug!(
+                "Address book match by address for '{}' ({})",
+                label,
+                watched.chain
+            );
+        }
+        return Ok(Some((watched.address.clone(), watched.chain.clone())));
+    }
+
+    Ok(None)
+}
+
+/// Executes the address book command.
 pub async fn run(
-    args: PortfolioArgs,
+    args: AddressBookArgs,
     config: &Config,
     clients: &dyn ChainClientFactory,
 ) -> Result<()> {
@@ -274,19 +358,19 @@ pub async fn run(
     let format = args.format.unwrap_or(config.output.format);
 
     match args.command {
-        PortfolioCommands::Add(add_args) => run_add(add_args, &data_dir).await,
-        PortfolioCommands::Remove(remove_args) => run_remove(remove_args, &data_dir).await,
-        PortfolioCommands::List => run_list(&data_dir, format).await,
-        PortfolioCommands::Summary(summary_args) => {
+        AddressBookCommands::Add(add_args) => run_add(add_args, &data_dir).await,
+        AddressBookCommands::Remove(remove_args) => run_remove(remove_args, &data_dir).await,
+        AddressBookCommands::List => run_list(&data_dir, format).await,
+        AddressBookCommands::Summary(summary_args) => {
             run_summary(summary_args, &data_dir, format, clients).await
         }
     }
 }
 
 async fn run_add(args: AddArgs, data_dir: &PathBuf) -> Result<()> {
-    tracing::info!(address = %args.address, "Adding address to portfolio");
+    tracing::info!(address = %args.address, "Adding address to address book");
 
-    let mut portfolio = Portfolio::load(data_dir)?;
+    let mut address_book = AddressBook::load(data_dir)?;
 
     let watched = WatchedAddress {
         address: args.address.clone(),
@@ -299,11 +383,11 @@ async fn run_add(args: AddArgs, data_dir: &PathBuf) -> Result<()> {
             .as_secs(),
     };
 
-    portfolio.add_address(watched)?;
-    portfolio.save(data_dir)?;
+    address_book.add_address(watched)?;
+    address_book.save(data_dir)?;
 
     println!(
-        "Added {} to portfolio{}",
+        "Added {} to address book{}",
         args.address,
         args.label
             .map(|l| format!(" as '{}'", l))
@@ -314,37 +398,37 @@ async fn run_add(args: AddArgs, data_dir: &PathBuf) -> Result<()> {
 }
 
 async fn run_remove(args: RemoveArgs, data_dir: &PathBuf) -> Result<()> {
-    tracing::info!(address = %args.address, "Removing address from portfolio");
+    tracing::info!(address = %args.address, "Removing address from address book");
 
-    let mut portfolio = Portfolio::load(data_dir)?;
-    let removed = portfolio.remove_address(&args.address)?;
+    let mut address_book = AddressBook::load(data_dir)?;
+    let removed = address_book.remove_address(&args.address)?;
 
     if removed {
-        portfolio.save(data_dir)?;
-        println!("Removed {} from portfolio", args.address);
+        address_book.save(data_dir)?;
+        println!("Removed {} from address book", args.address);
     } else {
-        println!("Address not found in portfolio: {}", args.address);
+        println!("Address not found in address book: {}", args.address);
     }
 
     Ok(())
 }
 
 async fn run_list(data_dir: &std::path::Path, format: OutputFormat) -> Result<()> {
-    let portfolio = Portfolio::load(data_dir)?;
+    let address_book = AddressBook::load(data_dir)?;
 
-    if portfolio.addresses.is_empty() {
-        println!("Portfolio is empty. Add addresses with 'scope portfolio add <address>'");
+    if address_book.addresses.is_empty() {
+        println!("Address book is empty. Add addresses with 'scope address-book add <address>'");
         return Ok(());
     }
 
     match format {
         OutputFormat::Json => {
-            let json = serde_json::to_string_pretty(&portfolio.addresses)?;
+            let json = serde_json::to_string_pretty(&address_book.addresses)?;
             println!("{}", json);
         }
         OutputFormat::Csv => {
             println!("address,label,chain,tags");
-            for addr in &portfolio.addresses {
+            for addr in &address_book.addresses {
                 println!(
                     "{},{},{},{}",
                     addr.address,
@@ -355,9 +439,9 @@ async fn run_list(data_dir: &std::path::Path, format: OutputFormat) -> Result<()
             }
         }
         OutputFormat::Table => {
-            println!("Portfolio Addresses");
+            println!("Address Book");
             println!("===================");
-            for addr in &portfolio.addresses {
+            for addr in &address_book.addresses {
                 println!(
                     "  {} ({}) - {}{}",
                     addr.address,
@@ -370,12 +454,12 @@ async fn run_list(data_dir: &std::path::Path, format: OutputFormat) -> Result<()
                     }
                 );
             }
-            println!("\nTotal: {} addresses", portfolio.addresses.len());
+            println!("\nTotal: {} addresses", address_book.addresses.len());
         }
         OutputFormat::Markdown => {
-            let mut md = "# Portfolio Addresses\n\n".to_string();
+            let mut md = "# Address Book\n\n".to_string();
             md.push_str("| Address | Chain | Label | Tags |\n|---------|-------|-------|------|\n");
-            for addr in &portfolio.addresses {
+            for addr in &address_book.addresses {
                 let tags = if addr.tags.is_empty() {
                     "-".to_string()
                 } else {
@@ -391,7 +475,7 @@ async fn run_list(data_dir: &std::path::Path, format: OutputFormat) -> Result<()
             }
             md.push_str(&format!(
                 "\n**Total:** {} addresses\n",
-                portfolio.addresses.len()
+                address_book.addresses.len()
             ));
             println!("{}", md);
         }
@@ -406,15 +490,15 @@ async fn run_summary(
     format: OutputFormat,
     clients: &dyn ChainClientFactory,
 ) -> Result<()> {
-    let portfolio = Portfolio::load(data_dir)?;
+    let address_book = AddressBook::load(data_dir)?;
 
-    if portfolio.addresses.is_empty() {
-        println!("Portfolio is empty. Add addresses with 'scope portfolio add <address>'");
+    if address_book.addresses.is_empty() {
+        println!("Address book is empty. Add addresses with 'scope address-book add <address>'");
         return Ok(());
     }
 
     // Filter addresses
-    let filtered: Vec<_> = portfolio
+    let filtered: Vec<_> = address_book
         .addresses
         .iter()
         .filter(|a| args.chain.as_ref().is_none_or(|c| &a.chain == c))
@@ -460,7 +544,7 @@ async fn run_summary(
         });
     }
 
-    let summary = PortfolioSummary {
+    let summary = AddressBookSummary {
         address_count: filtered.len(),
         balances_by_chain,
         total_usd: None,
@@ -486,7 +570,7 @@ async fn run_summary(
             }
         }
         OutputFormat::Table => {
-            println!("Portfolio Summary");
+            println!("Address Book Summary");
             println!("=================");
             println!("Addresses: {}", summary.address_count);
             println!();
@@ -518,14 +602,14 @@ async fn run_summary(
             }
         }
         OutputFormat::Markdown => {
-            let md = portfolio_summary_to_markdown(&summary);
+            let md = address_book_summary_to_markdown(&summary);
             println!("{}", md);
         }
     }
 
     // Generate report if requested
     if let Some(ref report_path) = args.report {
-        let md = portfolio_summary_to_markdown(&summary);
+        let md = address_book_summary_to_markdown(&summary);
         std::fs::write(report_path, md)?;
         println!("\nReport saved to: {}", report_path.display());
     }
@@ -533,10 +617,10 @@ async fn run_summary(
     Ok(())
 }
 
-/// Generates a markdown report for portfolio summary.
-fn portfolio_summary_to_markdown(summary: &PortfolioSummary) -> String {
+/// Generates a markdown report for address book summary.
+fn address_book_summary_to_markdown(summary: &AddressBookSummary) -> String {
     let mut md = format!(
-        "# Portfolio Report\n\n\
+        "# Address Book Report\n\n\
         **Generated:** {}  \n\
         **Addresses:** {}  \n\n",
         chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC"),
@@ -612,7 +696,8 @@ async fn fetch_address_balance(
     let client = match clients.create_chain_client(chain) {
         Ok(c) => c,
         Err(e) => {
-            tracing::error!(error = %e, chain = %chain, "Failed to create chain client");
+            eprintln!("  ⚠ Unsupported chain: {}", chain);
+            tracing::debug!(error = %e, chain = %chain, "Failed to create chain client");
             return ("Error".to_string(), vec![]);
         }
     };
@@ -621,12 +706,13 @@ async fn fetch_address_balance(
     let native_balance = match client.get_balance(address).await {
         Ok(bal) => bal.formatted,
         Err(e) => {
-            tracing::error!(error = %e, address = %address, "Failed to fetch balance");
+            eprintln!("  ⚠ Could not fetch balance for {}", address);
+            tracing::debug!(error = %e, address = %address, "Failed to fetch balance");
             "Error".to_string()
         }
     };
 
-    // Always fetch token balances for portfolio summary
+    // Always fetch token balances for address book summary
     let tokens = match client.get_token_balances(address).await {
         Ok(token_bals) => token_bals
             .into_iter()
@@ -638,7 +724,8 @@ async fn fetch_address_balance(
             })
             .collect(),
         Err(e) => {
-            tracing::warn!(error = %e, "Could not fetch token balances");
+            eprintln!("  ⚠ Token balances unavailable");
+            tracing::debug!(error = %e, "Could not fetch token balances");
             vec![]
         }
     };
@@ -655,8 +742,8 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn create_test_portfolio() -> Portfolio {
-        Portfolio {
+    fn create_test_address_book() -> AddressBook {
+        AddressBook {
             addresses: vec![
                 WatchedAddress {
                     address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
@@ -677,14 +764,14 @@ mod tests {
     }
 
     #[test]
-    fn test_portfolio_default() {
-        let portfolio = Portfolio::default();
-        assert!(portfolio.addresses.is_empty());
+    fn test_address_book_default() {
+        let address_book = AddressBook::default();
+        assert!(address_book.addresses.is_empty());
     }
 
     #[test]
-    fn test_portfolio_add_address() {
-        let mut portfolio = Portfolio::default();
+    fn test_address_book_add_address() {
+        let mut address_book = AddressBook::default();
 
         let watched = WatchedAddress {
             address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
@@ -694,14 +781,14 @@ mod tests {
             added_at: 0,
         };
 
-        let result = portfolio.add_address(watched);
+        let result = address_book.add_address(watched);
         assert!(result.is_ok());
-        assert_eq!(portfolio.addresses.len(), 1);
+        assert_eq!(address_book.addresses.len(), 1);
     }
 
     #[test]
-    fn test_portfolio_add_duplicate_fails() {
-        let mut portfolio = Portfolio::default();
+    fn test_address_book_add_duplicate_fails() {
+        let mut address_book = AddressBook::default();
 
         let watched1 = WatchedAddress {
             address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
@@ -719,82 +806,85 @@ mod tests {
             added_at: 0,
         };
 
-        portfolio.add_address(watched1).unwrap();
-        let result = portfolio.add_address(watched2);
+        address_book.add_address(watched1).unwrap();
+        let result = address_book.add_address(watched2);
 
         assert!(result.is_err());
         assert!(
             result
                 .unwrap_err()
                 .to_string()
-                .contains("already in portfolio")
+                .contains("already in address book")
         );
     }
 
     #[test]
-    fn test_portfolio_remove_address() {
-        let mut portfolio = create_test_portfolio();
-        let original_len = portfolio.addresses.len();
+    fn test_address_book_remove_address() {
+        let mut address_book = create_test_address_book();
+        let original_len = address_book.addresses.len();
 
-        let removed = portfolio
+        let removed = address_book
             .remove_address("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2")
             .unwrap();
 
         assert!(removed);
-        assert_eq!(portfolio.addresses.len(), original_len - 1);
+        assert_eq!(address_book.addresses.len(), original_len - 1);
     }
 
     #[test]
-    fn test_portfolio_remove_nonexistent() {
-        let mut portfolio = create_test_portfolio();
-        let original_len = portfolio.addresses.len();
+    fn test_address_book_remove_nonexistent() {
+        let mut address_book = create_test_address_book();
+        let original_len = address_book.addresses.len();
 
-        let removed = portfolio.remove_address("0xnonexistent").unwrap();
+        let removed = address_book.remove_address("0xnonexistent").unwrap();
 
         assert!(!removed);
-        assert_eq!(portfolio.addresses.len(), original_len);
+        assert_eq!(address_book.addresses.len(), original_len);
     }
 
     #[test]
-    fn test_portfolio_find_address() {
-        let portfolio = create_test_portfolio();
+    fn test_address_book_find_address() {
+        let address_book = create_test_address_book();
 
-        let found = portfolio.find_address("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2");
+        let found = address_book.find_address("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2");
         assert!(found.is_some());
         assert_eq!(found.unwrap().label, Some("Main Wallet".to_string()));
 
-        let not_found = portfolio.find_address("0xnonexistent");
+        let not_found = address_book.find_address("0xnonexistent");
         assert!(not_found.is_none());
     }
 
     #[test]
-    fn test_portfolio_find_address_case_insensitive() {
-        let portfolio = create_test_portfolio();
+    fn test_address_book_find_address_case_insensitive() {
+        let address_book = create_test_address_book();
 
-        let found = portfolio.find_address("0x742D35CC6634C0532925A3B844BC9E7595F1B3C2");
+        let found = address_book.find_address("0x742D35CC6634C0532925A3B844BC9E7595F1B3C2");
         assert!(found.is_some());
     }
 
     #[test]
-    fn test_portfolio_save_and_load() {
+    fn test_address_book_save_and_load() {
         let temp_dir = TempDir::new().unwrap();
         let data_dir = temp_dir.path().to_path_buf();
 
-        let portfolio = create_test_portfolio();
-        portfolio.save(&data_dir).unwrap();
+        let address_book = create_test_address_book();
+        address_book.save(&data_dir).unwrap();
 
-        let loaded = Portfolio::load(&data_dir).unwrap();
-        assert_eq!(loaded.addresses.len(), portfolio.addresses.len());
-        assert_eq!(loaded.addresses[0].address, portfolio.addresses[0].address);
+        let loaded = AddressBook::load(&data_dir).unwrap();
+        assert_eq!(loaded.addresses.len(), address_book.addresses.len());
+        assert_eq!(
+            loaded.addresses[0].address,
+            address_book.addresses[0].address
+        );
     }
 
     #[test]
-    fn test_portfolio_load_nonexistent_returns_default() {
+    fn test_address_book_load_nonexistent_returns_default() {
         let temp_dir = TempDir::new().unwrap();
         let data_dir = temp_dir.path().to_path_buf();
 
-        let portfolio = Portfolio::load(&data_dir).unwrap();
-        assert!(portfolio.addresses.is_empty());
+        let address_book = AddressBook::load(&data_dir).unwrap();
+        assert!(address_book.addresses.is_empty());
     }
 
     #[test]
@@ -818,8 +908,8 @@ mod tests {
     }
 
     #[test]
-    fn test_portfolio_summary_serialization() {
-        let summary = PortfolioSummary {
+    fn test_address_book_summary_serialization() {
+        let summary = AddressBookSummary {
             address_count: 2,
             balances_by_chain: HashMap::new(),
             total_usd: Some(10000.0),
@@ -839,27 +929,27 @@ mod tests {
     }
 
     #[test]
-    fn test_portfolio_args_parsing() {
+    fn test_address_book_args_parsing() {
         use clap::Parser;
 
         #[derive(Parser)]
         struct TestCli {
             #[command(flatten)]
-            args: PortfolioArgs,
+            args: AddressBookArgs,
         }
 
         let cli = TestCli::try_parse_from(["test", "list"]).unwrap();
-        assert!(matches!(cli.args.command, PortfolioCommands::List));
+        assert!(matches!(cli.args.command, AddressBookCommands::List));
     }
 
     #[test]
-    fn test_portfolio_add_args_parsing() {
+    fn test_address_book_add_args_parsing() {
         use clap::Parser;
 
         #[derive(Parser)]
         struct TestCli {
             #[command(flatten)]
-            args: PortfolioArgs,
+            args: AddressBookArgs,
         }
 
         let cli = TestCli::try_parse_from([
@@ -875,7 +965,7 @@ mod tests {
         ])
         .unwrap();
 
-        if let PortfolioCommands::Add(add_args) = cli.args.command {
+        if let AddressBookCommands::Add(add_args) = cli.args.command {
             assert_eq!(
                 add_args.address,
                 "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2"
@@ -941,17 +1031,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_portfolio_list_empty() {
+    async fn test_run_address_book_list_empty() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let config = Config {
-            portfolio: crate::config::PortfolioConfig {
+            address_book: crate::config::AddressBookConfig {
                 data_dir: Some(tmp_dir.path().to_path_buf()),
             },
             ..Default::default()
         };
         let factory = mock_factory();
-        let args = PortfolioArgs {
-            command: PortfolioCommands::List,
+        let args = AddressBookArgs {
+            command: AddressBookCommands::List,
             format: Some(OutputFormat::Table),
         };
         let result = super::run(args, &config, &factory).await;
@@ -959,10 +1049,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_portfolio_add_and_list() {
+    async fn test_run_address_book_add_and_list() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let config = Config {
-            portfolio: crate::config::PortfolioConfig {
+            address_book: crate::config::AddressBookConfig {
                 data_dir: Some(tmp_dir.path().to_path_buf()),
             },
             ..Default::default()
@@ -970,8 +1060,8 @@ mod tests {
         let factory = mock_factory();
 
         // Add address
-        let add_args = PortfolioArgs {
-            command: PortfolioCommands::Add(AddArgs {
+        let add_args = AddressBookArgs {
+            command: AddressBookCommands::Add(AddArgs {
                 address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
                 label: Some("Test Wallet".to_string()),
                 chain: "ethereum".to_string(),
@@ -983,8 +1073,8 @@ mod tests {
         assert!(result.is_ok());
 
         // List
-        let list_args = PortfolioArgs {
-            command: PortfolioCommands::List,
+        let list_args = AddressBookArgs {
+            command: AddressBookCommands::List,
             format: Some(OutputFormat::Json),
         };
         let result = super::run(list_args, &config, &factory).await;
@@ -992,10 +1082,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_portfolio_summary_with_mock() {
+    async fn test_run_address_book_summary_with_mock() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let config = Config {
-            portfolio: crate::config::PortfolioConfig {
+            address_book: crate::config::AddressBookConfig {
                 data_dir: Some(tmp_dir.path().to_path_buf()),
             },
             ..Default::default()
@@ -1003,8 +1093,8 @@ mod tests {
         let factory = mock_factory();
 
         // Add address first
-        let add_args = PortfolioArgs {
-            command: PortfolioCommands::Add(AddArgs {
+        let add_args = AddressBookArgs {
+            command: AddressBookCommands::Add(AddArgs {
                 address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
                 label: Some("Test".to_string()),
                 chain: "ethereum".to_string(),
@@ -1015,8 +1105,8 @@ mod tests {
         super::run(add_args, &config, &factory).await.unwrap();
 
         // Summary
-        let summary_args = PortfolioArgs {
-            command: PortfolioCommands::Summary(SummaryArgs {
+        let summary_args = AddressBookArgs {
+            command: AddressBookCommands::Summary(SummaryArgs {
                 chain: None,
                 tag: None,
                 include_tokens: false,
@@ -1029,10 +1119,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_portfolio_remove() {
+    async fn test_run_address_book_remove() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let config = Config {
-            portfolio: crate::config::PortfolioConfig {
+            address_book: crate::config::AddressBookConfig {
                 data_dir: Some(tmp_dir.path().to_path_buf()),
             },
             ..Default::default()
@@ -1040,8 +1130,8 @@ mod tests {
         let factory = mock_factory();
 
         // Add then remove
-        let add_args = PortfolioArgs {
-            command: PortfolioCommands::Add(AddArgs {
+        let add_args = AddressBookArgs {
+            command: AddressBookCommands::Add(AddArgs {
                 address: "0xtest".to_string(),
                 label: None,
                 chain: "ethereum".to_string(),
@@ -1051,8 +1141,8 @@ mod tests {
         };
         super::run(add_args, &config, &factory).await.unwrap();
 
-        let remove_args = PortfolioArgs {
-            command: PortfolioCommands::Remove(RemoveArgs {
+        let remove_args = AddressBookArgs {
+            command: AddressBookCommands::Remove(RemoveArgs {
                 address: "0xtest".to_string(),
             }),
             format: None,
@@ -1062,10 +1152,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_portfolio_summary_csv() {
+    async fn test_run_address_book_summary_csv() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let config = Config {
-            portfolio: crate::config::PortfolioConfig {
+            address_book: crate::config::AddressBookConfig {
                 data_dir: Some(tmp_dir.path().to_path_buf()),
             },
             ..Default::default()
@@ -1073,8 +1163,8 @@ mod tests {
         let factory = mock_factory();
 
         // Add address
-        let add_args = PortfolioArgs {
-            command: PortfolioCommands::Add(AddArgs {
+        let add_args = AddressBookArgs {
+            command: AddressBookCommands::Add(AddArgs {
                 address: "0xtest".to_string(),
                 label: Some("TestAddr".to_string()),
                 chain: "ethereum".to_string(),
@@ -1085,8 +1175,8 @@ mod tests {
         super::run(add_args, &config, &factory).await.unwrap();
 
         // CSV summary
-        let summary_args = PortfolioArgs {
-            command: PortfolioCommands::Summary(SummaryArgs {
+        let summary_args = AddressBookArgs {
+            command: AddressBookCommands::Summary(SummaryArgs {
                 chain: None,
                 tag: None,
                 include_tokens: false,
@@ -1099,10 +1189,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_portfolio_summary_table() {
+    async fn test_run_address_book_summary_table() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let config = Config {
-            portfolio: crate::config::PortfolioConfig {
+            address_book: crate::config::AddressBookConfig {
                 data_dir: Some(tmp_dir.path().to_path_buf()),
             },
             ..Default::default()
@@ -1110,8 +1200,8 @@ mod tests {
         let factory = mock_factory();
 
         // Add address
-        let add_args = PortfolioArgs {
-            command: PortfolioCommands::Add(AddArgs {
+        let add_args = AddressBookArgs {
+            command: AddressBookCommands::Add(AddArgs {
                 address: "0xtest".to_string(),
                 label: Some("TestAddr".to_string()),
                 chain: "ethereum".to_string(),
@@ -1122,8 +1212,8 @@ mod tests {
         super::run(add_args, &config, &factory).await.unwrap();
 
         // Table summary
-        let summary_args = PortfolioArgs {
-            command: PortfolioCommands::Summary(SummaryArgs {
+        let summary_args = AddressBookArgs {
+            command: AddressBookCommands::Summary(SummaryArgs {
                 chain: None,
                 tag: None,
                 include_tokens: true,
@@ -1136,10 +1226,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_portfolio_summary_with_chain_filter() {
+    async fn test_run_address_book_summary_with_chain_filter() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let config = Config {
-            portfolio: crate::config::PortfolioConfig {
+            address_book: crate::config::AddressBookConfig {
                 data_dir: Some(tmp_dir.path().to_path_buf()),
             },
             ..Default::default()
@@ -1147,8 +1237,8 @@ mod tests {
         let factory = mock_factory();
 
         // Add addresses on different chains
-        let add_eth = PortfolioArgs {
-            command: PortfolioCommands::Add(AddArgs {
+        let add_eth = AddressBookArgs {
+            command: AddressBookCommands::Add(AddArgs {
                 address: "0xeth".to_string(),
                 label: None,
                 chain: "ethereum".to_string(),
@@ -1158,8 +1248,8 @@ mod tests {
         };
         super::run(add_eth, &config, &factory).await.unwrap();
 
-        let add_poly = PortfolioArgs {
-            command: PortfolioCommands::Add(AddArgs {
+        let add_poly = AddressBookArgs {
+            command: AddressBookCommands::Add(AddArgs {
                 address: "0xpoly".to_string(),
                 label: None,
                 chain: "polygon".to_string(),
@@ -1170,8 +1260,8 @@ mod tests {
         super::run(add_poly, &config, &factory).await.unwrap();
 
         // Filter by chain
-        let summary_args = PortfolioArgs {
-            command: PortfolioCommands::Summary(SummaryArgs {
+        let summary_args = AddressBookArgs {
+            command: AddressBookCommands::Summary(SummaryArgs {
                 chain: Some("ethereum".to_string()),
                 tag: None,
                 include_tokens: false,
@@ -1184,10 +1274,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_portfolio_summary_with_tag_filter() {
+    async fn test_run_address_book_summary_with_tag_filter() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let config = Config {
-            portfolio: crate::config::PortfolioConfig {
+            address_book: crate::config::AddressBookConfig {
                 data_dir: Some(tmp_dir.path().to_path_buf()),
             },
             ..Default::default()
@@ -1195,8 +1285,8 @@ mod tests {
         let factory = mock_factory();
 
         // Add addresses with tags
-        let add_args = PortfolioArgs {
-            command: PortfolioCommands::Add(AddArgs {
+        let add_args = AddressBookArgs {
+            command: AddressBookCommands::Add(AddArgs {
                 address: "0xdefi".to_string(),
                 label: None,
                 chain: "ethereum".to_string(),
@@ -1207,8 +1297,8 @@ mod tests {
         super::run(add_args, &config, &factory).await.unwrap();
 
         // Filter by tag
-        let summary_args = PortfolioArgs {
-            command: PortfolioCommands::Summary(SummaryArgs {
+        let summary_args = AddressBookArgs {
+            command: AddressBookCommands::Summary(SummaryArgs {
                 chain: None,
                 tag: Some("defi".to_string()),
                 include_tokens: false,
@@ -1221,18 +1311,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_portfolio_summary_no_format() {
+    async fn test_run_address_book_summary_no_format() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let config = Config {
-            portfolio: crate::config::PortfolioConfig {
+            address_book: crate::config::AddressBookConfig {
                 data_dir: Some(tmp_dir.path().to_path_buf()),
             },
             ..Default::default()
         };
         let factory = mock_factory();
 
-        let add_args = PortfolioArgs {
-            command: PortfolioCommands::Add(AddArgs {
+        let add_args = AddressBookArgs {
+            command: AddressBookCommands::Add(AddArgs {
                 address: "0xtest".to_string(),
                 label: None,
                 chain: "ethereum".to_string(),
@@ -1242,8 +1332,8 @@ mod tests {
         };
         super::run(add_args, &config, &factory).await.unwrap();
 
-        let summary_args = PortfolioArgs {
-            command: PortfolioCommands::Summary(SummaryArgs {
+        let summary_args = AddressBookArgs {
+            command: AddressBookCommands::Summary(SummaryArgs {
                 chain: None,
                 tag: None,
                 include_tokens: false,
@@ -1256,10 +1346,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_portfolio_summary_empty() {
+    async fn test_run_address_book_summary_empty() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let config = Config {
-            portfolio: crate::config::PortfolioConfig {
+            address_book: crate::config::AddressBookConfig {
                 data_dir: Some(tmp_dir.path().to_path_buf()),
             },
             ..Default::default()
@@ -1267,8 +1357,8 @@ mod tests {
         let factory = mock_factory();
 
         // Summary with no addresses added
-        let summary_args = PortfolioArgs {
-            command: PortfolioCommands::Summary(SummaryArgs {
+        let summary_args = AddressBookArgs {
+            command: AddressBookCommands::Summary(SummaryArgs {
                 chain: None,
                 tag: None,
                 include_tokens: false,
@@ -1281,18 +1371,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_portfolio_add_with_tags() {
+    async fn test_run_address_book_add_with_tags() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let config = Config {
-            portfolio: crate::config::PortfolioConfig {
+            address_book: crate::config::AddressBookConfig {
                 data_dir: Some(tmp_dir.path().to_path_buf()),
             },
             ..Default::default()
         };
         let factory = mock_factory();
 
-        let add_args = PortfolioArgs {
-            command: PortfolioCommands::Add(AddArgs {
+        let add_args = AddressBookArgs {
+            command: AddressBookCommands::Add(AddArgs {
                 address: "0xtagged".to_string(),
                 label: Some("Tagged".to_string()),
                 chain: "ethereum".to_string(),
@@ -1322,10 +1412,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_portfolio_list_csv_format() {
+    async fn test_run_address_book_list_csv_format() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let config = Config {
-            portfolio: crate::config::PortfolioConfig {
+            address_book: crate::config::AddressBookConfig {
                 data_dir: Some(tmp_dir.path().to_path_buf()),
             },
             ..Default::default()
@@ -1333,8 +1423,8 @@ mod tests {
         let factory = mock_factory();
 
         // Add address
-        let add_args = PortfolioArgs {
-            command: PortfolioCommands::Add(AddArgs {
+        let add_args = AddressBookArgs {
+            command: AddressBookCommands::Add(AddArgs {
                 address: "0xCSV_test".to_string(),
                 label: Some("CsvAddr".to_string()),
                 chain: "ethereum".to_string(),
@@ -1345,8 +1435,8 @@ mod tests {
         super::run(add_args, &config, &factory).await.unwrap();
 
         // List with CSV
-        let list_args = PortfolioArgs {
-            command: PortfolioCommands::List,
+        let list_args = AddressBookArgs {
+            command: AddressBookCommands::List,
             format: Some(OutputFormat::Csv),
         };
         let result = super::run(list_args, &config, &factory).await;
@@ -1354,10 +1444,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_portfolio_list_table_format() {
+    async fn test_run_address_book_list_table_format() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let config = Config {
-            portfolio: crate::config::PortfolioConfig {
+            address_book: crate::config::AddressBookConfig {
                 data_dir: Some(tmp_dir.path().to_path_buf()),
             },
             ..Default::default()
@@ -1365,8 +1455,8 @@ mod tests {
         let factory = mock_factory();
 
         // Add addresses with and without labels
-        let add_args = PortfolioArgs {
-            command: PortfolioCommands::Add(AddArgs {
+        let add_args = AddressBookArgs {
+            command: AddressBookCommands::Add(AddArgs {
                 address: "0xTable_test1".to_string(),
                 label: Some("LabeledAddr".to_string()),
                 chain: "ethereum".to_string(),
@@ -1376,8 +1466,8 @@ mod tests {
         };
         super::run(add_args, &config, &factory).await.unwrap();
 
-        let add_args2 = PortfolioArgs {
-            command: PortfolioCommands::Add(AddArgs {
+        let add_args2 = AddressBookArgs {
+            command: AddressBookCommands::Add(AddArgs {
                 address: "0xTable_test2".to_string(),
                 label: None,
                 chain: "polygon".to_string(),
@@ -1388,8 +1478,8 @@ mod tests {
         super::run(add_args2, &config, &factory).await.unwrap();
 
         // List with Table
-        let list_args = PortfolioArgs {
-            command: PortfolioCommands::List,
+        let list_args = AddressBookArgs {
+            command: AddressBookCommands::List,
             format: Some(OutputFormat::Table),
         };
         let result = super::run(list_args, &config, &factory).await;
@@ -1397,10 +1487,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_portfolio_summary_table_with_tokens() {
+    async fn test_run_address_book_summary_table_with_tokens() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let config = Config {
-            portfolio: crate::config::PortfolioConfig {
+            address_book: crate::config::AddressBookConfig {
                 data_dir: Some(tmp_dir.path().to_path_buf()),
             },
             ..Default::default()
@@ -1408,8 +1498,8 @@ mod tests {
         let factory = mock_factory();
 
         // Add address
-        let add_args = PortfolioArgs {
-            command: PortfolioCommands::Add(AddArgs {
+        let add_args = AddressBookArgs {
+            command: AddressBookCommands::Add(AddArgs {
                 address: "0xTokenTest".to_string(),
                 label: Some("TokenAddr".to_string()),
                 chain: "ethereum".to_string(),
@@ -1420,8 +1510,8 @@ mod tests {
         super::run(add_args, &config, &factory).await.unwrap();
 
         // Summary with Table and tokens included
-        let summary_args = PortfolioArgs {
-            command: PortfolioCommands::Summary(SummaryArgs {
+        let summary_args = AddressBookArgs {
+            command: AddressBookCommands::Summary(SummaryArgs {
                 chain: None,
                 tag: None,
                 include_tokens: true,
@@ -1434,10 +1524,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_portfolio_summary_multiple_chains() {
+    async fn test_run_address_book_summary_multiple_chains() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let config = Config {
-            portfolio: crate::config::PortfolioConfig {
+            address_book: crate::config::AddressBookConfig {
                 data_dir: Some(tmp_dir.path().to_path_buf()),
             },
             ..Default::default()
@@ -1445,8 +1535,8 @@ mod tests {
         let factory = mock_factory();
 
         // Add addresses on the same chain to test chain balance aggregation
-        let add1 = PortfolioArgs {
-            command: PortfolioCommands::Add(AddArgs {
+        let add1 = AddressBookArgs {
+            command: AddressBookCommands::Add(AddArgs {
                 address: "0xMulti1".to_string(),
                 label: None,
                 chain: "ethereum".to_string(),
@@ -1456,8 +1546,8 @@ mod tests {
         };
         super::run(add1, &config, &factory).await.unwrap();
 
-        let add2 = PortfolioArgs {
-            command: PortfolioCommands::Add(AddArgs {
+        let add2 = AddressBookArgs {
+            command: AddressBookCommands::Add(AddArgs {
                 address: "0xMulti2".to_string(),
                 label: None,
                 chain: "ethereum".to_string(),
@@ -1468,8 +1558,8 @@ mod tests {
         super::run(add2, &config, &factory).await.unwrap();
 
         // Summary - should aggregate chain balances
-        let summary_args = PortfolioArgs {
-            command: PortfolioCommands::Summary(SummaryArgs {
+        let summary_args = AddressBookArgs {
+            command: AddressBookCommands::Summary(SummaryArgs {
                 chain: None,
                 tag: None,
                 include_tokens: false,
@@ -1482,10 +1572,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_portfolio_list_no_format() {
+    async fn test_run_address_book_list_no_format() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let config = Config {
-            portfolio: crate::config::PortfolioConfig {
+            address_book: crate::config::AddressBookConfig {
                 data_dir: Some(tmp_dir.path().to_path_buf()),
             },
             ..Default::default()
@@ -1493,8 +1583,8 @@ mod tests {
         let factory = mock_factory();
 
         // Add address
-        let add_args = PortfolioArgs {
-            command: PortfolioCommands::Add(AddArgs {
+        let add_args = AddressBookArgs {
+            command: AddressBookCommands::Add(AddArgs {
                 address: "0xNoFmt".to_string(),
                 label: Some("Test".to_string()),
                 chain: "ethereum".to_string(),
@@ -1505,8 +1595,8 @@ mod tests {
         super::run(add_args, &config, &factory).await.unwrap();
 
         // List with default format (None -> Table)
-        let list_args = PortfolioArgs {
-            command: PortfolioCommands::List,
+        let list_args = AddressBookArgs {
+            command: AddressBookCommands::List,
             format: None,
         };
         let result = super::run(list_args, &config, &factory).await;
@@ -1514,23 +1604,23 @@ mod tests {
     }
 
     #[test]
-    fn test_portfolio_new() {
-        let p = Portfolio::default();
+    fn test_address_book_new() {
+        let p = AddressBook::default();
         assert!(p.addresses.is_empty());
     }
 
     #[test]
-    fn test_portfolio_load_missing_dir() {
+    fn test_address_book_load_missing_dir() {
         let temp = tempfile::tempdir().unwrap();
-        let p = Portfolio::load(temp.path());
+        let p = AddressBook::load(temp.path());
         assert!(p.is_ok());
         assert!(p.unwrap().addresses.is_empty());
     }
 
     #[test]
-    fn test_portfolio_add_and_save_roundtrip() {
+    fn test_address_book_add_and_save_roundtrip() {
         let temp = tempfile::tempdir().unwrap();
-        let mut p = Portfolio::default();
+        let mut p = AddressBook::default();
         let addr = WatchedAddress {
             address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
             label: Some("Test".to_string()),
@@ -1543,7 +1633,7 @@ mod tests {
 
         let data_dir = temp.path().to_path_buf();
         p.save(&data_dir).unwrap();
-        let loaded = Portfolio::load(temp.path()).unwrap();
+        let loaded = AddressBook::load(temp.path()).unwrap();
         assert_eq!(loaded.addresses.len(), 1);
         assert_eq!(
             loaded.addresses[0].address,
@@ -1553,8 +1643,8 @@ mod tests {
     }
 
     #[test]
-    fn test_portfolio_add_duplicate() {
-        let mut p = Portfolio::default();
+    fn test_address_book_add_duplicate() {
+        let mut p = AddressBook::default();
         let addr1 = WatchedAddress {
             address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
             label: None,
@@ -1577,7 +1667,7 @@ mod tests {
             result
                 .unwrap_err()
                 .to_string()
-                .contains("already in portfolio")
+                .contains("already in address book")
         );
     }
 
@@ -1596,11 +1686,11 @@ mod tests {
     }
 
     // ========================================================================
-    // portfolio_summary_to_markdown tests
+    // address_book_summary_to_markdown tests
     // ========================================================================
 
     #[test]
-    fn test_portfolio_summary_to_markdown_basic() {
+    fn test_address_book_summary_to_markdown_basic() {
         let mut balances_by_chain = HashMap::new();
         balances_by_chain.insert(
             "ethereum".to_string(),
@@ -1611,7 +1701,7 @@ mod tests {
             },
         );
 
-        let summary = PortfolioSummary {
+        let summary = AddressBookSummary {
             address_count: 2,
             balances_by_chain,
             total_usd: None,
@@ -1635,10 +1725,10 @@ mod tests {
             ],
         };
 
-        let md = portfolio_summary_to_markdown(&summary);
+        let md = address_book_summary_to_markdown(&summary);
 
         // Check header elements
-        assert!(md.contains("# Portfolio Report"));
+        assert!(md.contains("# Address Book Report"));
         assert!(md.contains("**Addresses:** 2"));
         assert!(md.contains("Allocation by Chain"));
         assert!(md.contains("## Addresses"));
@@ -1660,7 +1750,7 @@ mod tests {
     }
 
     #[test]
-    fn test_portfolio_summary_to_markdown_with_usd() {
+    fn test_address_book_summary_to_markdown_with_usd() {
         let mut balances_by_chain = HashMap::new();
         balances_by_chain.insert(
             "ethereum".to_string(),
@@ -1671,7 +1761,7 @@ mod tests {
             },
         );
 
-        let summary = PortfolioSummary {
+        let summary = AddressBookSummary {
             address_count: 2,
             balances_by_chain,
             total_usd: Some(5000.0),
@@ -1695,7 +1785,7 @@ mod tests {
             ],
         };
 
-        let md = portfolio_summary_to_markdown(&summary);
+        let md = address_book_summary_to_markdown(&summary);
 
         // Check total USD
         assert!(md.contains("**Total Value (USD):** $5000.00"));
@@ -1709,7 +1799,7 @@ mod tests {
     }
 
     #[test]
-    fn test_portfolio_summary_to_markdown_with_tokens() {
+    fn test_address_book_summary_to_markdown_with_tokens() {
         let mut balances_by_chain = HashMap::new();
         balances_by_chain.insert(
             "ethereum".to_string(),
@@ -1754,7 +1844,7 @@ mod tests {
             },
         ];
 
-        let summary = PortfolioSummary {
+        let summary = AddressBookSummary {
             address_count: 1,
             balances_by_chain,
             total_usd: None,
@@ -1768,7 +1858,7 @@ mod tests {
             }],
         };
 
-        let md = portfolio_summary_to_markdown(&summary);
+        let md = address_book_summary_to_markdown(&summary);
 
         // Check that first 3 tokens are shown
         assert!(md.contains("USDC"));
@@ -1785,18 +1875,18 @@ mod tests {
     }
 
     #[test]
-    fn test_portfolio_summary_to_markdown_empty() {
-        let summary = PortfolioSummary {
+    fn test_address_book_summary_to_markdown_empty() {
+        let summary = AddressBookSummary {
             address_count: 0,
             balances_by_chain: HashMap::new(),
             total_usd: None,
             addresses: vec![],
         };
 
-        let md = portfolio_summary_to_markdown(&summary);
+        let md = address_book_summary_to_markdown(&summary);
 
         // Check header
-        assert!(md.contains("# Portfolio Report"));
+        assert!(md.contains("# Address Book Report"));
         assert!(md.contains("**Addresses:** 0"));
 
         // Check that chain allocation section exists (even if empty)
@@ -1807,5 +1897,181 @@ mod tests {
 
         // Check footer
         assert!(md.contains("Report generated by Scope"));
+    }
+
+    // ========================================================================
+    // find_by_label tests
+    // ========================================================================
+
+    #[test]
+    fn test_find_by_label_exact_match() {
+        let address_book = create_test_address_book();
+        let found = address_book.find_by_label("Main Wallet");
+        assert!(found.is_some());
+        assert_eq!(
+            found.unwrap().address,
+            "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2"
+        );
+    }
+
+    #[test]
+    fn test_find_by_label_case_insensitive() {
+        let address_book = create_test_address_book();
+        let found = address_book.find_by_label("main wallet");
+        assert!(found.is_some());
+        assert_eq!(
+            found.unwrap().address,
+            "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2"
+        );
+    }
+
+    #[test]
+    fn test_find_by_label_with_whitespace() {
+        let address_book = create_test_address_book();
+        let found = address_book.find_by_label("  Main Wallet  ");
+        assert!(found.is_some());
+    }
+
+    #[test]
+    fn test_find_by_label_not_found() {
+        let address_book = create_test_address_book();
+        let found = address_book.find_by_label("nonexistent");
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn test_find_by_label_no_label_entries() {
+        let address_book = create_test_address_book();
+        // Second entry has no label
+        let found = address_book.find_by_label("");
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn test_find_by_label_empty_address_book() {
+        let address_book = AddressBook::default();
+        let found = address_book.find_by_label("anything");
+        assert!(found.is_none());
+    }
+
+    // ========================================================================
+    // resolve_address_book_input tests
+    // ========================================================================
+
+    #[test]
+    fn test_resolve_address_book_input_by_label() {
+        let tmp_dir = TempDir::new().unwrap();
+        let mut address_book = AddressBook::default();
+        address_book
+            .add_address(WatchedAddress {
+                address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+                label: Some("hot-wallet".to_string()),
+                chain: "ethereum".to_string(),
+                tags: vec![],
+                added_at: 0,
+            })
+            .unwrap();
+        address_book.save(&tmp_dir.path().to_path_buf()).unwrap();
+
+        let config = Config {
+            address_book: crate::config::AddressBookConfig {
+                data_dir: Some(tmp_dir.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+
+        let result = resolve_address_book_input("@hot-wallet", &config).unwrap();
+        assert!(result.is_some());
+        let (addr, chain) = result.unwrap();
+        assert_eq!(addr, "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2");
+        assert_eq!(chain, "ethereum");
+    }
+
+    #[test]
+    fn test_resolve_address_book_input_by_address() {
+        let tmp_dir = TempDir::new().unwrap();
+        let mut address_book = AddressBook::default();
+        address_book
+            .add_address(WatchedAddress {
+                address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+                label: Some("test".to_string()),
+                chain: "polygon".to_string(),
+                tags: vec![],
+                added_at: 0,
+            })
+            .unwrap();
+        address_book.save(&tmp_dir.path().to_path_buf()).unwrap();
+
+        let config = Config {
+            address_book: crate::config::AddressBookConfig {
+                data_dir: Some(tmp_dir.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+
+        // Resolve by raw address — should still match and return chain info
+        let result =
+            resolve_address_book_input("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2", &config)
+                .unwrap();
+        assert!(result.is_some());
+        let (_addr, chain) = result.unwrap();
+        assert_eq!(chain, "polygon");
+    }
+
+    #[test]
+    fn test_resolve_address_book_input_not_found() {
+        let tmp_dir = TempDir::new().unwrap();
+        let config = Config {
+            address_book: crate::config::AddressBookConfig {
+                data_dir: Some(tmp_dir.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+
+        let result = resolve_address_book_input("@unknown-label", &config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_address_book_input_empty_address_book() {
+        let tmp_dir = TempDir::new().unwrap();
+        let config = Config {
+            address_book: crate::config::AddressBookConfig {
+                data_dir: Some(tmp_dir.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+
+        let result = resolve_address_book_input("@anything", &config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_address_book_input_case_insensitive_label() {
+        let tmp_dir = TempDir::new().unwrap();
+        let mut address_book = AddressBook::default();
+        address_book
+            .add_address(WatchedAddress {
+                address: "0xABCDEF1234567890abcdef1234567890ABCDEF12".to_string(),
+                label: Some("My DeFi Wallet".to_string()),
+                chain: "arbitrum".to_string(),
+                tags: vec![],
+                added_at: 0,
+            })
+            .unwrap();
+        address_book.save(&tmp_dir.path().to_path_buf()).unwrap();
+
+        let config = Config {
+            address_book: crate::config::AddressBookConfig {
+                data_dir: Some(tmp_dir.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+
+        let result = resolve_address_book_input("@my defi wallet", &config).unwrap();
+        assert!(result.is_some());
+        let (addr, chain) = result.unwrap();
+        assert_eq!(addr, "0xABCDEF1234567890abcdef1234567890ABCDEF12");
+        assert_eq!(chain, "arbitrum");
     }
 }

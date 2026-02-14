@@ -25,6 +25,7 @@
 //! - **ChartFocus** -- Full-width candles (~85%), minimal stats overlay below
 //! - **Feed** -- Transaction log takes priority (~75%), small metrics + buy/sell on top
 //! - **Compact** -- Price sparkline and metrics only, for small terminals (<80x24)
+//! - **Exchange** -- Order book + chart + market info (exchange-style view)
 //!
 //! The monitor auto-selects a layout based on terminal dimensions (responsive
 //! breakpoints). Manual switching via `L`/`H` disables auto-selection until `A`.
@@ -60,9 +61,10 @@
 //! - `J`/`K` scroll activity log, `+`/`-` adjust refresh speed
 
 use crate::chains::dex::{DexClient, DexDataSource, DexTokenData};
-use crate::chains::{ChainClient, ChainClientFactory};
+use crate::chains::{ChainClient, ChainClientFactory, DexPair};
 use crate::config::Config;
 use crate::error::{Result, ScopeError};
+use crate::market::{OrderBook, OrderBookLevel, Trade, TradeSide};
 use clap::Args;
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
@@ -131,7 +133,7 @@ pub struct MonitorArgs {
     /// Layout preset for the TUI dashboard.
     ///
     /// Controls how widgets are arranged on screen.
-    /// Options: dashboard, chart-focus, feed, compact.
+    /// Options: dashboard, chart-focus, feed, compact, exchange.
     #[arg(short, long)]
     pub layout: Option<LayoutPreset>,
 
@@ -532,6 +534,8 @@ pub enum LayoutPreset {
     Feed,
     /// Minimal single-column sparkline view for small terminals.
     Compact,
+    /// Exchange-style view: order book + chart + market info.
+    Exchange,
 }
 
 impl LayoutPreset {
@@ -541,17 +545,19 @@ impl LayoutPreset {
             LayoutPreset::Dashboard => LayoutPreset::ChartFocus,
             LayoutPreset::ChartFocus => LayoutPreset::Feed,
             LayoutPreset::Feed => LayoutPreset::Compact,
-            LayoutPreset::Compact => LayoutPreset::Dashboard,
+            LayoutPreset::Compact => LayoutPreset::Exchange,
+            LayoutPreset::Exchange => LayoutPreset::Dashboard,
         }
     }
 
     /// Cycles to the previous layout preset.
     pub fn prev(&self) -> Self {
         match self {
-            LayoutPreset::Dashboard => LayoutPreset::Compact,
+            LayoutPreset::Dashboard => LayoutPreset::Exchange,
             LayoutPreset::ChartFocus => LayoutPreset::Dashboard,
             LayoutPreset::Feed => LayoutPreset::ChartFocus,
             LayoutPreset::Compact => LayoutPreset::Feed,
+            LayoutPreset::Exchange => LayoutPreset::Compact,
         }
     }
 
@@ -562,6 +568,7 @@ impl LayoutPreset {
             LayoutPreset::ChartFocus => "Chart",
             LayoutPreset::Feed => "Feed",
             LayoutPreset::Compact => "Compact",
+            LayoutPreset::Exchange => "Exchange",
         }
     }
 }
@@ -769,6 +776,27 @@ pub struct MonitorState {
     /// Per-pair liquidity data: (pair_name, liquidity_usd).
     pub liquidity_pairs: Vec<(String, f64)>,
 
+    /// Synthetic order book generated from DEX pair data.
+    pub order_book: Option<OrderBook>,
+
+    /// Recent trades (synthetic from DEX pair data or real from exchange API).
+    pub recent_trades: VecDeque<Trade>,
+
+    /// Raw DEX pair data for the exchange view.
+    pub dex_pairs: Vec<DexPair>,
+
+    /// Token metadata: website URLs.
+    pub websites: Vec<String>,
+
+    /// Token metadata: social links (name, url).
+    pub socials: Vec<(String, String)>,
+
+    /// Earliest pair creation timestamp (for "listed since").
+    pub earliest_pair_created_at: Option<i64>,
+
+    /// DexScreener URL for this token.
+    pub dexscreener_url: Option<String>,
+
     /// Counter to throttle holder count fetches.
     pub holder_fetch_counter: u32,
 
@@ -893,6 +921,17 @@ impl MonitorState {
             color_scheme: ColorScheme::GreenRed, // Default color scheme
             holder_count: None,
             liquidity_pairs: Vec::new(),
+            order_book: None,
+            recent_trades: VecDeque::new(),
+            dex_pairs: token_data.pairs.clone(),
+            websites: token_data.websites.clone(),
+            socials: token_data
+                .socials
+                .iter()
+                .map(|s| (s.platform.clone(), s.url.clone()))
+                .collect(),
+            earliest_pair_created_at: token_data.earliest_pair_created_at,
+            dexscreener_url: token_data.dexscreener_url.clone(),
             holder_fetch_counter: 0,
             start_timestamp: now_ts as i64,
             layout: LayoutPreset::Dashboard,
@@ -1084,6 +1123,84 @@ impl MonitorState {
         history
     }
 
+    /// Generates a multi-level synthetic order book from DEX pair data.
+    ///
+    /// Aggregates liquidity across all pairs and distributes it into
+    /// realistic bid/ask levels around the current mid price. Levels are
+    /// spaced logarithmically so near-mid levels are denser.
+    fn generate_synthetic_order_book(
+        pairs: &[DexPair],
+        symbol: &str,
+        price: f64,
+        total_liquidity: f64,
+    ) -> Option<OrderBook> {
+        if price <= 0.0 || total_liquidity <= 0.0 {
+            return None;
+        }
+
+        // Spread is tighter for more liquid markets
+        let base_spread_bps = if total_liquidity > 1_000_000.0 {
+            5.0 // 0.05%
+        } else if total_liquidity > 100_000.0 {
+            15.0 // 0.15%
+        } else {
+            50.0 // 0.50%
+        };
+
+        let half_spread = price * base_spread_bps / 10_000.0;
+        let half_liq = total_liquidity / 2.0;
+        let num_levels: usize = 15;
+
+        // Generate ask levels (ascending from mid + half_spread)
+        let mut asks = Vec::with_capacity(num_levels);
+        for i in 0..num_levels {
+            // Exponential spacing: tighter near the mid, wider further out
+            let offset_pct = (1.0 + i as f64 * 0.3).powf(1.4) * 0.001;
+            let ask_price = price + half_spread + price * offset_pct;
+            // Liquidity decreases further from mid (exponential decay)
+            let weight = (-1.5 * i as f64 / num_levels as f64).exp();
+            let level_liq = half_liq * weight / num_levels as f64 * 2.5;
+            let quantity = level_liq / ask_price;
+            if quantity > 0.0 {
+                asks.push(OrderBookLevel {
+                    price: ask_price,
+                    quantity,
+                });
+            }
+        }
+
+        // Generate bid levels (descending from mid - half_spread)
+        let mut bids = Vec::with_capacity(num_levels);
+        for i in 0..num_levels {
+            let offset_pct = (1.0 + i as f64 * 0.3).powf(1.4) * 0.001;
+            let bid_price = price - half_spread - price * offset_pct;
+            if bid_price <= 0.0 {
+                break;
+            }
+            let weight = (-1.5 * i as f64 / num_levels as f64).exp();
+            let level_liq = half_liq * weight / num_levels as f64 * 2.5;
+            let quantity = level_liq / bid_price;
+            if quantity > 0.0 {
+                bids.push(OrderBookLevel {
+                    price: bid_price,
+                    quantity,
+                });
+            }
+        }
+
+        // Find best quote token from pairs for the pair label
+        let quote = pairs
+            .first()
+            .map(|p| p.quote_token.as_str())
+            .unwrap_or("USD");
+
+        Some(OrderBook {
+            pair: format!("{}/{}", symbol, quote),
+            bids,
+            asks,
+        })
+    }
+
     /// Updates the state with new token data.
     /// New data points are marked as real (is_real = true).
     pub fn update(&mut self, token_data: &DexTokenData) {
@@ -1149,6 +1266,63 @@ impl MonitorState {
                 (label, p.liquidity_usd)
             })
             .collect();
+
+        // Update DEX pairs and generate synthetic order book
+        self.dex_pairs = token_data.pairs.clone();
+        self.order_book = Self::generate_synthetic_order_book(
+            &token_data.pairs,
+            &token_data.symbol,
+            token_data.price_usd,
+            token_data.liquidity_usd,
+        );
+
+        // Generate synthetic trade from price movement
+        if token_data.price_usd > 0.0 {
+            let side = if price_changed && token_data.price_usd > self.current_price {
+                TradeSide::Buy
+            } else if price_changed {
+                TradeSide::Sell
+            } else {
+                // No change — alternate based on buy/sell ratio
+                if token_data.total_buys_24h >= token_data.total_sells_24h {
+                    TradeSide::Buy
+                } else {
+                    TradeSide::Sell
+                }
+            };
+            let ts_ms = (now_ts * 1000.0) as u64;
+            // Synthetic quantity based on recent volume
+            let qty = if token_data.volume_24h > 0.0 && token_data.price_usd > 0.0 {
+                // Rough: daily volume / 86400 updates * refresh_rate gives per-update volume
+                let per_update_vol =
+                    token_data.volume_24h / 86400.0 * self.refresh_rate.as_secs_f64();
+                per_update_vol / token_data.price_usd
+            } else {
+                1.0
+            };
+            self.recent_trades.push_back(Trade {
+                price: token_data.price_usd,
+                quantity: qty,
+                quote_quantity: Some(qty * token_data.price_usd),
+                timestamp_ms: ts_ms,
+                side,
+                id: None,
+            });
+            // Keep at most 200 trades
+            while self.recent_trades.len() > 200 {
+                self.recent_trades.pop_front();
+            }
+        }
+
+        // Update metadata
+        self.websites = token_data.websites.clone();
+        self.socials = token_data
+            .socials
+            .iter()
+            .map(|s| (s.platform.clone(), s.url.clone()))
+            .collect();
+        self.earliest_pair_created_at = token_data.earliest_pair_created_at;
+        self.dexscreener_url = token_data.dexscreener_url.clone();
 
         self.last_update = Instant::now();
         self.error_message = None;
@@ -1934,6 +2108,12 @@ struct LayoutAreas {
     buy_sell_gauge: Option<Rect>,
     metrics_panel: Option<Rect>,
     activity_feed: Option<Rect>,
+    /// Order book depth panel (Exchange layout).
+    order_book: Option<Rect>,
+    /// Market info panel with pair details (Exchange layout).
+    market_info: Option<Rect>,
+    /// Recent trade history (Exchange layout).
+    trade_history: Option<Rect>,
 }
 
 /// Dashboard layout: charts top, gauges middle, transaction feed bottom.
@@ -1993,6 +2173,9 @@ fn layout_dashboard(area: Rect, widgets: &WidgetVisibility) -> LayoutAreas {
         } else {
             None
         },
+        order_book: None,
+        market_info: None,
+        trade_history: None,
     }
 }
 
@@ -2027,6 +2210,9 @@ fn layout_chart_focus(area: Rect, widgets: &WidgetVisibility) -> LayoutAreas {
             None
         },
         activity_feed: None, // Hidden in chart-focus
+        order_book: None,
+        market_info: None,
+        trade_history: None,
     }
 }
 
@@ -2070,6 +2256,9 @@ fn layout_feed(area: Rect, widgets: &WidgetVisibility) -> LayoutAreas {
         } else {
             None
         },
+        order_book: None,
+        market_info: None,
+        trade_history: None,
     }
 }
 
@@ -2091,6 +2280,54 @@ fn layout_compact(area: Rect, widgets: &WidgetVisibility) -> LayoutAreas {
             None
         },
         activity_feed: None, // Hidden in compact
+        order_book: None,
+        market_info: None,
+        trade_history: None,
+    }
+}
+
+/// Exchange layout: order book left, chart center, trade history right.
+///
+/// ```text
+/// ┌─────────────────┬──────────────────────────┬─────────────────┐
+/// │                 │                          │                 │
+/// │  Order Book     │   Price Chart (45%)      │  Trade History  │  60%
+/// │    (25%)        │                          │    (30%)        │
+/// │                 │                          │                 │
+/// ├─────────────────┼──────────────────────────┼─────────────────┤
+/// │  Buy/Sell (25%) │   Market Info (45%)      │  (continued)    │  40%
+/// │                 │                          │    (30%)        │
+/// └─────────────────┴──────────────────────────┴─────────────────┘
+/// ```
+fn layout_exchange(area: Rect, _widgets: &WidgetVisibility) -> LayoutAreas {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(area);
+
+    let top = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(25),
+            Constraint::Percentage(45),
+            Constraint::Percentage(30),
+        ])
+        .split(rows[0]);
+
+    let bottom = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
+        .split(rows[1]);
+
+    LayoutAreas {
+        price_chart: Some(top[1]),
+        volume_chart: None,
+        buy_sell_gauge: Some(bottom[0]),
+        metrics_panel: None,
+        activity_feed: None,
+        order_book: Some(top[0]),
+        market_info: Some(bottom[1]),
+        trade_history: Some(top[2]),
     }
 }
 
@@ -2133,6 +2370,7 @@ fn ui(f: &mut Frame, state: &mut MonitorState) {
         LayoutPreset::ChartFocus => layout_chart_focus(chunks[1], &state.widgets),
         LayoutPreset::Feed => layout_feed(chunks[1], &state.widgets),
         LayoutPreset::Compact => layout_compact(chunks[1], &state.widgets),
+        LayoutPreset::Exchange => layout_exchange(chunks[1], &state.widgets),
     };
 
     // Render each widget if its area is allocated
@@ -2164,6 +2402,16 @@ fn ui(f: &mut Frame, state: &mut MonitorState) {
     }
     if let Some(area) = areas.activity_feed {
         render_activity_feed(f, area, state);
+    }
+    // Exchange-specific widgets
+    if let Some(area) = areas.order_book {
+        render_order_book_panel(f, area, state);
+    }
+    if let Some(area) = areas.market_info {
+        render_market_info_panel(f, area, state);
+    }
+    if let Some(area) = areas.trade_history {
+        render_recent_trades_panel(f, area, state);
     }
 
     // Render alert overlay on top of content area if alerts are active
@@ -3154,6 +3402,464 @@ fn render_metrics_panel(f: &mut Frame, area: Rect, state: &MonitorState) {
     f.render_widget(table, chunks[1]);
 }
 
+/// Renders the order book panel for the Exchange layout.
+///
+/// Shows asks (descending), spread, bids (descending) with depth bars.
+fn render_order_book_panel(f: &mut Frame, area: Rect, state: &MonitorState) {
+    let pal = state.palette();
+
+    let book = match &state.order_book {
+        Some(b) => b,
+        None => {
+            let block = Block::default()
+                .title(" ◈ Order Book (no data) ")
+                .borders(Borders::ALL)
+                .border_style(Style::new().fg(Color::DarkGray));
+            f.render_widget(block, area);
+            return;
+        }
+    };
+
+    let inner_height = area.height.saturating_sub(2) as usize; // minus borders
+    if inner_height < 3 {
+        return;
+    }
+
+    // Allocate rows: half for asks, 1 for spread, half for bids
+    let ask_rows = (inner_height.saturating_sub(1)) / 2;
+    let bid_rows = inner_height.saturating_sub(ask_rows).saturating_sub(1);
+
+    // Find max quantity for bar scaling
+    let max_qty = book
+        .asks
+        .iter()
+        .chain(book.bids.iter())
+        .map(|l| l.quantity)
+        .fold(0.0_f64, f64::max)
+        .max(0.001);
+
+    let inner_width = area.width.saturating_sub(2) as usize;
+    // Bar takes ~30% of width, rest is price/qty text
+    let bar_width_max = (inner_width as f64 * 0.3).round() as usize;
+
+    let mut lines: Vec<Line> = Vec::with_capacity(inner_height);
+
+    // --- Ask side (show in reverse so lowest ask is nearest the spread) ---
+    let visible_asks: Vec<_> = book.asks.iter().take(ask_rows).collect();
+    // Pad with empty lines if fewer asks than rows
+    for _ in 0..ask_rows.saturating_sub(visible_asks.len()) {
+        lines.push(Line::from(""));
+    }
+    for level in visible_asks.iter().rev() {
+        let bar_len = ((level.quantity / max_qty) * bar_width_max as f64).round() as usize;
+        let bar = "█".repeat(bar_len);
+        let price_str = format!("{:.6}", level.price);
+        let qty_str = format_number(level.quantity);
+        let val_str = format_number(level.value());
+        let padding = inner_width
+            .saturating_sub(bar_len)
+            .saturating_sub(price_str.len())
+            .saturating_sub(qty_str.len())
+            .saturating_sub(val_str.len())
+            .saturating_sub(4); // spaces between columns
+        lines.push(Line::from(vec![
+            Span::styled(bar, Style::new().fg(pal.down).dim()),
+            Span::raw(" "),
+            Span::styled(price_str, Style::new().fg(pal.down)),
+            Span::raw(" ".repeat(padding.max(1))),
+            Span::styled(qty_str, Style::new().fg(pal.neutral)),
+            Span::raw(" "),
+            Span::styled(val_str, Style::new().fg(Color::DarkGray)),
+        ]));
+    }
+
+    // --- Spread line ---
+    let spread = book
+        .best_ask()
+        .zip(book.best_bid())
+        .map(|(ask, bid)| {
+            let s = ask - bid;
+            let pct = if bid > 0.0 { (s / bid) * 100.0 } else { 0.0 };
+            format!("  Spread: {:.6} ({:.3}%)", s, pct)
+        })
+        .unwrap_or_else(|| "  Spread: --".to_string());
+    lines.push(Line::from(Span::styled(
+        spread,
+        Style::new().fg(Color::Yellow).bold(),
+    )));
+
+    // --- Bid side ---
+    for level in book.bids.iter().take(bid_rows) {
+        let bar_len = ((level.quantity / max_qty) * bar_width_max as f64).round() as usize;
+        let bar = "█".repeat(bar_len);
+        let price_str = format!("{:.6}", level.price);
+        let qty_str = format_number(level.quantity);
+        let val_str = format_number(level.value());
+        let padding = inner_width
+            .saturating_sub(bar_len)
+            .saturating_sub(price_str.len())
+            .saturating_sub(qty_str.len())
+            .saturating_sub(val_str.len())
+            .saturating_sub(4);
+        lines.push(Line::from(vec![
+            Span::styled(bar, Style::new().fg(pal.up).dim()),
+            Span::raw(" "),
+            Span::styled(price_str, Style::new().fg(pal.up)),
+            Span::raw(" ".repeat(padding.max(1))),
+            Span::styled(qty_str, Style::new().fg(pal.neutral)),
+            Span::raw(" "),
+            Span::styled(val_str, Style::new().fg(Color::DarkGray)),
+        ]));
+    }
+
+    let ask_depth: f64 = book.asks.iter().map(|l| l.value()).sum();
+    let bid_depth: f64 = book.bids.iter().map(|l| l.value()).sum();
+    let title = format!(
+        " ◈ {} │ Ask {} │ Bid {} ",
+        book.pair,
+        format_number(ask_depth),
+        format_number(bid_depth),
+    );
+
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(pal.border));
+
+    let paragraph = Paragraph::new(lines).block(block);
+    f.render_widget(paragraph, area);
+}
+
+/// Renders the recent trades panel for the Exchange layout.
+///
+/// Displays a scrolling list of recent trades with time, side (buy/sell),
+/// price, and quantity. Buy trades are green, sell trades are red.
+fn render_recent_trades_panel(f: &mut Frame, area: Rect, state: &MonitorState) {
+    let pal = state.palette();
+
+    if state.recent_trades.is_empty() {
+        let block = Block::default()
+            .title(" ◈ Recent Trades (no data) ")
+            .borders(Borders::ALL)
+            .border_style(Style::new().fg(Color::DarkGray));
+        f.render_widget(block, area);
+        return;
+    }
+
+    let inner_height = area.height.saturating_sub(2) as usize;
+    let inner_width = area.width.saturating_sub(2) as usize;
+
+    // Column widths
+    let time_width = 8; // HH:MM:SS
+    let side_width = 4; // BUY / SELL
+    let price_width = inner_width
+        .saturating_sub(time_width)
+        .saturating_sub(side_width)
+        .saturating_sub(3) // separators
+        / 2;
+    let qty_width = inner_width
+        .saturating_sub(time_width)
+        .saturating_sub(side_width)
+        .saturating_sub(price_width)
+        .saturating_sub(3);
+
+    let mut lines: Vec<Line> = Vec::with_capacity(inner_height);
+
+    // Header row
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("{:<time_width$}", "Time"),
+            Style::new().fg(Color::DarkGray).bold(),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("{:<side_width$}", "Side"),
+            Style::new().fg(Color::DarkGray).bold(),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("{:>price_width$}", "Price"),
+            Style::new().fg(Color::DarkGray).bold(),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("{:>qty_width$}", "Qty"),
+            Style::new().fg(Color::DarkGray).bold(),
+        ),
+    ]));
+
+    // Trade rows (most recent first)
+    let visible_count = inner_height.saturating_sub(1); // minus header
+    for trade in state.recent_trades.iter().rev().take(visible_count) {
+        let (side_str, side_color) = match trade.side {
+            TradeSide::Buy => ("BUY ", pal.up),
+            TradeSide::Sell => ("SELL", pal.down),
+        };
+
+        // Format timestamp (HH:MM:SS from epoch ms)
+        let secs = (trade.timestamp_ms / 1000) as i64;
+        let hours = (secs / 3600) % 24;
+        let mins = (secs / 60) % 60;
+        let sec = secs % 60;
+        let time_str = format!("{:02}:{:02}:{:02}", hours, mins, sec);
+
+        let price_str = if trade.price >= 1000.0 {
+            format!("{:.2}", trade.price)
+        } else if trade.price >= 1.0 {
+            format!("{:.4}", trade.price)
+        } else {
+            format!("{:.6}", trade.price)
+        };
+
+        let qty_str = format_number(trade.quantity);
+
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{:<time_width$}", time_str),
+                Style::new().fg(Color::DarkGray),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                format!("{:<side_width$}", side_str),
+                Style::new().fg(side_color),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                format!("{:>price_width$}", price_str),
+                Style::new().fg(side_color),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                format!("{:>qty_width$}", qty_str),
+                Style::new().fg(pal.neutral),
+            ),
+        ]));
+    }
+
+    let title = format!(" ◈ Recent Trades ({}) ", state.recent_trades.len());
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(pal.border));
+
+    let paragraph = Paragraph::new(lines).block(block);
+    f.render_widget(paragraph, area);
+}
+
+/// Renders the market info panel for the Exchange layout.
+///
+/// Shows per-pair breakdown (DEX, volume, liquidity), 24h stats,
+/// token metadata (links, creation date), and aggregated metrics.
+fn render_market_info_panel(f: &mut Frame, area: Rect, state: &MonitorState) {
+    let pal = state.palette();
+
+    // Split into left (pair table) and right (token info) columns
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(area);
+
+    // ── Left: Trading pairs table ──
+    {
+        let header = Row::new(vec!["DEX / Pair", "Volume 24h", "Liquidity", "Δ 24h"])
+            .style(Style::new().fg(Color::Cyan).bold())
+            .bottom_margin(0);
+
+        let rows: Vec<Row> = state
+            .dex_pairs
+            .iter()
+            .take(cols[0].height.saturating_sub(3) as usize) // fit available rows
+            .map(|p| {
+                let pair_label = format!("{}/{}", p.base_token, p.quote_token);
+                let dex_and_pair = format!("{} {}", p.dex_name, pair_label);
+                let vol = format_number(p.volume_24h);
+                let liq = format_number(p.liquidity_usd);
+                let change_str = format!("{:+.1}%", p.price_change_24h);
+                let change_color = if p.price_change_24h >= 0.0 {
+                    pal.up
+                } else {
+                    pal.down
+                };
+                Row::new(vec![
+                    ratatui::text::Text::from(dex_and_pair),
+                    ratatui::text::Text::styled(vol, Style::new().fg(pal.neutral)),
+                    ratatui::text::Text::styled(liq, Style::new().fg(pal.volume_bar)),
+                    ratatui::text::Text::styled(change_str, Style::new().fg(change_color)),
+                ])
+            })
+            .collect();
+
+        let widths = [
+            Constraint::Percentage(40),
+            Constraint::Percentage(22),
+            Constraint::Percentage(22),
+            Constraint::Percentage(16),
+        ];
+
+        let table = Table::new(rows, widths).header(header).block(
+            Block::default()
+                .title(format!(" ◫ Trading Pairs ({}) ", state.dex_pairs.len()))
+                .borders(Borders::ALL)
+                .border_style(Style::new().fg(pal.border)),
+        );
+
+        f.render_widget(table, cols[0]);
+    }
+
+    // ── Right: Token info + aggregated metrics ──
+    {
+        let mut info_lines: Vec<Line> = Vec::new();
+
+        // Price summary
+        let price_color = if state.price_change_24h >= 0.0 {
+            pal.up
+        } else {
+            pal.down
+        };
+        info_lines.push(Line::from(vec![
+            Span::styled(" Price  ", Style::new().fg(Color::DarkGray)),
+            Span::styled(
+                format!("${:.6}", state.current_price),
+                Style::new().fg(Color::White).bold(),
+            ),
+        ]));
+
+        // Multi-timeframe changes
+        let changes = [
+            ("5m", state.price_change_5m),
+            ("1h", state.price_change_1h),
+            ("6h", state.price_change_6h),
+            ("24h", state.price_change_24h),
+        ];
+        let change_spans: Vec<Span> = changes
+            .iter()
+            .flat_map(|(label, val)| {
+                let color = if *val >= 0.0 { pal.up } else { pal.down };
+                vec![
+                    Span::styled(format!(" {}: ", label), Style::new().fg(Color::DarkGray)),
+                    Span::styled(format!("{:+.2}%", val), Style::new().fg(color)),
+                ]
+            })
+            .collect();
+        info_lines.push(Line::from(change_spans));
+
+        info_lines.push(Line::from(""));
+
+        // Volume & Liquidity
+        info_lines.push(Line::from(vec![
+            Span::styled(" Vol 24h ", Style::new().fg(Color::DarkGray)),
+            Span::styled(
+                format!("${}", format_number(state.volume_24h)),
+                Style::new().fg(pal.neutral),
+            ),
+        ]));
+        info_lines.push(Line::from(vec![
+            Span::styled(" Liq     ", Style::new().fg(Color::DarkGray)),
+            Span::styled(
+                format!("${}", format_number(state.liquidity_usd)),
+                Style::new().fg(pal.volume_bar),
+            ),
+        ]));
+
+        // Market cap / FDV
+        if let Some(mc) = state.market_cap {
+            info_lines.push(Line::from(vec![
+                Span::styled(" MCap    ", Style::new().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("${}", format_number(mc)),
+                    Style::new().fg(pal.neutral),
+                ),
+            ]));
+        }
+        if let Some(fdv) = state.fdv {
+            info_lines.push(Line::from(vec![
+                Span::styled(" FDV     ", Style::new().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("${}", format_number(fdv)),
+                    Style::new().fg(pal.neutral),
+                ),
+            ]));
+        }
+
+        // Buy/sell stats
+        info_lines.push(Line::from(""));
+        let total_txs = state.buys_24h + state.sells_24h;
+        let buy_pct = if total_txs > 0 {
+            (state.buys_24h as f64 / total_txs as f64) * 100.0
+        } else {
+            50.0
+        };
+        info_lines.push(Line::from(vec![
+            Span::styled(" Buys    ", Style::new().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{} ({:.0}%)", state.buys_24h, buy_pct),
+                Style::new().fg(pal.up),
+            ),
+        ]));
+        info_lines.push(Line::from(vec![
+            Span::styled(" Sells   ", Style::new().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{} ({:.0}%)", state.sells_24h, 100.0 - buy_pct),
+                Style::new().fg(pal.down),
+            ),
+        ]));
+
+        // Holder count
+        if let Some(holders) = state.holder_count {
+            info_lines.push(Line::from(vec![
+                Span::styled(" Holders ", Style::new().fg(Color::DarkGray)),
+                Span::styled(format_number(holders as f64), Style::new().fg(pal.neutral)),
+            ]));
+        }
+
+        // Listed since
+        if let Some(ts) = state.earliest_pair_created_at {
+            let dt = chrono::DateTime::from_timestamp(ts, 0)
+                .map(|d| d.format("%Y-%m-%d").to_string())
+                .unwrap_or_else(|| "?".to_string());
+            info_lines.push(Line::from(vec![
+                Span::styled(" Listed  ", Style::new().fg(Color::DarkGray)),
+                Span::styled(dt, Style::new().fg(pal.neutral)),
+            ]));
+        }
+
+        // Links
+        if !state.websites.is_empty() || !state.socials.is_empty() {
+            info_lines.push(Line::from(""));
+            let mut link_spans = vec![Span::styled(" Links   ", Style::new().fg(Color::DarkGray))];
+            for (platform, _url) in &state.socials {
+                link_spans.push(Span::styled(
+                    format!("[{}] ", platform),
+                    Style::new().fg(Color::Cyan),
+                ));
+            }
+            for url in &state.websites {
+                // Show domain only
+                let domain = url
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://")
+                    .split('/')
+                    .next()
+                    .unwrap_or(url);
+                link_spans.push(Span::styled(
+                    format!("[{}] ", domain),
+                    Style::new().fg(Color::Blue),
+                ));
+            }
+            info_lines.push(Line::from(link_spans));
+        }
+
+        let title = format!(" ◉ {} ({}) ", state.symbol, state.name);
+        let block = Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_style(Style::new().fg(price_color));
+
+        let paragraph = Paragraph::new(info_lines).block(block);
+        f.render_widget(paragraph, cols[1]);
+    }
+}
+
 /// Renders the footer with status and controls.
 fn render_footer(f: &mut Frame, area: Rect, state: &MonitorState) {
     let elapsed = state.last_update.elapsed().as_secs();
@@ -3259,14 +3965,23 @@ fn format_number(n: f64) -> String {
 /// Applies CLI-provided overrides (layout, refresh, scale, etc.) on top
 /// of the config-file defaults.
 pub async fn run_direct(
-    args: MonitorArgs,
+    mut args: MonitorArgs,
     config: &Config,
     clients: &dyn ChainClientFactory,
 ) -> Result<()> {
+    // Resolve address book label → address + chain
+    if let Some((address, chain)) =
+        crate::cli::address_book::resolve_address_book_input(&args.token, config)?
+    {
+        args.token = address;
+        if args.chain == "ethereum" {
+            args.chain = chain;
+        }
+    }
+
     // Build a SessionContext from the CLI args (no interactive session needed)
     let ctx = SessionContext {
         chain: args.chain,
-        chain_explicit: true,
         ..SessionContext::default()
     };
 
@@ -3311,8 +4026,8 @@ pub async fn run(
         }
     };
 
-    println!("Starting live monitor for {}...", token_input);
-    println!("Fetching initial data...");
+    eprintln!("  Starting live monitor for {}...", token_input);
+    eprintln!("  Fetching initial data...");
 
     // Resolve token address
     let dex_client = clients.create_dex_client();
@@ -5458,12 +6173,14 @@ mod tests {
         assert_eq!(LayoutPreset::Dashboard.next(), LayoutPreset::ChartFocus);
         assert_eq!(LayoutPreset::ChartFocus.next(), LayoutPreset::Feed);
         assert_eq!(LayoutPreset::Feed.next(), LayoutPreset::Compact);
-        assert_eq!(LayoutPreset::Compact.next(), LayoutPreset::Dashboard);
+        assert_eq!(LayoutPreset::Compact.next(), LayoutPreset::Exchange);
+        assert_eq!(LayoutPreset::Exchange.next(), LayoutPreset::Dashboard);
     }
 
     #[test]
     fn test_layout_preset_prev_cycles() {
-        assert_eq!(LayoutPreset::Dashboard.prev(), LayoutPreset::Compact);
+        assert_eq!(LayoutPreset::Dashboard.prev(), LayoutPreset::Exchange);
+        assert_eq!(LayoutPreset::Exchange.prev(), LayoutPreset::Compact);
         assert_eq!(LayoutPreset::Compact.prev(), LayoutPreset::Feed);
         assert_eq!(LayoutPreset::Feed.prev(), LayoutPreset::ChartFocus);
         assert_eq!(LayoutPreset::ChartFocus.prev(), LayoutPreset::Dashboard);
@@ -5473,7 +6190,7 @@ mod tests {
     fn test_layout_preset_full_cycle() {
         let start = LayoutPreset::Dashboard;
         let mut preset = start;
-        for _ in 0..4 {
+        for _ in 0..5 {
             preset = preset.next();
         }
         assert_eq!(preset, start);
@@ -5485,6 +6202,7 @@ mod tests {
         assert_eq!(LayoutPreset::ChartFocus.label(), "Chart");
         assert_eq!(LayoutPreset::Feed.label(), "Feed");
         assert_eq!(LayoutPreset::Compact.label(), "Compact");
+        assert_eq!(LayoutPreset::Exchange.label(), "Exchange");
     }
 
     #[test]
@@ -5635,12 +6353,27 @@ mod tests {
     }
 
     #[test]
+    fn test_layout_exchange_has_order_book_and_market_info() {
+        let area = Rect::new(0, 0, 160, 50);
+        let vis = WidgetVisibility::default();
+        let areas = layout_exchange(area, &vis);
+        assert!(areas.order_book.is_some());
+        assert!(areas.market_info.is_some());
+        assert!(areas.price_chart.is_some());
+        assert!(areas.buy_sell_gauge.is_some());
+        assert!(areas.volume_chart.is_none()); // Not in exchange layout
+        assert!(areas.metrics_panel.is_none()); // Not in exchange layout
+        assert!(areas.activity_feed.is_none()); // Not in exchange layout
+    }
+
+    #[test]
     fn test_ui_render_all_layouts_no_panic() {
         let presets = [
             LayoutPreset::Dashboard,
             LayoutPreset::ChartFocus,
             LayoutPreset::Feed,
             LayoutPreset::Compact,
+            LayoutPreset::Exchange,
         ];
         for preset in &presets {
             let mut terminal = create_test_terminal();
@@ -5704,7 +6437,7 @@ mod tests {
         state.auto_layout = true;
 
         handle_key_event_on_state(make_key_event(KeyCode::Char('h')), &mut state);
-        assert_eq!(state.layout, LayoutPreset::Compact);
+        assert_eq!(state.layout, LayoutPreset::Exchange);
         assert!(!state.auto_layout);
     }
 
@@ -7212,6 +7945,54 @@ refresh_seconds: 5
         token_data.volume_1h = 0.0;
         let state = MonitorState::new(&token_data, "ethereum");
         assert!(!state.volume_history.is_empty());
+    }
+
+    #[test]
+    fn test_generate_synthetic_order_book() {
+        let pairs = vec![crate::chains::DexPair {
+            dex_name: "Uniswap V3".to_string(),
+            pair_address: "0xabc".to_string(),
+            base_token: "PUSD".to_string(),
+            quote_token: "USDT".to_string(),
+            price_usd: 1.0,
+            volume_24h: 50_000.0,
+            liquidity_usd: 200_000.0,
+            price_change_24h: 0.1,
+            buys_24h: 100,
+            sells_24h: 90,
+            buys_6h: 30,
+            sells_6h: 25,
+            buys_1h: 10,
+            sells_1h: 8,
+            pair_created_at: None,
+            url: None,
+        }];
+        let book = MonitorState::generate_synthetic_order_book(&pairs, "PUSD", 1.0, 200_000.0);
+        assert!(book.is_some());
+        let book = book.unwrap();
+        assert_eq!(book.pair, "PUSD/USDT");
+        assert!(!book.asks.is_empty());
+        assert!(!book.bids.is_empty());
+        // Asks should be ascending
+        for w in book.asks.windows(2) {
+            assert!(w[0].price <= w[1].price);
+        }
+        // Bids should be descending
+        for w in book.bids.windows(2) {
+            assert!(w[0].price >= w[1].price);
+        }
+    }
+
+    #[test]
+    fn test_generate_synthetic_order_book_zero_price() {
+        let book = MonitorState::generate_synthetic_order_book(&[], "TEST", 0.0, 100_000.0);
+        assert!(book.is_none());
+    }
+
+    #[test]
+    fn test_generate_synthetic_order_book_zero_liquidity() {
+        let book = MonitorState::generate_synthetic_order_book(&[], "TEST", 1.0, 0.0);
+        assert!(book.is_none());
     }
 
     // ========================================================================

@@ -677,7 +677,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_route_get_portfolio_list() {
+    async fn test_route_get_address_book_list() {
         use axum::http::{Request, StatusCode};
         use tower::ServiceExt;
 
@@ -685,7 +685,7 @@ mod tests {
         let app = build_router(state);
 
         let req = Request::builder()
-            .uri("/api/portfolio/list")
+            .uri("/api/address-book/list")
             .method("GET")
             .body(axum::body::Body::empty())
             .unwrap();
@@ -696,7 +696,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_route_post_portfolio_add() {
+    async fn test_route_post_address_book_add() {
         use axum::http::{Request, StatusCode, header};
         use tower::ServiceExt;
 
@@ -710,7 +710,7 @@ mod tests {
         });
 
         let req = Request::builder()
-            .uri("/api/portfolio/add")
+            .uri("/api/address-book/add")
             .method("POST")
             .header(header::CONTENT_TYPE, "application/json")
             .body(axum::body::Body::from(payload.to_string()))

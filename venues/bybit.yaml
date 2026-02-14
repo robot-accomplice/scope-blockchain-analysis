@@ -1,0 +1,55 @@
+id: bybit
+name: Bybit
+base_url: https://api.bybit.com
+timeout_secs: 15
+rate_limit_per_sec: 10
+
+symbol:
+  template: "{base}{quote}"
+  default_quote: USDT
+
+capabilities:
+  order_book:
+    path: /v5/market/orderbook
+    params:
+      category: spot
+      symbol: "{pair}"
+      limit: "200"
+    response_root: result
+    response:
+      asks_key: a
+      bids_key: b
+      level_format: positional
+
+  ticker:
+    path: /v5/market/tickers
+    params:
+      category: spot
+      symbol: "{pair}"
+    response_root: "result.list.0"
+    response:
+      last_price: lastPrice
+      high_24h: highPrice24h
+      low_24h: lowPrice24h
+      volume_24h: volume24h
+      quote_volume_24h: turnover24h
+      best_bid: bid1Price
+      best_ask: ask1Price
+
+  trades:
+    path: /v5/market/recent-trade
+    params:
+      category: spot
+      symbol: "{pair}"
+      limit: "{limit}"
+    response_root: "result.list"
+    response:
+      price: price
+      quantity: size
+      timestamp_ms: time
+      id: execId
+      side:
+        field: side
+        mapping:
+          Buy: buy
+          Sell: sell

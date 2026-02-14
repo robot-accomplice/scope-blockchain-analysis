@@ -5,6 +5,7 @@
 
 use crate::chains::dex::DexTokenData;
 use crate::chains::{ChainClientFactory, DexDataSource};
+use crate::market::{ExchangeClient, TradeSide, VenueRegistry};
 use crate::web::AppState;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
@@ -24,6 +25,13 @@ pub struct MonitorQuery {
     /// Refresh interval in seconds (default: 5).
     #[serde(default = "default_refresh")]
     pub refresh: u64,
+    /// Optional exchange venue ID (e.g., "binance") — when set, exchange data
+    /// (order book, ticker, recent trades) is included in each update frame.
+    #[serde(default)]
+    pub venue: Option<String>,
+    /// Base pair for exchange data (default: same as token).
+    #[serde(default)]
+    pub pair: Option<String>,
 }
 
 fn default_chain() -> String {
@@ -55,12 +63,26 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, params: Moni
     let token_input = params.token.clone();
     let chain = params.chain.clone();
 
+    // Optionally create an exchange client for CEX data
+    let exchange_client: Option<ExchangeClient> = params.venue.as_ref().and_then(|venue_id| {
+        VenueRegistry::load()
+            .ok()
+            .and_then(|r| r.create_exchange_client(venue_id).ok())
+    });
+
+    let exchange_pair: Option<String> = exchange_client.as_ref().map(|ec| {
+        let base = params.pair.as_deref().unwrap_or(&token_input);
+        ec.format_pair(base)
+    });
+
     // Send initial connection message
     let init_msg = serde_json::json!({
         "type": "connected",
         "token": token_input,
         "chain": chain,
         "refresh_secs": params.refresh,
+        "venue": params.venue,
+        "exchange_pair": exchange_pair,
     });
     if socket
         .send(Message::Text(init_msg.to_string()))
@@ -71,13 +93,20 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, params: Moni
     }
 
     loop {
-        // Fetch latest token data
+        // Fetch latest DEX token data
         let data: crate::error::Result<DexTokenData> =
             dex_client.get_token_data(&chain, &token_input).await;
 
+        // Optionally fetch exchange snapshot in parallel
+        let exchange_snapshot = if let (Some(ec), Some(pair)) = (&exchange_client, &exchange_pair) {
+            Some(ec.fetch_market_snapshot(pair).await)
+        } else {
+            None
+        };
+
         let msg = match data {
             Ok(token_data) => {
-                serde_json::json!({
+                let mut frame = serde_json::json!({
                     "type": "update",
                     "timestamp": chrono::Utc::now().to_rfc3339(),
                     "token": {
@@ -108,13 +137,25 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, params: Moni
                             "liquidity_usd": p.liquidity_usd,
                         })
                     }).collect::<Vec<_>>(),
-                })
+                });
+
+                // Attach exchange data if available
+                if let Some(snap) = &exchange_snapshot {
+                    attach_exchange_data(&mut frame, snap);
+                }
+
+                frame
             }
             Err(e) => {
-                serde_json::json!({
+                let mut frame = serde_json::json!({
                     "type": "error",
                     "message": e.to_string(),
-                })
+                });
+                // Still attach exchange data even on DEX error
+                if let Some(snap) = &exchange_snapshot {
+                    attach_exchange_data(&mut frame, snap);
+                }
+                frame
             }
         };
 
@@ -145,9 +186,64 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, params: Moni
     }
 }
 
+/// Attach exchange snapshot data (order book, ticker, trades) to a JSON frame.
+fn attach_exchange_data(frame: &mut serde_json::Value, snap: &crate::market::MarketSnapshot) {
+    if let Some(book) = &snap.order_book {
+        frame["exchange_order_book"] = serde_json::json!({
+            "pair": book.pair,
+            "best_bid": book.best_bid(),
+            "best_ask": book.best_ask(),
+            "mid_price": book.mid_price(),
+            "spread": book.spread(),
+            "bid_depth": book.bid_depth(),
+            "ask_depth": book.ask_depth(),
+            "bids": book.bids.iter().take(20).map(|l| {
+                serde_json::json!({"price": l.price, "quantity": l.quantity})
+            }).collect::<Vec<_>>(),
+            "asks": book.asks.iter().take(20).map(|l| {
+                serde_json::json!({"price": l.price, "quantity": l.quantity})
+            }).collect::<Vec<_>>(),
+        });
+    }
+
+    if let Some(ticker) = &snap.ticker {
+        frame["exchange_ticker"] = serde_json::json!({
+            "pair": ticker.pair,
+            "last_price": ticker.last_price,
+            "high_24h": ticker.high_24h,
+            "low_24h": ticker.low_24h,
+            "volume_24h": ticker.volume_24h,
+            "quote_volume_24h": ticker.quote_volume_24h,
+            "best_bid": ticker.best_bid,
+            "best_ask": ticker.best_ask,
+        });
+    }
+
+    if let Some(trades) = &snap.recent_trades {
+        frame["exchange_trades"] = serde_json::json!(
+            trades
+                .iter()
+                .take(20)
+                .map(|t| {
+                    serde_json::json!({
+                        "price": t.price,
+                        "quantity": t.quantity,
+                        "timestamp_ms": t.timestamp_ms,
+                        "side": match t.side {
+                            TradeSide::Buy => "buy",
+                            TradeSide::Sell => "sell",
+                        },
+                    })
+                })
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::market::{MarketSnapshot, OrderBook, OrderBookLevel, Ticker, Trade};
 
     #[test]
     fn test_default_chain() {
@@ -170,6 +266,7 @@ mod tests {
         assert_eq!(query.token, "USDC");
         assert_eq!(query.chain, "solana");
         assert_eq!(query.refresh, 10);
+        assert!(query.venue.is_none());
     }
 
     #[test]
@@ -181,17 +278,83 @@ mod tests {
         assert_eq!(query.token, "ETH");
         assert_eq!(query.chain, "ethereum");
         assert_eq!(query.refresh, 5);
+        assert!(query.venue.is_none());
+        assert!(query.pair.is_none());
     }
 
     #[test]
-    fn test_deserialize_monitor_query_custom_refresh() {
+    fn test_deserialize_monitor_query_with_venue() {
         let json = serde_json::json!({
             "token": "BTC",
-            "refresh": 30
+            "venue": "binance",
+            "pair": "USDC",
+            "refresh": 10
         });
         let query: MonitorQuery = serde_json::from_value(json).unwrap();
         assert_eq!(query.token, "BTC");
-        assert_eq!(query.chain, "ethereum");
-        assert_eq!(query.refresh, 30);
+        assert_eq!(query.venue.as_deref(), Some("binance"));
+        assert_eq!(query.pair.as_deref(), Some("USDC"));
+    }
+
+    #[test]
+    fn test_attach_exchange_data_full() {
+        let snapshot = MarketSnapshot {
+            order_book: Some(OrderBook {
+                pair: "BTC/USDT".to_string(),
+                bids: vec![OrderBookLevel {
+                    price: 50000.0,
+                    quantity: 1.5,
+                }],
+                asks: vec![OrderBookLevel {
+                    price: 50010.0,
+                    quantity: 2.0,
+                }],
+            }),
+            ticker: Some(Ticker {
+                pair: "BTC/USDT".to_string(),
+                last_price: Some(50005.0),
+                high_24h: Some(51000.0),
+                low_24h: Some(49000.0),
+                volume_24h: Some(1_000_000.0),
+                quote_volume_24h: Some(50_000_000.0),
+                best_bid: Some(50000.0),
+                best_ask: Some(50010.0),
+            }),
+            recent_trades: Some(vec![Trade {
+                price: 50005.0,
+                quantity: 0.5,
+                quote_quantity: Some(25002.5),
+                timestamp_ms: 1700000000000,
+                side: TradeSide::Buy,
+                id: None,
+            }]),
+        };
+
+        let mut frame = serde_json::json!({"type": "update"});
+        attach_exchange_data(&mut frame, &snapshot);
+
+        assert!(frame.get("exchange_order_book").is_some());
+        assert!(frame.get("exchange_ticker").is_some());
+        assert!(frame.get("exchange_trades").is_some());
+        assert_eq!(
+            frame["exchange_ticker"]["last_price"].as_f64().unwrap(),
+            50005.0
+        );
+    }
+
+    #[test]
+    fn test_attach_exchange_data_empty() {
+        let snapshot = MarketSnapshot {
+            order_book: None,
+            ticker: None,
+            recent_trades: None,
+        };
+
+        let mut frame = serde_json::json!({"type": "update"});
+        attach_exchange_data(&mut frame, &snapshot);
+
+        assert!(frame.get("exchange_order_book").is_none());
+        assert!(frame.get("exchange_ticker").is_none());
+        assert!(frame.get("exchange_trades").is_none());
     }
 }

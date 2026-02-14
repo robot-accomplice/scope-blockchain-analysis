@@ -12,7 +12,7 @@ use crate::cli::tx::{fetch_transaction_report, format_tx_markdown};
 use crate::config::Config;
 use crate::display::report;
 use crate::error::Result;
-use crate::market::{BinanceClient, HealthThresholds, MarketSummary, OrderBookClient};
+use crate::market::{HealthThresholds, MarketSummary, VenueRegistry};
 use crate::tokens::TokenAliases;
 use clap::Args;
 
@@ -94,10 +94,20 @@ pub fn infer_target(input: &str, chain_override: Option<&str>) -> InferredTarget
 
 /// Runs the insights command.
 pub async fn run(
-    args: InsightsArgs,
-    _config: &Config,
+    mut args: InsightsArgs,
+    config: &Config,
     clients: &dyn ChainClientFactory,
 ) -> Result<()> {
+    // Resolve address book label → address + chain
+    if let Some((address, chain)) =
+        crate::cli::address_book::resolve_address_book_input(&args.target, config)?
+    {
+        args.target = address;
+        if args.chain.is_none() {
+            args.chain = Some(chain);
+        }
+    }
+
     let chain_override = args.chain.as_deref();
     let target = infer_target(&args.target, chain_override);
 
@@ -343,42 +353,59 @@ pub async fn run(
                 analytics.holders.len()
             ));
 
-            // Stablecoin: auto-include market/peg
+            // Stablecoin: auto-include market/peg via venue registry
             let mut peg_healthy: Option<bool> = None;
             if is_stablecoin(&analytics.token.symbol) {
-                let pair = format!("{}USDT", analytics.token.symbol);
-                if let Ok(book) = BinanceClient::default_url().fetch_order_book(&pair).await {
-                    let thresholds = HealthThresholds {
-                        peg_target: 1.0,
-                        peg_range: 0.001,
-                        min_levels: 6,
-                        min_depth: 3000.0,
-                        min_bid_ask_ratio: 0.2,
-                        max_bid_ask_ratio: 5.0,
-                    };
-                    let volume_24h = BinanceClient::default_url()
-                        .fetch_24h_volume(&pair)
-                        .await
-                        .ok()
-                        .flatten();
-                    let summary =
-                        MarketSummary::from_order_book(&book, 1.0, &thresholds, volume_24h);
-                    let deviation_bps = summary
-                        .mid_price
-                        .map(|m| (m - 1.0) * 10_000.0)
-                        .unwrap_or(0.0);
-                    peg_healthy = Some(deviation_bps.abs() < 10.0);
-                    let peg_status = if peg_healthy.unwrap_or(false) {
-                        "✅ Peg healthy"
-                    } else if deviation_bps.abs() < 50.0 {
-                        "🟡 Slight peg deviation"
+                if let Ok(registry) = VenueRegistry::load() {
+                    // Try binance first, fall back to any available CEX
+                    let venue_id = if registry.contains("binance") {
+                        "binance"
                     } else {
-                        "⚠️ Peg deviation"
+                        registry.list().first().copied().unwrap_or("binance")
                     };
-                    output.push_str(&format!(
-                        "- **Market (Binance {}):** {} (deviation: {:.1} bps)\n",
-                        pair, peg_status, deviation_bps
-                    ));
+                    if let Ok(exchange) = registry.create_exchange_client(venue_id) {
+                        let pair = exchange.format_pair(&analytics.token.symbol);
+                        if let Ok(book) = exchange.fetch_order_book(&pair).await {
+                            let thresholds = HealthThresholds {
+                                peg_target: 1.0,
+                                peg_range: 0.001,
+                                min_levels: 6,
+                                min_depth: 3000.0,
+                                min_bid_ask_ratio: 0.2,
+                                max_bid_ask_ratio: 5.0,
+                            };
+                            let volume_24h = if exchange.has_ticker() {
+                                exchange
+                                    .fetch_ticker(&pair)
+                                    .await
+                                    .ok()
+                                    .and_then(|t| t.quote_volume_24h.or(t.volume_24h))
+                            } else {
+                                None
+                            };
+                            let summary =
+                                MarketSummary::from_order_book(&book, 1.0, &thresholds, volume_24h);
+                            let deviation_bps = summary
+                                .mid_price
+                                .map(|m| (m - 1.0) * 10_000.0)
+                                .unwrap_or(0.0);
+                            peg_healthy = Some(deviation_bps.abs() < 10.0);
+                            let peg_status = if peg_healthy.unwrap_or(false) {
+                                "Peg healthy"
+                            } else if deviation_bps.abs() < 50.0 {
+                                "Slight peg deviation"
+                            } else {
+                                "Peg deviation"
+                            };
+                            output.push_str(&format!(
+                                "- **Market ({} {}):** {} (deviation: {:.1} bps)\n",
+                                exchange.venue_name(),
+                                pair,
+                                peg_status,
+                                deviation_bps
+                            ));
+                        }
+                    }
                 }
             }
 

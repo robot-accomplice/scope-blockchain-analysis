@@ -27,6 +27,7 @@ pub mod charts;
 pub mod compliance;
 pub mod format;
 pub mod report;
+pub mod terminal;
 
 pub use charts::{
     ChartConfig, render_holder_distribution, render_price_chart, render_volume_chart,
