@@ -520,6 +520,7 @@ mod tests {
     /// Helper to create a mock venue YAML pointing at the given mock server URL.
     /// Writes a temporary venue descriptor to the user venues directory so the
     /// registry picks it up. Returns the venue id.
+    #[allow(dead_code)]
     fn setup_mock_venue(server_url: &str) -> (String, tempfile::TempDir) {
         let venue_id = format!("test_mock_{}", std::process::id());
         let yaml = format!(

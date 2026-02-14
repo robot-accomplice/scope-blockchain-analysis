@@ -23,6 +23,9 @@ Thumbs.db
 # Local configuration (keep config.yaml.example)
 config.yaml
 
+# Environment secrets
+.env
+
 # Test artifacts
 *.log
 

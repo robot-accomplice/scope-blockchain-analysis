@@ -273,10 +273,11 @@ impl ConfigurableExchangeClient {
                 }
             };
 
-            if let (Some(price), Some(quantity)) = (price, quantity) {
-                if price > 0.0 && quantity > 0.0 {
-                    levels.push(OrderBookLevel { price, quantity });
-                }
+            if let (Some(price), Some(quantity)) = (price, quantity)
+                && price > 0.0
+                && quantity > 0.0
+            {
+                levels.push(OrderBookLevel { price, quantity });
             }
         }
 
@@ -289,20 +290,20 @@ impl ConfigurableExchangeClient {
 
     /// Parse a TradeSide from a JSON value using the side mapping.
     fn parse_side(&self, data: &Value, mapping: &ResponseMapping) -> TradeSide {
-        if let Some(side_mapping) = &mapping.side {
-            if let Some(val) = self.navigate_field(data, &side_mapping.field) {
-                let val_str = match val {
-                    Value::String(s) => s.clone(),
-                    Value::Bool(b) => b.to_string(),
-                    Value::Number(n) => n.to_string(),
-                    _ => return TradeSide::Buy,
+        if let Some(side_mapping) = &mapping.side
+            && let Some(val) = self.navigate_field(data, &side_mapping.field)
+        {
+            let val_str = match val {
+                Value::String(s) => s.clone(),
+                Value::Bool(b) => b.to_string(),
+                Value::Number(n) => n.to_string(),
+                _ => return TradeSide::Buy,
+            };
+            if let Some(canonical) = side_mapping.mapping.get(&val_str) {
+                return match canonical.as_str() {
+                    "sell" => TradeSide::Sell,
+                    _ => TradeSide::Buy,
                 };
-                if let Some(canonical) = side_mapping.mapping.get(&val_str) {
-                    return match canonical.as_str() {
-                        "sell" => TradeSide::Sell,
-                        _ => TradeSide::Buy,
-                    };
-                }
             }
         }
         TradeSide::Buy

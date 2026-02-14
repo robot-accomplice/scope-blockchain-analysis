@@ -10,7 +10,7 @@ use crate::market::orderbook::{
 
 /// Unified exchange client that wraps per-capability trait objects.
 ///
-/// Created by [`VenueRegistry::create_exchange_client`]. Provides
+/// Created by [`super::VenueRegistry::create_exchange_client`]. Provides
 /// capability discovery and a convenience `fetch_market_snapshot` that
 /// fetches all available data in parallel.
 pub struct ExchangeClient {

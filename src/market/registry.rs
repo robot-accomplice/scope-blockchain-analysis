@@ -65,36 +65,34 @@ impl VenueRegistry {
 
         // Load user venues from ~/.config/scope/venues/
         let user_dir = Self::user_venues_dir();
-        if user_dir.is_dir() {
-            if let Ok(entries) = std::fs::read_dir(&user_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path
-                        .extension()
-                        .is_some_and(|ext| ext == "yaml" || ext == "yml")
-                    {
-                        match std::fs::read_to_string(&path) {
-                            Ok(contents) => {
-                                match serde_yaml::from_str::<VenueDescriptor>(&contents) {
-                                    Ok(desc) => {
-                                        registry.venues.insert(desc.id.clone(), desc);
-                                    }
-                                    Err(e) => {
-                                        eprintln!(
-                                            "Warning: failed to parse venue file {}: {}",
-                                            path.display(),
-                                            e
-                                        );
-                                    }
-                                }
+        if user_dir.is_dir()
+            && let Ok(entries) = std::fs::read_dir(&user_dir)
+        {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path
+                    .extension()
+                    .is_some_and(|ext| ext == "yaml" || ext == "yml")
+                {
+                    match std::fs::read_to_string(&path) {
+                        Ok(contents) => match serde_yaml::from_str::<VenueDescriptor>(&contents) {
+                            Ok(desc) => {
+                                registry.venues.insert(desc.id.clone(), desc);
                             }
                             Err(e) => {
                                 eprintln!(
-                                    "Warning: failed to read venue file {}: {}",
+                                    "Warning: failed to parse venue file {}: {}",
                                     path.display(),
                                     e
                                 );
                             }
+                        },
+                        Err(e) => {
+                            eprintln!(
+                                "Warning: failed to read venue file {}: {}",
+                                path.display(),
+                                e
+                            );
                         }
                     }
                 }
@@ -185,11 +183,11 @@ fn strsim_distance(a: &str, b: &str) -> usize {
     let n = b_chars.len();
 
     let mut dp = vec![vec![0usize; n + 1]; m + 1];
-    for i in 0..=m {
-        dp[i][0] = i;
+    for (i, row) in dp.iter_mut().enumerate().take(m + 1) {
+        row[0] = i;
     }
-    for j in 0..=n {
-        dp[0][j] = j;
+    for (j, val) in dp[0].iter_mut().enumerate().take(n + 1) {
+        *val = j;
     }
     for i in 1..=m {
         for j in 1..=n {

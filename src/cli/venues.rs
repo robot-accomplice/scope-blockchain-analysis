@@ -442,10 +442,7 @@ fn run_init(args: InitArgs) -> Result<()> {
 
         if target.exists() && !args.force {
             skipped += 1;
-            println!(
-                "  {} {} (exists, use --force to overwrite)",
-                "skip", filename
-            );
+            println!("  skip {} (exists, use --force to overwrite)", filename);
             continue;
         }
 
@@ -465,7 +462,7 @@ fn run_init(args: InitArgs) -> Result<()> {
                 ))
             })?;
             copied += 1;
-            println!("  {} {}", check_pass(&filename), "");
+            println!("  {}", check_pass(&filename));
         }
     }
 

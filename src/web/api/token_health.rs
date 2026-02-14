@@ -73,36 +73,33 @@ pub async fn handle(
 
         if !is_dex_venue(venue_id) {
             // CEX venue — use venue registry
-            let summary = if let Ok(registry) = VenueRegistry::load() {
-                if let Ok(exchange) = registry.create_exchange_client(venue_id) {
-                    let pair = exchange.format_pair(&analytics.token.symbol);
-                    match exchange.fetch_order_book(&pair).await {
-                        Ok(book) => {
-                            let volume_24h = if exchange.has_ticker() {
-                                exchange
-                                    .fetch_ticker(&pair)
-                                    .await
-                                    .ok()
-                                    .and_then(|t| t.quote_volume_24h.or(t.volume_24h))
-                            } else {
-                                None
-                            };
-                            Some(MarketSummary::from_order_book(
-                                &book,
-                                1.0,
-                                &thresholds,
-                                volume_24h,
-                            ))
-                        }
-                        Err(_) => None,
+            if let Ok(registry) = VenueRegistry::load()
+                && let Ok(exchange) = registry.create_exchange_client(venue_id)
+            {
+                let pair = exchange.format_pair(&analytics.token.symbol);
+                match exchange.fetch_order_book(&pair).await {
+                    Ok(book) => {
+                        let volume_24h = if exchange.has_ticker() {
+                            exchange
+                                .fetch_ticker(&pair)
+                                .await
+                                .ok()
+                                .and_then(|t| t.quote_volume_24h.or(t.volume_24h))
+                        } else {
+                            None
+                        };
+                        Some(MarketSummary::from_order_book(
+                            &book,
+                            1.0,
+                            &thresholds,
+                            volume_24h,
+                        ))
                     }
-                } else {
-                    None
+                    Err(_) => None,
                 }
             } else {
                 None
-            };
-            summary
+            }
         } else {
             // DEX venue
             let venue_chain = dex_venue_to_chain(venue_id);
