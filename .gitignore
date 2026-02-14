@@ -23,6 +23,9 @@ Thumbs.db
 # Local configuration (keep config.yaml.example)
 config.yaml
 
+# Environment variables (crates.io tokens, API keys)
+.env
+
 # Test artifacts
 *.log
 
