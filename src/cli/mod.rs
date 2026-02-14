@@ -29,12 +29,13 @@
 //!   discover     Browse trending/boosted tokens (alias: disc)
 //!   monitor      Live TUI dashboard (alias: mon)
 //!   market       Peg and order book health for stablecoins
+//!   venues       Manage exchange venue descriptors (alias: ven)
 //!
 //! Compliance:
 //!   compliance   Risk, trace, analyze, compliance-report
 //!
 //! Data & export:
-//!   portfolio    Add, remove, list, summary (alias: port)
+//!   address-book Add, remove, list, summary (alias: ab, portfolio)
 //!   export       Export to JSON/CSV
 //!   report       Batch and combined reports
 //!
@@ -53,38 +54,40 @@
 //! ```
 
 pub mod address;
+pub mod address_book;
 pub mod address_report;
 pub mod compliance;
 pub mod crawl;
 pub mod discover;
+pub mod errors;
 pub mod export;
 pub mod insights;
 pub mod interactive;
 pub mod market;
 pub mod monitor;
-pub mod portfolio;
 pub mod progress;
 pub mod report;
 pub mod setup;
 pub mod token_health;
 pub mod tx;
+pub mod venues;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 pub use address::AddressArgs;
+pub use address_book::AddressBookArgs;
 pub use crawl::CrawlArgs;
 pub use export::ExportArgs;
 pub use interactive::InteractiveArgs;
 pub use monitor::MonitorArgs;
-pub use portfolio::PortfolioArgs;
 pub use setup::SetupArgs;
 pub use tx::TxArgs;
 
 /// Blockchain Analysis CLI - A tool for blockchain data analysis.
 ///
 /// Scope provides comprehensive blockchain analysis capabilities including
-/// address investigation, transaction decoding, portfolio tracking, and
+/// address investigation, transaction decoding, address book management, and
 /// data export functionality.
 #[derive(Debug, Parser)]
 #[command(
@@ -93,7 +96,7 @@ pub use tx::TxArgs;
     about = "Scope Blockchain Analysis - A tool for blockchain data analysis",
     long_about = format!(
         "Scope Blockchain Analysis v{}\n\n\
-         A production-grade tool for blockchain data analysis, portfolio tracking,\n\
+         A production-grade tool for blockchain data analysis, address management,\n\
          and transaction investigation.\n\n\
          Use --help with any subcommand for detailed usage information.",
         env!("CARGO_PKG_VERSION")
@@ -203,6 +206,13 @@ pub enum Commands {
     #[command(subcommand)]
     Market(market::MarketCommands),
 
+    /// Manage exchange venue descriptors.
+    ///
+    /// List available venues, view the YAML schema, initialise the
+    /// user venues directory, or validate custom descriptor files.
+    #[command(subcommand, visible_alias = "ven")]
+    Venues(venues::VenuesCommands),
+
     // -- Compliance -----------------------------------------------------------
     /// Compliance and risk analysis commands.
     ///
@@ -212,12 +222,13 @@ pub enum Commands {
     Compliance(compliance::ComplianceCommands),
 
     // -- Data & export --------------------------------------------------------
-    /// Portfolio management commands.
+    /// Address book management commands.
     ///
-    /// Add, remove, and list watched addresses. View aggregated
-    /// portfolio balances across multiple chains.
-    #[command(visible_alias = "port")]
-    Portfolio(PortfolioArgs),
+    /// Add, remove, and list watched addresses (wallets, contracts, tokens).
+    /// View aggregated balances across multiple chains.
+    /// Use `@label` in any command to recall a saved address.
+    #[command(visible_alias = "ab", alias = "portfolio", alias = "port")]
+    AddressBook(AddressBookArgs),
 
     /// Export analysis data.
     ///
@@ -374,10 +385,17 @@ mod tests {
     }
 
     #[test]
-    fn test_cli_parse_portfolio_command() {
+    fn test_cli_parse_address_book_command() {
+        let cli = Cli::try_parse_from(["scope", "address-book", "list"]).unwrap();
+
+        assert!(matches!(cli.command, Commands::AddressBook(_)));
+    }
+
+    #[test]
+    fn test_cli_parse_address_book_portfolio_alias() {
         let cli = Cli::try_parse_from(["scope", "portfolio", "list"]).unwrap();
 
-        assert!(matches!(cli.command, Commands::Portfolio(_)));
+        assert!(matches!(cli.command, Commands::AddressBook(_)));
     }
 
     #[test]
@@ -789,73 +807,61 @@ mod tests {
         if let Commands::TokenHealth(args) = cli.command {
             assert_eq!(args.token, "USDC");
             assert!(args.with_market);
-            assert!(matches!(
-                args.market_venue,
-                crate::market::MarketVenue::Binance
-            ));
+            assert_eq!(args.venue, "binance"); // default venue
         } else {
             panic!("Expected TokenHealth command");
         }
     }
 
     #[test]
-    fn test_cli_parse_token_health_market_venue_biconomy() {
+    fn test_cli_parse_token_health_venue_biconomy() {
         let cli = Cli::try_parse_from([
             "scope",
             "token-health",
             "USDC",
             "--with-market",
-            "--market-venue",
+            "--venue",
             "biconomy",
         ])
         .unwrap();
         if let Commands::TokenHealth(args) = cli.command {
-            assert!(matches!(
-                args.market_venue,
-                crate::market::MarketVenue::Biconomy
-            ));
+            assert_eq!(args.venue, "biconomy");
         } else {
             panic!("Expected TokenHealth command");
         }
     }
 
     #[test]
-    fn test_cli_parse_token_health_market_venue_eth() {
+    fn test_cli_parse_token_health_venue_eth() {
         let cli = Cli::try_parse_from([
             "scope",
             "token-health",
             "USDC",
             "--with-market",
-            "--market-venue",
+            "--venue",
             "eth",
         ])
         .unwrap();
         if let Commands::TokenHealth(args) = cli.command {
-            assert!(matches!(
-                args.market_venue,
-                crate::market::MarketVenue::Ethereum
-            ));
+            assert_eq!(args.venue, "eth");
         } else {
             panic!("Expected TokenHealth command");
         }
     }
 
     #[test]
-    fn test_cli_parse_token_health_market_venue_solana() {
+    fn test_cli_parse_token_health_venue_solana() {
         let cli = Cli::try_parse_from([
             "scope",
             "token-health",
             "USDC",
             "--with-market",
-            "--market-venue",
+            "--venue",
             "solana",
         ])
         .unwrap();
         if let Commands::TokenHealth(args) = cli.command {
-            assert!(matches!(
-                args.market_venue,
-                crate::market::MarketVenue::Solana
-            ));
+            assert_eq!(args.venue, "solana");
         } else {
             panic!("Expected TokenHealth command");
         }

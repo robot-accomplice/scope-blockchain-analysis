@@ -1,0 +1,59 @@
+id: crypto_com
+name: Crypto.com
+base_url: https://api.crypto.com/exchange/v1
+timeout_secs: 15
+rate_limit_per_sec: 10
+
+symbol:
+  template: "{base}_{quote}"
+  default_quote: USDT
+
+capabilities:
+  order_book:
+    method: POST
+    path: /public/get-book
+    request_body:
+      method: "public/get-book"
+      params:
+        instrument_name: "{pair}"
+        depth: "100"
+    response_root: "result.data.0"
+    response:
+      asks_key: asks
+      bids_key: bids
+      level_format: positional
+
+  ticker:
+    method: POST
+    path: /public/get-tickers
+    request_body:
+      method: "public/get-tickers"
+      params:
+        instrument_name: "{pair}"
+    response_root: "result.data.0"
+    response:
+      last_price: a
+      high_24h: h
+      low_24h: l
+      volume_24h: v
+      best_bid: b
+      best_ask: k
+
+  trades:
+    method: POST
+    path: /public/get-trades
+    request_body:
+      method: "public/get-trades"
+      params:
+        instrument_name: "{pair}"
+    response_root: "result.data"
+    response:
+      price: p
+      quantity: q
+      timestamp_ms: t
+      id: d
+      side:
+        field: s
+        mapping:
+          BUY: buy
+          SELL: sell

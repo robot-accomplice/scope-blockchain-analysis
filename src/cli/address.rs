@@ -179,6 +179,16 @@ pub async fn run(
     config: &Config,
     clients: &dyn ChainClientFactory,
 ) -> Result<()> {
+    // Resolve address book label → address + chain
+    if let Some((address, chain)) =
+        crate::cli::address_book::resolve_address_book_input(&args.address, config)?
+    {
+        args.address = address;
+        if args.chain == "ethereum" {
+            args.chain = chain;
+        }
+    }
+
     // Auto-infer chain if using default and address format is recognizable
     if args.chain == "ethereum"
         && let Some(inferred) = crate::chains::infer_chain_from_address(&args.address)
@@ -300,7 +310,8 @@ pub async fn analyze_address(
                     .collect(),
             ),
             Err(e) => {
-                tracing::warn!("Failed to fetch transactions: {}", e);
+                eprintln!("  ⚠ Transaction history unavailable (use -v for details)");
+                tracing::debug!("Failed to fetch transactions: {}", e);
                 Some(vec![])
             }
         }
@@ -328,7 +339,8 @@ pub async fn analyze_address(
                     .collect(),
             ),
             Err(e) => {
-                tracing::warn!("Failed to fetch token balances: {}", e);
+                eprintln!("  ⚠ Token balances unavailable (use -v for details)");
+                tracing::debug!("Failed to fetch token balances: {}", e);
                 Some(vec![])
             }
         }
@@ -974,6 +986,22 @@ mod tests {
         };
         let result = super::run(args, &config, &factory).await;
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_address_args_debug() {
+        let args = AddressArgs {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: "ethereum".to_string(),
+            format: None,
+            include_txs: false,
+            include_tokens: false,
+            limit: 100,
+            report: None,
+            dossier: false,
+        };
+        let debug = format!("{:?}", args);
+        assert!(debug.contains("AddressArgs"));
     }
 
     #[tokio::test]

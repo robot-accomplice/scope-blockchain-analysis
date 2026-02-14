@@ -1,0 +1,51 @@
+id: kraken
+name: Kraken
+base_url: https://api.kraken.com/0
+timeout_secs: 15
+rate_limit_per_sec: 5
+
+symbol:
+  template: "{base}{quote}"
+  default_quote: USD
+
+capabilities:
+  order_book:
+    path: /public/Depth
+    params:
+      pair: "{pair}"
+      count: "100"
+    response_root: "result.*"
+    response:
+      asks_key: asks
+      bids_key: bids
+      level_format: positional
+
+  ticker:
+    path: /public/Ticker
+    params:
+      pair: "{pair}"
+    response_root: "result.*"
+    response:
+      last_price: "c.0"
+      high_24h: "h.1"
+      low_24h: "l.1"
+      volume_24h: "v.1"
+      best_bid: "b.0"
+      best_ask: "a.0"
+
+  trades:
+    path: /public/Trades
+    params:
+      pair: "{pair}"
+      count: "{limit}"
+    response_root: "result.*"
+    response:
+      # Kraken trades are positional arrays: [price, volume, time, side, type, misc]
+      price: "0"
+      quantity: "1"
+      timestamp_ms: "2"
+      side:
+        field: "3"
+        mapping:
+          b: buy
+          s: sell

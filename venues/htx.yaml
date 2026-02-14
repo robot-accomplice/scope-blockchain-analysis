@@ -1,0 +1,52 @@
+id: htx
+name: HTX
+base_url: https://api.huobi.pro
+timeout_secs: 15
+rate_limit_per_sec: 10
+
+symbol:
+  template: "{base}{quote}"
+  default_quote: usdt
+  case: lower
+
+capabilities:
+  order_book:
+    path: /market/depth
+    params:
+      symbol: "{pair}"
+      type: step0
+    response_root: tick
+    response:
+      asks_key: asks
+      bids_key: bids
+      level_format: positional
+
+  ticker:
+    path: /market/detail/merged
+    params:
+      symbol: "{pair}"
+    response_root: tick
+    response:
+      last_price: close
+      high_24h: high
+      low_24h: low
+      volume_24h: amount
+      quote_volume_24h: vol
+      best_bid: "bid.0"
+      best_ask: "ask.0"
+
+  trades:
+    path: /market/trade
+    params:
+      symbol: "{pair}"
+    response_root: "tick.data"
+    response:
+      price: price
+      quantity: amount
+      timestamp_ms: ts
+      id: id
+      side:
+        field: direction
+        mapping:
+          buy: buy
+          sell: sell

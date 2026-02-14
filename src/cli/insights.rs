@@ -12,7 +12,7 @@ use crate::cli::tx::{fetch_transaction_report, format_tx_markdown};
 use crate::config::Config;
 use crate::display::report;
 use crate::error::Result;
-use crate::market::{BinanceClient, HealthThresholds, MarketSummary, OrderBookClient};
+use crate::market::{HealthThresholds, MarketSummary, VenueRegistry};
 use crate::tokens::TokenAliases;
 use clap::Args;
 
@@ -94,10 +94,20 @@ pub fn infer_target(input: &str, chain_override: Option<&str>) -> InferredTarget
 
 /// Runs the insights command.
 pub async fn run(
-    args: InsightsArgs,
-    _config: &Config,
+    mut args: InsightsArgs,
+    config: &Config,
     clients: &dyn ChainClientFactory,
 ) -> Result<()> {
+    // Resolve address book label → address + chain
+    if let Some((address, chain)) =
+        crate::cli::address_book::resolve_address_book_input(&args.target, config)?
+    {
+        args.target = address;
+        if args.chain.is_none() {
+            args.chain = Some(chain);
+        }
+    }
+
     let chain_override = args.chain.as_deref();
     let target = infer_target(&args.target, chain_override);
 
@@ -290,8 +300,15 @@ pub async fn run(
         }
         InferredTarget::Token { chain } => {
             output.push_str("## Observations\n\n");
-            let analytics =
-                fetch_analytics_for_input(&args.target, chain, Period::Hour24, 10, clients).await?;
+            let analytics = fetch_analytics_for_input(
+                &args.target,
+                chain,
+                Period::Hour24,
+                10,
+                clients,
+                Some(&sp),
+            )
+            .await?;
 
             // Token risk summary (interpretive bullets)
             let risk_summary = report::token_risk_summary(&analytics);
@@ -343,42 +360,59 @@ pub async fn run(
                 analytics.holders.len()
             ));
 
-            // Stablecoin: auto-include market/peg
+            // Stablecoin: auto-include market/peg via venue registry
             let mut peg_healthy: Option<bool> = None;
-            if is_stablecoin(&analytics.token.symbol) {
-                let pair = format!("{}USDT", analytics.token.symbol);
-                if let Ok(book) = BinanceClient::default_url().fetch_order_book(&pair).await {
-                    let thresholds = HealthThresholds {
-                        peg_target: 1.0,
-                        peg_range: 0.001,
-                        min_levels: 6,
-                        min_depth: 3000.0,
-                        min_bid_ask_ratio: 0.2,
-                        max_bid_ask_ratio: 5.0,
-                    };
-                    let volume_24h = BinanceClient::default_url()
-                        .fetch_24h_volume(&pair)
-                        .await
-                        .ok()
-                        .flatten();
-                    let summary =
-                        MarketSummary::from_order_book(&book, 1.0, &thresholds, volume_24h);
-                    let deviation_bps = summary
-                        .mid_price
-                        .map(|m| (m - 1.0) * 10_000.0)
-                        .unwrap_or(0.0);
-                    peg_healthy = Some(deviation_bps.abs() < 10.0);
-                    let peg_status = if peg_healthy.unwrap_or(false) {
-                        "✅ Peg healthy"
-                    } else if deviation_bps.abs() < 50.0 {
-                        "🟡 Slight peg deviation"
-                    } else {
-                        "⚠️ Peg deviation"
-                    };
-                    output.push_str(&format!(
-                        "- **Market (Binance {}):** {} (deviation: {:.1} bps)\n",
-                        pair, peg_status, deviation_bps
-                    ));
+            if is_stablecoin(&analytics.token.symbol)
+                && let Ok(registry) = VenueRegistry::load()
+            {
+                // Try binance first, fall back to any available CEX
+                let venue_id = if registry.contains("binance") {
+                    "binance"
+                } else {
+                    registry.list().first().copied().unwrap_or("binance")
+                };
+                if let Ok(exchange) = registry.create_exchange_client(venue_id) {
+                    let pair = exchange.format_pair(&analytics.token.symbol);
+                    if let Ok(book) = exchange.fetch_order_book(&pair).await {
+                        let thresholds = HealthThresholds {
+                            peg_target: 1.0,
+                            peg_range: 0.001,
+                            min_levels: 6,
+                            min_depth: 3000.0,
+                            min_bid_ask_ratio: 0.2,
+                            max_bid_ask_ratio: 5.0,
+                        };
+                        let volume_24h = if exchange.has_ticker() {
+                            exchange
+                                .fetch_ticker(&pair)
+                                .await
+                                .ok()
+                                .and_then(|t| t.quote_volume_24h.or(t.volume_24h))
+                        } else {
+                            None
+                        };
+                        let summary =
+                            MarketSummary::from_order_book(&book, 1.0, &thresholds, volume_24h);
+                        let deviation_bps = summary
+                            .mid_price
+                            .map(|m| (m - 1.0) * 10_000.0)
+                            .unwrap_or(0.0);
+                        peg_healthy = Some(deviation_bps.abs() < 10.0);
+                        let peg_status = if peg_healthy.unwrap_or(false) {
+                            "Peg healthy"
+                        } else if deviation_bps.abs() < 50.0 {
+                            "Slight peg deviation"
+                        } else {
+                            "Peg deviation"
+                        };
+                        output.push_str(&format!(
+                            "- **Market ({} {}):** {} (deviation: {:.1} bps)\n",
+                            exchange.venue_name(),
+                            pair,
+                            peg_status,
+                            deviation_bps
+                        ));
+                    }
                 }
             }
 
@@ -1282,6 +1316,19 @@ mod tests {
         assert!(!is_stablecoin("WBTC"));
     }
 
+    #[test]
+    fn test_is_stablecoin_empty_string() {
+        assert!(!is_stablecoin(""));
+    }
+
+    #[test]
+    fn test_is_stablecoin_case_insensitive() {
+        // to_uppercase() makes comparison case-insensitive
+        assert!(is_stablecoin("UsDc"));
+        assert!(is_stablecoin("FraX"));
+        assert!(!is_stablecoin("SOL")); // SOL is not a stablecoin
+    }
+
     // ====================================================================
     // target_type_label and chain_label tests
     // ====================================================================
@@ -1776,5 +1823,268 @@ mod tests {
         let debug_str = format!("{:?}", args);
         assert!(debug_str.contains("InsightsArgs"));
         assert!(debug_str.contains("0x742d"));
+    }
+
+    // ====================================================================
+    // Additional tests for classify_tx_type — selector matches and edge cases
+    // ====================================================================
+
+    #[test]
+    fn test_classify_tx_type_contract_creation() {
+        assert_eq!(classify_tx_type("0xa9059cbb...", None), "Contract Creation");
+    }
+
+    #[test]
+    fn test_classify_tx_type_erc20_transfer() {
+        assert_eq!(
+            classify_tx_type("0xa9059cbb00000000", Some("0x1234")),
+            "ERC-20 Transfer"
+        );
+    }
+
+    #[test]
+    fn test_classify_tx_type_erc20_approve() {
+        assert_eq!(
+            classify_tx_type("0x095ea7b3...", Some("0x1234")),
+            "ERC-20 Approve"
+        );
+    }
+
+    #[test]
+    fn test_classify_tx_type_erc20_transfer_from() {
+        assert_eq!(
+            classify_tx_type("0x23b872dd...", Some("0x1234")),
+            "ERC-20 Transfer From"
+        );
+    }
+
+    #[test]
+    fn test_classify_tx_type_dex_swap() {
+        assert_eq!(
+            classify_tx_type("0x38ed1739...", Some("0x1234")),
+            "DEX Swap"
+        );
+        assert_eq!(
+            classify_tx_type("0x7ff36ab5...", Some("0x1234")),
+            "DEX Swap"
+        );
+    }
+
+    #[test]
+    fn test_classify_tx_type_native_transfer() {
+        assert_eq!(classify_tx_type("0x", Some("0x1234")), "Native Transfer");
+        assert_eq!(classify_tx_type("", Some("0x1234")), "Native Transfer");
+    }
+
+    #[test]
+    fn test_classify_tx_type_unknown_contract_call() {
+        assert_eq!(
+            classify_tx_type("0xdeadbeef12345678", Some("0x1234")),
+            "Contract Call"
+        );
+    }
+
+    // ====================================================================
+    // Additional tests for format_tx_value
+    // ====================================================================
+
+    #[test]
+    fn test_format_tx_value_ethereum_wei() {
+        let (fmt, high) = format_tx_value("1000000000000000000", "ethereum");
+        assert!(fmt.contains("1.000000"));
+        assert!(fmt.contains("ETH"));
+        assert!(!high); // 1 ETH < 10 threshold
+    }
+
+    #[test]
+    fn test_format_tx_value_hex() {
+        let (fmt, _) = format_tx_value("0xde0b6b3a7640000", "ethereum");
+        // 0xde0b6b3a7640000 = 10^18 = 1 ETH
+        assert!(fmt.contains("ETH"));
+    }
+
+    #[test]
+    fn test_format_tx_value_high_value() {
+        // 100 ETH in wei = 100000000000000000000
+        let (_, high) = format_tx_value("100000000000000000000", "ethereum");
+        assert!(high); // 100 ETH > 10
+    }
+
+    #[test]
+    fn test_format_tx_value_zero_decimal() {
+        let (fmt, high) = format_tx_value("0", "ethereum");
+        assert!(fmt.contains("0.000000"));
+        assert!(!high);
+    }
+
+    #[test]
+    fn test_format_tx_value_solana_additional() {
+        let (fmt, _) = format_tx_value("1000000000", "solana"); // 1 SOL
+        assert!(fmt.contains("SOL"));
+    }
+
+    #[test]
+    fn test_format_tx_value_tron_additional() {
+        let (fmt, _) = format_tx_value("1000000", "tron"); // 1 TRX
+        assert!(fmt.contains("TRX"));
+    }
+
+    #[test]
+    fn test_format_tx_value_empty_hex_additional() {
+        let (fmt, _) = format_tx_value("0x", "ethereum");
+        assert!(fmt.contains("0.000000"));
+    }
+
+    // ====================================================================
+    // Combined tests for target_type_label and chain_label
+    // ====================================================================
+
+    #[test]
+    fn test_target_type_label_combined() {
+        assert_eq!(
+            target_type_label(&InferredTarget::Address {
+                chain: "eth".to_string()
+            }),
+            "Address"
+        );
+        assert_eq!(
+            target_type_label(&InferredTarget::Transaction {
+                chain: "eth".to_string()
+            }),
+            "Transaction"
+        );
+        assert_eq!(
+            target_type_label(&InferredTarget::Token {
+                chain: "eth".to_string()
+            }),
+            "Token"
+        );
+    }
+
+    #[test]
+    fn test_chain_label_combined() {
+        assert_eq!(
+            chain_label(&InferredTarget::Address {
+                chain: "ethereum".to_string()
+            }),
+            "ethereum"
+        );
+        assert_eq!(
+            chain_label(&InferredTarget::Transaction {
+                chain: "polygon".to_string()
+            }),
+            "polygon"
+        );
+        assert_eq!(
+            chain_label(&InferredTarget::Token {
+                chain: "solana".to_string()
+            }),
+            "solana"
+        );
+    }
+
+    // ====================================================================
+    // Additional tests for meta_analysis_address
+    // ====================================================================
+
+    #[test]
+    fn test_meta_analysis_address_contract_high_risk() {
+        use crate::compliance::risk::RiskLevel;
+        let meta = meta_analysis_address(
+            true,
+            Some(2_000_000.0),
+            10,
+            Some(8.0),
+            Some(&RiskLevel::High),
+        );
+        assert!(meta.synthesis.contains("contract"));
+        assert!(meta.synthesis.contains("Significant value"));
+        assert!(meta.key_takeaway.contains("scrutiny"));
+        assert!(!meta.recommendations.is_empty());
+    }
+
+    #[test]
+    fn test_meta_analysis_address_wallet_low_risk() {
+        use crate::compliance::risk::RiskLevel;
+        let meta = meta_analysis_address(false, Some(0.5), 0, Some(2.0), Some(&RiskLevel::Low));
+        assert!(meta.synthesis.contains("wallet"));
+        assert!(meta.synthesis.contains("Minimal value"));
+    }
+
+    #[test]
+    fn test_meta_analysis_address_no_risk_data() {
+        let meta = meta_analysis_address(false, None, 0, None, None);
+        assert!(!meta.synthesis.is_empty());
+        assert!(meta.key_takeaway.contains("Review full report"));
+    }
+
+    // ====================================================================
+    // Additional tests for meta_analysis_tx
+    // ====================================================================
+
+    #[test]
+    fn test_meta_analysis_tx_failed_additional() {
+        let meta = meta_analysis_tx("Contract Call", false, false, "0x...", Some("0x..."));
+        assert!(meta.synthesis.contains("failed"));
+        assert!(meta.key_takeaway.contains("Failed"));
+    }
+
+    #[test]
+    fn test_meta_analysis_tx_high_value_native_additional() {
+        let meta = meta_analysis_tx("Native Transfer", true, true, "0x...", Some("0x..."));
+        assert!(meta.synthesis.contains("High-value"));
+        assert!(meta.key_takeaway.contains("Large native transfer"));
+    }
+
+    #[test]
+    fn test_meta_analysis_tx_routine() {
+        let meta = meta_analysis_tx("ERC-20 Transfer", true, false, "0x...", Some("0x..."));
+        assert!(meta.key_takeaway.contains("Routine"));
+    }
+
+    // ====================================================================
+    // Additional tests for meta_analysis_token
+    // ====================================================================
+
+    #[test]
+    fn test_meta_analysis_token_high_risk_additional() {
+        let risk = report::TokenRiskSummary {
+            score: 8,
+            level: "High",
+            emoji: "🔴",
+            concerns: vec!["Low liquidity".to_string()],
+            positives: vec![],
+        };
+        let meta = meta_analysis_token(&risk, false, None, None, 10_000.0);
+        assert!(meta.synthesis.contains("Elevated risk"));
+        assert!(meta.key_takeaway.contains("High risk"));
+    }
+
+    #[test]
+    fn test_meta_analysis_token_stablecoin_peg_healthy() {
+        let risk = report::TokenRiskSummary {
+            score: 2,
+            level: "Low",
+            emoji: "🟢",
+            concerns: vec![],
+            positives: vec!["Strong liquidity".to_string()],
+        };
+        let meta = meta_analysis_token(&risk, true, Some(true), Some(5.0), 5_000_000.0);
+        assert!(meta.synthesis.contains("peg is healthy"));
+        assert!(meta.synthesis.contains("Strong liquidity"));
+    }
+
+    #[test]
+    fn test_meta_analysis_token_stablecoin_peg_unhealthy() {
+        let risk = report::TokenRiskSummary {
+            score: 5,
+            level: "Medium",
+            emoji: "🟡",
+            concerns: vec!["Peg deviation".to_string()],
+            positives: vec![],
+        };
+        let meta = meta_analysis_token(&risk, true, Some(false), Some(40.0), 100_000.0);
+        assert!(meta.synthesis.contains("peg deviation"));
+        assert!(meta.synthesis.contains("Concentration risk"));
     }
 }

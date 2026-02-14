@@ -51,6 +51,7 @@ pub async fn handle(
         period,
         req.holders_limit,
         &state.factory,
+        None,
     )
     .await
     {

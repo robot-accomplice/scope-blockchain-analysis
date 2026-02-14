@@ -7,7 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.0.0] - 2026-02-13
+## [0.4.0] - 2026-02-14
+
+### Added
+- **Data-driven exchange venue system**: All CEX integrations are now described by YAML descriptor files instead of hardcoded Rust clients. Add new venues by dropping a YAML file in `~/.config/scope/venues/` — no code changes required.
+- **11 built-in venue descriptors**: Binance, Biconomy, Bitget, Bybit, Coinbase, Crypto.com, Gate.io, HTX, Kraken, MEXC, OKX — all with order book, ticker, and trade history support.
+- **Venue management CLI** (`scope venues` / `scope ven`): `list`, `schema`, `init`, `validate` subcommands for inspecting and authoring venue descriptors.
+- **Exchange monitor layout**: New `--layout exchange` preset for the TUI monitor showing order book, price chart, and recent trades in an exchange-style view.
+- **Ticker and trade history traits**: `TickerClient` and `TradeHistoryClient` traits alongside the existing `OrderBookClient`, composed by a unified `ExchangeClient` facade.
+- **Configurable exchange client**: Generic `ConfigurableExchangeClient` interprets YAML descriptors at runtime — supports REST GET/POST, JSONPath navigation (`response_root`), symbol case normalization, and flexible field mapping.
+- **Venue registry**: `VenueRegistry` loads built-in and user-defined descriptors with Levenshtein-distance typo suggestions for unknown venue names.
+- **Web API endpoints**: `GET /api/venues` (list venues) and `POST /api/exchange/snapshot` (full market snapshot).
+- **Spinner integration**: `Spinner::println` and `Spinner::suspend` for clean output alongside progress bars; spinner threaded through `resolve_token_input` and `fetch_analytics_for_input`.
+- **Colorized error output**: Errors display in red and hints in dimmed text when stderr is a TTY; plain text when piped.
+- **DEX aggregator client**: DEX data source abstraction for multi-chain liquidity queries.
+
+### Changed
+- **`--market-venue` renamed to `--venue`**: Shorter flag name in `market summary` and `token-health` commands (breaking).
+- **Venue argument is now a free-form string**: Instead of an enum, venues are resolved from the registry at runtime. Any venue with a YAML descriptor is valid.
+- **Config paths standardized**: All configuration and data stored under `~/.config/scope/` (XDG-compliant) on macOS and Linux.
+- **Version reverted to 0.4.0**: The premature 1.0.0 release was yanked from crates.io; this release correctly follows SemVer for a pre-1.0 project with ongoing API changes.
+- **Author email updated** to `robot@accomplice.ch`.
+
+### Removed
+- **Hardcoded `BiconomyClient` and `BinanceClient`**: Replaced by the generic `ConfigurableExchangeClient` driven by YAML descriptors.
+- **`MarketVenue` enum**: Replaced by string-based venue lookup through `VenueRegistry`.
+
+### Fixed
+- Spinner output no longer garbles multi-line messages during token resolution.
+- Error messages now include colored formatting for better readability in interactive terminals.
+
+## [1.0.0] - 2026-02-13 [YANKED]
 
 ### Added
 - **Shell completion** (`scope completions bash|zsh|fish`): Generate tab-completion scripts for bash, zsh, and fish shells via `clap_complete`
@@ -18,7 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Output Formats section**: Documentation of `--format json` vs `--ai` usage in README and QUICKSTART
 
 ### Changed
-- **Command grouping**: Commands in `--help` now ordered by task category (entity lookup → token analysis → compliance → data/export → config) instead of alphabetically
+- **Command grouping**: Commands in `--help` now ordered by task category (entity lookup -> token analysis -> compliance -> data/export -> config) instead of alphabetically
 - **Documentation link**: Top-level `--help` now shows GitHub repository URL and quickstart guide path
 - **Typo suggestions**: Verified clap built-in fuzzy matching ("Did you mean: ...") for misspelled subcommands
 - **Setup hints expanded**: Post-setup wizard now suggests `insights`, `monitor`, and `completions` commands
@@ -62,8 +92,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.0] - 2026-02-08
 
-## [0.2.0] - 2026-02-08
-
 ### Added
 - Initial release of Scope Blockchain Analysis
 - Multi-chain support: Ethereum, Polygon, Arbitrum, Optimism, Base, BSC, Solana, Tron
@@ -98,13 +126,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Configuration system with YAML support
 - Support for ERC-20, SPL, and TRC-20 tokens
 
-[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.3.1...v0.4.0
 [1.0.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.3.1...v1.0.0
 [0.3.1]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.2.2...v0.3.0
 [0.1.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/releases/tag/v0.1.0
 [0.2.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.1.0...v0.2.0
-[0.2.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.2.0...v0.2.0
 [0.2.1]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.2.0...v0.2.1
 [0.2.2]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.2.1...v0.2.2
-[0.3.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.2.2...v0.3.0

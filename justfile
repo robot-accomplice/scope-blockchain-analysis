@@ -185,6 +185,9 @@ ci-test:
 # Release
 # -----------------------------------------------------------------------------
 
+# Load .env if present (provides CARGO_REGISTRY_TOKEN)
+set dotenv-load
+
 # Publish current version to crates.io (dry-run first, then publish)
 publish:
     #!/usr/bin/env bash
@@ -195,6 +198,10 @@ publish:
     echo "Publishing scope-bca v$VERSION to crates.io"
     echo "═══════════════════════════════════════════════════════════════════"
     echo ""
+
+    if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+        echo "⚠️  CARGO_REGISTRY_TOKEN not set. Add it to .env or run: cargo login"
+    fi
 
     # Step 1: Verify clean working tree
     echo "Step 1/4: Checking working tree..."
@@ -236,6 +243,27 @@ publish:
 # Dry-run crates.io publish (verify packaging without uploading)
 publish-dry-run:
     cargo publish --dry-run
+
+# Yank a version from crates.io (prevents new deps, existing builds unaffected)
+yank VERSION:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+        echo "❌ CARGO_REGISTRY_TOKEN not set. Add it to .env or export it."
+        exit 1
+    fi
+    echo "Yanking scope-bca@{{VERSION}} from crates.io..."
+    read -p "Are you sure? This cannot be undone. (y/N): " CONFIRM
+    if [ "$CONFIRM" = "y" ] || [ "$CONFIRM" = "Y" ]; then
+        cargo yank --version {{VERSION}} scope-bca
+        echo "✓ scope-bca@{{VERSION}} yanked"
+    else
+        echo "Aborted."
+    fi
+
+# Un-yank a previously yanked version
+unyank VERSION:
+    cargo yank --version {{VERSION}} --undo scope-bca
 
 # Create a new release (interactive)
 release:

@@ -12,8 +12,8 @@
 //! # Export to CSV
 //! scope export --address 0x742d... --output history.csv --format csv
 //!
-//! # Export portfolio data
-//! scope export --portfolio --output portfolio.json
+//! # Export address book data
+//! scope export --address-book --output address_book.json
 //! ```
 
 use crate::chains::{ChainClientFactory, infer_chain_from_address};
@@ -29,9 +29,14 @@ pub struct ExportArgs {
     #[arg(short, long, value_name = "ADDRESS", group = "source")]
     pub address: Option<String>,
 
-    /// Export portfolio data.
-    #[arg(short, long, group = "source")]
-    pub portfolio: bool,
+    /// Export address book data.
+    #[arg(
+        long = "address-book",
+        short = 'p',
+        alias = "portfolio",
+        group = "source"
+    )]
+    pub address_book: bool,
 
     /// Output file path.
     #[arg(short, long, value_name = "PATH")]
@@ -61,7 +66,7 @@ pub struct ExportArgs {
 /// Data export report.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ExportReport {
-    /// Export type (address, portfolio).
+    /// Export type (address, address book).
     pub export_type: String,
 
     /// Number of records exported.
@@ -93,10 +98,21 @@ pub struct ExportReport {
 /// Returns [`ScopeError::Export`] if the export operation fails.
 /// Returns [`ScopeError::Io`] if file operations fail.
 pub async fn run(
-    args: ExportArgs,
+    mut args: ExportArgs,
     config: &Config,
     clients: &dyn ChainClientFactory,
 ) -> Result<()> {
+    // Resolve address book label → address + chain
+    if let Some(ref input) = args.address
+        && let Some((address, chain)) =
+            crate::cli::address_book::resolve_address_book_input(input, config)?
+    {
+        args.address = Some(address);
+        if args.chain == "ethereum" {
+            args.chain = chain;
+        }
+    }
+
     // Determine format from argument or file extension
     let format = args.format.unwrap_or_else(|| detect_format(&args.output));
 
@@ -107,13 +123,13 @@ pub async fn run(
     );
 
     let sp = crate::cli::progress::Spinner::new("Exporting data...");
-    let result = if args.portfolio {
-        export_portfolio(&args, format, config).await
+    let result = if args.address_book {
+        export_address_book(&args, format, config).await
     } else if let Some(ref address) = args.address {
         export_address(address, &args, format, clients).await
     } else {
         Err(ScopeError::Export(
-            "Must specify either --address or --portfolio".to_string(),
+            "Must specify either --address or --address-book".to_string(),
         ))
     };
     sp.finish_and_clear();
@@ -129,18 +145,22 @@ fn detect_format(path: &std::path::Path) -> OutputFormat {
     }
 }
 
-/// Exports portfolio data.
-async fn export_portfolio(args: &ExportArgs, format: OutputFormat, config: &Config) -> Result<()> {
-    use crate::cli::portfolio::Portfolio;
+/// Exports address book data.
+async fn export_address_book(
+    args: &ExportArgs,
+    format: OutputFormat,
+    config: &Config,
+) -> Result<()> {
+    use crate::cli::address_book::AddressBook;
 
     let data_dir = config.data_dir();
-    let portfolio = Portfolio::load(&data_dir)?;
+    let address_book = AddressBook::load(&data_dir)?;
 
     let content = match format {
-        OutputFormat::Json => serde_json::to_string_pretty(&portfolio)?,
+        OutputFormat::Json => serde_json::to_string_pretty(&address_book)?,
         OutputFormat::Csv => {
             let mut csv = String::from("address,label,chain,tags,added_at\n");
-            for addr in &portfolio.addresses {
+            for addr in &address_book.addresses {
                 csv.push_str(&format!(
                     "{},{},{},{},{}\n",
                     addr.address,
@@ -158,9 +178,9 @@ async fn export_portfolio(args: &ExportArgs, format: OutputFormat, config: &Conf
             ));
         }
         OutputFormat::Markdown => {
-            let mut md = "# Portfolio Export\n\n".to_string();
+            let mut md = "# Address Book Export\n\n".to_string();
             md.push_str("| Address | Label | Chain | Tags | Added |\n|---------|-------|-------|------|-------|\n");
-            for addr in &portfolio.addresses {
+            for addr in &address_book.addresses {
                 md.push_str(&format!(
                     "| `{}` | {} | {} | {} | {} |\n",
                     addr.address,
@@ -177,8 +197,8 @@ async fn export_portfolio(args: &ExportArgs, format: OutputFormat, config: &Conf
     std::fs::write(&args.output, &content)?;
 
     let report = ExportReport {
-        export_type: "portfolio".to_string(),
-        record_count: portfolio.addresses.len(),
+        export_type: "address book".to_string(),
+        record_count: address_book.addresses.len(),
         output_path: args.output.display().to_string(),
         format: format.to_string(),
         exported_at: std::time::SystemTime::now()
@@ -188,7 +208,7 @@ async fn export_portfolio(args: &ExportArgs, format: OutputFormat, config: &Conf
     };
 
     println!(
-        "Exported {} portfolio addresses to {}",
+        "Exported {} address book addresses to {}",
         report.record_count, report.output_path
     );
 
@@ -217,7 +237,7 @@ async fn export_address(
         "Exporting address data"
     );
 
-    println!("Fetching transactions for {} on {}...", address, chain);
+    eprintln!("  Fetching transactions for {} on {}...", address, chain);
 
     // Fetch real transaction history
     let client = clients.create_chain_client(&chain)?;
@@ -469,11 +489,11 @@ mod tests {
             Some("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string())
         );
         assert_eq!(cli.args.output, PathBuf::from("output.json"));
-        assert!(!cli.args.portfolio);
+        assert!(!cli.args.address_book);
     }
 
     #[test]
-    fn test_export_args_portfolio_flag() {
+    fn test_export_args_address_book_flag() {
         use clap::Parser;
 
         #[derive(Parser)]
@@ -482,11 +502,17 @@ mod tests {
             args: ExportArgs,
         }
 
+        // Test primary --address-book flag
         let cli =
-            TestCli::try_parse_from(["test", "--portfolio", "--output", "portfolio.json"]).unwrap();
-
-        assert!(cli.args.portfolio);
+            TestCli::try_parse_from(["test", "--address-book", "--output", "address_book.json"])
+                .unwrap();
+        assert!(cli.args.address_book);
         assert!(cli.args.address.is_none());
+
+        // Test backward-compat --portfolio alias
+        let cli = TestCli::try_parse_from(["test", "--portfolio", "--output", "address_book.json"])
+            .unwrap();
+        assert!(cli.args.address_book);
     }
 
     #[test]
@@ -575,15 +601,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_export_portfolio_json() {
-        use crate::cli::portfolio::{Portfolio, WatchedAddress};
+    async fn test_export_address_book_json() {
+        use crate::cli::address_book::{AddressBook, WatchedAddress};
 
         let temp_dir = TempDir::new().unwrap();
         let data_dir = temp_dir.path().to_path_buf();
-        let output_path = temp_dir.path().join("portfolio.json");
+        let output_path = temp_dir.path().join("address_book.json");
 
-        // Create a test portfolio
-        let portfolio = Portfolio {
+        // Create a test address book
+        let address_book = AddressBook {
             addresses: vec![WatchedAddress {
                 address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
                 label: Some("Test".to_string()),
@@ -592,10 +618,10 @@ mod tests {
                 added_at: 1700000000,
             }],
         };
-        portfolio.save(&data_dir).unwrap();
+        address_book.save(&data_dir).unwrap();
 
         let config = Config {
-            portfolio: crate::config::PortfolioConfig {
+            address_book: crate::config::AddressBookConfig {
                 data_dir: Some(data_dir),
             },
             ..Default::default()
@@ -603,7 +629,7 @@ mod tests {
 
         let args = ExportArgs {
             address: None,
-            portfolio: true,
+            address_book: true,
             output: output_path.clone(),
             format: Some(OutputFormat::Json),
             chain: "ethereum".to_string(),
@@ -612,7 +638,7 @@ mod tests {
             limit: 1000,
         };
 
-        let result = export_portfolio(&args, OutputFormat::Json, &config).await;
+        let result = export_address_book(&args, OutputFormat::Json, &config).await;
         assert!(result.is_ok());
         assert!(output_path.exists());
 
@@ -621,14 +647,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_export_portfolio_csv() {
-        use crate::cli::portfolio::{Portfolio, WatchedAddress};
+    async fn test_export_address_book_csv() {
+        use crate::cli::address_book::{AddressBook, WatchedAddress};
 
         let temp_dir = TempDir::new().unwrap();
         let data_dir = temp_dir.path().to_path_buf();
-        let output_path = temp_dir.path().join("portfolio.csv");
+        let output_path = temp_dir.path().join("address_book.csv");
 
-        let portfolio = Portfolio {
+        let address_book = AddressBook {
             addresses: vec![WatchedAddress {
                 address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
                 label: Some("Test Wallet".to_string()),
@@ -637,10 +663,10 @@ mod tests {
                 added_at: 1700000000,
             }],
         };
-        portfolio.save(&data_dir).unwrap();
+        address_book.save(&data_dir).unwrap();
 
         let config = Config {
-            portfolio: crate::config::PortfolioConfig {
+            address_book: crate::config::AddressBookConfig {
                 data_dir: Some(data_dir),
             },
             ..Default::default()
@@ -648,7 +674,7 @@ mod tests {
 
         let args = ExportArgs {
             address: None,
-            portfolio: true,
+            address_book: true,
             output: output_path.clone(),
             format: Some(OutputFormat::Csv),
             chain: "ethereum".to_string(),
@@ -657,7 +683,7 @@ mod tests {
             limit: 1000,
         };
 
-        let result = export_portfolio(&args, OutputFormat::Csv, &config).await;
+        let result = export_address_book(&args, OutputFormat::Csv, &config).await;
         assert!(result.is_ok());
 
         let content = std::fs::read_to_string(&output_path).unwrap();
@@ -667,14 +693,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_export_portfolio_markdown() {
-        use crate::cli::portfolio::{Portfolio, WatchedAddress};
+    async fn test_export_address_book_markdown() {
+        use crate::cli::address_book::{AddressBook, WatchedAddress};
 
         let temp_dir = TempDir::new().unwrap();
         let data_dir = temp_dir.path().to_path_buf();
-        let output_path = temp_dir.path().join("portfolio.md");
+        let output_path = temp_dir.path().join("address_book.md");
 
-        let portfolio = Portfolio {
+        let address_book = AddressBook {
             addresses: vec![WatchedAddress {
                 address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
                 label: Some("Test Wallet".to_string()),
@@ -683,10 +709,10 @@ mod tests {
                 added_at: 1700000000,
             }],
         };
-        portfolio.save(&data_dir).unwrap();
+        address_book.save(&data_dir).unwrap();
 
         let config = Config {
-            portfolio: crate::config::PortfolioConfig {
+            address_book: crate::config::AddressBookConfig {
                 data_dir: Some(data_dir),
             },
             ..Default::default()
@@ -694,7 +720,7 @@ mod tests {
 
         let args = ExportArgs {
             address: None,
-            portfolio: true,
+            address_book: true,
             output: output_path.clone(),
             format: Some(OutputFormat::Markdown),
             chain: "ethereum".to_string(),
@@ -703,12 +729,12 @@ mod tests {
             limit: 1000,
         };
 
-        let result = export_portfolio(&args, OutputFormat::Markdown, &config).await;
+        let result = export_address_book(&args, OutputFormat::Markdown, &config).await;
         assert!(result.is_ok());
         assert!(output_path.exists());
 
         let content = std::fs::read_to_string(&output_path).unwrap();
-        assert!(content.contains("# Portfolio Export"));
+        assert!(content.contains("# Address Book Export"));
         assert!(content.contains("| Address | Label | Chain | Tags | Added |"));
         assert!(content.contains("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2"));
         assert!(content.contains("Test Wallet"));
@@ -777,18 +803,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_export_portfolio_table_error() {
+    async fn test_export_address_book_table_error() {
         let temp_dir = TempDir::new().unwrap();
         let data_dir = temp_dir.path().to_path_buf();
         let output_path = temp_dir.path().join("output.txt");
 
-        // Create empty portfolio
-        use crate::cli::portfolio::Portfolio;
-        let portfolio = Portfolio { addresses: vec![] };
-        portfolio.save(&data_dir).unwrap();
+        // Create empty address book
+        use crate::cli::address_book::AddressBook;
+        let address_book = AddressBook { addresses: vec![] };
+        address_book.save(&data_dir).unwrap();
 
         let config = Config {
-            portfolio: crate::config::PortfolioConfig {
+            address_book: crate::config::AddressBookConfig {
                 data_dir: Some(data_dir),
             },
             ..Default::default()
@@ -796,7 +822,7 @@ mod tests {
 
         let args = ExportArgs {
             address: None,
-            portfolio: true,
+            address_book: true,
             output: output_path,
             format: Some(OutputFormat::Table),
             chain: "ethereum".to_string(),
@@ -805,7 +831,7 @@ mod tests {
             limit: 1000,
         };
 
-        let result = export_portfolio(&args, OutputFormat::Table, &config).await;
+        let result = export_address_book(&args, OutputFormat::Table, &config).await;
         assert!(result.is_err()); // Table format not supported for export
     }
 
@@ -814,7 +840,7 @@ mod tests {
         let config = Config::default();
         let args = ExportArgs {
             address: None,
-            portfolio: false,
+            address_book: false,
             output: PathBuf::from("output.json"),
             format: None,
             chain: "ethereum".to_string(),
@@ -863,7 +889,7 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let args = ExportArgs {
             address: Some("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string()),
-            portfolio: false,
+            address_book: false,
             output: tmp.path().to_path_buf(),
             format: Some(OutputFormat::Json),
             chain: "ethereum".to_string(),
@@ -885,7 +911,7 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let args = ExportArgs {
             address: Some("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string()),
-            portfolio: false,
+            address_book: false,
             output: tmp.path().to_path_buf(),
             format: Some(OutputFormat::Csv),
             chain: "ethereum".to_string(),
@@ -921,7 +947,7 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let args = ExportArgs {
             address: Some("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string()),
-            portfolio: false,
+            address_book: false,
             output: tmp.path().to_path_buf(),
             format: Some(OutputFormat::Json),
             chain: "polygon".to_string(), // Non-ethereum chain
@@ -943,7 +969,7 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let args = ExportArgs {
             address: Some("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string()),
-            portfolio: false,
+            address_book: false,
             output: tmp.path().to_path_buf(),
             format: Some(OutputFormat::Json),
             chain: "ethereum".to_string(),
@@ -962,7 +988,7 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let args = ExportArgs {
             address: Some("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string()),
-            portfolio: false,
+            address_book: false,
             output: tmp.path().to_path_buf(),
             format: Some(OutputFormat::Markdown),
             chain: "ethereum".to_string(),
@@ -987,7 +1013,7 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let args = ExportArgs {
             address: Some("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string()),
-            portfolio: false,
+            address_book: false,
             output: tmp.path().to_path_buf(),
             format: Some(OutputFormat::Table),
             chain: "ethereum".to_string(),
@@ -1022,7 +1048,7 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let args = ExportArgs {
             address: Some("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string()),
-            portfolio: false,
+            address_book: false,
             output: tmp.path().to_path_buf(),
             format: Some(OutputFormat::Json),
             chain: "ethereum".to_string(),
@@ -1060,7 +1086,7 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let args = ExportArgs {
             address: Some("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string()),
-            portfolio: false,
+            address_book: false,
             output: tmp.path().to_path_buf(),
             format: Some(OutputFormat::Json),
             chain: "ethereum".to_string(),
@@ -1083,7 +1109,7 @@ mod tests {
     fn test_export_args_debug() {
         let args = ExportArgs {
             address: Some("0xtest".to_string()),
-            portfolio: false,
+            address_book: false,
             output: PathBuf::from("test.json"),
             format: Some(OutputFormat::Json),
             chain: "ethereum".to_string(),

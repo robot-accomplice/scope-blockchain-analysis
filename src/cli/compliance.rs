@@ -292,7 +292,8 @@ pub async fn handle_analyze_with_client(
                 println!("Unusual hour transactions: {}", analysis.unusual_hours);
             }
             Err(e) => {
-                eprintln!("Error fetching transactions: {}", e);
+                eprintln!("  ⚠ Could not fetch transactions (use -v for details)");
+                tracing::debug!("Error fetching transactions: {}", e);
             }
         }
     } else {

@@ -144,10 +144,15 @@ struct ResolvedToken {
 /// 3. Token names/symbols - searched via DEX API with interactive selection
 ///
 /// Uses `dex_client` for search to enable dependency injection and testing.
+///
+/// When an optional `spinner` is provided, progress messages are routed through
+/// it instead of printing directly to stderr/stdout, keeping output on a single
+/// updating line.
 async fn resolve_token_input(
     args: &CrawlArgs,
     aliases: &mut TokenAliases,
     dex_client: &dyn DexDataSource,
+    spinner: Option<&crate::cli::progress::Spinner>,
 ) -> Result<ResolvedToken> {
     let input = args.token.trim();
 
@@ -175,10 +180,15 @@ async fn resolve_token_input(
     };
 
     if let Some(token_info) = aliases.get(input, chain_filter) {
-        println!(
+        let msg = format!(
             "Using saved token: {} ({}) on {}",
             token_info.symbol, token_info.name, token_info.chain
         );
+        if let Some(sp) = spinner {
+            sp.set_message(msg);
+        } else {
+            eprintln!("  {}", msg);
+        }
         return Ok(ResolvedToken {
             address: token_info.address.clone(),
             chain: token_info.chain.clone(),
@@ -187,7 +197,12 @@ async fn resolve_token_input(
     }
 
     // Search for tokens by name/symbol
-    println!("Searching for '{}'...", input);
+    let search_msg = format!("Searching for '{}'...", input);
+    if let Some(sp) = spinner {
+        sp.set_message(search_msg);
+    } else {
+        eprintln!("  {}", search_msg);
+    }
 
     let search_results = dex_client.search_tokens(input, chain_filter).await?;
 
@@ -199,7 +214,28 @@ async fn resolve_token_input(
     }
 
     // Display results and let user select
-    let selected = select_token(&search_results, args.yes)?;
+    // When a spinner is active, suspend it for interactive selection (multi-result)
+    // or route auto-select messages through it (single-result / --yes).
+    let selected = if let Some(sp) = spinner {
+        if search_results.len() == 1 || args.yes {
+            // Auto-select: route "Selected:" through the spinner
+            let sel = &search_results[0];
+            sp.set_message(format!(
+                "Selected: {} ({}) on {} - ${:.6}",
+                sel.symbol,
+                sel.name,
+                sel.chain,
+                sel.price_usd.unwrap_or(0.0)
+            ));
+            sel
+        } else {
+            // Interactive: suspend spinner for the prompt
+            let result = sp.suspend(|| select_token(&search_results, args.yes));
+            result?
+        }
+    } else {
+        select_token(&search_results, args.yes)?
+    };
 
     // Offer to save the alias
     if args.save || (!args.yes && prompt_save_alias()) {
@@ -210,7 +246,12 @@ async fn resolve_token_input(
             &selected.name,
         );
         if let Err(e) = aliases.save() {
-            tracing::warn!("Failed to save token alias: {}", e);
+            tracing::debug!("Failed to save token alias: {}", e);
+        } else if let Some(sp) = spinner {
+            sp.println(&format!(
+                "Saved {} as alias for future use.",
+                selected.symbol
+            ));
         } else {
             println!("Saved {} as alias for future use.", selected.symbol);
         }
@@ -342,12 +383,16 @@ fn prompt_save_alias_impl(reader: &mut impl BufRead, writer: &mut impl Write) ->
 
 /// Fetches token analytics for composite commands (e.g., token-health).
 /// Resolves token input (address or symbol) and returns full analytics.
+///
+/// When an optional `spinner` is provided, progress messages (searching,
+/// selecting) are routed through it for single-line in-place updates.
 pub async fn fetch_analytics_for_input(
     token_input: &str,
     chain: &str,
     period: Period,
     holders_limit: u32,
     clients: &dyn ChainClientFactory,
+    spinner: Option<&crate::cli::progress::Spinner>,
 ) -> Result<TokenAnalytics> {
     let args = CrawlArgs {
         token: token_input.to_string(),
@@ -362,7 +407,13 @@ pub async fn fetch_analytics_for_input(
     };
     let mut aliases = TokenAliases::load();
     let dex_client = clients.create_dex_client();
-    let resolved = resolve_token_input(&args, &mut aliases, dex_client.as_ref()).await?;
+    let resolved = resolve_token_input(&args, &mut aliases, dex_client.as_ref(), spinner).await?;
+    if let Some(sp) = spinner {
+        sp.set_message(format!(
+            "Fetching analytics for {} on {}...",
+            resolved.address, resolved.chain
+        ));
+    }
     let mut analytics =
         fetch_token_analytics(&resolved.address, &resolved.chain, &args, clients).await?;
     if let Some((symbol, name)) = &resolved.alias_info
@@ -379,16 +430,32 @@ pub async fn fetch_analytics_for_input(
 /// Fetches comprehensive token analytics and displays them with ASCII charts
 /// or generates a markdown report.
 pub async fn run(
-    args: CrawlArgs,
-    _config: &Config,
+    mut args: CrawlArgs,
+    config: &Config,
     clients: &dyn ChainClientFactory,
 ) -> Result<()> {
+    // Resolve address book label → address + chain before token resolution
+    if let Some((address, chain)) =
+        crate::cli::address_book::resolve_address_book_input(&args.token, config)?
+    {
+        args.token = address;
+        if args.chain == "ethereum" {
+            args.chain = chain;
+        }
+    }
+
     // Load token aliases
     let mut aliases = TokenAliases::load();
 
+    // Start spinner early so resolution messages route through it
+    let sp = crate::cli::progress::Spinner::new(&format!(
+        "Crawling token {} on {}...",
+        args.token, args.chain
+    ));
+
     // Resolve the token input to an address (uses factory's dex client for search)
     let dex_client = clients.create_dex_client();
-    let resolved = resolve_token_input(&args, &mut aliases, dex_client.as_ref()).await?;
+    let resolved = resolve_token_input(&args, &mut aliases, dex_client.as_ref(), Some(&sp)).await?;
 
     tracing::info!(
         token = %resolved.address,
@@ -397,8 +464,8 @@ pub async fn run(
         "Starting token crawl"
     );
 
-    let sp = crate::cli::progress::Spinner::new(&format!(
-        "Crawling token {} on {}...",
+    sp.set_message(format!(
+        "Fetching analytics for {} on {}...",
         resolved.address, resolved.chain
     ));
 
@@ -455,7 +522,6 @@ async fn fetch_token_analytics(
     let dex_client = clients.create_dex_client();
 
     // Try to fetch DEX data (price, volume, liquidity)
-    println!("  Fetching DEX data...");
     let dex_result = dex_client.get_token_data(chain, token_address).await;
 
     // Handle DEX data - either use it or fall back to block explorer only
@@ -466,7 +532,7 @@ async fn fetch_token_analytics(
         }
         Err(ScopeError::NotFound(_)) => {
             // No DEX data - fall back to block explorer only
-            println!("  No DEX data found, fetching from block explorer...");
+            tracing::debug!("No DEX data, falling back to block explorer");
             fetch_analytics_from_explorer(token_address, chain, args, clients).await
         }
         Err(e) => Err(e),
@@ -482,7 +548,6 @@ async fn fetch_analytics_with_dex(
     dex_data: crate::chains::dex::DexTokenData,
 ) -> Result<TokenAnalytics> {
     // Fetch holder data from block explorer (if available)
-    println!("  Fetching holder data...");
     let holders = fetch_holders(token_address, chain, args.holders_limit, clients).await?;
 
     // Get token info
@@ -610,11 +675,10 @@ async fn fetch_analytics_from_explorer(
     let client = clients.create_chain_client(chain)?;
 
     // Fetch token info
-    println!("  Fetching token info...");
     let token = match client.get_token_info(token_address).await {
         Ok(t) => t,
         Err(e) => {
-            tracing::warn!("Failed to fetch token info: {}", e);
+            tracing::debug!("Failed to fetch token info: {}", e);
             // Use placeholder token info
             Token {
                 contract_address: token_address.to_string(),
@@ -626,15 +690,13 @@ async fn fetch_analytics_from_explorer(
     };
 
     // Fetch holder data
-    println!("  Fetching holder data...");
     let holders = fetch_holders(token_address, chain, args.holders_limit, clients).await?;
 
     // Fetch holder count
-    println!("  Fetching holder count...");
     let total_holders = match client.get_token_holder_count(token_address).await {
         Ok(count) => count,
         Err(e) => {
-            tracing::warn!("Failed to fetch holder count: {}", e);
+            tracing::debug!("Failed to fetch holder count: {}", e);
             0
         }
     };
@@ -712,7 +774,7 @@ async fn fetch_holders(
             match client.get_token_holders(token_address, limit).await {
                 Ok(holders) => Ok(holders),
                 Err(e) => {
-                    tracing::warn!("Failed to fetch holders: {}", e);
+                    tracing::debug!("Failed to fetch holders: {}", e);
                     Ok(Vec::new())
                 }
             }

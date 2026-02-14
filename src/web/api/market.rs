@@ -1,9 +1,7 @@
 //! Market summary API handler.
 
 use crate::cli::crawl::{self, Period};
-use crate::market::{
-    BinanceClient, HealthThresholds, MarketSummary, MarketVenue, order_book_from_analytics,
-};
+use crate::market::{HealthThresholds, MarketSummary, VenueRegistry, order_book_from_analytics};
 use crate::web::AppState;
 use axum::Json;
 use axum::extract::State;
@@ -62,6 +60,23 @@ fn default_peg_range() -> f64 {
 
 /// Converts a MarketSummary to a JSON Value.
 fn summary_to_json(summary: &MarketSummary) -> serde_json::Value {
+    let exec_buy = summary.execution_10k_buy.as_ref().map(|e| {
+        serde_json::json!({
+            "notional_usdt": e.notional_usdt,
+            "vwap": e.vwap,
+            "slippage_bps": e.slippage_bps,
+            "fillable": e.fillable,
+        })
+    });
+    let exec_sell = summary.execution_10k_sell.as_ref().map(|e| {
+        serde_json::json!({
+            "notional_usdt": e.notional_usdt,
+            "vwap": e.vwap,
+            "slippage_bps": e.slippage_bps,
+            "fillable": e.fillable,
+        })
+    });
+
     serde_json::json!({
         "pair": summary.pair,
         "peg_target": summary.peg_target,
@@ -75,6 +90,14 @@ fn summary_to_json(summary: &MarketSummary) -> serde_json::Value {
         "bid_outliers": summary.bid_outliers,
         "ask_outliers": summary.ask_outliers,
         "healthy": summary.healthy,
+        "execution_10k_buy": exec_buy,
+        "execution_10k_sell": exec_sell,
+        "bids": summary.bids.iter().take(20).map(|l| {
+            serde_json::json!({"price": l.price, "quantity": l.quantity, "value": l.value()})
+        }).collect::<Vec<_>>(),
+        "asks": summary.asks.iter().take(20).map(|l| {
+            serde_json::json!({"price": l.price, "quantity": l.quantity, "value": l.value()})
+        }).collect::<Vec<_>>(),
         "checks": summary.checks.iter().map(|c| match c {
             crate::market::HealthCheck::Pass(msg) => serde_json::json!({"status": "pass", "message": msg}),
             crate::market::HealthCheck::Fail(msg) => serde_json::json!({"status": "fail", "message": msg}),
@@ -87,12 +110,7 @@ pub async fn handle(
     State(state): State<Arc<AppState>>,
     Json(req): Json<MarketRequest>,
 ) -> impl IntoResponse {
-    let venue: MarketVenue = match req.market_venue.as_str() {
-        "biconomy" => MarketVenue::Biconomy,
-        "eth" | "ethereum" => MarketVenue::Ethereum,
-        "solana" | "sol" => MarketVenue::Solana,
-        _ => MarketVenue::Binance,
-    };
+    let venue_id = &req.market_venue;
 
     let thresholds = HealthThresholds {
         peg_target: req.peg,
@@ -103,26 +121,40 @@ pub async fn handle(
         max_bid_ask_ratio: 5.0,
     };
 
-    if venue.is_cex() {
-        let pair = venue.format_pair(&req.pair);
-        let client_opt = venue.create_client();
-        let Some(client) = client_opt else {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "Failed to create market client" })),
-            )
-                .into_response();
+    if !is_dex_venue(venue_id) {
+        // CEX venue — use the venue registry
+        let registry = match VenueRegistry::load() {
+            Ok(r) => r,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": format!("Registry error: {e}") })),
+                )
+                    .into_response();
+            }
+        };
+        let exchange = match registry.create_exchange_client(venue_id) {
+            Ok(c) => c,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": e.to_string() })),
+                )
+                    .into_response();
+            }
         };
 
-        match client.fetch_order_book(&pair).await {
+        let pair = exchange.format_pair(&req.pair);
+        match exchange.fetch_order_book(&pair).await {
             Ok(book) => {
-                let volume_24h = match venue {
-                    MarketVenue::Binance => BinanceClient::default_url()
-                        .fetch_24h_volume(&pair)
+                let volume_24h = if exchange.has_ticker() {
+                    exchange
+                        .fetch_ticker(&pair)
                         .await
                         .ok()
-                        .flatten(),
-                    _ => None,
+                        .and_then(|t| t.quote_volume_24h.or(t.volume_24h))
+                } else {
+                    None
                 };
                 let summary =
                     MarketSummary::from_order_book(&book, req.peg, &thresholds, volume_24h);
@@ -136,11 +168,7 @@ pub async fn handle(
         }
     } else {
         // DEX venue: fetch analytics then synthesize order book
-        let venue_chain = match venue {
-            MarketVenue::Ethereum => "ethereum",
-            MarketVenue::Solana => "solana",
-            _ => &req.chain,
-        };
+        let venue_chain = dex_venue_to_chain(venue_id);
 
         match crawl::fetch_analytics_for_input(
             &req.pair,
@@ -148,6 +176,7 @@ pub async fn handle(
             Period::Hour24,
             10,
             &state.factory,
+            None,
         )
         .await
         {
@@ -184,6 +213,20 @@ pub async fn handle(
             )
                 .into_response(),
         }
+    }
+}
+
+/// Whether the venue string refers to a DEX venue.
+fn is_dex_venue(venue: &str) -> bool {
+    matches!(venue.to_lowercase().as_str(), "ethereum" | "eth" | "solana")
+}
+
+/// Resolve DEX venue name to a canonical chain name.
+fn dex_venue_to_chain(venue: &str) -> &str {
+    match venue.to_lowercase().as_str() {
+        "ethereum" | "eth" => "ethereum",
+        "solana" => "solana",
+        _ => "ethereum",
     }
 }
 
@@ -306,5 +349,68 @@ mod tests {
         let response = handle(State(state), axum::Json(req)).await.into_response();
         let status = response.status();
         assert!(status.is_success() || status.is_client_error() || status.is_server_error());
+    }
+
+    #[tokio::test]
+    async fn test_handle_market_with_cex_venue() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
+        use axum::extract::State;
+        use axum::response::IntoResponse;
+
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+        let req = MarketRequest {
+            pair: "BTC".to_string(),
+            market_venue: "binance".to_string(),
+            chain: "ethereum".to_string(),
+            peg: 1.0,
+            min_levels: 1,
+            min_depth: 50.0,
+            peg_range: 0.01,
+        };
+        let response = handle(State(state), axum::Json(req)).await.into_response();
+        let status = response.status();
+        assert!(
+            status.is_success() || status.is_server_error(),
+            "Unexpected status: {}",
+            status
+        );
+    }
+
+    #[test]
+    fn test_is_dex_venue() {
+        assert!(is_dex_venue("eth"));
+        assert!(is_dex_venue("ethereum"));
+        assert!(is_dex_venue("solana"));
+        assert!(!is_dex_venue("binance"));
+        assert!(!is_dex_venue("mexc"));
+    }
+
+    #[test]
+    fn test_dex_venue_to_chain() {
+        assert_eq!(dex_venue_to_chain("eth"), "ethereum");
+        assert_eq!(dex_venue_to_chain("ethereum"), "ethereum");
+        assert_eq!(dex_venue_to_chain("solana"), "solana");
+        assert_eq!(dex_venue_to_chain("unknown"), "ethereum");
+    }
+
+    #[test]
+    fn test_market_request_debug() {
+        let req = MarketRequest {
+            pair: "USDC".to_string(),
+            market_venue: "binance".to_string(),
+            chain: "ethereum".to_string(),
+            peg: 1.0,
+            min_levels: 6,
+            min_depth: 3000.0,
+            peg_range: 0.001,
+        };
+        let debug = format!("{:?}", req);
+        assert!(debug.contains("MarketRequest"));
     }
 }

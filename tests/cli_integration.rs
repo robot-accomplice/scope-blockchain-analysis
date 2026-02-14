@@ -26,7 +26,7 @@ fn test_help_output() {
         .stdout(predicate::str::contains("Scope Blockchain Analysis"))
         .stdout(predicate::str::contains("address"))
         .stdout(predicate::str::contains("tx"))
-        .stdout(predicate::str::contains("portfolio"))
+        .stdout(predicate::str::contains("address-book"))
         .stdout(predicate::str::contains("export"))
         .stdout(predicate::str::contains("setup"))
         .stdout(predicate::str::contains("insights"));
@@ -75,12 +75,12 @@ fn test_tx_help() {
 }
 
 #[test]
-fn test_portfolio_help() {
+fn test_address_book_help() {
     scope_cmd()
-        .args(["portfolio", "--help"])
+        .args(["address-book", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Portfolio management"))
+        .stdout(predicate::str::contains("Address book management"))
         .stdout(predicate::str::contains("add"))
         .stdout(predicate::str::contains("list"));
 }
@@ -162,7 +162,7 @@ fn test_port_alias() {
         .args(["port", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Portfolio management"));
+        .stdout(predicate::str::contains("Address book management"));
 }
 
 // ============================================================================
@@ -190,6 +190,14 @@ fn test_multiple_verbose_flags() {
 fn test_config_option() {
     scope_cmd()
         .args(["--config", "/nonexistent/path.yaml", "portfolio", "list"])
+        .assert()
+        .success(); // Should succeed with defaults when config not found
+}
+
+#[test]
+fn test_config_option_address_book() {
+    scope_cmd()
+        .args(["--config", "/nonexistent/path.yaml", "address-book", "list"])
         .assert()
         .success(); // Should succeed with defaults when config not found
 }
@@ -261,35 +269,35 @@ fn test_tx_short_hash() {
 }
 
 // ============================================================================
-// Portfolio Command Tests
+// Address Book Command Tests
 // ============================================================================
 
 #[test]
-fn test_portfolio_list_empty() {
+fn test_address_book_list_empty() {
     // Use a temp directory to avoid polluting real config
     let temp_dir = tempfile::tempdir().unwrap();
 
     scope_cmd()
         .env("HOME", temp_dir.path())
-        .args(["portfolio", "list"])
+        .args(["address-book", "list"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("empty").or(predicate::str::contains("Portfolio")));
+        .stdout(predicate::str::contains("empty").or(predicate::str::contains("Address book")));
 }
 
 #[test]
-fn test_portfolio_add_requires_address() {
+fn test_address_book_add_requires_address() {
     scope_cmd()
-        .args(["portfolio", "add"])
+        .args(["address-book", "add"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("required"));
 }
 
 #[test]
-fn test_portfolio_remove_requires_address() {
+fn test_address_book_remove_requires_address() {
     scope_cmd()
-        .args(["portfolio", "remove"])
+        .args(["address-book", "remove"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("required"));
@@ -321,7 +329,9 @@ fn test_export_requires_source() {
         .args(["export", "--output", output.to_str().unwrap()])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("--address").or(predicate::str::contains("--portfolio")));
+        .stderr(
+            predicate::str::contains("--address").or(predicate::str::contains("--address-book")),
+        );
 }
 
 // ============================================================================
@@ -445,14 +455,18 @@ fn test_address_csv_format_option() {
 
 #[test]
 fn test_ai_flag_accepted() {
-    // --ai should be accepted by the CLI; portfolio list emits to stdout
+    // --ai should be accepted by the CLI; address-book list emits to stdout
     let temp_dir = tempfile::tempdir().unwrap();
     scope_cmd()
         .env("HOME", temp_dir.path())
-        .args(["--ai", "portfolio", "list"])
+        .args(["--ai", "address-book", "list"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Portfolio").or(predicate::str::contains("empty")));
+        .stdout(
+            predicate::str::contains("Address book")
+                .or(predicate::str::contains("address book"))
+                .or(predicate::str::contains("empty")),
+        );
 }
 
 // ============================================================================
