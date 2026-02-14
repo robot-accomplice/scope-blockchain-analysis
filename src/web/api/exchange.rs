@@ -121,6 +121,21 @@ pub async fn handle(Json(req): Json<SnapshotRequest>) -> impl IntoResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::StatusCode;
+
+    #[test]
+    fn test_snapshot_request_empty_pair() {
+        let json = serde_json::json!({"venue": "binance", "pair": ""});
+        let req: SnapshotRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.pair, "");
+    }
+
+    #[test]
+    fn test_snapshot_request_large_limit() {
+        let json = serde_json::json!({"venue": "x", "trades_limit": 1000});
+        let req: SnapshotRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.trades_limit, 1000);
+    }
 
     #[test]
     fn test_deserialize_full() {
@@ -150,5 +165,87 @@ mod tests {
     fn test_defaults() {
         assert_eq!(default_pair(), "BTC");
         assert_eq!(default_trades_limit(), 50);
+    }
+
+    #[tokio::test]
+    async fn test_handle_unknown_venue() {
+        let req = SnapshotRequest {
+            venue: "nonexistent_venue_xyz".to_string(),
+            pair: "BTC".to_string(),
+            trades_limit: 50,
+        };
+        let response = handle(Json(req)).await.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn test_snapshot_request_deserialization_with_defaults() {
+        // Only venue provided, pair and trades_limit should use defaults
+        let json = serde_json::json!({"venue": "kraken"});
+        let req: SnapshotRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.venue, "kraken");
+        assert_eq!(req.pair, "BTC");
+        assert_eq!(req.trades_limit, 50);
+    }
+
+    #[test]
+    fn test_snapshot_request_debug() {
+        let req = SnapshotRequest {
+            venue: "test".to_string(),
+            pair: "ETH".to_string(),
+            trades_limit: 100,
+        };
+        let debug = format!("{:?}", req);
+        assert!(debug.contains("SnapshotRequest"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_valid_venue_graceful_failure() {
+        // Uses a real venue (binance) — VenueRegistry loads built-in descriptors.
+        // The actual API call will likely fail in CI (no network / timeouts),
+        // but the handler catches errors gracefully and still returns 200 with null fields.
+        let req = SnapshotRequest {
+            venue: "binance".to_string(),
+            pair: "BTC".to_string(),
+            trades_limit: 5,
+        };
+        let response = handle(Json(req)).await.into_response();
+        // Should succeed even if exchange API is unreachable
+        let status = response.status();
+        assert!(
+            status == StatusCode::OK || status == StatusCode::INTERNAL_SERVER_ERROR,
+            "Expected 200 or 500, got {}",
+            status
+        );
+
+        if status == StatusCode::OK {
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(json["venue"], "binance");
+            assert!(json["pair"].is_string());
+            // order_book/ticker/trades may be null (API failed) or populated (API succeeded)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_multiple_venues() {
+        // Test with several built-in venues to exercise the handler broadly
+        for venue in &["mexc", "okx", "bybit", "coinbase"] {
+            let req = SnapshotRequest {
+                venue: venue.to_string(),
+                pair: "ETH".to_string(),
+                trades_limit: 5,
+            };
+            let response = handle(Json(req)).await.into_response();
+            let status = response.status();
+            assert!(
+                status == StatusCode::OK || status == StatusCode::INTERNAL_SERVER_ERROR,
+                "Venue {} returned unexpected status {}",
+                venue,
+                status
+            );
+        }
     }
 }

@@ -59,6 +59,7 @@ pub mod address_report;
 pub mod compliance;
 pub mod crawl;
 pub mod discover;
+pub mod errors;
 pub mod export;
 pub mod insights;
 pub mod interactive;

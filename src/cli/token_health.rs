@@ -525,6 +525,36 @@ mod tests {
     }
 
     #[test]
+    fn test_is_dex_venue_values() {
+        assert!(is_dex_venue("eth"));
+        assert!(is_dex_venue("ethereum"));
+        assert!(is_dex_venue("solana"));
+        assert!(!is_dex_venue("binance"));
+        assert!(!is_dex_venue("mexc"));
+    }
+
+    #[test]
+    fn test_dex_venue_to_chain_values() {
+        assert_eq!(dex_venue_to_chain("eth"), "ethereum");
+        assert_eq!(dex_venue_to_chain("ethereum"), "ethereum");
+        assert_eq!(dex_venue_to_chain("solana"), "solana");
+        assert_eq!(dex_venue_to_chain("unknown"), "ethereum");
+    }
+
+    #[test]
+    fn test_token_health_args_debug() {
+        let args = TokenHealthArgs {
+            token: "USDC".to_string(),
+            chain: "ethereum".to_string(),
+            with_market: false,
+            venue: "binance".to_string(),
+            format: crate::config::OutputFormat::Table,
+        };
+        let debug = format!("{:?}", args);
+        assert!(debug.contains("TokenHealthArgs"));
+    }
+
+    #[test]
     fn test_format_large_number() {
         assert_eq!(
             crate::display::format_large_number(1_500_000_000.0),

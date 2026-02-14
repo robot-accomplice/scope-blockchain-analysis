@@ -743,4 +743,971 @@ mod tests {
             capabilities: CapabilitySet::default(),
         }
     }
+
+    // -------------------------------------------------------------------------
+    // Additional tests for coverage of descriptor(), format_pair(), current_type,
+    // extract_string(), navigate_field(), parse_levels(), parse_side(), format_display_pair
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_descriptor_accessor() {
+        let desc = make_test_descriptor();
+        let client = ConfigurableExchangeClient::new(desc.clone());
+        assert_eq!(client.descriptor().id, "test");
+        assert_eq!(client.descriptor().name, "Test");
+    }
+
+    #[test]
+    fn test_format_pair_accessor() {
+        let desc = make_test_descriptor();
+        let client = ConfigurableExchangeClient::new(desc);
+        assert_eq!(client.format_pair("BTC", None), "BTCUSDT");
+        assert_eq!(client.format_pair("ETH", Some("USD")), "ETHUSD");
+    }
+
+    #[test]
+    fn test_navigate_root_empty_string_path() {
+        let desc = make_test_descriptor();
+        let client = ConfigurableExchangeClient::new(desc);
+        let json = serde_json::json!({"price": 42});
+        let result = client.navigate_root(&json, Some("")).unwrap();
+        assert_eq!(result, &json);
+    }
+
+    #[test]
+    fn test_navigate_root_wildcard_on_non_object_null() {
+        let desc = make_test_descriptor();
+        let client = ConfigurableExchangeClient::new(desc);
+        let json = serde_json::json!({"result": null});
+        let result = client.navigate_root(&json, Some("result.*"));
+        assert!(result.is_err());
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(err_msg.contains("null"), "error should mention null type");
+    }
+
+    #[test]
+    fn test_navigate_root_wildcard_on_non_object_bool() {
+        let desc = make_test_descriptor();
+        let client = ConfigurableExchangeClient::new(desc);
+        let json = serde_json::json!({"result": true});
+        let result = client.navigate_root(&json, Some("result.*"));
+        assert!(result.is_err());
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(err_msg.contains("bool"), "error should mention bool type");
+    }
+
+    #[test]
+    fn test_navigate_root_wildcard_on_non_object_number() {
+        let desc = make_test_descriptor();
+        let client = ConfigurableExchangeClient::new(desc);
+        let json = serde_json::json!({"result": 42});
+        let result = client.navigate_root(&json, Some("result.*"));
+        assert!(result.is_err());
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            err_msg.contains("number"),
+            "error should mention number type"
+        );
+    }
+
+    #[test]
+    fn test_navigate_root_wildcard_on_non_object_string() {
+        let desc = make_test_descriptor();
+        let client = ConfigurableExchangeClient::new(desc);
+        let json = serde_json::json!({"result": "not_an_object"});
+        let result = client.navigate_root(&json, Some("result.*"));
+        assert!(result.is_err());
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            err_msg.contains("string"),
+            "error should mention string type"
+        );
+    }
+
+    #[test]
+    fn test_navigate_root_wildcard_on_non_object_array() {
+        let desc = make_test_descriptor();
+        let client = ConfigurableExchangeClient::new(desc);
+        let json = serde_json::json!({"result": [1, 2, 3]});
+        let result = client.navigate_root(&json, Some("result.*"));
+        assert!(result.is_err());
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(err_msg.contains("array"), "error should mention array type");
+    }
+
+    #[test]
+    fn test_navigate_root_wildcard_empty_object() {
+        let desc = make_test_descriptor();
+        let client = ConfigurableExchangeClient::new(desc);
+        let json = serde_json::json!({"result": {}});
+        let result = client.navigate_root(&json, Some("result.*"));
+        assert!(result.is_err());
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            err_msg.contains("empty object"),
+            "error should mention empty object"
+        );
+    }
+
+    #[test]
+    fn test_extract_string_from_string() {
+        let desc = make_test_descriptor();
+        let client = ConfigurableExchangeClient::new(desc);
+        let data = serde_json::json!({"id": "abc123"});
+        assert_eq!(
+            client.extract_string(&data, "id").as_deref(),
+            Some("abc123")
+        );
+    }
+
+    #[test]
+    fn test_extract_string_from_number() {
+        let desc = make_test_descriptor();
+        let client = ConfigurableExchangeClient::new(desc);
+        let data = serde_json::json!({"id": 12345});
+        assert_eq!(client.extract_string(&data, "id").as_deref(), Some("12345"));
+    }
+
+    #[test]
+    fn test_extract_string_from_nested_path() {
+        let desc = make_test_descriptor();
+        let client = ConfigurableExchangeClient::new(desc);
+        let data = serde_json::json!({"a": {"b": {"c": ["x", "value"]}}});
+        assert_eq!(
+            client.extract_string(&data, "a.b.c.1").as_deref(),
+            Some("value")
+        );
+    }
+
+    #[test]
+    fn test_extract_string_returns_none_for_object() {
+        let desc = make_test_descriptor();
+        let client = ConfigurableExchangeClient::new(desc);
+        let data = serde_json::json!({"id": {"nested": "obj"}});
+        assert_eq!(client.extract_string(&data, "id"), None);
+    }
+
+    #[test]
+    fn test_extract_string_returns_none_for_array() {
+        let desc = make_test_descriptor();
+        let client = ConfigurableExchangeClient::new(desc);
+        let data = serde_json::json!({"id": [1, 2, 3]});
+        assert_eq!(client.extract_string(&data, "id"), None);
+    }
+
+    #[test]
+    fn test_navigate_field_deeper_path() {
+        let desc = make_test_descriptor();
+        let client = ConfigurableExchangeClient::new(desc);
+        let data = serde_json::json!({"level1": {"level2": {"level3": [0, 99.5]}}});
+        assert_eq!(
+            client.extract_f64(&data, "level1.level2.level3.1"),
+            Some(99.5)
+        );
+    }
+
+    #[test]
+    fn test_parse_levels_empty_array() {
+        let desc = make_test_descriptor();
+        let client = ConfigurableExchangeClient::new(desc);
+        let arr = serde_json::json!([]);
+        let mapping = ResponseMapping::default();
+        let levels = client.parse_levels(&arr, &mapping).unwrap();
+        assert!(levels.is_empty());
+    }
+
+    #[test]
+    fn test_parse_levels_not_array_err() {
+        let desc = make_test_descriptor();
+        let client = ConfigurableExchangeClient::new(desc);
+        let not_arr = serde_json::json!({"not": "array"});
+        let mapping = ResponseMapping::default();
+        let result = client.parse_levels(&not_arr, &mapping);
+        assert!(result.is_err());
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(err_msg.contains("expected array"));
+    }
+
+    #[test]
+    fn test_parse_levels_filters_zero_price_and_quantity() {
+        let desc = make_test_descriptor();
+        let client = ConfigurableExchangeClient::new(desc);
+        let arr = serde_json::json!([
+            ["42000.0", "1.5"],
+            ["0.0", "1.0"],
+            ["42001.0", "0.0"],
+            ["42002.0", ""]
+        ]);
+        let mapping = ResponseMapping {
+            level_format: Some("positional".to_string()),
+            ..Default::default()
+        };
+        let levels = client.parse_levels(&arr, &mapping).unwrap();
+        assert_eq!(levels.len(), 1);
+        assert_eq!(levels[0].price, 42000.0);
+        assert_eq!(levels[0].quantity, 1.5);
+    }
+
+    #[test]
+    fn test_parse_levels_object_format_default_fields() {
+        let desc = make_test_descriptor();
+        let client = ConfigurableExchangeClient::new(desc);
+        let arr = serde_json::json!([
+            {"price": "100.0", "size": "2.0"},
+            {"price": "101.0", "size": "3.0"}
+        ]);
+        let mapping = ResponseMapping {
+            level_format: Some("object".to_string()),
+            level_price_field: None,
+            level_size_field: None,
+            ..Default::default()
+        };
+        let levels = client.parse_levels(&arr, &mapping).unwrap();
+        assert_eq!(levels.len(), 2);
+        assert_eq!(levels[0].price, 100.0);
+        assert_eq!(levels[0].quantity, 2.0);
+    }
+
+    #[test]
+    fn test_parse_side_no_mapping_returns_buy() {
+        let desc = make_test_descriptor();
+        let client = ConfigurableExchangeClient::new(desc);
+        let data = serde_json::json!({"side": "sell"});
+        let mapping = ResponseMapping {
+            side: None,
+            ..Default::default()
+        };
+        assert_eq!(client.parse_side(&data, &mapping), TradeSide::Buy);
+    }
+
+    #[test]
+    fn test_parse_side_field_missing_returns_buy() {
+        let desc = make_test_descriptor();
+        let client = ConfigurableExchangeClient::new(desc);
+        let data = serde_json::json!({});
+        let mapping = ResponseMapping {
+            side: Some(crate::market::descriptor::SideMapping {
+                field: "nonexistent".to_string(),
+                mapping: [("sell".to_string(), "sell".to_string())]
+                    .into_iter()
+                    .collect(),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(client.parse_side(&data, &mapping), TradeSide::Buy);
+    }
+
+    #[test]
+    fn test_parse_side_string_mapped_to_sell() {
+        let desc = make_test_descriptor();
+        let client = ConfigurableExchangeClient::new(desc);
+        let data = serde_json::json!({"side": "ask"});
+        let mapping = ResponseMapping {
+            side: Some(crate::market::descriptor::SideMapping {
+                field: "side".to_string(),
+                mapping: [
+                    ("ask".to_string(), "sell".to_string()),
+                    ("bid".to_string(), "buy".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(client.parse_side(&data, &mapping), TradeSide::Sell);
+    }
+
+    #[test]
+    fn test_parse_side_string_mapped_to_buy() {
+        let desc = make_test_descriptor();
+        let client = ConfigurableExchangeClient::new(desc);
+        let data = serde_json::json!({"side": "bid"});
+        let mapping = ResponseMapping {
+            side: Some(crate::market::descriptor::SideMapping {
+                field: "side".to_string(),
+                mapping: [
+                    ("ask".to_string(), "sell".to_string()),
+                    ("bid".to_string(), "buy".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(client.parse_side(&data, &mapping), TradeSide::Buy);
+    }
+
+    #[test]
+    fn test_parse_side_numeric_value() {
+        let desc = make_test_descriptor();
+        let client = ConfigurableExchangeClient::new(desc);
+        let data = serde_json::json!({"side": 1});
+        let mapping = ResponseMapping {
+            side: Some(crate::market::descriptor::SideMapping {
+                field: "side".to_string(),
+                mapping: [
+                    ("1".to_string(), "sell".to_string()),
+                    ("0".to_string(), "buy".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(client.parse_side(&data, &mapping), TradeSide::Sell);
+    }
+
+    #[test]
+    fn test_parse_side_unknown_value_returns_buy() {
+        let desc = make_test_descriptor();
+        let client = ConfigurableExchangeClient::new(desc);
+        let data = serde_json::json!({"side": "unknown"});
+        let mapping = ResponseMapping {
+            side: Some(crate::market::descriptor::SideMapping {
+                field: "side".to_string(),
+                mapping: [
+                    ("ask".to_string(), "sell".to_string()),
+                    ("bid".to_string(), "buy".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(client.parse_side(&data, &mapping), TradeSide::Buy);
+    }
+
+    #[test]
+    fn test_parse_side_non_string_number_bool_returns_buy() {
+        let desc = make_test_descriptor();
+        let client = ConfigurableExchangeClient::new(desc);
+        let data = serde_json::json!({"side": [1, 2, 3]});
+        let mapping = ResponseMapping {
+            side: Some(crate::market::descriptor::SideMapping {
+                field: "side".to_string(),
+                mapping: [("ask".to_string(), "sell".to_string())]
+                    .into_iter()
+                    .collect(),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(client.parse_side(&data, &mapping), TradeSide::Buy);
+    }
+
+    #[test]
+    fn test_format_display_pair_eur() {
+        assert_eq!(format_display_pair("BTCEUR", "{base}{quote}"), "BTC/EUR");
+        assert_eq!(format_display_pair("etheur", "{base}{quote}"), "eth/eur");
+    }
+
+    #[test]
+    fn test_format_display_pair_gbp() {
+        assert_eq!(format_display_pair("BTCGBP", "{base}{quote}"), "BTC/GBP");
+    }
+
+    #[test]
+    fn test_format_display_pair_unknown_quote() {
+        assert_eq!(format_display_pair("XYZABC", "{base}{quote}"), "XYZABC");
+    }
+
+    #[test]
+    fn test_format_display_pair_single_char() {
+        assert_eq!(format_display_pair("A", "{base}{quote}"), "A");
+    }
+
+    #[test]
+    fn test_format_display_pair_quote_only_no_split() {
+        assert_eq!(format_display_pair("USDT", "{base}{quote}"), "USDT");
+    }
+
+    // -------------------------------------------------------------------------
+    // Mockito-based HTTP tests for async fetch paths
+    // -------------------------------------------------------------------------
+
+    fn make_http_test_descriptor(base_url: &str) -> VenueDescriptor {
+        use crate::market::descriptor::*;
+        VenueDescriptor {
+            id: "mock_test".to_string(),
+            name: "Mock Test".to_string(),
+            base_url: base_url.to_string(),
+            timeout_secs: Some(5),
+            rate_limit_per_sec: None,
+            symbol: SymbolConfig {
+                template: "{base}{quote}".to_string(),
+                default_quote: "USDT".to_string(),
+                case: SymbolCase::Upper,
+            },
+            headers: std::collections::HashMap::new(),
+            capabilities: CapabilitySet {
+                order_book: Some(EndpointDescriptor {
+                    path: "/api/v1/depth".to_string(),
+                    method: HttpMethod::GET,
+                    params: [("symbol".to_string(), "{pair}".to_string())]
+                        .into_iter()
+                        .collect(),
+                    request_body: None,
+                    response_root: None,
+                    response: ResponseMapping {
+                        asks_key: Some("asks".to_string()),
+                        bids_key: Some("bids".to_string()),
+                        level_format: Some("positional".to_string()),
+                        ..Default::default()
+                    },
+                }),
+                ticker: Some(EndpointDescriptor {
+                    path: "/api/v1/ticker".to_string(),
+                    method: HttpMethod::GET,
+                    params: [("symbol".to_string(), "{pair}".to_string())]
+                        .into_iter()
+                        .collect(),
+                    request_body: None,
+                    response_root: None,
+                    response: ResponseMapping {
+                        last_price: Some("lastPrice".to_string()),
+                        high_24h: Some("highPrice".to_string()),
+                        low_24h: Some("lowPrice".to_string()),
+                        volume_24h: Some("volume".to_string()),
+                        quote_volume_24h: Some("quoteVolume".to_string()),
+                        best_bid: Some("bidPrice".to_string()),
+                        best_ask: Some("askPrice".to_string()),
+                        ..Default::default()
+                    },
+                }),
+                trades: Some(EndpointDescriptor {
+                    path: "/api/v1/trades".to_string(),
+                    method: HttpMethod::GET,
+                    params: [
+                        ("symbol".to_string(), "{pair}".to_string()),
+                        ("limit".to_string(), "{limit}".to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    request_body: None,
+                    response_root: None,
+                    response: ResponseMapping {
+                        price: Some("price".to_string()),
+                        quantity: Some("qty".to_string()),
+                        quote_quantity: Some("quoteQty".to_string()),
+                        timestamp_ms: Some("time".to_string()),
+                        id: Some("id".to_string()),
+                        side: Some(SideMapping {
+                            field: "isBuyerMaker".to_string(),
+                            mapping: [
+                                ("true".to_string(), "sell".to_string()),
+                                ("false".to_string(), "buy".to_string()),
+                            ]
+                            .into_iter()
+                            .collect(),
+                        }),
+                        ..Default::default()
+                    },
+                }),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_order_book_via_http() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/v1/depth")
+            .match_query(mockito::Matcher::AllOf(vec![mockito::Matcher::UrlEncoded(
+                "symbol".into(),
+                "BTCUSDT".into(),
+            )]))
+            .with_status(200)
+            .with_body(
+                serde_json::json!({
+                    "asks": [["50010.0", "1.5"], ["50020.0", "2.0"]],
+                    "bids": [["50000.0", "1.0"], ["49990.0", "3.0"]]
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let desc = make_http_test_descriptor(&server.url());
+        let client = ConfigurableExchangeClient::new(desc);
+        let book = client.fetch_order_book("BTCUSDT").await.unwrap();
+        assert_eq!(book.asks.len(), 2);
+        assert_eq!(book.bids.len(), 2);
+        assert_eq!(book.asks[0].price, 50010.0);
+        assert_eq!(book.bids[0].price, 50000.0);
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_fetch_ticker_via_http() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/v1/ticker")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "symbol".into(),
+                "BTCUSDT".into(),
+            ))
+            .with_status(200)
+            .with_body(
+                serde_json::json!({
+                    "lastPrice": "50100.5",
+                    "highPrice": "51200.0",
+                    "lowPrice": "48800.0",
+                    "volume": "1234.56",
+                    "quoteVolume": "62000000.0",
+                    "bidPrice": "50095.0",
+                    "askPrice": "50105.0"
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let desc = make_http_test_descriptor(&server.url());
+        let client = ConfigurableExchangeClient::new(desc);
+        let ticker = client.fetch_ticker("BTCUSDT").await.unwrap();
+        assert_eq!(ticker.pair, "BTC/USDT");
+        assert_eq!(ticker.last_price, Some(50100.5));
+        assert_eq!(ticker.high_24h, Some(51200.0));
+        assert_eq!(ticker.low_24h, Some(48800.0));
+        assert_eq!(ticker.volume_24h, Some(1234.56));
+        assert_eq!(ticker.quote_volume_24h, Some(62000000.0));
+        assert_eq!(ticker.best_bid, Some(50095.0));
+        assert_eq!(ticker.best_ask, Some(50105.0));
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_fetch_recent_trades_via_http() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/v1/trades")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("symbol".into(), "BTCUSDT".into()),
+                mockito::Matcher::UrlEncoded("limit".into(), "10".into()),
+            ]))
+            .with_status(200)
+            .with_body(
+                serde_json::json!([
+                    {
+                        "id": "trade-1",
+                        "price": "50000.0",
+                        "qty": "0.5",
+                        "quoteQty": "25000.0",
+                        "time": "1700000000000",
+                        "isBuyerMaker": true
+                    },
+                    {
+                        "id": "trade-2",
+                        "price": "50001.0",
+                        "qty": "1.0",
+                        "quoteQty": "50001.0",
+                        "time": "1700000001000",
+                        "isBuyerMaker": false
+                    }
+                ])
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let desc = make_http_test_descriptor(&server.url());
+        let client = ConfigurableExchangeClient::new(desc);
+        let trades = client.fetch_recent_trades("BTCUSDT", 10).await.unwrap();
+        assert_eq!(trades.len(), 2);
+        assert_eq!(trades[0].price, 50000.0);
+        assert_eq!(trades[0].quantity, 0.5);
+        assert_eq!(trades[0].quote_quantity, Some(25000.0));
+        assert_eq!(trades[0].timestamp_ms, 1700000000000);
+        assert_eq!(trades[0].id.as_deref(), Some("trade-1"));
+        assert_eq!(trades[0].side, TradeSide::Sell);
+        assert_eq!(trades[1].price, 50001.0);
+        assert_eq!(trades[1].quantity, 1.0);
+        assert_eq!(trades[1].side, TradeSide::Buy);
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_fetch_order_book_http_error() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/v1/depth")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "symbol".into(),
+                "BTCUSDT".into(),
+            ))
+            .with_status(500)
+            .with_body("Internal Server Error")
+            .create_async()
+            .await;
+
+        let desc = make_http_test_descriptor(&server.url());
+        let client = ConfigurableExchangeClient::new(desc);
+        let err = client.fetch_order_book("BTCUSDT").await.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("API error: HTTP 500"),
+            "expected error message to contain 'API error: HTTP 500', got: {}",
+            err_msg
+        );
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_fetch_order_book_no_capability() {
+        let desc = make_test_descriptor();
+        let client = ConfigurableExchangeClient::new(desc);
+        let err = client.fetch_order_book("BTCUSDT").await.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("does not support order book"),
+            "expected error message to contain 'does not support order book', got: {}",
+            err_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fetch_order_book_via_post() {
+        use crate::market::descriptor::*;
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/v1/depth")
+            .match_body(mockito::Matcher::Json(serde_json::json!({
+                "symbol": "BTCUSDT"
+            })))
+            .with_status(200)
+            .with_body(
+                serde_json::json!({
+                    "asks": [["50100.0", "2.0"]],
+                    "bids": [["50000.0", "1.0"]]
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let mut desc = make_http_test_descriptor(&server.url());
+        desc.capabilities.order_book = Some(EndpointDescriptor {
+            path: "/api/v1/depth".to_string(),
+            method: HttpMethod::POST,
+            params: std::collections::HashMap::new(),
+            request_body: Some(serde_json::json!({
+                "symbol": "{pair}"
+            })),
+            response_root: None,
+            response: ResponseMapping {
+                asks_key: Some("asks".to_string()),
+                bids_key: Some("bids".to_string()),
+                level_format: Some("positional".to_string()),
+                ..Default::default()
+            },
+        });
+
+        let client = ConfigurableExchangeClient::new(desc);
+        let book = client.fetch_order_book("BTCUSDT").await.unwrap();
+        assert_eq!(book.asks.len(), 1);
+        assert_eq!(book.bids.len(), 1);
+        assert_eq!(book.asks[0].price, 50100.0);
+        assert_eq!(book.bids[0].price, 50000.0);
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_fetch_order_book_missing_asks_key() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/v1/depth")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "symbol".into(),
+                "BTCUSDT".into(),
+            ))
+            .with_status(200)
+            .with_body(
+                serde_json::json!({
+                    "bids": [["50000.0", "1.0"]]
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let desc = make_http_test_descriptor(&server.url());
+        let client = ConfigurableExchangeClient::new(desc);
+        let err = client.fetch_order_book("BTCUSDT").await.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("missing 'asks'"),
+            "expected error message to contain 'missing \\'asks\\'', got: {}",
+            err_msg
+        );
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_fetch_order_book_missing_bids_key() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/v1/depth")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "symbol".into(),
+                "BTCUSDT".into(),
+            ))
+            .with_status(200)
+            .with_body(
+                serde_json::json!({
+                    "asks": [["50010.0", "1.5"]]
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let desc = make_http_test_descriptor(&server.url());
+        let client = ConfigurableExchangeClient::new(desc);
+        let err = client.fetch_order_book("BTCUSDT").await.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("missing 'bids'"),
+            "expected error message to contain 'missing \\'bids\\'', got: {}",
+            err_msg
+        );
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_fetch_ticker_with_filter() {
+        use crate::market::descriptor::*;
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/v1/tickers")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "symbol".into(),
+                "BTCUSDT".into(),
+            ))
+            .with_status(200)
+            .with_body(
+                serde_json::json!([
+                    {"symbol": "ETHUSDT", "lastPrice": "3000.0"},
+                    {"symbol": "BTCUSDT", "lastPrice": "50100.5", "highPrice": "51200.0"},
+                    {"symbol": "BNBUSDT", "lastPrice": "400.0"}
+                ])
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let mut desc = make_http_test_descriptor(&server.url());
+        desc.capabilities.ticker = Some(EndpointDescriptor {
+            path: "/api/v1/tickers".to_string(),
+            method: HttpMethod::GET,
+            params: [("symbol".to_string(), "{pair}".to_string())]
+                .into_iter()
+                .collect(),
+            request_body: None,
+            response_root: None,
+            response: ResponseMapping {
+                filter: Some(FilterConfig {
+                    field: "symbol".to_string(),
+                    value: "{pair}".to_string(),
+                }),
+                last_price: Some("lastPrice".to_string()),
+                high_24h: Some("highPrice".to_string()),
+                ..Default::default()
+            },
+        });
+
+        let client = ConfigurableExchangeClient::new(desc);
+        let ticker = client.fetch_ticker("BTCUSDT").await.unwrap();
+        assert_eq!(ticker.pair, "BTC/USDT");
+        assert_eq!(ticker.last_price, Some(50100.5));
+        assert_eq!(ticker.high_24h, Some(51200.0));
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_fetch_ticker_filter_no_match() {
+        use crate::market::descriptor::*;
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/v1/tickers")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "symbol".into(),
+                "BTCUSDT".into(),
+            ))
+            .with_status(200)
+            .with_body(
+                serde_json::json!([
+                    {"symbol": "ETHUSDT", "lastPrice": "3000.0"},
+                    {"symbol": "BNBUSDT", "lastPrice": "400.0"}
+                ])
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let mut desc = make_http_test_descriptor(&server.url());
+        desc.capabilities.ticker = Some(EndpointDescriptor {
+            path: "/api/v1/tickers".to_string(),
+            method: HttpMethod::GET,
+            params: [("symbol".to_string(), "{pair}".to_string())]
+                .into_iter()
+                .collect(),
+            request_body: None,
+            response_root: None,
+            response: ResponseMapping {
+                filter: Some(FilterConfig {
+                    field: "symbol".to_string(),
+                    value: "{pair}".to_string(),
+                }),
+                last_price: Some("lastPrice".to_string()),
+                ..Default::default()
+            },
+        });
+
+        let client = ConfigurableExchangeClient::new(desc);
+        let err = client.fetch_ticker("BTCUSDT").await.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("no ticker found for pair"),
+            "expected error message to contain 'no ticker found for pair', got: {}",
+            err_msg
+        );
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_fetch_trades_non_array_response() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/v1/trades")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("symbol".into(), "BTCUSDT".into()),
+                mockito::Matcher::UrlEncoded("limit".into(), "10".into()),
+            ]))
+            .with_status(200)
+            .with_body(
+                serde_json::json!({
+                    "trades": [{"price": "50000", "qty": "1"}]
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let desc = make_http_test_descriptor(&server.url());
+        let client = ConfigurableExchangeClient::new(desc);
+        let err = client.fetch_recent_trades("BTCUSDT", 10).await.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("expected array for trades"),
+            "expected error message to contain 'expected array for trades', got: {}",
+            err_msg
+        );
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_fetch_with_custom_headers() {
+        let mut server = mockito::Server::new_async().await;
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("X-Api-Key".to_string(), "test123".to_string());
+        let mock = server
+            .mock("GET", "/api/v1/ticker")
+            .match_header("x-api-key", "test123")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "symbol".into(),
+                "BTCUSDT".into(),
+            ))
+            .with_status(200)
+            .with_body(
+                serde_json::json!({
+                    "lastPrice": "50100.5",
+                    "highPrice": "51200.0",
+                    "lowPrice": "48800.0",
+                    "volume": "1234.56",
+                    "quoteVolume": "62000000.0",
+                    "bidPrice": "50095.0",
+                    "askPrice": "50105.0"
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let mut desc = make_http_test_descriptor(&server.url());
+        desc.headers = headers;
+        desc.capabilities.ticker.as_mut().unwrap().response = ResponseMapping {
+            last_price: Some("lastPrice".to_string()),
+            high_24h: Some("highPrice".to_string()),
+            low_24h: Some("lowPrice".to_string()),
+            volume_24h: Some("volume".to_string()),
+            quote_volume_24h: Some("quoteVolume".to_string()),
+            best_bid: Some("bidPrice".to_string()),
+            best_ask: Some("askPrice".to_string()),
+            ..Default::default()
+        };
+
+        let client = ConfigurableExchangeClient::new(desc);
+        let ticker = client.fetch_ticker("BTCUSDT").await.unwrap();
+        assert_eq!(ticker.last_price, Some(50100.5));
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_fetch_trades_no_capability() {
+        let desc = make_test_descriptor();
+        let client = ConfigurableExchangeClient::new(desc);
+        let err = client.fetch_recent_trades("BTCUSDT", 10).await.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("does not support trades"),
+            "expected error message to contain 'does not support trades', got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_navigate_root_index_out_of_bounds() {
+        let desc = make_test_descriptor();
+        let client = ConfigurableExchangeClient::new(desc);
+        let json = serde_json::json!({"data": [1, 2]});
+        let result = client.navigate_root(&json, Some("data.5"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("out of bounds"));
+    }
+
+    #[test]
+    fn test_navigate_root_missing_key() {
+        let desc = make_test_descriptor();
+        let client = ConfigurableExchangeClient::new(desc);
+        let json = serde_json::json!({"data": {"nested": 1}});
+        let result = client.navigate_root(&json, Some("data.missing_key"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("missing key"));
+    }
+
+    #[test]
+    fn test_interpolate_json_array() {
+        let desc = make_test_descriptor();
+        let client = ConfigurableExchangeClient::new(desc);
+        let template = serde_json::json!(["{pair}", "{limit}", 42]);
+        let result = client.interpolate_json(&template, "BTC_USDT", "100");
+        assert_eq!(result, serde_json::json!(["BTC_USDT", "100", 42]));
+    }
+
+    #[test]
+    fn test_interpolate_json_passthrough() {
+        let desc = make_test_descriptor();
+        let client = ConfigurableExchangeClient::new(desc);
+        assert_eq!(
+            client.interpolate_json(&serde_json::json!(42), "BTC", "100"),
+            serde_json::json!(42)
+        );
+        assert_eq!(
+            client.interpolate_json(&serde_json::json!(true), "BTC", "100"),
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            client.interpolate_json(&serde_json::json!(null), "BTC", "100"),
+            serde_json::json!(null)
+        );
+    }
 }

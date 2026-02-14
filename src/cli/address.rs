@@ -988,6 +988,22 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    #[test]
+    fn test_address_args_debug() {
+        let args = AddressArgs {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: "ethereum".to_string(),
+            format: None,
+            include_txs: false,
+            include_tokens: false,
+            limit: 100,
+            report: None,
+            dossier: false,
+        };
+        let debug = format!("{:?}", args);
+        assert!(debug.contains("AddressArgs"));
+    }
+
     #[tokio::test]
     async fn test_run_all_features() {
         let config = Config::default();

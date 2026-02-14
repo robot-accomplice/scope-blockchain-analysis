@@ -418,4 +418,130 @@ mod tests {
         assert!(snapshot.ticker.is_none());
         assert!(snapshot.recent_trades.is_none());
     }
+
+    // ================================================================
+    // Execution estimate edge-case tests (zero-price branches)
+    // ================================================================
+
+    #[test]
+    fn test_estimate_buy_zero_mid_price() {
+        // Bids and asks both at price 0 -> mid_price = 0 -> returns None
+        let book = OrderBook {
+            pair: "X/Y".to_string(),
+            bids: vec![OrderBookLevel {
+                price: 0.0,
+                quantity: 100.0,
+            }],
+            asks: vec![OrderBookLevel {
+                price: 0.0,
+                quantity: 100.0,
+            }],
+        };
+        assert!(book.estimate_buy_execution(1000.0).is_none());
+    }
+
+    #[test]
+    fn test_estimate_sell_zero_mid_price() {
+        let book = OrderBook {
+            pair: "X/Y".to_string(),
+            bids: vec![OrderBookLevel {
+                price: 0.0,
+                quantity: 100.0,
+            }],
+            asks: vec![OrderBookLevel {
+                price: 0.0,
+                quantity: 100.0,
+            }],
+        };
+        assert!(book.estimate_sell_execution(1000.0).is_none());
+    }
+
+    #[test]
+    fn test_estimate_buy_zero_price_level() {
+        // Valid mid price but one ask level has price 0 -> take_qty branch = 0.0
+        let book = OrderBook {
+            pair: "X/Y".to_string(),
+            bids: vec![OrderBookLevel {
+                price: 1.0,
+                quantity: 100.0,
+            }],
+            asks: vec![
+                OrderBookLevel {
+                    price: 0.0,
+                    quantity: 100.0,
+                },
+                OrderBookLevel {
+                    price: 1.001,
+                    quantity: 10000.0,
+                },
+            ],
+        };
+        let est = book.estimate_buy_execution(50.0).unwrap();
+        assert!(est.fillable);
+    }
+
+    #[test]
+    fn test_estimate_sell_zero_price_level() {
+        // Valid mid price but one bid level has price 0
+        let book = OrderBook {
+            pair: "X/Y".to_string(),
+            bids: vec![
+                OrderBookLevel {
+                    price: 0.0,
+                    quantity: 100.0,
+                },
+                OrderBookLevel {
+                    price: 0.999,
+                    quantity: 10000.0,
+                },
+            ],
+            asks: vec![OrderBookLevel {
+                price: 1.0,
+                quantity: 100.0,
+            }],
+        };
+        let est = book.estimate_sell_execution(50.0).unwrap();
+        assert!(est.fillable);
+    }
+
+    #[test]
+    fn test_estimate_buy_zero_filled_qty() {
+        // All ask levels have price 0 -> filled_qty stays 0 -> vwap = mid
+        let book = OrderBook {
+            pair: "X/Y".to_string(),
+            bids: vec![OrderBookLevel {
+                price: 1.0,
+                quantity: 100.0,
+            }],
+            asks: vec![OrderBookLevel {
+                price: 0.0,
+                quantity: 0.0,
+            }],
+        };
+        let est = book.estimate_buy_execution(50.0);
+        // Can still return Some if mid exists
+        assert!(est.is_some());
+        let est = est.unwrap();
+        assert!(!est.fillable);
+    }
+
+    #[test]
+    fn test_estimate_sell_zero_filled_qty() {
+        // All bid levels have price 0 and value 0
+        let book = OrderBook {
+            pair: "X/Y".to_string(),
+            bids: vec![OrderBookLevel {
+                price: 0.0,
+                quantity: 0.0,
+            }],
+            asks: vec![OrderBookLevel {
+                price: 1.0,
+                quantity: 100.0,
+            }],
+        };
+        let est = book.estimate_sell_execution(50.0);
+        assert!(est.is_some());
+        let est = est.unwrap();
+        assert!(!est.fillable);
+    }
 }

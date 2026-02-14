@@ -566,4 +566,293 @@ capabilities:
         assert_eq!(ob.response.level_size_field, Some("size".to_string()));
         assert_eq!(ob.response_root, Some("pricebook".to_string()));
     }
+
+    #[test]
+    fn test_venue_descriptor_format_pair_upper() {
+        let desc = VenueDescriptor {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            base_url: "https://example.com".to_string(),
+            timeout_secs: None,
+            rate_limit_per_sec: None,
+            symbol: SymbolConfig {
+                template: "{base}{quote}".to_string(),
+                default_quote: "USDT".to_string(),
+                case: SymbolCase::Upper,
+            },
+            headers: HashMap::new(),
+            capabilities: CapabilitySet::default(),
+        };
+        assert_eq!(desc.format_pair("btc", None), "BTCUSDT");
+        assert_eq!(desc.format_pair("ETH", Some("USD")), "ETHUSD");
+    }
+
+    #[test]
+    fn test_venue_descriptor_format_pair_lower() {
+        let desc = VenueDescriptor {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            base_url: "https://example.com".to_string(),
+            timeout_secs: None,
+            rate_limit_per_sec: None,
+            symbol: SymbolConfig {
+                template: "{base}{quote}".to_string(),
+                default_quote: "USDT".to_string(),
+                case: SymbolCase::Lower,
+            },
+            headers: HashMap::new(),
+            capabilities: CapabilitySet::default(),
+        };
+        assert_eq!(desc.format_pair("BTC", None), "btcusdt");
+        assert_eq!(desc.format_pair("ETH", Some("usd")), "ethusd");
+    }
+
+    #[test]
+    fn test_venue_descriptor_format_pair_with_separator() {
+        let desc = VenueDescriptor {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            base_url: "https://example.com".to_string(),
+            timeout_secs: None,
+            rate_limit_per_sec: None,
+            symbol: SymbolConfig {
+                template: "{base}_{quote}".to_string(),
+                default_quote: "USDT".to_string(),
+                case: SymbolCase::Upper,
+            },
+            headers: HashMap::new(),
+            capabilities: CapabilitySet::default(),
+        };
+        assert_eq!(desc.format_pair("BTC", None), "BTC_USDT");
+        assert_eq!(desc.format_pair("PUSD", Some("USD")), "PUSD_USD");
+    }
+
+    #[test]
+    fn test_capability_names() {
+        // Empty capabilities
+        let desc = VenueDescriptor {
+            id: "empty".to_string(),
+            name: "Empty".to_string(),
+            base_url: "https://example.com".to_string(),
+            timeout_secs: None,
+            rate_limit_per_sec: None,
+            symbol: SymbolConfig {
+                template: "{base}{quote}".to_string(),
+                default_quote: "USDT".to_string(),
+                case: SymbolCase::Upper,
+            },
+            headers: HashMap::new(),
+            capabilities: CapabilitySet::default(),
+        };
+        assert!(desc.capability_names().is_empty());
+
+        // Only trades
+        let desc_trades = VenueDescriptor {
+            id: "trades_only".to_string(),
+            name: "Trades Only".to_string(),
+            base_url: "https://example.com".to_string(),
+            timeout_secs: None,
+            rate_limit_per_sec: None,
+            symbol: SymbolConfig {
+                template: "{base}{quote}".to_string(),
+                default_quote: "USDT".to_string(),
+                case: SymbolCase::Upper,
+            },
+            headers: HashMap::new(),
+            capabilities: CapabilitySet {
+                order_book: None,
+                ticker: None,
+                trades: Some(EndpointDescriptor {
+                    method: HttpMethod::GET,
+                    path: "/trades".to_string(),
+                    params: HashMap::new(),
+                    request_body: None,
+                    response_root: None,
+                    response: ResponseMapping::default(),
+                }),
+            },
+        };
+        assert_eq!(desc_trades.capability_names(), vec!["trades"]);
+    }
+
+    #[test]
+    fn test_has_order_book() {
+        let with_ob = VenueDescriptor {
+            id: "x".to_string(),
+            name: "X".to_string(),
+            base_url: "https://x.com".to_string(),
+            timeout_secs: None,
+            rate_limit_per_sec: None,
+            symbol: SymbolConfig {
+                template: "{base}{quote}".to_string(),
+                default_quote: "USDT".to_string(),
+                case: SymbolCase::Upper,
+            },
+            headers: HashMap::new(),
+            capabilities: CapabilitySet {
+                order_book: Some(EndpointDescriptor {
+                    method: HttpMethod::GET,
+                    path: "/depth".to_string(),
+                    params: HashMap::new(),
+                    request_body: None,
+                    response_root: None,
+                    response: ResponseMapping::default(),
+                }),
+                ticker: None,
+                trades: None,
+            },
+        };
+        assert!(with_ob.has_order_book());
+
+        let without = VenueDescriptor {
+            capabilities: CapabilitySet::default(),
+            ..with_ob
+        };
+        assert!(!without.has_order_book());
+    }
+
+    #[test]
+    fn test_has_ticker() {
+        let with_ticker = VenueDescriptor {
+            id: "x".to_string(),
+            name: "X".to_string(),
+            base_url: "https://x.com".to_string(),
+            timeout_secs: None,
+            rate_limit_per_sec: None,
+            symbol: SymbolConfig {
+                template: "{base}{quote}".to_string(),
+                default_quote: "USDT".to_string(),
+                case: SymbolCase::Upper,
+            },
+            headers: HashMap::new(),
+            capabilities: CapabilitySet {
+                order_book: None,
+                ticker: Some(EndpointDescriptor {
+                    method: HttpMethod::GET,
+                    path: "/ticker".to_string(),
+                    params: HashMap::new(),
+                    request_body: None,
+                    response_root: None,
+                    response: ResponseMapping::default(),
+                }),
+                trades: None,
+            },
+        };
+        assert!(with_ticker.has_ticker());
+
+        let without = VenueDescriptor {
+            capabilities: CapabilitySet::default(),
+            ..with_ticker
+        };
+        assert!(!without.has_ticker());
+    }
+
+    #[test]
+    fn test_has_trades() {
+        let with_trades = VenueDescriptor {
+            id: "x".to_string(),
+            name: "X".to_string(),
+            base_url: "https://x.com".to_string(),
+            timeout_secs: None,
+            rate_limit_per_sec: None,
+            symbol: SymbolConfig {
+                template: "{base}{quote}".to_string(),
+                default_quote: "USDT".to_string(),
+                case: SymbolCase::Upper,
+            },
+            headers: HashMap::new(),
+            capabilities: CapabilitySet {
+                order_book: None,
+                ticker: None,
+                trades: Some(EndpointDescriptor {
+                    method: HttpMethod::GET,
+                    path: "/trades".to_string(),
+                    params: HashMap::new(),
+                    request_body: None,
+                    response_root: None,
+                    response: ResponseMapping::default(),
+                }),
+            },
+        };
+        assert!(with_trades.has_trades());
+
+        let without = VenueDescriptor {
+            capabilities: CapabilitySet::default(),
+            ..with_trades
+        };
+        assert!(!without.has_trades());
+    }
+
+    #[test]
+    fn test_response_mapping_default() {
+        let m = ResponseMapping::default();
+        assert!(m.asks_key.is_none());
+        assert!(m.bids_key.is_none());
+        assert!(m.level_format.is_none());
+        assert!(m.side.is_none());
+    }
+
+    #[test]
+    fn test_capability_set_default() {
+        let c = CapabilitySet::default();
+        assert!(c.order_book.is_none());
+        assert!(c.ticker.is_none());
+        assert!(c.trades.is_none());
+    }
+
+    #[test]
+    fn test_deserialize_full_descriptor_yaml() {
+        let yaml = r#"
+id: test_venue
+name: Test Venue Full
+base_url: https://api.test.com
+timeout_secs: 30
+rate_limit_per_sec: 5
+
+symbol:
+  template: "{base}-{quote}"
+  default_quote: USD
+  case: upper
+
+headers:
+  X-API-KEY: "placeholder"
+
+capabilities:
+  order_book:
+    path: /book
+    params:
+      pair: "{pair}"
+    response:
+      asks_key: asks
+      bids_key: bids
+  ticker:
+    path: /ticker
+    response:
+      last_price: last
+  trades:
+    path: /trades
+    response:
+      price: p
+      quantity: q
+"#;
+        let desc: VenueDescriptor = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(desc.id, "test_venue");
+        assert_eq!(desc.name, "Test Venue Full");
+        assert_eq!(desc.base_url, "https://api.test.com");
+        assert_eq!(desc.timeout_secs, Some(30));
+        assert_eq!(desc.rate_limit_per_sec, Some(5));
+        assert_eq!(desc.symbol.template, "{base}-{quote}");
+        assert_eq!(desc.symbol.default_quote, "USD");
+        assert_eq!(
+            desc.headers.get("X-API-KEY"),
+            Some(&"placeholder".to_string())
+        );
+        assert!(desc.has_order_book());
+        assert!(desc.has_ticker());
+        assert!(desc.has_trades());
+        assert_eq!(
+            desc.capability_names(),
+            vec!["order_book", "ticker", "trades"]
+        );
+    }
 }

@@ -349,4 +349,67 @@ mod tests {
         let status = response.status();
         assert!(status.is_success() || status.is_client_error() || status.is_server_error());
     }
+
+    #[tokio::test]
+    async fn test_handle_market_with_cex_venue() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
+        use axum::extract::State;
+        use axum::response::IntoResponse;
+
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+        let req = MarketRequest {
+            pair: "BTC".to_string(),
+            market_venue: "binance".to_string(),
+            chain: "ethereum".to_string(),
+            peg: 1.0,
+            min_levels: 1,
+            min_depth: 50.0,
+            peg_range: 0.01,
+        };
+        let response = handle(State(state), axum::Json(req)).await.into_response();
+        let status = response.status();
+        assert!(
+            status.is_success() || status.is_server_error(),
+            "Unexpected status: {}",
+            status
+        );
+    }
+
+    #[test]
+    fn test_is_dex_venue() {
+        assert!(is_dex_venue("eth"));
+        assert!(is_dex_venue("ethereum"));
+        assert!(is_dex_venue("solana"));
+        assert!(!is_dex_venue("binance"));
+        assert!(!is_dex_venue("mexc"));
+    }
+
+    #[test]
+    fn test_dex_venue_to_chain() {
+        assert_eq!(dex_venue_to_chain("eth"), "ethereum");
+        assert_eq!(dex_venue_to_chain("ethereum"), "ethereum");
+        assert_eq!(dex_venue_to_chain("solana"), "solana");
+        assert_eq!(dex_venue_to_chain("unknown"), "ethereum");
+    }
+
+    #[test]
+    fn test_market_request_debug() {
+        let req = MarketRequest {
+            pair: "USDC".to_string(),
+            market_venue: "binance".to_string(),
+            chain: "ethereum".to_string(),
+            peg: 1.0,
+            min_levels: 6,
+            min_depth: 3000.0,
+            peg_range: 0.001,
+        };
+        let debug = format!("{:?}", req);
+        assert!(debug.contains("MarketRequest"));
+    }
 }

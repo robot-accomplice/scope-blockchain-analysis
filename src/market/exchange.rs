@@ -186,7 +186,26 @@ impl std::fmt::Debug for ExchangeClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::market::descriptor::{CapabilitySet, SymbolCase, SymbolConfig, VenueDescriptor};
     use crate::market::registry::VenueRegistry;
+    use std::collections::HashMap;
+
+    fn make_empty_descriptor() -> VenueDescriptor {
+        VenueDescriptor {
+            id: "empty".to_string(),
+            name: "Empty".to_string(),
+            base_url: "https://example.com".to_string(),
+            timeout_secs: Some(5),
+            rate_limit_per_sec: None,
+            symbol: SymbolConfig {
+                template: "{base}{quote}".to_string(),
+                default_quote: "USDT".to_string(),
+                case: SymbolCase::Upper,
+            },
+            headers: HashMap::new(),
+            capabilities: CapabilitySet::default(),
+        }
+    }
 
     #[test]
     fn test_exchange_client_from_binance_descriptor() {
@@ -234,5 +253,60 @@ mod tests {
         let debug = format!("{:?}", client);
         assert!(debug.contains("okx"));
         assert!(debug.contains("has_order_book: true"));
+    }
+
+    #[test]
+    fn test_empty_descriptor_has_no_capabilities() {
+        let desc = make_empty_descriptor();
+        let client = ExchangeClient::from_descriptor(&desc);
+
+        assert!(!client.has_order_book());
+        assert!(!client.has_ticker());
+        assert!(!client.has_trade_history());
+    }
+
+    #[tokio::test]
+    async fn test_fetch_order_book_without_capability_returns_error() {
+        let desc = make_empty_descriptor();
+        let client = ExchangeClient::from_descriptor(&desc);
+
+        let err = client.fetch_order_book("BTCUSDT").await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("Empty"));
+        assert!(msg.contains("does not support order book"));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_ticker_without_capability_returns_error() {
+        let desc = make_empty_descriptor();
+        let client = ExchangeClient::from_descriptor(&desc);
+
+        let err = client.fetch_ticker("BTCUSDT").await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("Empty"));
+        assert!(msg.contains("does not support ticker"));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_recent_trades_without_capability_returns_error() {
+        let desc = make_empty_descriptor();
+        let client = ExchangeClient::from_descriptor(&desc);
+
+        let err = client.fetch_recent_trades("BTCUSDT", 50).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("Empty"));
+        assert!(msg.contains("does not support trades"));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_market_snapshot_empty_descriptor_returns_all_none() {
+        let desc = make_empty_descriptor();
+        let client = ExchangeClient::from_descriptor(&desc);
+
+        let snapshot = client.fetch_market_snapshot("BTCUSDT").await;
+
+        assert!(snapshot.order_book.is_none());
+        assert!(snapshot.ticker.is_none());
+        assert!(snapshot.recent_trades.is_none());
     }
 }

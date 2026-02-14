@@ -417,8 +417,11 @@ fn print_json_schema() {
 // =============================================================================
 
 fn run_init(args: InitArgs) -> Result<()> {
-    let dest = VenueRegistry::user_venues_dir();
+    run_init_impl(args, VenueRegistry::user_venues_dir())
+}
 
+/// Core init logic with explicit destination path (used by tests).
+fn run_init_impl(args: InitArgs, dest: std::path::PathBuf) -> Result<()> {
     // Ensure directory exists
     if !dest.exists() {
         std::fs::create_dir_all(&dest).map_err(|e| {
@@ -861,5 +864,100 @@ capabilities:
         assert!(serialized.contains("Roundtrip Exchange"));
         assert!(serialized.contains("/api/depth"));
         assert!(serialized.contains("case: lower"));
+    }
+
+    #[test]
+    fn test_run_init_to_temp_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().to_path_buf();
+        let args = InitArgs { force: true };
+        let result = run_init_impl(args, dest.clone());
+        assert!(result.is_ok());
+
+        // Verify venue files were created (registry has 11 built-in venues)
+        let registry = VenueRegistry::load().unwrap();
+        for id in registry.list() {
+            let filename = format!("{}.yaml", id);
+            let target = dest.join(&filename);
+            assert!(target.exists(), "Expected {} to exist", filename);
+            let content = std::fs::read_to_string(&target).unwrap();
+            assert!(content.contains(&format!("id: {}", id)));
+        }
+    }
+
+    #[test]
+    fn test_serialize_full_descriptor() {
+        let yaml = r#"
+id: full_caps
+name: Full Capabilities Exchange
+base_url: https://api.full.com
+symbol:
+  template: "{base}{quote}"
+  default_quote: USDT
+capabilities:
+  order_book:
+    path: /api/depth
+    params:
+      symbol: "{pair}"
+    response:
+      asks_key: asks
+      bids_key: bids
+      level_format: positional
+  ticker:
+    path: /api/ticker
+    params:
+      symbol: "{pair}"
+    response:
+      last_price: lastPrice
+      high_24h: high
+      low_24h: low
+  trades:
+    path: /api/trades
+    params:
+      symbol: "{pair}"
+      limit: "{limit}"
+    response:
+      items_key: data
+      price: price
+      quantity: qty
+      timestamp_ms: time
+      side:
+        field: side
+        mapping:
+          buy: buy
+          sell: sell
+"#;
+        let desc: VenueDescriptor = serde_yaml::from_str(yaml).unwrap();
+        let serialized = serialize_descriptor_yaml(&desc);
+        assert!(serialized.contains("order_book:"));
+        assert!(serialized.contains("ticker:"));
+        assert!(serialized.contains("trades:"));
+        assert!(serialized.contains("asks_key"));
+        assert!(serialized.contains("last_price"));
+        assert!(serialized.contains("items_key"));
+    }
+
+    #[test]
+    fn test_run_init_skips_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().to_path_buf();
+
+        // Write an existing binance.yaml before init
+        let existing_path = dest.join("binance.yaml");
+        std::fs::create_dir_all(&dest).unwrap();
+        let original_content = "id: binance\n# pre-existing file\n";
+        std::fs::write(&existing_path, original_content).unwrap();
+
+        // Run init with force=false
+        let args = InitArgs { force: false };
+        let result = run_init_impl(args, dest.clone());
+        assert!(result.is_ok());
+
+        // Verify binance.yaml was NOT overwritten (content unchanged)
+        let content = std::fs::read_to_string(&existing_path).unwrap();
+        assert_eq!(
+            content, original_content,
+            "Existing file should not be overwritten when force=false"
+        );
     }
 }

@@ -525,4 +525,116 @@ mod tests {
             .any(|c| matches!(c, HealthCheck::Fail(m) if m.contains("sell")));
         assert!(has_fail);
     }
+
+    #[test]
+    fn test_format_text_with_volume_and_spread() {
+        let book = OrderBook {
+            pair: "USDC/USDT".to_string(),
+            bids: vec![
+                OrderBookLevel {
+                    price: 0.9999,
+                    quantity: 1000.0,
+                },
+                OrderBookLevel {
+                    price: 0.9998,
+                    quantity: 1000.0,
+                },
+            ],
+            asks: vec![
+                OrderBookLevel {
+                    price: 1.0001,
+                    quantity: 1000.0,
+                },
+                OrderBookLevel {
+                    price: 1.0002,
+                    quantity: 1000.0,
+                },
+            ],
+        };
+        let summary = MarketSummary::from_order_book(
+            &book,
+            1.0,
+            &HealthThresholds::default(),
+            Some(50_000.0),
+        );
+        let out = summary.format_text(Some("binance"));
+        assert!(out.contains("Volume (24h)"));
+        assert!(out.contains("50000"));
+        assert!(out.contains("Spread"));
+    }
+
+    #[test]
+    fn test_format_text_with_outliers_and_many_levels() {
+        // Book with levels outside peg range (peg_range*5 = 0.005) -> outliers
+        // price_lo=0.995, price_hi=1.005 - asks above 1.005 excluded
+        let mut asks: Vec<OrderBookLevel> = (0..12)
+            .map(|i| OrderBookLevel {
+                price: 1.0 + 0.0001 * (i + 1) as f64, // 1.0001 .. 1.0012
+                quantity: 500.0,
+            })
+            .collect();
+        asks.push(OrderBookLevel {
+            price: 1.01, // outlier
+            quantity: 100.0,
+        });
+        let book = OrderBook {
+            pair: "PUSD/USDT".to_string(),
+            bids: vec![
+                OrderBookLevel {
+                    price: 0.9999,
+                    quantity: 600.0,
+                },
+                OrderBookLevel {
+                    price: 0.9998,
+                    quantity: 600.0,
+                },
+                OrderBookLevel {
+                    price: 0.9997,
+                    quantity: 600.0,
+                },
+                OrderBookLevel {
+                    price: 0.9996,
+                    quantity: 600.0,
+                },
+                OrderBookLevel {
+                    price: 0.9995,
+                    quantity: 600.0,
+                },
+                OrderBookLevel {
+                    price: 0.9994,
+                    quantity: 600.0,
+                },
+            ],
+            asks,
+        };
+        let summary =
+            MarketSummary::from_order_book(&book, 1.0, &HealthThresholds::default(), None);
+        let out = summary.format_text(None);
+        assert!(
+            out.contains("outliers excl.") || summary.ask_outliers > 0 || summary.bid_outliers > 0
+        );
+        assert!(out.contains("... +")); // truncation for > 8 levels
+    }
+
+    #[test]
+    fn test_format_text_execution_fillable() {
+        // Sufficient liquidity for 10k buy/sell -> fillable
+        let book = OrderBook {
+            pair: "USDC/USDT".to_string(),
+            bids: vec![OrderBookLevel {
+                price: 0.9999,
+                quantity: 20_000.0,
+            }],
+            asks: vec![OrderBookLevel {
+                price: 1.0001,
+                quantity: 20_000.0,
+            }],
+        };
+        let summary =
+            MarketSummary::from_order_book(&book, 1.0, &HealthThresholds::default(), None);
+        let out = summary.format_text(Some("cex"));
+        assert!(out.contains("Exec 10K buy"));
+        assert!(out.contains("Exec 10K sell"));
+        assert!(out.contains("slippage") || out.contains("insufficient"));
+    }
 }

@@ -269,6 +269,12 @@ mod tests {
     }
 
     #[test]
+    fn test_strsim_distance_completely_different() {
+        assert_eq!(strsim_distance("abc", "xyz"), 3);
+        assert_eq!(strsim_distance("hello", "world"), 4);
+    }
+
+    #[test]
     fn test_validate_yaml_valid() {
         let yaml = r#"
 id: test
@@ -316,5 +322,41 @@ symbol:
             let pair = desc.format_pair("BTC", None);
             assert!(!pair.is_empty(), "Venue {} produced empty pair", id);
         }
+    }
+
+    #[test]
+    fn test_registry_contains_existing_and_non_existing() {
+        let registry = VenueRegistry::default();
+        assert!(registry.contains("binance"));
+        assert!(registry.contains("kraken"));
+        assert!(!registry.contains("nonexistent"));
+        assert!(!registry.contains("binace")); // typo, not exact match
+    }
+
+    #[test]
+    fn test_registry_is_empty_returns_false_for_default() {
+        let registry = VenueRegistry::default();
+        assert!(!registry.is_empty());
+    }
+
+    #[test]
+    fn test_create_exchange_client_error_unknown_venue() {
+        let registry = VenueRegistry::default();
+        let err = registry
+            .create_exchange_client("nonexistent_venue_xyz")
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("Unknown venue"));
+        assert!(msg.contains("nonexistent_venue_xyz"));
+    }
+
+    #[test]
+    fn test_create_exchange_client_error_includes_did_you_mean() {
+        let registry = VenueRegistry::default();
+        let err = registry.create_exchange_client("binace").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("Unknown venue"));
+        assert!(msg.contains("Did you mean"));
+        assert!(msg.contains("binance"));
     }
 }

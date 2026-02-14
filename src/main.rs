@@ -59,9 +59,9 @@ use clap::{CommandFactory, Parser};
 use clap_complete::generate;
 use scope::Config;
 use scope::chains::DefaultClientFactory;
+use scope::cli::errors::display_error;
 use scope::cli::{Cli, Commands};
 use scope::config::OutputFormat;
-use scope::error::ScopeError;
 use std::io::{self, Write};
 use tracing_subscriber::EnvFilter;
 
@@ -389,58 +389,6 @@ fn init_logging(verbosity: u8) {
     }
 }
 
-/// Displays an error with a remediation hint when available.
-///
-/// Maps common error types to actionable suggestions so users
-/// know how to recover without consulting documentation.
-fn display_error(e: &ScopeError) {
-    // Extract the user-facing message, stripping redundant "Not found: " etc. prefixes
-    let msg = match e {
-        ScopeError::NotFound(inner) => inner.clone(),
-        other => format!("{}", other),
-    };
-
-    eprintln!("\n  ✗ {}", msg);
-
-    if let Some(hint) = error_suggestion(e) {
-        eprintln!("\n  {}", hint);
-    }
-    eprintln!();
-}
-
-/// Returns a user-facing suggestion for common error types.
-fn error_suggestion(e: &ScopeError) -> Option<&'static str> {
-    match e {
-        ScopeError::InvalidAddress(_) => Some(
-            "Ensure the address format matches the target chain.\n      \
-             EVM: 0x followed by 40 hex characters\n      \
-             Solana: base58 encoded public key\n      \
-             Tron: T followed by base58 characters",
-        ),
-        ScopeError::InvalidHash(_) => Some(
-            "Ensure the transaction hash matches the target chain.\n      \
-             EVM: 0x followed by 64 hex characters\n      \
-             Solana: base58 encoded signature",
-        ),
-        ScopeError::Config(_) => Some("Run `scope setup` to create or repair your configuration."),
-        ScopeError::Request(_) | ScopeError::Network(_) => Some(
-            "Check your network connection and try again.\n      \
-             Use -v for more details on the failing request.",
-        ),
-        ScopeError::Api(msg)
-            if msg.contains("401") || msg.contains("403") || msg.contains("key") =>
-        {
-            Some(
-                "Your API key may be missing or invalid.\n      Run `scope setup --key <provider>` to configure it.",
-            )
-        }
-        ScopeError::NotFound(_) => Some(
-            "The resource was not found. Verify the address, hash, or token exists on the specified chain.",
-        ),
-        _ => None,
-    }
-}
-
 // ============================================================================
 // Unit Tests
 // ============================================================================
@@ -516,60 +464,34 @@ mod tests {
     }
 
     #[test]
-    fn test_error_suggestion_invalid_address() {
-        let err = ScopeError::InvalidAddress("bad".into());
-        let hint = error_suggestion(&err);
-        assert!(hint.is_some());
-        assert!(hint.unwrap().contains("EVM"));
+    fn test_config_file_exists_with_explicit_path() {
+        // Create a temp file and point CLI at it
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("test_config.toml");
+        std::fs::write(&config_path, "").unwrap();
+
+        let cli = Cli::try_parse_from([
+            "scope",
+            "--config",
+            config_path.to_str().unwrap(),
+            "venues",
+            "list",
+        ])
+        .unwrap();
+        assert!(config_file_exists(&cli));
     }
 
     #[test]
-    fn test_error_suggestion_invalid_hash() {
-        let err = ScopeError::InvalidHash("bad".into());
-        let hint = error_suggestion(&err);
-        assert!(hint.is_some());
-        assert!(hint.unwrap().contains("64 hex"));
-    }
-
-    #[test]
-    fn test_error_suggestion_config() {
-        use std::path::PathBuf;
-        let err = ScopeError::Config(scope::error::ConfigError::NotFound {
-            path: PathBuf::from("/missing"),
-        });
-        let hint = error_suggestion(&err);
-        assert!(hint.is_some());
-        assert!(hint.unwrap().contains("scope setup"));
-    }
-
-    #[test]
-    fn test_error_suggestion_network() {
-        let err = ScopeError::Network("timeout".into());
-        let hint = error_suggestion(&err);
-        assert!(hint.is_some());
-        assert!(hint.unwrap().contains("network"));
-    }
-
-    #[test]
-    fn test_error_suggestion_api_auth() {
-        let err = ScopeError::Api("401 Unauthorized".into());
-        let hint = error_suggestion(&err);
-        assert!(hint.is_some());
-        assert!(hint.unwrap().contains("API key"));
-    }
-
-    #[test]
-    fn test_error_suggestion_not_found() {
-        let err = ScopeError::NotFound("address".into());
-        let hint = error_suggestion(&err);
-        assert!(hint.is_some());
-        assert!(hint.unwrap().contains("not found"));
-    }
-
-    #[test]
-    fn test_error_suggestion_other_returns_none() {
-        let err = ScopeError::Other("random".into());
-        assert!(error_suggestion(&err).is_none());
+    fn test_config_file_exists_nonexistent() {
+        let cli = Cli::try_parse_from([
+            "scope",
+            "--config",
+            "/tmp/nonexistent_scope_config_test.toml",
+            "venues",
+            "list",
+        ])
+        .unwrap();
+        assert!(!config_file_exists(&cli));
     }
 
     #[test]

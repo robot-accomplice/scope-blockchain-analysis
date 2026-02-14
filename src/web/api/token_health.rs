@@ -273,4 +273,53 @@ mod tests {
         let status = response.status();
         assert!(status.is_success() || status.is_client_error() || status.is_server_error());
     }
+
+    #[tokio::test]
+    async fn test_handle_token_health_with_cex_market() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
+        use axum::extract::State;
+        use axum::response::IntoResponse;
+
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+        let req = TokenHealthRequest {
+            token: "USDC".to_string(),
+            chain: "ethereum".to_string(),
+            with_market: true,
+            market_venue: "binance".to_string(), // CEX path
+        };
+        let response = handle(State(state), axum::Json(req)).await.into_response();
+        let status = response.status();
+        // Either succeeds (200) or fails gracefully (500)
+        assert!(status.is_success() || status.is_server_error());
+    }
+
+    #[test]
+    fn test_is_dex_venue() {
+        assert!(is_dex_venue("ethereum"));
+        assert!(is_dex_venue("eth"));
+        assert!(is_dex_venue("Ethereum"));
+        assert!(is_dex_venue("ETH"));
+        assert!(is_dex_venue("solana"));
+        assert!(is_dex_venue("Solana"));
+        assert!(!is_dex_venue("binance"));
+        assert!(!is_dex_venue("mexc"));
+        assert!(!is_dex_venue("okx"));
+        assert!(!is_dex_venue(""));
+    }
+
+    #[test]
+    fn test_dex_venue_to_chain() {
+        assert_eq!(dex_venue_to_chain("ethereum"), "ethereum");
+        assert_eq!(dex_venue_to_chain("eth"), "ethereum");
+        assert_eq!(dex_venue_to_chain("Ethereum"), "ethereum");
+        assert_eq!(dex_venue_to_chain("solana"), "solana");
+        assert_eq!(dex_venue_to_chain("Solana"), "solana");
+        assert_eq!(dex_venue_to_chain("unknown"), "ethereum"); // default
+    }
 }
