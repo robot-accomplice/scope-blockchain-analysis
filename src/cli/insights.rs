@@ -300,8 +300,15 @@ pub async fn run(
         }
         InferredTarget::Token { chain } => {
             output.push_str("## Observations\n\n");
-            let analytics =
-                fetch_analytics_for_input(&args.target, chain, Period::Hour24, 10, clients).await?;
+            let analytics = fetch_analytics_for_input(
+                &args.target,
+                chain,
+                Period::Hour24,
+                10,
+                clients,
+                Some(&sp),
+            )
+            .await?;
 
             // Token risk summary (interpretive bullets)
             let risk_summary = report::token_risk_summary(&analytics);

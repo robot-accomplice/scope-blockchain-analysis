@@ -289,7 +289,8 @@ async fn fetch_book_and_volume(
         // DEX path: synthesize from DexScreener analytics
         let chain = dex_venue_to_chain(&args.venue);
         let analytics =
-            crawl::fetch_analytics_for_input(&base, chain, Period::Hour24, 10, factory).await?;
+            crawl::fetch_analytics_for_input(&base, chain, Period::Hour24, 10, factory, None)
+                .await?;
         if analytics.dex_pairs.is_empty() {
             return Err(ScopeError::Chain(format!(
                 "No DEX pairs found for {} on {}",

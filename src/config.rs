@@ -273,12 +273,11 @@ impl Config {
 
     /// Returns the default data directory for address book storage.
     ///
-    /// On Linux/macOS: `~/.local/share/scope`
-    /// On Windows: `%LOCALAPPDATA%\scope`
+    /// Uses `~/.config/scope/data` on all platforms for consistency.
     pub fn default_data_dir() -> PathBuf {
-        dirs::data_local_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("scope")
+        dirs::home_dir()
+            .map(|h| h.join(".config").join("scope").join("data"))
+            .unwrap_or_else(|| PathBuf::from(".config").join("scope").join("data"))
     }
 
     /// Returns the effective data directory, using config or default.

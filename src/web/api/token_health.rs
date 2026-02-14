@@ -46,6 +46,7 @@ pub async fn handle(
         Period::Hour24,
         10,
         &state.factory,
+        None,
     )
     .await
     {

@@ -144,10 +144,15 @@ struct ResolvedToken {
 /// 3. Token names/symbols - searched via DEX API with interactive selection
 ///
 /// Uses `dex_client` for search to enable dependency injection and testing.
+///
+/// When an optional `spinner` is provided, progress messages are routed through
+/// it instead of printing directly to stderr/stdout, keeping output on a single
+/// updating line.
 async fn resolve_token_input(
     args: &CrawlArgs,
     aliases: &mut TokenAliases,
     dex_client: &dyn DexDataSource,
+    spinner: Option<&crate::cli::progress::Spinner>,
 ) -> Result<ResolvedToken> {
     let input = args.token.trim();
 
@@ -175,10 +180,15 @@ async fn resolve_token_input(
     };
 
     if let Some(token_info) = aliases.get(input, chain_filter) {
-        eprintln!(
-            "  Using saved token: {} ({}) on {}",
+        let msg = format!(
+            "Using saved token: {} ({}) on {}",
             token_info.symbol, token_info.name, token_info.chain
         );
+        if let Some(sp) = spinner {
+            sp.set_message(msg);
+        } else {
+            eprintln!("  {}", msg);
+        }
         return Ok(ResolvedToken {
             address: token_info.address.clone(),
             chain: token_info.chain.clone(),
@@ -187,7 +197,12 @@ async fn resolve_token_input(
     }
 
     // Search for tokens by name/symbol
-    eprintln!("  Searching for '{}'...", input);
+    let search_msg = format!("Searching for '{}'...", input);
+    if let Some(sp) = spinner {
+        sp.set_message(search_msg);
+    } else {
+        eprintln!("  {}", search_msg);
+    }
 
     let search_results = dex_client.search_tokens(input, chain_filter).await?;
 
@@ -199,7 +214,28 @@ async fn resolve_token_input(
     }
 
     // Display results and let user select
-    let selected = select_token(&search_results, args.yes)?;
+    // When a spinner is active, suspend it for interactive selection (multi-result)
+    // or route auto-select messages through it (single-result / --yes).
+    let selected = if let Some(sp) = spinner {
+        if search_results.len() == 1 || args.yes {
+            // Auto-select: route "Selected:" through the spinner
+            let sel = &search_results[0];
+            sp.set_message(format!(
+                "Selected: {} ({}) on {} - ${:.6}",
+                sel.symbol,
+                sel.name,
+                sel.chain,
+                sel.price_usd.unwrap_or(0.0)
+            ));
+            sel
+        } else {
+            // Interactive: suspend spinner for the prompt
+            let result = sp.suspend(|| select_token(&search_results, args.yes));
+            result?
+        }
+    } else {
+        select_token(&search_results, args.yes)?
+    };
 
     // Offer to save the alias
     if args.save || (!args.yes && prompt_save_alias()) {
@@ -211,6 +247,11 @@ async fn resolve_token_input(
         );
         if let Err(e) = aliases.save() {
             tracing::debug!("Failed to save token alias: {}", e);
+        } else if let Some(sp) = spinner {
+            sp.println(&format!(
+                "Saved {} as alias for future use.",
+                selected.symbol
+            ));
         } else {
             println!("Saved {} as alias for future use.", selected.symbol);
         }
@@ -342,12 +383,16 @@ fn prompt_save_alias_impl(reader: &mut impl BufRead, writer: &mut impl Write) ->
 
 /// Fetches token analytics for composite commands (e.g., token-health).
 /// Resolves token input (address or symbol) and returns full analytics.
+///
+/// When an optional `spinner` is provided, progress messages (searching,
+/// selecting) are routed through it for single-line in-place updates.
 pub async fn fetch_analytics_for_input(
     token_input: &str,
     chain: &str,
     period: Period,
     holders_limit: u32,
     clients: &dyn ChainClientFactory,
+    spinner: Option<&crate::cli::progress::Spinner>,
 ) -> Result<TokenAnalytics> {
     let args = CrawlArgs {
         token: token_input.to_string(),
@@ -362,7 +407,13 @@ pub async fn fetch_analytics_for_input(
     };
     let mut aliases = TokenAliases::load();
     let dex_client = clients.create_dex_client();
-    let resolved = resolve_token_input(&args, &mut aliases, dex_client.as_ref()).await?;
+    let resolved = resolve_token_input(&args, &mut aliases, dex_client.as_ref(), spinner).await?;
+    if let Some(sp) = spinner {
+        sp.set_message(format!(
+            "Fetching analytics for {} on {}...",
+            resolved.address, resolved.chain
+        ));
+    }
     let mut analytics =
         fetch_token_analytics(&resolved.address, &resolved.chain, &args, clients).await?;
     if let Some((symbol, name)) = &resolved.alias_info
@@ -396,9 +447,15 @@ pub async fn run(
     // Load token aliases
     let mut aliases = TokenAliases::load();
 
+    // Start spinner early so resolution messages route through it
+    let sp = crate::cli::progress::Spinner::new(&format!(
+        "Crawling token {} on {}...",
+        args.token, args.chain
+    ));
+
     // Resolve the token input to an address (uses factory's dex client for search)
     let dex_client = clients.create_dex_client();
-    let resolved = resolve_token_input(&args, &mut aliases, dex_client.as_ref()).await?;
+    let resolved = resolve_token_input(&args, &mut aliases, dex_client.as_ref(), Some(&sp)).await?;
 
     tracing::info!(
         token = %resolved.address,
@@ -407,8 +464,8 @@ pub async fn run(
         "Starting token crawl"
     );
 
-    let sp = crate::cli::progress::Spinner::new(&format!(
-        "Crawling token {} on {}...",
+    sp.set_message(format!(
+        "Fetching analytics for {} on {}...",
         resolved.address, resolved.chain
     ));
 

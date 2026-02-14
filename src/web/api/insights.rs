@@ -123,6 +123,7 @@ pub async fn handle(
                 crate::cli::crawl::Period::Hour24,
                 10,
                 &state.factory,
+                None,
             )
             .await
             {

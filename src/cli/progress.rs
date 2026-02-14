@@ -46,8 +46,8 @@ impl Spinner {
     }
 
     /// Updates the spinner message in-place.
-    pub fn set_message(&self, message: &str) {
-        self.bar.set_message(message.to_string());
+    pub fn set_message(&self, message: impl Into<String>) {
+        self.bar.set_message(message.into());
     }
 
     /// Finishes the spinner with a success message (checkmark).
@@ -67,6 +67,30 @@ impl Spinner {
     /// Finishes and clears the spinner line (no residual output).
     pub fn finish_and_clear(&self) {
         self.bar.finish_and_clear();
+    }
+
+    /// Prints a line above the spinner without garbling the animation.
+    ///
+    /// Uses `indicatif`'s built-in `println` which clears the spinner line,
+    /// writes the message, then redraws the spinner below it.
+    pub fn println(&self, message: &str) {
+        if self.bar.is_hidden() {
+            eprintln!("{}", message);
+        } else {
+            self.bar.println(message);
+        }
+    }
+
+    /// Temporarily suspends the spinner while running a closure, returning its result.
+    ///
+    /// The spinner is paused (line cleared) before `f` runs and resumed after.
+    /// Useful when other code needs to print to the terminal.
+    pub fn suspend<R, F: FnOnce() -> R>(&self, f: F) -> R {
+        if self.bar.is_hidden() {
+            f()
+        } else {
+            self.bar.suspend(f)
+        }
     }
 }
 
@@ -205,5 +229,22 @@ mod tests {
         sp.finish_warn("First warning");
         // finish_warn can be called multiple times (though unusual)
         sp.finish_warn("Second warning");
+    }
+
+    #[test]
+    fn test_spinner_println() {
+        let sp = Spinner::new("Working...");
+        sp.println("A message above the spinner");
+        sp.finish("Done");
+    }
+
+    #[test]
+    fn test_spinner_suspend() {
+        let sp = Spinner::new("Working...");
+        sp.suspend(|| {
+            // Code that prints directly
+            eprintln!("Suspended output");
+        });
+        sp.finish("Done");
     }
 }

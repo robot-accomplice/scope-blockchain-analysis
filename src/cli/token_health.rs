@@ -61,9 +61,15 @@ pub async fn run(
     };
     // 1. Fetch DEX analytics (crawl)
     let sp = crate::cli::progress::Spinner::new("Fetching token health data...");
-    let analytics =
-        crawl::fetch_analytics_for_input(&args.token, &args.chain, Period::Hour24, 10, clients)
-            .await?;
+    let analytics = crawl::fetch_analytics_for_input(
+        &args.token,
+        &args.chain,
+        Period::Hour24,
+        10,
+        clients,
+        Some(&sp),
+    )
+    .await?;
 
     // 2. Optionally fetch market summary for stablecoin
     let market_summary = if args.with_market {
@@ -101,15 +107,15 @@ pub async fn run(
                 ))
             } else {
                 if analytics.chain.ne(venue_chain) {
-                    eprintln!(
+                    sp.println(&format!(
                         "  Warning: DEX venue '{}' requires --chain {} (got {})",
                         args.venue, venue_chain, analytics.chain
-                    );
+                    ));
                 } else if analytics.dex_pairs.is_empty() {
-                    eprintln!(
+                    sp.println(&format!(
                         "  Warning: No DEX pairs found for {} on {}",
                         analytics.token.symbol, analytics.chain
-                    );
+                    ));
                 }
                 None
             }
@@ -137,17 +143,17 @@ pub async fn run(
                             ))
                         }
                         Err(e) => {
-                            eprintln!(
+                            sp.println(&format!(
                                 "  Warning: Market data unavailable for {} on {}",
                                 analytics.token.symbol, args.venue
-                            );
+                            ));
                             tracing::debug!("Market data error: {}", e);
                             None
                         }
                     }
                 }
                 Err(e) => {
-                    eprintln!("  Warning: {}", e);
+                    sp.println(&format!("  Warning: {}", e));
                     None
                 }
             }

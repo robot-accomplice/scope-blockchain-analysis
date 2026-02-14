@@ -140,12 +140,11 @@ impl VenueRegistry {
             .map(|(k, _)| k)
     }
 
-    /// Path to the user venues directory.
+    /// Path to the user venues directory (`~/.config/scope/venues/`).
     pub fn user_venues_dir() -> PathBuf {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("~/.config"))
-            .join("scope")
-            .join("venues")
+        dirs::home_dir()
+            .map(|h| h.join(".config").join("scope").join("venues"))
+            .unwrap_or_else(|| PathBuf::from(".config").join("scope").join("venues"))
     }
 
     /// Create an ExchangeClient for the given venue ID.

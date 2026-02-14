@@ -1,16 +1,43 @@
 //! Error display and remediation hints for CLI output.
+//!
+//! Colors errors red and hints dimmed when stderr is a TTY.
+//! Falls back to plain text when piped.
 
 use crate::error::ScopeError;
+use owo_colors::OwoColorize;
+use std::io::IsTerminal;
+
+/// Returns `true` when stderr is an interactive terminal.
+fn is_tty_stderr() -> bool {
+    std::io::stderr().is_terminal()
+}
 
 /// Displays an error with a remediation hint when available.
+///
+/// Uses color when stderr is a TTY, plain text otherwise.
 pub fn display_error(e: &ScopeError) {
+    display_error_styled(e, is_tty_stderr())
+}
+
+/// Internal styled implementation, testable with an explicit `tty` flag.
+fn display_error_styled(e: &ScopeError, tty: bool) {
     let msg = match e {
         ScopeError::NotFound(inner) => inner.clone(),
         other => format!("{}", other),
     };
-    eprintln!("\n  ✗ {}", msg);
+
+    if tty {
+        eprintln!("\n  {} {}", "✗".red().bold(), msg.red());
+    } else {
+        eprintln!("\n  ✗ {}", msg);
+    }
+
     if let Some(hint) = error_suggestion(e) {
-        eprintln!("\n  {}", hint);
+        if tty {
+            eprintln!("\n  {}", hint.dimmed());
+        } else {
+            eprintln!("\n  {}", hint);
+        }
     }
     eprintln!();
 }
@@ -52,6 +79,10 @@ pub fn error_suggestion(e: &ScopeError) -> Option<&'static str> {
 mod tests {
     use super::*;
 
+    // ================================================================
+    // display_error (delegates to non-TTY in CI)
+    // ================================================================
+
     #[test]
     fn test_display_error_not_found() {
         let err = ScopeError::NotFound("test resource".into());
@@ -81,6 +112,59 @@ mod tests {
         let err = ScopeError::Api("500 Internal Server Error".into());
         display_error(&err);
     }
+
+    // ================================================================
+    // display_error_styled — TTY branch (colored output)
+    // ================================================================
+
+    #[test]
+    fn test_display_error_styled_tty_not_found() {
+        let err = ScopeError::NotFound("test resource".into());
+        display_error_styled(&err, true);
+    }
+
+    #[test]
+    fn test_display_error_styled_tty_invalid_address() {
+        let err = ScopeError::InvalidAddress("0xbad".into());
+        display_error_styled(&err, true);
+    }
+
+    #[test]
+    fn test_display_error_styled_tty_config() {
+        use crate::error::ConfigError;
+        let err = ScopeError::Config(ConfigError::NotFound {
+            path: std::path::PathBuf::from("/missing"),
+        });
+        display_error_styled(&err, true);
+    }
+
+    #[test]
+    fn test_display_error_styled_tty_network() {
+        let err = ScopeError::Network("timeout".into());
+        display_error_styled(&err, true);
+    }
+
+    #[test]
+    fn test_display_error_styled_tty_api_auth() {
+        let err = ScopeError::Api("401 Unauthorized".into());
+        display_error_styled(&err, true);
+    }
+
+    #[test]
+    fn test_display_error_styled_tty_other_no_hint() {
+        let err = ScopeError::Other("random".into());
+        display_error_styled(&err, true);
+    }
+
+    #[test]
+    fn test_display_error_styled_non_tty() {
+        let err = ScopeError::NotFound("test".into());
+        display_error_styled(&err, false);
+    }
+
+    // ================================================================
+    // error_suggestion
+    // ================================================================
 
     #[test]
     fn test_error_suggestion_invalid_address() {
