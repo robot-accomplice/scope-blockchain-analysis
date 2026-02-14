@@ -13,19 +13,21 @@ A production-grade command-line tool for blockchain data analysis, portfolio tra
 - **Address Analysis**: Query balances (with USD valuation), transaction history, and token holdings for blockchain addresses
 - **Transaction Analysis**: Look up and decode blockchain transactions across all supported chains
 - **Token Crawling**: Crawl DEX data for any token -- price, volume, liquidity, holder analysis, and risk scoring with markdown report generation
-- **Live Monitoring**: Real-time TUI dashboard with four layout presets (Dashboard, Chart, Feed, Compact), responsive terminal sizing, config-driven widget visibility, price/volume/candlestick charts, price alerts, whale detection, CSV export, and auto-pause on input
+- **Live Monitoring**: Real-time TUI dashboard with five layout presets (Dashboard, Chart, Feed, Compact, Exchange), responsive terminal sizing, config-driven widget visibility, price/volume/candlestick charts, price alerts, whale detection, CSV export, and auto-pause on input
+- **Exchange Venues**: Data-driven CEX integration via YAML descriptors — 11 built-in venues (Binance, Biconomy, Bitget, Bybit, Coinbase, Crypto.com, Gate.io, HTX, Kraken, MEXC, OKX); add custom venues by dropping a YAML file in `~/.config/scope/venues/`
 - **Portfolio Management**: Track multiple addresses across chains with labels, tags, and aggregated balance views
 - **Compliance & Risk Assessment**: Risk scoring, transaction pattern detection, taint analysis, and compliance reporting
 - **Data Export**: Export address history and portfolio data to JSON or CSV with date range filtering
 - **Token Discovery**: Browse trending and boosted tokens from DexScreener (`scope discover` / `scope disc`)
-- **Market Command** (`scope market summary`): Peg and order book health for stablecoin markets; CEX (Binance, Biconomy) or DEX (Ethereum, Solana) venues; repeat mode with `--every`/`--duration`; `--report` and `--csv` export
-- **Token Health Suite** (`scope token-health` / `scope health`): DEX analytics with optional order book summary; venues: binance, biconomy, eth, solana
+- **Market Command** (`scope market summary`): Peg and order book health for stablecoin markets; any CEX venue from the registry or DEX (Ethereum, Solana); repeat mode with `--every`/`--duration`; `--report` and `--csv` export
+- **Token Health Suite** (`scope token-health` / `scope health`): DEX analytics with optional order book summary; any venue from the registry or DEX
+- **Venue Management** (`scope venues` / `scope ven`): List available venues, view the YAML schema, initialise user venues directory, validate custom descriptors
 - **Insights** (`scope insights` / `insight`): Infer chain and type (address, tx, token) from input; run relevant analyses and present unified observations
 - **Agent Output** (`scope --ai`): Global flag for markdown output to stdout (address, tx, crawl, discover, portfolio, export, token-health)
 - **Reporting**: Markdown reports for address, token, portfolio, and market commands; batch reports for multiple addresses (`scope report batch`); address dossier (address + risk combined)
 - **Shell Completion**: Tab-completion for bash, zsh, and fish (`scope completions <shell>`)
 - **Progress Indicators**: Spinners and progress bars for all long-running operations; auto-hidden in pipes
-- **Error Remediation**: Actionable hints for common errors (invalid format, missing config, network, auth)
+- **Colorized Errors**: Errors in red, remediation hints dimmed, plain text when piped
 - **Browser Mode** (`scope web` / `scope serve`): Locally hosted web UI (feature-gated; build with `--features web`)
 - **Interactive Mode**: REPL with preserved context between commands for faster workflow
 - **Setup Wizard**: Guided first-run configuration with `scope setup` for API keys and preferences
@@ -80,7 +82,7 @@ Use `--format json` when piping output to other tools or scripts. Use `--ai` whe
 
 ## Quick Start
 
-**→ [Full Quickstart Guide](docs/QUICKSTART.md)** — workflow-oriented guide for due diligence, token research, compliance, monitoring, and more.
+**-> [Full Quickstart Guide](docs/QUICKSTART.md)** — workflow-oriented guide for due diligence, token research, compliance, monitoring, and more.
 
 ```bash
 # Analyze an Ethereum address (auto-detects chain from address format)
@@ -114,34 +116,40 @@ scope compliance analyze 0xabc... --patterns structuring,layering
 scope crawl 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --chain ethereum
 
 # Live monitor -- launch directly from the command line
-scope monitor USDC                              # monitor by symbol (defaults to ethereum)
-scope mon PEPE --chain ethereum --layout chart-focus  # short alias with options
+scope monitor USDC                                          # defaults to ethereum
+scope mon PEPE --chain ethereum --layout chart-focus        # short alias with options
+scope monitor USDC --layout exchange                        # exchange-style: order book + chart + trades
 
-# Export data
-scope export --address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --output data.json
+# Exchange venues
+scope venues list                                           # show all available venues
+scope ven list --format json                                # machine-readable
+scope venues schema                                         # YAML schema for writing custom venues
+scope venues init                                           # copy built-in descriptors to ~/.config/scope/venues/
+scope venues validate my-venue.yaml                         # validate a custom descriptor
 
 # Token health (DEX + optional market)
 scope token-health USDC
-scope health USDC --with-market --market-venue binance
+scope health USDC --with-market --venue binance
 
 # Market peg and order book health
 scope market summary USDC
-scope market summary PUSD --market-venue biconomy --format json
+scope market summary PUSD --venue biconomy --format json
+scope market summary USDC --venue kraken
 
 # Unified insights — infer type and chain from any target
-scope insights 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2   # address → balance, tokens
-scope insights 0xabc123...                                 # tx hash → decoded tx
-scope insights USDC                                        # token symbol → DEX analytics
+scope insights 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2   # address -> balance, tokens
+scope insights 0xabc123...                                   # tx hash -> decoded tx
+scope insights USDC                                          # token symbol -> DEX analytics
 
 # Discover trending and boosted tokens
 scope discover
 scope discover --source boosts --chain ethereum --limit 10
 
+# Export data
+scope export --address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --output data.json
+
 # Batch report for multiple addresses
 scope report batch --addresses 0x742d...,0xabc... --output batch-report.md
-
-# Batch report with risk assessment per address
-scope report batch --addresses 0x742d...,0xabc... --output batch-report.md --with-risk
 
 # Agent-friendly markdown output
 scope --ai address 0x742d...
@@ -175,6 +183,7 @@ The web UI provides:
 - All CLI commands accessible via browser forms
 - JSON REST API at `/api/*` for programmatic access
 - Live WebSocket monitor with real-time price charts
+- Exchange venue selector and market snapshots
 - Configuration status and setup page
 
 ### Command Map
@@ -189,8 +198,11 @@ Not sure which command to use? Here's a quick decision tree:
 | Get token DEX data (price, volume, holders) | `scope crawl <token>` |
 | Token DEX + order book health (stablecoins) | `scope token-health <token> --with-market` |
 | Live real-time dashboard for a token | `scope monitor <token>` |
+| Exchange-style monitor (order book + trades) | `scope monitor <token> --layout exchange` |
 | Browse trending/boosted tokens | `scope discover` |
 | Check market peg/depth for a stablecoin | `scope market summary <symbol>` |
+| List available exchange venues | `scope venues list` |
+| Add a custom exchange venue | `scope venues schema` then drop YAML in `~/.config/scope/venues/` |
 | Assess compliance risk for an address | `scope compliance risk <addr>` |
 | Manage a portfolio of watched addresses | `scope portfolio add/remove/list/summary` |
 | Export data to JSON/CSV | `scope export --address <addr> --output file.json` |
@@ -199,6 +211,117 @@ Not sure which command to use? Here's a quick decision tree:
 ## Output Examples
 
 Representative output for key commands:
+
+### Venues list
+
+```bash
+> scope venues list
+```
+
+```text
+┌─ Available Venues ──────────────────────────────
+│  biconomy          order_book, ticker, trades
+│  binance           order_book, ticker, trades
+│  bitget            order_book, ticker, trades
+│  bybit             order_book, ticker, trades
+│  coinbase          order_book, ticker, trades
+│  crypto_com        order_book, ticker, trades
+│  gateio            order_book, ticker, trades
+│  htx               order_book, ticker, trades
+│  kraken            order_book, ticker, trades
+│  mexc              order_book, ticker, trades
+│  okx               order_book, ticker, trades
+├──────────────────────────────────────────────────
+│  Loaded            11 venues (0 built-in, 11 user)
+│  User dir          ~/.config/scope/venues
+└──────────────────────────────────────────────────
+```
+
+### Market summary (text)
+
+```bash
+> scope market summary USDC
+```
+
+```text
+┌─ USDC/USDT (binance) ───────────────────────────
+│
+├── Metrics
+│  Venue             binance
+│  Peg Target        1.0000
+│  Best Bid          1.0003  (+0.030%)
+│  Best Ask          1.0004  (+0.040%)
+│  Mid Price         1.0004  (+0.035%)
+│  Spread            0.0001  (0.010%)
+│  Volume (24h)      767883091 USDT
+│  Exec 10K buy      ~0.50 bps slippage
+│  Exec 10K sell     ~0.50 bps slippage
+│
+├── Ask Side — 42 levels, 95630691 USDT (+58 outliers excl.)
+│    1.0004  39143043.00 USDC  39158700.22 USDT
+│    1.0005  19270846.00 USDC  19280481.42 USDT
+│    1.0006  8915655.00 USDC  8921004.39 USDT
+│    ... +39 more levels
+│
+├── Bid Side — 49 levels, 174252594 USDT (+51 outliers excl.)
+│    1.0003  77790847.00 USDC  77814184.25 USDT
+│    1.0002  31092292.00 USDC  31098510.46 USDT
+│    1.0001  31875025.00 USDC  31878212.50 USDT
+│    ... +46 more levels
+│
+├── Health Checks
+│  ✓ No sells below peg
+│  ✓ Bid/Ask ratio: 1.82x
+│
+│  HEALTHY
+└──────────────────────────────────────────────────
+```
+
+### Market summary (JSON)
+
+```bash
+> scope market summary USDC --format json
+```
+
+```json
+{
+  "pair": "USDC/USDT",
+  "venue": "binance",
+  "peg_target": 1.0,
+  "best_bid": 1.0003,
+  "best_ask": 1.0004,
+  "mid_price": 1.00035,
+  "spread": 0.0001,
+  "volume_24h": 767883090.5,
+  "healthy": true,
+  "checks": [
+    {"status": "pass", "message": "No sells below peg"},
+    {"status": "pass", "message": "Bid/Ask ratio: 1.82x"}
+  ],
+  "execution_10k_buy": {"fillable": true, "slippage_bps": 0.5},
+  "execution_10k_sell": {"fillable": true, "slippage_bps": 0.5}
+}
+```
+
+### Token health
+
+```bash
+> scope token-health USDC
+```
+
+```text
+Fetching token health data...
+
+┌─ USDC   (USD Coin  ) ───────────────────────────
+│
+├── DEX Analytics
+│  Price             $1.002300
+│  24h Change        +0.00%
+│  24h Volume        $846.04K
+│  Liquidity         $810.64M
+│  Market Cap        $76.31B
+└──────────────────────────────────────────────────
+```
 
 ### Discover (table)
 
@@ -209,10 +332,10 @@ Representative output for key commands:
 ```text
 Featured Token Profiles (2) — limit 2
 --------------------------------------------------------------------------------
-  1. solana | 8dAsTqYBjG...h5Acpump | 8dAsTqYBjG9jyy7RkRhH8KkwmmZA7mFViWneh5Acpump...
-     https://dexscreener.com/solana/8dastqybjg9jyy7rkrhh8kkwmmza7mfviwneh5acpump
-  2. solana | BrRhmR14uo...cc4Xpump | -
-     https://dexscreener.com/solana/brrhmr14uohppfeuw6dcnxlpabsv5yz56zmpcc4xpump
+  1. solana | KeQnMAX5Ly...zJvMpump | -
+     https://dexscreener.com/solana/keqnmax5lydfbrcwvqhojlu84bgfsg9ahthzjvmpump
+  2. pulsechain | 0xE558edc9...0595aD11 | OLD GLORY RISE
+     https://dexscreener.com/pulsechain/0xe558edc934fdbb65cdf4868617d5f0d80595ad11
 ```
 
 ### Discover (JSON)
@@ -232,97 +355,77 @@ Featured Token Profiles (2) — limit 2
 ]
 ```
 
-### Market summary (text)
-
-```bash
-> scope market summary USDC
-```
-
-```text
-  USDC/USDT Market Summary (binance)
-  ────────────────────────────────────────────
-  Venue:          binance
-  Peg Target:     1.0000
-  Best Bid:       1.0006  (+0.060%)
-  Best Ask:       1.0007  (+0.070%)
-  Mid Price:      1.0006  (+0.065%)
-  Spread:         0.0001  (0.010%)
-  Volume (24h):   ~2B USDT
-  Execution:      10k buy:  ~0.50 bps slippage
-  Execution:      10k sell: ~0.50 bps slippage
-
-  Ask Side:   40 levels    ... USDT depth
-  Bid Side:   52 levels    ... USDT depth
-```
-
-### Market summary (JSON)
-
-```bash
-> scope market summary USDC --format json
-```
-
-```json
-{
-  "pair": "USDC/USDT",
-  "venue": "binance",
-  "peg_target": 1.0,
-  "best_bid": 1.0006,
-  "best_ask": 1.0007,
-  "mid_price": 1.0006,
-  "spread": 0.0001,
-  "volume_24h": 2027214951.6,
-  "healthy": true,
-  "checks": [
-    {"status": "pass", "message": "No sells below peg"},
-    {"status": "pass", "message": "Bid/Ask ratio: 1.62x"}
-  ],
-  "execution_10k_buy": {"fillable": true, "slippage_bps": 0.5},
-  "execution_10k_sell": {"fillable": true, "slippage_bps": 0.5}
-}
-```
-
-### Token health
-
-```bash
-scope token-health USDC
-```
-
-```text
-Searching for 'USDC'...
-Selected: USDC (USDC) on ethereum - $1.00
-
-# Token Health: USDC (USDC)
-
-## DEX Analytics
-==================================================
-Price:           $1.00
-24h Change:      -0.02%
-24h Volume:      $75.47M
-Liquidity:       $13.36M
-Market Cap:      $73.24B
-```
-
 ### Compliance risk
 
 ```bash
-scope compliance risk 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
+> scope compliance risk 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
 ```
 
 ```text
 Assessing risk for 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 on ethereum...
 
-🟢 Risk Assessment Report
+Risk Assessment Report
 ════════════════════════════════════════════════════════════
 Address:             0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
 Chain:               ethereum
 Risk Score:          1.9/10
-Risk Level:          🟢 Low
+Risk Level:          Low
 Assessed At:         2026-02-13 13:40 UTC
 
-💡 Recommendations
+Recommendations
 ────────────────────────────────────────────────────────────
 1. Standard monitoring
 ```
+
+## Exchange Venues
+
+Scope uses **YAML descriptor files** to define CEX API integrations. This data-driven approach means adding a new exchange requires zero code changes — just a YAML file.
+
+### Built-in Venues
+
+| Venue | ID | Capabilities |
+|-------|----|-------------|
+| Binance Spot | `binance` | order book, ticker, trades |
+| Biconomy | `biconomy` | order book, ticker, trades |
+| Bitget | `bitget` | order book, ticker, trades |
+| Bybit | `bybit` | order book, ticker, trades |
+| Coinbase | `coinbase` | order book, ticker, trades |
+| Crypto.com | `crypto_com` | order book, ticker, trades |
+| Gate.io | `gateio` | order book, ticker, trades |
+| HTX | `htx` | order book, ticker, trades |
+| Kraken | `kraken` | order book, ticker, trades |
+| MEXC | `mexc` | order book, ticker, trades |
+| OKX | `okx` | order book, ticker, trades |
+
+### Adding a Custom Venue
+
+1. Run `scope venues schema` to see the YAML format
+2. Create a YAML file following the schema
+3. Place it in `~/.config/scope/venues/`
+4. Validate with `scope venues validate my-venue.yaml`
+5. Use it immediately: `scope market summary USDC --venue my-venue`
+
+Or initialise the user directory with all built-in descriptors for reference:
+
+```bash
+scope venues init
+# Copies all 11 built-in descriptors to ~/.config/scope/venues/
+# Edit them to customise behaviour or use as templates
+```
+
+### Using Venues
+
+Venues are specified with the `--venue` flag on `market summary`, `token-health`, and `monitor`:
+
+```bash
+scope market summary USDC --venue binance       # Binance (default)
+scope market summary USDC --venue kraken         # Kraken
+scope market summary USDC --venue okx            # OKX
+scope health USDC --with-market --venue coinbase  # Coinbase order book
+scope monitor USDC --layout exchange              # Exchange-style TUI
+```
+
+The DEX venues (`eth`, `solana`) are still available and use on-chain liquidity data rather than the venue registry.
 
 ## Compliance Features
 
@@ -433,13 +536,6 @@ scope discover --format csv --limit 5
 
 Sources: `profiles` (featured), `boosts` (recent), `top-boosts` (most active). No API key required.
 
-Example output:
-
-```text
-  1. solana | 8dAsTqYBjG...h5Acpump | Token description...
-     https://dexscreener.com/solana/8dastqybjg9jyy7rkrhh8kkwmmza7mfviwneh5acpump
-```
-
 ## Data Export
 
 Export address history or portfolio data to JSON or CSV:
@@ -474,6 +570,9 @@ Format set to: json
 scope:solana> monitor USDC
 # Launches a real-time TUI dashboard with price/volume charts
 
+scope:solana> venues list
+# List all available exchange venues
+
 scope:solana> exit
 ```
 
@@ -482,9 +581,10 @@ Available interactive commands:
 - `address` / `addr` -- Analyze a blockchain address
 - `tx` / `transaction` -- Analyze a transaction
 - `crawl` / `token` -- Crawl token analytics
-- `monitor` / `mon` -- Live TUI dashboard with four layout presets, widget toggles, price/volume/candlestick charts, alerts, CSV export, and auto-pause
+- `monitor` / `mon` -- Live TUI dashboard with five layout presets, widget toggles, price/volume/candlestick charts, alerts, CSV export, and auto-pause
 - `portfolio` / `port` -- Portfolio management (add, remove, list, summary)
 - `tokens` / `aliases` -- Token alias management (add, remove, list, recent)
+- `venues` / `ven` -- Venue management (list, schema, init, validate)
 - `setup` / `config` -- Configuration commands
 - `chain` -- Set or show current chain
 - `format` -- Set or show output format (table, json, csv)
@@ -504,6 +604,7 @@ The monitor launches a real-time TUI dashboard. You can start it two ways:
 # Direct from the command line (no interactive mode needed)
 scope monitor USDC
 scope mon PEPE --chain ethereum --layout chart-focus --refresh 3
+scope monitor USDC --layout exchange    # Exchange-style: order book + chart + trades
 
 # Or from interactive mode
 scope interactive
@@ -512,14 +613,15 @@ scope> monitor USDC
 
 **Direct-command flags:** `--chain` / `-c`, `--layout` / `-l`, `--refresh` / `-r`, `--scale` / `-s`, `--color-scheme`, `--export` / `-e`.
 
-The monitor supports four layout presets that can be switched at runtime or configured in `config.yaml`:
+The monitor supports five layout presets that can be switched at runtime or configured in `config.yaml`:
 
 | Preset | Description |
 | --- | --- |
-| **Dashboard** | Charts top, gauges middle, transaction feed bottom (default) |
-| **Chart** | Full-width candles (~85%), minimal stats overlay |
-| **Feed** | Transaction log takes priority, small metrics + buy/sell on top |
-| **Compact** | Price sparkline and metrics only, for small terminals |
+| **Dashboard** | Balanced 2x2 grid with all widgets visible (default) |
+| **Chart** | Price chart takes ~85% of the screen; minimal stats overlay |
+| **Feed** | Transaction/activity feed prioritized; small price ticker |
+| **Compact** | Minimal single-column sparkline view for small terminals |
+| **Exchange** | Exchange-style view: order book, chart, recent trades, market info |
 
 The monitor automatically selects the best layout for your terminal size (responsive breakpoints). Manual layout switching disables auto-selection until you press `A`.
 
@@ -531,6 +633,7 @@ The monitor automatically selects the best layout for your terminal size (respon
 - **Color schemes**: Green/Red (default), Blue/Orange, Monochrome
 - **Holder count**: On-chain holder count (when API key is configured)
 - **Liquidity depth**: Per-pair liquidity breakdown across DEXes
+- **Exchange view**: Live order book, ticker, and recent trade history from any configured CEX venue
 - **Alerts**: Configurable price min/max, whale detection, and volume spike thresholds
 - **CSV export**: Record live data to `./scope-exports/` with a single keypress
 - **Auto-pause**: Optionally pause data fetching while interacting
@@ -544,7 +647,7 @@ The monitor automatically selects the best layout for your terminal size (respon
 | `P` / `Space` | Pause/resume |
 | `Shift+P` | Toggle auto-pause on input |
 | `E` | Toggle CSV export (REC indicator when active) |
-| `L` | Cycle layout forward (Dashboard -> Chart -> Feed -> Compact) |
+| `L` | Cycle layout forward (Dashboard -> Chart -> Feed -> Compact -> Exchange) |
 | `H` | Cycle layout backward |
 | `W` + `1-5` | Toggle widget visibility (1=price chart, 2=volume, 3=buy/sell, 4=metrics, 5=activity) |
 | `A` | Re-enable auto layout |
@@ -600,11 +703,11 @@ output:
   color: true
 
 portfolio:
-  data_dir: "~/.local/share/scope"
+  data_dir: "~/.config/scope/data"
 
 # Monitor TUI configuration (all optional, shown with defaults)
 monitor:
-  layout: dashboard          # dashboard | chart-focus | feed | compact
+  layout: dashboard          # dashboard | chart-focus | feed | compact | exchange
   refresh_seconds: 10
   scale: linear              # linear | log
   color_scheme: green-red    # green-red | blue-orange | monochrome
@@ -654,7 +757,7 @@ You can use Scope with **Solana** and **BSC** without paying for APIs.
 
 Dataflow and C4 architecture diagrams are in [`docs/architecture/`](docs/architecture/README.md):
 
-- **C4 Context** — Scope and external systems (Etherscan, DexScreener, RPCs, Biconomy)
+- **C4 Context** — Scope and external systems (Etherscan, DexScreener, RPCs, CEX APIs)
 - **C4 Containers** — CLI, Chains, Compliance, Market, Display, Config
 - **Dataflow** — Per-command diagrams for address, crawl, discover, compliance, market, token-health, portfolio, export, report, monitor, interactive
 
@@ -688,23 +791,24 @@ just summary   # USDC market summary (peg, spread, volume, execution, health che
 
 ### Peg & Order Book Health (`scope market`)
 
-The `scope market summary` command fetches level-2 order book data from CEX (Binance, Biconomy) or DEX (Ethereum, Solana) venues and reports peg, book health, volume, and execution checks:
+The `scope market summary` command fetches level-2 order book data from any CEX venue in the registry or DEX (Ethereum, Solana) and reports peg, book health, volume, and execution checks:
 
 - **Peg**: Target, best bid/ask deviation (%), mid price, spread
-- **Volume**: 24h quote volume (Binance ticker, DEX analytics; omitted for Biconomy)
+- **Volume**: 24h quote volume (from venue ticker; omitted for DEX venues)
 - **Execution**: Simulated 10k USDT buy/sell slippage or "insufficient liquidity"
 - **Order book**: Ask/bid levels with depth (base and quote amounts)
 - **Health checks**: No sells below peg, bid/ask ratio, minimum levels and depth per side
 - **Output**: Text (default) or JSON — see [Output Examples](#output-examples) for sample
-- **Tunable thresholds**: All health-check thresholds are configurable. Defaults (min-levels=6, min-depth=3000, peg-range=0.001, bid/ask ratio 0.2–5.0x) originated from the PUSD Hummingbot config—override for other markets.
+- **Tunable thresholds**: All health-check thresholds are configurable. Defaults (min-levels=6, min-depth=3000, peg-range=0.001, bid/ask ratio 0.2-5.0x) originated from the PUSD Hummingbot config—override for other markets.
 
 ```bash
-scope market summary                    # USDC on Binance (default, one shot)
-scope market summary PUSD               # PUSD on default venue
-scope market summary USDC --market-venue biconomy   # USDC on Biconomy
+scope market summary                           # USDC on Binance (default, one shot)
+scope market summary PUSD                      # PUSD on default venue
+scope market summary USDC --venue kraken       # USDC on Kraken
+scope market summary USDC --venue okx          # USDC on OKX
 scope market summary --peg 1.0 --min-depth 5000
 scope market summary --peg-range 0.002 --min-bid-ask-ratio 0.1   # Loosen thresholds
-scope market summary --format json     # Machine-readable output
+scope market summary --format json             # Machine-readable output
 
 # Repeated runs (default: every 60s for 1h)
 scope market summary --every 30s --duration 10m   # Every 30s for 10 min
@@ -720,14 +824,14 @@ scope market summary --every 1m                   # Every 1 min for 1h (default 
 Combines DEX analytics (crawl) with optional market/order book summary for stablecoins:
 
 ```bash
-scope token-health USDC              # DEX liquidity, volume, holders (table)
-scope health USDC --with-market      # + order book/peg (default: Binance)
-scope token-health USDC --with-market --market-venue biconomy
+scope token-health USDC                        # DEX liquidity, volume, holders (table)
+scope health USDC --with-market                # + order book/peg (default: Binance)
+scope token-health USDC --with-market --venue kraken
 scope token-health USDC --format json
-scope token-health USDC --ai         # Markdown to console for agent parsing
+scope token-health USDC --ai                   # Markdown to console for agent parsing
 ```
 
-With `--with-market`, order book data is fetched from the selected venue (`--market-venue`): **binance** (default), **biconomy**, **eth** (Ethereum DEX), **solana** (Solana DEX). CEX pair format: binance=USDCUSDT, biconomy=USDC_USDT. DEX venues use on-chain liquidity from the selected chain.
+With `--with-market`, order book data is fetched from the selected venue (`--venue`): any CEX venue from the registry (default **binance**), or **eth** / **solana** for DEX on-chain liquidity. Run `scope venues list` to see all available venues.
 
 ### Agent-Oriented Output (`--ai`)
 
@@ -764,7 +868,7 @@ Scope supports markdown and structured report generation across commands:
 | `scope compliance compliance-report` | `--output file` | Unified risk + pattern analysis (markdown) |
 | `scope report batch` | `--addresses a,b,c` or `--from-file path` + `--output report.md` | Combined report for multiple addresses |
 | `scope report batch` | `--with-risk` | Include risk assessment per address (uses ETHERSCAN_API_KEY) |
-| `scope token-health` | `USDC`, `--with-market`, `--market-venue binance\|biconomy\|eth\|solana` | DEX + optional market composite |
+| `scope token-health` | `--with-market --venue <venue>` | DEX + optional market composite |
 | `scope` | `--ai` (global) | Markdown console output for agent parsing |
 
 All reports include version and timestamp metadata for audit trail.
