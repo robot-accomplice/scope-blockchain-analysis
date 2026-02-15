@@ -69,6 +69,12 @@ pub struct EndpointDescriptor {
     /// - `"result.*"`: first value under `json["result"]` regardless of key.
     pub response_root: Option<String>,
 
+    /// Maps canonical interval names (e.g., `1m`, `5m`, `1h`, `1d`) to the
+    /// venue-specific strings (e.g., `1min`, `5min`, `hour`, `day`).
+    /// Only used by the OHLC capability; omit when the venue accepts canonical names.
+    #[serde(default)]
+    pub interval_map: HashMap<String, String>,
+
     /// Field mappings for parsing the response.
     pub response: ResponseMapping,
 }
@@ -360,6 +366,7 @@ mod tests {
                     params: HashMap::new(),
                     request_body: None,
                     response_root: None,
+                    interval_map: HashMap::new(),
                     response: ResponseMapping::default(),
                 }),
                 ticker: Some(EndpointDescriptor {
@@ -368,6 +375,7 @@ mod tests {
                     params: HashMap::new(),
                     request_body: None,
                     response_root: None,
+                    interval_map: HashMap::new(),
                     response: ResponseMapping::default(),
                 }),
                 trades: Some(EndpointDescriptor {
@@ -376,6 +384,7 @@ mod tests {
                     params: HashMap::new(),
                     request_body: None,
                     response_root: None,
+                    interval_map: HashMap::new(),
                     response: ResponseMapping::default(),
                 }),
                 ohlc: None,
@@ -406,6 +415,7 @@ mod tests {
                     params: HashMap::new(),
                     request_body: None,
                     response_root: None,
+                    interval_map: HashMap::new(),
                     response: ResponseMapping::default(),
                 }),
                 ticker: None,
@@ -697,6 +707,7 @@ capabilities:
                     params: HashMap::new(),
                     request_body: None,
                     response_root: None,
+                    interval_map: HashMap::new(),
                     response: ResponseMapping::default(),
                 }),
                 ohlc: None,
@@ -726,6 +737,7 @@ capabilities:
                     params: HashMap::new(),
                     request_body: None,
                     response_root: None,
+                    interval_map: HashMap::new(),
                     response: ResponseMapping::default(),
                 }),
                 ticker: None,
@@ -764,6 +776,7 @@ capabilities:
                     params: HashMap::new(),
                     request_body: None,
                     response_root: None,
+                    interval_map: HashMap::new(),
                     response: ResponseMapping::default(),
                 }),
                 trades: None,
@@ -802,6 +815,7 @@ capabilities:
                     params: HashMap::new(),
                     request_body: None,
                     response_root: None,
+                    interval_map: HashMap::new(),
                     response: ResponseMapping::default(),
                 }),
                 ohlc: None,
@@ -840,6 +854,7 @@ capabilities:
                     params: HashMap::new(),
                     request_body: None,
                     response_root: None,
+                    interval_map: HashMap::new(),
                     response: ResponseMapping::default(),
                 }),
             },
@@ -909,6 +924,80 @@ capabilities:
         let ohlc = desc.capabilities.ohlc.as_ref().unwrap();
         assert_eq!(ohlc.path, "/api/v3/klines");
         assert_eq!(ohlc.params.get("interval"), Some(&"{interval}".to_string()));
+        // interval_map should default to empty when omitted from YAML
+        assert!(ohlc.interval_map.is_empty());
+    }
+
+    #[test]
+    fn test_deserialize_ohlc_with_interval_map() {
+        let yaml = r#"
+id: biconomy_test
+name: Biconomy Test
+base_url: https://api.biconomy.com
+
+symbol:
+  template: "{base}_{quote}"
+  default_quote: USDT
+
+capabilities:
+  ohlc:
+    path: /api/v1/kline
+    params:
+      symbol: "{pair}"
+      type: "{interval}"
+      size: "{limit}"
+    interval_map:
+      1m: 1min
+      5m: 5min
+      15m: 15min
+      30m: 30min
+      1h: hour
+      4h: hour
+      1d: day
+    response:
+      ohlc_format: array_of_arrays
+      ohlc_fields: [open_time, open, high, low, close, volume]
+"#;
+        let desc: VenueDescriptor = serde_yaml::from_str(yaml).unwrap();
+        assert!(desc.has_ohlc());
+        let ohlc = desc.capabilities.ohlc.as_ref().unwrap();
+        assert_eq!(ohlc.interval_map.len(), 7);
+        assert_eq!(ohlc.interval_map.get("1m"), Some(&"1min".to_string()));
+        assert_eq!(ohlc.interval_map.get("1h"), Some(&"hour".to_string()));
+        assert_eq!(ohlc.interval_map.get("4h"), Some(&"hour".to_string()));
+        assert_eq!(ohlc.interval_map.get("1d"), Some(&"day".to_string()));
+        // Unmapped keys should not be present
+        assert!(ohlc.interval_map.get("1w").is_none());
+    }
+
+    #[test]
+    fn test_deserialize_biconomy_venue_yaml() {
+        let yaml = std::fs::read_to_string("venues/biconomy.yaml")
+            .expect("biconomy.yaml should exist");
+        let desc: VenueDescriptor = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(desc.id, "biconomy");
+        assert_eq!(desc.name, "Biconomy");
+        assert!(desc.has_order_book());
+        assert!(desc.has_ticker());
+        assert!(desc.has_trades());
+        assert!(desc.has_ohlc());
+        let ohlc = desc.capabilities.ohlc.as_ref().unwrap();
+        assert!(!ohlc.interval_map.is_empty(), "biconomy should have interval_map");
+        assert_eq!(ohlc.interval_map.get("1h"), Some(&"hour".to_string()));
+    }
+
+    #[test]
+    fn test_endpoint_descriptor_interval_map_defaults_empty() {
+        let ep = EndpointDescriptor {
+            method: HttpMethod::GET,
+            path: "/test".to_string(),
+            params: HashMap::new(),
+            request_body: None,
+            response_root: None,
+            interval_map: HashMap::new(),
+            response: ResponseMapping::default(),
+        };
+        assert!(ep.interval_map.is_empty());
     }
 
     #[test]

@@ -57,6 +57,14 @@ capabilities:
       symbol: "{pair}"
       type: "{interval}"
       size: "{limit}"
+    interval_map:
+      1m: 1min
+      5m: 5min
+      15m: 15min
+      30m: 30min
+      1h: hour
+      4h: hour
+      1d: day
     response:
       ohlc_format: array_of_arrays
       ohlc_fields: [open_time, open, high, low, close, volume]
