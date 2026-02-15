@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-02-15
+
+### Added
+- **Monitor `--pair` flag**: Bypass DexScreener token resolution entirely with `--pair PUSD_USDT --venue biconomy`. Enables monitoring tokens not indexed by DexScreener.
+- **Venue interval mapping**: `interval_map` field in venue OHLC descriptors translates canonical intervals (1m, 5m, 1h, 1d) to venue-specific formats. Unmapped intervals pass through unchanged.
+
+### Fixed
+- **Biconomy OHLC**: Resolved "Illegal parameter" error caused by Biconomy requiring non-standard interval names (`1min`, `5min`, `hour`, `day`) instead of the canonical format.
+- **Monitor PUSD resolution**: `scope monitor PUSD --venue biconomy` no longer resolves to the wrong token (syrupUSDC) when used with `--pair`.
+
 ## [0.4.1] - 2026-02-15
 
 ### Added
