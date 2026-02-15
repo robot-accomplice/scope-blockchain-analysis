@@ -1,6 +1,6 @@
 [package]
 name = "scope-bca"
-version = "0.4.3"
+version = "0.4.4"
 edition = "2024"
 authors = ["Jon Machen <robot@accomplice.ch>"]
 description = "Scope Blockchain Analysis - A production-grade tool for blockchain data analysis, address management, and transaction investigation"

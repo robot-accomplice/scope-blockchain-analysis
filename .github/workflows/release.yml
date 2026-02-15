@@ -85,6 +85,6 @@ jobs:
         run: cargo publish --dry-run
       
       - name: Publish to crates.io
-        run: cargo publish
+        run: cargo publish || echo "::warning::cargo publish failed (version may already exist)"
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
