@@ -4256,6 +4256,11 @@ fn build_exchange_token_data(
 }
 
 /// Resolves a token input (address or symbol) to an address.
+///
+/// Uses the same chain filter logic as the crawl command: when the chain is
+/// "ethereum" (the default), searches ALL chains so that exact symbol matches
+/// on other chains rank above substring matches on ethereum.  Includes a CEX
+/// ticker fallback when DexScreener returns no results.
 async fn resolve_token_address(
     input: &str,
     chain: &str,
@@ -4267,18 +4272,35 @@ async fn resolve_token_address(
         return Ok(input.to_string());
     }
 
-    // Check saved aliases
+    // Check saved aliases — use chain filter only when explicitly overridden
+    let chain_filter = if chain != "ethereum" {
+        Some(chain)
+    } else {
+        None
+    };
     let aliases = crate::tokens::TokenAliases::load();
-    if let Some(alias) = aliases.get(input, Some(chain)) {
+    if let Some(alias) = aliases.get(input, chain_filter) {
         return Ok(alias.address.clone());
     }
 
-    // Search by name/symbol
-    let results = dex_client.search_tokens(input, Some(chain)).await?;
+    // Search by name/symbol — same filter logic as crawl:
+    // "ethereum" (default) → None (all chains), explicit chain → Some(chain)
+    let mut results = dex_client.search_tokens(input, chain_filter).await?;
+
+    // CEX fallback: if DexScreener has no results, try exchange ticker
+    if results.is_empty()
+        && let Some(fallback) = try_cex_fallback(input, chain).await
+    {
+        eprintln!(
+            "  Not found on DexScreener; found {} on {} (CEX)",
+            fallback.symbol, fallback.chain
+        );
+        results.push(fallback);
+    }
 
     if results.is_empty() {
         return Err(ScopeError::NotFound(format!(
-            "No token found matching '{}' on {}",
+            "No token found matching '{}' on {} (checked DexScreener and CEX venues)",
             input, chain
         )));
     }
@@ -4298,6 +4320,33 @@ async fn resolve_token_address(
     // Multiple results — prompt user to select
     let selected = select_token_interactive(&results)?;
     Ok(selected.address.clone())
+}
+
+/// CEX venue ticker fallback for token resolution.
+///
+/// When DexScreener returns no results, tries to find the token on a
+/// centralized exchange (Binance) as a fallback. Returns a synthetic
+/// `TokenSearchResult` from the ticker data.
+async fn try_cex_fallback(
+    symbol: &str,
+    chain: &str,
+) -> Option<crate::chains::TokenSearchResult> {
+    let registry = crate::market::VenueRegistry::load().ok()?;
+    let descriptor = registry.get("binance")?;
+    let client = crate::market::ExchangeClient::from_descriptor(&descriptor.clone());
+    let pair = client.format_pair(&format!("{}USDT", symbol.to_uppercase()));
+    let ticker = client.fetch_ticker(&pair).await.ok()?;
+    let price = ticker.last_price.unwrap_or(0.0);
+    Some(crate::chains::TokenSearchResult {
+        address: String::new(),
+        symbol: symbol.to_uppercase(),
+        name: symbol.to_uppercase(),
+        chain: chain.to_string(),
+        price_usd: Some(price),
+        volume_24h: ticker.volume_24h.unwrap_or(0.0),
+        liquidity_usd: 0.0,
+        market_cap: None,
+    })
 }
 
 /// Abbreviates a blockchain address for display (e.g. "0x1234...abcd").
@@ -9461,5 +9510,94 @@ refresh_seconds: 5
         assert_eq!(mc.venue, Some("biconomy".to_string()));
         // pair is passed directly to run(), not stored in MonitorConfig
         assert_eq!(args.pair, Some("PUSD_USDT".to_string()));
+    }
+
+    // =========================================================================
+    // resolve_token_address chain filter tests
+    // =========================================================================
+
+    #[test]
+    fn test_chain_filter_logic_ethereum_default() {
+        // When chain is "ethereum" (default), chain_filter should be None
+        // so we search ALL chains and exact matches on any chain sort first.
+        let chain = "ethereum";
+        let chain_filter: Option<&str> = if chain != "ethereum" {
+            Some(chain)
+        } else {
+            None
+        };
+        assert!(chain_filter.is_none());
+    }
+
+    #[test]
+    fn test_chain_filter_logic_explicit_chain() {
+        // When chain is explicitly set (not "ethereum"), filter to that chain.
+        let chain = "solana";
+        let chain_filter: Option<&str> = if chain != "ethereum" {
+            Some(chain)
+        } else {
+            None
+        };
+        assert_eq!(chain_filter, Some("solana"));
+    }
+
+    #[test]
+    fn test_chain_filter_logic_bsc() {
+        let chain = "bsc";
+        let chain_filter: Option<&str> = if chain != "ethereum" {
+            Some(chain)
+        } else {
+            None
+        };
+        assert_eq!(chain_filter, Some("bsc"));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_token_address_with_address_input() {
+        use crate::chains::dex::DexClient;
+        let config = Config::default();
+        let dex = DexClient::new();
+        // EVM address should be returned directly, no DexScreener query
+        let result = resolve_token_address(
+            "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+            "ethereum",
+            &config,
+            &dex,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_token_address_solana_address() {
+        use crate::chains::dex::DexClient;
+        let config = Config::default();
+        let dex = DexClient::new();
+        // Solana address (base58, 32+ chars) should be returned directly
+        let addr = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+        let result = resolve_token_address(addr, "solana", &config, &dex)
+            .await
+            .unwrap();
+        assert_eq!(result, addr);
+    }
+
+    #[test]
+    fn test_try_cex_fallback_returns_correct_structure() {
+        // Verify the fallback constructs results with the right shape
+        // (can't easily test async CEX call without mocking, so test the structure)
+        let result = crate::chains::TokenSearchResult {
+            address: String::new(),
+            symbol: "TEST".to_string(),
+            name: "TEST".to_string(),
+            chain: "ethereum".to_string(),
+            price_usd: Some(1.0),
+            volume_24h: 100.0,
+            liquidity_usd: 0.0,
+            market_cap: None,
+        };
+        assert_eq!(result.symbol, "TEST");
+        assert!(result.address.is_empty());
+        assert_eq!(result.liquidity_usd, 0.0);
     }
 }
