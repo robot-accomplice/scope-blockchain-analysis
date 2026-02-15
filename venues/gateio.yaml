@@ -51,3 +51,13 @@ capabilities:
         mapping:
           buy: buy
           sell: sell
+
+  ohlc:
+    path: /api/v4/spot/candlesticks
+    params:
+      currency_pair: "{pair}"
+      interval: "{interval}"
+      limit: "{limit}"
+    response:
+      ohlc_format: array_of_arrays
+      ohlc_fields: [open_time, volume, close, high, low, open]

@@ -58,6 +58,9 @@ sequenceDiagram
 | `GET /api/discover`         | GET    | `api::discover::handle`     | `DexClient::get_token_profiles`  |
 | `POST /api/token-health`    | POST   | `api::token_health::handle` | `crawl::fetch_analytics_for_input` + market |
 | `POST /api/market/summary`  | POST   | `api::market::handle`       | `OrderBookClient::fetch_order_book` |
+| `POST /api/exchange/snapshot` | POST | `api::exchange::handle`    | Full market snapshot (order book, ticker, trades) |
+| `POST /api/exchange/ohlc`   | POST   | `api::exchange::handle_ohlc` | OHLC/candlestick data for venue/pair |
+| `POST /api/exchange/trades` | POST   | `api::exchange::handle_trades` | Recent trades for venue/pair |
 | `GET /api/portfolio/list`   | GET    | `api::portfolio::handle_list` | `Portfolio::load`              |
 | `POST /api/portfolio/add`   | POST   | `api::portfolio::handle_add`  | `Portfolio::add_address`       |
 | `POST /api/export`          | POST   | `api::export::handle`       | `ChainClient::get_*`             |

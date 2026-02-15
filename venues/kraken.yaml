@@ -49,3 +49,13 @@ capabilities:
         mapping:
           b: buy
           s: sell
+
+  ohlc:
+    path: /public/OHLC
+    params:
+      pair: "{pair}"
+      interval: "{interval}"
+    response_root: "result.*"
+    response:
+      ohlc_format: array_of_arrays
+      ohlc_fields: [open_time, open, high, low, close, _vwap, volume]

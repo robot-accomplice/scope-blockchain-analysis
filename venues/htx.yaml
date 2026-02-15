@@ -50,3 +50,19 @@ capabilities:
         mapping:
           buy: buy
           sell: sell
+
+  ohlc:
+    path: /market/history/kline
+    params:
+      symbol: "{pair}"
+      period: "{interval}"
+      size: "{limit}"
+    response_root: data
+    response:
+      ohlc_format: objects
+      open_time: id
+      open: open
+      high: high
+      low: low
+      close: close
+      ohlc_volume: vol

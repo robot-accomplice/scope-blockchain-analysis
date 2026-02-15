@@ -118,6 +118,166 @@ pub async fn handle(Json(req): Json<SnapshotRequest>) -> impl IntoResponse {
     Json(output).into_response()
 }
 
+// =============================================================================
+// POST /api/exchange/trades
+// =============================================================================
+
+/// Request body for exchange trades.
+#[derive(Debug, Deserialize)]
+pub struct TradesRequest {
+    /// Venue ID (e.g., "binance", "mexc").
+    pub venue: String,
+    /// Base token symbol (e.g., "BTC", "USDC").
+    #[serde(default = "default_pair")]
+    pub pair: String,
+    /// Maximum number of trades to return.
+    #[serde(default = "default_trades_limit")]
+    pub limit: u32,
+}
+
+/// POST /api/exchange/trades — Recent trades for a venue/pair.
+pub async fn handle_trades(Json(req): Json<TradesRequest>) -> impl IntoResponse {
+    let registry = match VenueRegistry::load() {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("Registry error: {e}") })),
+            )
+                .into_response();
+        }
+    };
+
+    let exchange = match registry.create_exchange_client(&req.venue) {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    let pair = exchange.format_pair(&req.pair);
+    match exchange.fetch_recent_trades(&pair, req.limit).await {
+        Ok(trades) => {
+            let json_trades: Vec<serde_json::Value> = trades
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "price": t.price,
+                        "quantity": t.quantity,
+                        "quote_quantity": t.quote_quantity,
+                        "timestamp_ms": t.timestamp_ms,
+                        "side": match t.side {
+                            crate::market::TradeSide::Buy => "buy",
+                            crate::market::TradeSide::Sell => "sell",
+                        },
+                        "id": t.id,
+                    })
+                })
+                .collect();
+            Json(serde_json::json!({
+                "venue": req.venue,
+                "pair": pair,
+                "trades": json_trades,
+            }))
+            .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+// =============================================================================
+// POST /api/exchange/ohlc
+// =============================================================================
+
+/// Request body for exchange OHLC.
+#[derive(Debug, Deserialize)]
+pub struct OhlcRequest {
+    /// Venue ID (e.g., "binance", "mexc").
+    pub venue: String,
+    /// Base token symbol (e.g., "BTC", "USDC").
+    #[serde(default = "default_pair")]
+    pub pair: String,
+    /// Candle interval (e.g., "1m", "1h", "1d").
+    #[serde(default = "default_interval")]
+    pub interval: String,
+    /// Maximum number of candles to return.
+    #[serde(default = "default_ohlc_limit")]
+    pub limit: u32,
+}
+
+fn default_interval() -> String {
+    "1h".to_string()
+}
+
+fn default_ohlc_limit() -> u32 {
+    100
+}
+
+/// POST /api/exchange/ohlc — OHLC candlestick data for a venue/pair.
+pub async fn handle_ohlc(Json(req): Json<OhlcRequest>) -> impl IntoResponse {
+    let registry = match VenueRegistry::load() {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("Registry error: {e}") })),
+            )
+                .into_response();
+        }
+    };
+
+    let exchange = match registry.create_exchange_client(&req.venue) {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    let pair = exchange.format_pair(&req.pair);
+    match exchange.fetch_ohlc(&pair, &req.interval, req.limit).await {
+        Ok(candles) => {
+            let json_candles: Vec<serde_json::Value> = candles
+                .iter()
+                .map(|c| {
+                    serde_json::json!({
+                        "open_time": c.open_time,
+                        "open": c.open,
+                        "high": c.high,
+                        "low": c.low,
+                        "close": c.close,
+                        "volume": c.volume,
+                        "close_time": c.close_time,
+                    })
+                })
+                .collect();
+            Json(serde_json::json!({
+                "venue": req.venue,
+                "pair": pair,
+                "interval": req.interval,
+                "candles": json_candles,
+            }))
+            .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,6 +349,53 @@ mod tests {
     }
 
     #[test]
+    fn test_trades_request_deserialization() {
+        let json = serde_json::json!({
+            "venue": "binance",
+            "pair": "USDC",
+            "limit": 25
+        });
+        let req: TradesRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.venue, "binance");
+        assert_eq!(req.pair, "USDC");
+        assert_eq!(req.limit, 25);
+    }
+
+    #[test]
+    fn test_trades_request_defaults() {
+        let json = serde_json::json!({"venue": "kraken"});
+        let req: TradesRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.venue, "kraken");
+        assert_eq!(req.pair, "BTC");
+        assert_eq!(req.limit, 50);
+    }
+
+    #[test]
+    fn test_ohlc_request_deserialization() {
+        let json = serde_json::json!({
+            "venue": "binance",
+            "pair": "ETH",
+            "interval": "4h",
+            "limit": 200
+        });
+        let req: OhlcRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.venue, "binance");
+        assert_eq!(req.pair, "ETH");
+        assert_eq!(req.interval, "4h");
+        assert_eq!(req.limit, 200);
+    }
+
+    #[test]
+    fn test_ohlc_request_defaults() {
+        let json = serde_json::json!({"venue": "mexc"});
+        let req: OhlcRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.venue, "mexc");
+        assert_eq!(req.pair, "BTC");
+        assert_eq!(req.interval, "1h");
+        assert_eq!(req.limit, 100);
+    }
+
+    #[test]
     fn test_snapshot_request_debug() {
         let req = SnapshotRequest {
             venue: "test".to_string(),
@@ -243,6 +450,143 @@ mod tests {
             assert!(
                 status == StatusCode::OK || status == StatusCode::INTERNAL_SERVER_ERROR,
                 "Venue {} returned unexpected status {}",
+                venue,
+                status
+            );
+        }
+    }
+
+    // =================================================================
+    // Trades endpoint tests
+    // =================================================================
+
+    #[tokio::test]
+    async fn test_handle_trades_unknown_venue() {
+        let req = TradesRequest {
+            venue: "nonexistent_venue_xyz".to_string(),
+            pair: "BTC".to_string(),
+            limit: 50,
+        };
+        let response = handle_trades(Json(req)).await.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"].as_str().unwrap().contains("Unknown venue"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_trades_valid_venue() {
+        let req = TradesRequest {
+            venue: "binance".to_string(),
+            pair: "BTC".to_string(),
+            limit: 5,
+        };
+        let response = handle_trades(Json(req)).await.into_response();
+        let status = response.status();
+        // May succeed (200 with trades) or fail gracefully (500 due to network)
+        assert!(
+            status == StatusCode::OK || status == StatusCode::INTERNAL_SERVER_ERROR,
+            "Expected 200 or 500, got {}",
+            status
+        );
+    }
+
+    // =================================================================
+    // OHLC endpoint tests
+    // =================================================================
+
+    #[tokio::test]
+    async fn test_handle_ohlc_unknown_venue() {
+        let req = OhlcRequest {
+            venue: "nonexistent_venue_xyz".to_string(),
+            pair: "BTC".to_string(),
+            interval: "1h".to_string(),
+            limit: 100,
+        };
+        let response = handle_ohlc(Json(req)).await.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"].as_str().unwrap().contains("Unknown venue"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_ohlc_valid_venue() {
+        let req = OhlcRequest {
+            venue: "binance".to_string(),
+            pair: "BTC".to_string(),
+            interval: "1h".to_string(),
+            limit: 5,
+        };
+        let response = handle_ohlc(Json(req)).await.into_response();
+        let status = response.status();
+        assert!(
+            status == StatusCode::OK || status == StatusCode::INTERNAL_SERVER_ERROR,
+            "Expected 200 or 500, got {}",
+            status
+        );
+    }
+
+    #[test]
+    fn test_trades_request_debug() {
+        let req = TradesRequest {
+            venue: "test".to_string(),
+            pair: "ETH".to_string(),
+            limit: 10,
+        };
+        let debug = format!("{:?}", req);
+        assert!(debug.contains("TradesRequest"));
+    }
+
+    #[test]
+    fn test_ohlc_request_debug() {
+        let req = OhlcRequest {
+            venue: "test".to_string(),
+            pair: "ETH".to_string(),
+            interval: "4h".to_string(),
+            limit: 50,
+        };
+        let debug = format!("{:?}", req);
+        assert!(debug.contains("OhlcRequest"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_trades_multiple_venues() {
+        for venue in &["mexc", "okx", "bybit"] {
+            let req = TradesRequest {
+                venue: venue.to_string(),
+                pair: "BTC".to_string(),
+                limit: 3,
+            };
+            let response = handle_trades(Json(req)).await.into_response();
+            let status = response.status();
+            assert!(
+                status == StatusCode::OK || status == StatusCode::INTERNAL_SERVER_ERROR,
+                "Venue {} trades returned unexpected status {}",
+                venue,
+                status
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_ohlc_multiple_venues() {
+        for venue in &["mexc", "okx", "bybit"] {
+            let req = OhlcRequest {
+                venue: venue.to_string(),
+                pair: "BTC".to_string(),
+                interval: "1h".to_string(),
+                limit: 3,
+            };
+            let response = handle_ohlc(Json(req)).await.into_response();
+            let status = response.status();
+            assert!(
+                status == StatusCode::OK || status == StatusCode::INTERNAL_SERVER_ERROR,
+                "Venue {} ohlc returned unexpected status {}",
                 venue,
                 status
             );

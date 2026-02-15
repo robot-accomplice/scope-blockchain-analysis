@@ -7,7 +7,7 @@
 use crate::error::Result;
 use async_trait::async_trait;
 
-use super::types::{OrderBook, Ticker, Trade};
+use super::types::{Candle, OrderBook, Ticker, Trade};
 
 /// Trait for clients that can fetch an order book snapshot.
 #[async_trait]
@@ -29,4 +29,19 @@ pub trait TradeHistoryClient: Send + Sync {
     /// Fetch the most recent trades for the given pair symbol.
     /// `limit` controls the maximum number of trades returned.
     async fn fetch_recent_trades(&self, pair_symbol: &str, limit: u32) -> Result<Vec<Trade>>;
+}
+
+/// Trait for clients that can fetch OHLC (candlestick / kline) data.
+#[async_trait]
+pub trait OhlcClient: Send + Sync {
+    /// Fetch OHLC candlesticks for the given pair symbol.
+    ///
+    /// * `interval` — candle width (e.g., "1m", "5m", "15m", "1h", "4h", "1d").
+    /// * `limit` — maximum number of candles to return.
+    async fn fetch_ohlc(
+        &self,
+        pair_symbol: &str,
+        interval: &str,
+        limit: u32,
+    ) -> Result<Vec<Candle>>;
 }

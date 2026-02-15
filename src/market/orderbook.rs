@@ -10,8 +10,8 @@
 // Re-export everything from submodules so existing `use crate::market::X` paths still work.
 pub use super::analytics::order_book_from_analytics;
 pub use super::health::{HealthThresholds, MarketSummary};
-pub use super::traits::{OrderBookClient, TickerClient, TradeHistoryClient};
+pub use super::traits::{OhlcClient, OrderBookClient, TickerClient, TradeHistoryClient};
 pub use super::types::{
-    ExecutionEstimate, ExecutionSide, HealthCheck, MarketSnapshot, OrderBook, OrderBookLevel,
-    Ticker, Trade, TradeSide,
+    Candle, ExecutionEstimate, ExecutionSide, HealthCheck, MarketSnapshot, OrderBook,
+    OrderBookLevel, Ticker, Trade, TradeSide,
 };

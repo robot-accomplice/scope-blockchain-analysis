@@ -5,7 +5,8 @@ use crate::error::{Result, ScopeError};
 use crate::market::configurable_client::ConfigurableExchangeClient;
 use crate::market::descriptor::VenueDescriptor;
 use crate::market::orderbook::{
-    MarketSnapshot, OrderBook, OrderBookClient, Ticker, TickerClient, Trade, TradeHistoryClient,
+    Candle, MarketSnapshot, OhlcClient, OrderBook, OrderBookClient, Ticker, TickerClient, Trade,
+    TradeHistoryClient,
 };
 
 /// Unified exchange client that wraps per-capability trait objects.
@@ -20,6 +21,7 @@ pub struct ExchangeClient {
     order_book: Option<Box<dyn OrderBookClient>>,
     ticker: Option<Box<dyn TickerClient>>,
     trade_history: Option<Box<dyn TradeHistoryClient>>,
+    ohlc: Option<Box<dyn OhlcClient>>,
 }
 
 impl ExchangeClient {
@@ -41,6 +43,11 @@ impl ExchangeClient {
             None
         };
         let trade_history: Option<Box<dyn TradeHistoryClient>> = if desc.has_trades() {
+            Some(Box::new(client.clone()))
+        } else {
+            None
+        };
+        let ohlc: Option<Box<dyn OhlcClient>> = if desc.has_ohlc() {
             Some(Box::new(client))
         } else {
             None
@@ -53,6 +60,7 @@ impl ExchangeClient {
             order_book,
             ticker,
             trade_history,
+            ohlc,
         }
     }
 
@@ -99,6 +107,11 @@ impl ExchangeClient {
         self.trade_history.is_some()
     }
 
+    /// Whether this client supports OHLC / kline data.
+    pub fn has_ohlc(&self) -> bool {
+        self.ohlc.is_some()
+    }
+
     // =========================================================================
     // Individual capability methods
     // =========================================================================
@@ -133,6 +146,15 @@ impl ExchangeClient {
                 ScopeError::Chain(format!("{} does not support trades", self.venue_name))
             })?
             .fetch_recent_trades(pair, limit)
+            .await
+    }
+
+    /// Fetch OHLC candlesticks (if supported).
+    pub async fn fetch_ohlc(&self, pair: &str, interval: &str, limit: u32) -> Result<Vec<Candle>> {
+        self.ohlc
+            .as_ref()
+            .ok_or_else(|| ScopeError::Chain(format!("{} does not support OHLC", self.venue_name)))?
+            .fetch_ohlc(pair, interval, limit)
             .await
     }
 
@@ -179,6 +201,7 @@ impl std::fmt::Debug for ExchangeClient {
             .field("has_order_book", &self.has_order_book())
             .field("has_ticker", &self.has_ticker())
             .field("has_trade_history", &self.has_trade_history())
+            .field("has_ohlc", &self.has_ohlc())
             .finish()
     }
 }
@@ -256,6 +279,14 @@ mod tests {
     }
 
     #[test]
+    fn test_exchange_client_has_ohlc_for_binance() {
+        let registry = VenueRegistry::default();
+        let desc = registry.get("binance").unwrap();
+        let client = ExchangeClient::from_descriptor(desc);
+        assert!(client.has_ohlc());
+    }
+
+    #[test]
     fn test_empty_descriptor_has_no_capabilities() {
         let desc = make_empty_descriptor();
         let client = ExchangeClient::from_descriptor(&desc);
@@ -285,6 +316,17 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("Empty"));
         assert!(msg.contains("does not support ticker"));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_ohlc_without_capability_returns_error() {
+        let desc = make_empty_descriptor();
+        let client = ExchangeClient::from_descriptor(&desc);
+
+        let err = client.fetch_ohlc("BTCUSDT", "1h", 100).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("Empty"));
+        assert!(msg.contains("does not support OHLC"));
     }
 
     #[tokio::test]
