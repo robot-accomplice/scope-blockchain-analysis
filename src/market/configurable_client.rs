@@ -623,8 +623,15 @@ impl OhlcClient for ConfigurableExchangeClient {
             ScopeError::Chain(format!("{} does not support OHLC", self.descriptor.name))
         })?;
 
+        // Map canonical interval (e.g., "1m") to venue-specific format (e.g., "1min")
+        let mapped_interval = endpoint
+            .interval_map
+            .get(interval)
+            .map(|s| s.as_str())
+            .unwrap_or(interval);
+
         let json = self
-            .fetch_endpoint_with_interval(endpoint, pair_symbol, Some(limit), interval)
+            .fetch_endpoint_with_interval(endpoint, pair_symbol, Some(limit), mapped_interval)
             .await?;
         let data = self.navigate_root(&json, endpoint.response_root.as_deref())?;
 
@@ -1369,6 +1376,7 @@ mod tests {
                         .collect(),
                     request_body: None,
                     response_root: None,
+                    interval_map: std::collections::HashMap::new(),
                     response: ResponseMapping {
                         asks_key: Some("asks".to_string()),
                         bids_key: Some("bids".to_string()),
@@ -1384,6 +1392,7 @@ mod tests {
                         .collect(),
                     request_body: None,
                     response_root: None,
+                    interval_map: std::collections::HashMap::new(),
                     response: ResponseMapping {
                         last_price: Some("lastPrice".to_string()),
                         high_24h: Some("highPrice".to_string()),
@@ -1406,6 +1415,7 @@ mod tests {
                     .collect(),
                     request_body: None,
                     response_root: None,
+                    interval_map: std::collections::HashMap::new(),
                     response: ResponseMapping {
                         price: Some("price".to_string()),
                         quantity: Some("qty".to_string()),
@@ -1616,6 +1626,7 @@ mod tests {
                 "symbol": "{pair}"
             })),
             response_root: None,
+            interval_map: std::collections::HashMap::new(),
             response: ResponseMapping {
                 asks_key: Some("asks".to_string()),
                 bids_key: Some("bids".to_string()),
@@ -1726,6 +1737,7 @@ mod tests {
                 .collect(),
             request_body: None,
             response_root: None,
+            interval_map: std::collections::HashMap::new(),
             response: ResponseMapping {
                 filter: Some(FilterConfig {
                     field: "symbol".to_string(),
@@ -1775,6 +1787,7 @@ mod tests {
                 .collect(),
             request_body: None,
             response_root: None,
+            interval_map: std::collections::HashMap::new(),
             response: ResponseMapping {
                 filter: Some(FilterConfig {
                     field: "symbol".to_string(),
@@ -1968,6 +1981,7 @@ mod tests {
                     .collect(),
                     request_body: None,
                     response_root: None,
+                    interval_map: std::collections::HashMap::new(),
                     response: ResponseMapping {
                         ohlc_format: Some("array_of_arrays".to_string()),
                         ohlc_fields: Some(vec![
@@ -2114,6 +2128,7 @@ mod tests {
                     .collect(),
                     request_body: None,
                     response_root: None,
+                    interval_map: std::collections::HashMap::new(),
                     response: ResponseMapping {
                         ohlc_format: Some("objects".to_string()),
                         open_time: Some("ts".to_string()),
@@ -2154,6 +2169,168 @@ mod tests {
             "expected OHLC error, got: {}",
             msg
         );
+    }
+
+    /// Verifies that `interval_map` translates canonical intervals to venue-specific
+    /// names before sending the HTTP request (e.g., Biconomy "1h" → "hour").
+    #[tokio::test]
+    async fn test_fetch_ohlc_interval_map() {
+        use crate::market::descriptor::*;
+        let mut server = mockito::Server::new_async().await;
+        // Expect the mapped interval "hour" rather than the canonical "1h"
+        let mock = server
+            .mock("GET", "/api/v1/kline")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("symbol".into(), "BTCUSDT".into()),
+                mockito::Matcher::UrlEncoded("type".into(), "hour".into()),
+                mockito::Matcher::UrlEncoded("size".into(), "2".into()),
+            ]))
+            .with_status(200)
+            .with_body(
+                serde_json::json!([
+                    [1700000000000u64, "50000.0", "50500.0", "49800.0", "50200.0", "100.5"],
+                    [1700003600000u64, "50200.0", "50800.0", "50100.0", "50700.0", "120.3"]
+                ])
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let desc = VenueDescriptor {
+            id: "interval_map_test".to_string(),
+            name: "Interval Map Test".to_string(),
+            base_url: server.url(),
+            timeout_secs: Some(5),
+            rate_limit_per_sec: None,
+            symbol: SymbolConfig {
+                template: "{base}{quote}".to_string(),
+                default_quote: "USDT".to_string(),
+                case: SymbolCase::Upper,
+            },
+            headers: std::collections::HashMap::new(),
+            capabilities: CapabilitySet {
+                order_book: None,
+                ticker: None,
+                trades: None,
+                ohlc: Some(EndpointDescriptor {
+                    path: "/api/v1/kline".to_string(),
+                    method: HttpMethod::GET,
+                    params: [
+                        ("symbol".to_string(), "{pair}".to_string()),
+                        ("type".to_string(), "{interval}".to_string()),
+                        ("size".to_string(), "{limit}".to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    request_body: None,
+                    response_root: None,
+                    interval_map: [
+                        ("1m".to_string(), "1min".to_string()),
+                        ("5m".to_string(), "5min".to_string()),
+                        ("1h".to_string(), "hour".to_string()),
+                        ("1d".to_string(), "day".to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    response: ResponseMapping {
+                        ohlc_format: Some("array_of_arrays".to_string()),
+                        ohlc_fields: Some(vec![
+                            "open_time".to_string(),
+                            "open".to_string(),
+                            "high".to_string(),
+                            "low".to_string(),
+                            "close".to_string(),
+                            "volume".to_string(),
+                        ]),
+                        ..Default::default()
+                    },
+                }),
+            },
+        };
+
+        let client = ConfigurableExchangeClient::new(desc);
+        let candles = client.fetch_ohlc("BTCUSDT", "1h", 2).await.unwrap();
+        assert_eq!(candles.len(), 2);
+        assert_eq!(candles[0].open, 50000.0);
+        assert_eq!(candles[1].close, 50700.0);
+        mock.assert_async().await;
+    }
+
+    /// When the interval is not in the map, the canonical value passes through.
+    #[tokio::test]
+    async fn test_fetch_ohlc_interval_map_passthrough() {
+        use crate::market::descriptor::*;
+        let mut server = mockito::Server::new_async().await;
+        // "15m" is not in the interval_map, so it should pass through unchanged
+        let mock = server
+            .mock("GET", "/api/v1/kline")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("symbol".into(), "BTCUSDT".into()),
+                mockito::Matcher::UrlEncoded("type".into(), "15m".into()),
+                mockito::Matcher::UrlEncoded("size".into(), "1".into()),
+            ]))
+            .with_status(200)
+            .with_body(
+                serde_json::json!([
+                    [1700000000000u64, "50000.0", "50500.0", "49800.0", "50200.0", "100.5"]
+                ])
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let desc = VenueDescriptor {
+            id: "passthrough_test".to_string(),
+            name: "Passthrough Test".to_string(),
+            base_url: server.url(),
+            timeout_secs: Some(5),
+            rate_limit_per_sec: None,
+            symbol: SymbolConfig {
+                template: "{base}{quote}".to_string(),
+                default_quote: "USDT".to_string(),
+                case: SymbolCase::Upper,
+            },
+            headers: std::collections::HashMap::new(),
+            capabilities: CapabilitySet {
+                order_book: None,
+                ticker: None,
+                trades: None,
+                ohlc: Some(EndpointDescriptor {
+                    path: "/api/v1/kline".to_string(),
+                    method: HttpMethod::GET,
+                    params: [
+                        ("symbol".to_string(), "{pair}".to_string()),
+                        ("type".to_string(), "{interval}".to_string()),
+                        ("size".to_string(), "{limit}".to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    request_body: None,
+                    response_root: None,
+                    // Only "1h" → "hour" mapped; "15m" should pass through as-is
+                    interval_map: [("1h".to_string(), "hour".to_string())]
+                        .into_iter()
+                        .collect(),
+                    response: ResponseMapping {
+                        ohlc_format: Some("array_of_arrays".to_string()),
+                        ohlc_fields: Some(vec![
+                            "open_time".to_string(),
+                            "open".to_string(),
+                            "high".to_string(),
+                            "low".to_string(),
+                            "close".to_string(),
+                            "volume".to_string(),
+                        ]),
+                        ..Default::default()
+                    },
+                }),
+            },
+        };
+
+        let client = ConfigurableExchangeClient::new(desc);
+        let candles = client.fetch_ohlc("BTCUSDT", "15m", 1).await.unwrap();
+        assert_eq!(candles.len(), 1);
+        mock.assert_async().await;
     }
 
     #[tokio::test]
@@ -2348,6 +2525,7 @@ mod tests {
                         "limit": "{limit}"
                     })),
                     response_root: None,
+                    interval_map: std::collections::HashMap::new(),
                     response: ResponseMapping {
                         ohlc_format: Some("array_of_arrays".to_string()),
                         ohlc_fields: Some(vec![
@@ -2405,6 +2583,7 @@ mod tests {
                     params: std::collections::HashMap::new(),
                     request_body: None,
                     response_root: None,
+                    interval_map: std::collections::HashMap::new(),
                     response: ResponseMapping {
                         ohlc_format: Some("array_of_arrays".to_string()),
                         ..Default::default()
@@ -2493,6 +2672,7 @@ mod tests {
                     .collect(),
                     request_body: None,
                     response_root: None,
+                    interval_map: std::collections::HashMap::new(),
                     response: ResponseMapping {
                         items_key: Some("data".to_string()),
                         ohlc_format: Some("objects".to_string()),

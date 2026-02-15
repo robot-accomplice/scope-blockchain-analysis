@@ -620,7 +620,7 @@ async fn execute_input(
         // Live monitor command
         "monitor" | "mon" => {
             let token = args.first().map(|s| s.to_string());
-            monitor::run(token, context, config, clients).await?;
+            monitor::run(token, None, context, config, clients).await?;
         }
 
         // Unknown command
