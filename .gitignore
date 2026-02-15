@@ -28,6 +28,7 @@ config.yaml
 
 # Test artifacts
 *.log
+scope-exports/
 
 # Local PR/release helpers (not for version control)
 PR_BODY.md
