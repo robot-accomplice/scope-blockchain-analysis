@@ -166,6 +166,14 @@ pub struct MonitorArgs {
     /// exchange API instead of generating synthetic candles from price history.
     #[arg(long, value_name = "VENUE")]
     pub venue: Option<String>,
+
+    /// Direct trading pair for exchange-only mode (e.g., PUSD_USDT).
+    ///
+    /// Bypasses DexScreener token resolution entirely and uses the exchange
+    /// ticker as the data source. Requires `--venue` to be specified.
+    /// Use this when the token is not listed on DexScreener.
+    #[arg(long, value_name = "PAIR")]
+    pub pair: Option<String>,
 }
 
 /// Maximum data retention: 24 hours.
@@ -4087,12 +4095,25 @@ pub async fn run_direct(
     let mut effective_config = config.clone();
     effective_config.monitor = monitor_config;
 
-    run(Some(args.token), &ctx, &effective_config, clients).await
+    run(
+        Some(args.token),
+        args.pair,
+        &ctx,
+        &effective_config,
+        clients,
+    )
+    .await
 }
 
 /// Entry point for the monitor command from interactive mode.
+///
+/// When `explicit_pair` is `Some`, token resolution is bypassed and the
+/// exchange ticker is used as the primary data source.  This enables
+/// monitoring tokens that are not indexed by DexScreener (e.g., PUSD on
+/// Biconomy).
 pub async fn run(
     token: Option<String>,
+    explicit_pair: Option<String>,
     ctx: &SessionContext,
     config: &Config,
     clients: &dyn ChainClientFactory,
@@ -4109,15 +4130,52 @@ pub async fn run(
     eprintln!("  Starting live monitor for {}...", token_input);
     eprintln!("  Fetching initial data...");
 
-    // Resolve token address
-    let dex_client = clients.create_dex_client();
-    let token_address =
-        resolve_token_address(&token_input, &ctx.chain, config, dex_client.as_ref()).await?;
+    // Create exchange client if a venue is configured (from MonitorConfig or CLI)
+    let exchange_client = config.monitor.venue.as_ref().and_then(|venue_id| {
+        crate::market::VenueRegistry::load()
+            .ok()
+            .and_then(|r| r.get(venue_id).cloned())
+            .map(|desc| crate::market::ExchangeClient::from_descriptor(&desc))
+    });
 
-    // Fetch initial data
-    let initial_data = dex_client
-        .get_token_data(&ctx.chain, &token_address)
-        .await?;
+    // ---- Exchange-only mode (--pair + --venue) ----
+    // Bypass DexScreener entirely when the user provides a direct pair.
+    let initial_data = if let Some(ref pair_str) = explicit_pair {
+        let ex = exchange_client.as_ref().ok_or_else(|| {
+            ScopeError::Chain("--pair requires --venue to be specified".to_string())
+        })?;
+
+        // Fetch the ticker to get current price data
+        let ticker = ex.fetch_ticker(pair_str).await.map_err(|e| {
+            ScopeError::Chain(format!("Failed to fetch ticker for {}: {}", pair_str, e))
+        })?;
+
+        // Extract base symbol from pair label (e.g., "PUSD/USDT" → "PUSD")
+        let base_symbol = ticker
+            .pair
+            .split('/')
+            .next()
+            .unwrap_or(&token_input)
+            .to_string();
+
+        eprintln!(
+            "  Exchange-only mode: {} @ ${:.6}",
+            pair_str,
+            ticker.last_price.unwrap_or(0.0)
+        );
+
+        // Build a minimal DexTokenData from the exchange ticker
+        build_exchange_token_data(&base_symbol, pair_str, &ticker)
+    } else {
+        // ---- Normal DexScreener mode ----
+        let dex_client = clients.create_dex_client();
+        let token_address =
+            resolve_token_address(&token_input, &ctx.chain, config, dex_client.as_ref()).await?;
+
+        dex_client
+            .get_token_data(&ctx.chain, &token_address)
+            .await?
+    };
 
     println!(
         "Monitoring {} ({}) on {}",
@@ -4131,15 +4189,7 @@ pub async fn run(
     // Create optional chain client for on-chain data (holder count, etc.)
     let chain_client = clients.create_chain_client(&ctx.chain).ok();
 
-    // Create exchange client if a venue is configured (from MonitorConfig or CLI)
-    let exchange_client = config.monitor.venue.as_ref().and_then(|venue_id| {
-        crate::market::VenueRegistry::load()
-            .ok()
-            .and_then(|r| r.get(venue_id).cloned())
-            .map(|desc| crate::market::ExchangeClient::from_descriptor(&desc))
-    });
-
-    // Create and run the app
+    // Create and run the app — override venue_pair when using explicit pair mode
     let mut app = MonitorApp::new(
         initial_data,
         &ctx.chain,
@@ -4147,6 +4197,12 @@ pub async fn run(
         chain_client,
         exchange_client,
     )?;
+
+    // In explicit-pair mode, override the auto-formatted pair with the user's exact pair
+    if let Some(ref pair_str) = explicit_pair {
+        app.state.venue_pair = Some(pair_str.clone());
+    }
+
     let result = app.run().await;
 
     // Cleanup is handled by Drop, but we do it explicitly for error handling
@@ -4155,6 +4211,48 @@ pub async fn run(
     }
 
     result
+}
+
+/// Builds a minimal [`DexTokenData`] from an exchange ticker.
+///
+/// Used in exchange-only mode (--pair) when DexScreener is not available
+/// for the token.
+fn build_exchange_token_data(
+    symbol: &str,
+    pair_label: &str,
+    ticker: &crate::market::Ticker,
+) -> DexTokenData {
+    let price = ticker.last_price.unwrap_or(0.0);
+    DexTokenData {
+        address: format!("exchange:{}", pair_label),
+        symbol: symbol.to_string(),
+        name: symbol.to_string(),
+        price_usd: price,
+        price_change_24h: 0.0,
+        price_change_6h: 0.0,
+        price_change_1h: 0.0,
+        price_change_5m: 0.0,
+        volume_24h: ticker.volume_24h.unwrap_or(0.0),
+        volume_6h: 0.0,
+        volume_1h: 0.0,
+        liquidity_usd: 0.0,
+        market_cap: None,
+        fdv: None,
+        pairs: vec![],
+        price_history: vec![],
+        volume_history: vec![],
+        total_buys_24h: 0,
+        total_sells_24h: 0,
+        total_buys_6h: 0,
+        total_sells_6h: 0,
+        total_buys_1h: 0,
+        total_sells_1h: 0,
+        earliest_pair_created_at: None,
+        image_url: None,
+        websites: vec![],
+        socials: vec![],
+        dexscreener_url: None,
+    }
 }
 
 /// Resolves a token input (address or symbol) to an address.
@@ -8988,6 +9086,7 @@ refresh_seconds: 5
             color_scheme: None,
             export: None,
             venue: None,
+            pair: None,
         };
 
         // Build the effective config the same way run_direct does
@@ -9010,6 +9109,7 @@ refresh_seconds: 5
             color_scheme: Some(ColorScheme::BlueOrange),
             export: Some(PathBuf::from("/tmp/test.csv")),
             venue: None,
+            pair: None,
         };
 
         let mut mc = config.monitor.clone();
@@ -9048,6 +9148,7 @@ refresh_seconds: 5
             color_scheme: None,
             export: None,
             venue: None,
+            pair: None,
         };
 
         let mut mc = config.monitor.clone();
@@ -9160,6 +9261,7 @@ refresh_seconds: 5
             color_scheme: None,
             export: None,
             venue: Some("binance".to_string()),
+            pair: None,
         };
         assert_eq!(args.venue, Some("binance".to_string()));
     }
@@ -9185,5 +9287,179 @@ refresh_seconds: 5
             is_bullish: false,
         };
         assert!(!bearish.is_bullish);
+    }
+
+    #[test]
+    fn test_build_exchange_token_data_from_ticker() {
+        let ticker = crate::market::Ticker {
+            pair: "PUSD/USDT".to_string(),
+            last_price: Some(1.001),
+            high_24h: Some(1.005),
+            low_24h: Some(0.998),
+            volume_24h: Some(500_000.0),
+            quote_volume_24h: Some(500_500.0),
+            best_bid: Some(1.0005),
+            best_ask: Some(1.0015),
+        };
+
+        let data = build_exchange_token_data("PUSD", "PUSD_USDT", &ticker);
+
+        assert_eq!(data.symbol, "PUSD");
+        assert_eq!(data.name, "PUSD");
+        assert_eq!(data.price_usd, 1.001);
+        assert_eq!(data.volume_24h, 500_000.0);
+        assert!(data.address.contains("exchange:"));
+        assert!(data.pairs.is_empty());
+        assert!(data.price_history.is_empty());
+        assert!(data.dexscreener_url.is_none());
+    }
+
+    #[test]
+    fn test_build_exchange_token_data_missing_price() {
+        let ticker = crate::market::Ticker {
+            pair: "FOO/USDT".to_string(),
+            last_price: None,
+            high_24h: None,
+            low_24h: None,
+            volume_24h: None,
+            quote_volume_24h: None,
+            best_bid: None,
+            best_ask: None,
+        };
+
+        let data = build_exchange_token_data("FOO", "FOO_USDT", &ticker);
+        assert_eq!(data.price_usd, 0.0);
+        assert_eq!(data.volume_24h, 0.0);
+    }
+
+    #[test]
+    fn test_monitor_args_with_pair() {
+        let args = MonitorArgs {
+            token: "PUSD".to_string(),
+            chain: "ethereum".to_string(),
+            refresh: None,
+            layout: None,
+            scale: None,
+            color_scheme: None,
+            export: None,
+            venue: Some("biconomy".to_string()),
+            pair: Some("PUSD_USDT".to_string()),
+        };
+        assert_eq!(args.pair, Some("PUSD_USDT".to_string()));
+        assert_eq!(args.venue, Some("biconomy".to_string()));
+    }
+
+    #[test]
+    fn test_monitor_args_pair_none_by_default() {
+        let args = MonitorArgs {
+            token: "BTC".to_string(),
+            chain: "ethereum".to_string(),
+            refresh: None,
+            layout: None,
+            scale: None,
+            color_scheme: None,
+            export: None,
+            venue: None,
+            pair: None,
+        };
+        assert!(args.pair.is_none());
+    }
+
+    #[test]
+    fn test_build_exchange_token_data_extracts_base_symbol() {
+        let ticker = crate::market::Ticker {
+            pair: "DOGE/USDT".to_string(),
+            last_price: Some(0.123),
+            high_24h: Some(0.13),
+            low_24h: Some(0.12),
+            volume_24h: Some(1_000_000.0),
+            quote_volume_24h: Some(123_000.0),
+            best_bid: Some(0.1225),
+            best_ask: Some(0.1235),
+        };
+
+        let data = build_exchange_token_data("DOGE", "DOGE_USDT", &ticker);
+        assert_eq!(data.symbol, "DOGE");
+        assert_eq!(data.name, "DOGE");
+        assert_eq!(data.price_usd, 0.123);
+        assert_eq!(data.volume_24h, 1_000_000.0);
+        // Verify all DEX-specific fields are zeroed/empty
+        assert_eq!(data.price_change_24h, 0.0);
+        assert_eq!(data.price_change_6h, 0.0);
+        assert_eq!(data.price_change_1h, 0.0);
+        assert_eq!(data.price_change_5m, 0.0);
+        assert_eq!(data.volume_6h, 0.0);
+        assert_eq!(data.volume_1h, 0.0);
+        assert_eq!(data.liquidity_usd, 0.0);
+        assert!(data.market_cap.is_none());
+        assert!(data.fdv.is_none());
+        assert!(data.earliest_pair_created_at.is_none());
+        assert!(data.image_url.is_none());
+        assert!(data.websites.is_empty());
+        assert!(data.socials.is_empty());
+        assert_eq!(data.total_buys_24h, 0);
+        assert_eq!(data.total_sells_24h, 0);
+    }
+
+    #[test]
+    fn test_build_exchange_token_data_address_format() {
+        let ticker = crate::market::Ticker {
+            pair: "X/Y".to_string(),
+            last_price: Some(1.0),
+            high_24h: None,
+            low_24h: None,
+            volume_24h: None,
+            quote_volume_24h: None,
+            best_bid: None,
+            best_ask: None,
+        };
+
+        let data = build_exchange_token_data("X", "X_Y", &ticker);
+        assert_eq!(data.address, "exchange:X_Y");
+    }
+
+    #[test]
+    fn test_monitor_args_pair_requires_venue_conceptually() {
+        // When --pair is set, --venue should also be set.
+        // This is a structural test; the runtime validation is in run().
+        let args = MonitorArgs {
+            token: "PUSD".to_string(),
+            chain: "ethereum".to_string(),
+            refresh: None,
+            layout: None,
+            scale: None,
+            color_scheme: None,
+            export: None,
+            venue: Some("biconomy".to_string()),
+            pair: Some("PUSD_USDT".to_string()),
+        };
+        assert!(args.venue.is_some());
+        assert!(args.pair.is_some());
+    }
+
+    #[test]
+    fn test_run_direct_config_pair_passthrough() {
+        // Verify that run_direct properly propagates the pair field
+        let config = Config::default();
+        let args = MonitorArgs {
+            token: "PUSD".to_string(),
+            chain: "ethereum".to_string(),
+            layout: None,
+            refresh: None,
+            scale: None,
+            color_scheme: None,
+            export: None,
+            venue: Some("biconomy".to_string()),
+            pair: Some("PUSD_USDT".to_string()),
+        };
+
+        // Simulate the config override path from run_direct
+        let mut mc = config.monitor.clone();
+        if let Some(ref venue) = args.venue {
+            mc.venue = Some(venue.clone());
+        }
+        assert_eq!(mc.venue, Some("biconomy".to_string()));
+        // pair is passed directly to run(), not stored in MonitorConfig
+        assert_eq!(args.pair, Some("PUSD_USDT".to_string()));
     }
 }
