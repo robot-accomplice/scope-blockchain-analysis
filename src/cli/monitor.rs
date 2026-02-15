@@ -4327,10 +4327,7 @@ async fn resolve_token_address(
 /// When DexScreener returns no results, tries to find the token on a
 /// centralized exchange (Binance) as a fallback. Returns a synthetic
 /// `TokenSearchResult` from the ticker data.
-async fn try_cex_fallback(
-    symbol: &str,
-    chain: &str,
-) -> Option<crate::chains::TokenSearchResult> {
+async fn try_cex_fallback(symbol: &str, chain: &str) -> Option<crate::chains::TokenSearchResult> {
     let registry = crate::market::VenueRegistry::load().ok()?;
     let descriptor = registry.get("binance")?;
     let client = crate::market::ExchangeClient::from_descriptor(&descriptor.clone());
