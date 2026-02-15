@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-02-15
+
 ### Added
 - **OHLC/candlestick CLI** (`scope market ohlc`): Fetch real candlestick data from CEX venues. Supports `--venue`, `--interval` (1m, 5m, 15m, 1h, 4h, 1d), `--limit`, and `--format json`.
 - **Recent trades CLI** (`scope market trades`): Fetch recent trades from CEX venues. Supports `--venue`, `--limit`, and `--format json`.
