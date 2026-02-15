@@ -967,13 +967,13 @@ capabilities:
         assert_eq!(ohlc.interval_map.get("4h"), Some(&"hour".to_string()));
         assert_eq!(ohlc.interval_map.get("1d"), Some(&"day".to_string()));
         // Unmapped keys should not be present
-        assert!(ohlc.interval_map.get("1w").is_none());
+        assert!(!ohlc.interval_map.contains_key("1w"));
     }
 
     #[test]
     fn test_deserialize_biconomy_venue_yaml() {
-        let yaml = std::fs::read_to_string("venues/biconomy.yaml")
-            .expect("biconomy.yaml should exist");
+        let yaml =
+            std::fs::read_to_string("venues/biconomy.yaml").expect("biconomy.yaml should exist");
         let desc: VenueDescriptor = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(desc.id, "biconomy");
         assert_eq!(desc.name, "Biconomy");
@@ -982,7 +982,10 @@ capabilities:
         assert!(desc.has_trades());
         assert!(desc.has_ohlc());
         let ohlc = desc.capabilities.ohlc.as_ref().unwrap();
-        assert!(!ohlc.interval_map.is_empty(), "biconomy should have interval_map");
+        assert!(
+            !ohlc.interval_map.is_empty(),
+            "biconomy should have interval_map"
+        );
         assert_eq!(ohlc.interval_map.get("1h"), Some(&"hour".to_string()));
     }
 
