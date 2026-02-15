@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-02-15
+
+### Fixed
+- **Monitor token resolution**: Aligned with crawl command's chain filter logic — when chain is "ethereum" (default), DexScreener now searches all chains so exact symbol matches sort first regardless of chain. Previously, `scope monitor PUSD` resolved to syrupUSDC (substring match on ethereum) instead of Pleasing USD (exact match on its native chain).
+- **Monitor CEX fallback**: Added CEX ticker fallback to monitor's token resolution (matching crawl behavior) when DexScreener returns no results.
+
 ## [0.4.2] - 2026-02-15
 
 ### Added
