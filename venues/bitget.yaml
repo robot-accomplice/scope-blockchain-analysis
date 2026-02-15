@@ -50,3 +50,13 @@ capabilities:
         mapping:
           buy: buy
           sell: sell
+
+  ohlc:
+    path: /api/v2/spot/market/candles
+    params:
+      symbol: "{pair}"
+      granularity: "{interval}"
+      limit: "{limit}"
+    response:
+      ohlc_format: array_of_arrays
+      ohlc_fields: [open_time, open, high, low, close, volume, close_time]

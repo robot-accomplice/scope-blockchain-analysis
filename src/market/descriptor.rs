@@ -115,6 +115,25 @@ pub struct ResponseMapping {
     pub timestamp_ms: Option<String>,
     pub id: Option<String>,
     pub side: Option<SideMapping>,
+
+    // -- OHLC / klines fields --
+    /// Response format: `"array_of_arrays"` (e.g., Binance) or `"objects"` (default).
+    /// When `"array_of_arrays"`, each candle is a positional array and the
+    /// `ohlc_fields` list determines field order.
+    pub ohlc_format: Option<String>,
+    /// Ordered field names for array-of-arrays format.
+    /// Default: `["open_time", "open", "high", "low", "close", "volume", "close_time"]`.
+    pub ohlc_fields: Option<Vec<String>>,
+    // For object format, reuse: open_time, open, high, low, close, volume, close_time
+    // mapped from explicit field names below.
+    pub open_time: Option<String>,
+    pub open: Option<String>,
+    pub high: Option<String>,
+    pub low: Option<String>,
+    pub close: Option<String>,
+    /// Base volume field name (for OHLC). Falls back to `volume_24h` if absent.
+    pub ohlc_volume: Option<String>,
+    pub close_time: Option<String>,
 }
 
 /// Maps venue-specific side indicators to canonical buy/sell.
@@ -145,6 +164,8 @@ pub struct CapabilitySet {
     pub ticker: Option<EndpointDescriptor>,
     /// Recent trades endpoint.
     pub trades: Option<EndpointDescriptor>,
+    /// OHLC / klines / candlestick endpoint.
+    pub ohlc: Option<EndpointDescriptor>,
 }
 
 /// Complete venue descriptor deserialized from a YAML file.
@@ -201,6 +222,9 @@ impl VenueDescriptor {
     pub fn has_trades(&self) -> bool {
         self.capabilities.trades.is_some()
     }
+    pub fn has_ohlc(&self) -> bool {
+        self.capabilities.ohlc.is_some()
+    }
 
     /// Return a list of capability names this venue supports.
     pub fn capability_names(&self) -> Vec<&'static str> {
@@ -213,6 +237,9 @@ impl VenueDescriptor {
         }
         if self.has_trades() {
             caps.push("trades");
+        }
+        if self.has_ohlc() {
+            caps.push("ohlc");
         }
         caps
     }
@@ -351,6 +378,7 @@ mod tests {
                     response_root: None,
                     response: ResponseMapping::default(),
                 }),
+                ohlc: None,
             },
         };
         let caps = desc.capability_names();
@@ -382,6 +410,7 @@ mod tests {
                 }),
                 ticker: None,
                 trades: None,
+                ohlc: None,
             },
         };
         assert_eq!(desc.capability_names(), vec!["order_book"]);
@@ -670,6 +699,7 @@ capabilities:
                     response_root: None,
                     response: ResponseMapping::default(),
                 }),
+                ohlc: None,
             },
         };
         assert_eq!(desc_trades.capability_names(), vec!["trades"]);
@@ -700,6 +730,7 @@ capabilities:
                 }),
                 ticker: None,
                 trades: None,
+                ohlc: None,
             },
         };
         assert!(with_ob.has_order_book());
@@ -736,6 +767,7 @@ capabilities:
                     response: ResponseMapping::default(),
                 }),
                 trades: None,
+                ohlc: None,
             },
         };
         assert!(with_ticker.has_ticker());
@@ -772,6 +804,7 @@ capabilities:
                     response_root: None,
                     response: ResponseMapping::default(),
                 }),
+                ohlc: None,
             },
         };
         assert!(with_trades.has_trades());
@@ -781,6 +814,45 @@ capabilities:
             ..with_trades
         };
         assert!(!without.has_trades());
+    }
+
+    #[test]
+    fn test_has_ohlc() {
+        let with_ohlc = VenueDescriptor {
+            id: "x".to_string(),
+            name: "X".to_string(),
+            base_url: "https://x.com".to_string(),
+            timeout_secs: None,
+            rate_limit_per_sec: None,
+            symbol: SymbolConfig {
+                template: "{base}{quote}".to_string(),
+                default_quote: "USDT".to_string(),
+                case: SymbolCase::Upper,
+            },
+            headers: HashMap::new(),
+            capabilities: CapabilitySet {
+                order_book: None,
+                ticker: None,
+                trades: None,
+                ohlc: Some(EndpointDescriptor {
+                    method: HttpMethod::GET,
+                    path: "/klines".to_string(),
+                    params: HashMap::new(),
+                    request_body: None,
+                    response_root: None,
+                    response: ResponseMapping::default(),
+                }),
+            },
+        };
+        assert!(with_ohlc.has_ohlc());
+        assert!(with_ohlc.capability_names().contains(&"ohlc"));
+
+        let without = VenueDescriptor {
+            capabilities: CapabilitySet::default(),
+            ..with_ohlc
+        };
+        assert!(!without.has_ohlc());
+        assert!(!without.capability_names().contains(&"ohlc"));
     }
 
     #[test]
@@ -798,6 +870,45 @@ capabilities:
         assert!(c.order_book.is_none());
         assert!(c.ticker.is_none());
         assert!(c.trades.is_none());
+        assert!(c.ohlc.is_none());
+    }
+
+    #[test]
+    fn test_deserialize_ohlc_capability() {
+        let yaml = r#"
+id: ohlc_venue
+name: OHLC Venue Test
+base_url: https://api.example.com
+
+symbol:
+  template: "{base}{quote}"
+  default_quote: USDT
+
+capabilities:
+  order_book:
+    path: /depth
+    params:
+      symbol: "{pair}"
+    response:
+      asks_key: asks
+      bids_key: bids
+      level_format: positional
+  ohlc:
+    path: /api/v3/klines
+    params:
+      symbol: "{pair}"
+      interval: "{interval}"
+      limit: "{limit}"
+    response:
+      ohlc_format: array_of_arrays
+      ohlc_fields: [open_time, open, high, low, close, volume, close_time]
+"#;
+        let desc: VenueDescriptor = serde_yaml::from_str(yaml).unwrap();
+        assert!(desc.has_ohlc());
+        assert!(desc.capability_names().contains(&"ohlc"));
+        let ohlc = desc.capabilities.ohlc.as_ref().unwrap();
+        assert_eq!(ohlc.path, "/api/v3/klines");
+        assert_eq!(ohlc.params.get("interval"), Some(&"{interval}".to_string()));
     }
 
     #[test]

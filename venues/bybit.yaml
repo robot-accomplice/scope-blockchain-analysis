@@ -53,3 +53,15 @@ capabilities:
         mapping:
           Buy: buy
           Sell: sell
+
+  ohlc:
+    path: /v5/market/kline
+    params:
+      category: spot
+      symbol: "{pair}"
+      interval: "{interval}"
+      limit: "{limit}"
+    response_root: "result.list"
+    response:
+      ohlc_format: array_of_arrays
+      ohlc_fields: [open_time, open, high, low, close, volume]

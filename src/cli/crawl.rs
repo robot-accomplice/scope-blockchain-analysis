@@ -31,6 +31,7 @@ use crate::chains::{
 use crate::config::{Config, OutputFormat};
 use crate::display::{charts, report};
 use crate::error::{Result, ScopeError};
+use crate::market::{ExchangeClient, VenueRegistry};
 use crate::tokens::TokenAliases;
 use clap::Args;
 use std::io::{self, BufRead, Write};
@@ -143,6 +144,30 @@ struct ResolvedToken {
 /// 2. Saved aliases - looked up from storage
 /// 3. Token names/symbols - searched via DEX API with interactive selection
 ///
+/// Attempts to find a token on a CEX venue when DexScreener has no results.
+///
+/// Tries the default venue (binance) first, checking `{SYMBOL}USDT`.
+/// Returns a synthetic [`TokenSearchResult`] with price/volume from the ticker.
+async fn try_cex_fallback(symbol: &str, chain: &str) -> Option<TokenSearchResult> {
+    let registry = VenueRegistry::load().ok()?;
+    let venue_id = "binance";
+    let descriptor = registry.get(venue_id)?;
+    let client = ExchangeClient::from_descriptor(&descriptor.clone());
+    let pair = client.format_pair(&format!("{}USDT", symbol.to_uppercase()));
+    let ticker = client.fetch_ticker(&pair).await.ok()?;
+    let price = ticker.last_price.unwrap_or(0.0);
+    Some(TokenSearchResult {
+        address: String::new(), // no on-chain address from CEX
+        symbol: symbol.to_uppercase(),
+        name: symbol.to_uppercase(),
+        chain: chain.to_string(),
+        price_usd: Some(price),
+        volume_24h: ticker.volume_24h.unwrap_or(0.0),
+        liquidity_usd: 0.0,
+        market_cap: None,
+    })
+}
+
 /// Uses `dex_client` for search to enable dependency injection and testing.
 ///
 /// When an optional `spinner` is provided, progress messages are routed through
@@ -204,12 +229,28 @@ async fn resolve_token_input(
         eprintln!("  {}", search_msg);
     }
 
-    let search_results = dex_client.search_tokens(input, chain_filter).await?;
+    let mut search_results = dex_client.search_tokens(input, chain_filter).await?;
+
+    // Fallback: if DexScreener has no results, try CEX venue ticker
+    if search_results.is_empty()
+        && let Some(fallback) = try_cex_fallback(input, &args.chain).await
+    {
+        let msg = format!(
+            "Not found on DexScreener; found {} on {} (CEX)",
+            fallback.symbol, fallback.chain
+        );
+        if let Some(sp) = spinner {
+            sp.println(&msg);
+        } else {
+            eprintln!("  {}", msg);
+        }
+        search_results.push(fallback);
+    }
 
     if search_results.is_empty() {
         return Err(ScopeError::NotFound(format!(
-            "No tokens found matching '{}'. Try a different name or use the contract address.",
-            input
+            "No token found matching '{}' on {} (checked DexScreener and CEX venues)",
+            input, args.chain
         )));
     }
 

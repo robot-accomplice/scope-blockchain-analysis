@@ -57,3 +57,23 @@ capabilities:
         mapping:
           BUY: buy
           SELL: sell
+
+  ohlc:
+    method: POST
+    path: /public/get-candlestick
+    request_body:
+      id: 1
+      method: "public/get-candlestick"
+      params:
+        instrument_name: "{pair}"
+        timeframe: "{interval}"
+      nonce: "0"
+    response_root: "result.data"
+    response:
+      ohlc_format: objects
+      open_time: t
+      open: o
+      high: h
+      low: l
+      close: c
+      ohlc_volume: v

@@ -31,6 +31,12 @@ pub enum MarketCommands {
     ///
     /// Use --every and --duration to run repeatedly (e.g., every 30s for 1 hour).
     Summary(SummaryArgs),
+
+    /// Fetch OHLC/candlestick (kline) data from a CEX venue.
+    Ohlc(OhlcArgs),
+
+    /// Fetch recent trades from a CEX venue.
+    Trades(TradesArgs),
 }
 
 /// Arguments for `scope market summary`.
@@ -109,6 +115,60 @@ pub enum SummaryFormat {
     Json,
 }
 
+/// Arguments for `scope market ohlc`.
+#[derive(Debug, Args)]
+pub struct OhlcArgs {
+    /// Trading pair symbol (e.g., USDC, BTC). Quote is USDT by default.
+    #[arg(default_value = "USDC", value_name = "SYMBOL")]
+    pub pair: String,
+
+    /// Exchange venue (e.g., binance, mexc, bybit).
+    #[arg(long, default_value = "binance", value_name = "VENUE")]
+    pub venue: String,
+
+    /// Candle interval (e.g., 1m, 5m, 15m, 1h, 4h, 1d).
+    #[arg(long, default_value = "1h", value_name = "INTERVAL")]
+    pub interval: String,
+
+    /// Maximum number of candles to fetch.
+    #[arg(long, default_value = "100", value_name = "LIMIT")]
+    pub limit: u32,
+
+    /// Output format.
+    #[arg(long, default_value = "text")]
+    pub format: OhlcFormat,
+}
+
+/// Arguments for `scope market trades`.
+#[derive(Debug, Args)]
+pub struct TradesArgs {
+    /// Trading pair symbol (e.g., USDC, BTC). Quote is USDT by default.
+    #[arg(default_value = "USDC", value_name = "SYMBOL")]
+    pub pair: String,
+
+    /// Exchange venue (e.g., binance, mexc, bybit).
+    #[arg(long, default_value = "binance", value_name = "VENUE")]
+    pub venue: String,
+
+    /// Maximum number of trades to fetch.
+    #[arg(long, default_value = "50", value_name = "LIMIT")]
+    pub limit: u32,
+
+    /// Output format.
+    #[arg(long, default_value = "text")]
+    pub format: OhlcFormat,
+}
+
+/// Output format for market data commands.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum OhlcFormat {
+    /// Human-readable text table (default).
+    #[default]
+    Text,
+    /// JSON for programmatic consumption.
+    Json,
+}
+
 /// Run the market command.
 pub async fn run(
     args: MarketCommands,
@@ -117,6 +177,8 @@ pub async fn run(
 ) -> Result<()> {
     match args {
         MarketCommands::Summary(summary_args) => run_summary(summary_args, factory).await,
+        MarketCommands::Ohlc(ohlc_args) => run_ohlc(ohlc_args).await,
+        MarketCommands::Trades(trades_args) => run_trades(trades_args).await,
     }
 }
 
@@ -513,6 +575,137 @@ async fn run_summary(args: SummaryArgs, factory: &dyn ChainClientFactory) -> Res
     Ok(())
 }
 
+// =============================================================================
+// OHLC Command
+// =============================================================================
+
+/// Execute the `scope market ohlc` command.
+async fn run_ohlc(args: OhlcArgs) -> Result<()> {
+    let registry = VenueRegistry::load()?;
+    let descriptor = registry.get(&args.venue).ok_or_else(|| {
+        ScopeError::NotFound(format!(
+            "Venue '{}' not found. Use `scope venues list` to see available venues.",
+            args.venue
+        ))
+    })?;
+
+    let client = crate::market::ExchangeClient::from_descriptor(descriptor);
+    let pair = client.format_pair(base_symbol_from_pair(&args.pair));
+
+    let candles = client.fetch_ohlc(&pair, &args.interval, args.limit).await?;
+
+    match args.format {
+        OhlcFormat::Json => {
+            let json_candles: Vec<serde_json::Value> = candles
+                .iter()
+                .map(|c| {
+                    serde_json::json!({
+                        "open_time": c.open_time,
+                        "open": c.open,
+                        "high": c.high,
+                        "low": c.low,
+                        "close": c.close,
+                        "volume": c.volume,
+                        "close_time": c.close_time,
+                    })
+                })
+                .collect();
+            println!("{}", serde_json::to_string_pretty(&json_candles).unwrap());
+        }
+        OhlcFormat::Text => {
+            println!();
+            println!(
+                "OHLC — {} ({}) interval={} limit={}",
+                pair, args.venue, args.interval, args.limit
+            );
+            println!("──────────────────────────────────────────────────────────");
+            println!(
+                "  {:>19}  {:>12}  {:>12}  {:>12}  {:>12}  {:>14}",
+                "Open Time", "Open", "High", "Low", "Close", "Volume"
+            );
+            println!("──────────────────────────────────────────────────────────");
+            for c in &candles {
+                let dt = chrono::DateTime::from_timestamp_millis(c.open_time as i64)
+                    .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
+                    .unwrap_or_else(|| format!("{}", c.open_time));
+                println!(
+                    "  {:>19}  {:>12.6}  {:>12.6}  {:>12.6}  {:>12.6}  {:>14.2}",
+                    dt, c.open, c.high, c.low, c.close, c.volume
+                );
+            }
+            println!();
+            println!("  {} candles returned", candles.len());
+            println!();
+        }
+    }
+    Ok(())
+}
+
+// =============================================================================
+// Trades Command
+// =============================================================================
+
+/// Execute the `scope market trades` command.
+async fn run_trades(args: TradesArgs) -> Result<()> {
+    let registry = VenueRegistry::load()?;
+    let descriptor = registry.get(&args.venue).ok_or_else(|| {
+        ScopeError::NotFound(format!(
+            "Venue '{}' not found. Use `scope venues list` to see available venues.",
+            args.venue
+        ))
+    })?;
+
+    let client = crate::market::ExchangeClient::from_descriptor(descriptor);
+    let pair = client.format_pair(base_symbol_from_pair(&args.pair));
+
+    let trades = client.fetch_recent_trades(&pair, args.limit).await?;
+
+    match args.format {
+        OhlcFormat::Json => {
+            let json_trades: Vec<serde_json::Value> = trades
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "price": t.price,
+                        "quantity": t.quantity,
+                        "quote_quantity": t.quote_quantity,
+                        "timestamp_ms": t.timestamp_ms,
+                        "side": format!("{:?}", t.side),
+                    })
+                })
+                .collect();
+            println!("{}", serde_json::to_string_pretty(&json_trades).unwrap());
+        }
+        OhlcFormat::Text => {
+            println!();
+            println!("Recent Trades — {} ({})", pair, args.venue);
+            println!("──────────────────────────────────────");
+            println!(
+                "  {:>10}  {:>5}  {:>12}  {:>12}",
+                "Time", "Side", "Price", "Qty"
+            );
+            println!("──────────────────────────────────────");
+            for t in &trades {
+                let time = chrono::DateTime::from_timestamp_millis(t.timestamp_ms as i64)
+                    .map(|d| d.format("%H:%M:%S").to_string())
+                    .unwrap_or_else(|| "?".to_string());
+                let side = match t.side {
+                    crate::market::TradeSide::Buy => "BUY",
+                    crate::market::TradeSide::Sell => "SELL",
+                };
+                println!(
+                    "  {:>10}  {:>5}  {:>12.6}  {:>12.2}",
+                    time, side, t.price, t.quantity
+                );
+            }
+            println!();
+            println!("  {} trades returned", trades.len());
+            println!();
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -794,6 +987,61 @@ capabilities:
     // ====================================================================
 
     #[test]
+    fn test_ohlc_args_deserialization() {
+        use crate::cli::{Cli, Commands};
+        use clap::Parser;
+        let cli = Cli::try_parse_from([
+            "scope",
+            "market",
+            "ohlc",
+            "USDC",
+            "--venue",
+            "binance",
+            "--interval",
+            "1h",
+            "--limit",
+            "50",
+        ])
+        .unwrap();
+        if let Commands::Market(MarketCommands::Ohlc(args)) = cli.command {
+            assert_eq!(args.pair, "USDC");
+            assert_eq!(args.venue, "binance");
+            assert_eq!(args.interval, "1h");
+            assert_eq!(args.limit, 50);
+        } else {
+            panic!("Expected Market Ohlc command");
+        }
+    }
+
+    #[test]
+    fn test_trades_args_deserialization() {
+        use crate::cli::{Cli, Commands};
+        use clap::Parser;
+        let cli = Cli::try_parse_from([
+            "scope", "market", "trades", "BTC", "--venue", "mexc", "--limit", "100",
+        ])
+        .unwrap();
+        if let Commands::Market(MarketCommands::Trades(args)) = cli.command {
+            assert_eq!(args.pair, "BTC");
+            assert_eq!(args.venue, "mexc");
+            assert_eq!(args.limit, 100);
+        } else {
+            panic!("Expected Market Trades command");
+        }
+    }
+
+    #[test]
+    fn test_base_symbol_from_pair_various_inputs() {
+        // Additional coverage for edge cases
+        assert_eq!(base_symbol_from_pair("USDC"), "USDC");
+        assert_eq!(base_symbol_from_pair("BTCUSDT"), "BTC");
+        assert_eq!(base_symbol_from_pair("ETH/USDT"), "ETH");
+        assert_eq!(base_symbol_from_pair("PUSD_USDT"), "PUSD");
+        assert_eq!(base_symbol_from_pair("X"), "X"); // short symbol, no USDT suffix
+        assert_eq!(base_symbol_from_pair(""), "");
+    }
+
+    #[test]
     fn test_summary_args_debug() {
         let args = SummaryArgs {
             pair: "USDC".to_string(),
@@ -956,5 +1204,199 @@ capabilities:
             chains_config: Default::default(),
         };
         let _result = run_summary(args, &factory).await;
+    }
+
+    // ====================================================================
+    // OHLC command tests
+    // ====================================================================
+
+    #[test]
+    fn test_ohlc_format_default() {
+        let fmt: OhlcFormat = Default::default();
+        assert_eq!(fmt, OhlcFormat::Text);
+    }
+
+    #[test]
+    fn test_ohlc_format_display() {
+        // ValueEnum-derived parsing
+        assert_eq!(format!("{:?}", OhlcFormat::Text), "Text");
+        assert_eq!(format!("{:?}", OhlcFormat::Json), "Json");
+    }
+
+    #[test]
+    fn test_ohlc_args_default_values() {
+        // Verify we can construct OhlcArgs with defaults
+        let args = OhlcArgs {
+            pair: "BTC".to_string(),
+            venue: "binance".to_string(),
+            interval: "1h".to_string(),
+            limit: 100,
+            format: OhlcFormat::Text,
+        };
+        assert_eq!(args.pair, "BTC");
+        assert_eq!(args.venue, "binance");
+        assert_eq!(args.interval, "1h");
+        assert_eq!(args.limit, 100);
+    }
+
+    #[test]
+    fn test_trades_args_construction() {
+        let args = TradesArgs {
+            pair: "ETH".to_string(),
+            venue: "okx".to_string(),
+            limit: 50,
+            format: OhlcFormat::Json,
+        };
+        assert_eq!(args.pair, "ETH");
+        assert_eq!(args.venue, "okx");
+        assert_eq!(args.limit, 50);
+    }
+
+    #[tokio::test]
+    async fn test_run_ohlc_unknown_venue() {
+        let args = OhlcArgs {
+            pair: "BTC".to_string(),
+            venue: "nonexistent_venue".to_string(),
+            interval: "1h".to_string(),
+            limit: 10,
+            format: OhlcFormat::Text,
+        };
+        let result = run_ohlc(args).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("not found"),
+            "expected 'not found' error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_trades_unknown_venue() {
+        let args = TradesArgs {
+            pair: "BTC".to_string(),
+            venue: "nonexistent_venue".to_string(),
+            limit: 10,
+            format: OhlcFormat::Text,
+        };
+        let result = run_trades(args).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("not found"),
+            "expected 'not found' error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_dispatches_ohlc() {
+        let cmd = MarketCommands::Ohlc(OhlcArgs {
+            pair: "BTC".to_string(),
+            venue: "nonexistent_test_venue".to_string(),
+            interval: "1h".to_string(),
+            limit: 5,
+            format: OhlcFormat::Text,
+        });
+        let factory = DefaultClientFactory {
+            chains_config: Default::default(),
+        };
+        let config = Config::default();
+        let result = run(cmd, &config, &factory).await;
+        // Should error with venue not found
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_run_dispatches_trades() {
+        let cmd = MarketCommands::Trades(TradesArgs {
+            pair: "ETH".to_string(),
+            venue: "nonexistent_test_venue".to_string(),
+            limit: 5,
+            format: OhlcFormat::Json,
+        });
+        let factory = DefaultClientFactory {
+            chains_config: Default::default(),
+        };
+        let config = Config::default();
+        let result = run(cmd, &config, &factory).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_run_ohlc_text_format_with_real_venue() {
+        // Uses a real venue with a real API call. May succeed or fail depending
+        // on network availability. Exercises venue resolution and client creation.
+        let args = OhlcArgs {
+            pair: "BTC".to_string(),
+            venue: "binance".to_string(),
+            interval: "1h".to_string(),
+            limit: 3,
+            format: OhlcFormat::Text,
+        };
+        let _result = run_ohlc(args).await;
+        // Don't assert success — depends on network
+    }
+
+    #[tokio::test]
+    async fn test_run_ohlc_json_format_with_real_venue() {
+        let args = OhlcArgs {
+            pair: "ETH".to_string(),
+            venue: "binance".to_string(),
+            interval: "15m".to_string(),
+            limit: 2,
+            format: OhlcFormat::Json,
+        };
+        let _result = run_ohlc(args).await;
+    }
+
+    #[tokio::test]
+    async fn test_run_trades_text_format_with_real_venue() {
+        let args = TradesArgs {
+            pair: "BTC".to_string(),
+            venue: "binance".to_string(),
+            limit: 5,
+            format: OhlcFormat::Text,
+        };
+        let _result = run_trades(args).await;
+    }
+
+    #[tokio::test]
+    async fn test_run_trades_json_format_with_real_venue() {
+        let args = TradesArgs {
+            pair: "ETH".to_string(),
+            venue: "binance".to_string(),
+            limit: 3,
+            format: OhlcFormat::Json,
+        };
+        let _result = run_trades(args).await;
+    }
+
+    #[tokio::test]
+    async fn test_run_ohlc_multiple_venues() {
+        // Exercise venue resolution for several built-in venues
+        for venue in &["mexc", "okx", "bybit"] {
+            let args = OhlcArgs {
+                pair: "BTC".to_string(),
+                venue: venue.to_string(),
+                interval: "1h".to_string(),
+                limit: 2,
+                format: OhlcFormat::Json,
+            };
+            let _result = run_ohlc(args).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_trades_multiple_venues() {
+        for venue in &["mexc", "okx", "bybit"] {
+            let args = TradesArgs {
+                pair: "BTC".to_string(),
+                venue: venue.to_string(),
+                limit: 3,
+                format: OhlcFormat::Text,
+            };
+            let _result = run_trades(args).await;
+        }
     }
 }
