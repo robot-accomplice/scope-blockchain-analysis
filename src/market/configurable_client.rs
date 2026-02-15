@@ -7,8 +7,8 @@
 use crate::error::{Result, ScopeError};
 use crate::market::descriptor::{EndpointDescriptor, HttpMethod, ResponseMapping, VenueDescriptor};
 use crate::market::orderbook::{
-    OrderBook, OrderBookClient, OrderBookLevel, Ticker, TickerClient, Trade, TradeHistoryClient,
-    TradeSide,
+    Candle, OhlcClient, OrderBook, OrderBookClient, OrderBookLevel, Ticker, TickerClient, Trade,
+    TradeHistoryClient, TradeSide,
 };
 use async_trait::async_trait;
 use reqwest::Client;
@@ -124,28 +124,128 @@ impl ConfigurableExchangeClient {
         path.replace("{pair}", pair)
     }
 
-    /// Interpolate `{pair}` and `{limit}` placeholders in a string value.
+    /// Interpolate `{pair}`, `{limit}`, and `{interval}` placeholders in a string value.
     fn interpolate_value(&self, template: &str, pair: &str, limit: &str) -> String {
-        template.replace("{pair}", pair).replace("{limit}", limit)
+        self.interpolate_value_full(template, pair, limit, "")
     }
 
-    /// Recursively interpolate `{pair}` and `{limit}` in a JSON value template.
+    /// Full interpolation with all supported placeholders.
+    fn interpolate_value_full(
+        &self,
+        template: &str,
+        pair: &str,
+        limit: &str,
+        interval: &str,
+    ) -> String {
+        template
+            .replace("{pair}", pair)
+            .replace("{limit}", limit)
+            .replace("{interval}", interval)
+    }
+
+    /// Recursively interpolate `{pair}`, `{limit}`, and `{interval}` in a JSON value template.
     fn interpolate_json(&self, value: &Value, pair: &str, limit: &str) -> Value {
+        self.interpolate_json_full(value, pair, limit, "")
+    }
+
+    fn interpolate_json_full(
+        &self,
+        value: &Value,
+        pair: &str,
+        limit: &str,
+        interval: &str,
+    ) -> Value {
         match value {
-            Value::String(s) => Value::String(self.interpolate_value(s, pair, limit)),
+            Value::String(s) => {
+                Value::String(self.interpolate_value_full(s, pair, limit, interval))
+            }
             Value::Object(map) => {
                 let mut new_map = serde_json::Map::new();
                 for (k, v) in map {
-                    new_map.insert(k.clone(), self.interpolate_json(v, pair, limit));
+                    new_map.insert(
+                        k.clone(),
+                        self.interpolate_json_full(v, pair, limit, interval),
+                    );
                 }
                 Value::Object(new_map)
             }
             Value::Array(arr) => Value::Array(
                 arr.iter()
-                    .map(|v| self.interpolate_json(v, pair, limit))
+                    .map(|v| self.interpolate_json_full(v, pair, limit, interval))
                     .collect(),
             ),
             other => other.clone(),
+        }
+    }
+
+    /// Execute an endpoint request with `{interval}` support (for OHLC).
+    async fn fetch_endpoint_with_interval(
+        &self,
+        endpoint: &EndpointDescriptor,
+        pair: &str,
+        limit: Option<u32>,
+        interval: &str,
+    ) -> Result<Value> {
+        let url = format!(
+            "{}{}",
+            self.descriptor.base_url,
+            self.interpolate_path(&endpoint.path, pair)
+        );
+        let limit_str = limit.unwrap_or(100).to_string();
+
+        match endpoint.method {
+            HttpMethod::GET => {
+                let mut req = self.http.get(&url);
+                for (k, v) in &self.descriptor.headers {
+                    req = req.header(k, v);
+                }
+                let params: Vec<(String, String)> = endpoint
+                    .params
+                    .iter()
+                    .map(|(k, v)| {
+                        (
+                            k.clone(),
+                            self.interpolate_value_full(v, pair, &limit_str, interval),
+                        )
+                    })
+                    .collect();
+                if !params.is_empty() {
+                    req = req.query(&params);
+                }
+                let resp = req.send().await?;
+                if !resp.status().is_success() {
+                    return Err(ScopeError::Chain(format!(
+                        "{} API error: HTTP {}",
+                        self.descriptor.name,
+                        resp.status()
+                    )));
+                }
+                resp.json::<Value>().await.map_err(|e| {
+                    ScopeError::Chain(format!("{} JSON parse error: {}", self.descriptor.name, e))
+                })
+            }
+            HttpMethod::POST => {
+                let mut req = self.http.post(&url);
+                for (k, v) in &self.descriptor.headers {
+                    req = req.header(k, v);
+                }
+                if let Some(body_template) = &endpoint.request_body {
+                    let body =
+                        self.interpolate_json_full(body_template, pair, &limit_str, interval);
+                    req = req.json(&body);
+                }
+                let resp = req.send().await?;
+                if !resp.status().is_success() {
+                    return Err(ScopeError::Chain(format!(
+                        "{} API error: HTTP {}",
+                        self.descriptor.name,
+                        resp.status()
+                    )));
+                }
+                resp.json::<Value>().await.map_err(|e| {
+                    ScopeError::Chain(format!("{} JSON parse error: {}", self.descriptor.name, e))
+                })
+            }
         }
     }
 
@@ -508,6 +608,128 @@ impl TradeHistoryClient for ConfigurableExchangeClient {
         }
 
         Ok(trades)
+    }
+}
+
+#[async_trait]
+impl OhlcClient for ConfigurableExchangeClient {
+    async fn fetch_ohlc(
+        &self,
+        pair_symbol: &str,
+        interval: &str,
+        limit: u32,
+    ) -> Result<Vec<Candle>> {
+        let endpoint = self.descriptor.capabilities.ohlc.as_ref().ok_or_else(|| {
+            ScopeError::Chain(format!("{} does not support OHLC", self.descriptor.name))
+        })?;
+
+        let json = self
+            .fetch_endpoint_with_interval(endpoint, pair_symbol, Some(limit), interval)
+            .await?;
+        let data = self.navigate_root(&json, endpoint.response_root.as_deref())?;
+
+        // Determine the array of candle items
+        let items_key = endpoint.response.items_key.as_deref().unwrap_or("");
+        let arr = if items_key.is_empty() {
+            data
+        } else {
+            data.get(items_key).unwrap_or(data)
+        };
+
+        let items = arr.as_array().ok_or_else(|| {
+            ScopeError::Chain(format!(
+                "{}: expected array for OHLC data",
+                self.descriptor.name
+            ))
+        })?;
+
+        let r = &endpoint.response;
+        let format = r.ohlc_format.as_deref().unwrap_or("objects");
+        let mut candles = Vec::with_capacity(items.len());
+
+        if format == "array_of_arrays" {
+            // Each candle is a positional array, e.g. Binance klines:
+            // [open_time, open, high, low, close, volume, close_time, ...]
+            let default_fields = vec![
+                "open_time".to_string(),
+                "open".to_string(),
+                "high".to_string(),
+                "low".to_string(),
+                "close".to_string(),
+                "volume".to_string(),
+                "close_time".to_string(),
+            ];
+            let fields = r.ohlc_fields.as_ref().unwrap_or(&default_fields);
+            let idx = |name: &str| -> Option<usize> { fields.iter().position(|f| f == name) };
+
+            for item in items {
+                let arr = match item.as_array() {
+                    Some(a) => a,
+                    None => continue,
+                };
+                let get_f64 = |i: Option<usize>| -> Option<f64> {
+                    i.and_then(|idx| arr.get(idx)).and_then(value_to_f64)
+                };
+                let get_u64 = |i: Option<usize>| -> Option<u64> { get_f64(i).map(|v| v as u64) };
+
+                if let (Some(open), Some(high), Some(low), Some(close)) = (
+                    get_f64(idx("open")),
+                    get_f64(idx("high")),
+                    get_f64(idx("low")),
+                    get_f64(idx("close")),
+                ) {
+                    candles.push(Candle {
+                        open_time: get_u64(idx("open_time")).unwrap_or(0),
+                        open,
+                        high,
+                        low,
+                        close,
+                        volume: get_f64(idx("volume")).unwrap_or(0.0),
+                        close_time: get_u64(idx("close_time")).unwrap_or(0),
+                    });
+                }
+            }
+        } else {
+            // Object format — each candle is a JSON object with named fields.
+            for item in items {
+                let open = r.open.as_ref().and_then(|f| self.extract_f64(item, f));
+                let high = r.high.as_ref().and_then(|f| self.extract_f64(item, f));
+                let low = r.low.as_ref().and_then(|f| self.extract_f64(item, f));
+                let close = r.close.as_ref().and_then(|f| self.extract_f64(item, f));
+
+                if let (Some(open), Some(high), Some(low), Some(close)) = (open, high, low, close) {
+                    let open_time = r
+                        .open_time
+                        .as_ref()
+                        .and_then(|f| self.extract_f64(item, f))
+                        .map(|v| v as u64)
+                        .unwrap_or(0);
+                    let volume = r
+                        .ohlc_volume
+                        .as_ref()
+                        .and_then(|f| self.extract_f64(item, f))
+                        .unwrap_or(0.0);
+                    let close_time = r
+                        .close_time
+                        .as_ref()
+                        .and_then(|f| self.extract_f64(item, f))
+                        .map(|v| v as u64)
+                        .unwrap_or(0);
+
+                    candles.push(Candle {
+                        open_time,
+                        open,
+                        high,
+                        low,
+                        close,
+                        volume,
+                        close_time,
+                    });
+                }
+            }
+        }
+
+        Ok(candles)
     }
 }
 
@@ -1202,6 +1424,7 @@ mod tests {
                         ..Default::default()
                     },
                 }),
+                ohlc: None,
             },
         }
     }
@@ -1709,5 +1932,588 @@ mod tests {
             client.interpolate_json(&serde_json::json!(null), "BTC", "100"),
             serde_json::json!(null)
         );
+    }
+
+    // =================================================================
+    // OHLC / kline tests
+    // =================================================================
+
+    fn make_ohlc_test_descriptor(base_url: &str) -> VenueDescriptor {
+        use crate::market::descriptor::*;
+        VenueDescriptor {
+            id: "ohlc_mock".to_string(),
+            name: "OHLC Mock".to_string(),
+            base_url: base_url.to_string(),
+            timeout_secs: Some(5),
+            rate_limit_per_sec: None,
+            symbol: SymbolConfig {
+                template: "{base}{quote}".to_string(),
+                default_quote: "USDT".to_string(),
+                case: SymbolCase::Upper,
+            },
+            headers: std::collections::HashMap::new(),
+            capabilities: CapabilitySet {
+                order_book: None,
+                ticker: None,
+                trades: None,
+                ohlc: Some(EndpointDescriptor {
+                    path: "/api/v1/klines".to_string(),
+                    method: HttpMethod::GET,
+                    params: [
+                        ("symbol".to_string(), "{pair}".to_string()),
+                        ("interval".to_string(), "{interval}".to_string()),
+                        ("limit".to_string(), "{limit}".to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    request_body: None,
+                    response_root: None,
+                    response: ResponseMapping {
+                        ohlc_format: Some("array_of_arrays".to_string()),
+                        ohlc_fields: Some(vec![
+                            "open_time".to_string(),
+                            "open".to_string(),
+                            "high".to_string(),
+                            "low".to_string(),
+                            "close".to_string(),
+                            "volume".to_string(),
+                            "close_time".to_string(),
+                        ]),
+                        ..Default::default()
+                    },
+                }),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_ohlc_array_of_arrays() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/v1/klines")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("symbol".into(), "BTCUSDT".into()),
+                mockito::Matcher::UrlEncoded("interval".into(), "1h".into()),
+                mockito::Matcher::UrlEncoded("limit".into(), "3".into()),
+            ]))
+            .with_status(200)
+            .with_body(
+                serde_json::json!([
+                    [
+                        1700000000000u64,
+                        "50000.0",
+                        "50500.0",
+                        "49800.0",
+                        "50200.0",
+                        "100.5",
+                        1700003599999u64
+                    ],
+                    [
+                        1700003600000u64,
+                        "50200.0",
+                        "50800.0",
+                        "50100.0",
+                        "50700.0",
+                        "120.3",
+                        1700007199999u64
+                    ],
+                    [
+                        1700007200000u64,
+                        "50700.0",
+                        "51000.0",
+                        "50600.0",
+                        "50900.0",
+                        "95.7",
+                        1700010799999u64
+                    ]
+                ])
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let desc = make_ohlc_test_descriptor(&server.url());
+        let client = ConfigurableExchangeClient::new(desc);
+        let candles = client.fetch_ohlc("BTCUSDT", "1h", 3).await.unwrap();
+
+        assert_eq!(candles.len(), 3);
+        assert_eq!(candles[0].open_time, 1700000000000);
+        assert_eq!(candles[0].open, 50000.0);
+        assert_eq!(candles[0].high, 50500.0);
+        assert_eq!(candles[0].low, 49800.0);
+        assert_eq!(candles[0].close, 50200.0);
+        assert_eq!(candles[0].volume, 100.5);
+        assert_eq!(candles[0].close_time, 1700003599999);
+        assert_eq!(candles[2].open, 50700.0);
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_fetch_ohlc_object_format() {
+        use crate::market::descriptor::*;
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/v1/candles")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("symbol".into(), "ETHUSDT".into()),
+                mockito::Matcher::UrlEncoded("interval".into(), "15m".into()),
+                mockito::Matcher::UrlEncoded("limit".into(), "2".into()),
+            ]))
+            .with_status(200)
+            .with_body(
+                serde_json::json!([
+                    {
+                        "ts": 1700000000000u64,
+                        "o": "3000.0",
+                        "h": "3050.0",
+                        "l": "2980.0",
+                        "c": "3020.0",
+                        "vol": "500.0",
+                        "ct": 1700000899999u64
+                    },
+                    {
+                        "ts": 1700000900000u64,
+                        "o": "3020.0",
+                        "h": "3080.0",
+                        "l": "3010.0",
+                        "c": "3060.0",
+                        "vol": "420.0",
+                        "ct": 1700001799999u64
+                    }
+                ])
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let desc = VenueDescriptor {
+            id: "ohlc_obj_mock".to_string(),
+            name: "OHLC Obj Mock".to_string(),
+            base_url: server.url(),
+            timeout_secs: Some(5),
+            rate_limit_per_sec: None,
+            symbol: SymbolConfig {
+                template: "{base}{quote}".to_string(),
+                default_quote: "USDT".to_string(),
+                case: SymbolCase::Upper,
+            },
+            headers: std::collections::HashMap::new(),
+            capabilities: CapabilitySet {
+                order_book: None,
+                ticker: None,
+                trades: None,
+                ohlc: Some(EndpointDescriptor {
+                    path: "/api/v1/candles".to_string(),
+                    method: HttpMethod::GET,
+                    params: [
+                        ("symbol".to_string(), "{pair}".to_string()),
+                        ("interval".to_string(), "{interval}".to_string()),
+                        ("limit".to_string(), "{limit}".to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    request_body: None,
+                    response_root: None,
+                    response: ResponseMapping {
+                        ohlc_format: Some("objects".to_string()),
+                        open_time: Some("ts".to_string()),
+                        open: Some("o".to_string()),
+                        high: Some("h".to_string()),
+                        low: Some("l".to_string()),
+                        close: Some("c".to_string()),
+                        ohlc_volume: Some("vol".to_string()),
+                        close_time: Some("ct".to_string()),
+                        ..Default::default()
+                    },
+                }),
+            },
+        };
+
+        let client = ConfigurableExchangeClient::new(desc);
+        let candles = client.fetch_ohlc("ETHUSDT", "15m", 2).await.unwrap();
+
+        assert_eq!(candles.len(), 2);
+        assert_eq!(candles[0].open_time, 1700000000000);
+        assert_eq!(candles[0].open, 3000.0);
+        assert_eq!(candles[0].high, 3050.0);
+        assert_eq!(candles[0].low, 2980.0);
+        assert_eq!(candles[0].close, 3020.0);
+        assert_eq!(candles[0].volume, 500.0);
+        assert_eq!(candles[1].close, 3060.0);
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_fetch_ohlc_no_capability() {
+        let desc = make_test_descriptor();
+        let client = ConfigurableExchangeClient::new(desc);
+        let err = client.fetch_ohlc("BTCUSDT", "1h", 100).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("does not support OHLC"),
+            "expected OHLC error, got: {}",
+            msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fetch_ohlc_non_array_response() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/v1/klines")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("symbol".into(), "BTCUSDT".into()),
+                mockito::Matcher::UrlEncoded("interval".into(), "1h".into()),
+                mockito::Matcher::UrlEncoded("limit".into(), "100".into()),
+            ]))
+            .with_status(200)
+            .with_body(serde_json::json!({"error": "not an array"}).to_string())
+            .create_async()
+            .await;
+
+        let desc = make_ohlc_test_descriptor(&server.url());
+        let client = ConfigurableExchangeClient::new(desc);
+        let err = client.fetch_ohlc("BTCUSDT", "1h", 100).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("expected array for OHLC"),
+            "expected array error, got: {}",
+            msg
+        );
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_fetch_ohlc_empty_array() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/v1/klines")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("symbol".into(), "BTCUSDT".into()),
+                mockito::Matcher::UrlEncoded("interval".into(), "1d".into()),
+                mockito::Matcher::UrlEncoded("limit".into(), "10".into()),
+            ]))
+            .with_status(200)
+            .with_body("[]")
+            .create_async()
+            .await;
+
+        let desc = make_ohlc_test_descriptor(&server.url());
+        let client = ConfigurableExchangeClient::new(desc);
+        let candles = client.fetch_ohlc("BTCUSDT", "1d", 10).await.unwrap();
+        assert!(candles.is_empty());
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_fetch_ohlc_skips_malformed_inner_items() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/v1/klines")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("symbol".into(), "BTCUSDT".into()),
+                mockito::Matcher::UrlEncoded("interval".into(), "1h".into()),
+                mockito::Matcher::UrlEncoded("limit".into(), "5".into()),
+            ]))
+            .with_status(200)
+            .with_body(
+                serde_json::json!([
+                    "not an array",
+                    [
+                        1700000000000u64,
+                        "50000.0",
+                        "50500.0",
+                        "49800.0",
+                        "50200.0",
+                        "100.5",
+                        1700003599999u64
+                    ],
+                    42
+                ])
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let desc = make_ohlc_test_descriptor(&server.url());
+        let client = ConfigurableExchangeClient::new(desc);
+        let candles = client.fetch_ohlc("BTCUSDT", "1h", 5).await.unwrap();
+        // Only the valid inner array should be parsed
+        assert_eq!(candles.len(), 1);
+        assert_eq!(candles[0].open, 50000.0);
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_fetch_ohlc_with_response_root() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/v1/klines")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("symbol".into(), "BTCUSDT".into()),
+                mockito::Matcher::UrlEncoded("interval".into(), "4h".into()),
+                mockito::Matcher::UrlEncoded("limit".into(), "2".into()),
+            ]))
+            .with_status(200)
+            .with_body(
+                serde_json::json!({
+                    "result": [
+                        [1700000000000u64, "50000.0", "50500.0", "49800.0", "50200.0", "100.5", 1700003599999u64],
+                        [1700003600000u64, "50200.0", "50800.0", "50100.0", "50700.0", "120.3", 1700007199999u64]
+                    ]
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let mut desc = make_ohlc_test_descriptor(&server.url());
+        desc.capabilities.ohlc.as_mut().unwrap().response_root = Some("result".to_string());
+
+        let client = ConfigurableExchangeClient::new(desc);
+        let candles = client.fetch_ohlc("BTCUSDT", "4h", 2).await.unwrap();
+        assert_eq!(candles.len(), 2);
+        mock.assert_async().await;
+    }
+
+    #[test]
+    fn test_interpolate_value_full_with_interval() {
+        let desc = make_test_descriptor();
+        let client = ConfigurableExchangeClient::new(desc);
+        let result =
+            client.interpolate_value_full("{pair}_{interval}_{limit}", "BTCUSDT", "50", "1h");
+        assert_eq!(result, "BTCUSDT_1h_50");
+    }
+
+    #[test]
+    fn test_interpolate_json_full_with_interval() {
+        let desc = make_test_descriptor();
+        let client = ConfigurableExchangeClient::new(desc);
+        let template = serde_json::json!({
+            "symbol": "{pair}",
+            "interval": "{interval}",
+            "limit": "{limit}"
+        });
+        let result = client.interpolate_json_full(&template, "ETHUSDT", "100", "15m");
+        assert_eq!(result["symbol"], "ETHUSDT");
+        assert_eq!(result["interval"], "15m");
+        assert_eq!(result["limit"], "100");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_ohlc_via_post_method() {
+        use crate::market::descriptor::*;
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/v1/klines")
+            .with_status(200)
+            .with_body(
+                serde_json::json!([[
+                    1700000000000u64,
+                    "50000.0",
+                    "50500.0",
+                    "49800.0",
+                    "50200.0",
+                    "100.5",
+                    1700003599999u64
+                ]])
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let desc = VenueDescriptor {
+            id: "post_ohlc".to_string(),
+            name: "POST OHLC".to_string(),
+            base_url: server.url(),
+            timeout_secs: Some(5),
+            rate_limit_per_sec: None,
+            symbol: SymbolConfig {
+                template: "{base}{quote}".to_string(),
+                default_quote: "USDT".to_string(),
+                case: SymbolCase::Upper,
+            },
+            headers: std::collections::HashMap::new(),
+            capabilities: CapabilitySet {
+                order_book: None,
+                ticker: None,
+                trades: None,
+                ohlc: Some(EndpointDescriptor {
+                    path: "/api/v1/klines".to_string(),
+                    method: HttpMethod::POST,
+                    params: std::collections::HashMap::new(),
+                    request_body: Some(serde_json::json!({
+                        "symbol": "{pair}",
+                        "interval": "{interval}",
+                        "limit": "{limit}"
+                    })),
+                    response_root: None,
+                    response: ResponseMapping {
+                        ohlc_format: Some("array_of_arrays".to_string()),
+                        ohlc_fields: Some(vec![
+                            "open_time".to_string(),
+                            "open".to_string(),
+                            "high".to_string(),
+                            "low".to_string(),
+                            "close".to_string(),
+                            "volume".to_string(),
+                            "close_time".to_string(),
+                        ]),
+                        ..Default::default()
+                    },
+                }),
+            },
+        };
+
+        let client = ConfigurableExchangeClient::new(desc);
+        let candles = client.fetch_ohlc("BTCUSDT", "1h", 1).await.unwrap();
+        assert_eq!(candles.len(), 1);
+        assert_eq!(candles[0].open, 50000.0);
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_fetch_ohlc_post_http_error() {
+        use crate::market::descriptor::*;
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/v1/klines")
+            .with_status(500)
+            .with_body("Internal Server Error")
+            .create_async()
+            .await;
+
+        let desc = VenueDescriptor {
+            id: "post_ohlc_err".to_string(),
+            name: "POST OHLC Err".to_string(),
+            base_url: server.url(),
+            timeout_secs: Some(5),
+            rate_limit_per_sec: None,
+            symbol: SymbolConfig {
+                template: "{base}{quote}".to_string(),
+                default_quote: "USDT".to_string(),
+                case: SymbolCase::Upper,
+            },
+            headers: std::collections::HashMap::new(),
+            capabilities: CapabilitySet {
+                order_book: None,
+                ticker: None,
+                trades: None,
+                ohlc: Some(EndpointDescriptor {
+                    path: "/api/v1/klines".to_string(),
+                    method: HttpMethod::POST,
+                    params: std::collections::HashMap::new(),
+                    request_body: None,
+                    response_root: None,
+                    response: ResponseMapping {
+                        ohlc_format: Some("array_of_arrays".to_string()),
+                        ..Default::default()
+                    },
+                }),
+            },
+        };
+
+        let client = ConfigurableExchangeClient::new(desc);
+        let err = client.fetch_ohlc("BTCUSDT", "1h", 100).await.unwrap_err();
+        assert!(err.to_string().contains("API error"));
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_fetch_ohlc_get_http_error() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/v1/klines")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("symbol".into(), "BTCUSDT".into()),
+                mockito::Matcher::UrlEncoded("interval".into(), "1h".into()),
+                mockito::Matcher::UrlEncoded("limit".into(), "100".into()),
+            ]))
+            .with_status(429)
+            .with_body("Rate limited")
+            .create_async()
+            .await;
+
+        let desc = make_ohlc_test_descriptor(&server.url());
+        let client = ConfigurableExchangeClient::new(desc);
+        let err = client.fetch_ohlc("BTCUSDT", "1h", 100).await.unwrap_err();
+        assert!(err.to_string().contains("API error"));
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_fetch_ohlc_with_items_key() {
+        use crate::market::descriptor::*;
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/v1/candles")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("symbol".into(), "BTCUSDT".into()),
+                mockito::Matcher::UrlEncoded("interval".into(), "1h".into()),
+                mockito::Matcher::UrlEncoded("limit".into(), "2".into()),
+            ]))
+            .with_status(200)
+            .with_body(
+                serde_json::json!({
+                    "data": [
+                        {"ts": 1700000000000u64, "o": "100.0", "h": "110.0", "l": "90.0", "c": "105.0", "vol": "1000.0", "ct": 1700003599999u64},
+                        {"ts": 1700003600000u64, "o": "105.0", "h": "115.0", "l": "100.0", "c": "110.0", "vol": "800.0", "ct": 1700007199999u64}
+                    ]
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let desc = VenueDescriptor {
+            id: "items_key_ohlc".to_string(),
+            name: "Items Key OHLC".to_string(),
+            base_url: server.url(),
+            timeout_secs: Some(5),
+            rate_limit_per_sec: None,
+            symbol: SymbolConfig {
+                template: "{base}{quote}".to_string(),
+                default_quote: "USDT".to_string(),
+                case: SymbolCase::Upper,
+            },
+            headers: std::collections::HashMap::new(),
+            capabilities: CapabilitySet {
+                order_book: None,
+                ticker: None,
+                trades: None,
+                ohlc: Some(EndpointDescriptor {
+                    path: "/api/v1/candles".to_string(),
+                    method: HttpMethod::GET,
+                    params: [
+                        ("symbol".to_string(), "{pair}".to_string()),
+                        ("interval".to_string(), "{interval}".to_string()),
+                        ("limit".to_string(), "{limit}".to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    request_body: None,
+                    response_root: None,
+                    response: ResponseMapping {
+                        items_key: Some("data".to_string()),
+                        ohlc_format: Some("objects".to_string()),
+                        open_time: Some("ts".to_string()),
+                        open: Some("o".to_string()),
+                        high: Some("h".to_string()),
+                        low: Some("l".to_string()),
+                        close: Some("c".to_string()),
+                        ohlc_volume: Some("vol".to_string()),
+                        close_time: Some("ct".to_string()),
+                        ..Default::default()
+                    },
+                }),
+            },
+        };
+
+        let client = ConfigurableExchangeClient::new(desc);
+        let candles = client.fetch_ohlc("BTCUSDT", "1h", 2).await.unwrap();
+        assert_eq!(candles.len(), 2);
+        assert_eq!(candles[0].open, 100.0);
+        assert_eq!(candles[1].close, 110.0);
+        mock.assert_async().await;
     }
 }

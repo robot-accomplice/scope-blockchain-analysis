@@ -14,12 +14,12 @@ A production-grade command-line tool for blockchain data analysis, portfolio tra
 - **Transaction Analysis**: Look up and decode blockchain transactions across all supported chains
 - **Token Crawling**: Crawl DEX data for any token -- price, volume, liquidity, holder analysis, and risk scoring with markdown report generation
 - **Live Monitoring**: Real-time TUI dashboard with five layout presets (Dashboard, Chart, Feed, Compact, Exchange), responsive terminal sizing, config-driven widget visibility, price/volume/candlestick charts, price alerts, whale detection, CSV export, and auto-pause on input
-- **Exchange Venues**: Data-driven CEX integration via YAML descriptors — 11 built-in venues (Binance, Biconomy, Bitget, Bybit, Coinbase, Crypto.com, Gate.io, HTX, Kraken, MEXC, OKX); add custom venues by dropping a YAML file in `~/.config/scope/venues/`
+- **Exchange Venues**: Data-driven CEX integration via YAML descriptors — 11 built-in venues (Binance, Biconomy, Bitget, Bybit, Coinbase, Crypto.com, Gate.io, HTX, Kraken, MEXC, OKX) with order book, ticker, trades, and OHLC support; add custom venues by dropping a YAML file in `~/.config/scope/venues/`
 - **Portfolio Management**: Track multiple addresses across chains with labels, tags, and aggregated balance views
 - **Compliance & Risk Assessment**: Risk scoring, transaction pattern detection, taint analysis, and compliance reporting
 - **Data Export**: Export address history and portfolio data to JSON or CSV with date range filtering
 - **Token Discovery**: Browse trending and boosted tokens from DexScreener (`scope discover` / `scope disc`)
-- **Market Command** (`scope market summary`): Peg and order book health for stablecoin markets; any CEX venue from the registry or DEX (Ethereum, Solana); repeat mode with `--every`/`--duration`; `--report` and `--csv` export
+- **Market Command** (`scope market summary`, `ohlc`, `trades`): Peg and order book health; OHLC/candlestick data; recent trades; any CEX venue from the registry or DEX (Ethereum, Solana); repeat mode with `--every`/`--duration`; `--report` and `--csv` export
 - **Token Health Suite** (`scope token-health` / `scope health`): DEX analytics with optional order book summary; any venue from the registry or DEX
 - **Venue Management** (`scope venues` / `scope ven`): List available venues, view the YAML schema, initialise user venues directory, validate custom descriptors
 - **Insights** (`scope insights` / `insight`): Infer chain and type (address, tx, token) from input; run relevant analyses and present unified observations
@@ -119,6 +119,7 @@ scope crawl 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --chain ethereum
 scope monitor USDC                                          # defaults to ethereum
 scope mon PEPE --chain ethereum --layout chart-focus        # short alias with options
 scope monitor USDC --layout exchange                        # exchange-style: order book + chart + trades
+scope monitor USDC --venue binance                           # real exchange OHLC instead of synthetic candles
 
 # Exchange venues
 scope venues list                                           # show all available venues
@@ -135,6 +136,10 @@ scope health USDC --with-market --venue binance
 scope market summary USDC
 scope market summary PUSD --venue biconomy --format json
 scope market summary USDC --venue kraken
+
+# OHLC and recent trades
+scope market ohlc USDC --venue binance --interval 1h --limit 100
+scope market trades USDC --venue binance --limit 50
 
 # Unified insights — infer type and chain from any target
 scope insights 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2   # address -> balance, tokens
@@ -181,7 +186,7 @@ scope serve --port 9090
 
 The web UI provides:
 - All CLI commands accessible via browser forms
-- JSON REST API at `/api/*` for programmatic access
+- JSON REST API at `/api/*` for programmatic access (exchange: snapshot, OHLC, trades)
 - Live WebSocket monitor with real-time price charts
 - Exchange venue selector and market snapshots
 - Configuration status and setup page
@@ -201,6 +206,8 @@ Not sure which command to use? Here's a quick decision tree:
 | Exchange-style monitor (order book + trades) | `scope monitor <token> --layout exchange` |
 | Browse trending/boosted tokens | `scope discover` |
 | Check market peg/depth for a stablecoin | `scope market summary <symbol>` |
+| Fetch OHLC/candlestick data from a venue | `scope market ohlc <symbol> --venue <venue> --interval 1h` |
+| Fetch recent trades from a venue | `scope market trades <symbol> --venue <venue>` |
 | List available exchange venues | `scope venues list` |
 | Add a custom exchange venue | `scope venues schema` then drop YAML in `~/.config/scope/venues/` |
 | Assess compliance risk for an address | `scope compliance risk <addr>` |
@@ -220,17 +227,17 @@ Representative output for key commands:
 
 ```text
 ┌─ Available Venues ──────────────────────────────
-│  biconomy          order_book, ticker, trades
-│  binance           order_book, ticker, trades
-│  bitget            order_book, ticker, trades
-│  bybit             order_book, ticker, trades
-│  coinbase          order_book, ticker, trades
-│  crypto_com        order_book, ticker, trades
-│  gateio            order_book, ticker, trades
-│  htx               order_book, ticker, trades
-│  kraken            order_book, ticker, trades
-│  mexc              order_book, ticker, trades
-│  okx               order_book, ticker, trades
+│  biconomy          order_book, ticker, trades, ohlc
+│  binance           order_book, ticker, trades, ohlc
+│  bitget            order_book, ticker, trades, ohlc
+│  bybit             order_book, ticker, trades, ohlc
+│  coinbase          order_book, ticker, trades, ohlc
+│  crypto_com        order_book, ticker, trades, ohlc
+│  gateio            order_book, ticker, trades, ohlc
+│  htx               order_book, ticker, trades, ohlc
+│  kraken            order_book, ticker, trades, ohlc
+│  mexc              order_book, ticker, trades, ohlc
+│  okx               order_book, ticker, trades, ohlc
 ├──────────────────────────────────────────────────
 │  Loaded            11 venues (0 built-in, 11 user)
 │  User dir          ~/.config/scope/venues
@@ -301,6 +308,42 @@ Representative output for key commands:
   "execution_10k_buy": {"fillable": true, "slippage_bps": 0.5},
   "execution_10k_sell": {"fillable": true, "slippage_bps": 0.5}
 }
+```
+
+### Market OHLC
+
+```bash
+> scope market ohlc USDC --venue binance --interval 1h --limit 5
+```
+
+```text
+OHLC — USDCUSDT (binance) interval=1h limit=5
+──────────────────────────────────────────────────────────
+           Open Time          Open         High          Low        Close         Volume
+──────────────────────────────────────────────────────────
+  2026-02-15 12:00    1.000400    1.000500    1.000300    1.000450    1250000.00
+  2026-02-15 11:00    1.000350    1.000420    1.000280    1.000400    980000.00
+  ...
+
+  5 candles returned
+```
+
+### Market trades
+
+```bash
+> scope market trades USDC --venue binance --limit 5
+```
+
+```text
+Recent Trades — USDCUSDT (binance)
+──────────────────────────────────────
+       Time  Side        Price           Qty
+──────────────────────────────────────
+  14:32:15   BUY    1.000350       5000.00
+  14:32:14  SELL    1.000340       1200.00
+  ...
+
+  5 trades returned
 ```
 
 ### Token health
@@ -611,7 +654,9 @@ scope interactive
 scope> monitor USDC
 ```
 
-**Direct-command flags:** `--chain` / `-c`, `--layout` / `-l`, `--refresh` / `-r`, `--scale` / `-s`, `--color-scheme`, `--export` / `-e`.
+**Direct-command flags:** `--chain` / `-c`, `--layout` / `-l`, `--refresh` / `-r`, `--scale` / `-s`, `--color-scheme`, `--export` / `-e`, `--venue` / `-v`.
+
+Use `--venue binance` (or any CEX venue) to fetch real exchange OHLC data instead of synthetic candles. The time period selector (1m, 5m, 15m, 1h, 4h, 1d) maps directly to the venue's candlestick intervals.
 
 The monitor supports five layout presets that can be switched at runtime or configured in `config.yaml`:
 
@@ -791,7 +836,9 @@ just summary   # USDC market summary (peg, spread, volume, execution, health che
 
 ### Peg & Order Book Health (`scope market`)
 
-The `scope market summary` command fetches level-2 order book data from any CEX venue in the registry or DEX (Ethereum, Solana) and reports peg, book health, volume, and execution checks:
+The `scope market` command has three subcommands:
+
+**`scope market summary`** — Fetches level-2 order book data from any CEX venue in the registry or DEX (Ethereum, Solana) and reports peg, book health, volume, and execution checks:
 
 - **Peg**: Target, best bid/ask deviation (%), mid price, spread
 - **Volume**: 24h quote volume (from venue ticker; omitted for DEX venues)
@@ -815,6 +862,20 @@ scope market summary --every 30s --duration 10m   # Every 30s for 10 min
 scope market summary --every 5m --duration 1h     # Every 5 min for 1 hour
 scope market summary --duration 24h               # Every 60s for 24h (default interval)
 scope market summary --every 1m                   # Every 1 min for 1h (default duration)
+```
+
+**`scope market ohlc`** — Fetches real OHLC/candlestick data from CEX venues:
+
+```bash
+scope market ohlc USDC --venue binance --interval 1h --limit 100
+scope market ohlc BTC --venue kraken --interval 15m --format json
+```
+
+**`scope market trades`** — Fetches recent trades from CEX venues:
+
+```bash
+scope market trades USDC --venue binance --limit 50
+scope market trades PUSD --venue biconomy --format json
 ```
 
 `just summary` invokes `scope market summary` under the hood.

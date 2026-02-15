@@ -236,6 +236,29 @@ pub struct MarketSnapshot {
 }
 
 // =============================================================================
+// OHLC / Candlestick
+// =============================================================================
+
+/// A single OHLC candlestick bar.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Candle {
+    /// Candle open time in milliseconds since epoch.
+    pub open_time: u64,
+    /// Opening price.
+    pub open: f64,
+    /// Highest price during the interval.
+    pub high: f64,
+    /// Lowest price during the interval.
+    pub low: f64,
+    /// Closing price.
+    pub close: f64,
+    /// Base-asset volume during the interval.
+    pub volume: f64,
+    /// Candle close time in milliseconds since epoch.
+    pub close_time: u64,
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -297,6 +320,41 @@ mod tests {
         assert!((book.spread().unwrap() - 0.0003).abs() < 1e-10);
         assert!((book.bid_depth() - 99.98 - 49.985).abs() < 0.01);
         assert!((book.ask_depth() - 200.02 - 150.03).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_candle_construction() {
+        let candle = Candle {
+            open_time: 1700000000000,
+            open: 100.0,
+            high: 105.0,
+            low: 95.0,
+            close: 102.0,
+            volume: 1_000_000.0,
+            close_time: 1700003600000,
+        };
+        assert_eq!(candle.open_time, 1700000000000);
+        assert_eq!(candle.open, 100.0);
+        assert_eq!(candle.high, 105.0);
+        assert_eq!(candle.low, 95.0);
+        assert_eq!(candle.close, 102.0);
+        assert_eq!(candle.volume, 1_000_000.0);
+        assert_eq!(candle.close_time, 1700003600000);
+    }
+
+    #[test]
+    fn test_candle_partial_eq() {
+        let c1 = Candle {
+            open_time: 1000,
+            open: 1.0,
+            high: 1.1,
+            low: 0.9,
+            close: 1.0,
+            volume: 100.0,
+            close_time: 2000,
+        };
+        let c2 = c1.clone();
+        assert_eq!(c1, c2);
     }
 
     #[test]

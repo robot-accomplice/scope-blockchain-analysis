@@ -45,3 +45,11 @@ capabilities:
         mapping:
           BUY: buy
           SELL: sell
+
+  ohlc:
+    path: /products/{pair}/candles
+    params:
+      granularity: "{interval}"
+    response:
+      ohlc_format: array_of_arrays
+      ohlc_fields: [open_time, low, high, open, close, volume]

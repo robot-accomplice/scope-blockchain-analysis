@@ -48,3 +48,13 @@ capabilities:
         mapping:
           "true": sell
           "false": buy
+
+  ohlc:
+    path: /api/v3/klines
+    params:
+      symbol: "{pair}"
+      interval: "{interval}"
+      limit: "{limit}"
+    response:
+      ohlc_format: array_of_arrays
+      ohlc_fields: [open_time, open, high, low, close, volume, close_time]

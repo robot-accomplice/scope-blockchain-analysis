@@ -48,6 +48,11 @@ pub fn routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/config", axum::routing::post(config_status::handle_save))
         .route("/venues", axum::routing::get(venues::handle))
         .route("/exchange/snapshot", axum::routing::post(exchange::handle))
+        .route(
+            "/exchange/trades",
+            axum::routing::post(exchange::handle_trades),
+        )
+        .route("/exchange/ohlc", axum::routing::post(exchange::handle_ohlc))
         .with_state(state)
 }
 

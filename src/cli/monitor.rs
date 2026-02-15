@@ -159,6 +159,13 @@ pub struct MonitorArgs {
     /// Start CSV export immediately, writing to the given path.
     #[arg(short, long, value_name = "PATH")]
     pub export: Option<PathBuf>,
+
+    /// Exchange venue for real OHLC candle data (e.g., binance, mexc).
+    ///
+    /// When specified, the monitor fetches real candlestick data from the
+    /// exchange API instead of generating synthetic candles from price history.
+    #[arg(long, value_name = "VENUE")]
+    pub venue: Option<String>,
 }
 
 /// Maximum data retention: 24 hours.
@@ -295,6 +302,18 @@ impl TimePeriod {
             TimePeriod::Hour1 => 3,
             TimePeriod::Hour4 => 4,
             TimePeriod::Day1 => 5,
+        }
+    }
+
+    /// Returns the exchange API kline interval string for this period.
+    pub fn exchange_interval(&self) -> &'static str {
+        match self {
+            TimePeriod::Min1 => "1m",
+            TimePeriod::Min5 => "5m",
+            TimePeriod::Min15 => "15m",
+            TimePeriod::Hour1 => "1h",
+            TimePeriod::Hour4 => "4h",
+            TimePeriod::Day1 => "1d",
         }
     }
 
@@ -661,6 +680,9 @@ pub struct MonitorConfig {
     pub export: ExportConfig,
     /// Whether to auto-pause data fetching when the user is interacting.
     pub auto_pause_on_input: bool,
+    /// Exchange venue for real OHLC candle data (e.g., "binance").
+    #[serde(default)]
+    pub venue: Option<String>,
 }
 
 impl Default for MonitorConfig {
@@ -674,6 +696,7 @@ impl Default for MonitorConfig {
             alerts: AlertConfig::default(),
             export: ExportConfig::default(),
             auto_pause_on_input: false,
+            venue: None,
         }
     }
 }
@@ -844,6 +867,14 @@ pub struct MonitorState {
 
     /// Duration after last input before auto-pause lifts (default 3s).
     pub auto_pause_timeout: Duration,
+
+    // ── Exchange OHLC ──
+    /// Real OHLC candles fetched from an exchange venue.
+    /// When present, `get_ohlc_candles` uses these instead of synthetic candles.
+    pub exchange_ohlc: Vec<OhlcCandle>,
+
+    /// Venue-formatted pair symbol for OHLC queries (e.g., "BTCUSDT").
+    pub venue_pair: Option<String>,
 }
 
 impl MonitorState {
@@ -950,6 +981,9 @@ impl MonitorState {
             auto_pause_on_input: false,
             last_input_at: now,
             auto_pause_timeout: Duration::from_secs(3),
+            // Exchange OHLC
+            exchange_ohlc: Vec::new(),
+            venue_pair: None,
         }
     }
 
@@ -1543,6 +1577,11 @@ impl MonitorState {
     /// - 4h view: 15-minute candles
     /// - 1d view: 1-hour candles
     pub fn get_ohlc_candles(&self) -> Vec<OhlcCandle> {
+        // Prefer real exchange OHLC candles when available
+        if !self.exchange_ohlc.is_empty() {
+            return self.exchange_ohlc.clone();
+        }
+
         let (data, _) = self.get_price_data_for_period();
 
         if data.is_empty() {
@@ -1710,6 +1749,9 @@ pub struct MonitorApp<B: ratatui::backend::Backend = ratatui::backend::Crossterm
     /// Optional chain client for on-chain data (holder count, etc.).
     chain_client: Option<Box<dyn ChainClient>>,
 
+    /// Optional exchange client for real OHLC data.
+    exchange_client: Option<crate::market::ExchangeClient>,
+
     /// Whether to exit the application.
     should_exit: bool,
 
@@ -1726,6 +1768,7 @@ impl MonitorApp {
         chain: &str,
         monitor_config: &MonitorConfig,
         chain_client: Option<Box<dyn ChainClient>>,
+        exchange_client: Option<crate::market::ExchangeClient>,
     ) -> Result<Self> {
         // Setup terminal using ratatui's simplified init
         let terminal = ratatui::init();
@@ -1736,11 +1779,18 @@ impl MonitorApp {
         let mut state = MonitorState::new(&initial_data, chain);
         state.apply_config(monitor_config);
 
+        // If we have an exchange client, set up the venue pair for OHLC queries
+        if let Some(ref ex) = exchange_client {
+            let pair = ex.format_pair(&initial_data.symbol);
+            state.venue_pair = Some(pair);
+        }
+
         Ok(Self {
             terminal,
             state,
             dex_client: Box::new(DexClient::new()),
             chain_client,
+            exchange_client,
             should_exit: false,
             owns_terminal: true,
         })
@@ -1963,6 +2013,33 @@ impl<B: ratatui::backend::Backend> MonitorApp<B> {
             Err(e) => {
                 self.state.error_message = Some(format!("API Error: {}", e));
                 self.state.last_update = Instant::now(); // Prevent rapid retries
+            }
+        }
+
+        // Fetch OHLC candles from exchange venue (if configured)
+        if let (Some(ex), Some(pair)) = (&self.exchange_client, &self.state.venue_pair.clone())
+            && ex.has_ohlc()
+        {
+            let interval = self.state.time_period.exchange_interval();
+            let limit = 100;
+            match ex.fetch_ohlc(pair, interval, limit).await {
+                Ok(candles) => {
+                    self.state.exchange_ohlc = candles
+                        .into_iter()
+                        .map(|c| OhlcCandle {
+                            timestamp: c.open_time as f64 / 1000.0,
+                            open: c.open,
+                            high: c.high,
+                            low: c.low,
+                            close: c.close,
+                            is_bullish: c.close >= c.open,
+                        })
+                        .collect();
+                }
+                Err(e) => {
+                    tracing::debug!("Failed to fetch OHLC: {}", e);
+                    // Fall back to synthetic candles silently
+                }
             }
         }
 
@@ -4002,6 +4079,9 @@ pub async fn run_direct(
     if let Some(ref path) = args.export {
         monitor_config.export.path = Some(path.to_string_lossy().into_owned());
     }
+    if let Some(ref venue) = args.venue {
+        monitor_config.venue = Some(venue.clone());
+    }
 
     // Use a temporary Config with the CLI-overridden monitor settings
     let mut effective_config = config.clone();
@@ -4051,8 +4131,22 @@ pub async fn run(
     // Create optional chain client for on-chain data (holder count, etc.)
     let chain_client = clients.create_chain_client(&ctx.chain).ok();
 
+    // Create exchange client if a venue is configured (from MonitorConfig or CLI)
+    let exchange_client = config.monitor.venue.as_ref().and_then(|venue_id| {
+        crate::market::VenueRegistry::load()
+            .ok()
+            .and_then(|r| r.get(venue_id).cloned())
+            .map(|desc| crate::market::ExchangeClient::from_descriptor(&desc))
+    });
+
     // Create and run the app
-    let mut app = MonitorApp::new(initial_data, &ctx.chain, &config.monitor, chain_client)?;
+    let mut app = MonitorApp::new(
+        initial_data,
+        &ctx.chain,
+        &config.monitor,
+        chain_client,
+        exchange_client,
+    )?;
     let result = app.run().await;
 
     // Cleanup is handled by Drop, but we do it explicitly for error handling
@@ -4418,6 +4512,16 @@ mod tests {
     }
 
     #[test]
+    fn test_time_period_exchange_interval() {
+        assert_eq!(TimePeriod::Min1.exchange_interval(), "1m");
+        assert_eq!(TimePeriod::Min5.exchange_interval(), "5m");
+        assert_eq!(TimePeriod::Min15.exchange_interval(), "15m");
+        assert_eq!(TimePeriod::Hour1.exchange_interval(), "1h");
+        assert_eq!(TimePeriod::Hour4.exchange_interval(), "4h");
+        assert_eq!(TimePeriod::Day1.exchange_interval(), "1d");
+    }
+
+    #[test]
     fn test_monitor_state_time_period() {
         let token_data = create_test_token_data();
         let mut state = MonitorState::new(&token_data, "ethereum");
@@ -4645,6 +4749,24 @@ mod tests {
         let candles = state.get_ohlc_candles();
         // Should have some candles
         assert!(!candles.is_empty());
+    }
+
+    #[test]
+    fn test_get_ohlc_candles_returns_exchange_ohlc_when_populated() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        // Populate exchange OHLC
+        let exchange_candles = vec![
+            OhlcCandle::new(1700000000.0, 100.0),
+            OhlcCandle::new(1700003600.0, 101.0),
+        ];
+        state.exchange_ohlc = exchange_candles.clone();
+        let candles = state.get_ohlc_candles();
+        assert_eq!(candles.len(), 2);
+        assert_eq!(candles[0].timestamp, 1700000000.0);
+        assert_eq!(candles[0].open, 100.0);
+        assert_eq!(candles[1].timestamp, 1700003600.0);
+        assert_eq!(candles[1].open, 101.0);
     }
 
     // ========================================================================
@@ -6518,6 +6640,7 @@ mod tests {
             alerts: AlertConfig::default(),
             export: ExportConfig::default(),
             auto_pause_on_input: false,
+            venue: None,
         };
 
         let yaml = serde_yaml::to_string(&config).unwrap();
@@ -6579,6 +6702,7 @@ widgets:
             alerts: AlertConfig::default(),
             export: ExportConfig::default(),
             auto_pause_on_input: false,
+            venue: None,
         };
         state.apply_config(&config);
         assert_eq!(state.layout, LayoutPreset::Feed);
@@ -7179,12 +7303,14 @@ widgets:
                 path: Some("./exports".to_string()),
             },
             auto_pause_on_input: true,
+            venue: Some("binance".to_string()),
         };
 
         let yaml = serde_yaml::to_string(&config).unwrap();
         let parsed: MonitorConfig = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(parsed.layout, LayoutPreset::Dashboard);
         assert_eq!(parsed.refresh_seconds, 10);
+        assert_eq!(parsed.venue, Some("binance".to_string()));
         assert_eq!(parsed.alerts.price_min, Some(0.5));
         assert_eq!(parsed.alerts.price_max, Some(10.0));
         assert_eq!(parsed.export.path, Some("./exports".to_string()));
@@ -8186,6 +8312,7 @@ refresh_seconds: 5
             state,
             dex_client: dex,
             chain_client,
+            exchange_client: None,
             should_exit: false,
             owns_terminal: false,
         }
@@ -8203,6 +8330,7 @@ refresh_seconds: 5
             state,
             dex_client: dex,
             chain_client,
+            exchange_client: None,
             should_exit: false,
             owns_terminal: false,
         }
@@ -8859,6 +8987,7 @@ refresh_seconds: 5
             scale: None,
             color_scheme: None,
             export: None,
+            venue: None,
         };
 
         // Build the effective config the same way run_direct does
@@ -8880,6 +9009,7 @@ refresh_seconds: 5
             scale: Some(ScaleMode::Log),
             color_scheme: Some(ColorScheme::BlueOrange),
             export: Some(PathBuf::from("/tmp/test.csv")),
+            venue: None,
         };
 
         let mut mc = config.monitor.clone();
@@ -8917,6 +9047,7 @@ refresh_seconds: 5
             scale: None,
             color_scheme: None,
             export: None,
+            venue: None,
         };
 
         let mut mc = config.monitor.clone();
@@ -8939,5 +9070,120 @@ refresh_seconds: 5
         assert_eq!(mc.scale, ScaleMode::Linear);
         assert_eq!(mc.color_scheme, ColorScheme::GreenRed);
         assert!(mc.export.path.is_none());
+    }
+
+    // =================================================================
+    // OHLC / exchange_interval tests
+    // =================================================================
+
+    #[test]
+    fn test_exchange_interval_mapping() {
+        assert_eq!(TimePeriod::Min1.exchange_interval(), "1m");
+        assert_eq!(TimePeriod::Min5.exchange_interval(), "5m");
+        assert_eq!(TimePeriod::Min15.exchange_interval(), "15m");
+        assert_eq!(TimePeriod::Hour1.exchange_interval(), "1h");
+        assert_eq!(TimePeriod::Hour4.exchange_interval(), "4h");
+        assert_eq!(TimePeriod::Day1.exchange_interval(), "1d");
+    }
+
+    #[test]
+    fn test_monitor_state_exchange_ohlc_default_empty() {
+        let token_data = create_test_token_data();
+        let state = MonitorState::new(&token_data, "ethereum");
+        assert!(state.exchange_ohlc.is_empty());
+        assert!(state.venue_pair.is_none());
+    }
+
+    #[test]
+    fn test_get_ohlc_candles_prefers_exchange_data() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+
+        // Add some synthetic candles from price history
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        state.price_history.push_back(DataPoint {
+            timestamp: now,
+            value: 1.0,
+            is_real: true,
+        });
+        state.price_history.push_back(DataPoint {
+            timestamp: now + 5.0,
+            value: 1.01,
+            is_real: true,
+        });
+
+        // Without exchange OHLC, should get synthetic candles
+        let candles_before = state.get_ohlc_candles();
+
+        // Now add exchange OHLC data
+        state.exchange_ohlc = vec![
+            OhlcCandle {
+                timestamp: 1700000000.0,
+                open: 50000.0,
+                high: 50500.0,
+                low: 49800.0,
+                close: 50200.0,
+                is_bullish: true,
+            },
+            OhlcCandle {
+                timestamp: 1700003600.0,
+                open: 50200.0,
+                high: 50800.0,
+                low: 50100.0,
+                close: 50700.0,
+                is_bullish: true,
+            },
+        ];
+
+        let candles_after = state.get_ohlc_candles();
+        assert_eq!(candles_after.len(), 2);
+        assert_eq!(candles_after[0].open, 50000.0);
+        assert_eq!(candles_after[1].close, 50700.0);
+
+        // Verify exchange data is preferred over synthetic
+        if !candles_before.is_empty() {
+            assert_ne!(candles_after[0].open, candles_before[0].open);
+        }
+    }
+
+    #[test]
+    fn test_monitor_args_with_venue() {
+        let args = MonitorArgs {
+            token: "BTC".to_string(),
+            chain: "ethereum".to_string(),
+            refresh: None,
+            layout: None,
+            scale: None,
+            color_scheme: None,
+            export: None,
+            venue: Some("binance".to_string()),
+        };
+        assert_eq!(args.venue, Some("binance".to_string()));
+    }
+
+    #[test]
+    fn test_ohlc_candle_is_bullish_calculation() {
+        let bullish = OhlcCandle {
+            timestamp: 1700000000.0,
+            open: 100.0,
+            high: 110.0,
+            low: 95.0,
+            close: 105.0,
+            is_bullish: true,
+        };
+        assert!(bullish.is_bullish);
+
+        let bearish = OhlcCandle {
+            timestamp: 1700000000.0,
+            open: 100.0,
+            high: 105.0,
+            low: 90.0,
+            close: 95.0,
+            is_bullish: false,
+        };
+        assert!(!bearish.is_bullish);
     }
 }

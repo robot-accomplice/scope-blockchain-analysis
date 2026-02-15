@@ -817,12 +817,17 @@ impl DexClient {
             }
         }
 
-        // Convert to vector and sort by liquidity (descending)
+        // Convert to vector and sort: exact symbol matches first, then by liquidity
+        let query_lower = query.to_lowercase();
         let mut results: Vec<TokenSearchResult> = token_map.into_values().collect();
         results.sort_by(|a, b| {
-            b.liquidity_usd
-                .partial_cmp(&a.liquidity_usd)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            let a_exact = a.symbol.to_lowercase() == query_lower;
+            let b_exact = b.symbol.to_lowercase() == query_lower;
+            b_exact.cmp(&a_exact).then(
+                b.liquidity_usd
+                    .partial_cmp(&a.liquidity_usd)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
         });
 
         // Limit results
@@ -1533,6 +1538,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_search_tokens_exact_match_sorts_before_partial() {
+        // Exact symbol match "USDC" should sort before "syrupUSDC" even if syrupUSDC has higher liquidity
+        let mut server = mockito::Server::new_async().await;
+        let pair_usdc = build_test_pair_json("ethereum", "USDC", "0xusdc", "1.00");
+        let pair_syrup = r#"{
+            "chainId":"ethereum","dexId":"uniswap","pairAddress":"0xpair2",
+            "baseToken":{"address":"0xsyrupusdc","name":"Syrup USDC","symbol":"syrupUSDC"},
+            "quoteToken":{"address":"0xquote","name":"USDT","symbol":"USDT"},
+            "priceUsd":"1.00",
+            "priceChange":{"h24":0.0,"h6":0.0,"h1":0.0,"m5":0.0},
+            "volume":{"h24":500000,"h6":125000,"h1":25000,"m5":2500},
+            "liquidity":{"usd":5000000,"base":5000000,"quote":5000000},
+            "fdv":null,"marketCap":null,
+            "txns":{"h24":{"buys":100,"sells":80},"h6":{"buys":20,"sells":15},"h1":{"buys":5,"sells":3}},
+            "pairCreatedAt":1690000000000,
+            "url":"https://dexscreener.com/ethereum/0xpair2"
+        }"#;
+        let body = format!(r#"{{"pairs":[{},{}]}}"#, pair_usdc, pair_syrup);
+        let _mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"/latest/dex/search.*".to_string()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&body)
+            .create_async()
+            .await;
+
+        let client = DexClient::with_base_url(&server.url());
+        let results = client.search_tokens("USDC", None).await.unwrap();
+        assert!(results.len() >= 2);
+        // First result must be exact match (USDC), not syrupUSDC
+        assert_eq!(results[0].symbol, "USDC");
+        // syrupUSDC has higher liquidity but should be second
+        let syrup_pos = results
+            .iter()
+            .position(|r| r.symbol == "syrupUSDC")
+            .unwrap();
+        assert!(syrup_pos > 0);
+        assert!(results[syrup_pos].liquidity_usd > results[0].liquidity_usd);
+    }
+
+    #[tokio::test]
+    async fn test_search_tokens_multiple_exact_matches_sort_by_liquidity() {
+        // Multiple exact "USDC" matches (different chains) should sort by liquidity among themselves
+        let mut server = mockito::Server::new_async().await;
+        let pair_eth = r#"{
+            "chainId":"ethereum","dexId":"uniswap","pairAddress":"0xpair1",
+            "baseToken":{"address":"0xusdc_eth","name":"USD Coin","symbol":"USDC"},
+            "quoteToken":{"address":"0xweth","name":"WETH","symbol":"WETH"},
+            "priceUsd":"1.00",
+            "priceChange":{"h24":0.0,"h6":0.0,"h1":0.0,"m5":0.0},
+            "volume":{"h24":1000000,"h6":250000,"h1":50000,"m5":5000},
+            "liquidity":{"usd":1000000,"base":1000000,"quote":1000000},
+            "fdv":null,"marketCap":null,
+            "txns":{"h24":{"buys":100,"sells":80},"h6":{"buys":20,"sells":15},"h1":{"buys":5,"sells":3}},
+            "pairCreatedAt":1690000000000,
+            "url":"https://dexscreener.com/ethereum/0xpair1"
+        }"#;
+        let pair_bsc = r#"{
+            "chainId":"bsc","dexId":"pancakeswap","pairAddress":"0xpair2",
+            "baseToken":{"address":"0xusdc_bsc","name":"USD Coin","symbol":"USDC"},
+            "quoteToken":{"address":"0xbnb","name":"BNB","symbol":"BNB"},
+            "priceUsd":"1.00",
+            "priceChange":{"h24":0.0,"h6":0.0,"h1":0.0,"m5":0.0},
+            "volume":{"h24":2000000,"h6":500000,"h1":100000,"m5":10000},
+            "liquidity":{"usd":3000000,"base":3000000,"quote":3000000},
+            "fdv":null,"marketCap":null,
+            "txns":{"h24":{"buys":200,"sells":150},"h6":{"buys":50,"sells":30},"h1":{"buys":10,"sells":6}},
+            "pairCreatedAt":1690000000000,
+            "url":"https://dexscreener.com/bsc/0xpair2"
+        }"#;
+        let body = format!(r#"{{"pairs":[{},{}]}}"#, pair_eth, pair_bsc);
+        let _mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"/latest/dex/search.*".to_string()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&body)
+            .create_async()
+            .await;
+
+        let client = DexClient::with_base_url(&server.url());
+        let results = client.search_tokens("USDC", None).await.unwrap();
+        assert_eq!(results.len(), 2);
+        // Both exact matches - should sort by liquidity descending
+        assert_eq!(results[0].symbol, "USDC");
+        assert_eq!(results[1].symbol, "USDC");
+        assert!(results[0].liquidity_usd >= results[1].liquidity_usd);
+        assert_eq!(results[0].chain, "bsc"); // BSC has 3M liquidity, should be first
+        assert_eq!(results[1].chain, "ethereum"); // Ethereum has 1M, second
+    }
+
+    #[tokio::test]
     async fn test_search_tokens_aggregates_volume_and_liquidity() {
         let mut server = mockito::Server::new_async().await;
         let _mock = server
@@ -1922,5 +2024,80 @@ mod tests {
         let tokens = client.get_token_profiles().await.unwrap();
         assert_eq!(tokens.len(), 1);
         assert_eq!(tokens[0].token_address, "0xvalid");
+    }
+
+    // =================================================================
+    // Token search sorting: exact symbol matches first
+    // =================================================================
+
+    #[tokio::test]
+    async fn test_search_tokens_exact_match_sorted_first() {
+        // Set up a mock that returns two tokens: "syrupUSDC" with higher liquidity
+        // and "USDC" with lower liquidity. The exact match "USDC" should come first.
+        let pair_syrup = build_test_pair_json("ethereum", "syrupUSDC", "0xsyrup", "1.0");
+        let pair_usdc = build_test_pair_json("ethereum", "USDC", "0xusdc", "1.0");
+
+        let body = format!(
+            r#"{{"schemaVersion":"1.0.0","pairs":[{},{}]}}"#,
+            pair_syrup, pair_usdc
+        );
+
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/latest/dex/search")
+            .match_query(mockito::Matcher::UrlEncoded("q".into(), "USDC".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&body)
+            .create_async()
+            .await;
+
+        let client = DexClient::with_base_url(&server.url());
+        let results = client.search_tokens("USDC", None).await.unwrap();
+
+        assert!(
+            results.len() >= 2,
+            "expected at least 2 results, got {}",
+            results.len()
+        );
+        // First result should be exact match "USDC", not "syrupUSDC"
+        assert_eq!(
+            results[0].symbol, "USDC",
+            "exact symbol match should be sorted first"
+        );
+        assert_eq!(results[1].symbol, "syrupUSDC");
+    }
+
+    #[tokio::test]
+    async fn test_search_tokens_no_results() {
+        let body = r#"{"schemaVersion":"1.0.0","pairs":[]}"#;
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/latest/dex/search")
+            .match_query(mockito::Matcher::UrlEncoded("q".into(), "ZZZZZ".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(body)
+            .create_async()
+            .await;
+
+        let client = DexClient::with_base_url(&server.url());
+        let results = client.search_tokens("ZZZZZ", None).await.unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_search_tokens_api_error_500() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/latest/dex/search")
+            .match_query(mockito::Matcher::UrlEncoded("q".into(), "ERR".into()))
+            .with_status(500)
+            .create_async()
+            .await;
+
+        let client = DexClient::with_base_url(&server.url());
+        let result = client.search_tokens("ERR", None).await;
+        assert!(result.is_err());
     }
 }
