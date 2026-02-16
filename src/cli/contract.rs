@@ -12,19 +12,84 @@ use clap::Args;
 
 /// Arguments for the contract analysis command.
 #[derive(Debug, Args)]
-#[command(after_help = "\x1b[1mExamples:\x1b[0m
+#[command(
+    after_help = "\x1b[1mExamples:\x1b[0m
   scope contract 0xdAC17F958D2ee523a2206206994597C13D831ec7
-  scope contract 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --chain ethereum
-  scope contract 0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D --json")]
+  scope ct 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --chain polygon
+  scope contract 0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D --json",
+    after_long_help = "\x1b[1mExamples:\x1b[0m
+
+  \x1b[1m$ scope contract 0xdAC17F958D2ee523a2206206994597C13D831ec7\x1b[0m
+
+  ========================================================================
+    CONTRACT ANALYSIS: 0xdAC17F958D2ee523a2206206994597C13D831ec7
+    Chain: ethereum | Verified: Yes
+  ========================================================================
+
+    Security Score: [################----] 80/100
+
+  --- Source Code ---
+    Contract Name: TetherToken
+    Compiler: v0.4.18+commit.9cf6e910
+    Optimization: No
+
+  --- Proxy Detection ---
+    Not a proxy contract
+
+  --- Access Control ---
+    Ownership: Ownable
+    Renounced: No
+    Privileged functions:
+      - pause (High): Can pause transfers
+      - addBlacklist (High): Can blacklist addresses
+
+  --- Vulnerability Findings ---
+    [. ] SC-TX-ORIGIN - tx.origin authorization (Low)
+
+  --- DeFi Analysis ---
+    Protocol Type: Token
+    Token Standards: ERC-20
+
+  --- External Intelligence ---
+    Explorer: https://etherscan.io/address/0xdAC17...
+    Sourcify: Verified
+    Audit Reports:
+      - Trail of Bits (TetherToken)
+
+  ========================================================================
+
+  \x1b[1m$ scope ct 0xA0b86991... --json\x1b[0m
+
+  {
+    \"address\": \"0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48\",
+    \"chain\": \"ethereum\",
+    \"is_verified\": true,
+    \"security_score\": 85,
+    \"security_summary\": \"Verified contract with ...\",
+    \"source_info\": { ... },
+    \"proxy_info\": { ... },
+    \"vulnerabilities\": [ ... ],
+    ...
+  }"
+)]
 pub struct ContractArgs {
     /// Contract address to analyze.
+    ///
+    /// Must be a valid address on the target chain. The address must be
+    /// a deployed smart contract (not an externally owned account).
+    #[arg(value_name = "ADDRESS")]
     pub address: String,
 
-    /// Chain to use (default: ethereum).
+    /// Target blockchain network.
+    ///
+    /// EVM chains with Etherscan-compatible APIs:
+    /// ethereum, polygon, arbitrum, optimism, base, bsc
     #[arg(long, short, default_value = "ethereum")]
     pub chain: String,
 
     /// Output raw JSON instead of formatted report.
+    ///
+    /// Useful for piping to `jq` or feeding to other tools.
     #[arg(long)]
     pub json: bool,
 }

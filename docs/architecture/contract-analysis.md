@@ -129,3 +129,23 @@ curl -X POST http://localhost:8080/api/contract \
   -H "Content-Type: application/json" \
   -d '{"address": "0xdAC17F958D2ee523a2206206994597C13D831ec7", "chain": "ethereum"}'
 ```
+
+## Web UI
+
+The web interface (`scope web`) includes a dedicated **Contract Analysis** panel:
+
+- **Navigation:** "Contract" button in the nav bar (4th from left)
+- **Inputs:** Contract address and chain selector
+- **Rich rendering:** Security score circle with color coding, source info grid, proxy detection, access control with privileged function table, severity-colored vulnerability cards, DeFi analysis with oracle/DEX integration details, and external intelligence links
+- **Downloads:** JSON, CSV (vulnerability export), and Markdown report formats
+
+The panel calls `POST /api/contract` which delegates to `contract::analyze_contract()`.
+
+## Interactive Mode
+
+Contract analysis is available in interactive mode:
+
+```text
+scope:ethereum> contract 0xdAC17F958D2ee523a2206206994597C13D831ec7
+scope:ethereum> ct 0xA0b86991... --chain=polygon --json
+```

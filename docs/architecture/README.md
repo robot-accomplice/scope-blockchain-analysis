@@ -31,7 +31,9 @@ Architecture and dataflow diagrams for the Scope blockchain analysis tool.
 | [dataflow-data-sources.md](dataflow-data-sources.md) | Data sources | ChainClientFactory, DexScreener, Etherscan, Biconomy |
 | [dataflow-web.md](dataflow-web.md) | `scope web` / `scope serve` | Browser mode: REST API, WebSocket monitor, daemon (feature-gated) |
 
-**Note:** `scope insights` dispatches to address, tx, and crawl handlers (see dataflow-main). `scope completions` generates shell scripts to stdout (no dataflow diagram needed).
+| [contract-analysis.md](contract-analysis.md) | `scope contract` | Contract analysis pipeline: source, proxy, access, vulnerability, DeFi, external intel |
+
+**Note:** `scope insights` dispatches to address, tx, and crawl handlers (see dataflow-main). `scope contract` has its own dataflow in [contract-analysis.md](contract-analysis.md). `scope completions` generates shell scripts to stdout (no dataflow diagram needed).
 
 ### Guidelines
 

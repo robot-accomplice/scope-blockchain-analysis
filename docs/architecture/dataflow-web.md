@@ -54,6 +54,7 @@ sequenceDiagram
 | `POST /api/address`         | POST   | `api::address::handle`      | `address::analyze_address`       |
 | `POST /api/tx`              | POST   | `api::tx::handle`           | `tx::fetch_transaction_report`   |
 | `POST /api/insights`        | POST   | `api::insights::handle`     | `insights::infer_target` + core  |
+| `POST /api/contract`        | POST   | `api::contract::handle`     | `contract::analyze_contract`     |
 | `POST /api/crawl`           | POST   | `api::crawl::handle`        | `crawl::fetch_analytics_for_input` |
 | `GET /api/discover`         | GET    | `api::discover::handle`     | `DexClient::get_token_profiles`  |
 | `POST /api/token-health`    | POST   | `api::token_health::handle` | `crawl::fetch_analytics_for_input` + market |

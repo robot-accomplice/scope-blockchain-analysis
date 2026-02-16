@@ -507,6 +507,41 @@ async fn execute_input(
             tx::run(tx_args, config, clients).await?;
         }
 
+        // Contract analysis command
+        "contract" | "ct" => {
+            if args.is_empty() {
+                eprintln!(
+                    "Usage: contract <address> [--chain=<chain>] [--json]"
+                );
+                return Ok(false);
+            }
+
+            let address = args[0].to_string();
+            let mut chain = context.chain.clone();
+            let mut json_output = false;
+
+            for arg in args.iter().skip(1) {
+                if arg.starts_with("--chain=") {
+                    chain = arg.trim_start_matches("--chain=").to_string();
+                } else if *arg == "--json" {
+                    json_output = true;
+                }
+            }
+
+            // Default to ethereum if auto
+            if chain == "auto" {
+                chain = "ethereum".to_string();
+            }
+
+            let ct_args = crate::cli::contract::ContractArgs {
+                address,
+                chain,
+                json: json_output,
+            };
+
+            crate::cli::contract::run(&ct_args, config, clients).await?;
+        }
+
         // Crawl command for token analytics
         "crawl" | "token" => {
             if args.is_empty() {
@@ -909,6 +944,8 @@ Analysis Commands:
   address <addr>    Analyze an address (uses current chain/format)
   addr              Shorthand for address
   tx <hash>         Analyze a transaction (uses current chain/format)
+  contract <addr>   Analyze a smart contract (security, proxy, access control)
+  ct                Shorthand for contract
   crawl <token>     Crawl token analytics (holders, volume, price)
   token             Shorthand for crawl
   monitor <token>   Live-updating charts for a token (TUI mode)
@@ -937,6 +974,7 @@ Configuration:
 Inline Overrides:
   address 0x... --chain=polygon --tokens
   tx 0x... --chain=arbitrum --trace --decode
+  contract 0x... --chain=polygon --json
   crawl USDC --chain=ethereum --period=7d --report=report.md
 
 Live Monitor:

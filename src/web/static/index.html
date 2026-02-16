@@ -28,6 +28,7 @@
     <button class="active" data-panel="insights">Insights</button>
     <button data-panel="address">Address</button>
     <button data-panel="tx">Transaction</button>
+    <button data-panel="contract">Contract</button>
     <button data-panel="crawl">Token Crawl</button>
     <button data-panel="discover">Discover</button>
     <button data-panel="token-health">Token Health</button>
@@ -142,6 +143,31 @@
       </div>
     </div>
     <div id="tx-results"></div>
+  </div>
+
+  <!-- Contract Analysis -->
+  <div class="panel" id="panel-contract">
+    <h2>Contract Analysis</h2>
+    <p>Analyze a smart contract for security vulnerabilities, proxy patterns, access control, DeFi risks, and audit history.</p>
+    <div class="form-row">
+      <div class="form-group" style="flex:3">
+        <label>Contract Address</label>
+        <input type="text" id="ct-address" placeholder="0xdAC17F958D2ee523a2206206994597C13D831ec7">
+      </div>
+      <div class="form-group" style="flex:1">
+        <label>Chain</label>
+        <select id="ct-chain">
+          <option value="ethereum">Ethereum</option>
+          <option value="polygon">Polygon</option>
+          <option value="arbitrum">Arbitrum</option>
+          <option value="optimism">Optimism</option>
+          <option value="base">Base</option>
+          <option value="bsc">BSC</option>
+        </select>
+      </div>
+      <button class="btn" onclick="runContract()">Analyze</button>
+    </div>
+    <div id="contract-results"></div>
   </div>
 
   <!-- Token Crawl -->

@@ -191,9 +191,11 @@ scope serve --port 9090
 
 The web UI provides:
 - All CLI commands accessible via browser forms
-- JSON REST API at `/api/*` for programmatic access (exchange: snapshot, OHLC, trades)
+- Contract Analysis panel with security scoring, vulnerability cards, proxy detection, and access control visualization
+- JSON REST API at `/api/*` for programmatic access (exchange: snapshot, OHLC, trades, contract analysis)
 - Live WebSocket monitor with real-time price charts
 - Exchange venue selector and market snapshots
+- Rich data rendering with download options (JSON, CSV, Markdown)
 - Configuration status and setup page
 
 ### Command Map
@@ -204,6 +206,7 @@ Not sure which command to use? Here's a quick decision tree:
 |--------------|---------|
 | Look up an address (balance, txs, tokens) | `scope address <addr>` |
 | Look up a transaction | `scope tx <hash>` |
+| Audit a smart contract (security, proxy, vulns) | `scope contract <addr>` |
 | Auto-detect input and run everything | `scope insights <target>` |
 | Get token DEX data (price, volume, holders) | `scope crawl <token>` |
 | Token DEX + order book health (stablecoins) | `scope token-health <token> --with-market` |
@@ -628,6 +631,7 @@ Available interactive commands:
 
 - `address` / `addr` -- Analyze a blockchain address
 - `tx` / `transaction` -- Analyze a transaction
+- `contract` / `ct` -- Analyze a smart contract (security, proxy, vulnerabilities)
 - `crawl` / `token` -- Crawl token analytics
 - `monitor` / `mon` -- Live TUI dashboard with five layout presets, widget toggles, price/volume/candlestick charts, alerts, CSV export, and auto-pause
 - `portfolio` / `port` -- Portfolio management (add, remove, list, summary)

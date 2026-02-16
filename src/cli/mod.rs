@@ -21,6 +21,7 @@
 //! Entity lookup:
 //!   address      Analyze a blockchain address (alias: addr)
 //!   tx           Analyze a transaction (alias: transaction)
+//!   contract     Analyze a smart contract (alias: ct)
 //!   insights     Auto-detect target type and run analyses (alias: insight)
 //!
 //! Token analysis:
@@ -104,6 +105,7 @@ pub use tx::TxArgs;
     ),
     after_help = "\x1b[1mExamples:\x1b[0m\n  \
                   scope address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2\n  \
+                  scope contract 0xdAC17F958D2ee523a2206206994597C13D831ec7\n  \
                   scope crawl USDC --chain ethereum\n  \
                   scope insights 0xabc123...\n  \
                   scope monitor USDC\n  \

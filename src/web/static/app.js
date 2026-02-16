@@ -953,6 +953,280 @@ function renderDiscover(resultEl, data) {
   resultEl.appendChild(view);
 }
 
+// ===== Contract Analysis =====
+function runContract() {
+  var address = document.getElementById('ct-address').value.trim();
+  if (!address) return;
+  var chain = document.getElementById('ct-chain').value;
+  apiPost('/api/contract', { address: address, chain: chain },
+    document.getElementById('contract-results'), renderContract);
+}
+
+function renderContract(resultEl, data) {
+  var view = el('div', { className: 'result-view' });
+
+  // Header
+  var hdr = el('div', { className: 'result-header' });
+  hdr.appendChild(chainBadge(data.chain));
+  hdr.appendChild(el('span', { className: 'addr-cell', textContent: data.address }));
+  if (data.source_info) {
+    hdr.appendChild(el('span', { className: 'ct-name-badge', textContent: data.source_info.contract_name }));
+  }
+  hdr.appendChild(el('span', {
+    className: data.is_verified ? 'ct-verified-badge' : 'ct-unverified-badge',
+    textContent: data.is_verified ? 'Verified' : 'Unverified'
+  }));
+  view.appendChild(hdr);
+
+  // Security Score
+  var scoreSection = el('div', { className: 'ct-score-section' });
+  var score = data.security_score || 0;
+  var scoreClass = score >= 80 ? 'ct-score-good' : score >= 60 ? 'ct-score-moderate' : score >= 40 ? 'ct-score-caution' : 'ct-score-danger';
+  var scoreCircle = el('div', { className: 'ct-score-circle ' + scoreClass, textContent: score });
+  scoreSection.appendChild(scoreCircle);
+  var scoreInfo = el('div', { className: 'ct-score-info' });
+  var label = score >= 80 ? 'GOOD' : score >= 60 ? 'MODERATE' : score >= 40 ? 'CAUTION' : score >= 20 ? 'HIGH RISK' : 'CRITICAL';
+  scoreInfo.appendChild(el('div', { className: 'ct-score-label', textContent: 'Security Score: ' + label }));
+  var barOuter = el('div', { className: 'ct-score-bar-outer' });
+  barOuter.appendChild(el('div', { className: 'ct-score-bar-fill ' + scoreClass, style: { width: score + '%' } }));
+  scoreInfo.appendChild(barOuter);
+  scoreInfo.appendChild(el('div', { className: 'ct-score-summary', textContent: data.security_summary || '' }));
+  scoreSection.appendChild(scoreInfo);
+  view.appendChild(scoreSection);
+
+  // Source Info
+  if (data.source_info) {
+    view.appendChild(el('div', { className: 'section-title' }, 'Source Code'));
+    var src = data.source_info;
+    var srcGrid = el('div', { className: 'metric-grid' });
+    srcGrid.appendChild(metricCard('Contract', src.contract_name));
+    srcGrid.appendChild(metricCard('Compiler', src.compiler_version));
+    srcGrid.appendChild(metricCard('EVM', src.evm_version || '-'));
+    srcGrid.appendChild(metricCard('License', src.license_type || '-'));
+    srcGrid.appendChild(metricCard('Optimization', src.optimization_used ? src.optimization_runs + ' runs' : 'Off'));
+    srcGrid.appendChild(metricCard('ABI Functions', src.parsed_abi ? src.parsed_abi.length : 0));
+    view.appendChild(srcGrid);
+  }
+
+  // Proxy Detection
+  if (data.proxy_info) {
+    view.appendChild(el('div', { className: 'section-title' }, 'Proxy Detection'));
+    var px = data.proxy_info;
+    if (px.is_proxy) {
+      var pxGrid = el('div', { className: 'metric-grid' });
+      pxGrid.appendChild(metricCard('Proxy Type', px.proxy_type));
+      if (px.implementation_address) pxGrid.appendChild(metricCard('Implementation', fmtAddr(px.implementation_address)));
+      if (px.admin_address) pxGrid.appendChild(metricCard('Admin', fmtAddr(px.admin_address)));
+      if (px.beacon_address) pxGrid.appendChild(metricCard('Beacon', fmtAddr(px.beacon_address)));
+      view.appendChild(pxGrid);
+    } else {
+      view.appendChild(el('div', { className: 'ct-note', textContent: 'Not a proxy contract.' }));
+    }
+    if (px.details && px.details.length > 0) {
+      var detList = el('ul', { className: 'ct-detail-list' });
+      px.details.forEach(function(d) { detList.appendChild(el('li', { textContent: d })); });
+      view.appendChild(detList);
+    }
+  }
+
+  // Access Control
+  if (data.access_control) {
+    view.appendChild(el('div', { className: 'section-title' }, 'Access Control'));
+    var ac = data.access_control;
+    var acGrid = el('div', { className: 'metric-grid' });
+    acGrid.appendChild(metricCard('Ownership', ac.ownership_pattern || 'None detected'));
+    acGrid.appendChild(metricCard('Renounced', ac.has_renounced_ownership ? 'Yes' : 'No'));
+    acGrid.appendChild(metricCard('Role-Based', ac.has_role_based_access ? 'Yes' : 'No'));
+    acGrid.appendChild(metricCard('tx.origin', ac.uses_tx_origin ? 'DANGER' : 'Safe', ac.uses_tx_origin ? { text: 'Vulnerable to phishing', cls: 'red' } : null));
+    view.appendChild(acGrid);
+
+    if (ac.roles && ac.roles.length > 0) {
+      var rolesDiv = el('div', { className: 'ct-tags' });
+      rolesDiv.appendChild(el('strong', { textContent: 'Roles: ' }));
+      ac.roles.forEach(function(r) {
+        rolesDiv.appendChild(el('span', { className: 'ct-tag', textContent: r }));
+      });
+      view.appendChild(rolesDiv);
+    }
+
+    if (ac.privileged_functions && ac.privileged_functions.length > 0) {
+      view.appendChild(el('div', { className: 'section-subtitle' }, 'Privileged Functions'));
+      var pfRows = ac.privileged_functions.map(function(pf) {
+        var riskCls = (pf.risk || '').toLowerCase();
+        return [
+          pf.name,
+          pf.modifiers ? pf.modifiers.join(', ') : '-',
+          pf.capability,
+          el('span', { className: 'ct-risk-badge ct-risk-' + riskCls, textContent: pf.risk || '-' })
+        ];
+      });
+      view.appendChild(buildDataTable(['Function', 'Modifier', 'Capability', 'Risk'], pfRows));
+    }
+
+    if (ac.auth_analysis) {
+      view.appendChild(el('div', { className: 'ct-auth-summary', textContent: ac.auth_analysis.summary }));
+    }
+  }
+
+  // Vulnerabilities
+  view.appendChild(el('div', { className: 'section-title' }, 'Vulnerability Scan'));
+  if (data.vulnerabilities && data.vulnerabilities.length > 0) {
+    var vulnContainer = el('div', { className: 'ct-vuln-list' });
+    data.vulnerabilities.forEach(function(v) {
+      var sevCls = (v.severity || 'informational').toLowerCase();
+      var card = el('div', { className: 'ct-vuln-card ct-sev-' + sevCls });
+      var cardHdr = el('div', { className: 'ct-vuln-header' });
+      cardHdr.appendChild(el('span', { className: 'ct-sev-badge ct-sev-' + sevCls, textContent: v.severity }));
+      cardHdr.appendChild(el('span', { className: 'ct-vuln-id', textContent: v.id }));
+      cardHdr.appendChild(el('span', { className: 'ct-vuln-title', textContent: v.title }));
+      card.appendChild(cardHdr);
+      card.appendChild(el('div', { className: 'ct-vuln-desc', textContent: v.description }));
+      card.appendChild(el('div', { className: 'ct-vuln-fix', textContent: 'Fix: ' + v.recommendation }));
+      vulnContainer.appendChild(card);
+    });
+    view.appendChild(vulnContainer);
+  } else {
+    view.appendChild(el('div', { className: 'ct-note ct-note-good', textContent: 'No vulnerability heuristics triggered.' }));
+  }
+
+  // DeFi Analysis
+  if (data.defi_analysis) {
+    view.appendChild(el('div', { className: 'section-title' }, 'DeFi Analysis'));
+    var df = data.defi_analysis;
+    var dfGrid = el('div', { className: 'metric-grid' });
+    dfGrid.appendChild(metricCard('Protocol Type', df.protocol_type || '-'));
+    if (df.token_standards && df.token_standards.length > 0) {
+      dfGrid.appendChild(metricCard('Token Standards', df.token_standards.join(', ')));
+    }
+    dfGrid.appendChild(metricCard('Oracle', df.has_oracle_dependency ? 'Yes' : 'No'));
+    dfGrid.appendChild(metricCard('Flash Loan Risk', df.has_flash_loan_risk ? 'Yes' : 'No'));
+    view.appendChild(dfGrid);
+
+    if (df.oracle_info && df.oracle_info.length > 0) {
+      view.appendChild(el('div', { className: 'section-subtitle' }, 'Oracle Dependencies'));
+      df.oracle_info.forEach(function(o) {
+        var oCard = el('div', { className: 'ct-oracle-card' });
+        oCard.appendChild(el('strong', { textContent: o.provider + ': ' }));
+        oCard.appendChild(el('span', { textContent: o.usage }));
+        if (o.risks && o.risks.length > 0) {
+          var rList = el('ul', { className: 'ct-detail-list' });
+          o.risks.forEach(function(r) { rList.appendChild(el('li', { className: 'ct-warn', textContent: r })); });
+          oCard.appendChild(rList);
+        }
+        view.appendChild(oCard);
+      });
+    }
+
+    if (df.dex_integrations && df.dex_integrations.length > 0) {
+      view.appendChild(el('div', { className: 'section-subtitle' }, 'DEX Integrations'));
+      var dexRows = df.dex_integrations.map(function(d) {
+        return [
+          d.dex,
+          d.integration_type,
+          el('span', { className: d.has_slippage_protection ? 'ct-check-ok' : 'ct-check-fail', textContent: d.has_slippage_protection ? 'Yes' : 'NO' }),
+          el('span', { className: d.has_deadline_protection ? 'ct-check-ok' : 'ct-check-fail', textContent: d.has_deadline_protection ? 'Yes' : 'NO' })
+        ];
+      });
+      view.appendChild(buildDataTable(['DEX', 'Type', 'Slippage', 'Deadline'], dexRows));
+    }
+
+    if (df.risk_factors && df.risk_factors.length > 0) {
+      view.appendChild(el('div', { className: 'section-subtitle' }, 'DeFi Risk Factors'));
+      df.risk_factors.forEach(function(rf) {
+        var rfDiv = el('div', { className: 'ct-risk-factor' });
+        rfDiv.appendChild(el('span', { className: 'ct-rf-name', textContent: rf.name }));
+        rfDiv.appendChild(el('span', { className: 'ct-rf-sev', textContent: rf.severity + '/10' }));
+        rfDiv.appendChild(el('div', { className: 'ct-rf-desc', textContent: rf.description }));
+        view.appendChild(rfDiv);
+      });
+    }
+  }
+
+  // External Intelligence
+  if (data.external_info) {
+    view.appendChild(el('div', { className: 'section-title' }, 'External Intelligence'));
+    var ext = data.external_info;
+    var extGrid = el('div', { className: 'metric-grid' });
+    if (ext.github_repo) {
+      var ghLink = el('a', { href: ext.github_repo, target: '_blank', textContent: ext.github_repo, className: 'ct-link' });
+      extGrid.appendChild(metricCard('GitHub', ghLink));
+    }
+    if (ext.sourcify_verified != null) {
+      extGrid.appendChild(metricCard('Sourcify', ext.sourcify_verified ? 'Verified' : 'Not verified'));
+    }
+    extGrid.appendChild(metricCard('Explorer', el('a', { href: ext.explorer_url, target: '_blank', textContent: 'View', className: 'ct-link' })));
+    view.appendChild(extGrid);
+
+    if (ext.audit_reports && ext.audit_reports.length > 0) {
+      view.appendChild(el('div', { className: 'section-subtitle' }, 'Audit Reports'));
+      var auditRows = ext.audit_reports.map(function(a) {
+        var link = a.url ? el('a', { href: a.url, target: '_blank', textContent: 'Link', className: 'ct-link' }) : '-';
+        return [a.auditor, a.scope, a.date || '-', link];
+      });
+      view.appendChild(buildDataTable(['Auditor', 'Scope', 'Date', 'Report'], auditRows));
+    }
+
+    if (ext.metadata && ext.metadata.length > 0) {
+      view.appendChild(el('div', { className: 'section-subtitle' }, 'Metadata'));
+      var metaRows = ext.metadata.map(function(m) { return [m.key, m.value]; });
+      view.appendChild(buildDataTable(['Key', 'Value'], metaRows));
+    }
+  }
+
+  // Download bar
+  var dl = createDownloadBar(data, {
+    filenameBase: 'scope-contract-' + fmtAddr(data.address),
+    csvFn: function(d) {
+      var rows = [];
+      if (d.vulnerabilities) {
+        rows = d.vulnerabilities.map(function(v) {
+          return [v.id, v.severity, v.category, v.title, v.description, v.recommendation];
+        });
+        return arrayToCSV(['id', 'severity', 'category', 'title', 'description', 'recommendation'], rows);
+      }
+      return JSON.stringify(d);
+    },
+    mdFn: function(d) {
+      var md = '# Contract Analysis Report\n\n';
+      md += '**Address:** `' + d.address + '`\n';
+      md += '**Chain:** ' + d.chain + '\n';
+      md += '**Verified:** ' + (d.is_verified ? 'Yes' : 'No') + '\n';
+      md += '**Security Score:** ' + d.security_score + '/100\n\n';
+      md += d.security_summary + '\n\n';
+      if (d.source_info) {
+        md += '## Source\n\n';
+        md += '- **Name:** ' + d.source_info.contract_name + '\n';
+        md += '- **Compiler:** ' + d.source_info.compiler_version + '\n';
+        md += '- **License:** ' + (d.source_info.license_type || '-') + '\n\n';
+      }
+      if (d.proxy_info && d.proxy_info.is_proxy) {
+        md += '## Proxy\n\n';
+        md += '- **Type:** ' + d.proxy_info.proxy_type + '\n';
+        if (d.proxy_info.implementation_address) md += '- **Implementation:** `' + d.proxy_info.implementation_address + '`\n';
+        md += '\n';
+      }
+      if (d.access_control) {
+        md += '## Access Control\n\n';
+        md += '- **Ownership:** ' + (d.access_control.ownership_pattern || 'None') + '\n';
+        md += '- **Renounced:** ' + (d.access_control.has_renounced_ownership ? 'Yes' : 'No') + '\n';
+        md += '- **tx.origin:** ' + (d.access_control.uses_tx_origin ? 'DANGER' : 'Safe') + '\n\n';
+      }
+      if (d.vulnerabilities && d.vulnerabilities.length > 0) {
+        md += '## Vulnerabilities\n\n';
+        md += '| ID | Severity | Title | Recommendation |\n|-----|----------|-------|----------------|\n';
+        d.vulnerabilities.forEach(function(v) {
+          md += '| ' + v.id + ' | ' + v.severity + ' | ' + v.title + ' | ' + v.recommendation + ' |\n';
+        });
+        md += '\n';
+      }
+      return md;
+    }
+  });
+  view.appendChild(dl.bar);
+  view.appendChild(dl.rawContainer);
+  resultEl.appendChild(view);
+}
+
 // ===== Compliance Risk Renderer =====
 function renderCompliance(resultEl, data) {
   var view = el('div', { className: 'result-view' });

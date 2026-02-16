@@ -105,6 +105,32 @@ scope compliance compliance-report 0xabc... --jurisdiction eu --report-type sar 
 
 ---
 
+## Workflow 3b: Smart Contract Audit
+
+**Goal:** Security-assess a smart contract—vulnerabilities, proxy patterns, access control, DeFi risks.
+
+```bash
+# Analyze a verified contract (Tether USDT)
+scope contract 0xdAC17F958D2ee523a2206206994597C13D831ec7
+
+# Short alias with chain override
+scope ct 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --chain polygon
+
+# JSON output for scripts or piping to jq
+scope contract 0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D --json
+
+# From interactive mode
+scope interactive
+scope> contract 0xdAC17F958D2ee523a2206206994597C13D831ec7
+scope> ct 0xA0b86991... --chain=polygon --json
+```
+
+**What you get:** Security score (0-100), source code verification, proxy detection (EIP-1967/1822/1167/Diamond), access control mapping, vulnerability heuristics, DeFi protocol analysis (oracles, flash loans, DEX slippage), and external intelligence (audit reports, GitHub links, Sourcify).
+
+**Pro tip:** The web UI (`scope web`) has a dedicated Contract panel with rich visual rendering of all findings.
+
+---
+
 ## Workflow 4: Live Monitoring
 
 **Goal:** Watch a token in real time with charts, alerts, and export.
@@ -207,6 +233,7 @@ scope:solana> exit
 |------|-------|
 | `address` | `addr` |
 | `transaction` | `tx` |
+| `contract` | `ct` |
 | `insights` | `insight` |
 | `crawl` | `token` |
 | `portfolio` | `port` |
@@ -226,6 +253,7 @@ Not sure which command to use? Here's a quick decision tree:
 |--------------|---------|
 | Look up an address (balance, txs, tokens) | `scope address <addr>` |
 | Look up a transaction | `scope tx <hash>` |
+| Audit a smart contract (security, proxy, vulns) | `scope contract <addr>` |
 | Auto-detect input and run everything | `scope insights <target>` |
 | Get token DEX data (price, volume, holders) | `scope crawl <token>` |
 | Token DEX + order book health (stablecoins) | `scope token-health <token> --with-market` |
