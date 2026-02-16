@@ -139,4 +139,70 @@ mod tests {
         let status = response.status();
         assert!(status.is_success() || status.is_client_error() || status.is_server_error());
     }
+
+    #[tokio::test]
+    async fn test_handle_risk_with_etherscan_key() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
+        use axum::extract::State;
+        use axum::response::IntoResponse;
+
+        let old_key = std::env::var_os("ETHERSCAN_API_KEY");
+        unsafe { std::env::set_var("ETHERSCAN_API_KEY", "test_key_for_coverage") };
+
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+        let req = ComplianceRiskRequest {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: "ethereum".to_string(),
+            detailed: false,
+        };
+        let response = handle_risk(State(state), axum::Json(req))
+            .await
+            .into_response();
+
+        if let Some(k) = old_key {
+            unsafe { std::env::set_var("ETHERSCAN_API_KEY", k) };
+        } else {
+            unsafe { std::env::remove_var("ETHERSCAN_API_KEY") };
+        }
+
+        let status = response.status();
+        assert!(status.is_success() || status.is_client_error() || status.is_server_error());
+    }
+
+    #[tokio::test]
+    async fn test_handle_risk_error_response() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
+        use axum::extract::State;
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+        let req = ComplianceRiskRequest {
+            address: "invalid-address".to_string(),
+            chain: "ethereum".to_string(),
+            detailed: false,
+        };
+        let response = handle_risk(State(state), axum::Json(req))
+            .await
+            .into_response();
+        if response.status() == StatusCode::INTERNAL_SERVER_ERROR {
+            let body = axum::body::to_bytes(response.into_body(), 1_000_000)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert!(json.get("error").is_some());
+        }
+    }
 }

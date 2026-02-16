@@ -429,4 +429,435 @@ mod tests {
         assert_eq!(sc_fns.len(), 1);
         assert_eq!(sc_fns[0].name, "transfer");
     }
+
+    #[test]
+    fn test_get_events() {
+        let abi = vec![
+            AbiEntry {
+                entry_type: "function".to_string(),
+                name: "transfer".to_string(),
+                inputs: vec![],
+                outputs: vec![],
+                state_mutability: "nonpayable".to_string(),
+            },
+            AbiEntry {
+                entry_type: "event".to_string(),
+                name: "Transfer".to_string(),
+                inputs: vec![],
+                outputs: vec![],
+                state_mutability: String::new(),
+            },
+            AbiEntry {
+                entry_type: "event".to_string(),
+                name: "Approval".to_string(),
+                inputs: vec![],
+                outputs: vec![],
+                state_mutability: String::new(),
+            },
+        ];
+        let events = get_events(&abi);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].name, "Transfer");
+        assert_eq!(events[1].name, "Approval");
+    }
+
+    #[test]
+    fn test_find_abi_by_selector_match() {
+        let entry = AbiEntry {
+            entry_type: "function".to_string(),
+            name: "transfer".to_string(),
+            inputs: vec![
+                AbiParam {
+                    name: "to".to_string(),
+                    param_type: "address".to_string(),
+                    indexed: false,
+                    components: vec![],
+                },
+                AbiParam {
+                    name: "amount".to_string(),
+                    param_type: "uint256".to_string(),
+                    indexed: false,
+                    components: vec![],
+                },
+            ],
+            outputs: vec![],
+            state_mutability: "nonpayable".to_string(),
+        };
+        let selector = entry.selector();
+        let abi = vec![entry];
+        let found = find_abi_by_selector(&selector, &abi);
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().name, "transfer");
+    }
+
+    #[test]
+    fn test_find_abi_by_selector_no_match() {
+        let abi = vec![AbiEntry {
+            entry_type: "function".to_string(),
+            name: "transfer".to_string(),
+            inputs: vec![],
+            outputs: vec![],
+            state_mutability: "nonpayable".to_string(),
+        }];
+        let found = find_abi_by_selector("0xdeadbeef", &abi);
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn test_find_abi_by_selector_skips_events() {
+        let abi = vec![AbiEntry {
+            entry_type: "event".to_string(),
+            name: "Transfer".to_string(),
+            inputs: vec![],
+            outputs: vec![],
+            state_mutability: String::new(),
+        }];
+        let found = find_abi_by_selector("0xdeadbeef", &abi);
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn test_decode_params_from_abi_basic() {
+        let entry = AbiEntry {
+            entry_type: "function".to_string(),
+            name: "transfer".to_string(),
+            inputs: vec![
+                AbiParam {
+                    name: "to".to_string(),
+                    param_type: "address".to_string(),
+                    indexed: false,
+                    components: vec![],
+                },
+                AbiParam {
+                    name: "amount".to_string(),
+                    param_type: "uint256".to_string(),
+                    indexed: false,
+                    components: vec![],
+                },
+            ],
+            outputs: vec![],
+            state_mutability: "nonpayable".to_string(),
+        };
+        let selector = entry.selector();
+        let addr_pad = "000000000000000000000000dac17f958d2ee523a2206206994597c13d831ec7";
+        let amount_pad = "0000000000000000000000000000000000000000000000000000000005f5e100";
+        let input = format!("{}{}{}", selector, addr_pad, amount_pad);
+        let params = decode_params_from_abi(&input, &entry);
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0].name, "to");
+        assert_eq!(params[0].param_type, "address");
+        assert!(params[0].value.contains("dac17f958d2ee523a2206206994597c13d831ec7"));
+        assert_eq!(params[1].name, "amount");
+        assert_eq!(params[1].value, "100000000");
+    }
+
+    #[test]
+    fn test_decode_params_from_abi_unnamed_params() {
+        let entry = AbiEntry {
+            entry_type: "function".to_string(),
+            name: "test".to_string(),
+            inputs: vec![AbiParam {
+                name: String::new(),
+                param_type: "bool".to_string(),
+                indexed: false,
+                components: vec![],
+            }],
+            outputs: vec![],
+            state_mutability: "nonpayable".to_string(),
+        };
+        let selector = entry.selector();
+        let bool_pad = "0000000000000000000000000000000000000000000000000000000000000001";
+        let input = format!("{}{}", selector, bool_pad);
+        let params = decode_params_from_abi(&input, &entry);
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "arg0");
+        assert_eq!(params[0].value, "true");
+    }
+
+    #[test]
+    fn test_decode_params_from_abi_short_data() {
+        let entry = AbiEntry {
+            entry_type: "function".to_string(),
+            name: "test".to_string(),
+            inputs: vec![
+                AbiParam {
+                    name: "a".to_string(),
+                    param_type: "uint256".to_string(),
+                    indexed: false,
+                    components: vec![],
+                },
+                AbiParam {
+                    name: "b".to_string(),
+                    param_type: "uint256".to_string(),
+                    indexed: false,
+                    components: vec![],
+                },
+            ],
+            outputs: vec![],
+            state_mutability: "nonpayable".to_string(),
+        };
+        let input = format!("0xa1b2c3d4{}", "00000000000000000000000000000000000000000000000000000000000000ff00");
+        let params = decode_params_from_abi(&input, &entry);
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0].name, "a");
+        assert!(params[1].value.len() > 0);
+    }
+
+    #[test]
+    fn test_decode_params_no_data() {
+        let entry = AbiEntry {
+            entry_type: "function".to_string(),
+            name: "test".to_string(),
+            inputs: vec![AbiParam {
+                name: "x".to_string(),
+                param_type: "uint256".to_string(),
+                indexed: false,
+                components: vec![],
+            }],
+            outputs: vec![],
+            state_mutability: "nonpayable".to_string(),
+        };
+        let input = "0xa1b2c3d4";
+        let params = decode_params_from_abi(input, &entry);
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].value, "(empty)");
+    }
+
+    #[test]
+    fn test_decode_abi_value_int() {
+        let hex = "0000000000000000000000000000000000000000000000000000000000000042";
+        assert_eq!(decode_abi_value(hex, "int256"), "66");
+    }
+
+    #[test]
+    fn test_decode_abi_value_large_uint() {
+        let hex = "00000000000000000000000000000000ffffffffffffffffffffffffffffffff";
+        let result = decode_abi_value(hex, "uint256");
+        assert!(result.starts_with("0x"));
+    }
+
+    #[test]
+    fn test_decode_abi_value_bytes4() {
+        let hex = "a9059cbb00000000000000000000000000000000000000000000000000000000";
+        let result = decode_abi_value(hex, "bytes4");
+        assert_eq!(result, "0xa9059cbb");
+    }
+
+    #[test]
+    fn test_decode_abi_value_bytes32() {
+        let hex = "a9059cbb000000000000000000000000000000000000000000000000deadbeef";
+        let result = decode_abi_value(hex, "bytes32");
+        assert!(result.starts_with("0x"));
+        assert_eq!(result.len(), 2 + 64);
+    }
+
+    #[test]
+    fn test_decode_abi_value_short_address() {
+        let hex = "deadbeef";
+        let result = decode_abi_value(hex, "address");
+        assert_eq!(result, "0xdeadbeef");
+    }
+
+    #[test]
+    fn test_decode_abi_value_dynamic_type_long() {
+        let hex = "0000000000000000000000000000000000000000000000000000000000000020";
+        let result = decode_abi_value(hex, "string");
+        assert!(result.starts_with("0x"));
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_decode_abi_value_dynamic_type_short() {
+        let hex = "abcdef01";
+        let result = decode_abi_value(hex, "bytes");
+        assert_eq!(result, "0xabcdef01");
+    }
+
+    #[test]
+    fn test_decode_calldata_empty_string() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(async {
+            let client = reqwest::Client::new();
+            decode_calldata("", None, &client).await
+        });
+        assert_eq!(result.function_name, "Native Transfer");
+        assert_eq!(result.selector, "0x");
+    }
+
+    #[test]
+    fn test_decode_calldata_short_selector() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(async {
+            let client = reqwest::Client::new();
+            decode_calldata("0xabcd", None, &client).await
+        });
+        assert_eq!(result.selector, "0xabcd");
+    }
+
+    #[test]
+    fn test_decode_calldata_with_abi() {
+        let entry = AbiEntry {
+            entry_type: "function".to_string(),
+            name: "transfer".to_string(),
+            inputs: vec![
+                AbiParam {
+                    name: "to".to_string(),
+                    param_type: "address".to_string(),
+                    indexed: false,
+                    components: vec![],
+                },
+                AbiParam {
+                    name: "value".to_string(),
+                    param_type: "uint256".to_string(),
+                    indexed: false,
+                    components: vec![],
+                },
+            ],
+            outputs: vec![],
+            state_mutability: "nonpayable".to_string(),
+        };
+        let selector = entry.selector();
+        let source = ContractSource {
+            contract_name: "Token".to_string(),
+            source_code: String::new(),
+            abi: String::new(),
+            compiler_version: String::new(),
+            optimization_used: false,
+            optimization_runs: 0,
+            evm_version: String::new(),
+            license_type: String::new(),
+            is_proxy: false,
+            implementation_address: None,
+            constructor_arguments: String::new(),
+            library: String::new(),
+            swarm_source: String::new(),
+            parsed_abi: vec![entry],
+        };
+        let addr_pad = "000000000000000000000000dac17f958d2ee523a2206206994597c13d831ec7";
+        let amt_pad = "0000000000000000000000000000000000000000000000000000000005f5e100";
+        let input = format!("{}{}{}", selector, addr_pad, amt_pad);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(async {
+            let client = reqwest::Client::new();
+            decode_calldata(&input, Some(&source), &client).await
+        });
+        assert_eq!(result.function_name, "transfer");
+        assert_eq!(result.parameters.len(), 2);
+        matches!(result.source, DecodeSource::VerifiedAbi);
+    }
+
+    #[test]
+    fn test_decode_abi_value_uint_parse_error() {
+        let hex = "zzzzzzzzzzzzzzzz";
+        let result = decode_abi_value(hex, "uint256");
+        assert!(result.starts_with("0x"));
+    }
+
+    #[test]
+    fn test_decode_abi_value_bytes_without_size() {
+        let hex = "a9059cbb00000000000000000000000000000000000000000000000000000000";
+        let result = decode_abi_value(hex, "bytes");
+        assert!(result.starts_with("0x"));
+    }
+
+    #[test]
+    fn test_decode_abi_value_bool_non_one_zero() {
+        let hex = "0000000000000000000000000000000000000000000000000000000000000002";
+        let result = decode_abi_value(hex, "bool");
+        assert_eq!(result, "false");
+    }
+
+    #[test]
+    fn test_decode_params_from_abi_offset_exceeds_data() {
+        let entry = AbiEntry {
+            entry_type: "function".to_string(),
+            name: "twoArgs".to_string(),
+            inputs: vec![
+                AbiParam {
+                    name: "a".to_string(),
+                    param_type: "uint256".to_string(),
+                    indexed: false,
+                    components: vec![],
+                },
+                AbiParam {
+                    name: "b".to_string(),
+                    param_type: "uint256".to_string(),
+                    indexed: false,
+                    components: vec![],
+                },
+            ],
+            outputs: vec![],
+            state_mutability: "nonpayable".to_string(),
+        };
+        let selector = entry.selector();
+        let single_param_data = "0000000000000000000000000000000000000000000000000000000000000042";
+        let input = format!("{}{}", selector, single_param_data);
+        let params = decode_params_from_abi(&input, &entry);
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0].value, "66");
+        assert_eq!(params[1].value, "(empty)");
+    }
+
+    #[test]
+    fn test_decode_params_from_abi_partial_second_param() {
+        let entry = AbiEntry {
+            entry_type: "function".to_string(),
+            name: "twoArgs".to_string(),
+            inputs: vec![
+                AbiParam {
+                    name: "a".to_string(),
+                    param_type: "uint256".to_string(),
+                    indexed: false,
+                    components: vec![],
+                },
+                AbiParam {
+                    name: "b".to_string(),
+                    param_type: "uint256".to_string(),
+                    indexed: false,
+                    components: vec![],
+                },
+            ],
+            outputs: vec![],
+            state_mutability: "nonpayable".to_string(),
+        };
+        let selector = entry.selector();
+        let first_full = "0000000000000000000000000000000000000000000000000000000000000042";
+        let second_partial = "000000000000000000000000000000000000000000000000000000000000";
+        let input = format!("{}{}{}", selector, first_full, second_partial);
+        let params = decode_params_from_abi(&input, &entry);
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0].value, "66");
+    }
+
+    #[test]
+    fn test_decode_calldata_raw_selector_fallback() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(async {
+            let client = reqwest::Client::new();
+            decode_calldata("0xdeadbeef", None, &client).await
+        });
+        assert_eq!(result.selector, "0xdeadbeef");
+        matches!(result.source, DecodeSource::Unknown | DecodeSource::FourByteDirectory);
+    }
+
+    #[test]
+    fn test_decoded_call_serialize_deserialize() {
+        let call = DecodedCall {
+            selector: "0xa9059cbb".to_string(),
+            signature: "transfer(address,uint256)".to_string(),
+            function_name: "transfer".to_string(),
+            parameters: vec![DecodedParam {
+                name: "to".to_string(),
+                param_type: "address".to_string(),
+                value: "0xdac17f958d2ee523a2206206994597c13d831ec7".to_string(),
+            }],
+            source: DecodeSource::VerifiedAbi,
+        };
+        let json = serde_json::to_string(&call).unwrap();
+        let restored: DecodedCall = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.selector, call.selector);
+        assert_eq!(restored.function_name, call.function_name);
+        assert_eq!(restored.parameters.len(), 1);
+    }
 }

@@ -1790,6 +1790,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_get_balance_explorer_api_error_result_empty() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"status":"0","message":"Invalid API Key","result":""}"#)
+            .create_async()
+            .await;
+
+        let client = EthereumClient::with_base_url(&server.url());
+        let result = client.get_balance(VALID_ADDRESS).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("API error"));
+        assert!(err.contains("Invalid API Key"));
+    }
+
+    #[tokio::test]
+    async fn test_get_balance_explorer_api_error_result_hex() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"status":"0","message":"Rate limit","result":"0x"}"#)
+            .create_async()
+            .await;
+
+        let client = EthereumClient::with_base_url(&server.url());
+        let result = client.get_balance(VALID_ADDRESS).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("API error"));
+    }
+
+    #[test]
+    fn test_ethereum_client_for_chain_optimism() {
+        let config = ChainsConfig::default();
+        let client = EthereumClient::for_chain("optimism", &config).unwrap();
+        assert_eq!(client.chain_name(), "optimism");
+        assert_eq!(client.native_token_symbol(), "ETH");
+        assert_eq!(client.chain_id, Some("10".to_string()));
+    }
+
+    #[test]
+    fn test_ethereum_client_for_chain_base() {
+        let config = ChainsConfig::default();
+        let client = EthereumClient::for_chain("base", &config).unwrap();
+        assert_eq!(client.chain_name(), "base");
+        assert_eq!(client.native_token_symbol(), "ETH");
+        assert_eq!(client.chain_id, Some("8453".to_string()));
+    }
+
+    #[test]
+    fn test_parse_balance_wei_bsc_client() {
+        let config = ChainsConfig::default();
+        let client = EthereumClient::for_chain("bsc", &config).unwrap();
+        let balance = client.parse_balance_wei("1000000000000000000").unwrap();
+        assert_eq!(balance.symbol, "BNB");
+    }
+
+    #[tokio::test]
     async fn test_get_balance_bsc_rpc_fallback_on_free_tier_restriction() {
         let mut server = mockito::Server::new_async().await;
         let _explorer_mock = server

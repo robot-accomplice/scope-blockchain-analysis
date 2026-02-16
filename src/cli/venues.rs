@@ -950,6 +950,67 @@ capabilities:
     }
 
     #[test]
+    fn test_serialize_descriptor_with_post_and_request_body() {
+        let yaml = r#"
+id: post_venue
+name: POST Exchange
+base_url: https://api.post.com
+symbol:
+  template: "{base}{quote}"
+  default_quote: USDT
+capabilities:
+  order_book:
+    method: POST
+    path: /api/depth
+    request_body: {"symbol":"{{pair}}"}
+    response_root: result
+    params: {}
+    response:
+      asks_key: asks
+      bids_key: bids
+      level_format: positional
+"#;
+        let desc: VenueDescriptor = serde_yaml::from_str(yaml).unwrap();
+        let serialized = serialize_descriptor_yaml(&desc);
+        assert!(serialized.contains("method: POST"));
+        assert!(serialized.contains("response_root"));
+        assert!(serialized.contains("request_body"));
+    }
+
+    #[test]
+    fn test_serialize_descriptor_with_filter_and_side() {
+        let yaml = r#"
+id: filter_venue
+name: Filter Exchange
+base_url: https://api.filter.com
+symbol:
+  template: "{base}{quote}"
+  default_quote: USDT
+capabilities:
+  trades:
+    path: /api/trades
+    params:
+      symbol: "{pair}"
+    response:
+      items_key: trades
+      filter:
+        field: symbol
+        value: "{pair}"
+      side:
+        field: side
+        mapping:
+          buy: B
+          sell: S
+"#;
+        let desc: VenueDescriptor = serde_yaml::from_str(yaml).unwrap();
+        let serialized = serialize_descriptor_yaml(&desc);
+        assert!(serialized.contains("filter:"));
+        assert!(serialized.contains("field:"));
+        assert!(serialized.contains("side:"));
+        assert!(serialized.contains("mapping:"));
+    }
+
+    #[test]
     fn test_run_init_skips_existing() {
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().to_path_buf();
@@ -971,5 +1032,78 @@ capabilities:
             content, original_content,
             "Existing file should not be overwritten when force=false"
         );
+    }
+
+    #[test]
+    fn test_run_init_creates_directory_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("nested").join("venues");
+        // Ensure parent doesn't exist
+        assert!(!dest.exists());
+        let args = InitArgs { force: true };
+        let result = run_init_impl(args, dest.clone());
+        assert!(result.is_ok());
+        assert!(dest.exists());
+        assert!(dest.is_dir());
+    }
+
+    #[test]
+    fn test_validate_file_template_missing_base() {
+        let yaml = r#"
+id: bad_template
+name: Bad Template Exchange
+base_url: https://api.test.com
+symbol:
+  template: "nobase{quote}"
+  default_quote: USDT
+capabilities:
+  order_book:
+    path: /depth
+    params:
+      symbol: "{pair}"
+    response:
+      asks_key: asks
+      bids_key: bids
+      level_format: positional
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad_template.yaml");
+        std::fs::write(&path, yaml).unwrap();
+
+        let args = ValidateArgs { file: path };
+        let result = run_validate(args);
+        assert!(result.is_ok()); // YAML parses; check_fail is printed for missing {base}
+    }
+
+    #[test]
+    fn test_validate_file_empty_capabilities() {
+        let yaml = r#"
+id: no_caps
+name: No Capabilities
+base_url: https://api.test.com
+symbol:
+  template: "{base}{quote}"
+  default_quote: USDT
+capabilities: {}
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("no_caps.yaml");
+        std::fs::write(&path, yaml).unwrap();
+
+        let args = ValidateArgs { file: path };
+        let result = run_validate(args);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_run_venues_command_routes_to_subcommands() {
+        let result = run(VenuesCommands::List(ListArgs {
+            format: ListFormat::Table,
+        }));
+        assert!(result.is_ok());
+        let result = run(VenuesCommands::Schema(SchemaArgs {
+            format: SchemaFormat::Text,
+        }));
+        assert!(result.is_ok());
     }
 }

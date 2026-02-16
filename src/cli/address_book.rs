@@ -1035,10 +1035,24 @@ mod tests {
     // End-to-end tests using MockClientFactory
     // ========================================================================
 
-    use crate::chains::mocks::MockClientFactory;
+    use crate::chains::mocks::{MockClientFactory, MockDexSource};
+    use crate::chains::{ChainClient, ChainClientFactory, DexDataSource};
 
     fn mock_factory() -> MockClientFactory {
         MockClientFactory::new()
+    }
+
+    /// Factory that fails to create chain clients - used to test error paths in fetch_address_balance.
+    struct FailingChainClientFactory;
+
+    impl ChainClientFactory for FailingChainClientFactory {
+        fn create_chain_client(&self, chain: &str) -> Result<Box<dyn ChainClient>> {
+            Err(ScopeError::Chain(format!("unsupported chain: {}", chain)))
+        }
+
+        fn create_dex_client(&self) -> Box<dyn DexDataSource> {
+            Box::new(MockDexSource::new())
+        }
     }
 
     #[tokio::test]
@@ -2058,6 +2072,46 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_address_book_input_label_not_found_with_available_labels() {
+        let tmp_dir = TempDir::new().unwrap();
+        let mut address_book = AddressBook::default();
+        address_book
+            .add_address(WatchedAddress {
+                address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+                label: Some("main-wallet".to_string()),
+                chain: "ethereum".to_string(),
+                tags: vec![],
+                added_at: 0,
+            })
+            .unwrap();
+        address_book
+            .add_address(WatchedAddress {
+                address: "0xABCdef1234567890abcdef1234567890ABCDEF12".to_string(),
+                label: Some("trading".to_string()),
+                chain: "polygon".to_string(),
+                tags: vec![],
+                added_at: 0,
+            })
+            .unwrap();
+        address_book.save(&tmp_dir.path().to_path_buf()).unwrap();
+
+        let config = Config {
+            address_book: crate::config::AddressBookConfig {
+                data_dir: Some(tmp_dir.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+
+        let result = resolve_address_book_input("@nonexistent-label", &config);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("No address book entry matching '@nonexistent-label'"));
+        assert!(err_msg.contains("Available labels"));
+        assert!(err_msg.contains("@main-wallet"));
+        assert!(err_msg.contains("@trading"));
+    }
+
+    #[test]
     fn test_resolve_address_book_input_case_insensitive_label() {
         let tmp_dir = TempDir::new().unwrap();
         let mut address_book = AddressBook::default();
@@ -2084,5 +2138,464 @@ mod tests {
         let (addr, chain) = result.unwrap();
         assert_eq!(addr, "0xABCDEF1234567890abcdef1234567890ABCDEF12");
         assert_eq!(chain, "arbitrum");
+    }
+
+    #[test]
+    fn test_resolve_address_book_input_raw_address_not_in_book_returns_none() {
+        let tmp_dir = TempDir::new().unwrap();
+        let mut address_book = AddressBook::default();
+        address_book
+            .add_address(WatchedAddress {
+                address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+                label: Some("test".to_string()),
+                chain: "ethereum".to_string(),
+                tags: vec![],
+                added_at: 0,
+            })
+            .unwrap();
+        address_book.save(&tmp_dir.path().to_path_buf()).unwrap();
+
+        let config = Config {
+            address_book: crate::config::AddressBookConfig {
+                data_dir: Some(tmp_dir.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+
+        // Raw address not in book (no @ prefix) -> Ok(None)
+        let result =
+            resolve_address_book_input("0xnonexistent123456789012345678901234567890", &config)
+                .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_resolve_address_book_input_load_fails_returns_none() {
+        let tmp_dir = TempDir::new().unwrap();
+        let address_book_path = tmp_dir.path().join("address_book.yaml");
+        std::fs::create_dir_all(tmp_dir.path()).unwrap();
+        std::fs::write(&address_book_path, "invalid: yaml: content: [").unwrap();
+
+        let config = Config {
+            address_book: crate::config::AddressBookConfig {
+                data_dir: Some(tmp_dir.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+
+        // When load fails (parse error), returns Ok(None)
+        let result = resolve_address_book_input("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2", &config);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn test_address_book_remove_address_case_insensitive() {
+        let mut address_book = create_test_address_book();
+        let original_len = address_book.addresses.len();
+
+        let removed = address_book
+            .remove_address("0x742D35CC6634C0532925A3B844BC9E7595F1B3C2")
+            .unwrap();
+
+        assert!(removed);
+        assert_eq!(address_book.addresses.len(), original_len - 1);
+    }
+
+    #[test]
+    fn test_address_book_remove_args_parsing() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct TestCli {
+            #[command(flatten)]
+            args: AddressBookArgs,
+        }
+
+        let cli = TestCli::try_parse_from([
+            "test",
+            "remove",
+            "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
+        ])
+        .unwrap();
+
+        if let AddressBookCommands::Remove(remove_args) = cli.args.command {
+            assert_eq!(
+                remove_args.address,
+                "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2"
+            );
+        } else {
+            panic!("Expected Remove command");
+        }
+    }
+
+    #[test]
+    fn test_address_book_summary_args_parsing() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct TestCli {
+            #[command(flatten)]
+            args: AddressBookArgs,
+        }
+
+        let cli = TestCli::try_parse_from([
+            "test",
+            "summary",
+            "--chain",
+            "ethereum",
+            "--tag",
+            "defi",
+            "--include-tokens",
+            "--report",
+            "report.md",
+        ])
+        .unwrap();
+
+        if let AddressBookCommands::Summary(summary_args) = cli.args.command {
+            assert_eq!(summary_args.chain, Some("ethereum".to_string()));
+            assert_eq!(summary_args.tag, Some("defi".to_string()));
+            assert!(summary_args.include_tokens);
+            assert_eq!(
+                summary_args.report,
+                Some(std::path::PathBuf::from("report.md"))
+            );
+        } else {
+            panic!("Expected Summary command");
+        }
+    }
+
+    #[test]
+    fn test_token_summary_serialization() {
+        let token = TokenSummary {
+            contract_address: "0xToken123".to_string(),
+            balance: "100.5".to_string(),
+            decimals: 18,
+            symbol: Some("USDC".to_string()),
+        };
+
+        let json = serde_json::to_string(&token).unwrap();
+        assert!(json.contains("0xToken123"));
+        assert!(json.contains("100.5"));
+        assert!(json.contains("USDC"));
+
+        let token_no_symbol = TokenSummary {
+            contract_address: "0xNoSymbol".to_string(),
+            balance: "50.0".to_string(),
+            decimals: 6,
+            symbol: None,
+        };
+        let json2 = serde_json::to_string(&token_no_symbol).unwrap();
+        assert!(!json2.contains("symbol"));
+    }
+
+    #[test]
+    fn test_chain_balance_serialization_without_usd() {
+        let balance = ChainBalance {
+            native_balance: "10.5".to_string(),
+            symbol: "ETH".to_string(),
+            usd: None,
+        };
+
+        let json = serde_json::to_string(&balance).unwrap();
+        assert!(json.contains("10.5"));
+        assert!(json.contains("ETH"));
+        assert!(!json.contains("usd"));
+    }
+
+    #[test]
+    fn test_address_book_summary_to_markdown_empty_tokens_display() {
+        let summary = AddressBookSummary {
+            address_count: 1,
+            balances_by_chain: HashMap::new(),
+            total_usd: None,
+            addresses: vec![AddressSummary {
+                address: "0xEmptyTokens".to_string(),
+                label: None,
+                chain: "ethereum".to_string(),
+                balance: "1.0".to_string(),
+                usd: None,
+                tokens: vec![],
+            }],
+        };
+
+        let md = address_book_summary_to_markdown(&summary);
+        assert!(md.contains("0xEmptyTokens"));
+        assert!(md.contains("| Address | Label | Chain | Balance | USD | Tokens |"));
+        assert!(md.contains("-"));
+    }
+
+    #[test]
+    fn test_address_book_summary_to_markdown_token_without_symbol_uses_contract() {
+        let mut balances = HashMap::new();
+        balances.insert(
+            "ethereum".to_string(),
+            ChainBalance {
+                native_balance: "1.0".to_string(),
+                symbol: "ETH".to_string(),
+                usd: None,
+            },
+        );
+
+        let summary = AddressBookSummary {
+            address_count: 1,
+            balances_by_chain: balances,
+            total_usd: None,
+            addresses: vec![AddressSummary {
+                address: "0xAddr".to_string(),
+                label: None,
+                chain: "ethereum".to_string(),
+                balance: "1.0".to_string(),
+                usd: None,
+                tokens: vec![TokenSummary {
+                    contract_address: "0xUnknownToken12345678".to_string(),
+                    balance: "100".to_string(),
+                    decimals: 18,
+                    symbol: None,
+                }],
+            }],
+        };
+
+        let md = address_book_summary_to_markdown(&summary);
+        assert!(md.contains("0xUnknownToken12345678"));
+    }
+
+    #[test]
+    fn test_address_book_load_invalid_yaml_returns_error() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let invalid_path = temp_dir.path().join("address_book.yaml");
+        std::fs::write(&invalid_path, "not valid: yaml: [unclosed").unwrap();
+
+        let result = AddressBook::load(temp_dir.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_address_book_save_creates_directory() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let nested_dir = temp_dir.path().join("scope").join("nested");
+        let address_book = create_test_address_book();
+
+        let result = address_book.save(&nested_dir);
+        assert!(result.is_ok());
+        assert!(nested_dir.exists());
+        assert!(nested_dir.join("address_book.yaml").exists());
+    }
+
+    #[tokio::test]
+    async fn test_run_address_book_add_without_label() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            address_book: crate::config::AddressBookConfig {
+                data_dir: Some(tmp_dir.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+        let factory = mock_factory();
+
+        let add_args = AddressBookArgs {
+            command: AddressBookCommands::Add(AddArgs {
+                address: "0xNoLabel".to_string(),
+                label: None,
+                chain: "ethereum".to_string(),
+                tags: vec![],
+            }),
+            format: None,
+        };
+        let result = super::run(add_args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_address_book_remove_nonexistent_address() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            address_book: crate::config::AddressBookConfig {
+                data_dir: Some(tmp_dir.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+        let factory = mock_factory();
+
+        let remove_args = AddressBookArgs {
+            command: AddressBookCommands::Remove(RemoveArgs {
+                address: "0xNeverAdded".to_string(),
+            }),
+            format: None,
+        };
+        let result = super::run(remove_args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_address_book_list_markdown_format() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            address_book: crate::config::AddressBookConfig {
+                data_dir: Some(tmp_dir.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+        let factory = mock_factory();
+
+        let add_args = AddressBookArgs {
+            command: AddressBookCommands::Add(AddArgs {
+                address: "0xMdTest".to_string(),
+                label: Some("MarkdownAddr".to_string()),
+                chain: "ethereum".to_string(),
+                tags: vec!["test".to_string()],
+            }),
+            format: None,
+        };
+        super::run(add_args, &config, &factory).await.unwrap();
+
+        let list_args = AddressBookArgs {
+            command: AddressBookCommands::List,
+            format: Some(OutputFormat::Markdown),
+        };
+        let result = super::run(list_args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_address_book_summary_markdown_format() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            address_book: crate::config::AddressBookConfig {
+                data_dir: Some(tmp_dir.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+        let factory = mock_factory();
+
+        let add_args = AddressBookArgs {
+            command: AddressBookCommands::Add(AddArgs {
+                address: "0xSummaryMd".to_string(),
+                label: Some("SummaryMarkdown".to_string()),
+                chain: "ethereum".to_string(),
+                tags: vec![],
+            }),
+            format: None,
+        };
+        super::run(add_args, &config, &factory).await.unwrap();
+
+        let summary_args = AddressBookArgs {
+            command: AddressBookCommands::Summary(SummaryArgs {
+                chain: None,
+                tag: None,
+                include_tokens: false,
+                report: None,
+            }),
+            format: Some(OutputFormat::Markdown),
+        };
+        let result = super::run(summary_args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_address_book_summary_with_report_file() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let report_path = tmp_dir.path().join("portfolio_report.md");
+        let config = Config {
+            address_book: crate::config::AddressBookConfig {
+                data_dir: Some(tmp_dir.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+        let factory = mock_factory();
+
+        let add_args = AddressBookArgs {
+            command: AddressBookCommands::Add(AddArgs {
+                address: "0xReportTest".to_string(),
+                label: Some("ReportAddr".to_string()),
+                chain: "ethereum".to_string(),
+                tags: vec![],
+            }),
+            format: None,
+        };
+        super::run(add_args, &config, &factory).await.unwrap();
+
+        let summary_args = AddressBookArgs {
+            command: AddressBookCommands::Summary(SummaryArgs {
+                chain: None,
+                tag: None,
+                include_tokens: false,
+                report: Some(report_path.clone()),
+            }),
+            format: Some(OutputFormat::Table),
+        };
+        let result = super::run(summary_args, &config, &factory).await;
+        assert!(result.is_ok());
+        assert!(report_path.exists());
+        let content = std::fs::read_to_string(&report_path).unwrap();
+        assert!(content.contains("# Address Book Report"));
+        assert!(content.contains("Report generated by Scope"));
+    }
+
+    #[tokio::test]
+    async fn test_run_address_book_summary_with_unsupported_chain() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            address_book: crate::config::AddressBookConfig {
+                data_dir: Some(tmp_dir.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+
+        let add_args = AddressBookArgs {
+            command: AddressBookCommands::Add(AddArgs {
+                address: "0xUnsupported".to_string(),
+                label: None,
+                chain: "unsupported_chain_xyz".to_string(),
+                tags: vec![],
+            }),
+            format: None,
+        };
+        super::run(add_args, &config, &mock_factory())
+            .await
+            .unwrap();
+
+        let failing_factory = FailingChainClientFactory;
+        let summary_args = AddressBookArgs {
+            command: AddressBookCommands::Summary(SummaryArgs {
+                chain: None,
+                tag: None,
+                include_tokens: false,
+                report: None,
+            }),
+            format: Some(OutputFormat::Json),
+        };
+        let result = super::run(summary_args, &config, &failing_factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_address_book_format_override_from_args() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            address_book: crate::config::AddressBookConfig {
+                data_dir: Some(tmp_dir.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+        let factory = mock_factory();
+
+        let add_args = AddressBookArgs {
+            command: AddressBookCommands::Add(AddArgs {
+                address: "0xFormatOverride".to_string(),
+                label: None,
+                chain: "ethereum".to_string(),
+                tags: vec![],
+            }),
+            format: Some(OutputFormat::Json),
+        };
+        super::run(add_args, &config, &factory).await.unwrap();
+
+        let list_args = AddressBookArgs {
+            command: AddressBookCommands::List,
+            format: Some(OutputFormat::Json),
+        };
+        let result = super::run(list_args, &config, &factory).await;
+        assert!(result.is_ok());
     }
 }

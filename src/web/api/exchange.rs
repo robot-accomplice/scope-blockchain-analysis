@@ -592,4 +592,37 @@ mod tests {
             );
         }
     }
+
+    #[tokio::test]
+    async fn test_handle_trades_error_response_structure() {
+        let req = TradesRequest {
+            venue: "nonexistent_venue_xyz".to_string(),
+            pair: "BTC".to_string(),
+            limit: 50,
+        };
+        let response = handle_trades(Json(req)).await.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json.get("error").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_handle_ohlc_error_response_structure() {
+        let req = OhlcRequest {
+            venue: "nonexistent_venue_xyz".to_string(),
+            pair: "BTC".to_string(),
+            interval: "1h".to_string(),
+            limit: 100,
+        };
+        let response = handle_ohlc(Json(req)).await.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json.get("error").is_some());
+    }
 }

@@ -433,4 +433,406 @@ mod tests {
         let files = extract_source_files(&source);
         assert_eq!(files.len(), 2);
     }
+
+    #[test]
+    fn test_chain_to_etherscan_id_all() {
+        assert_eq!(chain_to_etherscan_id("ethereum"), Some("1"));
+        assert_eq!(chain_to_etherscan_id("eth"), Some("1"));
+        assert_eq!(chain_to_etherscan_id("polygon"), Some("137"));
+        assert_eq!(chain_to_etherscan_id("matic"), Some("137"));
+        assert_eq!(chain_to_etherscan_id("arbitrum"), Some("42161"));
+        assert_eq!(chain_to_etherscan_id("arb"), Some("42161"));
+        assert_eq!(chain_to_etherscan_id("optimism"), Some("10"));
+        assert_eq!(chain_to_etherscan_id("op"), Some("10"));
+        assert_eq!(chain_to_etherscan_id("base"), Some("8453"));
+        assert_eq!(chain_to_etherscan_id("bsc"), Some("56"));
+        assert_eq!(chain_to_etherscan_id("bnb"), Some("56"));
+        assert_eq!(chain_to_etherscan_id("solana"), None);
+        assert_eq!(chain_to_etherscan_id("tron"), None);
+    }
+
+    #[test]
+    fn test_abi_entry_selector() {
+        let entry = AbiEntry {
+            entry_type: "function".to_string(),
+            name: "transfer".to_string(),
+            inputs: vec![
+                AbiParam {
+                    name: "to".to_string(),
+                    param_type: "address".to_string(),
+                    indexed: false,
+                    components: vec![],
+                },
+                AbiParam {
+                    name: "amount".to_string(),
+                    param_type: "uint256".to_string(),
+                    indexed: false,
+                    components: vec![],
+                },
+            ],
+            outputs: vec![],
+            state_mutability: "nonpayable".to_string(),
+        };
+        let selector = entry.selector();
+        assert!(selector.starts_with("0x"));
+        assert_eq!(selector.len(), 10);
+    }
+
+    #[test]
+    fn test_abi_entry_signature_no_params() {
+        let entry = AbiEntry {
+            entry_type: "function".to_string(),
+            name: "pause".to_string(),
+            inputs: vec![],
+            outputs: vec![],
+            state_mutability: "nonpayable".to_string(),
+        };
+        assert_eq!(entry.signature(), "pause()");
+    }
+
+    #[test]
+    fn test_abi_entry_pure_not_state_changing() {
+        let entry = AbiEntry {
+            entry_type: "function".to_string(),
+            name: "add".to_string(),
+            inputs: vec![],
+            outputs: vec![],
+            state_mutability: "pure".to_string(),
+        };
+        assert!(!entry.is_state_changing());
+    }
+
+    #[test]
+    fn test_abi_entry_payable_is_state_changing() {
+        let entry = AbiEntry {
+            entry_type: "function".to_string(),
+            name: "deposit".to_string(),
+            inputs: vec![],
+            outputs: vec![],
+            state_mutability: "payable".to_string(),
+        };
+        assert!(entry.is_state_changing());
+    }
+
+    #[test]
+    fn test_abi_entry_event_not_state_changing() {
+        let entry = AbiEntry {
+            entry_type: "event".to_string(),
+            name: "Transfer".to_string(),
+            inputs: vec![],
+            outputs: vec![],
+            state_mutability: String::new(),
+        };
+        assert!(!entry.is_state_changing());
+    }
+
+    #[test]
+    fn test_abi_param_canonical_type_tuple() {
+        let param = AbiParam {
+            name: "data".to_string(),
+            param_type: "tuple".to_string(),
+            indexed: false,
+            components: vec![
+                AbiParam {
+                    name: "a".to_string(),
+                    param_type: "address".to_string(),
+                    indexed: false,
+                    components: vec![],
+                },
+                AbiParam {
+                    name: "b".to_string(),
+                    param_type: "uint256".to_string(),
+                    indexed: false,
+                    components: vec![],
+                },
+            ],
+        };
+        assert_eq!(param.canonical_type(), "(address,uint256)");
+    }
+
+    #[test]
+    fn test_abi_param_canonical_type_nested_tuple() {
+        let param = AbiParam {
+            name: "nested".to_string(),
+            param_type: "tuple".to_string(),
+            indexed: false,
+            components: vec![AbiParam {
+                name: "inner".to_string(),
+                param_type: "tuple".to_string(),
+                indexed: false,
+                components: vec![AbiParam {
+                    name: "x".to_string(),
+                    param_type: "uint256".to_string(),
+                    indexed: false,
+                    components: vec![],
+                }],
+            }],
+        };
+        assert_eq!(param.canonical_type(), "((uint256))");
+    }
+
+    #[test]
+    fn test_extract_standard_json_source() {
+        let json_str = r#"{"sources":{"A.sol":{"content":"pragma solidity ^0.8.0;"}}}"#;
+        let source = ContractSource {
+            contract_name: "A".to_string(),
+            source_code: json_str.to_string(),
+            abi: "[]".to_string(),
+            compiler_version: "v0.8.19".to_string(),
+            optimization_used: false,
+            optimization_runs: 200,
+            evm_version: "paris".to_string(),
+            license_type: "MIT".to_string(),
+            is_proxy: false,
+            implementation_address: None,
+            constructor_arguments: String::new(),
+            library: String::new(),
+            swarm_source: String::new(),
+            parsed_abi: vec![],
+        };
+        let files = extract_source_files(&source);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "A.sol");
+    }
+
+    #[test]
+    fn test_extract_invalid_json_fallback() {
+        let source = ContractSource {
+            contract_name: "Token".to_string(),
+            source_code: "{invalid json".to_string(),
+            abi: "[]".to_string(),
+            compiler_version: "v0.8.19".to_string(),
+            optimization_used: false,
+            optimization_runs: 200,
+            evm_version: "paris".to_string(),
+            license_type: "MIT".to_string(),
+            is_proxy: false,
+            implementation_address: None,
+            constructor_arguments: String::new(),
+            library: String::new(),
+            swarm_source: String::new(),
+            parsed_abi: vec![],
+        };
+        let files = extract_source_files(&source);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "Token.sol");
+    }
+
+    #[test]
+    fn test_extract_standard_json_no_sources_key() {
+        let json_str = r#"{"settings":{"optimizer":{"enabled":true}}}"#;
+        let source = ContractSource {
+            contract_name: "Token".to_string(),
+            source_code: json_str.to_string(),
+            abi: "[]".to_string(),
+            compiler_version: "v0.8.19".to_string(),
+            optimization_used: false,
+            optimization_runs: 200,
+            evm_version: "paris".to_string(),
+            license_type: "MIT".to_string(),
+            is_proxy: false,
+            implementation_address: None,
+            constructor_arguments: String::new(),
+            library: String::new(),
+            swarm_source: String::new(),
+            parsed_abi: vec![],
+        };
+        let files = extract_source_files(&source);
+        assert_eq!(files.len(), 0);
+    }
+
+    #[test]
+    fn test_sha2_256_deterministic() {
+        let hash1 = sha2_256(b"hello");
+        let hash2 = sha2_256(b"hello");
+        assert_eq!(hash1, hash2);
+        let hash3 = sha2_256(b"world");
+        assert_ne!(hash1, hash3);
+    }
+
+    #[test]
+    fn test_contract_source_serialization() {
+        let source = ContractSource {
+            contract_name: "Test".to_string(),
+            source_code: "code".to_string(),
+            abi: "[]".to_string(),
+            compiler_version: "v0.8.19".to_string(),
+            optimization_used: true,
+            optimization_runs: 200,
+            evm_version: "paris".to_string(),
+            license_type: "MIT".to_string(),
+            is_proxy: true,
+            implementation_address: Some("0x123".to_string()),
+            constructor_arguments: "0xdeadbeef".to_string(),
+            library: "SafeMath:0xabc".to_string(),
+            swarm_source: "ipfs://Qm123".to_string(),
+            parsed_abi: vec![],
+        };
+        let json = serde_json::to_string(&source).unwrap();
+        let deserialized: ContractSource = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.contract_name, "Test");
+        assert!(deserialized.is_proxy);
+        assert_eq!(
+            deserialized.implementation_address,
+            Some("0x123".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_wrapped_invalid_inner_json() {
+        let source = ContractSource {
+            contract_name: "Token".to_string(),
+            source_code: "{{not valid json}}".to_string(),
+            abi: "[]".to_string(),
+            compiler_version: "v0.8.19".to_string(),
+            optimization_used: false,
+            optimization_runs: 200,
+            evm_version: "paris".to_string(),
+            license_type: "MIT".to_string(),
+            is_proxy: false,
+            implementation_address: None,
+            constructor_arguments: String::new(),
+            library: String::new(),
+            swarm_source: String::new(),
+            parsed_abi: vec![],
+        };
+        let files = extract_source_files(&source);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "Token.sol");
+    }
+
+    #[test]
+    fn test_extract_standard_json_source_missing_content() {
+        let json_str = r#"{"sources":{"A.sol":{},"B.sol":{"content":"valid"}}}"#;
+        let source = ContractSource {
+            contract_name: "Token".to_string(),
+            source_code: json_str.to_string(),
+            abi: "[]".to_string(),
+            compiler_version: "v0.8.19".to_string(),
+            optimization_used: false,
+            optimization_runs: 200,
+            evm_version: "paris".to_string(),
+            license_type: "MIT".to_string(),
+            is_proxy: false,
+            implementation_address: None,
+            constructor_arguments: String::new(),
+            library: String::new(),
+            swarm_source: String::new(),
+            parsed_abi: vec![],
+        };
+        let files = extract_source_files(&source);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "B.sol");
+        assert_eq!(files[0].content, "valid");
+    }
+
+    #[test]
+    fn test_extract_standard_json_empty_sources_object() {
+        let json_str = r#"{"sources":{}}"#;
+        let source = ContractSource {
+            contract_name: "Token".to_string(),
+            source_code: json_str.to_string(),
+            abi: "[]".to_string(),
+            compiler_version: "v0.8.19".to_string(),
+            optimization_used: false,
+            optimization_runs: 200,
+            evm_version: "paris".to_string(),
+            license_type: "MIT".to_string(),
+            is_proxy: false,
+            implementation_address: None,
+            constructor_arguments: String::new(),
+            library: String::new(),
+            swarm_source: String::new(),
+            parsed_abi: vec![],
+        };
+        let files = extract_source_files(&source);
+        assert_eq!(files.len(), 0);
+    }
+
+    #[test]
+    fn test_extract_standard_json_sources_not_object() {
+        let json_str = r#"{"sources":["file1.sol","file2.sol"]}"#;
+        let source = ContractSource {
+            contract_name: "Token".to_string(),
+            source_code: json_str.to_string(),
+            abi: "[]".to_string(),
+            compiler_version: "v0.8.19".to_string(),
+            optimization_used: false,
+            optimization_runs: 200,
+            evm_version: "paris".to_string(),
+            license_type: "MIT".to_string(),
+            is_proxy: false,
+            implementation_address: None,
+            constructor_arguments: String::new(),
+            library: String::new(),
+            swarm_source: String::new(),
+            parsed_abi: vec![],
+        };
+        let files = extract_source_files(&source);
+        assert_eq!(files.len(), 0);
+    }
+
+    #[test]
+    fn test_source_file_struct() {
+        let sf = SourceFile {
+            path: "contracts/Token.sol".to_string(),
+            content: "pragma solidity ^0.8.0;".to_string(),
+        };
+        assert_eq!(sf.path, "contracts/Token.sol");
+        let cloned = sf.clone();
+        assert_eq!(cloned.content, sf.content);
+    }
+
+    #[test]
+    fn test_abi_entry_constructor_not_state_changing() {
+        let entry = AbiEntry {
+            entry_type: "constructor".to_string(),
+            name: String::new(),
+            inputs: vec![],
+            outputs: vec![],
+            state_mutability: String::new(),
+        };
+        assert!(!entry.is_state_changing());
+    }
+
+    #[test]
+    fn test_abi_entry_fallback_not_state_changing() {
+        let entry = AbiEntry {
+            entry_type: "fallback".to_string(),
+            name: String::new(),
+            inputs: vec![],
+            outputs: vec![],
+            state_mutability: "payable".to_string(),
+        };
+        assert!(!entry.is_state_changing());
+    }
+
+    #[test]
+    fn test_abi_entry_selector_consistency() {
+        let entry = AbiEntry {
+            entry_type: "function".to_string(),
+            name: "transfer".to_string(),
+            inputs: vec![
+                AbiParam {
+                    name: "to".to_string(),
+                    param_type: "address".to_string(),
+                    indexed: false,
+                    components: vec![],
+                },
+                AbiParam {
+                    name: "value".to_string(),
+                    param_type: "uint256".to_string(),
+                    indexed: false,
+                    components: vec![],
+                },
+            ],
+            outputs: vec![],
+            state_mutability: "nonpayable".to_string(),
+        };
+        let sig = entry.signature();
+        let sel = entry.selector();
+        assert_eq!(sig, "transfer(address,uint256)");
+        assert!(sel.starts_with("0x"));
+        assert_eq!(sel.len(), 10);
+    }
 }

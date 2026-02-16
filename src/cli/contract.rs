@@ -316,3 +316,344 @@ fn print_contract_report(analysis: &contract::ContractAnalysis) {
 
     println!("\n{}", "=".repeat(72));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::contract::ContractAnalysis;
+
+    fn minimal_analysis() -> ContractAnalysis {
+        ContractAnalysis {
+            address: "0xtest".to_string(),
+            chain: "ethereum".to_string(),
+            is_verified: false,
+            source_info: None,
+            proxy_info: None,
+            access_control: None,
+            vulnerabilities: vec![],
+            defi_analysis: None,
+            external_info: None,
+            security_score: 30,
+            security_summary: "Unverified contract".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_print_report_minimal() {
+        print_contract_report(&minimal_analysis());
+    }
+
+    #[test]
+    fn test_print_report_verified_with_source() {
+        let mut a = minimal_analysis();
+        a.is_verified = true;
+        a.security_score = 75;
+        a.source_info = Some(crate::contract::source::ContractSource {
+            contract_name: "TestToken".to_string(),
+            source_code: "contract T {}".to_string(),
+            abi: "[]".to_string(),
+            compiler_version: "v0.8.19".to_string(),
+            optimization_used: true,
+            optimization_runs: 200,
+            evm_version: "paris".to_string(),
+            license_type: "MIT".to_string(),
+            is_proxy: false,
+            implementation_address: None,
+            constructor_arguments: String::new(),
+            library: String::new(),
+            swarm_source: String::new(),
+            parsed_abi: vec![],
+        });
+        print_contract_report(&a);
+    }
+
+    #[test]
+    fn test_print_report_source_no_optimization() {
+        let mut a = minimal_analysis();
+        a.is_verified = true;
+        a.source_info = Some(crate::contract::source::ContractSource {
+            contract_name: "T".to_string(),
+            source_code: String::new(),
+            abi: "[]".to_string(),
+            compiler_version: "v0.8.19".to_string(),
+            optimization_used: false,
+            optimization_runs: 0,
+            evm_version: "paris".to_string(),
+            license_type: "MIT".to_string(),
+            is_proxy: false,
+            implementation_address: None,
+            constructor_arguments: String::new(),
+            library: String::new(),
+            swarm_source: String::new(),
+            parsed_abi: vec![],
+        });
+        print_contract_report(&a);
+    }
+
+    #[test]
+    fn test_print_report_with_proxy() {
+        let mut a = minimal_analysis();
+        a.proxy_info = Some(crate::contract::proxy::ProxyInfo {
+            is_proxy: true,
+            proxy_type: "EIP-1967".to_string(),
+            implementation_address: Some("0ximpl".to_string()),
+            admin_address: Some("0xadmin".to_string()),
+            beacon_address: None,
+            details: vec!["Proxy detected".to_string()],
+        });
+        print_contract_report(&a);
+    }
+
+    #[test]
+    fn test_print_report_not_proxy() {
+        let mut a = minimal_analysis();
+        a.proxy_info = Some(crate::contract::proxy::ProxyInfo {
+            is_proxy: false,
+            proxy_type: "None".to_string(),
+            implementation_address: None,
+            admin_address: None,
+            beacon_address: None,
+            details: vec![],
+        });
+        print_contract_report(&a);
+    }
+
+    #[test]
+    fn test_print_report_access_control() {
+        let mut a = minimal_analysis();
+        a.access_control = Some(crate::contract::access::AccessControlMap {
+            ownership_pattern: Some("Ownable".to_string()),
+            has_renounced_ownership: true,
+            has_role_based_access: true,
+            uses_tx_origin: true,
+            tx_origin_locations: vec![],
+            modifiers: vec![],
+            privileged_functions: vec![crate::contract::access::PrivilegedFunction {
+                name: "mint".to_string(),
+                modifiers: vec!["onlyOwner".to_string()],
+                capability: "Mint tokens".to_string(),
+                risk: crate::contract::access::PrivilegeRisk::Critical,
+            }],
+            roles: vec!["MINTER_ROLE".to_string()],
+            auth_analysis: crate::contract::access::AuthAnalysis {
+                msg_sender_checks: 1,
+                tx_origin_checks: 1,
+                has_origin_sender_comparison: false,
+                summary: "Mixed auth".to_string(),
+            },
+        });
+        print_contract_report(&a);
+    }
+
+    #[test]
+    fn test_print_report_vulns() {
+        let mut a = minimal_analysis();
+        a.vulnerabilities = vec![
+            contract::vulnerability::VulnerabilityFinding {
+                id: "V-1".to_string(),
+                title: "Critical issue".to_string(),
+                severity: contract::vulnerability::Severity::Critical,
+                category: contract::vulnerability::VulnCategory::Reentrancy,
+                description: "desc".to_string(),
+                source_location: None,
+                recommendation: "fix".to_string(),
+            },
+            contract::vulnerability::VulnerabilityFinding {
+                id: "V-2".to_string(),
+                title: "High issue".to_string(),
+                severity: contract::vulnerability::Severity::High,
+                category: contract::vulnerability::VulnCategory::UncheckedCall,
+                description: "desc".to_string(),
+                source_location: None,
+                recommendation: "fix".to_string(),
+            },
+            contract::vulnerability::VulnerabilityFinding {
+                id: "V-3".to_string(),
+                title: "Medium".to_string(),
+                severity: contract::vulnerability::Severity::Medium,
+                category: contract::vulnerability::VulnCategory::Delegatecall,
+                description: "desc".to_string(),
+                source_location: None,
+                recommendation: "fix".to_string(),
+            },
+            contract::vulnerability::VulnerabilityFinding {
+                id: "V-4".to_string(),
+                title: "Low".to_string(),
+                severity: contract::vulnerability::Severity::Low,
+                category: contract::vulnerability::VulnCategory::TxOrigin,
+                description: "desc".to_string(),
+                source_location: None,
+                recommendation: "fix".to_string(),
+            },
+            contract::vulnerability::VulnerabilityFinding {
+                id: "V-5".to_string(),
+                title: "Info".to_string(),
+                severity: contract::vulnerability::Severity::Informational,
+                category: contract::vulnerability::VulnCategory::Informational,
+                description: "desc".to_string(),
+                source_location: None,
+                recommendation: "fix".to_string(),
+            },
+        ];
+        print_contract_report(&a);
+    }
+
+    #[test]
+    fn test_print_report_defi() {
+        let mut a = minimal_analysis();
+        a.defi_analysis = Some(crate::contract::defi::DefiAnalysis {
+            protocol_type: crate::contract::defi::ProtocolType::DEX,
+            has_oracle_dependency: true,
+            oracle_info: vec![crate::contract::defi::OracleInfo {
+                provider: "Chainlink".to_string(),
+                usage: "Price feed".to_string(),
+                risks: vec![],
+            }],
+            has_flash_loan_risk: true,
+            flash_loan_info: vec!["Flash loan detected".to_string()],
+            dex_integrations: vec![crate::contract::defi::DexIntegration {
+                dex: "Uniswap".to_string(),
+                integration_type: "Swap".to_string(),
+                has_slippage_protection: false,
+                has_deadline_protection: true,
+            }],
+            lending_patterns: vec![],
+            token_standards: vec![crate::contract::defi::TokenStandard::ERC20],
+            staking_patterns: vec![],
+            risk_factors: vec![crate::contract::defi::DefiRiskFactor {
+                name: "Test risk".to_string(),
+                description: "A risk".to_string(),
+                severity: 7,
+            }],
+        });
+        print_contract_report(&a);
+    }
+
+    #[test]
+    fn test_print_report_external() {
+        let mut a = minimal_analysis();
+        a.external_info = Some(crate::contract::external::ExternalInfo {
+            explorer_url: "https://etherscan.io/address/0xtest".to_string(),
+            github_repo: Some("https://github.com/test/repo".to_string()),
+            sourcify_verified: Some(true),
+            deployer: None,
+            audit_reports: vec![crate::contract::external::AuditReport {
+                auditor: "Trail of Bits".to_string(),
+                scope: "Token".to_string(),
+                url: "https://audit.com".to_string(),
+                date: None,
+            }],
+            metadata: vec![],
+        });
+        print_contract_report(&a);
+    }
+
+    #[test]
+    fn test_print_report_external_sourcify_false() {
+        let mut a = minimal_analysis();
+        a.external_info = Some(crate::contract::external::ExternalInfo {
+            explorer_url: "https://etherscan.io/address/0xtest".to_string(),
+            github_repo: None,
+            sourcify_verified: Some(false),
+            deployer: None,
+            audit_reports: vec![],
+            metadata: vec![],
+        });
+        print_contract_report(&a);
+    }
+
+    #[test]
+    fn test_print_report_access_control_empty_roles() {
+        let mut a = minimal_analysis();
+        a.access_control = Some(crate::contract::access::AccessControlMap {
+            ownership_pattern: Some("Ownable".to_string()),
+            has_renounced_ownership: false,
+            has_role_based_access: false,
+            uses_tx_origin: false,
+            tx_origin_locations: vec![],
+            modifiers: vec![],
+            privileged_functions: vec![],
+            roles: vec![],
+            auth_analysis: crate::contract::access::AuthAnalysis {
+                msg_sender_checks: 0,
+                tx_origin_checks: 0,
+                has_origin_sender_comparison: false,
+                summary: "No auth checks".to_string(),
+            },
+        });
+        print_contract_report(&a);
+    }
+
+    #[test]
+    fn test_print_report_external_audit_with_url() {
+        let mut a = minimal_analysis();
+        a.external_info = Some(crate::contract::external::ExternalInfo {
+            explorer_url: "https://etherscan.io/address/0xtest".to_string(),
+            github_repo: None,
+            sourcify_verified: None,
+            deployer: None,
+            audit_reports: vec![crate::contract::external::AuditReport {
+                auditor: "CertiK".to_string(),
+                scope: "Full".to_string(),
+                url: "https://certik.com/audit.pdf".to_string(),
+                date: None,
+            }],
+            metadata: vec![],
+        });
+        print_contract_report(&a);
+    }
+
+    #[test]
+    fn test_print_report_access_control_with_roles() {
+        let mut a = minimal_analysis();
+        a.access_control = Some(crate::contract::access::AccessControlMap {
+            ownership_pattern: None,
+            has_renounced_ownership: false,
+            has_role_based_access: true,
+            uses_tx_origin: false,
+            tx_origin_locations: vec![],
+            modifiers: vec![],
+            privileged_functions: vec![],
+            roles: vec!["ADMIN_ROLE".to_string(), "MINTER_ROLE".to_string()],
+            auth_analysis: crate::contract::access::AuthAnalysis {
+                msg_sender_checks: 2,
+                tx_origin_checks: 0,
+                has_origin_sender_comparison: false,
+                summary: "Role-based".to_string(),
+            },
+        });
+        print_contract_report(&a);
+    }
+
+    #[test]
+    fn test_print_report_defi_empty_token_standards() {
+        let mut a = minimal_analysis();
+        a.defi_analysis = Some(crate::contract::defi::DefiAnalysis {
+            protocol_type: crate::contract::defi::ProtocolType::Other,
+            has_oracle_dependency: false,
+            oracle_info: vec![],
+            has_flash_loan_risk: false,
+            flash_loan_info: vec![],
+            dex_integrations: vec![],
+            lending_patterns: vec![],
+            token_standards: vec![],
+            staking_patterns: vec![],
+            risk_factors: vec![],
+        });
+        print_contract_report(&a);
+    }
+
+    #[test]
+    fn test_print_report_proxy_no_impl_or_admin() {
+        let mut a = minimal_analysis();
+        a.proxy_info = Some(crate::contract::proxy::ProxyInfo {
+            is_proxy: true,
+            proxy_type: "Minimal Proxy".to_string(),
+            implementation_address: None,
+            admin_address: None,
+            beacon_address: None,
+            details: vec!["Minimal proxy".to_string()],
+        });
+        print_contract_report(&a);
+    }
+}

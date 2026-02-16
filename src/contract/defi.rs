@@ -630,8 +630,207 @@ mod tests {
             "IUniswapV2Router router; router.swapExactTokensForTokens(amountIn, 0, path, to, deadline);",
         );
         let analysis = analyze_defi_patterns(&src);
-        // amountOutMin is not explicitly named, but "amountoutmin" keyword is absent from source
-        // The heuristic checks for the keyword presence, not value
         assert!(!analysis.dex_integrations.is_empty());
+    }
+
+    #[test]
+    fn test_uniswap_twap_oracle() {
+        let src = make_source("OracleLibrary.observe(pool, secondsAgos);");
+        let analysis = analyze_defi_patterns(&src);
+        assert!(analysis.oracle_info.iter().any(|o| o.provider == "Uniswap V3 TWAP"));
+    }
+
+    #[test]
+    fn test_band_protocol_oracle() {
+        let src = make_source("IStdReference ref; ref.getReferenceData('ETH', 'USD');");
+        let analysis = analyze_defi_patterns(&src);
+        assert!(analysis.oracle_info.iter().any(|o| o.provider == "Band Protocol"));
+    }
+
+    #[test]
+    fn test_custom_oracle() {
+        let src = make_source("function getPrice() external view returns (uint);");
+        let analysis = analyze_defi_patterns(&src);
+        assert!(analysis.oracle_info.iter().any(|o| o.provider == "Custom/Unknown"));
+    }
+
+    #[test]
+    fn test_chainlink_missing_staleness() {
+        let src = make_source("AggregatorV3Interface priceFeed; priceFeed.latestRoundData();");
+        let analysis = analyze_defi_patterns(&src);
+        let cl = analysis.oracle_info.iter().find(|o| o.provider == "Chainlink").unwrap();
+        assert!(cl.risks.iter().any(|r| r.contains("Missing staleness")));
+    }
+
+    #[test]
+    fn test_flash_loan_dydx() {
+        let src = make_source("function callFunctionWithValue() external {}");
+        let analysis = analyze_defi_patterns(&src);
+        assert!(analysis.flash_loan_info.iter().any(|s| s.contains("dYdX")));
+    }
+
+    #[test]
+    fn test_flash_loan_uniswap_swap() {
+        let src = make_source("function uniswapV2Call(address, uint, uint, bytes) external {}");
+        let analysis = analyze_defi_patterns(&src);
+        assert!(analysis.flash_loan_info.iter().any(|s| s.contains("flash swap")));
+    }
+
+    #[test]
+    fn test_flash_loan_no_balanceof_warning() {
+        let src = make_source("function flashLoan() external { doStuff(); }");
+        let analysis = analyze_defi_patterns(&src);
+        assert!(analysis.flash_loan_info.iter().any(|s| s.contains("WARNING")));
+    }
+
+    #[test]
+    fn test_sushiswap_integration() {
+        let src = make_source("ISushiSwap router; router.swap(amountOutMin, deadline);");
+        let analysis = analyze_defi_patterns(&src);
+        assert!(analysis.dex_integrations.iter().any(|d| d.dex == "SushiSwap"));
+    }
+
+    #[test]
+    fn test_curve_integration() {
+        let src = make_source("ICurve pool; pool.exchange(0, 1, amount, min_amount);");
+        let analysis = analyze_defi_patterns(&src);
+        assert!(analysis.dex_integrations.iter().any(|d| d.dex == "Curve"));
+    }
+
+    #[test]
+    fn test_balancer_integration() {
+        let src = make_source("IBalancer vault; vault.swap(singleSwap, limit, deadline);");
+        let analysis = analyze_defi_patterns(&src);
+        assert!(analysis.dex_integrations.iter().any(|d| d.dex == "Balancer"));
+    }
+
+    #[test]
+    fn test_lending_pool_pattern() {
+        let src = make_source("LendingPool pool; pool.deposit(); Comptroller comp;");
+        let analysis = analyze_defi_patterns(&src);
+        assert!(analysis.lending_patterns.iter().any(|p| p.contains("Aave/Compound")));
+    }
+
+    #[test]
+    fn test_health_factor_pattern() {
+        let src = make_source("function borrow() {} function repay() {} uint healthFactor;");
+        let analysis = analyze_defi_patterns(&src);
+        assert!(analysis.lending_patterns.iter().any(|p| p.contains("Health factor")));
+    }
+
+    #[test]
+    fn test_interest_rate_pattern() {
+        let src = make_source("function borrow() {} function repay() {} uint interest; uint rate;");
+        let analysis = analyze_defi_patterns(&src);
+        assert!(analysis.lending_patterns.iter().any(|p| p.contains("Interest rate")));
+    }
+
+    #[test]
+    fn test_staking_reward_pattern() {
+        let src = make_source("function stake() {} function unstake() {} function rewardPerToken() view {}");
+        let analysis = analyze_defi_patterns(&src);
+        assert!(analysis.staking_patterns.iter().any(|p| p.contains("Synthetix")));
+    }
+
+    #[test]
+    fn test_vesting_pattern() {
+        let src = make_source("VestingSchedule schedule; function vesting() {}");
+        let analysis = analyze_defi_patterns(&src);
+        assert!(analysis.staking_patterns.iter().any(|p| p.contains("vesting")));
+    }
+
+    #[test]
+    fn test_timelock_staking() {
+        let src = make_source("function stake() {} function unstake() {} uint lockPeriod;");
+        let analysis = analyze_defi_patterns(&src);
+        assert!(analysis.staking_patterns.iter().any(|p| p.contains("Time-locked")));
+    }
+
+    #[test]
+    fn test_erc721_detection() {
+        let src = make_source("import ERC721; contract NFT is ERC721 {}");
+        let analysis = analyze_defi_patterns(&src);
+        assert!(analysis.token_standards.iter().any(|s| matches!(s, TokenStandard::ERC721)));
+    }
+
+    #[test]
+    fn test_erc1155_detection() {
+        let src = make_source("import ERC1155; contract Multi is ERC1155 {}");
+        let analysis = analyze_defi_patterns(&src);
+        assert!(analysis.token_standards.iter().any(|s| matches!(s, TokenStandard::ERC1155)));
+    }
+
+    #[test]
+    fn test_erc4626_detection() {
+        let src = make_source("import ERC4626; contract Vault is ERC4626 {}");
+        let analysis = analyze_defi_patterns(&src);
+        assert!(analysis.token_standards.iter().any(|s| matches!(s, TokenStandard::ERC4626)));
+    }
+
+    #[test]
+    fn test_classify_governance() {
+        let src = make_source("contract Gov { function propose() {} function vote() {} }");
+        let analysis = analyze_defi_patterns(&src);
+        assert!(matches!(analysis.protocol_type, ProtocolType::Governance));
+    }
+
+    #[test]
+    fn test_classify_bridge() {
+        let src = make_source("contract Bridge { function bridge() {} function crossChain() {} }");
+        let analysis = analyze_defi_patterns(&src);
+        assert!(matches!(analysis.protocol_type, ProtocolType::Bridge));
+    }
+
+    #[test]
+    fn test_classify_yield() {
+        let src = make_source("contract Farm { function stake() {} function farm() {} }");
+        let analysis = analyze_defi_patterns(&src);
+        assert!(matches!(analysis.protocol_type, ProtocolType::Yield));
+    }
+
+    #[test]
+    fn test_classify_other() {
+        let src = make_source("contract Utils { function doSomething() {} }");
+        let analysis = analyze_defi_patterns(&src);
+        assert!(matches!(analysis.protocol_type, ProtocolType::Other));
+    }
+
+    #[test]
+    fn test_lending_without_liquidation_risk() {
+        let src = make_source("function borrow(uint a) {} function repay(uint a) {}");
+        let analysis = analyze_defi_patterns(&src);
+        assert!(analysis.risk_factors.iter().any(|r| r.name.contains("Lending without liquidation")));
+    }
+
+    #[test]
+    fn test_dex_missing_slippage_risk_factor() {
+        let src = make_source("IUniswapV2Router router; router.swap(amount, 0, path, to, block.timestamp);");
+        let analysis = analyze_defi_patterns(&src);
+        for dex in &analysis.dex_integrations {
+            if !dex.has_slippage_protection {
+                assert!(analysis.risk_factors.iter().any(|r| r.name.contains("slippage")));
+            }
+        }
+    }
+
+    #[test]
+    fn test_protocol_type_display() {
+        assert_eq!(format!("{}", ProtocolType::Token), "Token");
+        assert_eq!(format!("{}", ProtocolType::DEX), "DEX/AMM");
+        assert_eq!(format!("{}", ProtocolType::Lending), "Lending");
+        assert_eq!(format!("{}", ProtocolType::Yield), "Yield/Staking");
+        assert_eq!(format!("{}", ProtocolType::Governance), "Governance");
+        assert_eq!(format!("{}", ProtocolType::Bridge), "Bridge");
+        assert_eq!(format!("{}", ProtocolType::NFTMarketplace), "NFT Marketplace");
+        assert_eq!(format!("{}", ProtocolType::Other), "Other");
+    }
+
+    #[test]
+    fn test_token_standard_display() {
+        assert_eq!(format!("{}", TokenStandard::ERC20), "ERC-20");
+        assert_eq!(format!("{}", TokenStandard::ERC721), "ERC-721");
+        assert_eq!(format!("{}", TokenStandard::ERC1155), "ERC-1155");
+        assert_eq!(format!("{}", TokenStandard::ERC4626), "ERC-4626");
+        assert_eq!(format!("{}", TokenStandard::Custom("Wrapped".to_string())), "Wrapped");
     }
 }

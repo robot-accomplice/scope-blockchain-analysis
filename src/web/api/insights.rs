@@ -288,4 +288,124 @@ mod tests {
         let status = response.status();
         assert!(status.is_success() || status.is_client_error() || status.is_server_error());
     }
+
+    #[tokio::test]
+    async fn test_handle_insights_address_analyze_error() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
+        use axum::extract::State;
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+        let req = InsightsRequest {
+            target: "0x0000000000000000000000000000000000000000".to_string(),
+            chain: Some("ethereum".to_string()),
+            decode: false,
+            trace: false,
+        };
+        let response = handle(State(state), axum::Json(req)).await.into_response();
+        if response.status() == StatusCode::INTERNAL_SERVER_ERROR {
+            let body = axum::body::to_bytes(response.into_body(), 1_000_000)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert!(json.get("error").is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_insights_tx_error() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
+        use axum::extract::State;
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+        let req = InsightsRequest {
+            target: "0x0000000000000000000000000000000000000000000000000000000000000000"
+                .to_string(),
+            chain: Some("ethereum".to_string()),
+            decode: false,
+            trace: false,
+        };
+        let response = handle(State(state), axum::Json(req)).await.into_response();
+        if response.status() == StatusCode::INTERNAL_SERVER_ERROR {
+            let body = axum::body::to_bytes(response.into_body(), 1_000_000)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert!(json.get("error").is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_insights_token_error() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
+        use axum::extract::State;
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+        let req = InsightsRequest {
+            target: "NONEXISTENT_TOKEN_XYZ_123".to_string(),
+            chain: Some("ethereum".to_string()),
+            decode: false,
+            trace: false,
+        };
+        let response = handle(State(state), axum::Json(req)).await.into_response();
+        if response.status() == StatusCode::INTERNAL_SERVER_ERROR {
+            let body = axum::body::to_bytes(response.into_body(), 1_000_000)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert!(json.get("error").is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_insights_unsupported_chain_bad_request() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
+        use axum::extract::State;
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+        let req = InsightsRequest {
+            target: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: Some("bitcoin".to_string()), // Unsupported chain
+            decode: false,
+            trace: false,
+        };
+        let response = handle(State(state), axum::Json(req)).await.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"].as_str().unwrap().contains("Unsupported chain"));
+    }
 }

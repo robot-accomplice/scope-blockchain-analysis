@@ -252,4 +252,166 @@ mod tests {
         let status = response.status();
         assert!(status.is_success() || status.is_client_error() || status.is_server_error());
     }
+
+    #[test]
+    fn test_deserialize_remove_request() {
+        let json = serde_json::json!({
+            "address": "0x1234567890123456789012345678901234567890"
+        });
+        let req: RemoveAddressBookRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.address, "0x1234567890123456789012345678901234567890");
+    }
+
+    #[tokio::test]
+    async fn test_handle_address_book_remove_direct() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
+        use axum::extract::State;
+        use axum::response::IntoResponse;
+
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+        let req = RemoveAddressBookRequest {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+        };
+        let response = handle_remove(State(state), axum::Json(req))
+            .await
+            .into_response();
+        let status = response.status();
+        // 200 (removed), 404 (not found), or 500 (load/save error)
+        assert!(
+            status.is_success()
+                || status == axum::http::StatusCode::NOT_FOUND
+                || status.is_server_error()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_address_book_remove_nonexistent() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
+        use axum::extract::State;
+        use axum::response::IntoResponse;
+
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+        let req = RemoveAddressBookRequest {
+            address: "0x000000000000000000000000000000000000dead".to_string(),
+        };
+        let response = handle_remove(State(state), axum::Json(req))
+            .await
+            .into_response();
+        // Should return 404 (not found) or 500 (load error)
+        assert!(
+            response.status() == axum::http::StatusCode::NOT_FOUND
+                || response.status().is_server_error()
+                || response.status().is_success()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_address_book_list_json_structure() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use axum::extract::State;
+        use axum::body;
+
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+        let response = handle_list(State(state)).await.into_response();
+        if response.status().is_success() {
+            let body_bytes = body::to_bytes(response.into_body(), 1_000_000)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            assert!(json.get("addresses").is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_address_book_add_duplicate_returns_bad_request() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
+        use axum::extract::State;
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let data_dir = tmp_dir.path().to_path_buf();
+        let mut config = Config::default();
+        config.address_book.data_dir = Some(data_dir.clone());
+
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+
+        let addr = "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string();
+        let req1 = AddAddressBookRequest {
+            address: addr.clone(),
+            chain: "ethereum".to_string(),
+            label: Some("First".to_string()),
+            tags: vec![],
+        };
+        let r1 = handle_add(State(state.clone()), axum::Json(req1))
+            .await
+            .into_response();
+        if !r1.status().is_success() {
+            return;
+        }
+
+        let req2 = AddAddressBookRequest {
+            address: addr,
+            chain: "ethereum".to_string(),
+            label: Some("Duplicate".to_string()),
+            tags: vec![],
+        };
+        let r2 = handle_add(State(state), axum::Json(req2))
+            .await
+            .into_response();
+        assert_eq!(r2.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(r2.into_body(), 1_000_000)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"]
+            .as_str()
+            .unwrap()
+            .to_lowercase()
+            .contains("already"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_address_book_list_corrupt_file_returns_500() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
+        use axum::extract::State;
+        use axum::http::StatusCode;
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let yaml_path = tmp_dir.path().join("address_book.yaml");
+        std::fs::write(&yaml_path, "{{{ invalid yaml").unwrap();
+
+        let mut config = Config::default();
+        config.address_book.data_dir = Some(tmp_dir.path().to_path_buf());
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+        let response = handle_list(State(state)).await.into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
 }

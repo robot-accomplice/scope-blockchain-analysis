@@ -637,4 +637,32 @@ mod tests {
         assert!(out.contains("Exec 10K sell"));
         assert!(out.contains("slippage") || out.contains("insufficient"));
     }
+
+    #[test]
+    fn test_format_text_bid_outliers_and_many_bid_levels() {
+        // Many bid levels + bid outlier → covers lines 328-330, 354-355
+        let mut bids: Vec<OrderBookLevel> = (0..12)
+            .map(|i| OrderBookLevel {
+                price: 1.0 - 0.0001 * (i + 1) as f64,
+                quantity: 500.0,
+            })
+            .collect();
+        bids.push(OrderBookLevel {
+            price: 0.98, // bid outlier far below peg
+            quantity: 100.0,
+        });
+        let book = OrderBook {
+            pair: "PUSD/USDT".to_string(),
+            bids,
+            asks: vec![
+                OrderBookLevel { price: 1.0001, quantity: 600.0 },
+                OrderBookLevel { price: 1.0002, quantity: 600.0 },
+            ],
+        };
+        let summary = MarketSummary::from_order_book(&book, 1.0, &HealthThresholds::default(), None);
+        let out = summary.format_text(None);
+        assert!(summary.bid_outliers > 0);
+        assert!(out.contains("outliers excl."));
+        assert!(out.contains("... +"));
+    }
 }

@@ -357,4 +357,240 @@ mod tests {
         });
         assert!(reports.iter().any(|r| r.auditor.contains("Trail of Bits")));
     }
+
+    #[test]
+    fn test_build_explorer_url_all_chains() {
+        assert_eq!(
+            build_explorer_url("0xabc", "eth"),
+            "https://etherscan.io/address/0xabc"
+        );
+        assert_eq!(
+            build_explorer_url("0xabc", "matic"),
+            "https://polygonscan.com/address/0xabc"
+        );
+        assert_eq!(
+            build_explorer_url("0xabc", "arbitrum"),
+            "https://arbiscan.io/address/0xabc"
+        );
+        assert_eq!(
+            build_explorer_url("0xabc", "arb"),
+            "https://arbiscan.io/address/0xabc"
+        );
+        assert_eq!(
+            build_explorer_url("0xabc", "optimism"),
+            "https://optimistic.etherscan.io/address/0xabc"
+        );
+        assert_eq!(
+            build_explorer_url("0xabc", "op"),
+            "https://optimistic.etherscan.io/address/0xabc"
+        );
+        assert_eq!(
+            build_explorer_url("0xabc", "base"),
+            "https://basescan.org/address/0xabc"
+        );
+        assert_eq!(
+            build_explorer_url("0xabc", "bnb"),
+            "https://bscscan.com/address/0xabc"
+        );
+        assert_eq!(
+            build_explorer_url("0xabc", "unknown_chain"),
+            "https://etherscan.io/address/0xabc"
+        );
+    }
+
+    #[test]
+    fn test_find_github_from_source_ownable() {
+        let src = make_source("import Ownable; contract Token is Ownable {}");
+        let repo = find_github_from_source(&src);
+        assert!(repo.is_some());
+        assert!(repo.unwrap().contains("OpenZeppelin"));
+    }
+
+    #[test]
+    fn test_find_github_from_source_compound() {
+        let src = make_source("import Compound from './Compound.sol';");
+        let repo = find_github_from_source(&src);
+        assert!(repo.is_some());
+        assert!(repo.unwrap().contains("compound"));
+    }
+
+    #[test]
+    fn test_find_github_from_source_aave() {
+        let src = make_source("import Aave from './lending/Aave.sol';");
+        let repo = find_github_from_source(&src);
+        assert!(repo.is_some());
+        assert!(repo.unwrap().contains("aave"));
+    }
+
+    #[test]
+    fn test_find_github_from_source_uniswapv3() {
+        let src = make_source("contract Token { UniswapV3Pool pool; }");
+        let repo = find_github_from_source(&src);
+        assert!(repo.is_some());
+        assert!(repo.unwrap().contains("v3-core"));
+    }
+
+    #[test]
+    fn test_find_github_from_contract_name_match() {
+        let mut src = make_source("contract SimpleToken {}");
+        src.contract_name = "AavePoolV3".to_string();
+        let repo = find_github_from_source(&src);
+        assert!(repo.is_some());
+        assert!(repo.unwrap().contains("aave"));
+    }
+
+    #[test]
+    fn test_find_github_with_ipfs_swarm() {
+        let mut src = make_source("contract SimpleToken {}");
+        src.swarm_source = "ipfs://Qm1234567890".to_string();
+        let repo = find_github_from_source(&src);
+        assert!(repo.is_none());
+    }
+
+    #[test]
+    fn test_discover_audits_no_source() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let reports = rt.block_on(async {
+            let client = reqwest::Client::new();
+            discover_audits("0xabc", "ethereum", None, &client).await
+        });
+        assert_eq!(reports.len(), 1);
+        assert!(reports[0].auditor.contains("No audit"));
+    }
+
+    #[test]
+    fn test_discover_audits_multiple_auditors() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let src = make_source("// Reviewed by Trail of Bits and OpenZeppelin");
+        let reports = rt.block_on(async {
+            let client = reqwest::Client::new();
+            discover_audits("0xabc", "ethereum", Some(&src), &client).await
+        });
+        assert!(reports.len() >= 2);
+    }
+
+    #[test]
+    fn test_discover_audits_audit_tag() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let src = make_source("/// @audit: Spearbit\ncontract Token {}");
+        let reports = rt.block_on(async {
+            let client = reqwest::Client::new();
+            discover_audits("0xabc", "ethereum", Some(&src), &client).await
+        });
+        assert!(reports.iter().any(|r| r.auditor.contains("Spearbit")));
+    }
+
+    #[test]
+    fn test_discover_audits_audited_by_tag() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let src = make_source("// audited by CustomAuditor\ncontract Token {}");
+        let reports = rt.block_on(async {
+            let client = reqwest::Client::new();
+            discover_audits("0xabc", "ethereum", Some(&src), &client).await
+        });
+        assert!(reports.iter().any(|r| r.auditor.contains("CustomAuditor")));
+    }
+
+    #[test]
+    fn test_discover_audits_no_duplicate() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let src = make_source("// audited by Trail of Bits\n// Trail of Bits reviewed");
+        let reports = rt.block_on(async {
+            let client = reqwest::Client::new();
+            discover_audits("0xabc", "ethereum", Some(&src), &client).await
+        });
+        let tob_count = reports
+            .iter()
+            .filter(|r| r.auditor.contains("Trail of Bits"))
+            .count();
+        assert!(tob_count >= 1);
+    }
+
+    #[test]
+    fn test_external_info_struct() {
+        let info = ExternalInfo {
+            github_repo: Some("https://github.com/test/repo".to_string()),
+            audit_reports: vec![],
+            sourcify_verified: Some(true),
+            deployer: Some("0xdead".to_string()),
+            explorer_url: "https://etherscan.io/address/0x1".to_string(),
+            metadata: vec![MetadataEntry {
+                key: "k".to_string(),
+                value: "v".to_string(),
+            }],
+        };
+        assert!(info.github_repo.is_some());
+        assert!(info.deployer.is_some());
+        assert_eq!(info.metadata.len(), 1);
+    }
+
+    #[test]
+    fn test_audit_report_struct() {
+        let report = AuditReport {
+            auditor: "ToB".to_string(),
+            url: "https://tob.com".to_string(),
+            date: Some("2024-01-01".to_string()),
+            scope: "Full protocol".to_string(),
+        };
+        assert_eq!(report.auditor, "ToB");
+        assert!(report.date.is_some());
+    }
+
+    #[test]
+    fn test_find_github_from_dev_natspec() {
+        let src = make_source(
+            "/** @dev See https://github.com/MyOrg/MyContract for full source */\ncontract C {}",
+        );
+        let repo = find_github_from_source(&src);
+        assert_eq!(repo, Some("https://github.com/MyOrg/MyContract".to_string()));
+    }
+
+    #[test]
+    fn test_metadata_entry_struct() {
+        let entry = MetadataEntry {
+            key: "chain".to_string(),
+            value: "ethereum".to_string(),
+        };
+        assert_eq!(entry.key, "chain");
+        let cloned = entry.clone();
+        assert_eq!(format!("{:?}", cloned), format!("{:?}", entry));
+    }
+
+    #[tokio::test]
+    async fn test_gather_external_info_with_source() {
+        let src = make_source("contract Test {}");
+        let client = reqwest::Client::new();
+        let result = gather_external_info("0xabc", "ethereum", Some(&src), &client)
+            .await
+            .unwrap();
+        assert!(result.explorer_url.contains("etherscan"));
+        assert!(result.metadata.iter().any(|m| m.key == "Contract Name"));
+        assert!(result.metadata.iter().any(|m| m.key == "Compiler"));
+        assert!(result.metadata.iter().any(|m| m.key == "License"));
+        assert!(result.metadata.iter().any(|m| m.key == "EVM Version"));
+        assert!(result.metadata.iter().any(|m| m.key == "Optimization"));
+    }
+
+    #[tokio::test]
+    async fn test_gather_external_info_without_optimization() {
+        let mut src = make_source("contract Test {}");
+        src.optimization_used = false;
+        let client = reqwest::Client::new();
+        let result = gather_external_info("0xabc", "polygon", Some(&src), &client)
+            .await
+            .unwrap();
+        let has_opt = result.metadata.iter().any(|m| m.key == "Optimization");
+        assert!(!has_opt);
+        assert!(result.explorer_url.contains("polygonscan"));
+    }
+
+    #[tokio::test]
+    async fn test_gather_external_info_no_source() {
+        let client = reqwest::Client::new();
+        let result = gather_external_info("0xabc", "ethereum", None, &client)
+            .await
+            .unwrap();
+        assert!(result.metadata.is_empty());
+        assert!(result.github_repo.is_none());
+    }
 }

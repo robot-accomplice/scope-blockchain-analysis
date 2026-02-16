@@ -358,4 +358,37 @@ symbol:
         assert!(msg.contains("Did you mean"));
         assert!(msg.contains("binance"));
     }
+
+    #[test]
+    fn test_create_exchange_client_success() {
+        let registry = VenueRegistry::default();
+        let client = registry.create_exchange_client("binance").unwrap();
+        assert_eq!(client.venue_name(), "Binance Spot");
+    }
+
+    #[test]
+    fn test_registry_load_returns_ok() {
+        let result = VenueRegistry::load();
+        assert!(result.is_ok());
+        let registry = result.unwrap();
+        assert!(registry.len() >= 11);
+    }
+
+    #[test]
+    fn test_strsim_distance_single_char_diff() {
+        assert_eq!(strsim_distance("a", "b"), 1);
+        assert_eq!(strsim_distance("test", "best"), 1);
+    }
+
+    #[test]
+    fn test_suggest_exact_match_returns_same() {
+        let registry = VenueRegistry::default();
+        assert_eq!(registry.suggest("binance"), Some("binance"));
+    }
+
+    #[test]
+    fn test_registry_get_nonexistent() {
+        let registry = VenueRegistry::default();
+        assert!(registry.get("nonexistent_xyz").is_none());
+    }
 }

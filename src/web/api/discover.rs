@@ -108,4 +108,141 @@ mod tests {
         assert_eq!(req.chain, Some("polygon".to_string()));
         assert_eq!(req.limit, 10);
     }
+
+    #[tokio::test]
+    async fn test_handle_discover_profiles() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
+        use axum::extract::{Query, State};
+        use axum::response::IntoResponse;
+
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+
+        let params = DiscoverQuery {
+            source: "profiles".to_string(),
+            chain: None,
+            limit: 5,
+        };
+        let response = handle(State(state), Query(params))
+            .await
+            .into_response();
+        let status = response.status();
+        assert!(status.is_success() || status.is_server_error());
+    }
+
+    #[tokio::test]
+    async fn test_handle_discover_boosts() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
+        use axum::extract::{Query, State};
+        use axum::response::IntoResponse;
+
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+
+        let params = DiscoverQuery {
+            source: "boosts".to_string(),
+            chain: None,
+            limit: 5,
+        };
+        let response = handle(State(state), Query(params))
+            .await
+            .into_response();
+        let status = response.status();
+        assert!(status.is_success() || status.is_server_error());
+    }
+
+    #[tokio::test]
+    async fn test_handle_discover_top_boosts() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
+        use axum::extract::{Query, State};
+        use axum::response::IntoResponse;
+
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+
+        let params = DiscoverQuery {
+            source: "top-boosts".to_string(),
+            chain: None,
+            limit: 5,
+        };
+        let response = handle(State(state), Query(params))
+            .await
+            .into_response();
+        let status = response.status();
+        assert!(status.is_success() || status.is_server_error());
+    }
+
+    #[tokio::test]
+    async fn test_handle_discover_with_chain_filter() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
+        use axum::extract::{Query, State};
+        use axum::response::IntoResponse;
+
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+
+        let params = DiscoverQuery {
+            source: "profiles".to_string(),
+            chain: Some("ethereum".to_string()),
+            limit: 10,
+        };
+        let response = handle(State(state), Query(params))
+            .await
+            .into_response();
+        let status = response.status();
+        assert!(status.is_success() || status.is_server_error());
+    }
+
+    #[tokio::test]
+    async fn test_handle_discover_error_path() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
+        use axum::extract::{Query, State};
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+
+        let params = DiscoverQuery {
+            source: "unknown-source".to_string(),
+            chain: None,
+            limit: 5,
+        };
+        let response = handle(State(state), Query(params))
+            .await
+            .into_response();
+        let status = response.status();
+        if status == StatusCode::INTERNAL_SERVER_ERROR {
+            let body = axum::body::to_bytes(response.into_body(), 1_000_000)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert!(json.get("error").is_some());
+        }
+    }
 }

@@ -446,4 +446,157 @@ mod tests {
         let ac = analyze_access_control(&src);
         assert!(ac.auth_analysis.summary.contains("DANGER"));
     }
+
+    #[test]
+    fn test_detect_ownership_pattern_custom_owner() {
+        let result = detect_ownership_pattern("function owner() public view returns (address) { return _owner; }");
+        assert_eq!(result, Some("Custom owner pattern".to_string()));
+    }
+
+    #[test]
+    fn test_detect_ownership_pattern_none() {
+        let result = detect_ownership_pattern("contract SimpleToken { function transfer() {} }");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_detect_modifiers_custom() {
+        let code = "modifier onlyValidator() { require(isValidator[msg.sender]); _; }\nfunction doThing() onlyValidator() {}";
+        let modifiers = detect_modifiers(code);
+        assert!(modifiers.iter().any(|m| m.name == "onlyValidator"));
+        let validator_mod = modifiers.iter().find(|m| m.name == "onlyValidator").unwrap();
+        assert!(matches!(validator_mod.check_type, ModifierCheckType::Custom));
+    }
+
+    #[test]
+    fn test_detect_modifiers_role_based() {
+        let code = "modifier onlyRole(bytes32 role) { _checkRole(role); _; }\nfunction mint() onlyRole(MINTER) {}";
+        let modifiers = detect_modifiers(code);
+        assert!(modifiers.iter().any(|m| m.name == "onlyRole"));
+        let role_mod = modifiers.iter().find(|m| m.name == "onlyRole").unwrap();
+        assert!(matches!(role_mod.check_type, ModifierCheckType::RoleBased));
+    }
+
+    #[test]
+    fn test_detect_modifiers_admin() {
+        let code = "modifier onlyAdmin() { require(msg.sender == admin); _; }";
+        let modifiers = detect_modifiers(code);
+        assert!(modifiers.iter().any(|m| m.name == "onlyAdmin"));
+        let admin_mod = modifiers.iter().find(|m| m.name == "onlyAdmin").unwrap();
+        assert!(matches!(admin_mod.check_type, ModifierCheckType::RoleBased));
+    }
+
+    #[test]
+    fn test_detect_modifiers_imported_only_owner() {
+        let code = "function mint() onlyOwner { tokens[msg.sender] += 1; }\nfunction burn() onlyOwner {}";
+        let modifiers = detect_modifiers(code);
+        assert!(modifiers.iter().any(|m| m.name == "onlyOwner"));
+        let owner_mod = modifiers.iter().find(|m| m.name == "onlyOwner").unwrap();
+        assert!(matches!(owner_mod.check_type, ModifierCheckType::OwnerOnly));
+        assert!(owner_mod.usage_count >= 2);
+    }
+
+    #[test]
+    fn test_detect_privileged_functions_with_abi() {
+        use crate::contract::source::{AbiEntry, AbiParam};
+        let code = "function mint(address to) onlyOwner { _mint(to); }";
+        let abi = vec![
+            AbiEntry {
+                entry_type: "function".to_string(),
+                name: "mint".to_string(),
+                inputs: vec![AbiParam {
+                    name: "to".to_string(),
+                    param_type: "address".to_string(),
+                    indexed: false,
+                    components: vec![],
+                }],
+                outputs: vec![],
+                state_mutability: "nonpayable".to_string(),
+            },
+            AbiEntry {
+                entry_type: "function".to_string(),
+                name: "pause".to_string(),
+                inputs: vec![],
+                outputs: vec![],
+                state_mutability: "nonpayable".to_string(),
+            },
+        ];
+        let fns = detect_privileged_functions(code, &abi);
+        assert!(!fns.is_empty());
+        assert!(fns.iter().any(|f| f.name == "mint"));
+    }
+
+    #[test]
+    fn test_detect_privileged_functions_abi_only() {
+        use crate::contract::source::{AbiEntry, AbiParam};
+        let code = "contract Token {}";
+        let abi = vec![AbiEntry {
+            entry_type: "function".to_string(),
+            name: "setFeeRecipient".to_string(),
+            inputs: vec![AbiParam {
+                name: "r".to_string(),
+                param_type: "address".to_string(),
+                indexed: false,
+                components: vec![],
+            }],
+            outputs: vec![],
+            state_mutability: "nonpayable".to_string(),
+        }];
+        let fns = detect_privileged_functions(code, &abi);
+        assert!(fns.iter().any(|f| f.name == "setFeeRecipient"));
+    }
+
+    #[test]
+    fn test_detect_roles_common_patterns() {
+        let code = "contract Token {\n\
+            bytes32 public constant UPGRADER_ROLE = keccak256('UPGRADER_ROLE');\n\
+            DEFAULT_ADMIN_ROLE;\n\
+            BURNER_ROLE;\n\
+        }";
+        let roles = detect_roles(code);
+        assert!(roles.contains(&"UPGRADER_ROLE".to_string()));
+        assert!(roles.contains(&"DEFAULT_ADMIN_ROLE".to_string()));
+        assert!(roles.contains(&"BURNER_ROLE".to_string()));
+    }
+
+    #[test]
+    fn test_analyze_auth_tx_origin_with_msg_sender() {
+        let code = "require(tx.origin == msg.sender, 'no contracts');";
+        let auth = analyze_auth_mechanisms(code);
+        assert!(auth.has_origin_sender_comparison);
+        assert!(auth.summary.contains("anti-contract-call"));
+    }
+
+    #[test]
+    fn test_analyze_auth_no_checks() {
+        let code = "contract Token { function transfer() {} }";
+        let auth = analyze_auth_mechanisms(code);
+        assert_eq!(auth.msg_sender_checks, 0);
+        assert_eq!(auth.tx_origin_checks, 0);
+        assert!(auth.summary.contains("No explicit authorization"));
+    }
+
+    #[test]
+    fn test_find_tx_origin_usage_multiple() {
+        let code = "require(tx.origin == owner);\nrequire(tx.origin != address(0));";
+        let locations = find_tx_origin_usage(code);
+        assert_eq!(locations.len(), 2);
+        assert_eq!(locations[0].line, 1);
+        assert_eq!(locations[1].line, 2);
+    }
+
+    #[test]
+    fn test_privilege_risk_debug() {
+        assert_eq!(format!("{:?}", PrivilegeRisk::Critical), "Critical");
+        assert_eq!(format!("{:?}", PrivilegeRisk::High), "High");
+        assert_eq!(format!("{:?}", PrivilegeRisk::Medium), "Medium");
+        assert_eq!(format!("{:?}", PrivilegeRisk::Low), "Low");
+    }
+
+    #[test]
+    fn test_modifier_check_type_debug() {
+        assert_eq!(format!("{:?}", ModifierCheckType::OwnerOnly), "OwnerOnly");
+        assert_eq!(format!("{:?}", ModifierCheckType::RoleBased), "RoleBased");
+        assert_eq!(format!("{:?}", ModifierCheckType::Custom), "Custom");
+    }
 }

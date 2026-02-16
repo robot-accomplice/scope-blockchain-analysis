@@ -167,4 +167,91 @@ mod tests {
         let status = response.status();
         assert!(status.is_success() || status.is_client_error() || status.is_server_error());
     }
+
+    #[tokio::test]
+    async fn test_handle_export_success_json_structure() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
+        use axum::body;
+        use axum::extract::State;
+        use axum::response::IntoResponse;
+
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+        let req = ExportRequest {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: "ethereum".to_string(),
+            format: "json".to_string(),
+            start_date: None,
+            end_date: None,
+        };
+        let response = handle(State(state), axum::Json(req)).await.into_response();
+        if response.status().is_success() {
+            let body_bytes = body::to_bytes(response.into_body(), 1_000_000)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            assert!(json.get("address").is_some());
+            assert!(json.get("chain").is_some());
+            assert!(json.get("format").is_some());
+            assert!(json.get("balance").is_some());
+        }
+    }
+
+    #[test]
+    fn test_export_request_debug() {
+        let req = ExportRequest {
+            address: "0xabc".to_string(),
+            chain: "ethereum".to_string(),
+            format: "json".to_string(),
+            start_date: None,
+            end_date: None,
+        };
+        let debug = format!("{:?}", req);
+        assert!(debug.contains("ExportRequest"));
+    }
+
+    #[test]
+    fn test_deserialize_export_csv_format() {
+        let json = serde_json::json!({
+            "address": "0x1234567890123456789012345678901234567890",
+            "format": "csv"
+        });
+        let req: ExportRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.format, "csv");
+    }
+
+    #[tokio::test]
+    async fn test_handle_export_unsupported_chain_bad_request() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
+        use axum::extract::State;
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+        let req = ExportRequest {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: "bitcoin".to_string(), // Unsupported chain
+            format: "json".to_string(),
+            start_date: None,
+            end_date: None,
+        };
+        let response = handle(State(state), axum::Json(req)).await.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"].as_str().unwrap().contains("Unsupported chain"));
+    }
 }

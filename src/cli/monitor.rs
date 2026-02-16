@@ -9602,4 +9602,548 @@ refresh_seconds: 5
         assert!(result.address.is_empty());
         assert_eq!(result.liquidity_usd, 0.0);
     }
+
+    #[test]
+    fn test_select_token_impl_single_result_pick() {
+        let results = vec![crate::chains::dex::TokenSearchResult {
+            address: "0xabc".to_string(),
+            symbol: "TEST".to_string(),
+            name: "Test Token".to_string(),
+            chain: "ethereum".to_string(),
+            price_usd: Some(1.0),
+            volume_24h: 100.0,
+            liquidity_usd: 1000.0,
+            market_cap: None,
+        }];
+        let input = b"1\n";
+        let mut output = Vec::new();
+        let result = select_token_impl(&results, &mut &input[..], &mut output);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().symbol, "TEST");
+    }
+
+    #[test]
+    fn test_select_token_impl_out_of_range() {
+        let results = vec![crate::chains::dex::TokenSearchResult {
+            address: "0xabc".to_string(),
+            symbol: "TEST".to_string(),
+            name: "Test Token".to_string(),
+            chain: "ethereum".to_string(),
+            price_usd: Some(1.0),
+            volume_24h: 100.0,
+            liquidity_usd: 1000.0,
+            market_cap: None,
+        }];
+        let input = b"0\n";
+        let mut output = Vec::new();
+        let result = select_token_impl(&results, &mut &input[..], &mut output);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_select_token_impl_second_of_two() {
+        let results = vec![
+            crate::chains::dex::TokenSearchResult {
+                address: "0xabc".to_string(),
+                symbol: "TOKEN1".to_string(),
+                name: "Token One".to_string(),
+                chain: "ethereum".to_string(),
+                price_usd: Some(1.0),
+                volume_24h: 100.0,
+                liquidity_usd: 1000.0,
+                market_cap: None,
+            },
+            crate::chains::dex::TokenSearchResult {
+                address: "0xdef".to_string(),
+                symbol: "TOKEN2".to_string(),
+                name: "Token Two".to_string(),
+                chain: "solana".to_string(),
+                price_usd: Some(2.0),
+                volume_24h: 200.0,
+                liquidity_usd: 2000.0,
+                market_cap: None,
+            },
+        ];
+        let input = b"2\n";
+        let mut output = Vec::new();
+        let result = select_token_impl(&results, &mut &input[..], &mut output);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().symbol, "TOKEN2");
+    }
+
+    // ========================================================================
+    // Key event tests
+    // ========================================================================
+
+    #[test]
+    fn test_handle_key_event_quit() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        let key = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('q'),
+            crossterm::event::KeyModifiers::NONE,
+        );
+        assert!(handle_key_event_on_state(key, &mut state));
+    }
+
+    #[test]
+    fn test_handle_key_event_pause() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        let key = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char(' '),
+            crossterm::event::KeyModifiers::NONE,
+        );
+        assert!(!state.paused);
+        assert!(!handle_key_event_on_state(key, &mut state));
+        assert!(state.paused);
+    }
+
+    #[test]
+    fn test_handle_key_event_chart_cycle() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        let initial_mode = state.chart_mode;
+        let key = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('c'),
+            crossterm::event::KeyModifiers::NONE,
+        );
+        handle_key_event_on_state(key, &mut state);
+        assert_ne!(state.chart_mode, initial_mode);
+    }
+
+    #[test]
+    fn test_handle_key_event_slower_faster() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        let initial_rate = state.refresh_rate_secs();
+
+        // '+' slows down (increases interval)
+        let key_plus = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('+'),
+            crossterm::event::KeyModifiers::NONE,
+        );
+        handle_key_event_on_state(key_plus, &mut state);
+        assert!(state.refresh_rate_secs() > initial_rate);
+
+        // '-' speeds up (decreases interval)
+        let key_minus = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('-'),
+            crossterm::event::KeyModifiers::NONE,
+        );
+        handle_key_event_on_state(key_minus, &mut state);
+        assert_eq!(state.refresh_rate_secs(), initial_rate);
+    }
+
+    #[test]
+    fn test_handle_key_event_time_period() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        let initial_period = state.time_period;
+        let key = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('t'),
+            crossterm::event::KeyModifiers::NONE,
+        );
+        handle_key_event_on_state(key, &mut state);
+        assert_ne!(state.time_period, initial_period);
+    }
+
+    #[test]
+    fn test_handle_key_event_escape() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        let key = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        );
+        assert!(handle_key_event_on_state(key, &mut state));
+    }
+
+    // ========================================================================
+    // Coverage gap: Exchange layout render functions (order book, trades, market info)
+    // ========================================================================
+
+    #[test]
+    fn test_render_order_book_panel_no_data() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        state.order_book = None;
+        let area = Rect::new(0, 0, 50, 20);
+        terminal
+            .draw(|f| render_order_book_panel(f, area, &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_order_book_panel_with_data() {
+        let mut terminal = create_test_terminal();
+        let state = create_populated_state();
+        let area = Rect::new(0, 0, 60, 25);
+        terminal
+            .draw(|f| render_order_book_panel(f, area, &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_order_book_panel_narrow_height() {
+        let mut terminal = create_test_terminal();
+        let state = create_populated_state();
+        let area = Rect::new(0, 0, 50, 3);
+        terminal
+            .draw(|f| render_order_book_panel(f, area, &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_recent_trades_panel_empty() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        state.recent_trades.clear();
+        let area = Rect::new(0, 0, 60, 15);
+        terminal
+            .draw(|f| render_recent_trades_panel(f, area, &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_recent_trades_panel_with_trades() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        state.recent_trades.push_back(Trade {
+            price: 1.5,
+            quantity: 100.0,
+            quote_quantity: None,
+            timestamp_ms: 1700000000000,
+            side: TradeSide::Buy,
+            id: None,
+        });
+        state.recent_trades.push_back(Trade {
+            price: 1.49,
+            quantity: 50.0,
+            quote_quantity: None,
+            timestamp_ms: 1700000001000,
+            side: TradeSide::Sell,
+            id: None,
+        });
+        let area = Rect::new(0, 0, 60, 20);
+        terminal
+            .draw(|f| render_recent_trades_panel(f, area, &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_recent_trades_panel_high_price_trade() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        state.recent_trades.push_back(Trade {
+            price: 50_000.0,
+            quantity: 0.5,
+            quote_quantity: None,
+            timestamp_ms: 1700000000000,
+            side: TradeSide::Buy,
+            id: None,
+        });
+        let area = Rect::new(0, 0, 60, 15);
+        terminal
+            .draw(|f| render_recent_trades_panel(f, area, &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_market_info_panel_no_panic() {
+        let mut terminal = create_test_terminal();
+        let state = create_populated_state();
+        let area = Rect::new(0, 0, 80, 30);
+        terminal
+            .draw(|f| render_market_info_panel(f, area, &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_market_info_panel_with_dex_pairs() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        state.dex_pairs = vec![
+            crate::chains::DexPair {
+                dex_name: "Uniswap V3".to_string(),
+                pair_address: "0xabc".to_string(),
+                base_token: "TEST".to_string(),
+                quote_token: "USDT".to_string(),
+                price_usd: 1.0,
+                volume_24h: 100_000.0,
+                liquidity_usd: 250_000.0,
+                price_change_24h: 2.5,
+                buys_24h: 50,
+                sells_24h: 40,
+                buys_6h: 15,
+                sells_6h: 12,
+                buys_1h: 5,
+                sells_1h: 4,
+                pair_created_at: None,
+                url: None,
+            },
+            crate::chains::DexPair {
+                dex_name: "SushiSwap".to_string(),
+                pair_address: "0xdef".to_string(),
+                base_token: "TEST".to_string(),
+                quote_token: "WETH".to_string(),
+                price_usd: 1.01,
+                volume_24h: 25_000.0,
+                liquidity_usd: 80_000.0,
+                price_change_24h: -1.2,
+                buys_24h: 20,
+                sells_24h: 25,
+                buys_6h: 8,
+                sells_6h: 10,
+                buys_1h: 3,
+                sells_1h: 4,
+                pair_created_at: None,
+                url: None,
+            },
+        ];
+        let area = Rect::new(0, 0, 100, 35);
+        terminal
+            .draw(|f| render_market_info_panel(f, area, &state))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_ohlc_candle_update_bearish() {
+        let mut candle = OhlcCandle::new(1700000000.0, 10.0);
+        assert!(candle.is_bullish);
+        candle.update(9.5);
+        assert!(!candle.is_bullish);
+        assert_eq!(candle.high, 10.0);
+        assert_eq!(candle.low, 9.5);
+        assert_eq!(candle.close, 9.5);
+    }
+
+    #[test]
+    fn test_time_period_index_all() {
+        assert_eq!(TimePeriod::Min1.index(), 0);
+        assert_eq!(TimePeriod::Min5.index(), 1);
+        assert_eq!(TimePeriod::Min15.index(), 2);
+        assert_eq!(TimePeriod::Hour1.index(), 3);
+        assert_eq!(TimePeriod::Hour4.index(), 4);
+        assert_eq!(TimePeriod::Day1.index(), 5);
+    }
+
+    #[test]
+    fn test_format_number_boundary_values() {
+        assert_eq!(format_number(0.5), "0.50");
+        assert_eq!(format_number(999.99), "999.99");
+        assert_eq!(format_number(1000.0), "1.00K");
+        assert_eq!(format_number(999_999.0), "1000.00K"); // 999999/1000 = 999.999 -> rounds to 1000.00
+        assert_eq!(format_number(1_000_000.0), "1.00M");
+        assert_eq!(format_number(999_999_999.0), "1000.00M");
+        assert_eq!(format_number(1_000_000_000.0), "1.00B");
+    }
+
+    #[test]
+    fn test_chart_mode_volume_profile_label() {
+        assert_eq!(ChartMode::VolumeProfile.label(), "VolPro");
+        assert_eq!(ChartMode::VolumeProfile.next(), ChartMode::Line);
+    }
+
+    #[test]
+    fn test_layout_exchange_ui_full_render() {
+        let mut terminal = create_test_terminal();
+        let mut state = create_populated_state();
+        state.layout = LayoutPreset::Exchange;
+        state.auto_layout = false;
+        state.dex_pairs = vec![crate::chains::DexPair {
+            dex_name: "Uniswap".to_string(),
+            pair_address: "0xabc".to_string(),
+            base_token: "TEST".to_string(),
+            quote_token: "USDT".to_string(),
+            price_usd: 1.0,
+            volume_24h: 50_000.0,
+            liquidity_usd: 100_000.0,
+            price_change_24h: 0.5,
+            buys_24h: 100,
+            sells_24h: 80,
+            buys_6h: 30,
+            sells_6h: 25,
+            buys_1h: 10,
+            sells_1h: 8,
+            pair_created_at: None,
+            url: None,
+        }];
+        state.order_book = MonitorState::generate_synthetic_order_book(
+            &state.dex_pairs,
+            &state.symbol,
+            state.current_price,
+            state.liquidity_usd,
+        );
+        state.recent_trades.push_back(Trade {
+            price: 1.0,
+            quantity: 500.0,
+            quote_quantity: None,
+            timestamp_ms: 1700000000000,
+            side: TradeSide::Buy,
+            id: None,
+        });
+        terminal.draw(|f| ui(f, &mut state)).unwrap();
+    }
+
+    // ========================================================================
+    // MonitorState::update and synthetic order book tests
+    // ========================================================================
+
+    fn make_dex_pair(dex: &str, base: &str, quote: &str, price: f64, vol: f64, liq: f64) -> crate::chains::DexPair {
+        crate::chains::DexPair {
+            dex_name: dex.to_string(),
+            base_token: base.to_string(),
+            quote_token: quote.to_string(),
+            price_usd: price,
+            volume_24h: vol,
+            liquidity_usd: liq,
+            price_change_24h: 5.0,
+            pair_address: format!("0x{}", dex),
+            buys_24h: 100,
+            sells_24h: 50,
+            buys_6h: 25,
+            sells_6h: 12,
+            buys_1h: 5,
+            sells_1h: 3,
+            pair_created_at: None,
+            url: None,
+        }
+    }
+
+    fn create_test_token_data_with_pairs() -> DexTokenData {
+        let mut data = create_test_token_data();
+        data.pairs = vec![
+            make_dex_pair("uniswap", "TEST", "USDC", 1.0, 500_000.0, 300_000.0),
+            make_dex_pair("sushiswap", "TEST", "WETH", 1.01, 200_000.0, 150_000.0),
+        ];
+        data
+    }
+
+    #[test]
+    fn test_generate_synthetic_order_book_with_pairs() {
+        let data = create_test_token_data_with_pairs();
+        let book = MonitorState::generate_synthetic_order_book(
+            &data.pairs, &data.symbol, data.price_usd, data.liquidity_usd,
+        );
+        assert!(book.is_some());
+        let book = book.unwrap();
+        assert!(!book.bids.is_empty());
+        assert!(!book.asks.is_empty());
+        assert!(book.bids[0].price < data.price_usd);
+        assert!(book.asks[0].price > data.price_usd);
+    }
+
+    #[test]
+    fn test_generate_synthetic_order_book_empty_pairs() {
+        let book = MonitorState::generate_synthetic_order_book(
+            &[], "TEST", 1.0, 500_000.0,
+        );
+        // Empty pairs with positive price/liquidity still generates a book
+        assert!(book.is_some());
+    }
+
+    #[test]
+    fn test_generate_synthetic_order_book_zero_mid_price() {
+        let pairs = vec![make_dex_pair("uniswap", "TEST", "USDC", 0.0, 100.0, 100.0)];
+        let book = MonitorState::generate_synthetic_order_book(&pairs, "TEST", 0.0, 100.0);
+        assert!(book.is_none());
+    }
+
+    #[test]
+    fn test_generate_synthetic_order_book_high_liquidity() {
+        let pairs = vec![make_dex_pair("uniswap", "WETH", "USDC", 3500.0, 50_000_000.0, 5_000_000.0)];
+        let book = MonitorState::generate_synthetic_order_book(
+            &pairs, "WETH", 3500.0, 5_000_000.0,
+        );
+        assert!(book.is_some());
+        let book = book.unwrap();
+        assert!(book.bids.len() > 5);
+        assert!(book.asks.len() > 5);
+    }
+
+    #[test]
+    fn test_monitor_state_update_with_token_data() {
+        let initial_data = create_test_token_data_with_pairs();
+        let mut state = MonitorState::new(&initial_data, "ethereum");
+        assert_eq!(state.current_price, 1.0);
+        assert_eq!(state.real_data_count, 0);
+
+        // Update with new price
+        let mut updated_data = initial_data.clone();
+        updated_data.price_usd = 1.05;
+        updated_data.volume_24h = 1_200_000.0;
+        state.update(&updated_data);
+
+        assert_eq!(state.current_price, 1.05);
+        assert_eq!(state.real_data_count, 1);
+        assert!(!state.price_history.is_empty());
+        assert!(!state.volume_history.is_empty());
+    }
+
+    #[test]
+    fn test_monitor_state_update_price_unchanged() {
+        let data = create_test_token_data();
+        let mut state = MonitorState::new(&data, "ethereum");
+        state.update(&data);
+        assert_eq!(state.real_data_count, 1);
+        // Price didn't change, so last_price_change_at should not update
+        assert_eq!(state.current_price, 1.0);
+    }
+
+    #[test]
+    fn test_monitor_state_update_generates_trades() {
+        let data = create_test_token_data_with_pairs();
+        let mut state = MonitorState::new(&data, "ethereum");
+
+        // Update with changed price to generate a trade
+        let mut new_data = data.clone();
+        new_data.price_usd = 1.10;
+        state.update(&new_data);
+
+        // recent_trades should have at least one trade from the update
+        assert!(!state.recent_trades.is_empty());
+    }
+
+    #[test]
+    fn test_monitor_state_update_liquidity_pairs() {
+        let data = create_test_token_data_with_pairs();
+        let mut state = MonitorState::new(&data, "ethereum");
+        state.update(&data);
+        assert_eq!(state.liquidity_pairs.len(), 2);
+        assert!(state.liquidity_pairs[0].0.contains("TEST/USDC"));
+        assert!(state.liquidity_pairs[1].0.contains("TEST/WETH"));
+    }
+
+    #[test]
+    fn test_monitor_state_update_dex_pairs_and_order_book() {
+        let data = create_test_token_data_with_pairs();
+        let mut state = MonitorState::new(&data, "ethereum");
+        state.update(&data);
+        assert_eq!(state.dex_pairs.len(), 2);
+        assert!(state.order_book.is_some());
+    }
+
+    #[test]
+    fn test_monitor_state_update_sells_more_than_buys() {
+        let mut data = create_test_token_data_with_pairs();
+        data.total_buys_24h = 10;
+        data.total_sells_24h = 50;
+        let mut state = MonitorState::new(&data, "ethereum");
+        state.update(&data);
+        // Should produce Sell side trade when sells > buys and price unchanged
+        assert!(!state.recent_trades.is_empty());
+    }
+
+    #[test]
+    fn test_monitor_state_update_zero_volume() {
+        let mut data = create_test_token_data_with_pairs();
+        data.volume_24h = 0.0;
+        let mut state = MonitorState::new(&data, "ethereum");
+        state.update(&data);
+        // Should still produce a trade with quantity 1.0
+        if let Some(trade) = state.recent_trades.back() {
+            assert_eq!(trade.quantity, 1.0);
+        }
+    }
 }

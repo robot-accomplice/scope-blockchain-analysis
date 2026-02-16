@@ -1260,4 +1260,81 @@ mod tests {
         assert!(report.contains("Round number pattern: false"));
         assert!(report.contains("Unusual hour transactions: 3"));
     }
+
+    #[test]
+    fn test_format_compliance_report_sar_type() {
+        use crate::compliance::risk::{RiskAssessment, RiskCategory, RiskFactor, RiskLevel};
+        let assessment = RiskAssessment {
+            address: "0xsar".to_string(),
+            chain: "ethereum".to_string(),
+            overall_score: 7.5,
+            risk_level: RiskLevel::High,
+            factors: vec![RiskFactor {
+                name: "Tx Velocity".to_string(),
+                category: RiskCategory::Behavioral,
+                score: 8.0,
+                weight: 1.0,
+                description: "High velocity".to_string(),
+                evidence: vec![],
+            }],
+            recommendations: vec!["File SAR".to_string()],
+            assessed_at: chrono::Utc::now(),
+        };
+        let patterns: Vec<(String, String, Option<crate::compliance::datasource::PatternAnalysis>)> =
+            vec![];
+        let report =
+            format_compliance_report(&[assessment], &patterns, &Jurisdiction::US, &ReportType::SAR);
+        assert!(report.contains("Compliance Report"));
+        assert!(report.contains("Risk Factor Breakdown"));
+        assert!(report.contains("Tx Velocity"));
+        assert!(report.contains("File SAR"));
+    }
+
+    #[test]
+    fn test_format_compliance_report_travel_rule_type() {
+        use crate::compliance::risk::{RiskAssessment, RiskCategory, RiskFactor, RiskLevel};
+        let assessment = RiskAssessment {
+            address: "0xtravel".to_string(),
+            chain: "ethereum".to_string(),
+            overall_score: 4.0,
+            risk_level: RiskLevel::Medium,
+            factors: vec![RiskFactor {
+                name: "Travel Rule".to_string(),
+                category: RiskCategory::Behavioral,
+                score: 4.0,
+                weight: 1.0,
+                description: "Threshold check".to_string(),
+                evidence: vec![],
+            }],
+            recommendations: vec![],
+            assessed_at: chrono::Utc::now(),
+        };
+        let patterns: Vec<(String, String, Option<crate::compliance::datasource::PatternAnalysis>)> =
+            vec![];
+        let report = format_compliance_report(
+            &[assessment],
+            &patterns,
+            &Jurisdiction::Singapore,
+            &ReportType::TravelRule,
+        );
+        assert!(report.contains("Compliance Report"));
+        assert!(report.contains("0xtravel"));
+        assert!(report.contains("4.0"));
+    }
+
+    #[test]
+    fn test_resolve_compliance_targets_file_empty_and_comments_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.txt");
+        std::fs::write(&path, "\n\n# comment only\n  \n").unwrap();
+        let result = resolve_compliance_targets(path.to_str().unwrap()).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_parse_address_line_with_chain_trimmed() {
+        let (addr, chain) = parse_address_line("0xabc , polygon ");
+        assert_eq!(addr, "0xabc");
+        assert_eq!(chain, "polygon");
+    }
 }

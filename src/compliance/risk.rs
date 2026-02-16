@@ -1624,4 +1624,314 @@ mod tests {
         let factor = detect_whale_activity(&txs, 100.0, 100_000.0);
         assert!(factor.score < 1.0);
     }
+
+    // ========================================================================
+    // Rugpull Indicator Tests
+    // ========================================================================
+
+    fn make_ca(verified: bool, ac: Option<crate::contract::access::AccessControlMap>) -> crate::contract::ContractAnalysis {
+        crate::contract::ContractAnalysis {
+            address: "0xtest".into(),
+            chain: "ethereum".into(),
+            is_verified: verified,
+            source_info: None,
+            proxy_info: None,
+            access_control: ac,
+            vulnerabilities: vec![],
+            defi_analysis: None,
+            external_info: None,
+            security_score: 50,
+            security_summary: String::new(),
+        }
+    }
+
+    fn make_ac(funcs: Vec<(&str, &str)>, renounced: bool, tx_origin: bool) -> crate::contract::access::AccessControlMap {
+        let priv_fns = funcs.iter().map(|(name, cap)| crate::contract::access::PrivilegedFunction {
+            name: name.to_string(),
+            modifiers: vec![],
+            capability: cap.to_string(),
+            risk: crate::contract::access::PrivilegeRisk::High,
+        }).collect();
+        crate::contract::access::AccessControlMap {
+            ownership_pattern: None,
+            has_renounced_ownership: renounced,
+            has_role_based_access: false,
+            uses_tx_origin: tx_origin,
+            tx_origin_locations: vec![],
+            modifiers: vec![],
+            privileged_functions: priv_fns,
+            roles: vec![],
+            auth_analysis: crate::contract::access::AuthAnalysis {
+                msg_sender_checks: 0, tx_origin_checks: 0,
+                has_origin_sender_comparison: false, summary: String::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn test_rugpull_mint_evidence() {
+        let ac = make_ac(vec![("mint", "Mint")], false, false);
+        let ca = make_ca(true, Some(ac));
+        let factors = detect_rugpull_indicators(Some(&ca), None);
+        assert!(!factors.is_empty());
+        let f = &factors[0];
+        assert!(f.evidence.iter().any(|e| e.contains("mint")));
+    }
+
+    #[test]
+    fn test_rugpull_pause_blacklist_setfee() {
+        let ac = make_ac(vec![("pause", "Pause"), ("blacklist", "Block"), ("setFee", "Fee")], false, false);
+        let ca = make_ca(true, Some(ac));
+        let factors = detect_rugpull_indicators(Some(&ca), None);
+        let f = &factors[0];
+        assert!(f.evidence.iter().any(|e| e.contains("pause")));
+        assert!(f.evidence.iter().any(|e| e.contains("blacklist")));
+        assert!(f.evidence.iter().any(|e| e.contains("fee")));
+    }
+
+    #[test]
+    fn test_rugpull_renounced_reduces_risk() {
+        let ac = make_ac(vec![("mint", "Mint")], true, false);
+        let ca = make_ca(true, Some(ac));
+        let factors = detect_rugpull_indicators(Some(&ca), None);
+        let f = &factors[0];
+        assert!(f.evidence.iter().any(|e| e.contains("renounced")));
+    }
+
+    #[test]
+    fn test_rugpull_tx_origin() {
+        let ac = make_ac(vec![], false, true);
+        let ca = make_ca(true, Some(ac));
+        let factors = detect_rugpull_indicators(Some(&ca), None);
+        let f = &factors[0];
+        assert!(f.evidence.iter().any(|e| e.contains("tx.origin")));
+    }
+
+    #[test]
+    fn test_rugpull_unverified() {
+        let ac = make_ac(vec![], false, false);
+        let ca = make_ca(false, Some(ac));
+        let factors = detect_rugpull_indicators(Some(&ca), None);
+        let f = &factors[0];
+        assert!(f.evidence.iter().any(|e| e.contains("not verified")));
+    }
+
+    fn make_ta(top10: Option<f64>, age: Option<f64>, buys: u64, sells: u64, liq: f64) -> crate::chains::TokenAnalytics {
+        crate::chains::TokenAnalytics {
+            token: crate::chains::Token { contract_address: "0x".into(), symbol: "T".into(), name: "T".into(), decimals: 18 },
+            chain: "ethereum".into(), holders: vec![], total_holders: 0,
+            volume_24h: 0.0, volume_7d: 0.0, price_usd: 0.0, price_change_24h: 0.0, price_change_7d: 0.0,
+            liquidity_usd: liq, market_cap: None, fdv: None, total_supply: None, circulating_supply: None,
+            price_history: vec![], volume_history: vec![], holder_history: vec![], dex_pairs: vec![],
+            fetched_at: 0, top_10_concentration: top10, top_50_concentration: None, top_100_concentration: None,
+            price_change_6h: 0.0, price_change_1h: 0.0,
+            total_buys_24h: buys, total_sells_24h: sells, total_buys_6h: 0, total_sells_6h: 0,
+            total_buys_1h: 0, total_sells_1h: 0, token_age_hours: age,
+            image_url: None, websites: vec![], socials: vec![], dexscreener_url: None,
+        }
+    }
+
+    #[test]
+    fn test_rugpull_high_concentration() {
+        let ta = make_ta(Some(85.0), None, 0, 0, 100000.0);
+        let factors = detect_rugpull_indicators(None, Some(&ta));
+        assert!(!factors.is_empty());
+        assert!(factors[0].evidence.iter().any(|e| e.contains("85.0%")));
+    }
+
+    #[test]
+    fn test_rugpull_moderate_concentration() {
+        let ta = make_ta(Some(55.0), None, 0, 0, 100000.0);
+        let factors = detect_rugpull_indicators(None, Some(&ta));
+        assert!(!factors.is_empty());
+        assert!(factors[0].evidence.iter().any(|e| e.contains("55.0%")));
+    }
+
+    #[test]
+    fn test_rugpull_very_new_token() {
+        let ta = make_ta(None, Some(12.0), 0, 0, 100000.0);
+        let factors = detect_rugpull_indicators(None, Some(&ta));
+        assert!(!factors.is_empty());
+        assert!(factors[0].evidence.iter().any(|e| e.contains("very new")));
+    }
+
+    #[test]
+    fn test_rugpull_recently_created() {
+        let ta = make_ta(None, Some(48.0), 0, 0, 100000.0);
+        let factors = detect_rugpull_indicators(None, Some(&ta));
+        assert!(!factors.is_empty());
+        assert!(factors[0].evidence.iter().any(|e| e.contains("recently created")));
+    }
+
+    #[test]
+    fn test_rugpull_honeypot() {
+        let ta = make_ta(None, None, 20, 0, 100000.0);
+        let factors = detect_rugpull_indicators(None, Some(&ta));
+        assert!(!factors.is_empty());
+        assert!(factors[0].evidence.iter().any(|e| e.contains("honeypot")));
+    }
+
+    #[test]
+    fn test_rugpull_low_liquidity() {
+        let ta = make_ta(None, None, 0, 0, 5000.0);
+        let factors = detect_rugpull_indicators(None, Some(&ta));
+        assert!(!factors.is_empty());
+        assert!(factors[0].evidence.iter().any(|e| e.contains("low liquidity") || e.contains("Very low")));
+    }
+
+    // ========================================================================
+    // Whale Activity Tests
+    // ========================================================================
+
+    fn make_whale_tx(value: &str) -> crate::chains::Transaction {
+        crate::chains::Transaction {
+            hash: "0xh".into(), block_number: Some(1), timestamp: Some(0),
+            from: "0xa".into(), to: Some("0xb".into()), value: value.to_string(),
+            gas_limit: 21000, gas_used: Some(21000), gas_price: "0".into(),
+            nonce: 0, input: "0x".into(), status: Some(true),
+        }
+    }
+
+    #[test]
+    fn test_whale_with_large_txs() {
+        let txs = vec![
+            make_whale_tx("200000"),
+            make_whale_tx("50"),
+            make_whale_tx("150000"),
+        ];
+        let factor = detect_whale_activity(&txs, 50000.0, 100000.0);
+        assert!(factor.evidence.iter().any(|e| e.contains("whale-sized")));
+    }
+
+    #[test]
+    fn test_whale_avg_near_threshold() {
+        let txs = vec![make_whale_tx("50")];
+        let factor = detect_whale_activity(&txs, 60000.0, 100000.0);
+        assert!(factor.evidence.iter().any(|e| e.contains("near whale threshold")));
+    }
+
+    // ========================================================================
+    // Timelock Tests
+    // ========================================================================
+
+    fn make_ca_with_source(code: &str) -> crate::contract::ContractAnalysis {
+        let mut ca = make_ca(true, None);
+        ca.source_info = Some(crate::contract::source::ContractSource {
+            contract_name: "Test".into(), source_code: code.to_string(),
+            abi: "[]".into(), compiler_version: "v0.8.19".into(),
+            optimization_used: true, optimization_runs: 200, evm_version: "paris".into(),
+            license_type: "MIT".into(), is_proxy: false, implementation_address: None,
+            constructor_arguments: String::new(), library: String::new(),
+            swarm_source: String::new(), parsed_abi: vec![],
+        });
+        ca
+    }
+
+    #[test]
+    fn test_timelock_controller_detected() {
+        let ca = make_ca_with_source("contract G is TimelockController { }");
+        let f = detect_timelock(&ca).unwrap();
+        assert_eq!(f.score, 2.0);
+        assert!(f.evidence.iter().any(|e| e.contains("TimelockController")));
+    }
+
+    #[test]
+    fn test_timelock_queue_delay_execute() {
+        let ca = make_ca_with_source("function queue() {} function execute() {} uint delay;");
+        let f = detect_timelock(&ca).unwrap();
+        assert_eq!(f.score, 2.0);
+    }
+
+    #[test]
+    fn test_timelock_mindelay() {
+        let ca = make_ca_with_source("TimelockController tl; uint minDelay;");
+        let f = detect_timelock(&ca).unwrap();
+        assert!(f.evidence.iter().any(|e| e.contains("Minimum delay")));
+    }
+
+    #[test]
+    fn test_no_timelock() {
+        let ca = make_ca_with_source("contract Token { function transfer() {} }");
+        let f = detect_timelock(&ca).unwrap();
+        assert_eq!(f.score, 5.0);
+    }
+
+    #[test]
+    fn test_timelock_no_source() {
+        let ca = make_ca(true, None);
+        assert!(detect_timelock(&ca).is_none());
+    }
+
+    // ========================================================================
+    // Multisig Tests
+    // ========================================================================
+
+    #[test]
+    fn test_multisig_gnosis() {
+        let ca = make_ca_with_source("import Gnosis; contract W is GnosisSafe { }");
+        let f = detect_multisig(&ca).unwrap();
+        assert_eq!(f.score, 2.0);
+    }
+
+    #[test]
+    fn test_multisig_threshold_owners() {
+        let ca = make_ca_with_source("uint threshold; address[] owners;");
+        let f = detect_multisig(&ca).unwrap();
+        assert_eq!(f.score, 2.0);
+    }
+
+    #[test]
+    fn test_multisig_confirm_execute() {
+        let ca = make_ca_with_source("function confirmTransaction() {} function executeTransaction() {}");
+        let f = detect_multisig(&ca).unwrap();
+        assert_eq!(f.score, 2.0);
+    }
+
+    #[test]
+    fn test_no_multisig() {
+        let ca = make_ca_with_source("contract Token { }");
+        let f = detect_multisig(&ca).unwrap();
+        assert_eq!(f.score, 4.0);
+    }
+
+    #[test]
+    fn test_multisig_with_proxy_admin() {
+        let mut ca = make_ca_with_source("contract Token { }");
+        ca.proxy_info = Some(crate::contract::proxy::ProxyInfo {
+            is_proxy: true,
+            proxy_type: "EIP-1967".into(),
+            implementation_address: None,
+            admin_address: Some("0xadmin".into()),
+            beacon_address: None,
+            details: vec![],
+        });
+        let f = detect_multisig(&ca).unwrap();
+        assert!(f.evidence.iter().any(|e| e.contains("0xadmin")));
+    }
+
+    // ========================================================================
+    // Gini Coefficient Edge Cases
+    // ========================================================================
+
+    #[test]
+    fn test_gini_all_zeros() {
+        assert_eq!(compute_gini_coefficient(&[0.0, 0.0, 0.0]), 0.0);
+    }
+
+    #[test]
+    fn test_gini_single_element() {
+        assert_eq!(compute_gini_coefficient(&[100.0]), 0.0);
+    }
+
+    #[test]
+    fn test_gini_two_equal() {
+        let g = compute_gini_coefficient(&[50.0, 50.0]);
+        assert!(g < 0.01);
+    }
+
+    #[test]
+    fn test_gini_two_unequal() {
+        let g = compute_gini_coefficient(&[1.0, 99.0]);
+        assert!(g > 0.0);
+    }
 }

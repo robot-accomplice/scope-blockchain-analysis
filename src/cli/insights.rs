@@ -1515,6 +1515,44 @@ mod tests {
     }
 
     #[test]
+    fn test_format_tx_value_arbitrum() {
+        let (fmt, _) = format_tx_value("1000000000000000000", "arbitrum");
+        assert!(fmt.contains("ETH"));
+    }
+
+    #[test]
+    fn test_format_tx_value_optimism() {
+        let (fmt, _) = format_tx_value("1000000000000000000", "optimism");
+        assert!(fmt.contains("ETH"));
+    }
+
+    #[test]
+    fn test_format_tx_value_base() {
+        let (fmt, _) = format_tx_value("1000000000000000000", "base");
+        assert!(fmt.contains("ETH"));
+    }
+
+    #[test]
+    fn test_format_tx_value_aegis() {
+        // aegis uses 18 decimals; native_symbol returns "???" for unknown chains
+        let (fmt, _) = format_tx_value("1000000000000000000", "aegis");
+        assert!(fmt.contains("1.0") || fmt.contains("1.000000"));
+    }
+
+    #[test]
+    fn test_format_tx_value_unknown_chain_defaults_18_decimals() {
+        let (fmt, _) = format_tx_value("1000000000000000000", "unknown_chain");
+        assert!(fmt.contains("1") || fmt.contains("ETH"));
+    }
+
+    #[test]
+    fn test_format_tx_value_invalid_hex_parse() {
+        let (fmt, high) = format_tx_value("0xZZZZ", "ethereum");
+        assert!(fmt.contains("0.000000"));
+        assert!(!high);
+    }
+
+    #[test]
     fn test_format_tx_value_high_value_threshold() {
         // > 10 native units = high value
         let (_, high) = format_tx_value("11000000000000000000", "ethereum"); // 11 ETH
@@ -1598,6 +1636,25 @@ mod tests {
     fn test_meta_analysis_address_default_takeaway() {
         let meta = meta_analysis_address(false, Some(5_000.0), 0, None, None);
         assert!(meta.key_takeaway.contains("Review full report"));
+    }
+
+    #[test]
+    fn test_meta_analysis_address_empty_synthesis() {
+        let meta = meta_analysis_address(
+            false,
+            Some(5_000.0), // moderate value, not significant/minimal
+            2,             // 2 tokens, not 1, not >5
+            None,
+            None,
+        );
+        assert!(meta.synthesis.contains("wallet (EOA)"));
+    }
+
+    #[test]
+    fn test_meta_analysis_address_synthesis_parts_joined() {
+        let meta = meta_analysis_address(false, None, 0, None, None);
+        assert!(!meta.synthesis.is_empty());
+        assert!(meta.synthesis.contains("Address analyzed") || meta.synthesis.contains("wallet"));
     }
 
     #[test]
@@ -1786,6 +1843,20 @@ mod tests {
         let meta = meta_analysis_token(&summary, true, None, None, 1_000_000.0);
         // When peg_healthy is None, recommendation should still suggest verifying peg
         assert!(meta.recommendations.iter().any(|r| r.contains("peg")));
+    }
+
+    #[test]
+    fn test_meta_analysis_token_mixed_signals_key_takeaway() {
+        let summary = report::TokenRiskSummary {
+            score: 5,
+            level: "Medium",
+            emoji: "🟡",
+            concerns: vec!["Some concern".to_string()],
+            positives: vec!["Some positive".to_string()],
+        };
+        let meta = meta_analysis_token(&summary, false, None, None, 500_000.0);
+        assert!(meta.key_takeaway.contains("Risk 5/10"));
+        assert!(meta.key_takeaway.contains("Medium"));
     }
 
     // ====================================================================
@@ -2091,5 +2162,30 @@ mod tests {
         let meta = meta_analysis_token(&risk, true, Some(false), Some(40.0), 100_000.0);
         assert!(meta.synthesis.contains("peg deviation"));
         assert!(meta.synthesis.contains("Concentration risk"));
+    }
+
+    #[test]
+    fn test_meta_analysis_token_high_risk_empty_concerns_uses_multiple_factors() {
+        let risk = report::TokenRiskSummary {
+            score: 8,
+            level: "High",
+            emoji: "🔴",
+            concerns: vec![],
+            positives: vec![],
+        };
+        let meta = meta_analysis_token(&risk, false, None, None, 50_000.0);
+        assert!(meta.key_takeaway.contains("multiple factors") || meta.key_takeaway.contains("High risk"));
+    }
+
+    #[test]
+    fn test_infer_target_chain_override_with_address() {
+        let t = infer_target("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2", Some("arbitrum"));
+        assert!(matches!(t, InferredTarget::Address { chain } if chain == "arbitrum"));
+    }
+
+    #[test]
+    fn test_meta_analysis_tx_approval_contains_approval_in_match() {
+        let meta = meta_analysis_tx("ERC-20 Approval", true, false, "0xfrom", Some("0xto"));
+        assert!(meta.recommendations.iter().any(|r| r.contains("spender") || r.contains("allowance")));
     }
 }

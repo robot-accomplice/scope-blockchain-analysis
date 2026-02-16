@@ -1430,6 +1430,15 @@ mod tests {
     }
 
     #[test]
+    fn test_output_table_explorer_with_supply_and_holders() {
+        let mut analytics = make_test_analytics(false);
+        analytics.total_supply = Some("1000000000".to_string());
+        analytics.total_holders = 50_000;
+        let result = output_table_explorer_only(&analytics);
+        assert!(result.is_ok());
+    }
+
+    #[test]
     fn test_output_table_with_dex_multiple_pairs() {
         let mut analytics = make_test_analytics(true);
         for i in 0..8 {
@@ -1756,6 +1765,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_run_crawl_markdown_output() {
+        let config = Config::default();
+        let factory = mock_factory_for_crawl();
+        let args = CrawlArgs {
+            token: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+            chain: "ethereum".to_string(),
+            period: Period::Hour24,
+            holders_limit: 5,
+            format: OutputFormat::Markdown,
+            no_charts: true,
+            report: None,
+            yes: true,
+            save: false,
+        };
+        let result = super::run(args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_crawl_unsupported_chain_no_dex() {
+        // No DEX data + chain without explorer support → NotFound
+        let mut factory = MockClientFactory::new();
+        factory.mock_dex.token_data = None;
+        factory.mock_dex.search_results = vec![];
+
+        let config = Config::default();
+        let args = CrawlArgs {
+            token: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+            chain: "avalanche".to_string(), // Not in has_explorer list
+            period: Period::Hour24,
+            holders_limit: 5,
+            format: OutputFormat::Json,
+            no_charts: true,
+            report: None,
+            yes: true,
+            save: false,
+        };
+        let result = super::run(args, &config, &factory).await;
+        assert!(result.is_err());
+        let err_str = result.unwrap_err().to_string();
+        assert!(
+            err_str.contains("avalanche") || err_str.contains("block explorer") || err_str.contains("No DEX"),
+            "Expected error about unsupported chain, got: {}",
+            err_str
+        );
+    }
+
+    #[tokio::test]
     async fn test_run_crawl_day30_period() {
         let config = Config::default();
         let factory = mock_factory_for_crawl();
@@ -1801,6 +1858,47 @@ mod tests {
     fn test_output_csv_with_all_fields() {
         let analytics = make_test_analytics(true);
         let result = output_csv(&analytics);
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_fetch_analytics_for_input() {
+        let factory = mock_factory_for_crawl();
+        let result = super::fetch_analytics_for_input(
+            "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+            "ethereum",
+            Period::Hour24,
+            5,
+            &factory,
+            None,
+        )
+        .await;
+        assert!(result.is_ok());
+        let analytics = result.unwrap();
+        assert_eq!(analytics.chain, "ethereum");
+        assert!(!analytics.token.contract_address.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_run_crawl_chain_without_holder_support() {
+        // Chain not in fetch_holders list (e.g. fantom) → Ok(Vec::new()) for holders
+        let mut factory = mock_factory_for_crawl();
+        if let Some(ref mut td) = factory.mock_dex.token_data {
+            td.address = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string();
+        }
+        let config = Config::default();
+        let args = CrawlArgs {
+            token: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+            chain: "fantom".to_string(),
+            period: Period::Hour24,
+            holders_limit: 5,
+            format: OutputFormat::Json,
+            no_charts: true,
+            report: None,
+            yes: true,
+            save: false,
+        };
+        let result = super::run(args, &config, &factory).await;
         assert!(result.is_ok());
     }
 
@@ -2087,6 +2185,29 @@ mod tests {
     }
 
     #[test]
+    fn test_abbreviate_address_boundary_16_chars() {
+        // Exactly 16 chars - not abbreviated (len > 16 is false)
+        let addr = "0x1234567890abcd";
+        assert_eq!(abbreviate_address(addr), addr);
+    }
+
+    #[test]
+    fn test_abbreviate_address_boundary_17_chars() {
+        // 17 chars - should be abbreviated (8 + "..." + 6)
+        let addr = "0x1234567890abcdef1";
+        let result = abbreviate_address(addr);
+        assert!(result.contains("..."));
+        assert_eq!(&result[..8], "0x123456");
+        // Last 6 chars of original "0x1234567890abcdef1" are "bcdef1"
+        assert_eq!(&result[result.len() - 6..], "bcdef1");
+    }
+
+    #[test]
+    fn test_abbreviate_address_empty() {
+        assert_eq!(abbreviate_address(""), "");
+    }
+
+    #[test]
     fn test_select_token_user_selects_third() {
         let results = make_search_results();
         let input = b"3\n";
@@ -2182,6 +2303,94 @@ mod tests {
     fn test_prompt_save_alias_empty() {
         let input = b"\n";
         let mut reader = std::io::Cursor::new(&input[..]);
+        let mut writer = Vec::new();
+
+        assert!(!prompt_save_alias_impl(&mut reader, &mut writer));
+    }
+
+    #[test]
+    fn test_prompt_save_alias_uppercase_y() {
+        let input = b"Y\n";
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut writer = Vec::new();
+
+        assert!(prompt_save_alias_impl(&mut reader, &mut writer));
+    }
+
+    #[test]
+    fn test_prompt_save_alias_uppercase_yes() {
+        let input = b"YES\n";
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut writer = Vec::new();
+
+        assert!(prompt_save_alias_impl(&mut reader, &mut writer));
+    }
+
+    #[test]
+    fn test_prompt_save_alias_other_input() {
+        let input = b"maybe\n";
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut writer = Vec::new();
+
+        assert!(!prompt_save_alias_impl(&mut reader, &mut writer));
+    }
+
+    /// Failing writer for error-path tests.
+    struct FailingWriter;
+    impl std::io::Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(std::io::ErrorKind::Other, "write failed"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::new(std::io::ErrorKind::Other, "flush failed"))
+        }
+    }
+
+    /// Reader that fails on read_line (via fill_buf).
+    struct FailingReader;
+    impl std::io::Read for FailingReader {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(std::io::ErrorKind::Other, "read failed"))
+        }
+    }
+    impl std::io::BufRead for FailingReader {
+        fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+            Err(std::io::Error::new(std::io::ErrorKind::Other, "read failed"))
+        }
+        fn consume(&mut self, _amt: usize) {}
+    }
+
+    #[test]
+    fn test_prompt_save_alias_impl_write_fails() {
+        let input = b"y\n";
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut writer = FailingWriter;
+
+        assert!(!prompt_save_alias_impl(&mut reader, &mut writer));
+    }
+
+    #[test]
+    fn test_prompt_save_alias_impl_flush_fails() {
+        // Writer that succeeds on write but fails on flush
+        struct WriteOkFlushFail;
+        impl std::io::Write for WriteOkFlushFail {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::Error::new(std::io::ErrorKind::Other, "flush failed"))
+            }
+        }
+        let input = b"y\n";
+        let mut reader = std::io::Cursor::new(&input[..]);
+        let mut writer = WriteOkFlushFail;
+
+        assert!(!prompt_save_alias_impl(&mut reader, &mut writer));
+    }
+
+    #[test]
+    fn test_prompt_save_alias_impl_read_fails() {
+        let mut reader = FailingReader;
         let mut writer = Vec::new();
 
         assert!(!prompt_save_alias_impl(&mut reader, &mut writer));

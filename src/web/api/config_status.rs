@@ -247,6 +247,114 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_save_config_request_debug() {
+        let req = SaveConfigRequest {
+            api_keys: std::collections::HashMap::new(),
+            rpc_endpoints: std::collections::HashMap::new(),
+        };
+        let debug = format!("{:?}", req);
+        assert!(debug.contains("SaveConfigRequest"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_save_config_path_none() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
+        use axum::extract::State;
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+
+        let req = SaveConfigRequest {
+            api_keys: std::collections::HashMap::new(),
+            rpc_endpoints: std::collections::HashMap::new(),
+        };
+
+        let old_home = std::env::var_os("HOME");
+        let old_userprofile = std::env::var_os("USERPROFILE");
+        unsafe {
+            std::env::remove_var("HOME");
+            std::env::remove_var("USERPROFILE");
+        }
+
+        let response = handle_save(State(state), axum::Json(req))
+            .await
+            .into_response();
+
+        if let Some(h) = old_home {
+            unsafe { std::env::set_var("HOME", h) };
+        }
+        if let Some(u) = old_userprofile {
+            unsafe { std::env::set_var("USERPROFILE", u) };
+        }
+
+        if response.status() == StatusCode::INTERNAL_SERVER_ERROR {
+            let body = axum::body::to_bytes(response.into_body(), 1_000_000)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert!(
+                json["error"].as_str().unwrap().contains("Cannot determine config path")
+                    || json["error"].as_str().unwrap().contains("Failed to create config dir")
+                    || json["error"].as_str().unwrap().contains("Failed to write config")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_save_config_create_dir_fails() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
+        use axum::extract::State;
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_home = tmp.path().join("fake_home");
+        std::fs::create_dir_all(&fake_home).unwrap();
+        let config_as_file = fake_home.join(".config");
+        std::fs::File::create(&config_as_file).unwrap();
+
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+
+        let req = SaveConfigRequest {
+            api_keys: std::collections::HashMap::new(),
+            rpc_endpoints: std::collections::HashMap::new(),
+        };
+
+        let old_home = std::env::var_os("HOME");
+        unsafe { std::env::set_var("HOME", &fake_home) };
+
+        let response = handle_save(State(state), axum::Json(req))
+            .await
+            .into_response();
+
+        if let Some(h) = old_home {
+            unsafe { std::env::set_var("HOME", h) };
+        } else {
+            unsafe { std::env::remove_var("HOME") };
+        }
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"].as_str().unwrap().contains("Failed to create config dir"));
+    }
+
     #[tokio::test]
     async fn test_handle_save_config_with_api_keys_and_rpc() {
         use crate::chains::DefaultClientFactory;

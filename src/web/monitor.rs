@@ -357,4 +357,83 @@ mod tests {
         assert!(frame.get("exchange_ticker").is_none());
         assert!(frame.get("exchange_trades").is_none());
     }
+
+    #[test]
+    fn test_attach_exchange_data_with_sell_trade() {
+        let snapshot = MarketSnapshot {
+            order_book: None,
+            ticker: None,
+            recent_trades: Some(vec![Trade {
+                price: 50005.0,
+                quantity: 0.5,
+                quote_quantity: Some(25002.5),
+                timestamp_ms: 1700000000000,
+                side: TradeSide::Sell,
+                id: None,
+            }]),
+        };
+
+        let mut frame = serde_json::json!({"type": "update"});
+        attach_exchange_data(&mut frame, &snapshot);
+
+        assert!(frame.get("exchange_trades").is_some());
+        let trades = frame["exchange_trades"].as_array().unwrap();
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0]["side"], "sell");
+    }
+
+    #[test]
+    fn test_attach_exchange_data_order_book_only() {
+        let snapshot = MarketSnapshot {
+            order_book: Some(OrderBook {
+                pair: "ETH/USDT".to_string(),
+                bids: vec![OrderBookLevel {
+                    price: 2000.0,
+                    quantity: 2.0,
+                }],
+                asks: vec![OrderBookLevel {
+                    price: 2005.0,
+                    quantity: 1.5,
+                }],
+            }),
+            ticker: None,
+            recent_trades: None,
+        };
+
+        let mut frame = serde_json::json!({"type": "update"});
+        attach_exchange_data(&mut frame, &snapshot);
+
+        assert!(frame.get("exchange_order_book").is_some());
+        assert_eq!(frame["exchange_order_book"]["pair"], "ETH/USDT");
+        assert_eq!(frame["exchange_order_book"]["best_bid"], 2000.0);
+        assert_eq!(frame["exchange_order_book"]["best_ask"], 2005.0);
+        assert!(frame.get("exchange_ticker").is_none());
+        assert!(frame.get("exchange_trades").is_none());
+    }
+
+    #[test]
+    fn test_attach_exchange_data_ticker_only() {
+        let snapshot = MarketSnapshot {
+            order_book: None,
+            ticker: Some(Ticker {
+                pair: "SOL/USDT".to_string(),
+                last_price: Some(100.5),
+                high_24h: Some(102.0),
+                low_24h: Some(99.0),
+                volume_24h: Some(50000.0),
+                quote_volume_24h: Some(5_000_000.0),
+                best_bid: Some(100.0),
+                best_ask: Some(101.0),
+            }),
+            recent_trades: None,
+        };
+
+        let mut frame = serde_json::json!({"type": "update"});
+        attach_exchange_data(&mut frame, &snapshot);
+
+        assert!(frame.get("exchange_ticker").is_some());
+        assert_eq!(frame["exchange_ticker"]["pair"], "SOL/USDT");
+        assert_eq!(frame["exchange_ticker"]["last_price"], 100.5);
+        assert!(frame.get("exchange_order_book").is_none());
+    }
 }
