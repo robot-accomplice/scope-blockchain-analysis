@@ -22,6 +22,7 @@ A production-grade command-line tool for blockchain data analysis, portfolio tra
 - **Market Command** (`scope market summary`, `ohlc`, `trades`): Peg and order book health; OHLC/candlestick data; recent trades; any CEX venue from the registry or DEX (Ethereum, Solana); repeat mode with `--every`/`--duration`; `--report` and `--csv` export
 - **Token Health Suite** (`scope token-health` / `scope health`): DEX analytics with optional order book summary; any venue from the registry or DEX
 - **Venue Management** (`scope venues` / `scope ven`): List available venues, view the YAML schema, initialise user venues directory, validate custom descriptors
+- **Contract Analysis** (`scope contract` / `scope ct`): Comprehensive smart contract security analysis — source code verification, proxy detection (EIP-1967/1822/1167/Diamond), access control mapping, vulnerability heuristics (reentrancy, selfdestruct, unchecked calls, tx.origin, overflow), DeFi protocol checks (oracle, flash loan, DEX slippage), external intelligence (GitHub linking, audit reports, Sourcify), and security scoring (0-100)
 - **Insights** (`scope insights` / `insight`): Infer chain and type (address, tx, token) from input; run relevant analyses and present unified observations
 - **Agent Output** (`scope --ai`): Global flag for markdown output to stdout (address, tx, crawl, discover, portfolio, export, token-health)
 - **Reporting**: Markdown reports for address, token, portfolio, and market commands; batch reports for multiple addresses (`scope report batch`); address dossier (address + risk combined)
@@ -104,6 +105,10 @@ scope address TDqSquXBgUCLYvYC4XZgrprLK589dkhSCf --chain tron
 
 # Look up a transaction
 scope tx 0xabc123def456789012345678901234567890123456789012345678901234abcd
+
+# Analyze a smart contract (security scoring, proxy detection, vulnerabilities)
+scope contract 0xdAC17F958D2ee523a2206206994597C13D831ec7
+scope ct 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --json
 
 # Risk assessment for compliance
 export ETHERSCAN_API_KEY="your_key_here"

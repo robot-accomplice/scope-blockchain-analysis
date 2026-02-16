@@ -503,6 +503,39 @@ fn test_insight_alias() {
 }
 
 // ============================================================================
+// Contract Analysis Tests
+// ============================================================================
+
+#[test]
+fn test_contract_help() {
+    scope_cmd()
+        .args(["contract", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("contract"))
+        .stdout(predicate::str::contains("address"))
+        .stdout(predicate::str::contains("chain"));
+}
+
+#[test]
+fn test_contract_alias() {
+    scope_cmd()
+        .args(["ct", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("address"));
+}
+
+#[test]
+fn test_contract_requires_address() {
+    scope_cmd()
+        .arg("contract")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("required"));
+}
+
+// ============================================================================
 // Help Display & Typo Suggestion Tests
 // ============================================================================
 

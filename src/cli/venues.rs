@@ -81,6 +81,9 @@ pub enum VenuesCommands {
 
 /// Arguments for `scope venues list`.
 #[derive(Debug, Args)]
+#[command(after_help = "\x1b[1mExamples:\x1b[0m
+  scope venues list
+  scope venues list --format json")]
 pub struct ListArgs {
     /// Output format.
     #[arg(short, long, default_value = "table")]
@@ -99,6 +102,9 @@ pub enum ListFormat {
 
 /// Arguments for `scope venues schema`.
 #[derive(Debug, Args)]
+#[command(after_help = "\x1b[1mExamples:\x1b[0m
+  scope venues schema
+  scope venues schema --format json")]
 pub struct SchemaArgs {
     /// Output format.
     #[arg(short, long, default_value = "text")]
@@ -117,6 +123,9 @@ pub enum SchemaFormat {
 
 /// Arguments for `scope venues init`.
 #[derive(Debug, Args)]
+#[command(after_help = "\x1b[1mExamples:\x1b[0m
+  scope venues init
+  scope venues init --force")]
 pub struct InitArgs {
     /// Overwrite existing files in the user venues directory.
     #[arg(long)]
@@ -125,6 +134,9 @@ pub struct InitArgs {
 
 /// Arguments for `scope venues validate`.
 #[derive(Debug, Args)]
+#[command(after_help = "\x1b[1mExamples:\x1b[0m
+  scope venues validate my-exchange.yaml
+  scope venues validate ~/.config/scope/venues/custom.yaml")]
 pub struct ValidateArgs {
     /// Path to the YAML file to validate.
     pub file: std::path::PathBuf,

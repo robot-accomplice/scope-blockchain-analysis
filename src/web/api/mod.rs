@@ -7,6 +7,7 @@ pub mod address;
 pub mod address_book;
 pub mod compliance;
 pub mod config_status;
+pub mod contract;
 pub mod crawl;
 pub mod discover;
 pub mod exchange;
@@ -39,6 +40,11 @@ pub fn routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/address-book/add",
             axum::routing::post(address_book::handle_add),
         )
+        .route(
+            "/address-book/remove",
+            axum::routing::post(address_book::handle_remove),
+        )
+        .route("/contract", axum::routing::post(contract::handle))
         .route("/export", axum::routing::post(export::handle))
         .route(
             "/compliance/risk",

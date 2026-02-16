@@ -57,6 +57,10 @@ pub enum AddressBookCommands {
 
 /// Arguments for adding an address.
 #[derive(Debug, Clone, Args)]
+#[command(after_help = "\x1b[1mExamples:\x1b[0m
+  scope address-book add 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --label \"Main Wallet\"
+  scope address-book add 0x742d... --chain ethereum --tags hot,trading
+  scope ab add DRpbCBMx...TDt1v --chain solana --label \"SOL Vault\"")]
 pub struct AddArgs {
     /// The address to add.
     #[arg(value_name = "ADDRESS")]
@@ -77,6 +81,9 @@ pub struct AddArgs {
 
 /// Arguments for removing an address.
 #[derive(Debug, Clone, Args)]
+#[command(after_help = "\x1b[1mExamples:\x1b[0m
+  scope address-book remove 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
+  scope ab remove DRpbCBMx...TDt1v")]
 pub struct RemoveArgs {
     /// The address to remove.
     #[arg(value_name = "ADDRESS")]
@@ -85,6 +92,10 @@ pub struct RemoveArgs {
 
 /// Arguments for address book summary.
 #[derive(Debug, Clone, Args)]
+#[command(after_help = "\x1b[1mExamples:\x1b[0m
+  scope address-book summary
+  scope address-book summary --chain ethereum --include-tokens
+  scope ab summary --tag trading --report portfolio.md")]
 pub struct SummaryArgs {
     /// Filter by chain.
     #[arg(short, long)]

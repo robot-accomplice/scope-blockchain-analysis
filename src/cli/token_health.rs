@@ -14,6 +14,49 @@ use clap::Args;
 
 /// Arguments for the token-health command.
 #[derive(Debug, Args)]
+#[command(
+    after_help = "\x1b[1mExamples:\x1b[0m
+  scope token-health USDC
+  scope token-health PUSD --with-market --venue biconomy
+  scope token-health 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --format json",
+    after_long_help = "\x1b[1mExamples:\x1b[0m
+
+  \x1b[1m$ scope token-health USDC\x1b[0m
+
+  +-- USDC (USD Coin) ---------------------------------+
+  |                                                     |
+  |-- DEX Analytics                                     |
+  |  Price              $0.9999                         |
+  |  24h Change         -0.01%                          |
+  |  24h Volume         $5.00M                          |
+  |  Liquidity          $100.00M                        |
+  |  Market Cap         $30.00B                         |
+  |  Top 10 Holders     35.5%                           |
+  +-----------------------------------------------------+
+
+  \x1b[1m$ scope token-health PUSD --with-market --venue biconomy\x1b[0m
+
+  +-- PUSD (Pleasing USD) -----------------------------+
+  |                                                     |
+  |-- DEX Analytics                                     |
+  |  Price              $0.9999                         |
+  |  24h Change         +0.02%                          |
+  |  24h Volume         $50.00K                         |
+  |  Liquidity          $250.00K                        |
+  |                                                     |
+  |-- Market / Order Book                               |
+  |  Venue              biconomy                        |
+  |  Best Bid           0.9999                          |
+  |  Best Ask           1.0001                          |
+  |  Bid Depth          6000 USDT                       |
+  |  Ask Depth          5000 USDT                       |
+  |                                                     |
+  |  + No sells below peg                               |
+  |  + Bid/Ask ratio: 1.20x                             |
+  |                                                     |
+  |  HEALTHY                                            |
+  +-----------------------------------------------------+"
+)]
 pub struct TokenHealthArgs {
     /// Token symbol or contract address (e.g., USDC, 0xA0b86991...).
     pub token: String,

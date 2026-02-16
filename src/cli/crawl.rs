@@ -79,11 +79,50 @@ impl Period {
 
 /// Arguments for the crawl command.
 #[derive(Debug, Args)]
-#[command(after_help = "\x1b[1mExamples:\x1b[0m
+#[command(
+    after_help = "\x1b[1mExamples:\x1b[0m
   scope crawl USDC
   scope crawl 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --chain ethereum
   scope crawl USDC --period 7d --report usdc_report.md
-  scope crawl PEPE --format json --no-charts")]
+  scope crawl PEPE --format json --no-charts",
+    after_long_help = "\x1b[1mExamples:\x1b[0m
+
+  \x1b[1m$ scope crawl USDC\x1b[0m
+
+  Key Metrics
+  ==================================================
+  Price:           $0.999900
+  24h Change:      -0.01%
+  24h Volume:      $5.00M
+  Liquidity:       $100.00M
+  Market Cap:      $30.00B
+  FDV:             $30.00B
+
+  Top Trading Pairs
+  ==================================================
+  1. Uniswap V3 USDC/WETH - $5.00M ($50.00M liq)
+  2. Uniswap V2 USDC/USDT - $2.50M ($25.00M liq)
+  ...
+
+  \x1b[1m$ scope crawl PEPE --period 7d --no-charts\x1b[0m
+
+  Key Metrics
+  ==================================================
+  Price:           $0.000012
+  24h Change:      +8.50%
+  24h Volume:      $120.00M
+  Liquidity:       $45.00M
+  Market Cap:      $5.00B
+  ...
+
+  \x1b[1m$ scope crawl USDC --report usdc.md\x1b[0m
+
+  Key Metrics
+  ==================================================
+  Price:           $0.999900
+  ...
+  Report saved to usdc.md"
+)]
 pub struct CrawlArgs {
     /// Token address or name/symbol to analyze.
     ///

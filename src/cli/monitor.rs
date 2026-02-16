@@ -116,6 +116,11 @@ use super::interactive::SessionContext;
 /// scope monitor USDC --layout chart-focus --refresh 3
 /// ```
 #[derive(Debug, Args)]
+#[command(after_help = "\x1b[1mExamples:\x1b[0m
+  scope monitor USDC
+  scope monitor PEPE --chain ethereum --layout chart-focus
+  scope monitor PUSD --venue biconomy --pair PUSD_USDT
+  scope monitor BTC --venue binance --refresh 5 --scale log")]
 pub struct MonitorArgs {
     /// Token address or symbol to monitor.
     ///

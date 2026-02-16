@@ -26,11 +26,48 @@ use clap::Args;
 
 /// Arguments for the address analysis command.
 #[derive(Debug, Clone, Args)]
-#[command(after_help = "\x1b[1mExamples:\x1b[0m
+#[command(
+    after_help = "\x1b[1mExamples:\x1b[0m
   scope address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
   scope address 0x742d... --include-txs --include-tokens
   scope address 0x742d... --dossier --report dossier.md
-  scope address DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy --chain solana")]
+  scope address DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy --chain solana",
+    after_long_help = "\x1b[1mExamples:\x1b[0m
+
+  \x1b[1m$ scope address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2\x1b[0m
+
+  Address Analysis Report
+  =======================
+  Address:      0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
+  Chain:        ethereum
+  Balance:      1.234567 ETH
+  Value (USD):  $3,456.78
+  Transactions: 142
+
+  \x1b[1m$ scope address 0x742d... --dossier --report dossier.md\x1b[0m
+
+  Address Analysis Report
+  =======================
+  Address:      0x742d35Cc...f1b3c2
+  Chain:        ethereum
+  Balance:      1.234567 ETH
+  ...
+  Risk Assessment
+  =======================
+  Risk Score:   35/100 (Low)
+  Factors:      No sanctions matches, moderate tx volume
+  Report saved to dossier.md
+
+  \x1b[1m$ scope address DRpbCBMx...TDt1v --chain solana\x1b[0m
+
+  Address Analysis Report
+  =======================
+  Address:      DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy
+  Chain:        solana
+  Balance:      42.500000 SOL
+  Value (USD):  $5,312.50
+  Transactions: 87"
+)]
 pub struct AddressArgs {
     /// The blockchain address to analyze.
     ///

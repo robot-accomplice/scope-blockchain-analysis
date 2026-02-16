@@ -44,6 +44,42 @@ pub enum MarketCommands {
 /// Default thresholds (min_levels, min_depth, peg_range) originated from the
 /// PUSD Hummingbot market-making config and are tunable for other markets.
 #[derive(Debug, Args)]
+#[command(
+    after_help = "\x1b[1mExamples:\x1b[0m
+  scope market summary PUSD --venue biconomy
+  scope market summary USDC --venue binance --format json
+  scope market summary PUSD --venue biconomy --every 30s --duration 1h
+  scope market summary PUSD --venue biconomy --report health.md --csv peg.csv",
+    after_long_help = "\x1b[1mExamples:\x1b[0m
+
+  \x1b[1m$ scope market summary PUSD --venue biconomy\x1b[0m
+
+  +-- PUSD/USDT (biconomy) ----------------------------+
+  |                                                     |
+  |-- Metrics                                           |
+  |  Best Bid           0.9999  (-0.010%)               |
+  |  Best Ask           1.0001  (+0.010%)               |
+  |  Mid Price          1.0000  (+0.000%)               |
+  |  Spread             0.0002  (0.020%)                |
+  |  Volume (24h)       125000 USDT                     |
+  |                                                     |
+  |-- Health Checks                                     |
+  |  + No sells below peg                               |
+  |  + Bid/Ask ratio: 0.93x                             |
+  |  + Bid levels: 8 >= 6 minimum                       |
+  |  + Bid depth: 42000 USDT >= 3000 USDT minimum       |
+  |                                                     |
+  |  HEALTHY                                            |
+  +-----------------------------------------------------+
+
+  \x1b[1m$ scope market summary PUSD --venue biconomy --every 30s --duration 1h\x1b[0m
+
+  Monitoring PUSD/USDT (biconomy) every 30s for 1h...
+  [2026-02-16 10:00:00] Mid=1.0000 Spread=0.020% Depth=42K/45K HEALTHY
+  [2026-02-16 10:00:30] Mid=1.0000 Spread=0.020% Depth=42K/44K HEALTHY
+  [2026-02-16 10:01:00] Mid=0.9999 Spread=0.030% Depth=41K/44K HEALTHY
+  ..."
+)]
 pub struct SummaryArgs {
     /// Base token symbol (e.g., USDC, PUSD). Quote is USDT.
     #[arg(default_value = "USDC", value_name = "SYMBOL")]
@@ -117,6 +153,41 @@ pub enum SummaryFormat {
 
 /// Arguments for `scope market ohlc`.
 #[derive(Debug, Args)]
+#[command(
+    after_help = "\x1b[1mExamples:\x1b[0m
+  scope market ohlc BTC
+  scope market ohlc PUSD --venue biconomy --interval 1d
+  scope market ohlc ETH --venue mexc --limit 50 --format json",
+    after_long_help = "\x1b[1mExamples:\x1b[0m
+
+  \x1b[1m$ scope market ohlc BTC --limit 5\x1b[0m
+
+  OHLC -- BTCUSDT (binance) interval=1h limit=5
+  --------------------------------------------------------
+            Open Time          Open         High          Low        Close         Volume
+  --------------------------------------------------------
+    2026-02-16 09:00  97250.120000  97380.540000  97210.980000  97345.670000        1234.56
+    2026-02-16 08:00  97100.890000  97260.120000  97080.340000  97250.120000        1456.78
+    2026-02-16 07:00  96950.230000  97120.890000  96920.560000  97100.890000        1678.90
+    ...
+
+    5 candles returned
+
+  \x1b[1m$ scope market ohlc BTC --format json --limit 2\x1b[0m
+
+  [
+    {
+      \"open_time\": 1739696400000,
+      \"open\": 97250.12,
+      \"high\": 97380.54,
+      \"low\": 97210.98,
+      \"close\": 97345.67,
+      \"volume\": 1234.56,
+      \"close_time\": null
+    },
+    ...
+  ]"
+)]
 pub struct OhlcArgs {
     /// Trading pair symbol (e.g., USDC, BTC). Quote is USDT by default.
     #[arg(default_value = "USDC", value_name = "SYMBOL")]
@@ -141,6 +212,10 @@ pub struct OhlcArgs {
 
 /// Arguments for `scope market trades`.
 #[derive(Debug, Args)]
+#[command(after_help = "\x1b[1mExamples:\x1b[0m
+  scope market trades BTC
+  scope market trades PUSD --venue biconomy --limit 20
+  scope market trades ETH --venue okx --format json")]
 pub struct TradesArgs {
     /// Trading pair symbol (e.g., USDC, BTC). Quote is USDT by default.
     #[arg(default_value = "USDC", value_name = "SYMBOL")]

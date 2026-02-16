@@ -76,6 +76,15 @@ async fn serve_ui(uri: axum::http::Uri) -> impl axum::response::IntoResponse {
             include_str!("static/style.css"),
         )
             .into_response(),
+        "favicon.svg" => (
+            [(axum::http::header::CONTENT_TYPE, "image/svg+xml")],
+            include_str!("static/favicon.svg"),
+        )
+            .into_response(),
+        "favicon.ico" => {
+            // Redirect .ico requests to the SVG favicon
+            axum::response::Redirect::permanent("/favicon.svg").into_response()
+        }
         // SPA fallback: serve index.html for client-side routing
         _ => axum::response::Html(include_str!("static/index.html")).into_response(),
     }

@@ -39,6 +39,10 @@ use super::{address, address_book, crawl, monitor, tx};
 
 /// Arguments for the interactive command.
 #[derive(Debug, Clone, Args)]
+#[command(after_help = "\x1b[1mExamples:\x1b[0m
+  scope interactive
+  scope shell
+  scope interactive --no-banner")]
 pub struct InteractiveArgs {
     /// Skip displaying the banner on startup.
     #[arg(long)]

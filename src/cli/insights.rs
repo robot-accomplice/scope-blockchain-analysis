@@ -29,6 +29,11 @@ pub enum InferredTarget {
 
 /// Arguments for the insights command.
 #[derive(Debug, Args)]
+#[command(after_help = "\x1b[1mExamples:\x1b[0m
+  scope insights 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
+  scope insights 0xabc123def456... --decode --trace
+  scope insights USDC
+  scope insights DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy --chain solana")]
 pub struct InsightsArgs {
     /// Target to analyze: address, transaction hash, or token (symbol/name/address).
     ///

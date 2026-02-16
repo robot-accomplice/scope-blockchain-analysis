@@ -25,6 +25,10 @@ pub enum ComplianceCommands {
 }
 
 #[derive(Debug, Args)]
+#[command(after_help = "\x1b[1mExamples:\x1b[0m
+  scope compliance risk 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
+  scope compliance risk 0x742d... --detailed --format json
+  scope compliance risk 0x742d... --output risk_report.json")]
 pub struct RiskArgs {
     /// Address to assess
     #[arg(value_name = "ADDRESS")]
@@ -48,6 +52,10 @@ pub struct RiskArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(after_help = "\x1b[1mExamples:\x1b[0m
+  scope compliance trace 0xabc123def456...
+  scope compliance trace 0xabc123... --depth 5 --flag-suspicious
+  scope compliance trace 0xabc123... --format json")]
 pub struct TraceArgs {
     /// Transaction hash to trace
     #[arg(value_name = "TX_HASH")]
@@ -67,6 +75,10 @@ pub struct TraceArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(after_help = "\x1b[1mExamples:\x1b[0m
+  scope compliance analyze 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
+  scope compliance analyze 0x742d... --patterns structuring,layering --range 90d
+  scope compliance analyze 0x742d... --format json")]
 pub struct AnalyzeArgs {
     /// Address to analyze
     #[arg(value_name = "ADDRESS")]
@@ -86,6 +98,9 @@ pub struct AnalyzeArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(after_help = "\x1b[1mExamples:\x1b[0m
+  scope compliance compliance-report 0x742d... -j us -o report.json
+  scope compliance compliance-report addresses.txt -j eu --report-type detailed -o report.json")]
 pub struct ComplianceReportArgs {
     /// Address or addresses file
     #[arg(value_name = "TARGET")]

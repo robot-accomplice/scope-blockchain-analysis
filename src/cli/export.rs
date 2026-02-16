@@ -24,6 +24,11 @@ use std::path::PathBuf;
 
 /// Arguments for the export command.
 #[derive(Debug, Clone, Args)]
+#[command(after_help = "\x1b[1mExamples:\x1b[0m
+  scope export --address 0x742d... --output txns.csv
+  scope export --address 0x742d... --output txns.json --from 2025-01-01 --to 2025-12-31
+  scope export --address-book --output portfolio.csv
+  scope export -a 0x742d... -o data.csv --chain polygon --limit 500")]
 pub struct ExportArgs {
     /// Address to export data for.
     #[arg(short, long, value_name = "ADDRESS", group = "source")]

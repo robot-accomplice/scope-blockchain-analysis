@@ -4,12 +4,23 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Scope — Blockchain Analysis</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 <div class="app">
   <header>
-    <h1><span>scope</span> blockchain analysis</h1>
+    <div class="header-brand">
+      <h1>sc<svg class="header-logo-inline" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="32" cy="32" r="28" fill="none" stroke="#3fb950" stroke-width="3"/>
+        <circle cx="32" cy="32" r="14" fill="none" stroke="#3fb950" stroke-width="2" opacity="0.7"/>
+        <circle cx="32" cy="32" r="4" fill="#f85149"/>
+        <line x1="32" y1="0" x2="32" y2="16" stroke="#3fb950" stroke-width="2.5" stroke-linecap="round"/>
+        <line x1="32" y1="48" x2="32" y2="64" stroke="#3fb950" stroke-width="2.5" stroke-linecap="round"/>
+        <line x1="0" y1="32" x2="16" y2="32" stroke="#3fb950" stroke-width="2.5" stroke-linecap="round"/>
+        <line x1="48" y1="32" x2="64" y2="32" stroke="#3fb950" stroke-width="2.5" stroke-linecap="round"/>
+      </svg>pe <span class="header-subtitle">blockchain analysis</span></h1>
+    </div>
     <span class="version" id="version"></span>
   </header>
 
@@ -32,9 +43,7 @@
   <!-- Insights -->
   <div class="panel active" id="panel-insights">
     <h2>Unified Insights</h2>
-    <p style="color:var(--text-muted);margin-bottom:12px;">
-      Enter any target — address, tx hash, or token — and Scope will detect the type and run relevant analyses.
-    </p>
+    <p>Enter any target — address, tx hash, or token — and Scope will detect the type and run relevant analyses.</p>
     <div class="form-row">
       <div class="form-group" style="flex:3">
         <label>Target</label>
@@ -260,9 +269,7 @@
   <!-- Exchange -->
   <div class="panel" id="panel-exchange">
     <h2>Exchange Snapshot</h2>
-    <p style="color:var(--text-muted);margin-bottom:12px;">
-      Fetch real-time order book, ticker, and recent trades from any supported exchange venue.
-    </p>
+    <p>Fetch real-time order book, ticker, and recent trades from any supported exchange venue.</p>
     <div class="form-row">
       <div class="form-group">
         <label>Venue</label>
@@ -329,23 +336,22 @@
   <!-- Address Book -->
   <div class="panel" id="panel-address-book">
     <h2>Address Book</h2>
-    <p style="color:var(--text-muted);margin-bottom:12px;">
-      Save wallets, contracts, and token addresses with labels. Use <code>@label</code> in the CLI to recall them.
-    </p>
-    <div class="form-row">
-      <button class="btn" onclick="loadAddressBook()">Refresh List</button>
-      <button class="btn btn-secondary" onclick="showAddAddress()">+ Add Address</button>
-    </div>
-    <div id="ab-add" style="display:none;margin-top:12px;">
+    <p>Save wallets, contracts, and token addresses with labels. Use <code>@label</code> in the CLI to recall them.</p>
+    <div id="ab-add-form" class="ab-add-form">
       <div class="form-row">
-        <div class="form-group" style="flex:2">
+        <div class="form-group" style="flex:3">
           <label>Address</label>
-          <input type="text" id="ab-address" placeholder="0x...">
+          <input type="text" id="ab-address" placeholder="0x742d35Cc... or T... or base58...">
         </div>
         <div class="form-group">
           <label>Chain</label>
           <select id="ab-chain">
             <option value="ethereum">Ethereum</option>
+            <option value="polygon">Polygon</option>
+            <option value="arbitrum">Arbitrum</option>
+            <option value="optimism">Optimism</option>
+            <option value="base">Base</option>
+            <option value="bsc">BSC</option>
             <option value="solana">Solana</option>
             <option value="tron">Tron</option>
           </select>
@@ -354,10 +360,14 @@
           <label>Label</label>
           <input type="text" id="ab-label" placeholder="main-wallet">
         </div>
+        <div class="form-group">
+          <label>Tags (comma-separated)</label>
+          <input type="text" id="ab-tags" placeholder="defi, nft">
+        </div>
         <button class="btn" onclick="addAddressBookEntry()">Add</button>
       </div>
     </div>
-    <div id="ab-results"></div>
+    <div id="ab-table"></div>
   </div>
 
   <!-- Compliance -->

@@ -208,6 +208,15 @@ pub trait ChainClient: Send + Sync {
             "Code lookup not supported on this chain".to_string(),
         ))
     }
+
+    /// Reads a storage slot value at a contract address (EVM: eth_getStorageAt).
+    /// Returns the 32-byte hex value at the given slot position.
+    /// Default: not supported.
+    async fn get_storage_at(&self, _address: &str, _slot: &str) -> Result<String> {
+        Err(crate::error::ScopeError::Chain(
+            "Storage lookup not supported on this chain".to_string(),
+        ))
+    }
 }
 
 /// Factory trait for creating chain clients and DEX data sources.
@@ -587,6 +596,80 @@ pub struct TokenSocial {
 }
 
 // ============================================================================
+// NFT Types
+// ============================================================================
+
+/// NFT token metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NftMetadata {
+    /// Token ID.
+    pub token_id: String,
+    /// NFT name.
+    pub name: Option<String>,
+    /// NFT description.
+    pub description: Option<String>,
+    /// Image URL.
+    pub image_url: Option<String>,
+    /// Token URI (metadata JSON location).
+    pub token_uri: Option<String>,
+    /// Token standard (ERC-721 or ERC-1155).
+    pub standard: String,
+    /// Collection/contract name.
+    pub collection_name: Option<String>,
+    /// Additional attributes.
+    pub attributes: Vec<NftAttribute>,
+}
+
+/// An NFT attribute (trait).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NftAttribute {
+    /// Trait type/name.
+    pub trait_type: String,
+    /// Trait value.
+    pub value: String,
+}
+
+// ============================================================================
+// Gas Analysis Types
+// ============================================================================
+
+/// Gas usage analysis for a contract or address.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GasAnalysis {
+    /// Average gas used per transaction.
+    pub avg_gas_used: u64,
+    /// Maximum gas used in a single transaction.
+    pub max_gas_used: u64,
+    /// Minimum gas used in a single transaction.
+    pub min_gas_used: u64,
+    /// Total gas spent (sum of gas_used * gas_price).
+    pub total_gas_cost_wei: String,
+    /// Total gas cost in ETH/native token.
+    pub total_gas_cost_formatted: String,
+    /// Number of transactions analyzed.
+    pub tx_count: u64,
+    /// Gas usage by function selector (top callers).
+    pub gas_by_function: Vec<GasByFunction>,
+    /// Failed transaction count and wasted gas.
+    pub failed_tx_count: u64,
+    /// Gas wasted on failed transactions.
+    pub wasted_gas: u64,
+}
+
+/// Gas usage breakdown by function.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GasByFunction {
+    /// Function selector or name.
+    pub function: String,
+    /// Number of calls.
+    pub call_count: u64,
+    /// Average gas per call.
+    pub avg_gas: u64,
+    /// Total gas for this function.
+    pub total_gas: u64,
+}
+
+// ============================================================================
 // Chain Metadata
 // ============================================================================
 
@@ -768,6 +851,106 @@ pub fn infer_chain_from_hash(hash: &str) -> Option<&'static str> {
     }
 
     None
+}
+
+/// Analyze gas usage from a set of transactions.
+///
+/// Computes statistics on gas consumption, identifies gas-heavy functions,
+/// and flags failed transactions.
+pub fn analyze_gas_usage(transactions: &[Transaction]) -> GasAnalysis {
+    if transactions.is_empty() {
+        return GasAnalysis {
+            avg_gas_used: 0,
+            max_gas_used: 0,
+            min_gas_used: 0,
+            total_gas_cost_wei: "0".to_string(),
+            total_gas_cost_formatted: "0".to_string(),
+            tx_count: 0,
+            gas_by_function: vec![],
+            failed_tx_count: 0,
+            wasted_gas: 0,
+        };
+    }
+
+    let mut total_gas: u64 = 0;
+    let mut max_gas: u64 = 0;
+    let mut min_gas: u64 = u64::MAX;
+    let mut failed_count: u64 = 0;
+    let mut wasted_gas: u64 = 0;
+    let mut function_gas: std::collections::HashMap<String, (u64, u64)> =
+        std::collections::HashMap::new();
+
+    for tx in transactions {
+        let gas_used = tx.gas_used.unwrap_or(0);
+        total_gas += gas_used;
+        if gas_used > max_gas {
+            max_gas = gas_used;
+        }
+        if gas_used < min_gas {
+            min_gas = gas_used;
+        }
+
+        // Track failed transactions
+        if tx.status == Some(false) {
+            failed_count += 1;
+            wasted_gas += gas_used;
+        }
+
+        // Group by function selector
+        let selector = if tx.input.len() >= 10 {
+            tx.input[..10].to_string()
+        } else if tx.input.is_empty() || tx.input == "0x" {
+            "transfer()".to_string()
+        } else {
+            tx.input.clone()
+        };
+
+        let entry = function_gas.entry(selector).or_insert((0, 0));
+        entry.0 += 1; // call count
+        entry.1 += gas_used; // total gas
+    }
+
+    let tx_count = transactions.len() as u64;
+    let avg_gas = if tx_count > 0 {
+        total_gas / tx_count
+    } else {
+        0
+    };
+
+    if min_gas == u64::MAX {
+        min_gas = 0;
+    }
+
+    // Sort functions by total gas usage
+    let mut gas_by_function: Vec<GasByFunction> = function_gas
+        .into_iter()
+        .map(|(function, (call_count, total_gas_fn))| GasByFunction {
+            function,
+            call_count,
+            avg_gas: if call_count > 0 {
+                total_gas_fn / call_count
+            } else {
+                0
+            },
+            total_gas: total_gas_fn,
+        })
+        .collect();
+    gas_by_function.sort_by(|a, b| b.total_gas.cmp(&a.total_gas));
+
+    // Format total gas cost (rough estimate using average gas price)
+    let total_gas_cost_formatted = format!("{} gas units", total_gas);
+
+    GasAnalysis {
+        avg_gas_used: avg_gas,
+        max_gas_used: max_gas,
+        min_gas_used: min_gas,
+        total_gas_cost_wei: total_gas.to_string(),
+        total_gas_cost_formatted,
+        tx_count,
+        gas_by_function,
+        failed_tx_count: failed_count,
+        wasted_gas,
+    }
 }
 
 // ============================================================================

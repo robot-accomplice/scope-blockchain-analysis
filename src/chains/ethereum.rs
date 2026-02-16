@@ -891,6 +891,26 @@ impl EthereumClient {
         Ok(response.result.unwrap_or_else(|| "0x".to_string()))
     }
 
+    /// Reads a storage slot value at a contract address (eth_getStorageAt).
+    pub async fn get_storage_at(&self, address: &str, slot: &str) -> Result<String> {
+        validate_eth_address(address)?;
+
+        let url = self.build_api_url(&format!(
+            "module=proxy&action=eth_getStorageAt&address={}&position={}&tag=latest",
+            address, slot
+        ));
+
+        #[derive(Deserialize)]
+        struct StorageResponse {
+            result: Option<String>,
+        }
+
+        let response: StorageResponse = self.client.get(&url).send().await?.json().await?;
+        Ok(response.result.unwrap_or_else(|| {
+            "0x0000000000000000000000000000000000000000000000000000000000000000".to_string()
+        }))
+    }
+
     /// Fetches ERC-20 token balances for an address.
     ///
     /// Uses Etherscan's tokentx endpoint to find unique tokens the address
@@ -1386,6 +1406,10 @@ impl ChainClient for EthereumClient {
 
     async fn get_code(&self, address: &str) -> Result<String> {
         self.get_code(address).await
+    }
+
+    async fn get_storage_at(&self, address: &str, slot: &str) -> Result<String> {
+        self.get_storage_at(address, slot).await
     }
 }
 

@@ -79,10 +79,69 @@ pub async fn handle_add(
                 )
                     .into_response();
             }
-            Json(serde_json::json!({ "status": "added", "address": req.address })).into_response()
+            Json(serde_json::json!({
+                "status": "added",
+                "address": req.address,
+                "addresses": address_book.addresses,
+            }))
+            .into_response()
         }
         Err(e) => (
             StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// Request body for removing an address book entry.
+#[derive(Debug, Deserialize)]
+pub struct RemoveAddressBookRequest {
+    /// Blockchain address to remove.
+    pub address: String,
+}
+
+/// POST /api/address-book/remove — Remove an address from the address book.
+pub async fn handle_remove(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RemoveAddressBookRequest>,
+) -> impl IntoResponse {
+    let data_dir = state.config.data_dir();
+    let mut address_book = match AddressBook::load(&data_dir) {
+        Ok(ab) => ab,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    match address_book.remove_address(&req.address) {
+        Ok(true) => {
+            let data_dir_buf = data_dir.to_path_buf();
+            if let Err(e) = address_book.save(&data_dir_buf) {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": e.to_string() })),
+                )
+                    .into_response();
+            }
+            Json(serde_json::json!({
+                "status": "removed",
+                "address": req.address,
+                "addresses": address_book.addresses,
+            }))
+            .into_response()
+        }
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": format!("Address '{}' not found in address book", req.address) })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),
         )
             .into_response(),

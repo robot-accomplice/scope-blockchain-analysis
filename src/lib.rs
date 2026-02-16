@@ -235,6 +235,13 @@ pub mod tokens;
 /// and compliance reporting for blockchain addresses.
 pub mod compliance;
 
+/// Smart contract analysis module.
+///
+/// Provides contract source retrieval, ABI decoding, proxy detection,
+/// access control mapping, vulnerability scanning, DeFi protocol checks,
+/// and external intelligence (GitHub linking, audit reports).
+pub mod contract;
+
 /// Market module for peg and order book health analysis.
 ///
 /// Fetches level-2 order book data from exchange APIs and runs

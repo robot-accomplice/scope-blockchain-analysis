@@ -30,8 +30,10 @@ fn section_header_styled(title: &str, tty: bool) -> String {
     let pad = width.saturating_sub(title.len() + 4);
     if tty {
         format!(
-            "{}",
-            format!("\n┌─ {} {}", title.bold(), "─".repeat(pad)).cyan()
+            "\n{} {} {}",
+            "┌─".cyan(),
+            title.bold().bright_white(),
+            "─".repeat(pad).cyan()
         )
     } else {
         format!("\n┌─ {} {}", title, "─".repeat(pad))
