@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-02-17
+
+### Added
+- **Console output standards**: Codified terminal display guidelines in a Cursor rule (`.cursor/rules/console-output-standards.mdc`). All CLI reports now use a consistent box-drawing visual language with `display::terminal` helpers.
+- **New display helpers**: `score_bar`, `severity_label`, `warning_row`, `info_row`, `link_row`, `detail_row`, `bullet_row`, `table_header`, `table_row`, `numbered_row` — reusable, TTY-aware building blocks for structured terminal output.
+- **Automatic word wrapping**: Long text in all content helpers (`kv_row`, `check_pass`, `check_fail`, `warning_row`, `info_row`, `detail_row`, `bullet_row`, `numbered_row`) now wraps at the detected terminal width via `crossterm`. URLs and other long tokens are preserved unbroken.
+- **Web UI screenshots**: Six annotated screenshots added to README (Insights, Address, Contract, Address Book, Market, Setup).
+- **`crossterm` dependency**: Used for terminal width detection in word-wrapping logic.
+
+### Changed
+- **Contract analysis output**: Completely rewritten to use box-drawing section headers, color-coded score bars, severity labels, and structured subsections instead of raw ASCII separators.
+- **Ubiquitous helper adoption**: Seven CLI commands (`tx`, `setup`, `market`, `crawl`, `interactive`, `discover`) and one display module (`compliance`) migrated from manual `println!` formatting to `display::terminal` helpers. Zero remaining raw separators in terminal output.
+- **README output examples**: Updated OHLC, trades, discover, compliance, and setup examples to match the new box-drawing format. Added contract analysis example.
+- **Test coverage**: Increased to 90.41% (2,705 tests) with TTY wrapping continuation tests and DeFi branch coverage.
+
 ## [0.5.0] - 2026-02-13
 
 ### Added
