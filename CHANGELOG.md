@@ -7,16 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-02-13
+
 ### Added
-- **Address book integration across all web API handlers**: All endpoints that accept address/token inputs (`/api/address`, `/api/insights`, `/api/contract`, `/api/crawl`, `/api/export`, `/api/compliance/risk`, `/api/token-health`) now resolve `@label` shortcuts from the address book. The resolved chain is used as the default unless explicitly overridden.
-- **Web UI address book autocomplete**: All address/token input fields in the web UI now show `@label` suggestions via a browser-native datalist, populated from the address book and refreshed on add/remove.
-- **`@label` hints in all CLI help output**: Every command that accepts an address or token (`address`, `contract`, `crawl`, `insights`, `export`, `token-health`, `monitor`, `market summary`, `compliance risk`, `tx`) now shows `@label` examples in its help text. The top-level `scope --help` includes a tip about address book shortcuts.
-- **Shared `resolve_address_book` helper**: New `web::api::resolve_address_book()` function and `ResolvedInput` struct for consistent address book resolution across all web API handlers, with 5 unit tests.
+- **Contract analysis module**: New `scope contract <address>` command with ABI decoding, proxy detection, external call mapping, and a composite security score (0-100). Supports Ethereum, BSC, Polygon, and Arbitrum via block explorer APIs.
+- **Contract panel in web UI**: Full contract analysis interface in the browser mode with security score visualization, function tables, external call graphs, and proxy detection display.
+- **Address book integration across all features**: All CLI commands and web API endpoints that accept address/token inputs now resolve `@label` shortcuts from the address book. The resolved chain is used as the default unless explicitly overridden.
+- **Web UI address book autocomplete**: All address/token input fields in the web UI show `@label` suggestions via a browser-native datalist, populated from the address book and refreshed on add/remove.
+- **`@label` hints in all CLI help output**: Every command that accepts an address or token now shows `@label` examples in its help text. The top-level `scope --help` includes a tip about address book shortcuts.
+- **Interactive mode contract support**: The interactive REPL now includes a `contract` command for on-the-fly contract analysis.
 
 ### Changed
+- **Test coverage increased to 90%+**: Comprehensive test suite expansion from ~80% to 90.08% coverage (2525+ tests) across all modules.
 - **Codebase cleanup**: Replaced all legacy token references with generic stablecoin examples (DAI, USDC) across code, tests, help text, documentation, and changelog.
-- **Updated `.cursor/rules/project-context.mdc`**: Added explicit rule against legacy project references.
-- **Added `.cursor/rules/address-book-integration.mdc`**: Permanent rule requiring all current and future features to support `@label` address book shortcuts.
+- **Clippy compliance**: Resolved all clippy warnings including `io_other_error`, `len_zero`, and `collapsible_if` lints.
 
 ## [0.4.4] - 2026-02-15
 
