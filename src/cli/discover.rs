@@ -114,35 +114,33 @@ pub async fn run_with_client(
             println!("{}", serde_json::to_string_pretty(&rows)?);
         }
         OutputFormat::Table | OutputFormat::Markdown => {
-            println!(
-                "\n{} ({}) — limit {}",
+            use crate::display::terminal as t;
+
+            let title = format!(
+                "{} ({})",
                 match args.source {
                     DiscoverSource::Profiles => "Featured Token Profiles",
                     DiscoverSource::Boosts => "Recently Boosted Tokens",
                     DiscoverSource::TopBoosts => "Top Boosted Tokens",
                 },
-                filtered.len(),
-                args.limit
+                filtered.len()
             );
-            println!("{}", "-".repeat(80));
+            println!("{}", t::section_header(&title));
+            println!("{}", t::kv_row("Results", &filtered.len().to_string()));
+
             for (i, t) in filtered.iter().enumerate() {
-                let desc = t
-                    .description
-                    .as_deref()
-                    .map(|d| {
-                        let truncated = if d.len() > 60 { &d[..57] } else { d };
-                        format!("{}...", truncated)
-                    })
-                    .unwrap_or_else(|| "-".to_string());
-                println!(
-                    "{:3}. {} | {} | {}",
-                    i + 1,
+                let desc = t.description.as_deref().unwrap_or("-");
+                let row_text = format!(
+                    "{} | {} | {}",
                     t.chain_id,
                     truncate_address(&t.token_address),
                     desc
                 );
-                println!("     {}", t.url);
+                println!("{}", t::numbered_row(i + 1, &row_text));
+                println!("{}", t::detail_row(&t.url));
             }
+
+            println!("{}", t::section_footer());
         }
         OutputFormat::Csv => {
             println!("chain,address,description,url");

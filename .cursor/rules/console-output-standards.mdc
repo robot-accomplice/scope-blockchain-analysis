@@ -1,0 +1,123 @@
+---
+description: Console output formatting standards for all CLI commands
+globs: src/cli/**/*.rs, src/display/**/*.rs
+alwaysApply: false
+---
+
+# Console Output Standards
+
+All CLI commands that produce human-readable terminal output **must** use the shared
+helpers in `src/display/terminal.rs`. Raw `println!` with hand-drawn separators
+(`===`, `---`, `***`) is not permitted for structured output sections.
+
+## Required: Use `display::terminal` Helpers
+
+Import the module at the top of the output function:
+
+```rust
+use crate::display::terminal as t;
+```
+
+### Layout Structure
+
+Every report follows box-drawing structure with these elements:
+
+| Element | Helper | Visual |
+|---------|--------|--------|
+| Section header (top) | `t::section_header("Title")` | `┌─ Title ──────────` |
+| Sub-section | `t::subsection_header("Sub")` | `├── Sub` |
+| Key-value pair | `t::kv_row("Key", "Value")` | `│  Key              Value` |
+| Delta value (±) | `t::kv_row_delta("Key", val, "fmt")` | `│  Key              +5.2%` (green/red) |
+| Score bar | `t::score_bar("Label", score, max)` | `│  Label            [████────] 60/100` |
+| Pass check | `t::check_pass("msg")` | `│  ✓ msg` (green) |
+| Fail check | `t::check_fail("msg")` | `│  ✗ msg` (red) |
+| Warning | `t::warning_row("msg")` | `│  ⚠ msg` (yellow) |
+| Info note | `t::info_row("msg")` | `│  ℹ msg` (dimmed) |
+| Link / URL | `t::link_row("Label", "url")` | `│  Label            url` (underlined) |
+| Bullet item | `t::bullet_row("msg")` | `│    • msg` |
+| Detail / indent | `t::detail_row("msg")` | `│      msg` (dimmed) |
+| Numbered list item | `t::numbered_row(i, "msg")` | `│  1. msg` (wraps) |
+| Table header | `t::table_header(cols)` | `│    Col1  Col2` + rule line |
+| Table row | `t::table_row(cols, vals)` | `│    val1  val2` |
+| Blank continuation | `t::blank_row()` | `│` |
+| Separator | `t::separator()` | `├──────────────────` |
+| Health status | `t::status_line(healthy)` | `│  HEALTHY` / `│  UNHEALTHY` |
+| Section footer | `t::section_footer()` | `└──────────────────` |
+
+### Skeleton of a Report
+
+```rust
+fn print_report(data: &Data) {
+    use crate::display::terminal as t;
+
+    println!("{}", t::section_header("Report Title"));
+    println!("{}", t::kv_row("Field", &data.value));
+    println!("{}", t::score_bar("Score", data.score, 100));
+
+    println!("{}", t::subsection_header("Details"));
+    println!("{}", t::kv_row("Key", "Value"));
+    println!("{}", t::check_pass("All good"));
+    println!("{}", t::warning_row("Something to note"));
+
+    for item in &data.items {
+        println!("{}", t::bullet_row(&item.name));
+        println!("{}", t::detail_row(&item.description));
+    }
+
+    println!("{}", t::section_footer());
+}
+```
+
+## Principles
+
+1. **TTY-aware**: All helpers automatically fall back to plain text when stdout is piped. Never add manual ANSI escape codes.
+
+2. **Word wrapping**: All content helpers (`kv_row`, `check_pass`, `check_fail`, `warning_row`, `info_row`, `detail_row`, `bullet_row`) automatically word-wrap long text to fit the detected terminal width. Continuation lines are indented to align with the first line's content column and preserve the `│` box-drawing prefix. URLs and other long tokens that exceed the available width are kept intact on their own line (never broken mid-word). Callers do not need to pre-wrap text — the helpers handle it.
+
+3. **Color semantics** (enforced by the helpers):
+   - Cyan: structural chrome (box-drawing characters)
+   - Green: positive / pass / healthy / high score
+   - Red: negative / fail / unhealthy / critical severity
+   - Yellow: warnings / medium severity / moderate scores
+   - Dimmed: labels, secondary text, informational severity
+   - Underline: URLs and links
+
+4. **Severity color mapping** (via `t::severity_label`):
+   - Critical → red bold
+   - High → red
+   - Medium → yellow
+   - Low → cyan
+   - Informational → dimmed
+
+5. **Score bar color thresholds** (via `t::score_bar`):
+   - >= 80 → green
+   - >= 50 → yellow
+   - < 50 → red
+
+6. **No raw separators**: Never use `"=".repeat(n)`, `"---"`, or similar. Use `t::section_header`, `t::subsection_header`, `t::separator`, and `t::section_footer` for all visual boundaries.
+
+7. **Consistent indentation**: Don't manually pad with spaces. The helpers handle alignment (18-char key column in `kv_row`, 4-space indent for bullets, 6-space indent for details).
+
+8. **Reference implementation**: `src/cli/token_health.rs` and `src/cli/contract.rs` demonstrate the canonical patterns. Follow these when adding new commands.
+
+## Word Wrapping Details
+
+The `wrap_lines(text, content_width)` function in `display::terminal` handles word wrapping:
+
+- **Terminal width detection**: `terminal_width()` uses `crossterm::terminal::size()` with an 80-column fallback.
+- **Content width**: Each helper knows its prefix width (e.g. `kv_row` = 21 cols, `detail_row` = 7 cols) and subtracts it from the terminal width to determine available content columns.
+- **Word boundaries**: Text is split on whitespace. Words that fit within the remaining line width are joined with spaces; words that would overflow trigger a line break.
+- **Long tokens (URLs)**: A single word longer than the available width is placed on its own line unbroken. This prevents URLs from being split mid-address.
+- **Continuation alignment**: Wrapped lines are indented to align with the first line's text start position, maintaining the `│` prefix on every line.
+
+Do **not** manually wrap text before passing it to helpers. The helpers handle this automatically.
+
+## Adding New Helpers
+
+If a new visual pattern is needed:
+
+1. Add the helper in `src/display/terminal.rs` with both public and `_styled(…, tty: bool)` variants.
+2. Respect the `is_tty()` check in the public function, delegate to the styled variant.
+3. Use `content_width_for(prefix_width)` and `wrap_lines()` for any helper that accepts free-form text.
+4. Add tests for both TTY and non-TTY paths, including a word-wrap integration test with long input.
+5. Update this rule's table above.

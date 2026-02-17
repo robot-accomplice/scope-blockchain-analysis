@@ -22,42 +22,38 @@ use clap::Args;
 
   \x1b[1m$ scope contract 0xdAC17F958D2ee523a2206206994597C13D831ec7\x1b[0m
 
-  ========================================================================
-    CONTRACT ANALYSIS: 0xdAC17F958D2ee523a2206206994597C13D831ec7
-    Chain: ethereum | Verified: Yes
-  ========================================================================
-
-    Security Score: [################----] 80/100
-
-  --- Source Code ---
-    Contract Name: TetherToken
-    Compiler: v0.4.18+commit.9cf6e910
-    Optimization: No
-
-  --- Proxy Detection ---
-    Not a proxy contract
-
-  --- Access Control ---
-    Ownership: Ownable
-    Renounced: No
-    Privileged functions:
-      - pause (High): Can pause transfers
-      - addBlacklist (High): Can blacklist addresses
-
-  --- Vulnerability Findings ---
-    [. ] SC-TX-ORIGIN - tx.origin authorization (Low)
-
-  --- DeFi Analysis ---
-    Protocol Type: Token
-    Token Standards: ERC-20
-
-  --- External Intelligence ---
-    Explorer: https://etherscan.io/address/0xdAC17...
-    Sourcify: Verified
-    Audit Reports:
-      - Trail of Bits (TetherToken)
-
-  ========================================================================
+  ┌─ Contract Analysis: 0xdAC17F958D2ee523a2206206994597C13D831ec7 ─
+  │  Chain             ethereum
+  │  Verified          Yes
+  │
+  │  Security Score    [████████████████────] 80/100
+  │
+  ├── Source Code
+  │  Contract Name    TetherToken
+  │  Compiler         v0.4.18+commit.9cf6e910
+  │  Optimization     No
+  │
+  ├── Proxy Detection
+  │  ✓ Not a proxy contract
+  │
+  ├── Access Control
+  │  Ownership        Ownable
+  │  Renounced        No
+  │    • pause (High): Can pause transfers
+  │    • addBlacklist (High): Can blacklist addresses
+  │
+  ├── Vulnerability Findings
+  │  ℹ SC-TX-ORIGIN — tx.origin authorization (Low)
+  │
+  ├── DeFi Analysis
+  │  Protocol Type    Token
+  │  Token Standards  ERC-20
+  │
+  ├── External Intelligence
+  │  Explorer         https://etherscan.io/address/0xdAC17...
+  │  ✓ Sourcify verified
+  │    • Trail of Bits (TetherToken)
+  └──────────────────────────────────────────────────
 
   \x1b[1m$ scope ct 0xA0b86991... --json\x1b[0m
 
@@ -127,162 +123,207 @@ pub async fn run(
 }
 
 /// Print a formatted contract analysis report to the terminal.
+///
+/// Uses `display::terminal` helpers for consistent box-drawing, color,
+/// and TTY-awareness matching the rest of the CLI.
 fn print_contract_report(analysis: &contract::ContractAnalysis) {
-    println!("\n{}", "=".repeat(72));
-    println!("  CONTRACT ANALYSIS: {}", analysis.address);
-    println!(
-        "  Chain: {} | Verified: {}",
-        analysis.chain,
-        if analysis.is_verified { "Yes" } else { "No" }
-    );
-    println!("{}", "=".repeat(72));
+    use crate::display::terminal as t;
 
-    // Security Score
-    let score_bar = format!(
-        "[{}{}] {}/100",
-        "#".repeat((analysis.security_score as usize) / 5),
-        "-".repeat(20 - (analysis.security_score as usize) / 5),
-        analysis.security_score
+    let title = format!("Contract Analysis: {}", analysis.address);
+    println!("{}", t::section_header(&title));
+    println!("{}", t::kv_row("Chain", &analysis.chain));
+    println!(
+        "{}",
+        t::kv_row("Verified", if analysis.is_verified { "Yes" } else { "No" })
     );
-    println!("\n  Security Score: {}", score_bar);
-    println!("  {}", analysis.security_summary);
+    println!("{}", t::blank_row());
+    println!(
+        "{}",
+        t::score_bar("Security Score", analysis.security_score, 100)
+    );
+    println!("{}", t::detail_row(&analysis.security_summary));
+
+    if !analysis.is_verified {
+        println!("{}", t::blank_row());
+        println!(
+            "{}",
+            t::warning_row("Source code is NOT verified — analysis is limited")
+        );
+    }
 
     // Source Info
     if let Some(src) = &analysis.source_info {
-        println!("\n--- Source Code ---");
-        println!("  Contract Name: {}", src.contract_name);
-        println!("  Compiler: {}", src.compiler_version);
-        println!("  EVM Version: {}", src.evm_version);
-        println!("  License: {}", src.license_type);
+        println!("{}", t::subsection_header("Source Code"));
+        println!("{}", t::kv_row("Contract Name", &src.contract_name));
+        println!("{}", t::kv_row("Compiler", &src.compiler_version));
+        println!("{}", t::kv_row("EVM Version", &src.evm_version));
+        println!("{}", t::kv_row("License", &src.license_type));
         println!(
-            "  Optimization: {}",
-            if src.optimization_used {
-                format!("Yes ({} runs)", src.optimization_runs)
-            } else {
-                "No".to_string()
-            }
+            "{}",
+            t::kv_row(
+                "Optimization",
+                &if src.optimization_used {
+                    format!("Yes ({} runs)", src.optimization_runs)
+                } else {
+                    "No".to_string()
+                }
+            )
         );
-        println!("  ABI Functions: {}", src.parsed_abi.len());
+        println!(
+            "{}",
+            t::kv_row("ABI Functions", &src.parsed_abi.len().to_string())
+        );
     }
 
     // Proxy Info
     if let Some(proxy) = &analysis.proxy_info {
-        println!("\n--- Proxy Detection ---");
+        println!("{}", t::subsection_header("Proxy Detection"));
         if proxy.is_proxy {
-            println!("  Type: {}", proxy.proxy_type);
+            println!("{}", t::kv_row("Type", &proxy.proxy_type));
             if let Some(impl_addr) = &proxy.implementation_address {
-                println!("  Implementation: {}", impl_addr);
+                println!("{}", t::kv_row("Implementation", impl_addr));
             }
             if let Some(admin) = &proxy.admin_address {
-                println!("  Admin: {}", admin);
+                println!("{}", t::kv_row("Admin", admin));
             }
         } else {
-            println!("  Not a proxy contract");
+            println!("{}", t::check_pass("Not a proxy contract"));
         }
         for detail in &proxy.details {
-            println!("  - {}", detail);
+            println!("{}", t::bullet_row(detail));
         }
     }
 
     // Access Control
     if let Some(ac) = &analysis.access_control {
-        println!("\n--- Access Control ---");
+        println!("{}", t::subsection_header("Access Control"));
         if let Some(pattern) = &ac.ownership_pattern {
-            println!("  Ownership: {}", pattern);
+            println!("{}", t::kv_row("Ownership", pattern));
         }
         println!(
-            "  Renounced: {}",
-            if ac.has_renounced_ownership {
-                "Yes"
-            } else {
-                "No"
-            }
+            "{}",
+            t::kv_row(
+                "Renounced",
+                if ac.has_renounced_ownership {
+                    "Yes"
+                } else {
+                    "No"
+                }
+            )
         );
         println!(
-            "  Role-based: {}",
-            if ac.has_role_based_access {
-                "Yes"
-            } else {
-                "No"
-            }
+            "{}",
+            t::kv_row(
+                "Role-based",
+                if ac.has_role_based_access {
+                    "Yes"
+                } else {
+                    "No"
+                }
+            )
         );
         if ac.uses_tx_origin {
-            println!("  WARNING: Uses tx.origin for authorization");
+            println!("{}", t::warning_row("Uses tx.origin for authorization"));
         }
         if !ac.roles.is_empty() {
-            println!("  Roles: {}", ac.roles.join(", "));
+            println!("{}", t::kv_row("Roles", &ac.roles.join(", ")));
         }
         if !ac.privileged_functions.is_empty() {
-            println!("  Privileged functions:");
+            println!("{}", t::blank_row());
             for pf in &ac.privileged_functions {
-                println!("    - {} ({:?}): {}", pf.name, pf.risk, pf.capability);
+                let sev = t::severity_label(&format!("{:?}", pf.risk));
+                println!(
+                    "{}",
+                    t::bullet_row(&format!("{} ({}): {}", pf.name, sev, pf.capability))
+                );
             }
         }
-        println!("\n  Auth: {}", ac.auth_analysis.summary);
+        println!("{}", t::blank_row());
+        println!("{}", t::kv_row("Auth", &ac.auth_analysis.summary));
     }
 
     // Vulnerabilities
+    println!("{}", t::subsection_header("Vulnerability Findings"));
     if !analysis.vulnerabilities.is_empty() {
-        println!("\n--- Vulnerability Findings ---");
         for vuln in &analysis.vulnerabilities {
-            let severity_indicator = match vuln.severity {
-                contract::vulnerability::Severity::Critical => "[!!]",
-                contract::vulnerability::Severity::High => "[! ]",
-                contract::vulnerability::Severity::Medium => "[* ]",
-                contract::vulnerability::Severity::Low => "[. ]",
-                contract::vulnerability::Severity::Informational => "[i ]",
-            };
+            let sev_str = format!("{}", vuln.severity);
+            let sev = t::severity_label(&sev_str);
+            match vuln.severity {
+                contract::vulnerability::Severity::Critical
+                | contract::vulnerability::Severity::High => {
+                    println!(
+                        "{}",
+                        t::check_fail(&format!("{} — {} ({})", vuln.id, vuln.title, sev))
+                    );
+                }
+                _ => {
+                    println!(
+                        "{}",
+                        t::info_row(&format!("{} — {} ({})", vuln.id, vuln.title, sev))
+                    );
+                }
+            }
+            println!("{}", t::detail_row(&vuln.description));
             println!(
-                "  {} {} - {} ({})",
-                severity_indicator, vuln.id, vuln.title, vuln.severity
+                "{}",
+                t::detail_row(&format!("Fix: {}", vuln.recommendation))
             );
-            println!("      {}", vuln.description);
-            println!("      Fix: {}", vuln.recommendation);
         }
     } else {
-        println!("\n--- Vulnerability Findings ---");
-        println!("  No heuristic findings triggered.");
+        println!("{}", t::check_pass("No heuristic findings triggered"));
     }
 
     // DeFi Analysis
     if let Some(defi) = &analysis.defi_analysis {
-        println!("\n--- DeFi Analysis ---");
-        println!("  Protocol Type: {}", defi.protocol_type);
+        println!("{}", t::subsection_header("DeFi Analysis"));
+        println!(
+            "{}",
+            t::kv_row("Protocol Type", &defi.protocol_type.to_string())
+        );
         if !defi.token_standards.is_empty() {
             let standards: Vec<String> =
                 defi.token_standards.iter().map(|s| s.to_string()).collect();
-            println!("  Token Standards: {}", standards.join(", "));
+            println!("{}", t::kv_row("Token Standards", &standards.join(", ")));
         }
         if defi.has_oracle_dependency {
             for oracle in &defi.oracle_info {
-                println!("  Oracle: {} ({})", oracle.provider, oracle.usage);
+                println!(
+                    "{}",
+                    t::kv_row("Oracle", &format!("{} ({})", oracle.provider, oracle.usage))
+                );
             }
         }
         if defi.has_flash_loan_risk {
-            println!("  Flash Loan Risk: Yes");
+            println!("{}", t::warning_row("Flash loan risk detected"));
         }
         for dex in &defi.dex_integrations {
+            let slippage = if dex.has_slippage_protection {
+                "✓"
+            } else {
+                "✗"
+            };
+            let deadline = if dex.has_deadline_protection {
+                "✓"
+            } else {
+                "✗"
+            };
             println!(
-                "  DEX: {} - slippage: {}, deadline: {}",
-                dex.dex,
-                if dex.has_slippage_protection {
-                    "Yes"
-                } else {
-                    "NO"
-                },
-                if dex.has_deadline_protection {
-                    "Yes"
-                } else {
-                    "NO"
-                }
+                "{}",
+                t::bullet_row(&format!(
+                    "{} — slippage: {} deadline: {}",
+                    dex.dex, slippage, deadline
+                ))
             );
         }
         if !defi.risk_factors.is_empty() {
-            println!("  Risk Factors:");
+            println!("{}", t::blank_row());
             for rf in &defi.risk_factors {
                 println!(
-                    "    - {} (severity {}/10): {}",
-                    rf.name, rf.severity, rf.description
+                    "{}",
+                    t::bullet_row(&format!(
+                        "{} ({}/10): {}",
+                        rf.name, rf.severity, rf.description
+                    ))
                 );
             }
         }
@@ -290,33 +331,39 @@ fn print_contract_report(analysis: &contract::ContractAnalysis) {
 
     // External Info
     if let Some(ext) = &analysis.external_info {
-        println!("\n--- External Intelligence ---");
-        println!("  Explorer: {}", ext.explorer_url);
+        println!("{}", t::subsection_header("External Intelligence"));
+        println!("{}", t::link_row("Explorer", &ext.explorer_url));
         if let Some(repo) = &ext.github_repo {
-            println!("  GitHub: {}", repo);
+            println!("{}", t::link_row("GitHub", repo));
         }
         if let Some(verified) = &ext.sourcify_verified {
-            println!(
-                "  Sourcify: {}",
-                if *verified {
-                    "Verified"
-                } else {
-                    "Not verified"
-                }
-            );
+            if *verified {
+                println!("{}", t::check_pass("Sourcify verified"));
+            } else {
+                println!("{}", t::check_fail("Sourcify not verified"));
+            }
         }
         if !ext.audit_reports.is_empty() {
-            println!("  Audit Reports:");
+            println!("{}", t::blank_row());
             for report in &ext.audit_reports {
-                println!("    - {} ({})", report.auditor, report.scope);
+                println!(
+                    "{}",
+                    t::bullet_row(&format!("{} ({})", report.auditor, report.scope))
+                );
                 if !report.url.is_empty() {
-                    println!("      {}", report.url);
+                    println!("{}", t::detail_row(&report.url));
                 }
             }
+        } else {
+            println!("{}", t::blank_row());
+            println!(
+                "{}",
+                t::info_row("No audit reports found — check block explorer manually")
+            );
         }
     }
 
-    println!("\n{}", "=".repeat(72));
+    println!("{}", t::section_footer());
 }
 
 #[cfg(test)]
@@ -655,6 +702,29 @@ mod tests {
             admin_address: None,
             beacon_address: None,
             details: vec!["Minimal proxy".to_string()],
+        });
+        print_contract_report(&a);
+    }
+
+    #[test]
+    fn test_print_report_defi_slippage_protected_no_deadline() {
+        let mut a = minimal_analysis();
+        a.defi_analysis = Some(crate::contract::defi::DefiAnalysis {
+            protocol_type: crate::contract::defi::ProtocolType::DEX,
+            has_oracle_dependency: false,
+            oracle_info: vec![],
+            has_flash_loan_risk: false,
+            flash_loan_info: vec![],
+            dex_integrations: vec![crate::contract::defi::DexIntegration {
+                dex: "SushiSwap".to_string(),
+                integration_type: "Swap".to_string(),
+                has_slippage_protection: true,
+                has_deadline_protection: false,
+            }],
+            lending_patterns: vec![],
+            token_standards: vec![],
+            staking_patterns: vec![],
+            risk_factors: vec![],
         });
         print_contract_report(&a);
     }

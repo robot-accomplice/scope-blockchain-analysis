@@ -886,6 +886,8 @@ fn output_table(analytics: &TokenAnalytics, args: &CrawlArgs) -> Result<()> {
 
 /// Outputs full analytics table with DEX data.
 fn output_table_with_dex(analytics: &TokenAnalytics, args: &CrawlArgs) -> Result<()> {
+    use crate::display::terminal as t;
+
     // Display charts if not disabled
     if !args.no_charts {
         let dashboard = charts::render_analytics_dashboard(
@@ -899,71 +901,112 @@ fn output_table_with_dex(analytics: &TokenAnalytics, args: &CrawlArgs) -> Result
     } else {
         // Display text-only summary
         println!(
-            "Token: {} ({})",
-            analytics.token.name, analytics.token.symbol
+            "{}",
+            t::section_header(&format!(
+                "{} ({})",
+                analytics.token.name, analytics.token.symbol
+            ))
         );
-        println!("Chain: {}", analytics.chain);
-        println!("Contract: {}", analytics.token.contract_address);
-        println!();
+        println!("{}", t::kv_row("Chain", &analytics.chain));
+        println!(
+            "{}",
+            t::kv_row("Contract", &analytics.token.contract_address)
+        );
+        println!("{}", t::blank_row());
     }
 
     // Key metrics
-    println!("Key Metrics");
-    println!("{}", "=".repeat(50));
-    println!("Price:           ${:.6}", analytics.price_usd);
-    println!("24h Change:      {:+.2}%", analytics.price_change_24h);
+    println!("{}", t::subsection_header("Key Metrics"));
     println!(
-        "24h Volume:      ${}",
-        crate::display::format_large_number(analytics.volume_24h)
+        "{}",
+        t::kv_row("Price", &format!("${:.6}", analytics.price_usd))
     );
     println!(
-        "Liquidity:       ${}",
-        crate::display::format_large_number(analytics.liquidity_usd)
+        "{}",
+        t::kv_row_delta(
+            "24h Change",
+            analytics.price_change_24h,
+            &format!("{:+.2}%", analytics.price_change_24h)
+        )
+    );
+    println!(
+        "{}",
+        t::kv_row(
+            "24h Volume",
+            &format!(
+                "${}",
+                crate::display::format_large_number(analytics.volume_24h)
+            )
+        )
+    );
+    println!(
+        "{}",
+        t::kv_row(
+            "Liquidity",
+            &format!(
+                "${}",
+                crate::display::format_large_number(analytics.liquidity_usd)
+            )
+        )
     );
 
     if let Some(mc) = analytics.market_cap {
         println!(
-            "Market Cap:      ${}",
-            crate::display::format_large_number(mc)
+            "{}",
+            t::kv_row(
+                "Market Cap",
+                &format!("${}", crate::display::format_large_number(mc))
+            )
         );
     }
 
     if let Some(fdv) = analytics.fdv {
         println!(
-            "FDV:             ${}",
-            crate::display::format_large_number(fdv)
+            "{}",
+            t::kv_row(
+                "FDV",
+                &format!("${}", crate::display::format_large_number(fdv))
+            )
         );
     }
 
     // Trading pairs
     if !analytics.dex_pairs.is_empty() {
-        println!();
-        println!("Top Trading Pairs");
-        println!("{}", "=".repeat(50));
+        println!("{}", t::blank_row());
+        println!("{}", t::subsection_header("Top Trading Pairs"));
 
         for (i, pair) in analytics.dex_pairs.iter().take(5).enumerate() {
-            println!(
-                "{}. {} {}/{} - ${} (${} liq)",
-                i + 1,
+            let pair_str = format!(
+                "{} {}/{} - ${} (${} liq)",
                 pair.dex_name,
                 pair.base_token,
                 pair.quote_token,
                 crate::display::format_large_number(pair.volume_24h),
                 crate::display::format_large_number(pair.liquidity_usd)
             );
+            println!("{}", t::numbered_row(i + 1, &pair_str));
         }
     }
 
     // Concentration summary
     if let Some(top_10) = analytics.top_10_concentration {
-        println!();
-        println!("Holder Concentration");
-        println!("{}", "=".repeat(50));
-        println!("Top 10 holders:  {:.1}% of supply", top_10);
+        println!("{}", t::blank_row());
+        println!("{}", t::subsection_header("Holder Concentration"));
+        println!(
+            "{}",
+            t::kv_row("Top 10 holders", &format!("{:.1}% of supply", top_10))
+        );
 
         if let Some(top_50) = analytics.top_50_concentration {
-            println!("Top 50 holders:  {:.1}% of supply", top_50);
+            println!(
+                "{}",
+                t::kv_row("Top 50 holders", &format!("{:.1}% of supply", top_50))
+            );
         }
+    }
+
+    if args.no_charts {
+        println!("{}", t::section_footer());
     }
 
     Ok(())
@@ -971,40 +1014,71 @@ fn output_table_with_dex(analytics: &TokenAnalytics, args: &CrawlArgs) -> Result
 
 /// Outputs basic token info from block explorer (no DEX data).
 fn output_table_explorer_only(analytics: &TokenAnalytics) -> Result<()> {
-    println!("Token Info (Block Explorer Data)");
-    println!("{}", "=".repeat(60));
-    println!();
+    use crate::display::terminal as t;
+
+    println!("{}", t::section_header("Token Info (Block Explorer)"));
 
     // Basic token info
-    println!("Name:            {}", analytics.token.name);
-    println!("Symbol:          {}", analytics.token.symbol);
-    println!("Contract:        {}", analytics.token.contract_address);
-    println!("Chain:           {}", analytics.chain);
-    println!("Decimals:        {}", analytics.token.decimals);
+    println!("{}", t::kv_row("Name", &analytics.token.name));
+    println!("{}", t::kv_row("Symbol", &analytics.token.symbol));
+    println!(
+        "{}",
+        t::kv_row("Contract", &analytics.token.contract_address)
+    );
+    println!("{}", t::kv_row("Chain", &analytics.chain));
+    println!(
+        "{}",
+        t::kv_row("Decimals", &analytics.token.decimals.to_string())
+    );
 
     if analytics.total_holders > 0 {
-        println!("Total Holders:   {}", analytics.total_holders);
+        println!(
+            "{}",
+            t::kv_row("Total Holders", &analytics.total_holders.to_string())
+        );
     }
 
     if let Some(supply) = &analytics.total_supply {
-        println!("Total Supply:    {}", supply);
+        println!("{}", t::kv_row("Total Supply", supply));
     }
 
     // Note about missing DEX data
-    println!();
-    println!("Note: No DEX trading data available for this token.");
-    println!("      Price, volume, and liquidity data require active DEX pairs.");
+    println!("{}", t::blank_row());
+    println!(
+        "{}",
+        t::info_row(
+            "No DEX trading data available for this token. Price, volume, and liquidity data require active DEX pairs."
+        )
+    );
 
     // Top holders if available
     if !analytics.holders.is_empty() {
-        println!();
-        println!("Top Holders");
-        println!("{}", "=".repeat(60));
-        println!(
-            "{:>4}  {:>10}  {:>20}  Address",
-            "Rank", "Percent", "Balance"
-        );
-        println!("{}", "-".repeat(80));
+        println!("{}", t::blank_row());
+        println!("{}", t::subsection_header("Top Holders"));
+
+        let cols = [
+            t::Col {
+                label: "Rank",
+                width: 4,
+                align: '>',
+            },
+            t::Col {
+                label: "Percent",
+                width: 10,
+                align: '>',
+            },
+            t::Col {
+                label: "Balance",
+                width: 20,
+                align: '>',
+            },
+            t::Col {
+                label: "Address",
+                width: 42,
+                align: '<',
+            },
+        ];
+        println!("{}", t::table_header(&cols));
 
         for holder in analytics.holders.iter().take(10) {
             // Truncate address for display
@@ -1018,24 +1092,36 @@ fn output_table_explorer_only(analytics: &TokenAnalytics) -> Result<()> {
                 holder.address.clone()
             };
 
-            println!(
-                "{:>4}  {:>9.2}%  {:>20}  {}",
-                holder.rank, holder.percentage, holder.formatted_balance, addr_display
-            );
+            let rank_str = holder.rank.to_string();
+            let percent_str = format!("{:.2}%", holder.percentage);
+            let values = [
+                rank_str.as_str(),
+                percent_str.as_str(),
+                holder.formatted_balance.as_str(),
+                addr_display.as_str(),
+            ];
+            println!("{}", t::table_row(&cols, &values));
         }
     }
 
     // Concentration summary
     if let Some(top_10) = analytics.top_10_concentration {
-        println!();
-        println!("Holder Concentration");
-        println!("{}", "=".repeat(60));
-        println!("Top 10 holders:  {:.1}% of supply", top_10);
+        println!("{}", t::blank_row());
+        println!("{}", t::subsection_header("Holder Concentration"));
+        println!(
+            "{}",
+            t::kv_row("Top 10 holders", &format!("{:.1}% of supply", top_10))
+        );
 
         if let Some(top_50) = analytics.top_50_concentration {
-            println!("Top 50 holders:  {:.1}% of supply", top_50);
+            println!(
+                "{}",
+                t::kv_row("Top 50 holders", &format!("{:.1}% of supply", top_50))
+            );
         }
     }
+
+    println!("{}", t::section_footer());
 
     Ok(())
 }

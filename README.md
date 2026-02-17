@@ -199,6 +199,8 @@ The web UI provides:
 - Rich data rendering with download options (JSON, CSV, Markdown)
 - Configuration status and setup page
 
+See the [Web Interface](#web-interface) section below for screenshots.
+
 ### Command Map
 
 Not sure which command to use? Here's a quick decision tree:
@@ -326,15 +328,18 @@ Representative output for key commands:
 ```
 
 ```text
-OHLC — USDCUSDT (binance) interval=1h limit=5
-──────────────────────────────────────────────────────────
-           Open Time          Open         High          Low        Close         Volume
-──────────────────────────────────────────────────────────
-  2026-02-15 12:00    1.000400    1.000500    1.000300    1.000450    1250000.00
-  2026-02-15 11:00    1.000350    1.000420    1.000280    1.000400    980000.00
-  ...
-
-  5 candles returned
+┌─ OHLC — USDCUSDT (binance) ────────────────────
+│  Interval          1h
+│  Limit             5
+│
+│          Open Time        Open        High         Low       Close        Volume
+│  ─────────────────────────────────────────────────────────────────────────────────
+│   2026-02-15 12:00    1.000400    1.000500    1.000300    1.000450    1250000.00
+│   2026-02-15 11:00    1.000350    1.000420    1.000280    1.000400     980000.00
+│   ...
+│
+│  ℹ 5 candles returned
+└──────────────────────────────────────────────────
 ```
 
 ### Market trades
@@ -344,15 +349,16 @@ OHLC — USDCUSDT (binance) interval=1h limit=5
 ```
 
 ```text
-Recent Trades — USDCUSDT (binance)
-──────────────────────────────────────
-       Time  Side        Price           Qty
-──────────────────────────────────────
-  14:32:15   BUY    1.000350       5000.00
-  14:32:14  SELL    1.000340       1200.00
-  ...
-
-  5 trades returned
+┌─ Recent Trades — USDCUSDT (binance) ───────────
+│
+│        Time   Side        Price          Qty
+│  ────────────────────────────────────────────────
+│    14:32:15    BUY    1.000350      5000.00
+│    14:32:14   SELL    1.000340      1200.00
+│    ...
+│
+│  ℹ 5 trades returned
+└──────────────────────────────────────────────────
 ```
 
 ### Token health
@@ -382,12 +388,14 @@ Fetching token health data...
 ```
 
 ```text
-Featured Token Profiles (2) — limit 2
---------------------------------------------------------------------------------
-  1. solana | KeQnMAX5Ly...zJvMpump | -
-     https://dexscreener.com/solana/keqnmax5lydfbrcwvqhojlu84bgfsg9ahthzjvmpump
-  2. pulsechain | 0xE558edc9...0595aD11 | OLD GLORY RISE
-     https://dexscreener.com/pulsechain/0xe558edc934fdbb65cdf4868617d5f0d80595ad11
+┌─ Featured Token Profiles (2) ──────────────────
+│  Results            2
+│
+│  1. solana | KeQnMAX5Ly...zJvMpump | -
+│       https://dexscreener.com/solana/keqnmax5lydfbrcwvqhojlu84bgfsg9ahthzjvmpump
+│  2. pulsechain | 0xE558edc9...0595aD11 | OLD GLORY RISE
+│       https://dexscreener.com/pulsechain/0xe558edc934fdbb65cdf4868617d5f0d80595ad11
+└──────────────────────────────────────────────────
 ```
 
 ### Discover (JSON)
@@ -416,18 +424,122 @@ Featured Token Profiles (2) — limit 2
 ```text
 Assessing risk for 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 on ethereum...
 
-Risk Assessment Report
-════════════════════════════════════════════════════════════
-Address:             0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
-Chain:               ethereum
-Risk Score:          1.9/10
-Risk Level:          Low
-Assessed At:         2026-02-13 13:40 UTC
-
-Recommendations
-────────────────────────────────────────────────────────────
-1. Standard monitoring
+┌─ 🟢 Risk Assessment Report ───────────────────
+│  Address            0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
+│  Chain              ethereum
+│  Risk Score         [██──────────────────] 19/100
+│  Risk Level         🟢 Low
+│  Assessed At        2026-02-13 13:40 UTC
+│
+├── Recommendations
+│  1. Standard monitoring
+└──────────────────────────────────────────────────
 ```
+
+### Contract analysis
+
+```bash
+> scope contract 0xdAC17F958D2ee523a2206206994597C13D831ec7
+```
+
+```text
+┌─ Contract Analysis: 0xdAC17F958D2ee523a2206206994597C13D831ec7
+│  Chain              ethereum
+│  Verified           Yes
+│
+│  Security Score     [████████████████────] 82/100
+│       Moderate risk — some findings detected
+│
+├── Source Code
+│  Contract Name      TetherToken
+│  Compiler           v0.4.18+commit.9cf6e910
+│  EVM Version        default
+│  License            MIT
+│  Optimization       No
+│  ABI Functions      36
+│
+├── Proxy Detection
+│  ✓ Not a proxy contract
+│
+├── Access Control
+│  Ownership          Ownable
+│  Renounced          No
+│  Role-based         No
+│
+├── Vulnerability Findings
+│  ✗ VULN-003 — Unchecked External Calls (High)
+│       External calls without return value checks can silently fail
+│       Fix: Check return values of all external calls
+│  ℹ VULN-005 — Missing Zero-Address Checks (Medium)
+│       Functions accepting addresses should validate against address(0)
+│       Fix: Add require(addr != address(0)) checks
+│
+├── External Intelligence
+│  ℹ GitHub repository linked
+│  ✓ Sourcify verification found
+└──────────────────────────────────────────────────
+```
+
+### Setup status
+
+```bash
+> scope setup --status
+```
+
+```text
+┌─ Scope Configuration Status ──────────────────
+│  Config File        ~/.config/scope/config.yaml
+│
+├── API Keys
+│  ✓ etherscan        configured
+│  ✓ polygonscan      configured
+│  ✗ bscscan          not set
+│  ✗ solscan          not set
+│  ✗ tronscan         not set
+│
+├── RPC Endpoints
+│  ✓ ethereum_rpc     configured
+│  ✓ bsc_rpc          configured
+│  ✓ solana_rpc       configured
+│  ✓ tron_api         configured
+│
+│  ℹ Run `scope setup` to configure missing keys
+└──────────────────────────────────────────────────
+```
+
+## Web Interface
+
+Scope includes a locally-hosted web UI (`scope web`) that provides browser-based access to all analysis features. The interface features a dark theme, responsive layout, and `@label` address book autocomplete in every input field.
+
+<p align="center">
+  <img src="docs/screenshots/web-insights.png" alt="Insights panel" width="800">
+  <br><em>Unified Insights — auto-detect address, tx hash, or token and run all relevant analyses</em>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/web-address.png" alt="Address analysis panel" width="800">
+  <br><em>Address Analysis — balance, tokens, transactions, and optional dossier (risk) mode</em>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/web-contract.png" alt="Contract analysis panel" width="800">
+  <br><em>Contract Analysis — security scoring, proxy detection, vulnerability findings</em>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/web-address-book.png" alt="Address Book" width="800">
+  <br><em>Address Book — save addresses with labels; use <code>@label</code> in any input for instant recall</em>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/web-market.png" alt="Market summary panel" width="800">
+  <br><em>Market Summary — peg analysis, order book depth, and health checks for any CEX venue</em>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/web-setup.png" alt="Configuration panel" width="800">
+  <br><em>Configuration — API key status, RPC endpoints, and inline key management</em>
+</p>
 
 ## Exchange Venues
 

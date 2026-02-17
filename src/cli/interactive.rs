@@ -674,6 +674,7 @@ async fn execute_input(
 
 /// Execute tokens subcommand for managing saved token aliases.
 async fn execute_tokens_command(args: &[&str]) -> Result<()> {
+    use crate::display::terminal as t;
     use crate::tokens::TokenAliases;
 
     let mut aliases = TokenAliases::load();
@@ -682,22 +683,48 @@ async fn execute_tokens_command(args: &[&str]) -> Result<()> {
         // List all saved tokens
         let tokens = aliases.list();
         if tokens.is_empty() {
-            println!("No saved token aliases.");
-            println!("Use 'crawl <token_name> --save' to save a token alias.");
+            println!("{}", t::info_row("No saved token aliases."));
+            println!(
+                "{}",
+                t::info_row("Use 'crawl <token_name> --save' to save a token alias.")
+            );
             return Ok(());
         }
 
-        println!("\nSaved Token Aliases\n{}\n", "=".repeat(60));
-        println!("{:<10} {:<12} {:<20} Address", "Symbol", "Chain", "Name");
-        println!("{}", "-".repeat(80));
-
+        println!("{}", t::section_header("Saved Token Aliases"));
+        let cols = &[
+            t::Col {
+                label: "Symbol",
+                width: 10,
+                align: '<',
+            },
+            t::Col {
+                label: "Chain",
+                width: 12,
+                align: '<',
+            },
+            t::Col {
+                label: "Name",
+                width: 20,
+                align: '<',
+            },
+            t::Col {
+                label: "Address",
+                width: 42,
+                align: '<',
+            },
+        ];
+        println!("{}", t::table_header(cols));
         for token in tokens {
             println!(
-                "{:<10} {:<12} {:<20} {}",
-                token.symbol, token.chain, token.name, token.address
+                "{}",
+                t::table_row(
+                    cols,
+                    &[&token.symbol, &token.chain, &token.name, &token.address]
+                )
             );
         }
-        println!();
+        println!("{}", t::section_footer());
         return Ok(());
     }
 
@@ -706,41 +733,87 @@ async fn execute_tokens_command(args: &[&str]) -> Result<()> {
         "list" | "ls" => {
             let tokens = aliases.list();
             if tokens.is_empty() {
-                println!("No saved token aliases.");
+                println!("{}", t::info_row("No saved token aliases."));
                 return Ok(());
             }
 
-            println!("\nSaved Token Aliases\n{}\n", "=".repeat(60));
-            println!("{:<10} {:<12} {:<20} Address", "Symbol", "Chain", "Name");
-            println!("{}", "-".repeat(80));
-
+            println!("{}", t::section_header("Saved Token Aliases"));
+            let cols = &[
+                t::Col {
+                    label: "Symbol",
+                    width: 10,
+                    align: '<',
+                },
+                t::Col {
+                    label: "Chain",
+                    width: 12,
+                    align: '<',
+                },
+                t::Col {
+                    label: "Name",
+                    width: 20,
+                    align: '<',
+                },
+                t::Col {
+                    label: "Address",
+                    width: 42,
+                    align: '<',
+                },
+            ];
+            println!("{}", t::table_header(cols));
             for token in tokens {
                 println!(
-                    "{:<10} {:<12} {:<20} {}",
-                    token.symbol, token.chain, token.name, token.address
+                    "{}",
+                    t::table_row(
+                        cols,
+                        &[&token.symbol, &token.chain, &token.name, &token.address]
+                    )
                 );
             }
-            println!();
+            println!("{}", t::section_footer());
         }
 
         "recent" => {
             let recent = aliases.recent();
             if recent.is_empty() {
-                println!("No recently used tokens.");
+                println!("{}", t::info_row("No recently used tokens."));
                 return Ok(());
             }
 
-            println!("\nRecently Used Tokens\n{}\n", "=".repeat(60));
-            println!("{:<10} {:<12} {:<20} Address", "Symbol", "Chain", "Name");
-            println!("{}", "-".repeat(80));
-
+            println!("{}", t::section_header("Recently Used Tokens"));
+            let cols = &[
+                t::Col {
+                    label: "Symbol",
+                    width: 10,
+                    align: '<',
+                },
+                t::Col {
+                    label: "Chain",
+                    width: 12,
+                    align: '<',
+                },
+                t::Col {
+                    label: "Name",
+                    width: 20,
+                    align: '<',
+                },
+                t::Col {
+                    label: "Address",
+                    width: 42,
+                    align: '<',
+                },
+            ];
+            println!("{}", t::table_header(cols));
             for token in recent {
                 println!(
-                    "{:<10} {:<12} {:<20} {}",
-                    token.symbol, token.chain, token.name, token.address
+                    "{}",
+                    t::table_row(
+                        cols,
+                        &[&token.symbol, &token.chain, &token.name, &token.address]
+                    )
                 );
             }
-            println!();
+            println!("{}", t::section_footer());
         }
 
         "remove" | "rm" | "delete" => {
