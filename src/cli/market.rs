@@ -41,11 +41,48 @@ pub enum MarketCommands {
 
 /// Arguments for `scope market summary`.
 ///
-/// Default thresholds (min_levels, min_depth, peg_range) originated from the
-/// PUSD Hummingbot market-making config and are tunable for other markets.
+/// Default thresholds (min_levels, min_depth, peg_range) originated from
+/// stablecoin market-making defaults and are tunable for other markets.
 #[derive(Debug, Args)]
+#[command(
+    after_help = "\x1b[1mExamples:\x1b[0m
+  scope market summary DAI --venue binance
+  scope market summary @dai-token --venue binance         \x1b[2m# address book shortcut\x1b[0m
+  scope market summary USDC --venue binance --format json
+  scope market summary DAI --venue binance --every 30s --duration 1h
+  scope market summary DAI --venue binance --report health.md --csv peg.csv",
+    after_long_help = "\x1b[1mExamples:\x1b[0m
+
+  \x1b[1m$ scope market summary DAI --venue binance\x1b[0m
+
+  +-- DAI/USDT (binance) ----------------------------+
+  |                                                     |
+  |-- Metrics                                           |
+  |  Best Bid           0.9999  (-0.010%)               |
+  |  Best Ask           1.0001  (+0.010%)               |
+  |  Mid Price          1.0000  (+0.000%)               |
+  |  Spread             0.0002  (0.020%)                |
+  |  Volume (24h)       125000 USDT                     |
+  |                                                     |
+  |-- Health Checks                                     |
+  |  + No sells below peg                               |
+  |  + Bid/Ask ratio: 0.93x                             |
+  |  + Bid levels: 8 >= 6 minimum                       |
+  |  + Bid depth: 42000 USDT >= 3000 USDT minimum       |
+  |                                                     |
+  |  HEALTHY                                            |
+  +-----------------------------------------------------+
+
+  \x1b[1m$ scope market summary DAI --venue binance --every 30s --duration 1h\x1b[0m
+
+  Monitoring DAI/USDT (binance) every 30s for 1h...
+  [2026-02-16 10:00:00] Mid=1.0000 Spread=0.020% Depth=42K/45K HEALTHY
+  [2026-02-16 10:00:30] Mid=1.0000 Spread=0.020% Depth=42K/44K HEALTHY
+  [2026-02-16 10:01:00] Mid=0.9999 Spread=0.030% Depth=41K/44K HEALTHY
+  ..."
+)]
 pub struct SummaryArgs {
-    /// Base token symbol (e.g., USDC, PUSD). Quote is USDT.
+    /// Base token symbol (e.g., USDC, DAI) or @label from address book. Quote is USDT.
     #[arg(default_value = "USDC", value_name = "SYMBOL")]
     pub pair: String,
 
@@ -62,11 +99,11 @@ pub struct SummaryArgs {
     #[arg(long, default_value = "1.0", value_name = "TARGET")]
     pub peg: f64,
 
-    /// Minimum order book levels per side (default from PUSD Hummingbot config).
+    /// Minimum order book levels per side.
     #[arg(long, default_value = "6", value_name = "N")]
     pub min_levels: usize,
 
-    /// Minimum depth per side in quote terms, e.g. USDT (default from PUSD Hummingbot config).
+    /// Minimum depth per side in quote terms, e.g. USDT.
     #[arg(long, default_value = "3000", value_name = "USDT")]
     pub min_depth: f64,
 
@@ -117,6 +154,41 @@ pub enum SummaryFormat {
 
 /// Arguments for `scope market ohlc`.
 #[derive(Debug, Args)]
+#[command(
+    after_help = "\x1b[1mExamples:\x1b[0m
+  scope market ohlc BTC
+  scope market ohlc DAI --venue binance --interval 1d
+  scope market ohlc ETH --venue mexc --limit 50 --format json",
+    after_long_help = "\x1b[1mExamples:\x1b[0m
+
+  \x1b[1m$ scope market ohlc BTC --limit 5\x1b[0m
+
+  OHLC -- BTCUSDT (binance) interval=1h limit=5
+  --------------------------------------------------------
+            Open Time          Open         High          Low        Close         Volume
+  --------------------------------------------------------
+    2026-02-16 09:00  97250.120000  97380.540000  97210.980000  97345.670000        1234.56
+    2026-02-16 08:00  97100.890000  97260.120000  97080.340000  97250.120000        1456.78
+    2026-02-16 07:00  96950.230000  97120.890000  96920.560000  97100.890000        1678.90
+    ...
+
+    5 candles returned
+
+  \x1b[1m$ scope market ohlc BTC --format json --limit 2\x1b[0m
+
+  [
+    {
+      \"open_time\": 1739696400000,
+      \"open\": 97250.12,
+      \"high\": 97380.54,
+      \"low\": 97210.98,
+      \"close\": 97345.67,
+      \"volume\": 1234.56,
+      \"close_time\": null
+    },
+    ...
+  ]"
+)]
 pub struct OhlcArgs {
     /// Trading pair symbol (e.g., USDC, BTC). Quote is USDT by default.
     #[arg(default_value = "USDC", value_name = "SYMBOL")]
@@ -141,6 +213,10 @@ pub struct OhlcArgs {
 
 /// Arguments for `scope market trades`.
 #[derive(Debug, Args)]
+#[command(after_help = "\x1b[1mExamples:\x1b[0m
+  scope market trades BTC
+  scope market trades DAI --venue binance --limit 20
+  scope market trades ETH --venue okx --format json")]
 pub struct TradesArgs {
     /// Trading pair symbol (e.g., USDC, BTC). Quote is USDT by default.
     #[arg(default_value = "USDC", value_name = "SYMBOL")]
@@ -183,7 +259,7 @@ pub async fn run(
 }
 
 /// Parse duration strings like "30s", "5m", "1h", "24h" into seconds.
-/// Extract base symbol from pair (e.g. "PUSD_USDT" -> "PUSD", "USDCUSDT" -> "USDC", "USDC" -> "USDC").
+/// Extract base symbol from pair (e.g. "DAI_USDT" -> "DAI", "USDCUSDT" -> "USDC", "USDC" -> "USDC").
 fn base_symbol_from_pair(pair: &str) -> &str {
     let p = pair.trim();
     if let Some(i) = p.find("_USDT") {
@@ -835,6 +911,21 @@ capabilities:
     }
 
     #[test]
+    fn test_parse_duration_unknown_unit_error_message() {
+        let result = parse_duration("30z");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Unknown duration unit"));
+        assert!(err.to_string().contains("z"));
+    }
+
+    #[test]
+    fn test_parse_duration_invalid_number_error() {
+        let result = parse_duration("abc30s");
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_parse_duration_non_positive() {
         assert!(parse_duration("0").is_err());
         assert!(parse_duration("-5s").is_err());
@@ -846,13 +937,13 @@ capabilities:
 
     #[test]
     fn test_base_symbol_from_pair_underscore() {
-        assert_eq!(base_symbol_from_pair("PUSD_USDT"), "PUSD");
+        assert_eq!(base_symbol_from_pair("DAI_USDT"), "DAI");
         assert_eq!(base_symbol_from_pair("USDC_USDT"), "USDC");
     }
 
     #[test]
     fn test_base_symbol_from_pair_lowercase_underscore() {
-        assert_eq!(base_symbol_from_pair("pusd_usdt"), "pusd");
+        assert_eq!(base_symbol_from_pair("dai_usdt"), "dai");
     }
 
     #[test]
@@ -863,7 +954,7 @@ capabilities:
     #[test]
     fn test_base_symbol_from_pair_concat() {
         assert_eq!(base_symbol_from_pair("USDCUSDT"), "USDC");
-        assert_eq!(base_symbol_from_pair("PUSDUSDT"), "PUSD");
+        assert_eq!(base_symbol_from_pair("DAIUSDT"), "DAI");
     }
 
     #[test]
@@ -874,7 +965,7 @@ capabilities:
 
     #[test]
     fn test_base_symbol_from_pair_whitespace() {
-        assert_eq!(base_symbol_from_pair("  PUSD_USDT  "), "PUSD");
+        assert_eq!(base_symbol_from_pair("  DAI_USDT  "), "DAI");
     }
 
     // ====================================================================
@@ -1036,7 +1127,7 @@ capabilities:
         assert_eq!(base_symbol_from_pair("USDC"), "USDC");
         assert_eq!(base_symbol_from_pair("BTCUSDT"), "BTC");
         assert_eq!(base_symbol_from_pair("ETH/USDT"), "ETH");
-        assert_eq!(base_symbol_from_pair("PUSD_USDT"), "PUSD");
+        assert_eq!(base_symbol_from_pair("DAI_USDT"), "DAI");
         assert_eq!(base_symbol_from_pair("X"), "X"); // short symbol, no USDT suffix
         assert_eq!(base_symbol_from_pair(""), "");
     }
@@ -1398,5 +1489,332 @@ capabilities:
             };
             let _result = run_trades(args).await;
         }
+    }
+
+    // ====================================================================
+    // parse_duration — additional edge cases for full coverage
+    // ====================================================================
+
+    #[test]
+    fn test_parse_duration_whitespace_empty() {
+        assert!(parse_duration("").is_err());
+        assert!(parse_duration("   ").is_err());
+    }
+
+    #[test]
+    fn test_parse_duration_sec_secs_second_seconds() {
+        assert_eq!(parse_duration("1sec").unwrap(), 1);
+        assert_eq!(parse_duration("2secs").unwrap(), 2);
+        assert_eq!(parse_duration("1second").unwrap(), 1);
+        assert_eq!(parse_duration("3seconds").unwrap(), 3);
+    }
+
+    #[test]
+    fn test_parse_duration_minute_minutes() {
+        assert_eq!(parse_duration("1minute").unwrap(), 60);
+        assert_eq!(parse_duration("2minutes").unwrap(), 120);
+    }
+
+    #[test]
+    fn test_parse_duration_hr_hrs_hour_hours() {
+        assert_eq!(parse_duration("1hr").unwrap(), 3600);
+        assert_eq!(parse_duration("2hrs").unwrap(), 7200);
+        assert_eq!(parse_duration("1hour").unwrap(), 3600);
+        assert_eq!(parse_duration("0.5hours").unwrap(), 1800);
+    }
+
+    #[test]
+    fn test_parse_duration_number_only_defaults_to_seconds() {
+        assert_eq!(parse_duration("1.5").unwrap(), 1);
+        assert_eq!(parse_duration("42").unwrap(), 42);
+    }
+
+    #[test]
+    fn test_parse_duration_trimmed_input() {
+        assert_eq!(parse_duration("  30s  ").unwrap(), 30);
+        assert_eq!(parse_duration(" 5m ").unwrap(), 300);
+    }
+
+    #[test]
+    fn test_parse_duration_invalid_number_format() {
+        assert!(parse_duration("1.2.3s").is_err());
+        assert!(parse_duration("abc").is_err());
+    }
+
+    // ====================================================================
+    // dex_venue_to_chain — unknown venue fallback
+    // ====================================================================
+
+    #[test]
+    fn test_dex_venue_to_chain_unknown_returns_ethereum() {
+        assert_eq!(dex_venue_to_chain("binance"), "ethereum");
+        assert_eq!(dex_venue_to_chain("kraken"), "ethereum");
+        assert_eq!(dex_venue_to_chain("unknown"), "ethereum");
+    }
+
+    // ====================================================================
+    // market_summary_to_markdown — mixed Pass/Fail checks
+    // ====================================================================
+
+    #[test]
+    fn test_market_summary_to_markdown_mixed_pass_fail_checks() {
+        use crate::market::{HealthCheck, MarketSummary};
+        let summary = MarketSummary {
+            pair: "TESTUSDT".to_string(),
+            peg_target: 1.0,
+            best_bid: Some(0.9999),
+            best_ask: Some(1.0001),
+            mid_price: Some(1.0000),
+            spread: Some(0.0002),
+            volume_24h: Some(500_000.0),
+            bid_depth: 40_000.0,
+            ask_depth: 45_000.0,
+            bid_outliers: 0,
+            ask_outliers: 0,
+            healthy: false,
+            checks: vec![
+                HealthCheck::Pass("Spread within range".to_string()),
+                HealthCheck::Fail("Bid depth below minimum".to_string()),
+            ],
+            execution_10k_buy: None,
+            execution_10k_sell: None,
+            asks: vec![],
+            bids: vec![],
+        };
+        let md = market_summary_to_markdown(&summary, "TestVenue", "TESTUSDT");
+        assert!(md.contains("✓ Spread within range"));
+        assert!(md.contains("✗ Bid depth below minimum"));
+        assert!(md.contains("✗")); // unhealthy indicator in table
+    }
+
+    #[test]
+    fn test_market_summary_to_markdown_empty_checks() {
+        use crate::market::MarketSummary;
+        let summary = MarketSummary {
+            pair: "X".to_string(),
+            peg_target: 1.0,
+            best_bid: Some(1.0),
+            best_ask: Some(1.0),
+            mid_price: Some(1.0),
+            spread: Some(0.0),
+            volume_24h: None,
+            bid_depth: 100.0,
+            ask_depth: 100.0,
+            bid_outliers: 0,
+            ask_outliers: 0,
+            healthy: true,
+            checks: vec![],
+            execution_10k_buy: None,
+            execution_10k_sell: None,
+            asks: vec![],
+            bids: vec![],
+        };
+        let md = market_summary_to_markdown(&summary, "Venue", "X");
+        assert!(md.contains("Market Health Report"));
+        assert!(md.contains("Health Checks"));
+    }
+
+    // ====================================================================
+    // OhlcFormat / SummaryFormat trait coverage
+    // ====================================================================
+
+    #[test]
+    fn test_ohlc_format_partial_eq() {
+        assert_eq!(OhlcFormat::Text, OhlcFormat::Text);
+        assert_eq!(OhlcFormat::Json, OhlcFormat::Json);
+        assert_ne!(OhlcFormat::Text, OhlcFormat::Json);
+    }
+
+    #[test]
+    fn test_summary_format_clone_copy() {
+        let text = SummaryFormat::Text;
+        let cloned = text;
+        assert!(matches!(cloned, SummaryFormat::Text));
+        assert!(matches!(text, SummaryFormat::Text));
+    }
+
+    // ====================================================================
+    // run_summary — error paths and report/csv
+    // ====================================================================
+
+    #[tokio::test]
+    async fn test_run_summary_interval_zero_error() {
+        let args = SummaryArgs {
+            pair: "USDC".to_string(),
+            venue: "eth".to_string(),
+            chain: "ethereum".to_string(),
+            peg: 1.0,
+            min_levels: 1,
+            min_depth: 50.0,
+            peg_range: 0.01,
+            min_bid_ask_ratio: 0.1,
+            max_bid_ask_ratio: 10.0,
+            format: SummaryFormat::Text,
+            every: Some("0.1s".to_string()),
+            duration: Some("1m".to_string()),
+            report: None,
+            csv: None,
+        };
+        let factory = DefaultClientFactory {
+            chains_config: Default::default(),
+        };
+        let result = run_summary(args, &factory).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Interval must be positive") || err.contains("positive"),
+            "expected interval error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_summary_one_shot_with_report() {
+        let report_dir = tempfile::tempdir().unwrap();
+        let report_path = report_dir.path().join("report.md");
+        let args = SummaryArgs {
+            pair: "USDC".to_string(),
+            venue: "eth".to_string(),
+            chain: "ethereum".to_string(),
+            peg: 1.0,
+            min_levels: 1,
+            min_depth: 50.0,
+            peg_range: 0.01,
+            min_bid_ask_ratio: 0.1,
+            max_bid_ask_ratio: 10.0,
+            format: SummaryFormat::Text,
+            every: None,
+            duration: None,
+            report: Some(report_path.clone()),
+            csv: None,
+        };
+        let factory = DefaultClientFactory {
+            chains_config: Default::default(),
+        };
+        let result = run_summary(args, &factory).await;
+        if result.is_ok() {
+            let content = std::fs::read_to_string(&report_path).unwrap();
+            assert!(content.contains("Market Health Report"));
+        }
+    }
+
+    // ====================================================================
+    // MarketCommands and struct Debug/construction
+    // ====================================================================
+
+    #[test]
+    fn test_market_commands_debug() {
+        let cmd = MarketCommands::Summary(SummaryArgs {
+            pair: "USDC".to_string(),
+            venue: "binance".to_string(),
+            chain: "ethereum".to_string(),
+            peg: 1.0,
+            min_levels: 6,
+            min_depth: 3000.0,
+            peg_range: 0.001,
+            min_bid_ask_ratio: 0.2,
+            max_bid_ask_ratio: 5.0,
+            format: SummaryFormat::Text,
+            every: None,
+            duration: None,
+            report: None,
+            csv: None,
+        });
+        let debug = format!("{:?}", cmd);
+        assert!(debug.contains("Summary"));
+
+        let ohlc_cmd = MarketCommands::Ohlc(OhlcArgs {
+            pair: "BTC".to_string(),
+            venue: "binance".to_string(),
+            interval: "1h".to_string(),
+            limit: 100,
+            format: OhlcFormat::Text,
+        });
+        assert!(format!("{:?}", ohlc_cmd).contains("Ohlc"));
+
+        let trades_cmd = MarketCommands::Trades(TradesArgs {
+            pair: "ETH".to_string(),
+            venue: "binance".to_string(),
+            limit: 50,
+            format: OhlcFormat::Json,
+        });
+        assert!(format!("{:?}", trades_cmd).contains("Trades"));
+    }
+
+    #[test]
+    fn test_summary_args_with_report_csv_options() {
+        let args = SummaryArgs {
+            pair: "DAI".to_string(),
+            venue: "binance".to_string(),
+            chain: "ethereum".to_string(),
+            peg: 1.0,
+            min_levels: 6,
+            min_depth: 3000.0,
+            peg_range: 0.001,
+            min_bid_ask_ratio: 0.2,
+            max_bid_ask_ratio: 5.0,
+            format: SummaryFormat::Json,
+            every: Some("30s".to_string()),
+            duration: Some("1h".to_string()),
+            report: Some(std::path::PathBuf::from("/tmp/report.md")),
+            csv: Some(std::path::PathBuf::from("/tmp/data.csv")),
+        };
+        assert_eq!(args.pair, "DAI");
+        assert_eq!(args.venue, "binance");
+        assert!(args.every.is_some());
+        assert!(args.duration.is_some());
+        assert!(args.report.is_some());
+        assert!(args.csv.is_some());
+    }
+
+    #[test]
+    fn test_base_symbol_from_pair_4char_usdt() {
+        // "USDT" itself has len 4, so doesn't satisfy p.len() > 4
+        assert_eq!(base_symbol_from_pair("USDT"), "USDT");
+    }
+
+    #[test]
+    fn test_market_summary_to_markdown_unhealthy() {
+        use crate::market::{HealthCheck, MarketSummary};
+        let summary = MarketSummary {
+            pair: "X".to_string(),
+            peg_target: 1.0,
+            best_bid: Some(0.99),
+            best_ask: Some(1.01),
+            mid_price: Some(1.0),
+            spread: Some(0.02),
+            volume_24h: None,
+            bid_depth: 100.0,
+            ask_depth: 100.0,
+            bid_outliers: 0,
+            ask_outliers: 0,
+            healthy: false,
+            checks: vec![HealthCheck::Fail("Peg deviation too high".to_string())],
+            execution_10k_buy: None,
+            execution_10k_sell: None,
+            asks: vec![],
+            bids: vec![],
+        };
+        let md = market_summary_to_markdown(&summary, "Test", "X");
+        assert!(md.contains("✗"));
+        assert!(md.contains("Peg deviation too high"));
+    }
+
+    #[test]
+    fn test_ohlc_format_eq() {
+        assert_eq!(OhlcFormat::Text, OhlcFormat::Text);
+        assert_ne!(OhlcFormat::Text, OhlcFormat::Json);
+    }
+
+    #[test]
+    fn test_trades_args_default_venue() {
+        let args = TradesArgs {
+            pair: "USDC".to_string(),
+            venue: "binance".to_string(),
+            limit: 50,
+            format: OhlcFormat::Text,
+        };
+        assert_eq!(args.pair, "USDC");
+        assert_eq!(args.venue, "binance");
     }
 }

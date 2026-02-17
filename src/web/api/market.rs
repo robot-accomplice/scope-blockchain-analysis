@@ -13,7 +13,7 @@ use std::sync::Arc;
 /// Request body for market summary.
 #[derive(Debug, Deserialize)]
 pub struct MarketRequest {
-    /// Token symbol (e.g., "USDC", "PUSD"). Default: "USDC".
+    /// Token symbol (e.g., "USDC", "DAI"). Default: "USDC".
     #[serde(default = "default_pair")]
     pub pair: String,
     /// Market venue: "binance", "biconomy", "eth", "solana".
@@ -237,8 +237,8 @@ mod tests {
     #[test]
     fn test_deserialize_full() {
         let json = serde_json::json!({
-            "pair": "PUSD",
-            "market_venue": "biconomy",
+            "pair": "DAI",
+            "market_venue": "binance",
             "chain": "polygon",
             "peg": 1.0,
             "min_levels": 10,
@@ -246,8 +246,8 @@ mod tests {
             "peg_range": 0.002
         });
         let req: MarketRequest = serde_json::from_value(json).unwrap();
-        assert_eq!(req.pair, "PUSD");
-        assert_eq!(req.market_venue, "biconomy");
+        assert_eq!(req.pair, "DAI");
+        assert_eq!(req.market_venue, "binance");
         assert_eq!(req.chain, "polygon");
         assert_eq!(req.peg, 1.0);
         assert_eq!(req.min_levels, 10);
@@ -412,5 +412,121 @@ mod tests {
         };
         let debug = format!("{:?}", req);
         assert!(debug.contains("MarketRequest"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_market_invalid_venue_bad_request() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
+        use axum::extract::State;
+        use axum::response::IntoResponse;
+
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+        let req = MarketRequest {
+            pair: "USDC".to_string(),
+            market_venue: "nonexistent_venue_xyz".to_string(),
+            chain: "ethereum".to_string(),
+            peg: 1.0,
+            min_levels: 6,
+            min_depth: 3000.0,
+            peg_range: 0.001,
+        };
+        let response = handle(State(state), axum::Json(req)).await.into_response();
+        let status = response.status();
+        // Unknown venue -> BAD_REQUEST from create_exchange_client
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_handle_market_success_json_structure() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
+        use axum::body;
+        use axum::extract::State;
+        use axum::response::IntoResponse;
+
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+        let req = MarketRequest {
+            pair: "USDC".to_string(),
+            market_venue: "binance".to_string(),
+            chain: "ethereum".to_string(),
+            peg: 1.0,
+            min_levels: 6,
+            min_depth: 3000.0,
+            peg_range: 0.001,
+        };
+        let response = handle(State(state), axum::Json(req)).await.into_response();
+        if response.status().is_success() {
+            let body_bytes = body::to_bytes(response.into_body(), 1_000_000)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            assert!(json.get("pair").is_some());
+            assert!(json.get("peg_target").is_some());
+            assert!(json.get("best_bid").is_some());
+            assert!(json.get("best_ask").is_some());
+            assert!(json.get("healthy").is_some());
+            assert!(json.get("checks").is_some());
+        }
+    }
+
+    #[test]
+    fn test_is_dex_venue_case_insensitive() {
+        assert!(is_dex_venue("ETHEREUM"));
+        assert!(is_dex_venue("SOLANA"));
+        assert!(!is_dex_venue("BINANCE"));
+    }
+
+    #[test]
+    fn test_summary_to_json_with_execution_estimates() {
+        use crate::market::OrderBookLevel;
+
+        let book = crate::market::OrderBook {
+            pair: "USDC/USDT".to_string(),
+            bids: vec![
+                OrderBookLevel {
+                    price: 0.9999,
+                    quantity: 20_000.0,
+                },
+                OrderBookLevel {
+                    price: 0.9998,
+                    quantity: 10_000.0,
+                },
+            ],
+            asks: vec![
+                OrderBookLevel {
+                    price: 1.0001,
+                    quantity: 20_000.0,
+                },
+                OrderBookLevel {
+                    price: 1.0002,
+                    quantity: 10_000.0,
+                },
+            ],
+        };
+        let thresholds = HealthThresholds::default();
+        let summary =
+            crate::market::MarketSummary::from_order_book(&book, 1.0, &thresholds, Some(50_000.0));
+        let json = summary_to_json(&summary);
+
+        assert_eq!(json["pair"], "USDC/USDT");
+        assert!(json["best_bid"].as_f64().unwrap() > 0.0);
+        assert!(json["best_ask"].as_f64().unwrap() > 0.0);
+        assert!(json.get("healthy").is_some());
+        assert!(!json["checks"].as_array().unwrap().is_empty());
+        assert!(json.get("execution_10k_buy").is_some());
+        assert!(json.get("execution_10k_sell").is_some());
+        assert!(json.get("bids").is_some());
+        assert!(json.get("asks").is_some());
     }
 }

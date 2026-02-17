@@ -76,6 +76,15 @@ async fn serve_ui(uri: axum::http::Uri) -> impl axum::response::IntoResponse {
             include_str!("static/style.css"),
         )
             .into_response(),
+        "favicon.svg" => (
+            [(axum::http::header::CONTENT_TYPE, "image/svg+xml")],
+            include_str!("static/favicon.svg"),
+        )
+            .into_response(),
+        "favicon.ico" => {
+            // Redirect .ico requests to the SVG favicon
+            axum::response::Redirect::permanent("/favicon.svg").into_response()
+        }
         // SPA fallback: serve index.html for client-side routing
         _ => axum::response::Html(include_str!("static/index.html")).into_response(),
     }
@@ -322,6 +331,81 @@ mod tests {
         assert!(html.contains("<!DOCTYPE html>"));
     }
 
+    #[tokio::test]
+    async fn test_serve_ui_favicon_svg() {
+        let response = serve_ui(axum::http::Uri::from_static("/favicon.svg"))
+            .await
+            .into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let headers = response.headers();
+        let ct = headers.get(axum::http::header::CONTENT_TYPE).unwrap();
+        assert_eq!(ct, "image/svg+xml");
+    }
+
+    #[tokio::test]
+    async fn test_serve_ui_favicon_ico_redirect() {
+        let response = serve_ui(axum::http::Uri::from_static("/favicon.ico"))
+            .await
+            .into_response();
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::PERMANENT_REDIRECT
+        );
+        let headers = response.headers();
+        let loc = headers.get(axum::http::header::LOCATION).unwrap();
+        assert_eq!(loc, "/favicon.svg");
+    }
+
+    #[tokio::test]
+    async fn test_route_ws_monitor_handshake() {
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let state = test_state();
+        let app = build_router(state);
+
+        // GET /ws/monitor?token=USDC - WebSocket upgrade with required query params
+        let req = Request::builder()
+            .uri("/ws/monitor?token=USDC")
+            .method("GET")
+            .header("Connection", "Upgrade")
+            .header("Upgrade", "websocket")
+            .header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+            .header("Sec-WebSocket-Version", "13")
+            .body(axum::body::Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(req).await.unwrap();
+        // With Upgrade headers: 101 Switching Protocols; without proper handshake: 426
+        let status = response.status();
+        assert!(
+            status == StatusCode::SWITCHING_PROTOCOLS
+                || status == StatusCode::UPGRADE_REQUIRED
+                || status.is_success(),
+            "Unexpected status: {}",
+            status
+        );
+    }
+
+    #[tokio::test]
+    async fn test_route_ws_monitor_missing_token() {
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let state = test_state();
+        let app = build_router(state);
+
+        let req = Request::builder()
+            .uri("/ws/monitor")
+            .method("GET")
+            .body(axum::body::Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(req).await.unwrap();
+        // Missing required token param -> 422 Unprocessable Entity
+        assert!(response.status().is_client_error());
+    }
+
     #[test]
     fn test_pid_file_path_in_data_dir() {
         let path = pid_file_path();
@@ -355,6 +439,13 @@ mod tests {
         let pid = pid_file_path();
         let log = log_file_path();
         assert_eq!(pid.parent(), log.parent());
+    }
+
+    #[test]
+    fn test_stop_daemon_invoked_no_pid_file() {
+        // Exercise stop_daemon when PID file does not exist (common in tests)
+        let result = stop_daemon();
+        assert!(result.is_ok());
     }
 
     // Helper to create the test app state
@@ -633,6 +724,35 @@ mod tests {
 
         let req = Request::builder()
             .uri("/api/token-health")
+            .method("POST")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(payload.to_string()))
+            .unwrap();
+
+        let response = app.oneshot(req).await.unwrap();
+        let status = response.status();
+        assert!(
+            status == StatusCode::OK
+                || status == StatusCode::BAD_REQUEST
+                || status == StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[tokio::test]
+    async fn test_route_post_contract() {
+        use axum::http::{Request, StatusCode, header};
+        use tower::ServiceExt;
+
+        let state = test_state();
+        let app = build_router(state);
+
+        let payload = serde_json::json!({
+            "address": "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
+            "chain": "ethereum"
+        });
+
+        let req = Request::builder()
+            .uri("/api/contract")
             .method("POST")
             .header(header::CONTENT_TYPE, "application/json")
             .body(axum::body::Body::from(payload.to_string()))

@@ -323,7 +323,7 @@ mod tests {
             headers: HashMap::new(),
             capabilities: CapabilitySet::default(),
         };
-        assert_eq!(desc.format_pair("PUSD", None), "PUSD_USDT");
+        assert_eq!(desc.format_pair("DAI", None), "DAI_USDT");
     }
 
     #[test]
@@ -663,7 +663,7 @@ capabilities:
             capabilities: CapabilitySet::default(),
         };
         assert_eq!(desc.format_pair("BTC", None), "BTC_USDT");
-        assert_eq!(desc.format_pair("PUSD", Some("USD")), "PUSD_USD");
+        assert_eq!(desc.format_pair("DAI", Some("USD")), "DAI_USD");
     }
 
     #[test]

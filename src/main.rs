@@ -164,6 +164,11 @@ async fn main() -> Result<()> {
         chains_config: config.chains.clone(),
     };
 
+    // Print version on stderr for non-interactive commands
+    if !cli.command.is_interactive() {
+        eprintln!("Scope v{}", scope::VERSION);
+    }
+
     // Dispatch to command handler
     let result = match cli.command {
         Commands::Completions(args) => {
@@ -228,6 +233,7 @@ async fn main() -> Result<()> {
             .await
             .map_err(|e| scope::error::ScopeError::Other(e.to_string())),
         Commands::Insights(args) => scope::cli::insights::run(args, &config, &factory).await,
+        Commands::Contract(ref args) => scope::cli::contract::run(args, &config, &factory).await,
         // Web command is handled above before factory creation
         Commands::Web(_) => unreachable!("Web command handled before dispatch"),
     };
@@ -273,6 +279,11 @@ fn prompt_for_setup() -> bool {
 
 /// Runs a command with the given config.
 async fn run_command(command: Commands, config: &Config) -> Result<()> {
+    // Print version on stderr for non-interactive commands
+    if !command.is_interactive() {
+        eprintln!("Scope v{}", scope::VERSION);
+    }
+
     let factory = DefaultClientFactory {
         chains_config: config.chains.clone(),
     };
@@ -339,6 +350,7 @@ async fn run_command(command: Commands, config: &Config) -> Result<()> {
             .await
             .map_err(|e| scope::error::ScopeError::Other(e.to_string())),
         Commands::Insights(args) => scope::cli::insights::run(args, config, &factory).await,
+        Commands::Contract(ref args) => scope::cli::contract::run(args, config, &factory).await,
         // Web command is handled in main() before factory creation
         Commands::Web(_) => unreachable!("Web command handled before dispatch"),
     };

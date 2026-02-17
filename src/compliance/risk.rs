@@ -414,6 +414,316 @@ impl RiskEngine {
     }
 }
 
+// ============================================================================
+// Enhanced Risk Detection (Contract-Aware)
+// ============================================================================
+
+/// Enhanced holder concentration analysis with Gini coefficient.
+pub fn compute_gini_coefficient(percentages: &[f64]) -> f64 {
+    if percentages.is_empty() {
+        return 0.0;
+    }
+    let n = percentages.len() as f64;
+    let mut sorted = percentages.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let sum: f64 = sorted.iter().sum();
+    if sum == 0.0 {
+        return 0.0;
+    }
+
+    let mut numerator = 0.0;
+    for (i, &val) in sorted.iter().enumerate() {
+        numerator += (2.0 * (i as f64 + 1.0) - n - 1.0) * val;
+    }
+
+    (numerator / (n * sum)).clamp(0.0, 1.0)
+}
+
+/// Detect rugpull indicators from contract analysis.
+///
+/// Returns a list of rugpull risk indicators with severity (0-10).
+pub fn detect_rugpull_indicators(
+    contract_analysis: Option<&crate::contract::ContractAnalysis>,
+    token_analytics: Option<&crate::chains::TokenAnalytics>,
+) -> Vec<RiskFactor> {
+    let mut factors = Vec::new();
+
+    if let Some(ca) = contract_analysis {
+        let mut evidence = Vec::new();
+        let mut score: f32 = 0.0;
+
+        // Check for owner can mint
+        if let Some(ac) = &ca.access_control {
+            for pf in &ac.privileged_functions {
+                match pf.name.to_lowercase().as_str() {
+                    n if n.contains("mint") => {
+                        score += 3.0;
+                        evidence.push(format!("Owner can mint tokens: {}", pf.name));
+                    }
+                    n if n.contains("pause") => {
+                        score += 2.0;
+                        evidence.push(format!("Owner can pause transfers: {}", pf.name));
+                    }
+                    n if n.contains("blacklist") => {
+                        score += 2.5;
+                        evidence.push(format!("Owner can blacklist addresses: {}", pf.name));
+                    }
+                    n if n.contains("setfee") || n.contains("settax") => {
+                        score += 2.0;
+                        evidence.push(format!("Owner can change fees: {}", pf.name));
+                    }
+                    _ => {}
+                }
+            }
+
+            // Renounced ownership reduces risk
+            if ac.has_renounced_ownership {
+                score -= 3.0;
+                evidence.push("Ownership has been renounced".to_string());
+            }
+
+            // tx.origin usage is a red flag
+            if ac.uses_tx_origin {
+                score += 2.0;
+                evidence.push("Uses tx.origin for authorization".to_string());
+            }
+        }
+
+        // Unverified source is a major red flag
+        if !ca.is_verified {
+            score += 3.0;
+            evidence.push("Contract source code is not verified".to_string());
+        }
+
+        score = score.clamp(0.0, 10.0);
+
+        if !evidence.is_empty() {
+            factors.push(RiskFactor {
+                name: "Rugpull Risk (Contract)".to_string(),
+                category: RiskCategory::Reputation,
+                score,
+                weight: 0.35,
+                description: "Contract-level rugpull indicators".to_string(),
+                evidence,
+            });
+        }
+    }
+
+    if let Some(ta) = token_analytics {
+        let mut evidence = Vec::new();
+        let mut score: f32 = 0.0;
+
+        // Extreme concentration
+        if let Some(top10) = ta.top_10_concentration {
+            if top10 > 80.0 {
+                score += 4.0;
+                evidence.push(format!("Top 10 holders control {:.1}% of supply", top10));
+            } else if top10 > 50.0 {
+                score += 2.0;
+                evidence.push(format!("Top 10 holders control {:.1}% of supply", top10));
+            }
+        }
+
+        // Very new token
+        if let Some(age) = ta.token_age_hours {
+            if age < 24.0 {
+                score += 3.0;
+                evidence.push(format!("Token is very new ({:.0}h old)", age));
+            } else if age < 72.0 {
+                score += 1.5;
+                evidence.push(format!("Token is recently created ({:.0}h old)", age));
+            }
+        }
+
+        // No sells (honeypot indicator)
+        if ta.total_sells_24h == 0 && ta.total_buys_24h > 10 {
+            score += 4.0;
+            evidence.push(format!(
+                "No sells in 24h with {} buys (potential honeypot)",
+                ta.total_buys_24h
+            ));
+        }
+
+        // Low liquidity
+        if ta.liquidity_usd < 10_000.0 && ta.liquidity_usd > 0.0 {
+            score += 2.0;
+            evidence.push(format!("Very low liquidity: ${:.0}", ta.liquidity_usd));
+        }
+
+        score = score.clamp(0.0, 10.0);
+
+        if !evidence.is_empty() {
+            factors.push(RiskFactor {
+                name: "Rugpull Risk (Token)".to_string(),
+                category: RiskCategory::Reputation,
+                score,
+                weight: 0.35,
+                description: "Token-level rugpull indicators".to_string(),
+                evidence,
+            });
+        }
+    }
+
+    factors
+}
+
+/// Detect whale activity from transaction data.
+///
+/// Returns whale-related risk factors based on large transactions
+/// and holder concentration.
+pub fn detect_whale_activity(
+    transactions: &[crate::chains::Transaction],
+    avg_tx_value_usd: f64,
+    whale_threshold_usd: f64,
+) -> RiskFactor {
+    let mut evidence = Vec::new();
+    let mut score: f32 = 0.0;
+
+    let large_txs: Vec<_> = transactions
+        .iter()
+        .filter(|tx| {
+            // Parse value if possible (rough heuristic)
+            tx.value
+                .parse::<f64>()
+                .map(|v| v > whale_threshold_usd)
+                .unwrap_or(false)
+        })
+        .collect();
+
+    if !large_txs.is_empty() {
+        let pct = (large_txs.len() as f64 / transactions.len() as f64) * 100.0;
+        score += (pct / 10.0) as f32;
+        evidence.push(format!(
+            "{} whale-sized transactions ({:.1}% of total)",
+            large_txs.len(),
+            pct
+        ));
+    }
+
+    if avg_tx_value_usd > whale_threshold_usd * 0.5 {
+        score += 2.0;
+        evidence.push(format!(
+            "Average transaction size ${:.0} is near whale threshold ${:.0}",
+            avg_tx_value_usd, whale_threshold_usd
+        ));
+    }
+
+    if evidence.is_empty() {
+        evidence.push("No significant whale activity detected".to_string());
+    }
+
+    score = score.clamp(0.0, 10.0);
+
+    RiskFactor {
+        name: "Whale Activity".to_string(),
+        category: RiskCategory::Behavioral,
+        score,
+        weight: 0.15,
+        description: "Large transaction and whale holder analysis".to_string(),
+        evidence,
+    }
+}
+
+/// Detect timelock patterns from contract analysis.
+pub fn detect_timelock(
+    contract_analysis: &crate::contract::ContractAnalysis,
+) -> Option<RiskFactor> {
+    let src = contract_analysis.source_info.as_ref()?;
+    let code_lower = src.source_code.to_lowercase();
+
+    let mut evidence = Vec::new();
+    let mut has_timelock = false;
+
+    if code_lower.contains("timelockcontroller") || code_lower.contains("timelock") {
+        has_timelock = true;
+        evidence.push("TimelockController pattern detected".to_string());
+    }
+
+    if code_lower.contains("delay")
+        && code_lower.contains("queue")
+        && code_lower.contains("execute")
+    {
+        has_timelock = true;
+        evidence.push("Queue/delay/execute governance pattern found".to_string());
+    }
+
+    if code_lower.contains("mindelay") || code_lower.contains("minimum_delay") {
+        evidence.push("Minimum delay parameter found".to_string());
+    }
+
+    // Timelock presence reduces risk
+    let score = if has_timelock { 2.0 } else { 5.0 };
+
+    Some(RiskFactor {
+        name: "Timelock".to_string(),
+        category: RiskCategory::Entity,
+        score,
+        weight: 0.10,
+        description: if has_timelock {
+            "Timelock governance detected (reduces admin risk)".to_string()
+        } else {
+            "No timelock governance detected for admin operations".to_string()
+        },
+        evidence,
+    })
+}
+
+/// Detect multisig patterns from contract analysis and bytecode.
+pub fn detect_multisig(
+    contract_analysis: &crate::contract::ContractAnalysis,
+) -> Option<RiskFactor> {
+    let mut evidence = Vec::new();
+    let mut is_multisig = false;
+
+    // Check source code
+    if let Some(src) = &contract_analysis.source_info {
+        let code_lower = src.source_code.to_lowercase();
+
+        if code_lower.contains("gnosis")
+            || code_lower.contains("safe") && code_lower.contains("multisig")
+        {
+            is_multisig = true;
+            evidence.push("Gnosis Safe / multisig wallet pattern detected".to_string());
+        }
+
+        if code_lower.contains("threshold") && code_lower.contains("owners") {
+            is_multisig = true;
+            evidence.push("Multi-owner threshold pattern (M-of-N signatures)".to_string());
+        }
+
+        if code_lower.contains("confirmtransaction") && code_lower.contains("executetransaction") {
+            is_multisig = true;
+            evidence.push("Confirm/execute transaction pattern (multisig workflow)".to_string());
+        }
+    }
+
+    // Check admin address (if known, could check if it's a multisig)
+    if let Some(proxy) = &contract_analysis.proxy_info
+        && let Some(admin) = &proxy.admin_address
+    {
+        evidence.push(format!(
+            "Proxy admin address: {} (verify if multisig)",
+            admin
+        ));
+    }
+
+    let score = if is_multisig { 2.0 } else { 4.0 };
+
+    Some(RiskFactor {
+        name: "Multisig Governance".to_string(),
+        category: RiskCategory::Entity,
+        score,
+        weight: 0.10,
+        description: if is_multisig {
+            "Multisig governance detected (reduces single-key risk)".to_string()
+        } else {
+            "No multisig governance detected".to_string()
+        },
+        evidence,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1278,5 +1588,439 @@ mod tests {
 
         // Should have elevated risk due to high counterparty count
         assert!(assessment.overall_score > 0.0);
+    }
+
+    #[test]
+    fn test_gini_coefficient_equal_distribution() {
+        // All equal holdings = Gini 0
+        let holdings = vec![10.0, 10.0, 10.0, 10.0, 10.0];
+        let gini = compute_gini_coefficient(&holdings);
+        assert!(gini < 0.01, "Expected near-zero Gini, got {}", gini);
+    }
+
+    #[test]
+    fn test_gini_coefficient_concentrated() {
+        // One holder has everything
+        let holdings = vec![0.0, 0.0, 0.0, 0.0, 100.0];
+        let gini = compute_gini_coefficient(&holdings);
+        assert!(gini > 0.7, "Expected high Gini, got {}", gini);
+    }
+
+    #[test]
+    fn test_gini_coefficient_empty() {
+        let gini = compute_gini_coefficient(&[]);
+        assert_eq!(gini, 0.0);
+    }
+
+    #[test]
+    fn test_rugpull_indicators_none() {
+        let factors = detect_rugpull_indicators(None, None);
+        assert!(factors.is_empty());
+    }
+
+    #[test]
+    fn test_whale_detection_no_whales() {
+        let txs = vec![];
+        let factor = detect_whale_activity(&txs, 100.0, 100_000.0);
+        assert!(factor.score < 1.0);
+    }
+
+    // ========================================================================
+    // Rugpull Indicator Tests
+    // ========================================================================
+
+    fn make_ca(
+        verified: bool,
+        ac: Option<crate::contract::access::AccessControlMap>,
+    ) -> crate::contract::ContractAnalysis {
+        crate::contract::ContractAnalysis {
+            address: "0xtest".into(),
+            chain: "ethereum".into(),
+            is_verified: verified,
+            source_info: None,
+            proxy_info: None,
+            access_control: ac,
+            vulnerabilities: vec![],
+            defi_analysis: None,
+            external_info: None,
+            security_score: 50,
+            security_summary: String::new(),
+        }
+    }
+
+    fn make_ac(
+        funcs: Vec<(&str, &str)>,
+        renounced: bool,
+        tx_origin: bool,
+    ) -> crate::contract::access::AccessControlMap {
+        let priv_fns = funcs
+            .iter()
+            .map(|(name, cap)| crate::contract::access::PrivilegedFunction {
+                name: name.to_string(),
+                modifiers: vec![],
+                capability: cap.to_string(),
+                risk: crate::contract::access::PrivilegeRisk::High,
+            })
+            .collect();
+        crate::contract::access::AccessControlMap {
+            ownership_pattern: None,
+            has_renounced_ownership: renounced,
+            has_role_based_access: false,
+            uses_tx_origin: tx_origin,
+            tx_origin_locations: vec![],
+            modifiers: vec![],
+            privileged_functions: priv_fns,
+            roles: vec![],
+            auth_analysis: crate::contract::access::AuthAnalysis {
+                msg_sender_checks: 0,
+                tx_origin_checks: 0,
+                has_origin_sender_comparison: false,
+                summary: String::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn test_rugpull_mint_evidence() {
+        let ac = make_ac(vec![("mint", "Mint")], false, false);
+        let ca = make_ca(true, Some(ac));
+        let factors = detect_rugpull_indicators(Some(&ca), None);
+        assert!(!factors.is_empty());
+        let f = &factors[0];
+        assert!(f.evidence.iter().any(|e| e.contains("mint")));
+    }
+
+    #[test]
+    fn test_rugpull_pause_blacklist_setfee() {
+        let ac = make_ac(
+            vec![
+                ("pause", "Pause"),
+                ("blacklist", "Block"),
+                ("setFee", "Fee"),
+            ],
+            false,
+            false,
+        );
+        let ca = make_ca(true, Some(ac));
+        let factors = detect_rugpull_indicators(Some(&ca), None);
+        let f = &factors[0];
+        assert!(f.evidence.iter().any(|e| e.contains("pause")));
+        assert!(f.evidence.iter().any(|e| e.contains("blacklist")));
+        assert!(f.evidence.iter().any(|e| e.contains("fee")));
+    }
+
+    #[test]
+    fn test_rugpull_renounced_reduces_risk() {
+        let ac = make_ac(vec![("mint", "Mint")], true, false);
+        let ca = make_ca(true, Some(ac));
+        let factors = detect_rugpull_indicators(Some(&ca), None);
+        let f = &factors[0];
+        assert!(f.evidence.iter().any(|e| e.contains("renounced")));
+    }
+
+    #[test]
+    fn test_rugpull_tx_origin() {
+        let ac = make_ac(vec![], false, true);
+        let ca = make_ca(true, Some(ac));
+        let factors = detect_rugpull_indicators(Some(&ca), None);
+        let f = &factors[0];
+        assert!(f.evidence.iter().any(|e| e.contains("tx.origin")));
+    }
+
+    #[test]
+    fn test_rugpull_unverified() {
+        let ac = make_ac(vec![], false, false);
+        let ca = make_ca(false, Some(ac));
+        let factors = detect_rugpull_indicators(Some(&ca), None);
+        let f = &factors[0];
+        assert!(f.evidence.iter().any(|e| e.contains("not verified")));
+    }
+
+    fn make_ta(
+        top10: Option<f64>,
+        age: Option<f64>,
+        buys: u64,
+        sells: u64,
+        liq: f64,
+    ) -> crate::chains::TokenAnalytics {
+        crate::chains::TokenAnalytics {
+            token: crate::chains::Token {
+                contract_address: "0x".into(),
+                symbol: "T".into(),
+                name: "T".into(),
+                decimals: 18,
+            },
+            chain: "ethereum".into(),
+            holders: vec![],
+            total_holders: 0,
+            volume_24h: 0.0,
+            volume_7d: 0.0,
+            price_usd: 0.0,
+            price_change_24h: 0.0,
+            price_change_7d: 0.0,
+            liquidity_usd: liq,
+            market_cap: None,
+            fdv: None,
+            total_supply: None,
+            circulating_supply: None,
+            price_history: vec![],
+            volume_history: vec![],
+            holder_history: vec![],
+            dex_pairs: vec![],
+            fetched_at: 0,
+            top_10_concentration: top10,
+            top_50_concentration: None,
+            top_100_concentration: None,
+            price_change_6h: 0.0,
+            price_change_1h: 0.0,
+            total_buys_24h: buys,
+            total_sells_24h: sells,
+            total_buys_6h: 0,
+            total_sells_6h: 0,
+            total_buys_1h: 0,
+            total_sells_1h: 0,
+            token_age_hours: age,
+            image_url: None,
+            websites: vec![],
+            socials: vec![],
+            dexscreener_url: None,
+        }
+    }
+
+    #[test]
+    fn test_rugpull_high_concentration() {
+        let ta = make_ta(Some(85.0), None, 0, 0, 100000.0);
+        let factors = detect_rugpull_indicators(None, Some(&ta));
+        assert!(!factors.is_empty());
+        assert!(factors[0].evidence.iter().any(|e| e.contains("85.0%")));
+    }
+
+    #[test]
+    fn test_rugpull_moderate_concentration() {
+        let ta = make_ta(Some(55.0), None, 0, 0, 100000.0);
+        let factors = detect_rugpull_indicators(None, Some(&ta));
+        assert!(!factors.is_empty());
+        assert!(factors[0].evidence.iter().any(|e| e.contains("55.0%")));
+    }
+
+    #[test]
+    fn test_rugpull_very_new_token() {
+        let ta = make_ta(None, Some(12.0), 0, 0, 100000.0);
+        let factors = detect_rugpull_indicators(None, Some(&ta));
+        assert!(!factors.is_empty());
+        assert!(factors[0].evidence.iter().any(|e| e.contains("very new")));
+    }
+
+    #[test]
+    fn test_rugpull_recently_created() {
+        let ta = make_ta(None, Some(48.0), 0, 0, 100000.0);
+        let factors = detect_rugpull_indicators(None, Some(&ta));
+        assert!(!factors.is_empty());
+        assert!(
+            factors[0]
+                .evidence
+                .iter()
+                .any(|e| e.contains("recently created"))
+        );
+    }
+
+    #[test]
+    fn test_rugpull_honeypot() {
+        let ta = make_ta(None, None, 20, 0, 100000.0);
+        let factors = detect_rugpull_indicators(None, Some(&ta));
+        assert!(!factors.is_empty());
+        assert!(factors[0].evidence.iter().any(|e| e.contains("honeypot")));
+    }
+
+    #[test]
+    fn test_rugpull_low_liquidity() {
+        let ta = make_ta(None, None, 0, 0, 5000.0);
+        let factors = detect_rugpull_indicators(None, Some(&ta));
+        assert!(!factors.is_empty());
+        assert!(
+            factors[0]
+                .evidence
+                .iter()
+                .any(|e| e.contains("low liquidity") || e.contains("Very low"))
+        );
+    }
+
+    // ========================================================================
+    // Whale Activity Tests
+    // ========================================================================
+
+    fn make_whale_tx(value: &str) -> crate::chains::Transaction {
+        crate::chains::Transaction {
+            hash: "0xh".into(),
+            block_number: Some(1),
+            timestamp: Some(0),
+            from: "0xa".into(),
+            to: Some("0xb".into()),
+            value: value.to_string(),
+            gas_limit: 21000,
+            gas_used: Some(21000),
+            gas_price: "0".into(),
+            nonce: 0,
+            input: "0x".into(),
+            status: Some(true),
+        }
+    }
+
+    #[test]
+    fn test_whale_with_large_txs() {
+        let txs = vec![
+            make_whale_tx("200000"),
+            make_whale_tx("50"),
+            make_whale_tx("150000"),
+        ];
+        let factor = detect_whale_activity(&txs, 50000.0, 100000.0);
+        assert!(factor.evidence.iter().any(|e| e.contains("whale-sized")));
+    }
+
+    #[test]
+    fn test_whale_avg_near_threshold() {
+        let txs = vec![make_whale_tx("50")];
+        let factor = detect_whale_activity(&txs, 60000.0, 100000.0);
+        assert!(
+            factor
+                .evidence
+                .iter()
+                .any(|e| e.contains("near whale threshold"))
+        );
+    }
+
+    // ========================================================================
+    // Timelock Tests
+    // ========================================================================
+
+    fn make_ca_with_source(code: &str) -> crate::contract::ContractAnalysis {
+        let mut ca = make_ca(true, None);
+        ca.source_info = Some(crate::contract::source::ContractSource {
+            contract_name: "Test".into(),
+            source_code: code.to_string(),
+            abi: "[]".into(),
+            compiler_version: "v0.8.19".into(),
+            optimization_used: true,
+            optimization_runs: 200,
+            evm_version: "paris".into(),
+            license_type: "MIT".into(),
+            is_proxy: false,
+            implementation_address: None,
+            constructor_arguments: String::new(),
+            library: String::new(),
+            swarm_source: String::new(),
+            parsed_abi: vec![],
+        });
+        ca
+    }
+
+    #[test]
+    fn test_timelock_controller_detected() {
+        let ca = make_ca_with_source("contract G is TimelockController { }");
+        let f = detect_timelock(&ca).unwrap();
+        assert_eq!(f.score, 2.0);
+        assert!(f.evidence.iter().any(|e| e.contains("TimelockController")));
+    }
+
+    #[test]
+    fn test_timelock_queue_delay_execute() {
+        let ca = make_ca_with_source("function queue() {} function execute() {} uint delay;");
+        let f = detect_timelock(&ca).unwrap();
+        assert_eq!(f.score, 2.0);
+    }
+
+    #[test]
+    fn test_timelock_mindelay() {
+        let ca = make_ca_with_source("TimelockController tl; uint minDelay;");
+        let f = detect_timelock(&ca).unwrap();
+        assert!(f.evidence.iter().any(|e| e.contains("Minimum delay")));
+    }
+
+    #[test]
+    fn test_no_timelock() {
+        let ca = make_ca_with_source("contract Token { function transfer() {} }");
+        let f = detect_timelock(&ca).unwrap();
+        assert_eq!(f.score, 5.0);
+    }
+
+    #[test]
+    fn test_timelock_no_source() {
+        let ca = make_ca(true, None);
+        assert!(detect_timelock(&ca).is_none());
+    }
+
+    // ========================================================================
+    // Multisig Tests
+    // ========================================================================
+
+    #[test]
+    fn test_multisig_gnosis() {
+        let ca = make_ca_with_source("import Gnosis; contract W is GnosisSafe { }");
+        let f = detect_multisig(&ca).unwrap();
+        assert_eq!(f.score, 2.0);
+    }
+
+    #[test]
+    fn test_multisig_threshold_owners() {
+        let ca = make_ca_with_source("uint threshold; address[] owners;");
+        let f = detect_multisig(&ca).unwrap();
+        assert_eq!(f.score, 2.0);
+    }
+
+    #[test]
+    fn test_multisig_confirm_execute() {
+        let ca = make_ca_with_source(
+            "function confirmTransaction() {} function executeTransaction() {}",
+        );
+        let f = detect_multisig(&ca).unwrap();
+        assert_eq!(f.score, 2.0);
+    }
+
+    #[test]
+    fn test_no_multisig() {
+        let ca = make_ca_with_source("contract Token { }");
+        let f = detect_multisig(&ca).unwrap();
+        assert_eq!(f.score, 4.0);
+    }
+
+    #[test]
+    fn test_multisig_with_proxy_admin() {
+        let mut ca = make_ca_with_source("contract Token { }");
+        ca.proxy_info = Some(crate::contract::proxy::ProxyInfo {
+            is_proxy: true,
+            proxy_type: "EIP-1967".into(),
+            implementation_address: None,
+            admin_address: Some("0xadmin".into()),
+            beacon_address: None,
+            details: vec![],
+        });
+        let f = detect_multisig(&ca).unwrap();
+        assert!(f.evidence.iter().any(|e| e.contains("0xadmin")));
+    }
+
+    // ========================================================================
+    // Gini Coefficient Edge Cases
+    // ========================================================================
+
+    #[test]
+    fn test_gini_all_zeros() {
+        assert_eq!(compute_gini_coefficient(&[0.0, 0.0, 0.0]), 0.0);
+    }
+
+    #[test]
+    fn test_gini_single_element() {
+        assert_eq!(compute_gini_coefficient(&[100.0]), 0.0);
+    }
+
+    #[test]
+    fn test_gini_two_equal() {
+        let g = compute_gini_coefficient(&[50.0, 50.0]);
+        assert!(g < 0.01);
+    }
+
+    #[test]
+    fn test_gini_two_unequal() {
+        let g = compute_gini_coefficient(&[1.0, 99.0]);
+        assert!(g > 0.0);
     }
 }

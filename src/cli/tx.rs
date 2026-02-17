@@ -27,7 +27,9 @@ use clap::Args;
 #[command(after_help = "\x1b[1mExamples:\x1b[0m
   scope tx 0xabc123def456...
   scope tx 0xabc123... --chain polygon --trace
-  scope tx 0xabc123... --decode --format json")]
+  scope tx 0xabc123... --decode --format json
+
+\x1b[2mTip: All address/token inputs accept @label shortcuts from the address book.\x1b[0m")]
 pub struct TxArgs {
     /// The transaction hash to analyze.
     ///

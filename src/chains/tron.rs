@@ -1889,4 +1889,704 @@ mod tests {
                 .contains("Account not found")
         );
     }
+
+    #[tokio::test]
+    async fn test_get_token_info_success() {
+        // get_token_info uses TRONSCAN_API directly (not mockable via api_url),
+        // so we test the response parsing path that mirrors get_token_info logic
+        let info: serde_json::Value = serde_json::from_str(
+            r#"{"trc20_tokens": [{"symbol": "USDT", "contract_name": "TetherToken", "decimals": 6}]}"#,
+        )
+        .unwrap();
+        let tokens = info.get("trc20_tokens").and_then(|v| v.as_array()).unwrap();
+        let token_data = tokens.first().unwrap();
+        let symbol = token_data
+            .get("symbol")
+            .and_then(|v| v.as_str())
+            .unwrap_or("UNKNOWN");
+        assert_eq!(symbol, "USDT");
+        let name = token_data
+            .get("contract_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown Token");
+        assert_eq!(name, "TetherToken");
+        let decimals = token_data
+            .get("decimals")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(6) as u8;
+        assert_eq!(decimals, 6);
+    }
+
+    #[tokio::test]
+    async fn test_get_token_info_no_tokens() {
+        let info: serde_json::Value = serde_json::from_str(r#"{"trc20_tokens": []}"#).unwrap();
+        let tokens = info.get("trc20_tokens").and_then(|v| v.as_array()).unwrap();
+        assert!(tokens.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_token_info_missing_field() {
+        let info: serde_json::Value =
+            serde_json::from_str(r#"{"trc20_tokens": [{"symbol": "TEST"}]}"#).unwrap();
+        let tokens = info.get("trc20_tokens").and_then(|v| v.as_array()).unwrap();
+        let token_data = tokens.first().unwrap();
+        let name = token_data
+            .get("contract_name")
+            .or_else(|| token_data.get("name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown Token");
+        assert_eq!(name, "Unknown Token");
+        let decimals = token_data
+            .get("decimals")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(6) as u8;
+        assert_eq!(decimals, 6);
+    }
+
+    #[tokio::test]
+    async fn test_token_holder_response_parsing() {
+        let json: serde_json::Value = serde_json::from_str(
+            r#"{"trc20_tokens": [
+                {"holder_address": "TDqSquXBgUCLYvYC4XZgrprLK589dkhSCf", "balance": "5000000"},
+                {"holder_address": "TN3W4H6rK2ce4vX9YnFQHwKENnHjoxb3m9", "balance": "3000000"}
+            ]}"#,
+        )
+        .unwrap();
+        let holders_data: &[serde_json::Value] = json
+            .get("trc20_tokens")
+            .and_then(|v| v.as_array())
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        assert_eq!(holders_data.len(), 2);
+
+        let total_balance: f64 = holders_data
+            .iter()
+            .filter_map(|h| h.get("balance").and_then(|v| v.as_str()))
+            .filter_map(|s| s.parse::<f64>().ok())
+            .sum();
+        assert_eq!(total_balance, 8000000.0);
+
+        let decimals: u8 = 6;
+        let holders: Vec<TokenHolder> = holders_data
+            .iter()
+            .enumerate()
+            .filter_map(|(i, h)| {
+                let holder_address = h.get("holder_address")?.as_str()?.to_string();
+                let balance_raw = h.get("balance")?.as_str()?.to_string();
+                let balance: f64 = balance_raw.parse().ok()?;
+                let percentage = if total_balance > 0.0 {
+                    (balance / total_balance) * 100.0
+                } else {
+                    0.0
+                };
+                let divisor = 10_f64.powi(decimals as i32);
+                let formatted = format!("{:.6}", balance / divisor);
+                Some(TokenHolder {
+                    address: holder_address,
+                    balance: balance_raw,
+                    formatted_balance: formatted,
+                    percentage,
+                    rank: (i + 1) as u32,
+                })
+            })
+            .collect();
+        assert_eq!(holders.len(), 2);
+        assert_eq!(holders[0].rank, 1);
+        assert_eq!(holders[1].rank, 2);
+        assert!(holders[0].percentage > 60.0);
+        assert!(holders[0].formatted_balance.contains("5.000000"));
+    }
+
+    #[tokio::test]
+    async fn test_token_holder_count_parsing() {
+        let json: serde_json::Value = serde_json::from_str(r#"{"rangeTotal": 12345}"#).unwrap();
+        let count = json.get("rangeTotal").and_then(|v| v.as_u64()).unwrap_or(0);
+        assert_eq!(count, 12345);
+
+        let json_no_field: serde_json::Value = serde_json::from_str(r#"{}"#).unwrap();
+        let count2 = json_no_field
+            .get("rangeTotal")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        assert_eq!(count2, 0);
+    }
+
+    #[test]
+    fn test_dex_search_response_deserialization() {
+        let json = r#"{"pairs":[{"baseTokenSymbol":"TRX","priceUsd":"0.08"}]}"#;
+        let result: std::result::Result<DexSearchResponse, _> = serde_json::from_str(json);
+        assert!(result.is_ok());
+        let resp = result.unwrap();
+        let pairs = resp.pairs.unwrap();
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].price_usd, Some("0.08".to_string()));
+    }
+
+    #[test]
+    fn test_dex_search_response_empty() {
+        let json = r#"{"pairs":[]}"#;
+        let result: std::result::Result<DexSearchResponse, _> = serde_json::from_str(json);
+        assert!(result.is_ok());
+        assert!(result.unwrap().pairs.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_dex_search_response_no_pairs() {
+        let json = r#"{}"#;
+        let result: std::result::Result<DexSearchResponse, _> = serde_json::from_str(json);
+        assert!(result.is_ok());
+        assert!(result.unwrap().pairs.is_none());
+    }
+
+    // -------------------------------------------------------------------------
+    // Invalid input validation tests
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_get_transaction_invalid_hash() {
+        let client = TronClient::default();
+        let result = client.get_transaction("not-a-valid-hash").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("64 characters"));
+    }
+
+    #[tokio::test]
+    async fn test_get_transactions_invalid_address() {
+        let client = TronClient::default();
+        let result = client.get_transactions("invalid-address", 10).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_token_info_invalid_address() {
+        let client = TronClient::default();
+        let result = client.get_token_info("bad-address").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_token_holders_invalid_address() {
+        let client = TronClient::default();
+        let result = client.get_token_holders("bad-address", 10).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_token_holder_count_invalid_address() {
+        let client = TronClient::default();
+        let result = client.get_token_holder_count("bad-address").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_chain_client_get_token_info_invalid_address() {
+        let client = TronClient::default();
+        let chain_client: &dyn ChainClient = &client;
+        let result = chain_client.get_token_info("x").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_chain_client_get_token_holders_invalid_address() {
+        let client = TronClient::default();
+        let chain_client: &dyn ChainClient = &client;
+        let result = chain_client.get_token_holders("x", 10).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_chain_client_get_token_holder_count_invalid_address() {
+        let client = TronClient::default();
+        let chain_client: &dyn ChainClient = &client;
+        let result = chain_client.get_token_holder_count("x").await;
+        assert!(result.is_err());
+    }
+
+    // -------------------------------------------------------------------------
+    // API error edge cases
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_get_balance_api_error_unknown_error() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"/v1/accounts/.*".to_string()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data": [], "success": false}"#)
+            .create_async()
+            .await;
+
+        let client = TronClient::with_api_url(&server.url());
+        let result = client.get_balance(VALID_ADDRESS).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unknown error"));
+    }
+
+    #[tokio::test]
+    async fn test_get_transaction_status_none() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"/v1/transactions/.*".to_string()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                "data": [{
+                    "txID": "b3c12d62ad7e7b8b83b09a68b9b8f9b23a1b8f8b8f9b8f9b8f9b8f9b8f9b8f9b",
+                    "block_number": 50000000,
+                    "block_timestamp": 1700000000000,
+                    "ret": []
+                }],
+                "success": true
+            }"#,
+            )
+            .create_async()
+            .await;
+
+        let client = TronClient::with_api_url(&server.url());
+        let tx = client.get_transaction(VALID_TX_HASH).await.unwrap();
+        assert_eq!(tx.status, None);
+    }
+
+    #[tokio::test]
+    async fn test_get_transaction_no_ret_field() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"/v1/transactions/.*".to_string()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                "data": [{
+                    "txID": "b3c12d62ad7e7b8b83b09a68b9b8f9b23a1b8f8b8f9b8f9b8f9b8f9b8f9b8f9b",
+                    "block_number": 50000000,
+                    "block_timestamp": 1700000000000
+                }],
+                "success": true
+            }"#,
+            )
+            .create_async()
+            .await;
+
+        let client = TronClient::with_api_url(&server.url());
+        let tx = client.get_transaction(VALID_TX_HASH).await.unwrap();
+        assert_eq!(tx.status, None);
+    }
+
+    #[tokio::test]
+    async fn test_get_transaction_to_address_none() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"/v1/transactions/.*".to_string()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                "data": [{
+                    "txID": "b3c12d62ad7e7b8b83b09a68b9b8f9b23a1b8f8b8f9b8f9b8f9b8f9b8f9b8f9b",
+                    "block_number": 50000000,
+                    "block_timestamp": 1700000000000,
+                    "raw_data": {
+                        "contract": [{
+                            "parameter": {
+                                "value": {
+                                    "amount": 1000000,
+                                    "owner_address": "TDqSquXBgUCLYvYC4XZgrprLK589dkhSCf"
+                                }
+                            }
+                        }]
+                    },
+                    "ret": [{"contractRet": "SUCCESS"}]
+                }],
+                "success": true
+            }"#,
+            )
+            .create_async()
+            .await;
+
+        let client = TronClient::with_api_url(&server.url());
+        let tx = client.get_transaction(VALID_TX_HASH).await.unwrap();
+        assert_eq!(tx.to, None);
+        assert_eq!(tx.value, "1000000");
+    }
+
+    #[tokio::test]
+    async fn test_get_transaction_amount_none() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"/v1/transactions/.*".to_string()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                "data": [{
+                    "txID": "b3c12d62ad7e7b8b83b09a68b9b8f9b23a1b8f8b8f9b8f9b8f9b8f9b8f9b8f9b",
+                    "block_number": 50000000,
+                    "block_timestamp": 1700000000000,
+                    "raw_data": {
+                        "contract": [{
+                            "parameter": {
+                                "value": {
+                                    "owner_address": "TDqSquXBgUCLYvYC4XZgrprLK589dkhSCf",
+                                    "to_address": "TN3W4H6rK2ce4vX9YnFQHwKENnHjoxb3m9"
+                                }
+                            }
+                        }]
+                    },
+                    "ret": [{"contractRet": "SUCCESS"}]
+                }],
+                "success": true
+            }"#,
+            )
+            .create_async()
+            .await;
+
+        let client = TronClient::with_api_url(&server.url());
+        let tx = client.get_transaction(VALID_TX_HASH).await.unwrap();
+        assert_eq!(tx.value, "0");
+    }
+
+    #[tokio::test]
+    async fn test_get_transaction_no_raw_data() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"/v1/transactions/.*".to_string()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                "data": [{
+                    "txID": "b3c12d62ad7e7b8b83b09a68b9b8f9b23a1b8f8b8f9b8f9b8f9b8f9b8f9b8f9b",
+                    "block_number": 50000000,
+                    "block_timestamp": 1700000000000,
+                    "ret": [{"contractRet": "SUCCESS"}]
+                }],
+                "success": true
+            }"#,
+            )
+            .create_async()
+            .await;
+
+        let client = TronClient::with_api_url(&server.url());
+        let tx = client.get_transaction(VALID_TX_HASH).await.unwrap();
+        assert_eq!(tx.from, "");
+        assert_eq!(tx.to, None);
+        assert_eq!(tx.value, "0");
+    }
+
+    #[tokio::test]
+    async fn test_get_block_number_block_header_none() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/wallet/getnowblock")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"other": "data"}"#)
+            .create_async()
+            .await;
+
+        let client = TronClient::with_api_url(&server.url());
+        let result = client.get_block_number().await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid block"));
+    }
+
+    #[tokio::test]
+    async fn test_get_block_number_raw_data_none() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/wallet/getnowblock")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"block_header":{}}"#)
+            .create_async()
+            .await;
+
+        let client = TronClient::with_api_url(&server.url());
+        let result = client.get_block_number().await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_block_number_number_none() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/wallet/getnowblock")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"block_header":{"raw_data":{}}}"#)
+            .create_async()
+            .await;
+
+        let client = TronClient::with_api_url(&server.url());
+        let result = client.get_block_number().await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_trc20_balances_api_error_unknown() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"/v1/accounts/.*".to_string()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data": [], "success": false}"#)
+            .create_async()
+            .await;
+
+        let client = TronClient::with_api_url(&server.url());
+        let result = client.get_trc20_balances(VALID_ADDRESS).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unknown error"));
+    }
+
+    #[tokio::test]
+    async fn test_get_transactions_api_error_unknown() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"/v1/accounts/.*/transactions.*".to_string()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data": [], "success": false}"#)
+            .create_async()
+            .await;
+
+        let client = TronClient::with_api_url(&server.url());
+        let result = client.get_transactions(VALID_ADDRESS, 10).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unknown error"));
+    }
+
+    #[tokio::test]
+    async fn test_get_transaction_api_error_unknown() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"/v1/transactions/.*".to_string()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data": [], "success": false}"#)
+            .create_async()
+            .await;
+
+        let client = TronClient::with_api_url(&server.url());
+        let result = client.get_transaction(VALID_TX_HASH).await;
+        assert!(result.is_err());
+    }
+
+    // -------------------------------------------------------------------------
+    // Struct construction and deserialization
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_trc20_token_balance_struct() {
+        let balance = Trc20TokenBalance {
+            contract_address: "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t".to_string(),
+            raw_balance: "5000000".to_string(),
+        };
+        assert_eq!(
+            balance.contract_address,
+            "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
+        );
+        assert_eq!(balance.raw_balance, "5000000");
+        let debug_str = format!("{:?}", balance);
+        assert!(debug_str.contains("Trc20TokenBalance"));
+    }
+
+    #[test]
+    fn test_account_response_with_error_field() {
+        let json = r#"{
+            "data": [],
+            "success": false,
+            "error": "Custom error message"
+        }"#;
+        let response: AccountResponse = serde_json::from_str(json).unwrap();
+        assert!(!response.success);
+        assert_eq!(response.error, Some("Custom error message".to_string()));
+    }
+
+    #[test]
+    fn test_account_response_trc20_balances() {
+        let json = r#"{
+            "data": [{
+                "balance": 1000000,
+                "address": "TDqSquXBgUCLYvYC4XZgrprLK589dkhSCf",
+                "trc20": [
+                    {"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t": "10000000"}
+                ]
+            }],
+            "success": true
+        }"#;
+        let response: AccountResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.data.len(), 1);
+        assert_eq!(response.data[0].trc20.len(), 1);
+        let trc20 = &response.data[0].trc20[0];
+        assert_eq!(
+            trc20.balances.get("TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"),
+            Some(&"10000000".to_string())
+        );
+    }
+
+    #[test]
+    fn test_transaction_list_response_with_error() {
+        let json = r#"{
+            "data": [],
+            "success": false,
+            "error": "Transaction not found"
+        }"#;
+        let response: TransactionListResponse = serde_json::from_str(json).unwrap();
+        assert!(!response.success);
+        assert_eq!(response.error, Some("Transaction not found".to_string()));
+    }
+
+    #[test]
+    fn test_full_transaction_deserialization() {
+        let json = r#"{
+            "data": [{
+                "txID": "abc123def456",
+                "block_number": 12345,
+                "block_timestamp": 1600000000000,
+                "raw_data": {
+                    "contract": [{
+                        "parameter": {
+                            "value": {
+                                "amount": 999999,
+                                "owner_address": "TFrom123",
+                                "to_address": "TTo456"
+                            }
+                        },
+                        "type": "TransferContract"
+                    }]
+                },
+                "ret": [{"contractRet": "SUCCESS"}]
+            }],
+            "success": true
+        }"#;
+        let response: TransactionListResponse = serde_json::from_str(json).unwrap();
+        let tx = &response.data[0];
+        assert_eq!(tx.tx_id, "abc123def456");
+        assert_eq!(tx.block_number, Some(12345));
+        assert_eq!(tx.block_timestamp, Some(1600000000000));
+        let contract_value = tx
+            .raw_data
+            .as_ref()
+            .and_then(|r| r.contract.as_ref())
+            .and_then(|c| c.first())
+            .and_then(|c| c.parameter.as_ref())
+            .and_then(|p| p.value.as_ref())
+            .unwrap();
+        assert_eq!(contract_value.amount, Some(999999));
+        assert_eq!(contract_value.owner_address.as_deref(), Some("TFrom123"));
+        assert_eq!(contract_value.to_address.as_deref(), Some("TTo456"));
+        assert_eq!(
+            tx.ret
+                .as_ref()
+                .and_then(|r| r.first())
+                .and_then(|r| r.contract_ret.as_deref()),
+            Some("SUCCESS")
+        );
+    }
+
+    #[test]
+    fn test_tron_client_default_trait() {
+        let client = TronClient::default();
+        assert_eq!(client.chain_name(), "tron");
+        assert_eq!(client.native_token_symbol(), "TRX");
+        assert_eq!(client.api_url, DEFAULT_TRON_API);
+    }
+
+    #[test]
+    fn test_dex_search_pair_wtrx() {
+        let json = r#"{"pairs":[{"baseTokenSymbol":"WTRX","priceUsd":"0.08"}]}"#;
+        let result: std::result::Result<DexSearchResponse, _> = serde_json::from_str(json);
+        assert!(result.is_ok());
+        let resp = result.unwrap();
+        let pairs = resp.pairs.unwrap();
+        assert_eq!(pairs[0].base_token_symbol, Some("WTRX".to_string()));
+        assert_eq!(pairs[0].price_usd, Some("0.08".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_enrich_balance_usd_no_panic() {
+        let mut balance = Balance {
+            raw: "1000000".to_string(),
+            formatted: "1.000000 TRX".to_string(),
+            decimals: TRX_DECIMALS,
+            symbol: "TRX".to_string(),
+            usd_value: None,
+        };
+        let client = TronClient::default();
+        client.enrich_balance_usd(&mut balance).await;
+        // Should not panic; usd_value may or may not be set depending on DexScreener response
+    }
+
+    #[test]
+    fn test_trc20_token_balance_debug_format() {
+        let b = Trc20TokenBalance {
+            contract_address: "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t".to_string(),
+            raw_balance: "1000000".to_string(),
+        };
+        let s = format!("{:?}", b);
+        assert!(s.contains("Trc20TokenBalance"));
+        assert!(s.contains("1000000"));
+    }
+
+    #[tokio::test]
+    async fn test_get_transactions_with_minimal_contract_data() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"/v1/accounts/.*/transactions.*".to_string()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                "data": [{
+                    "txID": "c4d23e73be8f8c9c94c10b79c0c0a0c24b2c9a9c0a0c0a0c0a0c0a0c0a0c0a0c0a0c",
+                    "block_number": 50000000,
+                    "block_timestamp": 1700000000000,
+                    "raw_data": {"contract": [{}]},
+                    "ret": []
+                }],
+                "success": true
+            }"#,
+            )
+            .create_async()
+            .await;
+
+        let client = TronClient::with_api_url(&server.url());
+        let txs = client.get_transactions(VALID_ADDRESS, 5).await.unwrap();
+        assert_eq!(txs.len(), 1);
+        assert_eq!(txs[0].value, "0");
+        assert_eq!(txs[0].status, None);
+    }
 }

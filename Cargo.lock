@@ -2334,7 +2334,7 @@ dependencies = [
 
 [[package]]
 name = "scope-bca"
-version = "0.4.4"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2348,12 +2348,14 @@ dependencies = [
  "crossterm",
  "dirs",
  "futures",
+ "hex",
  "indicatif",
  "libc",
  "mockito",
  "owo-colors",
  "predicates",
  "ratatui",
+ "regex",
  "reqwest",
  "rustyline",
  "serde",

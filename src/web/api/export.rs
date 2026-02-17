@@ -35,6 +35,9 @@ fn default_format() -> String {
 
 /// POST /api/export — Export address data.
 ///
+/// Supports address book shortcuts: pass `@label` as the address to
+/// resolve it from the address book.
+///
 /// Returns the export data directly as JSON (regardless of requested format)
 /// since the web API always returns JSON. The `format` field is preserved
 /// in the response metadata for client-side handling.
@@ -42,8 +45,22 @@ pub async fn handle(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ExportRequest>,
 ) -> impl IntoResponse {
+    // Resolve address book shortcuts (@label or direct address match)
+    let resolved = match super::resolve_address_book(&req.address, &state.config) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response();
+        }
+    };
+    let address = resolved.value;
+    let chain = resolved.chain.unwrap_or(req.chain);
+
     let client: Box<dyn crate::chains::ChainClient> =
-        match state.factory.create_chain_client(&req.chain) {
+        match state.factory.create_chain_client(&chain) {
             Ok(c) => c,
             Err(e) => {
                 return (
@@ -55,7 +72,7 @@ pub async fn handle(
         };
 
     // Fetch balance
-    let mut balance = match client.get_balance(&req.address).await {
+    let mut balance = match client.get_balance(&address).await {
         Ok(b) => b,
         Err(e) => {
             return (
@@ -68,14 +85,14 @@ pub async fn handle(
     client.enrich_balance_usd(&mut balance).await;
 
     // Fetch transactions
-    let txs = client.get_transactions(&req.address, 100).await.ok();
+    let txs = client.get_transactions(&address, 100).await.ok();
 
     // Fetch token balances
-    let tokens = client.get_token_balances(&req.address).await.ok();
+    let tokens = client.get_token_balances(&address).await.ok();
 
     Json(serde_json::json!({
-        "address": req.address,
-        "chain": req.chain,
+        "address": address,
+        "chain": chain,
         "format": req.format,
         "balance": {
             "raw": balance.raw,
@@ -166,5 +183,140 @@ mod tests {
         let response = handle(State(state), axum::Json(req)).await.into_response();
         let status = response.status();
         assert!(status.is_success() || status.is_client_error() || status.is_server_error());
+    }
+
+    #[tokio::test]
+    async fn test_handle_export_success_json_structure() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
+        use axum::body;
+        use axum::extract::State;
+        use axum::response::IntoResponse;
+
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+        let req = ExportRequest {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: "ethereum".to_string(),
+            format: "json".to_string(),
+            start_date: None,
+            end_date: None,
+        };
+        let response = handle(State(state), axum::Json(req)).await.into_response();
+        if response.status().is_success() {
+            let body_bytes = body::to_bytes(response.into_body(), 1_000_000)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            assert!(json.get("address").is_some());
+            assert!(json.get("chain").is_some());
+            assert!(json.get("format").is_some());
+            assert!(json.get("balance").is_some());
+        }
+    }
+
+    #[test]
+    fn test_export_request_debug() {
+        let req = ExportRequest {
+            address: "0xabc".to_string(),
+            chain: "ethereum".to_string(),
+            format: "json".to_string(),
+            start_date: None,
+            end_date: None,
+        };
+        let debug = format!("{:?}", req);
+        assert!(debug.contains("ExportRequest"));
+    }
+
+    #[test]
+    fn test_deserialize_export_csv_format() {
+        let json = serde_json::json!({
+            "address": "0x1234567890123456789012345678901234567890",
+            "format": "csv"
+        });
+        let req: ExportRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.format, "csv");
+    }
+
+    #[tokio::test]
+    async fn test_handle_export_unsupported_chain_bad_request() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
+        use axum::extract::State;
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+
+        // Use a temp data dir to avoid local address book interfering
+        let tmp = tempfile::tempdir().unwrap();
+        let config = Config {
+            address_book: crate::config::AddressBookConfig {
+                data_dir: Some(tmp.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+        let req = ExportRequest {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: "bitcoin".to_string(), // Unsupported chain
+            format: "json".to_string(),
+            start_date: None,
+            end_date: None,
+        };
+        let response = handle(State(state), axum::Json(req)).await.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap()
+                .contains("Unsupported chain")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_export_label_not_found() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
+        use axum::extract::State;
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config = Config {
+            address_book: crate::config::AddressBookConfig {
+                data_dir: Some(tmp.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+        let req = ExportRequest {
+            address: "@ghost-wallet".to_string(),
+            chain: "ethereum".to_string(),
+            format: "json".to_string(),
+            start_date: None,
+            end_date: None,
+        };
+        let response = handle(State(state), axum::Json(req)).await.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"].as_str().unwrap().contains("@ghost-wallet"));
     }
 }

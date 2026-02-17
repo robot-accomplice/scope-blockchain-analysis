@@ -14,8 +14,53 @@ use clap::Args;
 
 /// Arguments for the token-health command.
 #[derive(Debug, Args)]
+#[command(
+    after_help = "\x1b[1mExamples:\x1b[0m
+  scope token-health USDC
+  scope token-health @dai-token --with-market             \x1b[2m# address book shortcut\x1b[0m
+  scope token-health DAI --with-market --venue binance
+  scope token-health 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --format json",
+    after_long_help = "\x1b[1mExamples:\x1b[0m
+
+  \x1b[1m$ scope token-health USDC\x1b[0m
+
+  +-- USDC (USD Coin) ---------------------------------+
+  |                                                     |
+  |-- DEX Analytics                                     |
+  |  Price              $0.9999                         |
+  |  24h Change         -0.01%                          |
+  |  24h Volume         $5.00M                          |
+  |  Liquidity          $100.00M                        |
+  |  Market Cap         $30.00B                         |
+  |  Top 10 Holders     35.5%                           |
+  +-----------------------------------------------------+
+
+  \x1b[1m$ scope token-health DAI --with-market --venue binance\x1b[0m
+
+  +-- DAI (Dai Stablecoin) -----------------------------+
+  |                                                     |
+  |-- DEX Analytics                                     |
+  |  Price              $0.9999                         |
+  |  24h Change         +0.02%                          |
+  |  24h Volume         $50.00K                         |
+  |  Liquidity          $250.00K                        |
+  |                                                     |
+  |-- Market / Order Book                               |
+  |  Venue              binance                        |
+  |  Best Bid           0.9999                          |
+  |  Best Ask           1.0001                          |
+  |  Bid Depth          6000 USDT                       |
+  |  Ask Depth          5000 USDT                       |
+  |                                                     |
+  |  + No sells below peg                               |
+  |  + Bid/Ask ratio: 1.20x                             |
+  |                                                     |
+  |  HEALTHY                                            |
+  +-----------------------------------------------------+"
+)]
 pub struct TokenHealthArgs {
     /// Token symbol or contract address (e.g., USDC, 0xA0b86991...).
+    /// Use @label to resolve from the address book (e.g., @dai-token).
     pub token: String,
 
     /// Target blockchain network.
@@ -813,6 +858,186 @@ mod tests {
         };
 
         let result = run(args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_dex_venue_to_chain_case_insensitive() {
+        assert_eq!(dex_venue_to_chain("ETH"), "ethereum");
+        assert_eq!(dex_venue_to_chain("Ethereum"), "ethereum");
+        assert_eq!(dex_venue_to_chain("SOLANA"), "solana");
+    }
+
+    #[test]
+    fn test_is_dex_venue_uppercase() {
+        assert!(is_dex_venue("ETH"));
+        assert!(is_dex_venue("SOLANA"));
+        assert!(!is_dex_venue("BINANCE"));
+    }
+
+    #[test]
+    fn test_token_health_to_markdown_market_missing_prices() {
+        let analytics = make_test_analytics(false);
+        let mut market = make_test_market_summary();
+        market.best_bid = None;
+        market.best_ask = None;
+        market.mid_price = None;
+        market.spread = None;
+        let md = token_health_to_markdown(&analytics, Some(&market), Some("binance"));
+        assert!(md.contains("Market / Order Book"));
+        assert!(md.contains("-")); // Dash for missing prices in table
+    }
+
+    #[test]
+    fn test_token_health_to_markdown_market_empty_checks() {
+        let analytics = make_test_analytics(false);
+        let mut market = make_test_market_summary();
+        market.checks = vec![];
+        let md = token_health_to_markdown(&analytics, Some(&market), Some("binance"));
+        assert!(md.contains("Market / Order Book"));
+        assert!(!md.contains("Health Checks:")); // Empty checks = no section
+    }
+
+    #[test]
+    fn test_token_health_to_json_empty_checks() {
+        let analytics = make_test_analytics(false);
+        let mut market = make_test_market_summary();
+        market.checks = vec![];
+        let json = token_health_to_json(&analytics, Some(&market)).unwrap();
+        assert!(json.contains("\"market\""));
+        assert!(json.contains("\"checks\": []"));
+    }
+
+    #[test]
+    fn test_output_token_health_table_market_missing_prices() {
+        let analytics = make_test_analytics(false);
+        let mut market = make_test_market_summary();
+        market.best_bid = None;
+        market.best_ask = None;
+        market.mid_price = None;
+        let result = output_token_health_table(&analytics, Some(&market), Some("binance"));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_token_health_table_market_empty_checks() {
+        let analytics = make_test_analytics(false);
+        let mut market = make_test_market_summary();
+        market.checks = vec![];
+        let result = output_token_health_table(&analytics, Some(&market), None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_token_health_table_market_without_venue() {
+        let analytics = make_test_analytics(false);
+        let market = make_test_market_summary();
+        let result = output_token_health_table(&analytics, Some(&market), None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_token_health_args_all_formats() {
+        for format in [
+            OutputFormat::Table,
+            OutputFormat::Json,
+            OutputFormat::Csv,
+            OutputFormat::Markdown,
+        ] {
+            let args = TokenHealthArgs {
+                token: "USDC".to_string(),
+                chain: "ethereum".to_string(),
+                with_market: false,
+                venue: "binance".to_string(),
+                format,
+            };
+            assert_eq!(args.format, format);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_token_health_csv() {
+        let mut factory = MockClientFactory::new();
+        factory.mock_dex.token_data = Some(make_test_dex_token_data(vec![]));
+
+        let config = Config::default();
+        let args = TokenHealthArgs {
+            token: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+            chain: "ethereum".to_string(),
+            with_market: false,
+            venue: "binance".to_string(),
+            format: OutputFormat::Csv,
+        };
+
+        let result = run(args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_token_health_config_markdown_override() {
+        let mut factory = MockClientFactory::new();
+        factory.mock_dex.token_data = Some(make_test_dex_token_data(vec![]));
+
+        let mut config = Config::default();
+        config.output.format = OutputFormat::Markdown;
+        let args = TokenHealthArgs {
+            token: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+            chain: "ethereum".to_string(),
+            with_market: false,
+            venue: "binance".to_string(),
+            format: OutputFormat::Table, // Args say Table, config overrides to Markdown
+        };
+
+        let result = run(args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_token_health_to_json_market_none_values() {
+        let analytics = make_test_analytics(false);
+        let mut market = make_test_market_summary();
+        market.best_bid = None;
+        market.best_ask = None;
+        market.mid_price = None;
+        market.spread = None;
+        let json = token_health_to_json(&analytics, Some(&market)).unwrap();
+        assert!(json.contains("\"market\""));
+        assert!(json.contains("null")); // None serializes as null
+    }
+
+    #[test]
+    fn test_token_health_to_markdown_report_footer() {
+        let analytics = make_test_analytics(false);
+        let md = token_health_to_markdown(&analytics, None, None);
+        assert!(!md.is_empty());
+        assert!(md.contains("USDC"));
+        assert!(md.contains("USD Coin"));
+    }
+
+    #[test]
+    fn test_output_token_health_table_with_dex_pairs_analytics() {
+        let analytics = make_test_analytics(true);
+        let result = output_token_health_table(&analytics, None, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_token_health_to_markdown_market_with_venue_none() {
+        let analytics = make_test_analytics(false);
+        let market = make_test_market_summary();
+        let md = token_health_to_markdown(&analytics, Some(&market), None);
+        assert!(md.contains("Market / Order Book"));
+        assert!(!md.contains("**Venue:**"));
+    }
+
+    #[test]
+    fn test_output_token_health_table_market_no_bid_ask() {
+        let analytics = make_test_analytics(false);
+        let mut market = make_test_market_summary();
+        market.best_bid = None;
+        market.best_ask = None;
+        market.mid_price = None;
+        let result = output_token_health_table(&analytics, Some(&market), Some("binance"));
         assert!(result.is_ok());
     }
 }

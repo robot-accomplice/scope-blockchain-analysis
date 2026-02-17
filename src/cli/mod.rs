@@ -21,6 +21,7 @@
 //! Entity lookup:
 //!   address      Analyze a blockchain address (alias: addr)
 //!   tx           Analyze a transaction (alias: transaction)
+//!   contract     Analyze a smart contract (alias: ct)
 //!   insights     Auto-detect target type and run analyses (alias: insight)
 //!
 //! Token analysis:
@@ -57,6 +58,7 @@ pub mod address;
 pub mod address_book;
 pub mod address_report;
 pub mod compliance;
+pub mod contract;
 pub mod crawl;
 pub mod discover;
 pub mod errors;
@@ -103,11 +105,14 @@ pub use tx::TxArgs;
     ),
     after_help = "\x1b[1mExamples:\x1b[0m\n  \
                   scope address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2\n  \
+                  scope address @main-wallet              \x1b[2m# address book shortcut\x1b[0m\n  \
+                  scope contract 0xdAC17F958D2ee523a2206206994597C13D831ec7\n  \
                   scope crawl USDC --chain ethereum\n  \
                   scope insights 0xabc123...\n  \
                   scope monitor USDC\n  \
                   scope compliance risk 0x742d...\n  \
                   scope setup\n\n\
+                  \x1b[2mTip: Use @label in any command to recall an address from the address book.\x1b[0m\n\n\
                   \x1b[1mDocumentation:\x1b[0m\n  \
                   https://github.com/robot-accomplice/scope-blockchain-analysis\n  \
                   Quickstart guide: docs/QUICKSTART.md"
@@ -146,6 +151,7 @@ pub struct Cli {
 
 /// Available CLI subcommands.
 #[derive(Debug, Subcommand)]
+#[allow(clippy::large_enum_variant)]
 pub enum Commands {
     // -- Entity lookup --------------------------------------------------------
     /// Analyze a blockchain address.
@@ -168,6 +174,14 @@ pub enum Commands {
     /// detect it, run the appropriate analyses, and present observations.
     #[command(visible_alias = "insight")]
     Insights(insights::InsightsArgs),
+
+    /// Analyze a smart contract.
+    ///
+    /// Retrieves source code, detects proxy patterns, maps access control,
+    /// scans for vulnerabilities, checks DeFi patterns, and gathers external
+    /// intelligence (GitHub links, audit reports).
+    #[command(visible_alias = "ct")]
+    Contract(contract::ContractArgs),
 
     // -- Token analysis -------------------------------------------------------
     /// Crawl a token for analytics data.
@@ -270,8 +284,29 @@ pub enum Commands {
     Web(WebArgs),
 }
 
+impl Commands {
+    /// Returns `true` for interactive/long-running commands that manage their
+    /// own UI (TUI, REPL, web server, setup wizard, shell completions).
+    /// Non-interactive commands return `false` and get a version header.
+    pub fn is_interactive(&self) -> bool {
+        matches!(
+            self,
+            Commands::Interactive(_)
+                | Commands::Monitor(_)
+                | Commands::Setup(_)
+                | Commands::Completions(_)
+                | Commands::Web(_)
+        )
+    }
+}
+
 /// Arguments for the web server command.
 #[derive(Debug, Clone, clap::Args)]
+#[command(after_help = "\x1b[1mExamples:\x1b[0m
+  scope web
+  scope web --port 3000 --bind 0.0.0.0
+  scope serve --daemon
+  scope web --stop")]
 pub struct WebArgs {
     /// Port to listen on.
     #[arg(long, short, default_value = "8080")]
@@ -294,6 +329,10 @@ pub struct WebArgs {
 
 /// Arguments for the completions command.
 #[derive(Debug, Clone, clap::Args)]
+#[command(after_help = "\x1b[1mExamples:\x1b[0m
+  scope completions bash >> ~/.bashrc
+  scope completions zsh > ~/.zfunc/_scope
+  scope completions fish > ~/.config/fish/completions/scope.fish")]
 pub struct CompletionsArgs {
     /// The shell to generate completions for.
     #[arg(value_enum)]
@@ -744,9 +783,9 @@ mod tests {
 
     #[test]
     fn test_cli_parse_market_summary_with_pair() {
-        let cli = Cli::try_parse_from(["scope", "market", "summary", "PUSD_USDT"]).unwrap();
+        let cli = Cli::try_parse_from(["scope", "market", "summary", "DAI_USDT"]).unwrap();
         if let Commands::Market(market::MarketCommands::Summary(args)) = cli.command {
-            assert_eq!(args.pair, "PUSD_USDT");
+            assert_eq!(args.pair, "DAI_USDT");
         } else {
             panic!("Expected Market Summary command");
         }

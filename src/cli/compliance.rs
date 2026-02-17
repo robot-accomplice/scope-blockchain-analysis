@@ -25,8 +25,13 @@ pub enum ComplianceCommands {
 }
 
 #[derive(Debug, Args)]
+#[command(after_help = "\x1b[1mExamples:\x1b[0m
+  scope compliance risk 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
+  scope compliance risk @main-wallet                      \x1b[2m# address book shortcut\x1b[0m
+  scope compliance risk 0x742d... --detailed --format json
+  scope compliance risk 0x742d... --output risk_report.json")]
 pub struct RiskArgs {
-    /// Address to assess
+    /// Address to assess. Use @label for address book shortcut.
     #[arg(value_name = "ADDRESS")]
     pub address: String,
 
@@ -48,6 +53,10 @@ pub struct RiskArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(after_help = "\x1b[1mExamples:\x1b[0m
+  scope compliance trace 0xabc123def456...
+  scope compliance trace 0xabc123... --depth 5 --flag-suspicious
+  scope compliance trace 0xabc123... --format json")]
 pub struct TraceArgs {
     /// Transaction hash to trace
     #[arg(value_name = "TX_HASH")]
@@ -67,6 +76,10 @@ pub struct TraceArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(after_help = "\x1b[1mExamples:\x1b[0m
+  scope compliance analyze 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
+  scope compliance analyze 0x742d... --patterns structuring,layering --range 90d
+  scope compliance analyze 0x742d... --format json")]
 pub struct AnalyzeArgs {
     /// Address to analyze
     #[arg(value_name = "ADDRESS")]
@@ -86,6 +99,9 @@ pub struct AnalyzeArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(after_help = "\x1b[1mExamples:\x1b[0m
+  scope compliance compliance-report 0x742d... -j us -o report.json
+  scope compliance compliance-report addresses.txt -j eu --report-type detailed -o report.json")]
 pub struct ComplianceReportArgs {
     /// Address or addresses file
     #[arg(value_name = "TARGET")]
@@ -1244,5 +1260,92 @@ mod tests {
         assert!(report.contains("Structuring detected: false"));
         assert!(report.contains("Round number pattern: false"));
         assert!(report.contains("Unusual hour transactions: 3"));
+    }
+
+    #[test]
+    fn test_format_compliance_report_sar_type() {
+        use crate::compliance::risk::{RiskAssessment, RiskCategory, RiskFactor, RiskLevel};
+        let assessment = RiskAssessment {
+            address: "0xsar".to_string(),
+            chain: "ethereum".to_string(),
+            overall_score: 7.5,
+            risk_level: RiskLevel::High,
+            factors: vec![RiskFactor {
+                name: "Tx Velocity".to_string(),
+                category: RiskCategory::Behavioral,
+                score: 8.0,
+                weight: 1.0,
+                description: "High velocity".to_string(),
+                evidence: vec![],
+            }],
+            recommendations: vec!["File SAR".to_string()],
+            assessed_at: chrono::Utc::now(),
+        };
+        let patterns: Vec<(
+            String,
+            String,
+            Option<crate::compliance::datasource::PatternAnalysis>,
+        )> = vec![];
+        let report = format_compliance_report(
+            &[assessment],
+            &patterns,
+            &Jurisdiction::US,
+            &ReportType::SAR,
+        );
+        assert!(report.contains("Compliance Report"));
+        assert!(report.contains("Risk Factor Breakdown"));
+        assert!(report.contains("Tx Velocity"));
+        assert!(report.contains("File SAR"));
+    }
+
+    #[test]
+    fn test_format_compliance_report_travel_rule_type() {
+        use crate::compliance::risk::{RiskAssessment, RiskCategory, RiskFactor, RiskLevel};
+        let assessment = RiskAssessment {
+            address: "0xtravel".to_string(),
+            chain: "ethereum".to_string(),
+            overall_score: 4.0,
+            risk_level: RiskLevel::Medium,
+            factors: vec![RiskFactor {
+                name: "Travel Rule".to_string(),
+                category: RiskCategory::Behavioral,
+                score: 4.0,
+                weight: 1.0,
+                description: "Threshold check".to_string(),
+                evidence: vec![],
+            }],
+            recommendations: vec![],
+            assessed_at: chrono::Utc::now(),
+        };
+        let patterns: Vec<(
+            String,
+            String,
+            Option<crate::compliance::datasource::PatternAnalysis>,
+        )> = vec![];
+        let report = format_compliance_report(
+            &[assessment],
+            &patterns,
+            &Jurisdiction::Singapore,
+            &ReportType::TravelRule,
+        );
+        assert!(report.contains("Compliance Report"));
+        assert!(report.contains("0xtravel"));
+        assert!(report.contains("4.0"));
+    }
+
+    #[test]
+    fn test_resolve_compliance_targets_file_empty_and_comments_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.txt");
+        std::fs::write(&path, "\n\n# comment only\n  \n").unwrap();
+        let result = resolve_compliance_targets(path.to_str().unwrap()).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_parse_address_line_with_chain_trimmed() {
+        let (addr, chain) = parse_address_line("0xabc , polygon ");
+        assert_eq!(addr, "0xabc");
+        assert_eq!(chain, "polygon");
     }
 }

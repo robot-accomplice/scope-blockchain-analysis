@@ -15,13 +15,14 @@ A production-grade command-line tool for blockchain data analysis, portfolio tra
 - **Token Crawling**: Crawl DEX data for any token -- price, volume, liquidity, holder analysis, and risk scoring with markdown report generation
 - **Live Monitoring**: Real-time TUI dashboard with five layout presets (Dashboard, Chart, Feed, Compact, Exchange), responsive terminal sizing, config-driven widget visibility, price/volume/candlestick charts, price alerts, whale detection, CSV export, and auto-pause on input
 - **Exchange Venues**: Data-driven CEX integration via YAML descriptors — 11 built-in venues (Binance, Biconomy, Bitget, Bybit, Coinbase, Crypto.com, Gate.io, HTX, Kraken, MEXC, OKX) with order book, ticker, trades, and OHLC support; add custom venues by dropping a YAML file in `~/.config/scope/venues/`
-- **Portfolio Management**: Track multiple addresses across chains with labels, tags, and aggregated balance views
+- **Portfolio Management**: Track multiple addresses across chains with labels, tags, and aggregated balance views; `@label` shortcuts work in both CLI and web UI for instant address recall
 - **Compliance & Risk Assessment**: Risk scoring, transaction pattern detection, taint analysis, and compliance reporting
 - **Data Export**: Export address history and portfolio data to JSON or CSV with date range filtering
 - **Token Discovery**: Browse trending and boosted tokens from DexScreener (`scope discover` / `scope disc`)
 - **Market Command** (`scope market summary`, `ohlc`, `trades`): Peg and order book health; OHLC/candlestick data; recent trades; any CEX venue from the registry or DEX (Ethereum, Solana); repeat mode with `--every`/`--duration`; `--report` and `--csv` export
 - **Token Health Suite** (`scope token-health` / `scope health`): DEX analytics with optional order book summary; any venue from the registry or DEX
 - **Venue Management** (`scope venues` / `scope ven`): List available venues, view the YAML schema, initialise user venues directory, validate custom descriptors
+- **Contract Analysis** (`scope contract` / `scope ct`): Comprehensive smart contract security analysis — source code verification, proxy detection (EIP-1967/1822/1167/Diamond), access control mapping, vulnerability heuristics (reentrancy, selfdestruct, unchecked calls, tx.origin, overflow), DeFi protocol checks (oracle, flash loan, DEX slippage), external intelligence (GitHub linking, audit reports, Sourcify), and security scoring (0-100)
 - **Insights** (`scope insights` / `insight`): Infer chain and type (address, tx, token) from input; run relevant analyses and present unified observations
 - **Agent Output** (`scope --ai`): Global flag for markdown output to stdout (address, tx, crawl, discover, portfolio, export, token-health)
 - **Reporting**: Markdown reports for address, token, portfolio, and market commands; batch reports for multiple addresses (`scope report batch`); address dossier (address + risk combined)
@@ -105,6 +106,10 @@ scope address TDqSquXBgUCLYvYC4XZgrprLK589dkhSCf --chain tron
 # Look up a transaction
 scope tx 0xabc123def456789012345678901234567890123456789012345678901234abcd
 
+# Analyze a smart contract (security scoring, proxy detection, vulnerabilities)
+scope contract 0xdAC17F958D2ee523a2206206994597C13D831ec7
+scope ct 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --json
+
 # Risk assessment for compliance
 export ETHERSCAN_API_KEY="your_key_here"
 scope compliance risk 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --detailed
@@ -134,7 +139,7 @@ scope health USDC --with-market --venue binance
 
 # Market peg and order book health
 scope market summary USDC
-scope market summary PUSD --venue biconomy --format json
+scope market summary DAI --venue binance --format json
 scope market summary USDC --venue kraken
 
 # OHLC and recent trades
@@ -186,9 +191,12 @@ scope serve --port 9090
 
 The web UI provides:
 - All CLI commands accessible via browser forms
-- JSON REST API at `/api/*` for programmatic access (exchange: snapshot, OHLC, trades)
+- **Address Book integration** — type `@label` in any input field for autocomplete; the backend resolves the label and auto-fills the chain
+- Contract Analysis panel with security scoring, vulnerability cards, proxy detection, and access control visualization
+- JSON REST API at `/api/*` for programmatic access (exchange: snapshot, OHLC, trades, contract analysis)
 - Live WebSocket monitor with real-time price charts
 - Exchange venue selector and market snapshots
+- Rich data rendering with download options (JSON, CSV, Markdown)
 - Configuration status and setup page
 
 ### Command Map
@@ -199,6 +207,7 @@ Not sure which command to use? Here's a quick decision tree:
 |--------------|---------|
 | Look up an address (balance, txs, tokens) | `scope address <addr>` |
 | Look up a transaction | `scope tx <hash>` |
+| Audit a smart contract (security, proxy, vulns) | `scope contract <addr>` |
 | Auto-detect input and run everything | `scope insights <target>` |
 | Get token DEX data (price, volume, holders) | `scope crawl <token>` |
 | Token DEX + order book health (stablecoins) | `scope token-health <token> --with-market` |
@@ -623,6 +632,7 @@ Available interactive commands:
 
 - `address` / `addr` -- Analyze a blockchain address
 - `tx` / `transaction` -- Analyze a transaction
+- `contract` / `ct` -- Analyze a smart contract (security, proxy, vulnerabilities)
 - `crawl` / `token` -- Crawl token analytics
 - `monitor` / `mon` -- Live TUI dashboard with five layout presets, widget toggles, price/volume/candlestick charts, alerts, CSV export, and auto-pause
 - `portfolio` / `port` -- Portfolio management (add, remove, list, summary)
@@ -846,11 +856,11 @@ The `scope market` command has three subcommands:
 - **Order book**: Ask/bid levels with depth (base and quote amounts)
 - **Health checks**: No sells below peg, bid/ask ratio, minimum levels and depth per side
 - **Output**: Text (default) or JSON — see [Output Examples](#output-examples) for sample
-- **Tunable thresholds**: All health-check thresholds are configurable. Defaults (min-levels=6, min-depth=3000, peg-range=0.001, bid/ask ratio 0.2-5.0x) originated from the PUSD Hummingbot config—override for other markets.
+- **Tunable thresholds**: All health-check thresholds are configurable. Defaults (min-levels=6, min-depth=3000, peg-range=0.001, bid/ask ratio 0.2-5.0x) are sensible stablecoin defaults—override for other markets.
 
 ```bash
 scope market summary                           # USDC on Binance (default, one shot)
-scope market summary PUSD                      # PUSD on default venue
+scope market summary DAI                       # DAI on default venue
 scope market summary USDC --venue kraken       # USDC on Kraken
 scope market summary USDC --venue okx          # USDC on OKX
 scope market summary --peg 1.0 --min-depth 5000
@@ -875,7 +885,7 @@ scope market ohlc BTC --venue kraken --interval 15m --format json
 
 ```bash
 scope market trades USDC --venue binance --limit 50
-scope market trades PUSD --venue biconomy --format json
+scope market trades DAI --venue binance --format json
 ```
 
 `just summary` invokes `scope market summary` under the hood.

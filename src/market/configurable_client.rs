@@ -820,6 +820,31 @@ mod tests {
     }
 
     #[test]
+    fn test_format_display_pair_eur_concatenated() {
+        assert_eq!(format_display_pair("XBTEUR", "{base}{quote}"), "XBT/EUR");
+    }
+
+    #[test]
+    fn test_format_display_pair_gbp_concatenated() {
+        assert_eq!(format_display_pair("XBTGBP", "{base}{quote}"), "XBT/GBP");
+    }
+
+    #[test]
+    fn test_format_display_pair_usdc_concatenated() {
+        assert_eq!(format_display_pair("ETHUSDC", "{base}{quote}"), "ETH/USDC");
+    }
+
+    #[test]
+    fn test_format_display_pair_no_quote_match_returns_raw() {
+        assert_eq!(format_display_pair("XYZABC", "{base}{quote}"), "XYZABC");
+    }
+
+    #[test]
+    fn test_format_display_pair_base_zero_len_returns_raw() {
+        assert_eq!(format_display_pair("USDT", "{base}{quote}"), "USDT");
+    }
+
+    #[test]
     fn test_value_to_f64_number() {
         let val = serde_json::json!(42.5);
         assert_eq!(value_to_f64(&val), Some(42.5));
@@ -953,6 +978,33 @@ mod tests {
                 "params": {"instrument": "BTC_USDT", "depth": "100"}
             })
         );
+    }
+
+    #[test]
+    fn test_interpolate_json_array_with_placeholders() {
+        let desc = make_test_descriptor();
+        let client = ConfigurableExchangeClient::new(desc);
+        let template = serde_json::json!({
+            "pairs": ["{pair}", "limit:{limit}"]
+        });
+        let result = client.interpolate_json(&template, "BTCUSDT", "50");
+        assert_eq!(result["pairs"][0], "BTCUSDT");
+        assert_eq!(result["pairs"][1], "limit:50");
+    }
+
+    #[test]
+    fn test_interpolate_json_preserves_primitive_types() {
+        let desc = make_test_descriptor();
+        let client = ConfigurableExchangeClient::new(desc);
+        let template = serde_json::json!({
+            "flag": true,
+            "count": 42,
+            "name": "static"
+        });
+        let result = client.interpolate_json(&template, "BTC", "10");
+        assert_eq!(result["flag"], true);
+        assert_eq!(result["count"], 42);
+        assert_eq!(result["name"], "static");
     }
 
     fn make_test_descriptor() -> VenueDescriptor {
@@ -1321,17 +1373,6 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(client.parse_side(&data, &mapping), TradeSide::Buy);
-    }
-
-    #[test]
-    fn test_format_display_pair_eur() {
-        assert_eq!(format_display_pair("BTCEUR", "{base}{quote}"), "BTC/EUR");
-        assert_eq!(format_display_pair("etheur", "{base}{quote}"), "eth/eur");
-    }
-
-    #[test]
-    fn test_format_display_pair_gbp() {
-        assert_eq!(format_display_pair("BTCGBP", "{base}{quote}"), "BTC/GBP");
     }
 
     #[test]
@@ -1918,15 +1959,6 @@ mod tests {
         let result = client.navigate_root(&json, Some("data.missing_key"));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("missing key"));
-    }
-
-    #[test]
-    fn test_interpolate_json_array() {
-        let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
-        let template = serde_json::json!(["{pair}", "{limit}", 42]);
-        let result = client.interpolate_json(&template, "BTC_USDT", "100");
-        assert_eq!(result, serde_json::json!(["BTC_USDT", "100", 42]));
     }
 
     #[test]

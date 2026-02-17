@@ -1,0 +1,60 @@
+---
+description: All features must support address book @label shortcuts
+alwaysApply: true
+---
+
+# Address Book Integration Requirement
+
+**Every feature that accepts an address, token, or contract input must support address book `@label` shortcuts.** This applies to both CLI commands and web API handlers.
+
+## How It Works
+
+The address book (`~/.config/scope/data/address_book.yaml`) lets users save addresses with labels. The `@label` syntax resolves a label to its stored address and chain.
+
+### Core Function
+
+`cli::address_book::resolve_address_book_input(input, config)` handles resolution:
+- `@label` → looks up the label, returns `(address, chain)` or an error with suggestions
+- Raw address → if it matches a book entry, returns `(address, chain)` with the stored chain
+- No match → returns `None`, caller uses the input as-is
+
+### Web API Helper
+
+`web::api::resolve_address_book(input, config)` wraps the core function for HTTP handlers, returning a `ResolvedInput { value, chain }`.
+
+## Rules for New Features
+
+### CLI Commands
+- If the command accepts an address/token/contract argument, call `resolve_address_book_input()` on that input before processing
+- Use the resolved chain as the default (allow explicit `--chain` to override)
+- On `@label` miss, propagate the error with available label suggestions
+
+### Web API Handlers
+- If the handler accepts an address/token/contract field in its request body, call `super::resolve_address_book()` at the top of the handler
+- Use `resolved.chain.unwrap_or(req.chain)` so address book chain is used unless the user explicitly provides one
+- Return 400 with the error message on `@label` miss
+
+### Web UI (Frontend)
+- Any new input field for addresses/tokens must include `list="ab-suggestions"` for autocomplete
+- Placeholder text should mention `or @label`
+- The datalist is populated automatically by `updateAddressBookSuggestions()` in `app.js`
+
+## Pattern (Backend)
+
+```rust
+// At the top of every handler that takes an address/token:
+let resolved = match super::resolve_address_book(&req.address, &state.config) {
+    Ok(r) => r,
+    Err(e) => {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response();
+    }
+};
+let address = resolved.value;
+let chain = resolved.chain.unwrap_or(req.chain);
+```
+
+## Currently Integrated
+
+CLI: `address`, `insights`, `crawl`, `contract`, `export`, `compliance`, `token-health`, `monitor`, `portfolio`, `report`, `interactive`
+
+Web API: `address`, `insights`, `crawl`, `contract`, `export`, `compliance/risk`, `token-health`

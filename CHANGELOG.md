@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-02-13
+
+### Added
+- **Contract analysis module**: New `scope contract <address>` command with ABI decoding, proxy detection, external call mapping, and a composite security score (0-100). Supports Ethereum, BSC, Polygon, and Arbitrum via block explorer APIs.
+- **Contract panel in web UI**: Full contract analysis interface in the browser mode with security score visualization, function tables, external call graphs, and proxy detection display.
+- **Address book integration across all features**: All CLI commands and web API endpoints that accept address/token inputs now resolve `@label` shortcuts from the address book. The resolved chain is used as the default unless explicitly overridden.
+- **Web UI address book autocomplete**: All address/token input fields in the web UI show `@label` suggestions via a browser-native datalist, populated from the address book and refreshed on add/remove.
+- **`@label` hints in all CLI help output**: Every command that accepts an address or token now shows `@label` examples in its help text. The top-level `scope --help` includes a tip about address book shortcuts.
+- **Interactive mode contract support**: The interactive REPL now includes a `contract` command for on-the-fly contract analysis.
+
+### Changed
+- **Test coverage increased to 90%+**: Comprehensive test suite expansion from ~80% to 90.08% coverage (2525+ tests) across all modules.
+- **Codebase cleanup**: Replaced all legacy token references with generic stablecoin examples (DAI, USDC) across code, tests, help text, documentation, and changelog.
+- **Clippy compliance**: Resolved all clippy warnings including `io_other_error`, `len_zero`, and `collapsible_if` lints.
+
 ## [0.4.4] - 2026-02-15
 
 ### Fixed
@@ -15,18 +30,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.4.3] - 2026-02-15
 
 ### Fixed
-- **Monitor token resolution**: Aligned with crawl command's chain filter logic — when chain is "ethereum" (default), DexScreener now searches all chains so exact symbol matches sort first regardless of chain. Previously, `scope monitor PUSD` resolved to syrupUSDC (substring match on ethereum) instead of Pleasing USD (exact match on its native chain).
+- **Monitor token resolution**: Aligned with crawl command's chain filter logic — when chain is "ethereum" (default), DexScreener now searches all chains so exact symbol matches sort first regardless of chain. Previously, `scope monitor DAI` resolved to syrupUSDC (substring match on ethereum) instead of Dai (exact match on its native chain).
 - **Monitor CEX fallback**: Added CEX ticker fallback to monitor's token resolution (matching crawl behavior) when DexScreener returns no results.
 
 ## [0.4.2] - 2026-02-15
 
 ### Added
-- **Monitor `--pair` flag**: Bypass DexScreener token resolution entirely with `--pair PUSD_USDT --venue biconomy`. Enables monitoring tokens not indexed by DexScreener.
+- **Monitor `--pair` flag**: Bypass DexScreener token resolution entirely with `--pair DAI_USDT --venue binance`. Enables monitoring tokens not indexed by DexScreener.
 - **Venue interval mapping**: `interval_map` field in venue OHLC descriptors translates canonical intervals (1m, 5m, 1h, 1d) to venue-specific formats. Unmapped intervals pass through unchanged.
 
 ### Fixed
 - **Biconomy OHLC**: Resolved "Illegal parameter" error caused by Biconomy requiring non-standard interval names (`1min`, `5min`, `hour`, `day`) instead of the canonical format.
-- **Monitor PUSD resolution**: `scope monitor PUSD --venue biconomy` no longer resolves to the wrong token (syrupUSDC) when used with `--pair`.
+- **Monitor DAI resolution**: `scope monitor DAI --venue binance` no longer resolves to the wrong token (syrupUSDC) when used with `--pair`.
 
 ## [0.4.1] - 2026-02-15
 
@@ -38,7 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **OHLC capability for all 11 venues**: All built-in venue descriptors now include `ohlc` endpoint configurations.
 
 ### Changed
-- **CEX venue ticker fallback**: When DexScreener returns no results for a token (e.g., PUSD), the system falls back to checking CEX venues (Binance) for ticker data.
+- **CEX venue ticker fallback**: When DexScreener returns no results for a token (e.g., DAI), the system falls back to checking CEX venues (Binance) for ticker data.
 
 ### Fixed
 - **Token search ranking**: Exact symbol matches are now preferred over substring matches, resolving the syrupUSDC-before-USDC ordering bug.

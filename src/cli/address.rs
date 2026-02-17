@@ -26,16 +26,55 @@ use clap::Args;
 
 /// Arguments for the address analysis command.
 #[derive(Debug, Clone, Args)]
-#[command(after_help = "\x1b[1mExamples:\x1b[0m
+#[command(
+    after_help = "\x1b[1mExamples:\x1b[0m
   scope address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
+  scope address @main-wallet                              \x1b[2m# address book shortcut\x1b[0m
   scope address 0x742d... --include-txs --include-tokens
   scope address 0x742d... --dossier --report dossier.md
-  scope address DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy --chain solana")]
+  scope address DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy --chain solana",
+    after_long_help = "\x1b[1mExamples:\x1b[0m
+
+  \x1b[1m$ scope address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2\x1b[0m
+
+  Address Analysis Report
+  =======================
+  Address:      0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
+  Chain:        ethereum
+  Balance:      1.234567 ETH
+  Value (USD):  $3,456.78
+  Transactions: 142
+
+  \x1b[1m$ scope address 0x742d... --dossier --report dossier.md\x1b[0m
+
+  Address Analysis Report
+  =======================
+  Address:      0x742d35Cc...f1b3c2
+  Chain:        ethereum
+  Balance:      1.234567 ETH
+  ...
+  Risk Assessment
+  =======================
+  Risk Score:   35/100 (Low)
+  Factors:      No sanctions matches, moderate tx volume
+  Report saved to dossier.md
+
+  \x1b[1m$ scope address DRpbCBMx...TDt1v --chain solana\x1b[0m
+
+  Address Analysis Report
+  =======================
+  Address:      DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy
+  Chain:        solana
+  Balance:      42.500000 SOL
+  Value (USD):  $5,312.50
+  Transactions: 87"
+)]
 pub struct AddressArgs {
     /// The blockchain address to analyze.
     ///
     /// Must be a valid address format for the target chain
     /// (e.g., 0x-prefixed 40-character hex for Ethereum).
+    /// Use @label to resolve from the address book (e.g., @main-wallet).
     #[arg(value_name = "ADDRESS")]
     pub address: String,
 
@@ -527,6 +566,24 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_address_valid_arbitrum() {
+        let result = validate_address("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2", "arbitrum");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_address_valid_optimism() {
+        let result = validate_address("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2", "optimism");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_address_valid_base() {
+        let result = validate_address("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2", "base");
+        assert!(result.is_ok());
+    }
+
+    #[test]
     fn test_validate_address_valid_solana() {
         let result = validate_address("DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy", "solana");
         assert!(result.is_ok());
@@ -661,6 +718,79 @@ mod tests {
     }
 
     #[test]
+    fn test_transaction_summary_with_none_to_and_false_status() {
+        let tx = TransactionSummary {
+            hash: "0xcontract".to_string(),
+            block_number: 999,
+            timestamp: 1700001000,
+            from: "0xfrom".to_string(),
+            to: None,
+            value: "0".to_string(),
+            status: false,
+        };
+        let json = serde_json::to_string(&tx).unwrap();
+        assert!(json.contains("0xcontract"));
+        assert!(json.contains("\"status\":false"));
+        let deserialized: TransactionSummary = serde_json::from_str(&json).unwrap();
+        assert!(deserialized.to.is_none());
+        assert!(!deserialized.status);
+    }
+
+    #[test]
+    fn test_address_report_deserialization() {
+        let json = r#"{
+            "address": "0xabc123",
+            "chain": "polygon",
+            "balance": {"raw": "1000", "formatted": "0.001 MATIC"},
+            "transaction_count": 5
+        }"#;
+        let report: AddressReport = serde_json::from_str(json).unwrap();
+        assert_eq!(report.address, "0xabc123");
+        assert_eq!(report.chain, "polygon");
+        assert_eq!(report.balance.raw, "1000");
+        assert_eq!(report.transaction_count, 5);
+        assert!(report.transactions.is_none());
+        assert!(report.tokens.is_none());
+    }
+
+    #[test]
+    fn test_balance_clone() {
+        let b = Balance {
+            raw: "1000".to_string(),
+            formatted: "1.0".to_string(),
+            usd: Some(2500.0),
+        };
+        let c = b.clone();
+        assert_eq!(b.raw, c.raw);
+        assert_eq!(b.usd, c.usd);
+    }
+
+    #[test]
+    fn test_address_report_clone() {
+        let report = make_test_report();
+        let cloned = report.clone();
+        assert_eq!(report.address, cloned.address);
+        assert_eq!(report.transaction_count, cloned.transaction_count);
+    }
+
+    #[test]
+    fn test_address_args_clone() {
+        let args = AddressArgs {
+            address: "0xabc".to_string(),
+            chain: "ethereum".to_string(),
+            format: Some(OutputFormat::Json),
+            include_txs: true,
+            include_tokens: true,
+            limit: 50,
+            report: None,
+            dossier: true,
+        };
+        let cloned = args.clone();
+        assert_eq!(args.address, cloned.address);
+        assert_eq!(args.dossier, cloned.dossier);
+    }
+
+    #[test]
     fn test_token_balance_serialization() {
         let token = TokenBalance {
             contract_address: "0xtoken".to_string(),
@@ -753,6 +883,13 @@ mod tests {
         let mut report = make_test_report();
         report.tokens = Some(vec![]);
         let result = output_report(&report, OutputFormat::Table);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_output_report_markdown() {
+        let report = make_test_report();
+        let result = output_report(&report, OutputFormat::Markdown);
         assert!(result.is_ok());
     }
 
@@ -872,6 +1009,227 @@ mod tests {
         let client = MockClient;
         let result = analyze_address(&args, &client).await;
         assert!(result.is_ok());
+    }
+
+    /// Mock client that returns Err for get_transactions; analyze_address should fall back to empty vec.
+    struct FailTxMockClient;
+    #[async_trait]
+    impl ChainClient for FailTxMockClient {
+        fn chain_name(&self) -> &str {
+            "ethereum"
+        }
+        fn native_token_symbol(&self) -> &str {
+            "ETH"
+        }
+        async fn get_balance(&self, _addr: &str) -> crate::error::Result<ChainBalance> {
+            Ok(ChainBalance {
+                raw: "1000000000000000000".into(),
+                formatted: "1.0 ETH".into(),
+                decimals: 18,
+                symbol: "ETH".into(),
+                usd_value: Some(2500.0),
+            })
+        }
+        async fn enrich_balance_usd(&self, _b: &mut ChainBalance) {}
+        async fn get_transaction(&self, _h: &str) -> crate::error::Result<ChainTransaction> {
+            Err(crate::error::ScopeError::NotFound("mock".into()))
+        }
+        async fn get_transactions(
+            &self,
+            _addr: &str,
+            _lim: u32,
+        ) -> crate::error::Result<Vec<ChainTransaction>> {
+            Err(crate::error::ScopeError::Chain("tx fetch failed".into()))
+        }
+        async fn get_block_number(&self) -> crate::error::Result<u64> {
+            Ok(12345678)
+        }
+        async fn get_token_balances(
+            &self,
+            _addr: &str,
+        ) -> crate::error::Result<Vec<ChainTokenBalance>> {
+            Ok(vec![])
+        }
+        async fn get_code(&self, _addr: &str) -> crate::error::Result<String> {
+            Ok("0x".into())
+        }
+    }
+
+    /// Mock client that returns Err for get_token_balances; analyze_address should fall back to empty vec.
+    struct FailTokenBalancesMockClient;
+    #[async_trait]
+    impl ChainClient for FailTokenBalancesMockClient {
+        fn chain_name(&self) -> &str {
+            "ethereum"
+        }
+        fn native_token_symbol(&self) -> &str {
+            "ETH"
+        }
+        async fn get_balance(&self, _addr: &str) -> crate::error::Result<ChainBalance> {
+            Ok(ChainBalance {
+                raw: "1000000000000000000".into(),
+                formatted: "1.0 ETH".into(),
+                decimals: 18,
+                symbol: "ETH".into(),
+                usd_value: Some(2500.0),
+            })
+        }
+        async fn enrich_balance_usd(&self, _b: &mut ChainBalance) {}
+        async fn get_transaction(&self, _h: &str) -> crate::error::Result<ChainTransaction> {
+            Err(crate::error::ScopeError::NotFound("mock".into()))
+        }
+        async fn get_transactions(
+            &self,
+            _addr: &str,
+            _lim: u32,
+        ) -> crate::error::Result<Vec<ChainTransaction>> {
+            Ok(vec![])
+        }
+        async fn get_block_number(&self) -> crate::error::Result<u64> {
+            Ok(12345678)
+        }
+        async fn get_token_balances(
+            &self,
+            _addr: &str,
+        ) -> crate::error::Result<Vec<ChainTokenBalance>> {
+            Err(crate::error::ScopeError::Chain(
+                "token balances fetch failed".into(),
+            ))
+        }
+        async fn get_code(&self, _addr: &str) -> crate::error::Result<String> {
+            Ok("0x".into())
+        }
+    }
+
+    /// Mock client that returns a transaction with None for block_number, timestamp, status.
+    struct PartialTxMockClient;
+    #[async_trait]
+    impl ChainClient for PartialTxMockClient {
+        fn chain_name(&self) -> &str {
+            "ethereum"
+        }
+        fn native_token_symbol(&self) -> &str {
+            "ETH"
+        }
+        async fn get_balance(&self, _addr: &str) -> crate::error::Result<ChainBalance> {
+            Ok(ChainBalance {
+                raw: "0".into(),
+                formatted: "0 ETH".into(),
+                decimals: 18,
+                symbol: "ETH".into(),
+                usd_value: None,
+            })
+        }
+        async fn enrich_balance_usd(&self, _b: &mut ChainBalance) {}
+        async fn get_transaction(&self, _h: &str) -> crate::error::Result<ChainTransaction> {
+            Err(crate::error::ScopeError::NotFound("mock".into()))
+        }
+        async fn get_transactions(
+            &self,
+            _addr: &str,
+            _lim: u32,
+        ) -> crate::error::Result<Vec<ChainTransaction>> {
+            Ok(vec![ChainTransaction {
+                hash: "0xpartial".into(),
+                block_number: None,
+                timestamp: None,
+                from: "0xfrom".into(),
+                to: None,
+                value: "0.5".into(),
+                gas_limit: 21000,
+                gas_used: Some(21000),
+                gas_price: "20000000000".into(),
+                nonce: 1,
+                input: "0x".into(),
+                status: None,
+            }])
+        }
+        async fn get_block_number(&self) -> crate::error::Result<u64> {
+            Ok(1)
+        }
+        async fn get_token_balances(
+            &self,
+            _addr: &str,
+        ) -> crate::error::Result<Vec<ChainTokenBalance>> {
+            Ok(vec![])
+        }
+        async fn get_code(&self, _addr: &str) -> crate::error::Result<String> {
+            Ok("0x".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_analyze_address_tx_fallback_on_error() {
+        let args = AddressArgs {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: "ethereum".to_string(),
+            format: None,
+            include_txs: true,
+            include_tokens: false,
+            limit: 10,
+            report: None,
+            dossier: false,
+        };
+        let client = FailTxMockClient;
+        let result = analyze_address(&args, &client).await;
+        assert!(result.is_ok());
+        let report = result.unwrap();
+        assert!(
+            report
+                .transactions
+                .as_ref()
+                .map(|v| v.is_empty())
+                .unwrap_or(false)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_analyze_address_tokens_fallback_on_error() {
+        let args = AddressArgs {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: "ethereum".to_string(),
+            format: None,
+            include_txs: false,
+            include_tokens: true,
+            limit: 10,
+            report: None,
+            dossier: false,
+        };
+        let client = FailTokenBalancesMockClient;
+        let result = analyze_address(&args, &client).await;
+        assert!(result.is_ok());
+        let report = result.unwrap();
+        assert!(
+            report
+                .tokens
+                .as_ref()
+                .map(|v| v.is_empty())
+                .unwrap_or(false)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_analyze_address_tx_with_none_fields() {
+        let args = AddressArgs {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: "ethereum".to_string(),
+            format: None,
+            include_txs: true,
+            include_tokens: false,
+            limit: 10,
+            report: None,
+            dossier: false,
+        };
+        let client = PartialTxMockClient;
+        let result = analyze_address(&args, &client).await;
+        assert!(result.is_ok());
+        let report = result.unwrap();
+        let txs = report.transactions.unwrap();
+        assert_eq!(txs.len(), 1);
+        assert_eq!(txs[0].block_number, 0);
+        assert_eq!(txs[0].timestamp, 0);
+        assert_eq!(txs[0].to, None);
+        assert!(txs[0].status); // unwrap_or(true) when None
     }
 
     // ========================================================================

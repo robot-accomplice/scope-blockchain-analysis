@@ -611,4 +611,22 @@ output:
         assert!(chains.tron_api.is_none());
         assert!(chains.api_keys.is_empty());
     }
+
+    #[test]
+    fn test_load_unreadable_file_returns_error() {
+        // Create a directory where a file is expected to trigger read error
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.yaml");
+        // Create it as a directory so reading it as a file fails
+        std::fs::create_dir_all(&config_path).unwrap();
+        let result = Config::load(Some(&config_path));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_default_path_returns_valid_path() {
+        let path = Config::default_path();
+        // Should always return some path (may or may not exist)
+        assert!(path.to_str().unwrap().contains("scope"));
+    }
 }

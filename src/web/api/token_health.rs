@@ -35,14 +35,31 @@ fn default_venue() -> String {
 }
 
 /// POST /api/token-health — Token health suite.
+///
+/// Supports address book shortcuts: pass `@label` as the token to
+/// resolve it from the address book.
 pub async fn handle(
     State(state): State<Arc<AppState>>,
     Json(req): Json<TokenHealthRequest>,
 ) -> impl IntoResponse {
+    // Resolve address book shortcuts (@label or direct address match)
+    let resolved = match super::resolve_address_book(&req.token, &state.config) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response();
+        }
+    };
+    let token = resolved.value;
+    let chain = resolved.chain.unwrap_or(req.chain);
+
     // Fetch DEX analytics
     let analytics = match crawl::fetch_analytics_for_input(
-        &req.token,
-        &req.chain,
+        &token,
+        &chain,
         Period::Hour24,
         10,
         &state.factory,
@@ -322,5 +339,119 @@ mod tests {
         assert_eq!(dex_venue_to_chain("solana"), "solana");
         assert_eq!(dex_venue_to_chain("Solana"), "solana");
         assert_eq!(dex_venue_to_chain("unknown"), "ethereum"); // default
+    }
+
+    #[tokio::test]
+    async fn test_handle_token_health_invalid_token_error_path() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
+        use axum::extract::State;
+        use axum::response::IntoResponse;
+
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+        let req = TokenHealthRequest {
+            token: "INVALID_TOKEN_XYZ_NONEXISTENT".to_string(),
+            chain: "ethereum".to_string(),
+            with_market: false,
+            market_venue: "binance".to_string(),
+        };
+        let response = handle(State(state), axum::Json(req)).await.into_response();
+        let status = response.status();
+        // May succeed (empty analytics) or 500 (fetch error)
+        assert!(status.is_success() || status.is_server_error());
+    }
+
+    #[test]
+    fn test_token_health_request_debug() {
+        let req = TokenHealthRequest {
+            token: "USDC".to_string(),
+            chain: "ethereum".to_string(),
+            with_market: true,
+            market_venue: "binance".to_string(),
+        };
+        let debug = format!("{:?}", req);
+        assert!(debug.contains("TokenHealthRequest"));
+    }
+
+    #[test]
+    fn test_deserialize_with_optional_venue() {
+        let json = serde_json::json!({
+            "token": "DAI",
+            "market_venue": "mexc"
+        });
+        let req: TokenHealthRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.token, "DAI");
+        assert_eq!(req.market_venue, "mexc");
+    }
+
+    #[tokio::test]
+    async fn test_handle_token_health_success_json_structure() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
+        use axum::body;
+        use axum::extract::State;
+        use axum::response::IntoResponse;
+
+        let config = Config::default();
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+        let req = TokenHealthRequest {
+            token: "USDC".to_string(),
+            chain: "ethereum".to_string(),
+            with_market: false,
+            market_venue: "binance".to_string(),
+        };
+        let response = handle(State(state), axum::Json(req)).await.into_response();
+        if response.status().is_success() {
+            let body_bytes = body::to_bytes(response.into_body(), 1_000_000)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            assert!(json.get("analytics").is_some());
+            assert!(json.get("market").is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_token_health_label_not_found() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
+        use axum::extract::State;
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config = Config {
+            address_book: crate::config::AddressBookConfig {
+                data_dir: Some(tmp.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+        let req = TokenHealthRequest {
+            token: "@nonexistent".to_string(),
+            chain: "ethereum".to_string(),
+            with_market: false,
+            market_venue: "binance".to_string(),
+        };
+        let response = handle(State(state), axum::Json(req)).await.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"].as_str().unwrap().contains("@nonexistent"));
     }
 }

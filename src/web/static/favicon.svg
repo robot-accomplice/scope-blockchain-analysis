@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Outer ring -->
+  <circle cx="32" cy="32" r="28" fill="none" stroke="#3fb950" stroke-width="3"/>
+  <!-- Inner ring -->
+  <circle cx="32" cy="32" r="14" fill="none" stroke="#3fb950" stroke-width="2" opacity="0.7"/>
+  <!-- Center dot (red) -->
+  <circle cx="32" cy="32" r="4" fill="#f85149"/>
+  <!-- Crosshair lines -->
+  <line x1="32" y1="0" x2="32" y2="16" stroke="#3fb950" stroke-width="2.5" stroke-linecap="round"/>
+  <line x1="32" y1="48" x2="32" y2="64" stroke="#3fb950" stroke-width="2.5" stroke-linecap="round"/>
+  <line x1="0" y1="32" x2="16" y2="32" stroke="#3fb950" stroke-width="2.5" stroke-linecap="round"/>
+  <line x1="48" y1="32" x2="64" y2="32" stroke="#3fb950" stroke-width="2.5" stroke-linecap="round"/>
+</svg>

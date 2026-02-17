@@ -24,6 +24,10 @@ pub enum DiscoverSource {
 
 /// Arguments for the discover command.
 #[derive(Debug, Args)]
+#[command(after_help = "\x1b[1mExamples:\x1b[0m
+  scope discover
+  scope discover --source boosts --chain solana
+  scope discover --source top-boosts --limit 30 --format json")]
 pub struct DiscoverArgs {
     /// Discovery source: profiles (featured), boosts (recent), top-boosts (most active)
     #[arg(short, long, default_value = "profiles")]

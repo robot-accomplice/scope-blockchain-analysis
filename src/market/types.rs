@@ -12,7 +12,7 @@
 pub struct OrderBookLevel {
     /// Price (e.g., 1.0001)
     pub price: f64,
-    /// Quantity in base asset (e.g., PUSD)
+    /// Quantity in base asset (e.g., DAI)
     pub quantity: f64,
 }
 
@@ -27,7 +27,7 @@ impl OrderBookLevel {
 /// Full order book snapshot with bids and asks.
 #[derive(Debug, Clone)]
 pub struct OrderBook {
-    /// Trading pair label (e.g., "PUSD/USDT").
+    /// Trading pair label (e.g., "DAI/USDT").
     pub pair: String,
     /// Bids sorted by price descending (best bid first).
     pub bids: Vec<OrderBookLevel>,
@@ -278,7 +278,7 @@ mod tests {
     #[test]
     fn test_order_book_empty() {
         let book = OrderBook {
-            pair: "PUSD/USDT".to_string(),
+            pair: "DAI/USDT".to_string(),
             bids: vec![],
             asks: vec![],
         };
@@ -292,7 +292,7 @@ mod tests {
     #[test]
     fn test_order_book_with_levels() {
         let book = OrderBook {
-            pair: "PUSD/USDT".to_string(),
+            pair: "DAI/USDT".to_string(),
             bids: vec![
                 OrderBookLevel {
                     price: 0.9998,
