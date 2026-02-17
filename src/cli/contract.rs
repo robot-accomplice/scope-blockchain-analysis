@@ -705,4 +705,27 @@ mod tests {
         });
         print_contract_report(&a);
     }
+
+    #[test]
+    fn test_print_report_defi_slippage_protected_no_deadline() {
+        let mut a = minimal_analysis();
+        a.defi_analysis = Some(crate::contract::defi::DefiAnalysis {
+            protocol_type: crate::contract::defi::ProtocolType::DEX,
+            has_oracle_dependency: false,
+            oracle_info: vec![],
+            has_flash_loan_risk: false,
+            flash_loan_info: vec![],
+            dex_integrations: vec![crate::contract::defi::DexIntegration {
+                dex: "SushiSwap".to_string(),
+                integration_type: "Swap".to_string(),
+                has_slippage_protection: true,
+                has_deadline_protection: false,
+            }],
+            lending_patterns: vec![],
+            token_standards: vec![],
+            staking_patterns: vec![],
+            risk_factors: vec![],
+        });
+        print_contract_report(&a);
+    }
 }

@@ -1470,4 +1470,47 @@ mod tests {
         assert!(row.contains("12."));
         assert!(row.contains("Twelfth item"));
     }
+
+    // ── TTY wrapping continuation tests ──
+    // Exercise the tty=true branch for multi-line wrapping in each helper.
+
+    #[test]
+    fn test_check_pass_wraps_tty() {
+        let long = "No sells detected below the configured peg target during the monitoring window across all tracked pairs and venues in scope";
+        let row = check_pass_styled(long, true);
+        assert!(row.contains("✓"));
+        assert!(row.lines().count() > 1, "should wrap to multiple lines");
+    }
+
+    #[test]
+    fn test_check_fail_wraps_tty() {
+        let long = "Bid depth is significantly below the minimum threshold required for healthy market conditions on this particular trading pair";
+        let row = check_fail_styled(long, true);
+        assert!(row.contains("✗"));
+        assert!(row.lines().count() > 1, "should wrap to multiple lines");
+    }
+
+    #[test]
+    fn test_warning_row_wraps_tty() {
+        let long = "Source code is NOT verified — unable to perform full source-level analysis on this contract. Consider requesting verification from the deployer.";
+        let row = warning_row_styled(long, true);
+        assert!(row.contains("⚠"));
+        assert!(row.lines().count() > 1, "should wrap to multiple lines");
+    }
+
+    #[test]
+    fn test_info_row_wraps_tty() {
+        let long = "No audit reports found in any public database. Check block explorer and auditor databases manually for third-party audit information and verification.";
+        let row = info_row_styled(long, true);
+        assert!(row.contains("ℹ"));
+        assert!(row.lines().count() > 1, "should wrap to multiple lines");
+    }
+
+    #[test]
+    fn test_numbered_row_wraps_tty() {
+        let long = "This is a very long description that should eventually wrap to the next line when the terminal width is narrow enough to force it";
+        let row = numbered_row_styled(1, long, true);
+        assert!(row.contains("1."));
+        assert!(row.lines().count() > 1, "should wrap to multiple lines");
+    }
 }
