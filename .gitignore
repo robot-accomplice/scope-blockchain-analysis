@@ -6,6 +6,7 @@
 *.profdata
 cobertura.xml
 tarpaulin-report.html
+tarpaulin-report.json
 lcov.info
 .coverage-last
 
