@@ -75,75 +75,85 @@ pub async fn run(args: SetupArgs, config: &Config) -> Result<()> {
 
 /// Shows the current configuration status.
 fn show_status(config: &Config) {
-    println!();
-    println!("Scope Configuration Status");
-    println!("{}", "=".repeat(60));
-    println!();
+    use crate::display::terminal as t;
+
+    println!("{}", t::section_header("Scope Configuration Status"));
 
     // Config file location
     let config_path = Config::config_path()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "Not found".to_string());
-    println!("Config file: {}", config_path);
-    println!();
+    println!("{}", t::kv_row("Config file", &config_path));
+    println!("{}", t::blank_row());
 
     // API Keys
-    println!("API Keys:");
-    println!("{}", "-".repeat(60));
+    println!("{}", t::subsection_header("API Keys"));
 
     let api_keys = get_api_key_items(config);
     let mut missing_keys = Vec::new();
 
     for item in &api_keys {
-        let status = if item.is_set {
-            "✓ Set"
+        let info = get_api_key_info(item.name);
+        if item.is_set {
+            let hint = item.value_hint.as_deref().unwrap_or("");
+            let msg = if hint.is_empty() {
+                item.name.to_string()
+            } else {
+                format!("{} {}", item.name, hint)
+            };
+            println!("{}", t::check_pass(&msg));
         } else {
             missing_keys.push(item.name);
-            "✗ Not set"
-        };
-        let hint = item.value_hint.as_deref().unwrap_or("");
-        let info = get_api_key_info(item.name);
-        println!(
-            "  {:<15} {} {}",
-            item.name,
-            status,
-            if item.is_set { hint } else { "" }
-        );
-        println!("    Chain: {}", info.chain);
+            println!("{}", t::check_fail(item.name));
+        }
+        println!("{}", t::kv_row("Chain", info.chain));
     }
 
     // Show where to get missing keys
     if !missing_keys.is_empty() {
-        println!();
-        println!("Where to get API keys:");
-        println!("{}", "-".repeat(60));
+        println!("{}", t::blank_row());
+        println!("{}", t::subsection_header("Missing API Keys"));
         for key_name in missing_keys {
             let info = get_api_key_info(key_name);
-            println!("  {}: {}", key_name, info.url);
+            println!("{}", t::link_row(key_name, info.url));
         }
     }
 
-    println!();
-    println!("Defaults:");
-    println!("{}", "-".repeat(40));
+    println!("{}", t::blank_row());
+    println!("{}", t::subsection_header("Defaults"));
     println!(
-        "  Chain:         {}",
-        config.chains.ethereum_rpc.as_deref().unwrap_or("ethereum")
+        "{}",
+        t::kv_row(
+            "Chain",
+            config.chains.ethereum_rpc.as_deref().unwrap_or("ethereum")
+        )
     );
-    println!("  Output format: {:?}", config.output.format);
     println!(
-        "  Color output:  {}",
-        if config.output.color {
-            "enabled"
-        } else {
-            "disabled"
-        }
+        "{}",
+        t::kv_row("Output format", &format!("{:?}", config.output.format))
+    );
+    println!(
+        "{}",
+        t::kv_row(
+            "Color output",
+            if config.output.color {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        )
     );
 
-    println!();
-    println!("Run 'scope setup' to configure missing settings.");
-    println!("Run 'scope setup --key <provider>' to configure a specific key.");
-    println!();
+    println!("{}", t::blank_row());
+    println!(
+        "{}",
+        t::info_row("Run 'scope setup' to configure missing settings.")
+    );
+    println!(
+        "{}",
+        t::info_row("Run 'scope setup --key <provider>' to configure a specific key.")
+    );
+    println!("{}", t::section_footer());
 }
 
 /// Gets API key configuration items.

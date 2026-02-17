@@ -569,6 +569,119 @@ fn bullet_row_styled(msg: &str, tty: bool) -> String {
 }
 
 // ============================================================================
+// Table helpers (for columnar data inside sections)
+// ============================================================================
+
+/// Column specification for table formatting.
+pub struct Col<'a> {
+    /// Column header text.
+    pub label: &'a str,
+    /// Minimum width in characters.
+    pub width: usize,
+    /// Alignment: `'<'` for left, `'>'` for right.
+    pub align: char,
+}
+
+/// Format a table header row inside a section box.
+///
+/// ```text
+/// │    Rank      Percent                Balance  Address
+/// │  ─────────────────────────────────────────────────────
+/// ```
+pub fn table_header(cols: &[Col]) -> String {
+    table_header_styled(cols, is_tty())
+}
+
+fn table_header_styled(cols: &[Col], tty: bool) -> String {
+    let mut header = String::new();
+    for col in cols {
+        if col.align == '>' {
+            header.push_str(&format!("{:>width$}  ", col.label, width = col.width));
+        } else {
+            header.push_str(&format!("{:<width$}  ", col.label, width = col.width));
+        }
+    }
+    let header = header.trim_end().to_string();
+    let rule_len = cols.iter().map(|c| c.width + 2).sum::<usize>();
+    let rule = "─".repeat(rule_len);
+
+    if tty {
+        format!(
+            "{}    {}\n{}  {}",
+            "│".cyan(),
+            header.dimmed(),
+            "│".cyan(),
+            rule.cyan()
+        )
+    } else {
+        format!("│    {}\n│  {}", header, rule)
+    }
+}
+
+/// Format a table data row inside a section box.
+///
+/// Each value is aligned according to the column specification.
+///
+/// ```text
+/// │       1     12.50%         1,000,000  0xdAC1...1ec7
+/// ```
+pub fn table_row(cols: &[Col], values: &[&str]) -> String {
+    table_row_styled(cols, values, is_tty())
+}
+
+fn table_row_styled(cols: &[Col], values: &[&str], tty: bool) -> String {
+    let mut row = String::new();
+    for (i, col) in cols.iter().enumerate() {
+        let val = values.get(i).copied().unwrap_or("");
+        if col.align == '>' {
+            row.push_str(&format!("{:>width$}  ", val, width = col.width));
+        } else {
+            row.push_str(&format!("{:<width$}  ", val, width = col.width));
+        }
+    }
+    let row = row.trim_end().to_string();
+
+    if tty {
+        format!("{}    {}", "│".cyan(), row)
+    } else {
+        format!("│    {}", row)
+    }
+}
+
+/// Format an enumerated list item inside a section box.
+///
+/// ```text
+/// │  1. Uniswap ETH/USDC - $1.2M ($500K liq)
+/// ```
+pub fn numbered_row(index: usize, msg: &str) -> String {
+    numbered_row_styled(index, msg, is_tty())
+}
+
+fn numbered_row_styled(index: usize, msg: &str, tty: bool) -> String {
+    // Prefix: "│  N. " = ~6 visible columns (varies with digit count)
+    let prefix_len = 4 + format!("{}.", index).len();
+    let avail = terminal_width().saturating_sub(prefix_len);
+    let wrapped = wrap_lines(msg, avail);
+
+    let num = format!("{}.", index);
+    let mut out = if tty {
+        format!("{}  {} {}", "│".cyan(), num.dimmed(), wrapped[0])
+    } else {
+        format!("│  {} {}", num, wrapped[0])
+    };
+
+    let cont_pad = " ".repeat(num.len() + 1);
+    for line in &wrapped[1..] {
+        if tty {
+            out.push_str(&format!("\n{}  {}{}", "│".cyan(), cont_pad, line));
+        } else {
+            out.push_str(&format!("\n│  {}{}", cont_pad, line));
+        }
+    }
+    out
+}
+
+// ============================================================================
 // Unit Tests
 // ============================================================================
 
@@ -1234,5 +1347,127 @@ mod tests {
         assert!(row.contains("Summary"));
         assert!(row.contains("Verified"));
         assert!(row.contains("permissions"));
+    }
+
+    // ============================================================
+    // Table / numbered row helper tests
+    // ============================================================
+
+    #[test]
+    fn test_table_header_contains_labels() {
+        let cols = &[
+            Col {
+                label: "Rank",
+                width: 6,
+                align: '>',
+            },
+            Col {
+                label: "Name",
+                width: 20,
+                align: '<',
+            },
+        ];
+        let header = table_header(cols);
+        assert!(header.contains("Rank"));
+        assert!(header.contains("Name"));
+        assert!(header.contains("│"));
+        assert!(header.contains("─"));
+    }
+
+    #[test]
+    fn test_table_row_contains_values() {
+        let cols = &[
+            Col {
+                label: "Rank",
+                width: 6,
+                align: '>',
+            },
+            Col {
+                label: "Name",
+                width: 20,
+                align: '<',
+            },
+        ];
+        let row = table_row(cols, &["1", "TestToken"]);
+        assert!(row.contains("1"));
+        assert!(row.contains("TestToken"));
+        assert!(row.contains("│"));
+    }
+
+    #[test]
+    fn test_table_row_missing_values() {
+        let cols = &[
+            Col {
+                label: "A",
+                width: 5,
+                align: '<',
+            },
+            Col {
+                label: "B",
+                width: 5,
+                align: '<',
+            },
+        ];
+        let row = table_row(cols, &["only"]);
+        assert!(row.contains("only"));
+        assert!(row.contains("│"));
+    }
+
+    #[test]
+    fn test_table_header_tty() {
+        let cols = &[Col {
+            label: "Price",
+            width: 10,
+            align: '>',
+        }];
+        let header = table_header_styled(cols, true);
+        assert!(header.contains("Price"));
+        assert!(header.contains("│"));
+    }
+
+    #[test]
+    fn test_table_row_tty() {
+        let cols = &[Col {
+            label: "Price",
+            width: 10,
+            align: '>',
+        }];
+        let row = table_row_styled(cols, &["$1.00"], true);
+        assert!(row.contains("$1.00"));
+        assert!(row.contains("│"));
+    }
+
+    #[test]
+    fn test_numbered_row_basic() {
+        let row = numbered_row(1, "First item");
+        assert!(row.contains("1."));
+        assert!(row.contains("First item"));
+        assert!(row.contains("│"));
+    }
+
+    #[test]
+    fn test_numbered_row_wraps() {
+        let long = "This is a very long description that should eventually wrap to the next line when the terminal width is narrow enough";
+        let row = numbered_row(1, long);
+        assert!(row.contains("1."));
+        assert!(row.contains("This"));
+        assert!(row.contains("enough"));
+        for line in row.lines() {
+            assert!(line.contains('│'));
+        }
+    }
+
+    #[test]
+    fn test_numbered_row_tty() {
+        let row = numbered_row_styled(5, "Fifth item", true);
+        assert!(row.contains("5."));
+        assert!(row.contains("Fifth item"));
+    }
+
+    #[test]
+    fn test_numbered_row_double_digits() {
+        let row = numbered_row(12, "Twelfth item");
+        assert!(row.contains("12."));
+        assert!(row.contains("Twelfth item"));
     }
 }

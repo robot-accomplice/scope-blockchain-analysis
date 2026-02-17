@@ -387,44 +387,57 @@ fn output_report(report: &TransactionReport, format: OutputFormat) -> Result<()>
             );
         }
         OutputFormat::Table => {
-            println!("Transaction Analysis Report");
-            println!("===========================");
-            println!("Hash:         {}", report.hash);
-            println!("Chain:        {}", report.chain);
-            println!("Block:        {}", report.block.number);
+            use crate::display::terminal as t;
+
+            println!("{}", t::section_header("Transaction Analysis"));
+            println!("{}", t::kv_row("Hash", &report.hash));
+            println!("{}", t::kv_row("Chain", &report.chain));
+            println!("{}", t::kv_row("Block", &report.block.number.to_string()));
+            if report.transaction.status {
+                println!("{}", t::check_pass("Success"));
+            } else {
+                println!("{}", t::check_fail("Failed"));
+            }
+            println!("{}", t::blank_row());
+            println!("{}", t::kv_row("From", &report.transaction.from));
             println!(
-                "Status:       {}",
-                if report.transaction.status {
-                    "Success"
-                } else {
-                    "Failed"
-                }
+                "{}",
+                t::kv_row(
+                    "To",
+                    report
+                        .transaction
+                        .to
+                        .as_deref()
+                        .unwrap_or("Contract Creation")
+                )
             );
-            println!();
-            println!("From:         {}", report.transaction.from);
+            println!("{}", t::kv_row("Value", &report.transaction.value));
+            println!("{}", t::blank_row());
             println!(
-                "To:           {}",
-                report
-                    .transaction
-                    .to
-                    .as_deref()
-                    .unwrap_or("Contract Creation")
+                "{}",
+                t::kv_row("Gas Limit", &report.gas.gas_limit.to_string())
             );
-            println!("Value:        {}", report.transaction.value);
-            println!();
-            println!("Gas Limit:    {}", report.gas.gas_limit);
-            println!("Gas Used:     {}", report.gas.gas_used);
-            println!("Gas Price:    {}", report.gas.gas_price);
-            println!("Fee:          {}", report.gas.transaction_fee);
+            println!(
+                "{}",
+                t::kv_row("Gas Used", &report.gas.gas_used.to_string())
+            );
+            println!("{}", t::kv_row("Gas Price", &report.gas.gas_price));
+            println!("{}", t::kv_row("Fee", &report.gas.transaction_fee));
 
             if let Some(ref decoded) = report.decoded_input {
-                println!();
-                println!("Function:     {}", decoded.function_name);
-                println!("Signature:    {}", decoded.function_signature);
+                println!("{}", t::blank_row());
+                println!("{}", t::subsection_header("Decoded Input"));
+                println!("{}", t::kv_row("Function", &decoded.function_name));
+                println!("{}", t::kv_row("Signature", &decoded.function_signature));
                 if !decoded.parameters.is_empty() {
-                    println!("Parameters:");
                     for param in &decoded.parameters {
-                        println!("  {} ({}): {}", param.name, param.param_type, param.value);
+                        println!(
+                            "{}",
+                            t::bullet_row(&format!(
+                                "{} ({}): {}",
+                                param.name, param.param_type, param.value
+                            ))
+                        );
                     }
                 }
             }
@@ -432,15 +445,23 @@ fn output_report(report: &TransactionReport, format: OutputFormat) -> Result<()>
             if let Some(ref traces) = report.internal_transactions
                 && !traces.is_empty()
             {
-                println!();
-                println!("Internal Transactions: {}", traces.len());
+                println!("{}", t::blank_row());
+                println!(
+                    "{}",
+                    t::subsection_header(&format!("Internal Transactions ({})", traces.len()))
+                );
                 for (i, trace) in traces.iter().enumerate() {
                     println!(
-                        "  [{}] {} {} -> {}",
-                        i, trace.call_type, trace.from, trace.to
+                        "{}",
+                        t::bullet_row(&format!(
+                            "[{}] {} {} -> {}",
+                            i, trace.call_type, trace.from, trace.to
+                        ))
                     );
                 }
             }
+
+            println!("{}", t::section_footer());
         }
         OutputFormat::Markdown => {
             let md = format_tx_markdown(report);

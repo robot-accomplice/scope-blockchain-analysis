@@ -30,73 +30,119 @@ pub fn format_risk_report(
 
 /// Format as pretty table
 fn format_risk_table(assessment: &RiskAssessment, detailed: bool) -> String {
+    use crate::display::terminal as t;
     let mut output = String::new();
 
     // Header
-    output.push_str(&format!(
-        "\n{} Risk Assessment Report\n",
+    output.push_str(&t::section_header(&format!(
+        "{} Risk Assessment Report",
         assessment.risk_level.emoji()
-    ));
-    output.push_str(&"═".repeat(60));
+    )));
     output.push('\n');
 
-    // Summary section (simple text format)
-    output.push_str(&format!("{:<20} {}\n", "Address:", assessment.address));
-    output.push_str(&format!("{:<20} {}\n", "Chain:", assessment.chain));
-    output.push_str(&format!(
-        "{:<20} {:.1}/10\n",
-        "Risk Score:", assessment.overall_score
+    // Summary section
+    output.push_str(&t::kv_row("Address", &assessment.address));
+    output.push('\n');
+    output.push_str(&t::kv_row("Chain", &assessment.chain));
+    output.push('\n');
+    output.push_str(&t::score_bar(
+        "Risk Score",
+        (assessment.overall_score * 10.0) as u32,
+        100,
     ));
-    output.push_str(&format!(
-        "{:<20} {} {:?}\n",
-        "Risk Level:",
-        assessment.risk_level.emoji(),
-        assessment.risk_level
+    output.push('\n');
+    output.push_str(&t::kv_row(
+        "Risk Level",
+        &format!(
+            "{} {:?}",
+            assessment.risk_level.emoji(),
+            assessment.risk_level
+        ),
     ));
-    output.push_str(&format!(
-        "{:<20} {}\n",
-        "Assessed At:",
-        assessment.assessed_at.format("%Y-%m-%d %H:%M UTC")
+    output.push('\n');
+    output.push_str(&t::kv_row(
+        "Assessed At",
+        &assessment
+            .assessed_at
+            .format("%Y-%m-%d %H:%M UTC")
+            .to_string(),
     ));
+    output.push('\n');
 
     // Risk factors
     if detailed {
-        output.push_str("\n📊 Risk Factor Breakdown\n");
-        output.push_str(&"─".repeat(60));
+        output.push_str(&t::subsection_header("Risk Factor Breakdown"));
         output.push('\n');
-        output.push_str(&format!(
-            "{:<25} {:<12} {:<8} {:<8} {:<10}\n",
-            "Factor", "Category", "Score", "Weight", "Weighted"
-        ));
-        output.push_str(&"─".repeat(60));
+
+        let cols = [
+            t::Col {
+                label: "Factor",
+                width: 25,
+                align: '<',
+            },
+            t::Col {
+                label: "Category",
+                width: 12,
+                align: '<',
+            },
+            t::Col {
+                label: "Score",
+                width: 8,
+                align: '<',
+            },
+            t::Col {
+                label: "Weight",
+                width: 8,
+                align: '<',
+            },
+            t::Col {
+                label: "Weighted",
+                width: 10,
+                align: '<',
+            },
+        ];
+
+        output.push_str(&t::table_header(&cols));
         output.push('\n');
 
         for factor in &assessment.factors {
             let weighted = factor.score * factor.weight;
-            output.push_str(&format!(
-                "{:<25} {:<12} {:<8.1} {:<8.0}% {:<10.2}\n",
-                factor.name.chars().take(24).collect::<String>(),
-                format!("{:?}", factor.category)
-                    .chars()
-                    .take(11)
-                    .collect::<String>(),
-                factor.score,
-                factor.weight * 100.0,
-                weighted
+            let factor_name = factor.name.chars().take(24).collect::<String>();
+            let category_str = format!("{:?}", factor.category)
+                .chars()
+                .take(11)
+                .collect::<String>();
+            let score_str = format!("{:.1}", factor.score);
+            let weight_str = format!("{:.0}%", factor.weight * 100.0);
+            let weighted_str = format!("{:.2}", weighted);
+
+            output.push_str(&t::table_row(
+                &cols,
+                &[
+                    &factor_name,
+                    &category_str,
+                    &score_str,
+                    &weight_str,
+                    &weighted_str,
+                ],
             ));
+            output.push('\n');
         }
     }
 
     // Recommendations
     if !assessment.recommendations.is_empty() {
-        output.push_str("\n💡 Recommendations\n");
-        output.push_str(&"─".repeat(60));
+        output.push_str(&t::subsection_header("Recommendations"));
         output.push('\n');
 
         for (i, rec) in assessment.recommendations.iter().enumerate() {
-            output.push_str(&format!("{}. {}\n", i + 1, rec));
+            output.push_str(&t::numbered_row(i + 1, rec));
+            output.push('\n');
         }
     }
+
+    output.push_str(&t::section_footer());
+    output.push('\n');
 
     output
 }

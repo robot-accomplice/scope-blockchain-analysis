@@ -8,6 +8,7 @@
 use crate::chains::ChainClientFactory;
 use crate::cli::crawl::{self, Period};
 use crate::config::Config;
+use crate::display::terminal as t;
 use crate::error::{Result, ScopeError};
 use crate::market::{
     HealthThresholds, MarketSummary, OrderBook, VenueRegistry, order_book_from_analytics,
@@ -689,29 +690,72 @@ async fn run_ohlc(args: OhlcArgs) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&json_candles).unwrap());
         }
         OhlcFormat::Text => {
-            println!();
             println!(
-                "OHLC — {} ({}) interval={} limit={}",
-                pair, args.venue, args.interval, args.limit
+                "{}",
+                t::section_header(&format!("OHLC — {} ({})", pair, args.venue))
             );
-            println!("──────────────────────────────────────────────────────────");
-            println!(
-                "  {:>19}  {:>12}  {:>12}  {:>12}  {:>12}  {:>14}",
-                "Open Time", "Open", "High", "Low", "Close", "Volume"
-            );
-            println!("──────────────────────────────────────────────────────────");
+            println!("{}", t::kv_row("Interval", &args.interval));
+            println!("{}", t::kv_row("Limit", &args.limit.to_string()));
+
+            let cols = [
+                t::Col {
+                    label: "Open Time",
+                    width: 19,
+                    align: '>',
+                },
+                t::Col {
+                    label: "Open",
+                    width: 12,
+                    align: '>',
+                },
+                t::Col {
+                    label: "High",
+                    width: 12,
+                    align: '>',
+                },
+                t::Col {
+                    label: "Low",
+                    width: 12,
+                    align: '>',
+                },
+                t::Col {
+                    label: "Close",
+                    width: 12,
+                    align: '>',
+                },
+                t::Col {
+                    label: "Volume",
+                    width: 14,
+                    align: '>',
+                },
+            ];
+            println!("{}", t::table_header(&cols));
+
             for c in &candles {
                 let dt = chrono::DateTime::from_timestamp_millis(c.open_time as i64)
                     .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
                     .unwrap_or_else(|| format!("{}", c.open_time));
-                println!(
-                    "  {:>19}  {:>12.6}  {:>12.6}  {:>12.6}  {:>12.6}  {:>14.2}",
-                    dt, c.open, c.high, c.low, c.close, c.volume
-                );
+                let open_str = format!("{:.6}", c.open);
+                let high_str = format!("{:.6}", c.high);
+                let low_str = format!("{:.6}", c.low);
+                let close_str = format!("{:.6}", c.close);
+                let volume_str = format!("{:.2}", c.volume);
+                let values = [
+                    dt.as_str(),
+                    open_str.as_str(),
+                    high_str.as_str(),
+                    low_str.as_str(),
+                    close_str.as_str(),
+                    volume_str.as_str(),
+                ];
+                println!("{}", t::table_row(&cols, &values));
             }
-            println!();
-            println!("  {} candles returned", candles.len());
-            println!();
+
+            println!(
+                "{}",
+                t::info_row(&format!("{} candles returned", candles.len()))
+            );
+            println!("{}", t::section_footer());
         }
     }
     Ok(())
@@ -753,30 +797,59 @@ async fn run_trades(args: TradesArgs) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&json_trades).unwrap());
         }
         OhlcFormat::Text => {
-            println!();
-            println!("Recent Trades — {} ({})", pair, args.venue);
-            println!("──────────────────────────────────────");
             println!(
-                "  {:>10}  {:>5}  {:>12}  {:>12}",
-                "Time", "Side", "Price", "Qty"
+                "{}",
+                t::section_header(&format!("Recent Trades — {} ({})", pair, args.venue))
             );
-            println!("──────────────────────────────────────");
+
+            let cols = [
+                t::Col {
+                    label: "Time",
+                    width: 10,
+                    align: '>',
+                },
+                t::Col {
+                    label: "Side",
+                    width: 5,
+                    align: '>',
+                },
+                t::Col {
+                    label: "Price",
+                    width: 12,
+                    align: '>',
+                },
+                t::Col {
+                    label: "Qty",
+                    width: 12,
+                    align: '>',
+                },
+            ];
+            println!("{}", t::table_header(&cols));
+
             for t in &trades {
                 let time = chrono::DateTime::from_timestamp_millis(t.timestamp_ms as i64)
                     .map(|d| d.format("%H:%M:%S").to_string())
                     .unwrap_or_else(|| "?".to_string());
-                let side = match t.side {
+                let side_str = match t.side {
                     crate::market::TradeSide::Buy => "BUY",
                     crate::market::TradeSide::Sell => "SELL",
                 };
-                println!(
-                    "  {:>10}  {:>5}  {:>12.6}  {:>12.2}",
-                    time, side, t.price, t.quantity
-                );
+                let price_str = format!("{:.6}", t.price);
+                let qty_str = format!("{:.2}", t.quantity);
+                let values = [
+                    time.as_str(),
+                    side_str,
+                    price_str.as_str(),
+                    qty_str.as_str(),
+                ];
+                println!("{}", t::table_row(&cols, &values));
             }
-            println!();
-            println!("  {} trades returned", trades.len());
-            println!();
+
+            println!(
+                "{}",
+                t::info_row(&format!("{} trades returned", trades.len()))
+            );
+            println!("{}", t::section_footer());
         }
     }
     Ok(())

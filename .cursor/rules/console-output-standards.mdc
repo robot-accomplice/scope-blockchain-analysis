@@ -36,6 +36,9 @@ Every report follows box-drawing structure with these elements:
 | Link / URL | `t::link_row("Label", "url")` | `│  Label            url` (underlined) |
 | Bullet item | `t::bullet_row("msg")` | `│    • msg` |
 | Detail / indent | `t::detail_row("msg")` | `│      msg` (dimmed) |
+| Numbered list item | `t::numbered_row(i, "msg")` | `│  1. msg` (wraps) |
+| Table header | `t::table_header(cols)` | `│    Col1  Col2` + rule line |
+| Table row | `t::table_row(cols, vals)` | `│    val1  val2` |
 | Blank continuation | `t::blank_row()` | `│` |
 | Separator | `t::separator()` | `├──────────────────` |
 | Health status | `t::status_line(healthy)` | `│  HEALTHY` / `│  UNHEALTHY` |
