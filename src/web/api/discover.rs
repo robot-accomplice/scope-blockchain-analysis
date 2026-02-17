@@ -128,9 +128,7 @@ mod tests {
             chain: None,
             limit: 5,
         };
-        let response = handle(State(state), Query(params))
-            .await
-            .into_response();
+        let response = handle(State(state), Query(params)).await.into_response();
         let status = response.status();
         assert!(status.is_success() || status.is_server_error());
     }
@@ -154,9 +152,7 @@ mod tests {
             chain: None,
             limit: 5,
         };
-        let response = handle(State(state), Query(params))
-            .await
-            .into_response();
+        let response = handle(State(state), Query(params)).await.into_response();
         let status = response.status();
         assert!(status.is_success() || status.is_server_error());
     }
@@ -180,9 +176,7 @@ mod tests {
             chain: None,
             limit: 5,
         };
-        let response = handle(State(state), Query(params))
-            .await
-            .into_response();
+        let response = handle(State(state), Query(params)).await.into_response();
         let status = response.status();
         assert!(status.is_success() || status.is_server_error());
     }
@@ -206,9 +200,7 @@ mod tests {
             chain: Some("ethereum".to_string()),
             limit: 10,
         };
-        let response = handle(State(state), Query(params))
-            .await
-            .into_response();
+        let response = handle(State(state), Query(params)).await.into_response();
         let status = response.status();
         assert!(status.is_success() || status.is_server_error());
     }
@@ -233,9 +225,7 @@ mod tests {
             chain: None,
             limit: 5,
         };
-        let response = handle(State(state), Query(params))
-            .await
-            .into_response();
+        let response = handle(State(state), Query(params)).await.into_response();
         let status = response.status();
         if status == StatusCode::INTERNAL_SERVER_ERROR {
             let body = axum::body::to_bytes(response.into_body(), 1_000_000)

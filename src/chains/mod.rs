@@ -1751,12 +1751,7 @@ mod tests {
     // analyze_gas_usage Tests
     // ============================================================================
 
-    fn tx(
-        hash: &str,
-        gas_used: Option<u64>,
-        input: &str,
-        status: Option<bool>,
-    ) -> Transaction {
+    fn tx(hash: &str, gas_used: Option<u64>, input: &str, status: Option<bool>) -> Transaction {
         Transaction {
             hash: hash.to_string(),
             block_number: Some(1),

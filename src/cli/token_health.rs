@@ -17,7 +17,8 @@ use clap::Args;
 #[command(
     after_help = "\x1b[1mExamples:\x1b[0m
   scope token-health USDC
-  scope token-health PUSD --with-market --venue biconomy
+  scope token-health @dai-token --with-market             \x1b[2m# address book shortcut\x1b[0m
+  scope token-health DAI --with-market --venue binance
   scope token-health 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --format json",
     after_long_help = "\x1b[1mExamples:\x1b[0m
 
@@ -34,9 +35,9 @@ use clap::Args;
   |  Top 10 Holders     35.5%                           |
   +-----------------------------------------------------+
 
-  \x1b[1m$ scope token-health PUSD --with-market --venue biconomy\x1b[0m
+  \x1b[1m$ scope token-health DAI --with-market --venue binance\x1b[0m
 
-  +-- PUSD (Pleasing USD) -----------------------------+
+  +-- DAI (Dai Stablecoin) -----------------------------+
   |                                                     |
   |-- DEX Analytics                                     |
   |  Price              $0.9999                         |
@@ -45,7 +46,7 @@ use clap::Args;
   |  Liquidity          $250.00K                        |
   |                                                     |
   |-- Market / Order Book                               |
-  |  Venue              biconomy                        |
+  |  Venue              binance                        |
   |  Best Bid           0.9999                          |
   |  Best Ask           1.0001                          |
   |  Bid Depth          6000 USDT                       |
@@ -59,6 +60,7 @@ use clap::Args;
 )]
 pub struct TokenHealthArgs {
     /// Token symbol or contract address (e.g., USDC, 0xA0b86991...).
+    /// Use @label to resolve from the address book (e.g., @dai-token).
     pub token: String,
 
     /// Target blockchain network.

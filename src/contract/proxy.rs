@@ -349,12 +349,17 @@ mod tests {
     fn test_extract_address_no_prefix() {
         let slot = "000000000000000000000000dac17f958d2ee523a2206206994597c13d831ec7";
         let addr = extract_address_from_slot(slot);
-        assert_eq!(addr, Some("0xdac17f958d2ee523a2206206994597c13d831ec7".to_string()));
+        assert_eq!(
+            addr,
+            Some("0xdac17f958d2ee523a2206206994597c13d831ec7".to_string())
+        );
     }
 
     #[test]
     fn test_detect_transparent_upgradeable() {
-        let src = make_source("import TransparentUpgradeableProxy; contract P is TransparentUpgradeableProxy {}");
+        let src = make_source(
+            "import TransparentUpgradeableProxy; contract P is TransparentUpgradeableProxy {}",
+        );
         let mut info = ProxyInfo::default();
         detect_proxy_from_source(&src, &mut info);
         assert!(info.is_proxy);
@@ -363,7 +368,8 @@ mod tests {
 
     #[test]
     fn test_detect_beacon_proxy() {
-        let src = make_source("import BeaconProxy; contract P is BeaconProxy { UpgradeableBeacon b; }");
+        let src =
+            make_source("import BeaconProxy; contract P is BeaconProxy { UpgradeableBeacon b; }");
         let mut info = ProxyInfo::default();
         detect_proxy_from_source(&src, &mut info);
         assert!(info.is_proxy);
@@ -409,7 +415,9 @@ mod tests {
 
     #[test]
     fn test_detect_proxy_from_source_facetcut() {
-        let src = make_source("struct FacetCut { address target; } function addFacet(FacetCut[] calldata)");
+        let src = make_source(
+            "struct FacetCut { address target; } function addFacet(FacetCut[] calldata)",
+        );
         let mut info = ProxyInfo::default();
         detect_proxy_from_source(&src, &mut info);
         assert!(info.is_proxy);
@@ -418,11 +426,16 @@ mod tests {
 
     #[test]
     fn test_detect_proxy_from_source_set_implementation() {
-        let src = make_source("function _setImplementation(address impl) internal { _impl = impl; }");
+        let src =
+            make_source("function _setImplementation(address impl) internal { _impl = impl; }");
         let mut info = ProxyInfo::default();
         detect_proxy_from_source(&src, &mut info);
         assert!(info.is_proxy);
-        assert!(info.details.iter().any(|d| d.contains("_setImplementation")));
+        assert!(
+            info.details
+                .iter()
+                .any(|d| d.contains("_setImplementation"))
+        );
     }
 
     #[test]
@@ -460,16 +473,9 @@ mod tests {
         let bytecode = format!("0x{}{}{}", prefix, impl_addr, suffix);
         let client = crate::chains::mocks::MockChainClient::new("ethereum", "ETH");
         let http = reqwest::Client::new();
-        let result = detect_proxy(
-            "0xproxy",
-            "ethereum",
-            &bytecode,
-            None,
-            &client,
-            &http,
-        )
-        .await
-        .unwrap();
+        let result = detect_proxy("0xproxy", "ethereum", &bytecode, None, &client, &http)
+            .await
+            .unwrap();
         assert!(result.is_proxy);
         assert!(result.proxy_type.contains("EIP-1167"));
         assert_eq!(
@@ -499,16 +505,9 @@ mod tests {
         let bytecode = "0x6080604052348015600f57600080fd5b50"; // Non-minimal-proxy bytecode
         let client = crate::chains::mocks::MockChainClient::new("ethereum", "ETH");
         let http = reqwest::Client::new();
-        let result = detect_proxy(
-            "0xproxy",
-            "ethereum",
-            bytecode,
-            Some(&src),
-            &client,
-            &http,
-        )
-        .await
-        .unwrap();
+        let result = detect_proxy("0xproxy", "ethereum", bytecode, Some(&src), &client, &http)
+            .await
+            .unwrap();
         assert!(result.is_proxy);
         assert!(result.proxy_type.contains("Etherscan"));
         assert_eq!(
@@ -519,7 +518,8 @@ mod tests {
 
     #[test]
     fn test_extract_address_from_slot_exactly_40_chars() {
-        let slot_str = "0x".to_string() + &"0".repeat(24) + "dac17f958d2ee523a2206206994597c13d831ec7";
+        let slot_str =
+            "0x".to_string() + &"0".repeat(24) + "dac17f958d2ee523a2206206994597c13d831ec7";
         let addr = extract_address_from_slot(&slot_str);
         assert_eq!(
             addr,
@@ -575,11 +575,18 @@ mod tests {
             self.inner.enrich_balance_usd(b).await
         }
 
-        async fn get_transaction(&self, h: &str) -> crate::error::Result<crate::chains::Transaction> {
+        async fn get_transaction(
+            &self,
+            h: &str,
+        ) -> crate::error::Result<crate::chains::Transaction> {
             self.inner.get_transaction(h).await
         }
 
-        async fn get_transactions(&self, a: &str, limit: u32) -> crate::error::Result<Vec<crate::chains::Transaction>> {
+        async fn get_transactions(
+            &self,
+            a: &str,
+            limit: u32,
+        ) -> crate::error::Result<Vec<crate::chains::Transaction>> {
             self.inner.get_transactions(a, limit).await
         }
 
@@ -587,46 +594,42 @@ mod tests {
             self.inner.get_block_number().await
         }
 
-        async fn get_token_balances(&self, a: &str) -> crate::error::Result<Vec<crate::chains::TokenBalance>> {
+        async fn get_token_balances(
+            &self,
+            a: &str,
+        ) -> crate::error::Result<Vec<crate::chains::TokenBalance>> {
             self.inner.get_token_balances(a).await
         }
 
         async fn get_storage_at(&self, _address: &str, slot: &str) -> crate::error::Result<String> {
-            if slot == EIP1967_IMPL_SLOT {
-                if let Some(ref v) = self.impl_slot_value {
-                    return Ok(v.clone());
-                }
+            if slot == EIP1967_IMPL_SLOT
+                && let Some(ref v) = self.impl_slot_value
+            {
+                return Ok(v.clone());
             }
-            if slot == EIP1967_ADMIN_SLOT {
-                if let Some(ref v) = self.admin_slot_value {
-                    return Ok(v.clone());
-                }
+            if slot == EIP1967_ADMIN_SLOT
+                && let Some(ref v) = self.admin_slot_value
+            {
+                return Ok(v.clone());
             }
-            if slot == EIP1967_BEACON_SLOT {
-                if let Some(ref v) = self.beacon_slot_value {
-                    return Ok(v.clone());
-                }
+            if slot == EIP1967_BEACON_SLOT
+                && let Some(ref v) = self.beacon_slot_value
+            {
+                return Ok(v.clone());
             }
-            Err(crate::error::ScopeError::Chain("No storage mock".to_string()))
+            Err(crate::error::ScopeError::Chain(
+                "No storage mock".to_string(),
+            ))
         }
     }
 
     #[tokio::test]
     async fn test_detect_proxy_eip1967_transparent() {
-        let client = StorageMockClient::with_impl_slot(
-            "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
-        );
+        let client = StorageMockClient::with_impl_slot("a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
         let http = reqwest::Client::new();
-        let result = detect_proxy(
-            "0xproxy",
-            "ethereum",
-            "0x6080604052",
-            None,
-            &client,
-            &http,
-        )
-        .await
-        .unwrap();
+        let result = detect_proxy("0xproxy", "ethereum", "0x6080604052", None, &client, &http)
+            .await
+            .unwrap();
         assert!(result.is_proxy);
         assert!(result.proxy_type.contains("EIP-1967"));
         assert_eq!(
@@ -653,9 +656,7 @@ mod tests {
             swarm_source: String::new(),
             parsed_abi: vec![],
         };
-        let client = StorageMockClient::with_impl_slot(
-            "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
-        );
+        let client = StorageMockClient::with_impl_slot("a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
         let http = reqwest::Client::new();
         let result = detect_proxy(
             "0xproxy",
@@ -679,16 +680,9 @@ mod tests {
             "c0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
         );
         let http = reqwest::Client::new();
-        let result = detect_proxy(
-            "0xproxy",
-            "ethereum",
-            "0x6080604052",
-            None,
-            &client,
-            &http,
-        )
-        .await
-        .unwrap();
+        let result = detect_proxy("0xproxy", "ethereum", "0x6080604052", None, &client, &http)
+            .await
+            .unwrap();
         assert!(result.is_proxy);
         assert!(result.admin_address.is_some());
         assert!(result.beacon_address.is_some());

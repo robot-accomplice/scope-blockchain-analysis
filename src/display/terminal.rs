@@ -349,8 +349,8 @@ mod tests {
 
     #[test]
     fn test_orderbook_level() {
-        let row = orderbook_level(1.0001, 500.0, "PUSD", 500.05, 1.0);
-        assert!(row.contains("PUSD"));
+        let row = orderbook_level(1.0001, 500.0, "DAI", 500.05, 1.0);
+        assert!(row.contains("DAI"));
         assert!(row.contains("USDT"));
     }
 
@@ -372,9 +372,9 @@ mod tests {
 
     #[test]
     fn test_orderbook_level_various_prices() {
-        let row_low = orderbook_level(0.9990, 100.0, "PUSD", 99.90, 1.0);
-        let row_mid = orderbook_level(1.0000, 100.0, "PUSD", 100.0, 1.0);
-        let row_high = orderbook_level(1.0015, 100.0, "PUSD", 100.15, 1.0);
+        let row_low = orderbook_level(0.9990, 100.0, "DAI", 99.90, 1.0);
+        let row_mid = orderbook_level(1.0000, 100.0, "DAI", 100.0, 1.0);
+        let row_high = orderbook_level(1.0015, 100.0, "DAI", 100.15, 1.0);
         assert!(row_low.contains("0.9990"));
         assert!(row_mid.contains("1.0000"));
         assert!(row_high.contains("1.0015"));
@@ -518,8 +518,8 @@ mod tests {
 
     #[test]
     fn test_orderbook_level_tty() {
-        let row = orderbook_level_styled(1.0001, 500.0, "PUSD", 500.05, 1.0, true);
-        assert!(row.contains("PUSD"));
+        let row = orderbook_level_styled(1.0001, 500.0, "DAI", 500.05, 1.0, true);
+        assert!(row.contains("DAI"));
         assert!(row.contains("USDT"));
     }
 }

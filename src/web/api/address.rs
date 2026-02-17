@@ -41,13 +41,31 @@ fn default_limit() -> u32 {
 }
 
 /// POST /api/address — Analyze a blockchain address.
+///
+/// Supports address book shortcuts: pass `@label` as the address to
+/// resolve it from the address book. The chain will also be set from
+/// the book entry unless explicitly overridden.
 pub async fn handle(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AddressRequest>,
 ) -> impl IntoResponse {
+    // Resolve address book shortcuts (@label or direct address match)
+    let resolved = match super::resolve_address_book(&req.address, &state.config) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response();
+        }
+    };
+    let address = resolved.value;
+    let chain = resolved.chain.unwrap_or(req.chain);
+
     let args = AddressArgs {
-        address: req.address,
-        chain: req.chain,
+        address,
+        chain,
         format: None,
         include_txs: req.include_txs,
         include_tokens: req.include_tokens,
@@ -173,7 +191,14 @@ mod tests {
         use axum::http::StatusCode;
         use axum::response::IntoResponse;
 
-        let config = Config::default();
+        // Use a temp data dir to avoid local address book interfering
+        let tmp = tempfile::tempdir().unwrap();
+        let config = Config {
+            address_book: crate::config::AddressBookConfig {
+                data_dir: Some(tmp.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
         let factory = DefaultClientFactory {
             chains_config: config.chains.clone(),
         };
@@ -192,6 +217,53 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(json["error"].as_str().unwrap().contains("Unsupported chain"));
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap()
+                .contains("Unsupported chain")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_address_book_label_not_found() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
+        use axum::extract::State;
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config = Config {
+            address_book: crate::config::AddressBookConfig {
+                data_dir: Some(tmp.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+        let req = AddressRequest {
+            address: "@nonexistent-label".to_string(),
+            chain: "ethereum".to_string(),
+            include_txs: false,
+            include_tokens: false,
+            limit: 10,
+            dossier: false,
+        };
+        let response = handle(State(state), axum::Json(req)).await.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap()
+                .contains("@nonexistent-label")
+        );
     }
 }

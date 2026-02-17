@@ -15,7 +15,7 @@ A production-grade command-line tool for blockchain data analysis, portfolio tra
 - **Token Crawling**: Crawl DEX data for any token -- price, volume, liquidity, holder analysis, and risk scoring with markdown report generation
 - **Live Monitoring**: Real-time TUI dashboard with five layout presets (Dashboard, Chart, Feed, Compact, Exchange), responsive terminal sizing, config-driven widget visibility, price/volume/candlestick charts, price alerts, whale detection, CSV export, and auto-pause on input
 - **Exchange Venues**: Data-driven CEX integration via YAML descriptors — 11 built-in venues (Binance, Biconomy, Bitget, Bybit, Coinbase, Crypto.com, Gate.io, HTX, Kraken, MEXC, OKX) with order book, ticker, trades, and OHLC support; add custom venues by dropping a YAML file in `~/.config/scope/venues/`
-- **Portfolio Management**: Track multiple addresses across chains with labels, tags, and aggregated balance views
+- **Portfolio Management**: Track multiple addresses across chains with labels, tags, and aggregated balance views; `@label` shortcuts work in both CLI and web UI for instant address recall
 - **Compliance & Risk Assessment**: Risk scoring, transaction pattern detection, taint analysis, and compliance reporting
 - **Data Export**: Export address history and portfolio data to JSON or CSV with date range filtering
 - **Token Discovery**: Browse trending and boosted tokens from DexScreener (`scope discover` / `scope disc`)
@@ -139,7 +139,7 @@ scope health USDC --with-market --venue binance
 
 # Market peg and order book health
 scope market summary USDC
-scope market summary PUSD --venue biconomy --format json
+scope market summary DAI --venue binance --format json
 scope market summary USDC --venue kraken
 
 # OHLC and recent trades
@@ -191,6 +191,7 @@ scope serve --port 9090
 
 The web UI provides:
 - All CLI commands accessible via browser forms
+- **Address Book integration** — type `@label` in any input field for autocomplete; the backend resolves the label and auto-fills the chain
 - Contract Analysis panel with security scoring, vulnerability cards, proxy detection, and access control visualization
 - JSON REST API at `/api/*` for programmatic access (exchange: snapshot, OHLC, trades, contract analysis)
 - Live WebSocket monitor with real-time price charts
@@ -855,11 +856,11 @@ The `scope market` command has three subcommands:
 - **Order book**: Ask/bid levels with depth (base and quote amounts)
 - **Health checks**: No sells below peg, bid/ask ratio, minimum levels and depth per side
 - **Output**: Text (default) or JSON — see [Output Examples](#output-examples) for sample
-- **Tunable thresholds**: All health-check thresholds are configurable. Defaults (min-levels=6, min-depth=3000, peg-range=0.001, bid/ask ratio 0.2-5.0x) originated from the PUSD Hummingbot config—override for other markets.
+- **Tunable thresholds**: All health-check thresholds are configurable. Defaults (min-levels=6, min-depth=3000, peg-range=0.001, bid/ask ratio 0.2-5.0x) are sensible stablecoin defaults—override for other markets.
 
 ```bash
 scope market summary                           # USDC on Binance (default, one shot)
-scope market summary PUSD                      # PUSD on default venue
+scope market summary DAI                       # DAI on default venue
 scope market summary USDC --venue kraken       # USDC on Kraken
 scope market summary USDC --venue okx          # USDC on OKX
 scope market summary --peg 1.0 --min-depth 5000
@@ -884,7 +885,7 @@ scope market ohlc BTC --venue kraken --interval 15m --format json
 
 ```bash
 scope market trades USDC --venue binance --limit 50
-scope market trades PUSD --venue biconomy --format json
+scope market trades DAI --venue binance --format json
 ```
 
 `just summary` invokes `scope market summary` under the hood.

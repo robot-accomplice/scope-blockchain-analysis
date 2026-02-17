@@ -301,9 +301,18 @@ mod tests {
                 .unwrap();
             let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
             assert!(
-                json["error"].as_str().unwrap().contains("Cannot determine config path")
-                    || json["error"].as_str().unwrap().contains("Failed to create config dir")
-                    || json["error"].as_str().unwrap().contains("Failed to write config")
+                json["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Cannot determine config path")
+                    || json["error"]
+                        .as_str()
+                        .unwrap()
+                        .contains("Failed to create config dir")
+                    || json["error"]
+                        .as_str()
+                        .unwrap()
+                        .contains("Failed to write config")
             );
         }
     }
@@ -352,7 +361,12 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(json["error"].as_str().unwrap().contains("Failed to create config dir"));
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap()
+                .contains("Failed to create config dir")
+        );
     }
 
     #[tokio::test]

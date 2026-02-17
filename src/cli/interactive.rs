@@ -510,9 +510,7 @@ async fn execute_input(
         // Contract analysis command
         "contract" | "ct" => {
             if args.is_empty() {
-                eprintln!(
-                    "Usage: contract <address> [--chain=<chain>] [--json]"
-                );
+                eprintln!("Usage: contract <address> [--chain=<chain>] [--json]");
                 return Ok(false);
             }
 

@@ -347,7 +347,10 @@ mod tests {
         let response = serve_ui(axum::http::Uri::from_static("/favicon.ico"))
             .await
             .into_response();
-        assert_eq!(response.status(), axum::http::StatusCode::PERMANENT_REDIRECT);
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::PERMANENT_REDIRECT
+        );
         let headers = response.headers();
         let loc = headers.get(axum::http::header::LOCATION).unwrap();
         assert_eq!(loc, "/favicon.svg");

@@ -542,7 +542,10 @@ mod tests {
             "/** @dev See https://github.com/MyOrg/MyContract for full source */\ncontract C {}",
         );
         let repo = find_github_from_source(&src);
-        assert_eq!(repo, Some("https://github.com/MyOrg/MyContract".to_string()));
+        assert_eq!(
+            repo,
+            Some("https://github.com/MyOrg/MyContract".to_string())
+        );
     }
 
     #[test]

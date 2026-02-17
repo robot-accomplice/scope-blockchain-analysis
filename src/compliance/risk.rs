@@ -1629,7 +1629,10 @@ mod tests {
     // Rugpull Indicator Tests
     // ========================================================================
 
-    fn make_ca(verified: bool, ac: Option<crate::contract::access::AccessControlMap>) -> crate::contract::ContractAnalysis {
+    fn make_ca(
+        verified: bool,
+        ac: Option<crate::contract::access::AccessControlMap>,
+    ) -> crate::contract::ContractAnalysis {
         crate::contract::ContractAnalysis {
             address: "0xtest".into(),
             chain: "ethereum".into(),
@@ -1645,13 +1648,20 @@ mod tests {
         }
     }
 
-    fn make_ac(funcs: Vec<(&str, &str)>, renounced: bool, tx_origin: bool) -> crate::contract::access::AccessControlMap {
-        let priv_fns = funcs.iter().map(|(name, cap)| crate::contract::access::PrivilegedFunction {
-            name: name.to_string(),
-            modifiers: vec![],
-            capability: cap.to_string(),
-            risk: crate::contract::access::PrivilegeRisk::High,
-        }).collect();
+    fn make_ac(
+        funcs: Vec<(&str, &str)>,
+        renounced: bool,
+        tx_origin: bool,
+    ) -> crate::contract::access::AccessControlMap {
+        let priv_fns = funcs
+            .iter()
+            .map(|(name, cap)| crate::contract::access::PrivilegedFunction {
+                name: name.to_string(),
+                modifiers: vec![],
+                capability: cap.to_string(),
+                risk: crate::contract::access::PrivilegeRisk::High,
+            })
+            .collect();
         crate::contract::access::AccessControlMap {
             ownership_pattern: None,
             has_renounced_ownership: renounced,
@@ -1662,8 +1672,10 @@ mod tests {
             privileged_functions: priv_fns,
             roles: vec![],
             auth_analysis: crate::contract::access::AuthAnalysis {
-                msg_sender_checks: 0, tx_origin_checks: 0,
-                has_origin_sender_comparison: false, summary: String::new(),
+                msg_sender_checks: 0,
+                tx_origin_checks: 0,
+                has_origin_sender_comparison: false,
+                summary: String::new(),
             },
         }
     }
@@ -1680,7 +1692,15 @@ mod tests {
 
     #[test]
     fn test_rugpull_pause_blacklist_setfee() {
-        let ac = make_ac(vec![("pause", "Pause"), ("blacklist", "Block"), ("setFee", "Fee")], false, false);
+        let ac = make_ac(
+            vec![
+                ("pause", "Pause"),
+                ("blacklist", "Block"),
+                ("setFee", "Fee"),
+            ],
+            false,
+            false,
+        );
         let ca = make_ca(true, Some(ac));
         let factors = detect_rugpull_indicators(Some(&ca), None);
         let f = &factors[0];
@@ -1716,18 +1736,54 @@ mod tests {
         assert!(f.evidence.iter().any(|e| e.contains("not verified")));
     }
 
-    fn make_ta(top10: Option<f64>, age: Option<f64>, buys: u64, sells: u64, liq: f64) -> crate::chains::TokenAnalytics {
+    fn make_ta(
+        top10: Option<f64>,
+        age: Option<f64>,
+        buys: u64,
+        sells: u64,
+        liq: f64,
+    ) -> crate::chains::TokenAnalytics {
         crate::chains::TokenAnalytics {
-            token: crate::chains::Token { contract_address: "0x".into(), symbol: "T".into(), name: "T".into(), decimals: 18 },
-            chain: "ethereum".into(), holders: vec![], total_holders: 0,
-            volume_24h: 0.0, volume_7d: 0.0, price_usd: 0.0, price_change_24h: 0.0, price_change_7d: 0.0,
-            liquidity_usd: liq, market_cap: None, fdv: None, total_supply: None, circulating_supply: None,
-            price_history: vec![], volume_history: vec![], holder_history: vec![], dex_pairs: vec![],
-            fetched_at: 0, top_10_concentration: top10, top_50_concentration: None, top_100_concentration: None,
-            price_change_6h: 0.0, price_change_1h: 0.0,
-            total_buys_24h: buys, total_sells_24h: sells, total_buys_6h: 0, total_sells_6h: 0,
-            total_buys_1h: 0, total_sells_1h: 0, token_age_hours: age,
-            image_url: None, websites: vec![], socials: vec![], dexscreener_url: None,
+            token: crate::chains::Token {
+                contract_address: "0x".into(),
+                symbol: "T".into(),
+                name: "T".into(),
+                decimals: 18,
+            },
+            chain: "ethereum".into(),
+            holders: vec![],
+            total_holders: 0,
+            volume_24h: 0.0,
+            volume_7d: 0.0,
+            price_usd: 0.0,
+            price_change_24h: 0.0,
+            price_change_7d: 0.0,
+            liquidity_usd: liq,
+            market_cap: None,
+            fdv: None,
+            total_supply: None,
+            circulating_supply: None,
+            price_history: vec![],
+            volume_history: vec![],
+            holder_history: vec![],
+            dex_pairs: vec![],
+            fetched_at: 0,
+            top_10_concentration: top10,
+            top_50_concentration: None,
+            top_100_concentration: None,
+            price_change_6h: 0.0,
+            price_change_1h: 0.0,
+            total_buys_24h: buys,
+            total_sells_24h: sells,
+            total_buys_6h: 0,
+            total_sells_6h: 0,
+            total_buys_1h: 0,
+            total_sells_1h: 0,
+            token_age_hours: age,
+            image_url: None,
+            websites: vec![],
+            socials: vec![],
+            dexscreener_url: None,
         }
     }
 
@@ -1760,7 +1816,12 @@ mod tests {
         let ta = make_ta(None, Some(48.0), 0, 0, 100000.0);
         let factors = detect_rugpull_indicators(None, Some(&ta));
         assert!(!factors.is_empty());
-        assert!(factors[0].evidence.iter().any(|e| e.contains("recently created")));
+        assert!(
+            factors[0]
+                .evidence
+                .iter()
+                .any(|e| e.contains("recently created"))
+        );
     }
 
     #[test]
@@ -1776,7 +1837,12 @@ mod tests {
         let ta = make_ta(None, None, 0, 0, 5000.0);
         let factors = detect_rugpull_indicators(None, Some(&ta));
         assert!(!factors.is_empty());
-        assert!(factors[0].evidence.iter().any(|e| e.contains("low liquidity") || e.contains("Very low")));
+        assert!(
+            factors[0]
+                .evidence
+                .iter()
+                .any(|e| e.contains("low liquidity") || e.contains("Very low"))
+        );
     }
 
     // ========================================================================
@@ -1785,10 +1851,18 @@ mod tests {
 
     fn make_whale_tx(value: &str) -> crate::chains::Transaction {
         crate::chains::Transaction {
-            hash: "0xh".into(), block_number: Some(1), timestamp: Some(0),
-            from: "0xa".into(), to: Some("0xb".into()), value: value.to_string(),
-            gas_limit: 21000, gas_used: Some(21000), gas_price: "0".into(),
-            nonce: 0, input: "0x".into(), status: Some(true),
+            hash: "0xh".into(),
+            block_number: Some(1),
+            timestamp: Some(0),
+            from: "0xa".into(),
+            to: Some("0xb".into()),
+            value: value.to_string(),
+            gas_limit: 21000,
+            gas_used: Some(21000),
+            gas_price: "0".into(),
+            nonce: 0,
+            input: "0x".into(),
+            status: Some(true),
         }
     }
 
@@ -1807,7 +1881,12 @@ mod tests {
     fn test_whale_avg_near_threshold() {
         let txs = vec![make_whale_tx("50")];
         let factor = detect_whale_activity(&txs, 60000.0, 100000.0);
-        assert!(factor.evidence.iter().any(|e| e.contains("near whale threshold")));
+        assert!(
+            factor
+                .evidence
+                .iter()
+                .any(|e| e.contains("near whale threshold"))
+        );
     }
 
     // ========================================================================
@@ -1817,12 +1896,20 @@ mod tests {
     fn make_ca_with_source(code: &str) -> crate::contract::ContractAnalysis {
         let mut ca = make_ca(true, None);
         ca.source_info = Some(crate::contract::source::ContractSource {
-            contract_name: "Test".into(), source_code: code.to_string(),
-            abi: "[]".into(), compiler_version: "v0.8.19".into(),
-            optimization_used: true, optimization_runs: 200, evm_version: "paris".into(),
-            license_type: "MIT".into(), is_proxy: false, implementation_address: None,
-            constructor_arguments: String::new(), library: String::new(),
-            swarm_source: String::new(), parsed_abi: vec![],
+            contract_name: "Test".into(),
+            source_code: code.to_string(),
+            abi: "[]".into(),
+            compiler_version: "v0.8.19".into(),
+            optimization_used: true,
+            optimization_runs: 200,
+            evm_version: "paris".into(),
+            license_type: "MIT".into(),
+            is_proxy: false,
+            implementation_address: None,
+            constructor_arguments: String::new(),
+            library: String::new(),
+            swarm_source: String::new(),
+            parsed_abi: vec![],
         });
         ca
     }
@@ -1882,7 +1969,9 @@ mod tests {
 
     #[test]
     fn test_multisig_confirm_execute() {
-        let ca = make_ca_with_source("function confirmTransaction() {} function executeTransaction() {}");
+        let ca = make_ca_with_source(
+            "function confirmTransaction() {} function executeTransaction() {}",
+        );
         let f = detect_multisig(&ca).unwrap();
         assert_eq!(f.score, 2.0);
     }

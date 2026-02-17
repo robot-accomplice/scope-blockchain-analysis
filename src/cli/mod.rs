@@ -105,12 +105,14 @@ pub use tx::TxArgs;
     ),
     after_help = "\x1b[1mExamples:\x1b[0m\n  \
                   scope address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2\n  \
+                  scope address @main-wallet              \x1b[2m# address book shortcut\x1b[0m\n  \
                   scope contract 0xdAC17F958D2ee523a2206206994597C13D831ec7\n  \
                   scope crawl USDC --chain ethereum\n  \
                   scope insights 0xabc123...\n  \
                   scope monitor USDC\n  \
                   scope compliance risk 0x742d...\n  \
                   scope setup\n\n\
+                  \x1b[2mTip: Use @label in any command to recall an address from the address book.\x1b[0m\n\n\
                   \x1b[1mDocumentation:\x1b[0m\n  \
                   https://github.com/robot-accomplice/scope-blockchain-analysis\n  \
                   Quickstart guide: docs/QUICKSTART.md"
@@ -781,9 +783,9 @@ mod tests {
 
     #[test]
     fn test_cli_parse_market_summary_with_pair() {
-        let cli = Cli::try_parse_from(["scope", "market", "summary", "PUSD_USDT"]).unwrap();
+        let cli = Cli::try_parse_from(["scope", "market", "summary", "DAI_USDT"]).unwrap();
         if let Commands::Market(market::MarketCommands::Summary(args)) = cli.command {
-            assert_eq!(args.pair, "PUSD_USDT");
+            assert_eq!(args.pair, "DAI_USDT");
         } else {
             panic!("Expected Market Summary command");
         }

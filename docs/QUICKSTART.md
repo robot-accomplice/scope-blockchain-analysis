@@ -182,7 +182,7 @@ scope report batch --from-file addresses.txt --output batch-report.md
 ```bash
 # One-shot summary (default: Binance)
 scope market summary USDC
-scope market summary PUSD --market-venue biconomy
+scope market summary DAI --market-venue binance
 
 # Repeat mode for monitoring
 scope market summary USDC --every 30s --duration 10m

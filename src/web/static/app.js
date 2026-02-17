@@ -1641,7 +1641,31 @@ function runExport() {
 
 // ===== Address Book =====
 function loadAddressBook() {
-  apiGet('/api/address-book/list', document.getElementById('ab-table'), renderAddressBook);
+  apiGet('/api/address-book/list', document.getElementById('ab-table'), function(resultEl, data) {
+    renderAddressBook(resultEl, data);
+    updateAddressBookSuggestions(data);
+  });
+}
+
+function updateAddressBookSuggestions(data) {
+  var entries = data.addresses || data.entries || [];
+  if (!Array.isArray(entries)) entries = [];
+  var datalist = document.getElementById('ab-suggestions');
+  if (!datalist) return;
+  clearElement(datalist);
+  entries.forEach(function(entry) {
+    if (entry.label) {
+      var opt = document.createElement('option');
+      opt.value = '@' + entry.label;
+      opt.label = entry.label + ' (' + entry.chain + ': ' + fmtAddr(entry.address) + ')';
+      datalist.appendChild(opt);
+    }
+    // Also suggest the raw address
+    var addrOpt = document.createElement('option');
+    addrOpt.value = entry.address;
+    addrOpt.label = (entry.label || fmtAddr(entry.address)) + ' (' + entry.chain + ')';
+    datalist.appendChild(addrOpt);
+  });
 }
 
 function addAddressBookEntry() {
@@ -1673,10 +1697,11 @@ function addAddressBookEntry() {
       document.getElementById('ab-address').value = '';
       document.getElementById('ab-label').value = '';
       document.getElementById('ab-tags').value = '';
-      // Render the updated list
+      // Render the updated list and refresh suggestions
       if (data.addresses) {
         clearElement(resultEl);
         renderAddressBook(resultEl, data);
+        updateAddressBookSuggestions(data);
       } else {
         loadAddressBook();
       }
@@ -1703,6 +1728,7 @@ function removeAddressBookEntry(address) {
       if (data.addresses) {
         clearElement(resultEl);
         renderAddressBook(resultEl, data);
+        updateAddressBookSuggestions(data);
       } else {
         loadAddressBook();
       }

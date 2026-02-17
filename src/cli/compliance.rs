@@ -27,10 +27,11 @@ pub enum ComplianceCommands {
 #[derive(Debug, Args)]
 #[command(after_help = "\x1b[1mExamples:\x1b[0m
   scope compliance risk 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
+  scope compliance risk @main-wallet                      \x1b[2m# address book shortcut\x1b[0m
   scope compliance risk 0x742d... --detailed --format json
   scope compliance risk 0x742d... --output risk_report.json")]
 pub struct RiskArgs {
-    /// Address to assess
+    /// Address to assess. Use @label for address book shortcut.
     #[arg(value_name = "ADDRESS")]
     pub address: String,
 
@@ -1280,10 +1281,17 @@ mod tests {
             recommendations: vec!["File SAR".to_string()],
             assessed_at: chrono::Utc::now(),
         };
-        let patterns: Vec<(String, String, Option<crate::compliance::datasource::PatternAnalysis>)> =
-            vec![];
-        let report =
-            format_compliance_report(&[assessment], &patterns, &Jurisdiction::US, &ReportType::SAR);
+        let patterns: Vec<(
+            String,
+            String,
+            Option<crate::compliance::datasource::PatternAnalysis>,
+        )> = vec![];
+        let report = format_compliance_report(
+            &[assessment],
+            &patterns,
+            &Jurisdiction::US,
+            &ReportType::SAR,
+        );
         assert!(report.contains("Compliance Report"));
         assert!(report.contains("Risk Factor Breakdown"));
         assert!(report.contains("Tx Velocity"));
@@ -1309,8 +1317,11 @@ mod tests {
             recommendations: vec![],
             assessed_at: chrono::Utc::now(),
         };
-        let patterns: Vec<(String, String, Option<crate::compliance::datasource::PatternAnalysis>)> =
-            vec![];
+        let patterns: Vec<(
+            String,
+            String,
+            Option<crate::compliance::datasource::PatternAnalysis>,
+        )> = vec![];
         let report = format_compliance_report(
             &[assessment],
             &patterns,

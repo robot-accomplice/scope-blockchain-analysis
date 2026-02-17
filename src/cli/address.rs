@@ -29,6 +29,7 @@ use clap::Args;
 #[command(
     after_help = "\x1b[1mExamples:\x1b[0m
   scope address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
+  scope address @main-wallet                              \x1b[2m# address book shortcut\x1b[0m
   scope address 0x742d... --include-txs --include-tokens
   scope address 0x742d... --dossier --report dossier.md
   scope address DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy --chain solana",
@@ -73,6 +74,7 @@ pub struct AddressArgs {
     ///
     /// Must be a valid address format for the target chain
     /// (e.g., 0x-prefixed 40-character hex for Ethereum).
+    /// Use @label to resolve from the address book (e.g., @main-wallet).
     #[arg(value_name = "ADDRESS")]
     pub address: String,
 
@@ -1090,7 +1092,9 @@ mod tests {
             &self,
             _addr: &str,
         ) -> crate::error::Result<Vec<ChainTokenBalance>> {
-            Err(crate::error::ScopeError::Chain("token balances fetch failed".into()))
+            Err(crate::error::ScopeError::Chain(
+                "token balances fetch failed".into(),
+            ))
         }
         async fn get_code(&self, _addr: &str) -> crate::error::Result<String> {
             Ok("0x".into())
@@ -1170,7 +1174,13 @@ mod tests {
         let result = analyze_address(&args, &client).await;
         assert!(result.is_ok());
         let report = result.unwrap();
-        assert!(report.transactions.as_ref().map(|v| v.is_empty()).unwrap_or(false));
+        assert!(
+            report
+                .transactions
+                .as_ref()
+                .map(|v| v.is_empty())
+                .unwrap_or(false)
+        );
     }
 
     #[tokio::test]
@@ -1189,7 +1199,13 @@ mod tests {
         let result = analyze_address(&args, &client).await;
         assert!(result.is_ok());
         let report = result.unwrap();
-        assert!(report.tokens.as_ref().map(|v| v.is_empty()).unwrap_or(false));
+        assert!(
+            report
+                .tokens
+                .as_ref()
+                .map(|v| v.is_empty())
+                .unwrap_or(false)
+        );
     }
 
     #[tokio::test]

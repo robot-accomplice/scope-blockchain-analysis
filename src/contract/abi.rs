@@ -546,7 +546,11 @@ mod tests {
         assert_eq!(params.len(), 2);
         assert_eq!(params[0].name, "to");
         assert_eq!(params[0].param_type, "address");
-        assert!(params[0].value.contains("dac17f958d2ee523a2206206994597c13d831ec7"));
+        assert!(
+            params[0]
+                .value
+                .contains("dac17f958d2ee523a2206206994597c13d831ec7")
+        );
         assert_eq!(params[1].name, "amount");
         assert_eq!(params[1].value, "100000000");
     }
@@ -596,11 +600,14 @@ mod tests {
             outputs: vec![],
             state_mutability: "nonpayable".to_string(),
         };
-        let input = format!("0xa1b2c3d4{}", "00000000000000000000000000000000000000000000000000000000000000ff00");
+        let input = format!(
+            "0xa1b2c3d4{}",
+            "00000000000000000000000000000000000000000000000000000000000000ff00"
+        );
         let params = decode_params_from_abi(&input, &entry);
         assert_eq!(params.len(), 2);
         assert_eq!(params[0].name, "a");
-        assert!(params[1].value.len() > 0);
+        assert!(!params[1].value.is_empty());
     }
 
     #[test]
@@ -838,7 +845,10 @@ mod tests {
             decode_calldata("0xdeadbeef", None, &client).await
         });
         assert_eq!(result.selector, "0xdeadbeef");
-        matches!(result.source, DecodeSource::Unknown | DecodeSource::FourByteDirectory);
+        matches!(
+            result.source,
+            DecodeSource::Unknown | DecodeSource::FourByteDirectory
+        );
     }
 
     #[test]

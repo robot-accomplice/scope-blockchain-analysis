@@ -28,10 +28,27 @@ fn default_chain() -> String {
 }
 
 /// POST /api/compliance/risk — Risk assessment for an address.
+///
+/// Supports address book shortcuts: pass `@label` as the address to
+/// resolve it from the address book.
 pub async fn handle_risk(
     State(_state): State<Arc<AppState>>,
     Json(req): Json<ComplianceRiskRequest>,
 ) -> impl IntoResponse {
+    // Resolve address book shortcuts (@label or direct address match)
+    let resolved = match super::resolve_address_book(&req.address, &_state.config) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response();
+        }
+    };
+    let address = resolved.value;
+    let chain = resolved.chain.unwrap_or(req.chain);
+
     // Build risk engine (with Etherscan key if available)
     let engine = if let Ok(key) = std::env::var("ETHERSCAN_API_KEY") {
         let sources = DataSources::new(key);
@@ -41,7 +58,7 @@ pub async fn handle_risk(
         RiskEngine::new()
     };
 
-    match engine.assess_address(&req.address, &req.chain).await {
+    match engine.assess_address(&address, &chain).await {
         Ok(assessment) => Json(serde_json::json!({
             "address": assessment.address,
             "chain": assessment.chain,
@@ -204,5 +221,41 @@ mod tests {
             let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
             assert!(json.get("error").is_some());
         }
+    }
+
+    #[tokio::test]
+    async fn test_handle_risk_label_not_found() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
+        use axum::extract::State;
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config = Config {
+            address_book: crate::config::AddressBookConfig {
+                data_dir: Some(tmp.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+        let req = ComplianceRiskRequest {
+            address: "@fake-wallet".to_string(),
+            chain: "ethereum".to_string(),
+            detailed: false,
+        };
+        let response = handle_risk(State(state), axum::Json(req))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"].as_str().unwrap().contains("@fake-wallet"));
     }
 }

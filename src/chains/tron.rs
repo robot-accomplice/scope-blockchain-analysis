@@ -1898,10 +1898,7 @@ mod tests {
             r#"{"trc20_tokens": [{"symbol": "USDT", "contract_name": "TetherToken", "decimals": 6}]}"#,
         )
         .unwrap();
-        let tokens = info
-            .get("trc20_tokens")
-            .and_then(|v| v.as_array())
-            .unwrap();
+        let tokens = info.get("trc20_tokens").and_then(|v| v.as_array()).unwrap();
         let token_data = tokens.first().unwrap();
         let symbol = token_data
             .get("symbol")
@@ -1922,12 +1919,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_token_info_no_tokens() {
-        let info: serde_json::Value =
-            serde_json::from_str(r#"{"trc20_tokens": []}"#).unwrap();
-        let tokens = info
-            .get("trc20_tokens")
-            .and_then(|v| v.as_array())
-            .unwrap();
+        let info: serde_json::Value = serde_json::from_str(r#"{"trc20_tokens": []}"#).unwrap();
+        let tokens = info.get("trc20_tokens").and_then(|v| v.as_array()).unwrap();
         assert!(tokens.is_empty());
     }
 
@@ -1935,10 +1928,7 @@ mod tests {
     async fn test_get_token_info_missing_field() {
         let info: serde_json::Value =
             serde_json::from_str(r#"{"trc20_tokens": [{"symbol": "TEST"}]}"#).unwrap();
-        let tokens = info
-            .get("trc20_tokens")
-            .and_then(|v| v.as_array())
-            .unwrap();
+        let tokens = info.get("trc20_tokens").and_then(|v| v.as_array()).unwrap();
         let token_data = tokens.first().unwrap();
         let name = token_data
             .get("contract_name")
@@ -2009,8 +1999,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_token_holder_count_parsing() {
-        let json: serde_json::Value =
-            serde_json::from_str(r#"{"rangeTotal": 12345}"#).unwrap();
+        let json: serde_json::Value = serde_json::from_str(r#"{"rangeTotal": 12345}"#).unwrap();
         let count = json.get("rangeTotal").and_then(|v| v.as_u64()).unwrap_or(0);
         assert_eq!(count, 12345);
 
@@ -2422,7 +2411,10 @@ mod tests {
             contract_address: "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t".to_string(),
             raw_balance: "5000000".to_string(),
         };
-        assert_eq!(balance.contract_address, "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t");
+        assert_eq!(
+            balance.contract_address,
+            "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
+        );
         assert_eq!(balance.raw_balance, "5000000");
         let debug_str = format!("{:?}", balance);
         assert!(debug_str.contains("Trc20TokenBalance"));
@@ -2514,7 +2506,10 @@ mod tests {
         assert_eq!(contract_value.owner_address.as_deref(), Some("TFrom123"));
         assert_eq!(contract_value.to_address.as_deref(), Some("TTo456"));
         assert_eq!(
-            tx.ret.as_ref().and_then(|r| r.first()).and_then(|r| r.contract_ret.as_deref()),
+            tx.ret
+                .as_ref()
+                .and_then(|r| r.first())
+                .and_then(|r| r.contract_ret.as_deref()),
             Some("SUCCESS")
         );
     }

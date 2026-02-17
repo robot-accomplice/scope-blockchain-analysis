@@ -13,7 +13,7 @@ use std::sync::Arc;
 /// Request body for market summary.
 #[derive(Debug, Deserialize)]
 pub struct MarketRequest {
-    /// Token symbol (e.g., "USDC", "PUSD"). Default: "USDC".
+    /// Token symbol (e.g., "USDC", "DAI"). Default: "USDC".
     #[serde(default = "default_pair")]
     pub pair: String,
     /// Market venue: "binance", "biconomy", "eth", "solana".
@@ -237,8 +237,8 @@ mod tests {
     #[test]
     fn test_deserialize_full() {
         let json = serde_json::json!({
-            "pair": "PUSD",
-            "market_venue": "biconomy",
+            "pair": "DAI",
+            "market_venue": "binance",
             "chain": "polygon",
             "peg": 1.0,
             "min_levels": 10,
@@ -246,8 +246,8 @@ mod tests {
             "peg_range": 0.002
         });
         let req: MarketRequest = serde_json::from_value(json).unwrap();
-        assert_eq!(req.pair, "PUSD");
-        assert_eq!(req.market_venue, "biconomy");
+        assert_eq!(req.pair, "DAI");
+        assert_eq!(req.market_venue, "binance");
         assert_eq!(req.chain, "polygon");
         assert_eq!(req.peg, 1.0);
         assert_eq!(req.min_levels, 10);
@@ -523,7 +523,7 @@ mod tests {
         assert!(json["best_bid"].as_f64().unwrap() > 0.0);
         assert!(json["best_ask"].as_f64().unwrap() > 0.0);
         assert!(json.get("healthy").is_some());
-        assert!(json["checks"].as_array().unwrap().len() > 0);
+        assert!(!json["checks"].as_array().unwrap().is_empty());
         assert!(json.get("execution_10k_buy").is_some());
         assert!(json.get("execution_10k_sell").is_some());
         assert!(json.get("bids").is_some());

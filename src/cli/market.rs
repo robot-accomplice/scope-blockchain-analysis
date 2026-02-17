@@ -41,20 +41,21 @@ pub enum MarketCommands {
 
 /// Arguments for `scope market summary`.
 ///
-/// Default thresholds (min_levels, min_depth, peg_range) originated from the
-/// PUSD Hummingbot market-making config and are tunable for other markets.
+/// Default thresholds (min_levels, min_depth, peg_range) originated from
+/// stablecoin market-making defaults and are tunable for other markets.
 #[derive(Debug, Args)]
 #[command(
     after_help = "\x1b[1mExamples:\x1b[0m
-  scope market summary PUSD --venue biconomy
+  scope market summary DAI --venue binance
+  scope market summary @dai-token --venue binance         \x1b[2m# address book shortcut\x1b[0m
   scope market summary USDC --venue binance --format json
-  scope market summary PUSD --venue biconomy --every 30s --duration 1h
-  scope market summary PUSD --venue biconomy --report health.md --csv peg.csv",
+  scope market summary DAI --venue binance --every 30s --duration 1h
+  scope market summary DAI --venue binance --report health.md --csv peg.csv",
     after_long_help = "\x1b[1mExamples:\x1b[0m
 
-  \x1b[1m$ scope market summary PUSD --venue biconomy\x1b[0m
+  \x1b[1m$ scope market summary DAI --venue binance\x1b[0m
 
-  +-- PUSD/USDT (biconomy) ----------------------------+
+  +-- DAI/USDT (binance) ----------------------------+
   |                                                     |
   |-- Metrics                                           |
   |  Best Bid           0.9999  (-0.010%)               |
@@ -72,16 +73,16 @@ pub enum MarketCommands {
   |  HEALTHY                                            |
   +-----------------------------------------------------+
 
-  \x1b[1m$ scope market summary PUSD --venue biconomy --every 30s --duration 1h\x1b[0m
+  \x1b[1m$ scope market summary DAI --venue binance --every 30s --duration 1h\x1b[0m
 
-  Monitoring PUSD/USDT (biconomy) every 30s for 1h...
+  Monitoring DAI/USDT (binance) every 30s for 1h...
   [2026-02-16 10:00:00] Mid=1.0000 Spread=0.020% Depth=42K/45K HEALTHY
   [2026-02-16 10:00:30] Mid=1.0000 Spread=0.020% Depth=42K/44K HEALTHY
   [2026-02-16 10:01:00] Mid=0.9999 Spread=0.030% Depth=41K/44K HEALTHY
   ..."
 )]
 pub struct SummaryArgs {
-    /// Base token symbol (e.g., USDC, PUSD). Quote is USDT.
+    /// Base token symbol (e.g., USDC, DAI) or @label from address book. Quote is USDT.
     #[arg(default_value = "USDC", value_name = "SYMBOL")]
     pub pair: String,
 
@@ -98,11 +99,11 @@ pub struct SummaryArgs {
     #[arg(long, default_value = "1.0", value_name = "TARGET")]
     pub peg: f64,
 
-    /// Minimum order book levels per side (default from PUSD Hummingbot config).
+    /// Minimum order book levels per side.
     #[arg(long, default_value = "6", value_name = "N")]
     pub min_levels: usize,
 
-    /// Minimum depth per side in quote terms, e.g. USDT (default from PUSD Hummingbot config).
+    /// Minimum depth per side in quote terms, e.g. USDT.
     #[arg(long, default_value = "3000", value_name = "USDT")]
     pub min_depth: f64,
 
@@ -156,7 +157,7 @@ pub enum SummaryFormat {
 #[command(
     after_help = "\x1b[1mExamples:\x1b[0m
   scope market ohlc BTC
-  scope market ohlc PUSD --venue biconomy --interval 1d
+  scope market ohlc DAI --venue binance --interval 1d
   scope market ohlc ETH --venue mexc --limit 50 --format json",
     after_long_help = "\x1b[1mExamples:\x1b[0m
 
@@ -214,7 +215,7 @@ pub struct OhlcArgs {
 #[derive(Debug, Args)]
 #[command(after_help = "\x1b[1mExamples:\x1b[0m
   scope market trades BTC
-  scope market trades PUSD --venue biconomy --limit 20
+  scope market trades DAI --venue binance --limit 20
   scope market trades ETH --venue okx --format json")]
 pub struct TradesArgs {
     /// Trading pair symbol (e.g., USDC, BTC). Quote is USDT by default.
@@ -258,7 +259,7 @@ pub async fn run(
 }
 
 /// Parse duration strings like "30s", "5m", "1h", "24h" into seconds.
-/// Extract base symbol from pair (e.g. "PUSD_USDT" -> "PUSD", "USDCUSDT" -> "USDC", "USDC" -> "USDC").
+/// Extract base symbol from pair (e.g. "DAI_USDT" -> "DAI", "USDCUSDT" -> "USDC", "USDC" -> "USDC").
 fn base_symbol_from_pair(pair: &str) -> &str {
     let p = pair.trim();
     if let Some(i) = p.find("_USDT") {
@@ -936,13 +937,13 @@ capabilities:
 
     #[test]
     fn test_base_symbol_from_pair_underscore() {
-        assert_eq!(base_symbol_from_pair("PUSD_USDT"), "PUSD");
+        assert_eq!(base_symbol_from_pair("DAI_USDT"), "DAI");
         assert_eq!(base_symbol_from_pair("USDC_USDT"), "USDC");
     }
 
     #[test]
     fn test_base_symbol_from_pair_lowercase_underscore() {
-        assert_eq!(base_symbol_from_pair("pusd_usdt"), "pusd");
+        assert_eq!(base_symbol_from_pair("dai_usdt"), "dai");
     }
 
     #[test]
@@ -953,7 +954,7 @@ capabilities:
     #[test]
     fn test_base_symbol_from_pair_concat() {
         assert_eq!(base_symbol_from_pair("USDCUSDT"), "USDC");
-        assert_eq!(base_symbol_from_pair("PUSDUSDT"), "PUSD");
+        assert_eq!(base_symbol_from_pair("DAIUSDT"), "DAI");
     }
 
     #[test]
@@ -964,7 +965,7 @@ capabilities:
 
     #[test]
     fn test_base_symbol_from_pair_whitespace() {
-        assert_eq!(base_symbol_from_pair("  PUSD_USDT  "), "PUSD");
+        assert_eq!(base_symbol_from_pair("  DAI_USDT  "), "DAI");
     }
 
     // ====================================================================
@@ -1126,7 +1127,7 @@ capabilities:
         assert_eq!(base_symbol_from_pair("USDC"), "USDC");
         assert_eq!(base_symbol_from_pair("BTCUSDT"), "BTC");
         assert_eq!(base_symbol_from_pair("ETH/USDT"), "ETH");
-        assert_eq!(base_symbol_from_pair("PUSD_USDT"), "PUSD");
+        assert_eq!(base_symbol_from_pair("DAI_USDT"), "DAI");
         assert_eq!(base_symbol_from_pair("X"), "X"); // short symbol, no USDT suffix
         assert_eq!(base_symbol_from_pair(""), "");
     }
@@ -1743,8 +1744,8 @@ capabilities:
     #[test]
     fn test_summary_args_with_report_csv_options() {
         let args = SummaryArgs {
-            pair: "PUSD".to_string(),
-            venue: "biconomy".to_string(),
+            pair: "DAI".to_string(),
+            venue: "binance".to_string(),
             chain: "ethereum".to_string(),
             peg: 1.0,
             min_levels: 6,
@@ -1758,8 +1759,8 @@ capabilities:
             report: Some(std::path::PathBuf::from("/tmp/report.md")),
             csv: Some(std::path::PathBuf::from("/tmp/data.csv")),
         };
-        assert_eq!(args.pair, "PUSD");
-        assert_eq!(args.venue, "biconomy");
+        assert_eq!(args.pair, "DAI");
+        assert_eq!(args.venue, "binance");
         assert!(args.every.is_some());
         assert!(args.duration.is_some());
         assert!(args.report.is_some());

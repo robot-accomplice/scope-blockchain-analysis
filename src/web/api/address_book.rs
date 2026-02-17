@@ -321,8 +321,8 @@ mod tests {
     async fn test_handle_address_book_list_json_structure() {
         use crate::chains::DefaultClientFactory;
         use crate::config::Config;
-        use axum::extract::State;
         use axum::body;
+        use axum::extract::State;
 
         let config = Config::default();
         let factory = DefaultClientFactory {
@@ -386,11 +386,13 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(json["error"]
-            .as_str()
-            .unwrap()
-            .to_lowercase()
-            .contains("already"));
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap()
+                .to_lowercase()
+                .contains("already")
+        );
     }
 
     #[tokio::test]

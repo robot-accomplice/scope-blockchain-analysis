@@ -15,6 +15,7 @@ use clap::Args;
 #[command(
     after_help = "\x1b[1mExamples:\x1b[0m
   scope contract 0xdAC17F958D2ee523a2206206994597C13D831ec7
+  scope ct @usdt-contract                                 \x1b[2m# address book shortcut\x1b[0m
   scope ct 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --chain polygon
   scope contract 0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D --json",
     after_long_help = "\x1b[1mExamples:\x1b[0m
@@ -77,6 +78,7 @@ pub struct ContractArgs {
     ///
     /// Must be a valid address on the target chain. The address must be
     /// a deployed smart contract (not an externally owned account).
+    /// Use @label to resolve from the address book (e.g., @usdt-contract).
     #[arg(value_name = "ADDRESS")]
     pub address: String,
 

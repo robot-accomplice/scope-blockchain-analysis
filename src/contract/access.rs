@@ -449,7 +449,9 @@ mod tests {
 
     #[test]
     fn test_detect_ownership_pattern_custom_owner() {
-        let result = detect_ownership_pattern("function owner() public view returns (address) { return _owner; }");
+        let result = detect_ownership_pattern(
+            "function owner() public view returns (address) { return _owner; }",
+        );
         assert_eq!(result, Some("Custom owner pattern".to_string()));
     }
 
@@ -464,8 +466,14 @@ mod tests {
         let code = "modifier onlyValidator() { require(isValidator[msg.sender]); _; }\nfunction doThing() onlyValidator() {}";
         let modifiers = detect_modifiers(code);
         assert!(modifiers.iter().any(|m| m.name == "onlyValidator"));
-        let validator_mod = modifiers.iter().find(|m| m.name == "onlyValidator").unwrap();
-        assert!(matches!(validator_mod.check_type, ModifierCheckType::Custom));
+        let validator_mod = modifiers
+            .iter()
+            .find(|m| m.name == "onlyValidator")
+            .unwrap();
+        assert!(matches!(
+            validator_mod.check_type,
+            ModifierCheckType::Custom
+        ));
     }
 
     #[test]
@@ -488,7 +496,8 @@ mod tests {
 
     #[test]
     fn test_detect_modifiers_imported_only_owner() {
-        let code = "function mint() onlyOwner { tokens[msg.sender] += 1; }\nfunction burn() onlyOwner {}";
+        let code =
+            "function mint() onlyOwner { tokens[msg.sender] += 1; }\nfunction burn() onlyOwner {}";
         let modifiers = detect_modifiers(code);
         assert!(modifiers.iter().any(|m| m.name == "onlyOwner"));
         let owner_mod = modifiers.iter().find(|m| m.name == "onlyOwner").unwrap();

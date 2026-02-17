@@ -31,6 +31,7 @@ pub enum InferredTarget {
 #[derive(Debug, Args)]
 #[command(after_help = "\x1b[1mExamples:\x1b[0m
   scope insights 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
+  scope insights @main-wallet                             \x1b[2m# address book shortcut\x1b[0m
   scope insights 0xabc123def456... --decode --trace
   scope insights USDC
   scope insights DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy --chain solana")]
@@ -38,6 +39,7 @@ pub struct InsightsArgs {
     /// Target to analyze: address, transaction hash, or token (symbol/name/address).
     ///
     /// Scope infers the type and chain from format:
+    /// - `@label` = address book shortcut (e.g. @main-wallet)
     /// - `0x...` (42 chars) = EVM address → ethereum
     /// - `T...` (34 chars) = Tron address → tron
     /// - Base58 (32–44 chars) = Solana address → solana
@@ -519,7 +521,7 @@ fn format_tx_value(value_str: &str, chain: &str) -> (String, bool) {
 fn is_stablecoin(symbol: &str) -> bool {
     matches!(
         symbol.to_uppercase().as_str(),
-        "USDC" | "USDT" | "DAI" | "BUSD" | "TUSD" | "USDP" | "FRAX" | "LUSD" | "PUSD" | "GUSD"
+        "USDC" | "USDT" | "DAI" | "BUSD" | "TUSD" | "USDP" | "FRAX" | "LUSD" | "GUSD"
     )
 }
 
@@ -1314,7 +1316,6 @@ mod tests {
         assert!(is_stablecoin("USDP"));
         assert!(is_stablecoin("FRAX"));
         assert!(is_stablecoin("LUSD"));
-        assert!(is_stablecoin("PUSD"));
         assert!(is_stablecoin("GUSD"));
         assert!(!is_stablecoin("ETH"));
         assert!(!is_stablecoin("PEPE"));
@@ -2174,18 +2175,28 @@ mod tests {
             positives: vec![],
         };
         let meta = meta_analysis_token(&risk, false, None, None, 50_000.0);
-        assert!(meta.key_takeaway.contains("multiple factors") || meta.key_takeaway.contains("High risk"));
+        assert!(
+            meta.key_takeaway.contains("multiple factors")
+                || meta.key_takeaway.contains("High risk")
+        );
     }
 
     #[test]
     fn test_infer_target_chain_override_with_address() {
-        let t = infer_target("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2", Some("arbitrum"));
+        let t = infer_target(
+            "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
+            Some("arbitrum"),
+        );
         assert!(matches!(t, InferredTarget::Address { chain } if chain == "arbitrum"));
     }
 
     #[test]
     fn test_meta_analysis_tx_approval_contains_approval_in_match() {
         let meta = meta_analysis_tx("ERC-20 Approval", true, false, "0xfrom", Some("0xto"));
-        assert!(meta.recommendations.iter().any(|r| r.contains("spender") || r.contains("allowance")));
+        assert!(
+            meta.recommendations
+                .iter()
+                .any(|r| r.contains("spender") || r.contains("allowance"))
+        );
     }
 }

@@ -82,6 +82,7 @@ impl Period {
 #[command(
     after_help = "\x1b[1mExamples:\x1b[0m
   scope crawl USDC
+  scope crawl @usdc-token                                 \x1b[2m# address book shortcut\x1b[0m
   scope crawl 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --chain ethereum
   scope crawl USDC --period 7d --report usdc_report.md
   scope crawl PEPE --format json --no-charts",
@@ -129,6 +130,7 @@ pub struct CrawlArgs {
     /// Can be a contract address (0x...) or a token symbol/name.
     /// If a name is provided, matching tokens will be searched and
     /// you can select from the results.
+    /// Use @label to resolve from the address book (e.g., @usdc-token).
     pub token: String,
 
     /// Target blockchain network.
@@ -1806,7 +1808,9 @@ mod tests {
         assert!(result.is_err());
         let err_str = result.unwrap_err().to_string();
         assert!(
-            err_str.contains("avalanche") || err_str.contains("block explorer") || err_str.contains("No DEX"),
+            err_str.contains("avalanche")
+                || err_str.contains("block explorer")
+                || err_str.contains("No DEX"),
             "Expected error about unsupported chain, got: {}",
             err_str
         );
@@ -2339,10 +2343,10 @@ mod tests {
     struct FailingWriter;
     impl std::io::Write for FailingWriter {
         fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
-            Err(std::io::Error::new(std::io::ErrorKind::Other, "write failed"))
+            Err(std::io::Error::other("write failed"))
         }
         fn flush(&mut self) -> std::io::Result<()> {
-            Err(std::io::Error::new(std::io::ErrorKind::Other, "flush failed"))
+            Err(std::io::Error::other("flush failed"))
         }
     }
 
@@ -2350,12 +2354,12 @@ mod tests {
     struct FailingReader;
     impl std::io::Read for FailingReader {
         fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
-            Err(std::io::Error::new(std::io::ErrorKind::Other, "read failed"))
+            Err(std::io::Error::other("read failed"))
         }
     }
     impl std::io::BufRead for FailingReader {
         fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
-            Err(std::io::Error::new(std::io::ErrorKind::Other, "read failed"))
+            Err(std::io::Error::other("read failed"))
         }
         fn consume(&mut self, _amt: usize) {}
     }
@@ -2378,7 +2382,7 @@ mod tests {
                 Ok(buf.len())
             }
             fn flush(&mut self) -> std::io::Result<()> {
-                Err(std::io::Error::new(std::io::ErrorKind::Other, "flush failed"))
+                Err(std::io::Error::other("flush failed"))
             }
         }
         let input = b"y\n";

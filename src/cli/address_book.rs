@@ -2184,7 +2184,8 @@ mod tests {
         };
 
         // When load fails (parse error), returns Ok(None)
-        let result = resolve_address_book_input("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2", &config);
+        let result =
+            resolve_address_book_input("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2", &config);
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
     }

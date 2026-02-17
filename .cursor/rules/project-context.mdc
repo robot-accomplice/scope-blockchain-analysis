@@ -8,5 +8,6 @@ alwaysApply: true
 This is a **personal project**. It does not use Linear.
 
 - Do not require or suggest Linear issue links in PRs
-- Do not reference COIN-XX, palm-finance Linear workspace, or @theyashmathur reviewer workflow
-- PR workflow: create PR to target branch (develop/main) without Linear or Palm-specific requirements
+- Do not reference any external project workflows or reviewer assignments
+- PR workflow: create PR to target branch (develop/main) without external project requirements
+- **No references to legacy or external project branding anywhere in code or docs** — this project is fully independent

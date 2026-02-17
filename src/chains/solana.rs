@@ -1728,7 +1728,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(token.decimals, 6);
-        assert_eq!(token.contract_address, "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+        assert_eq!(
+            token.contract_address,
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+        );
         assert!(token.symbol.starts_with("EPjFWdd5"));
         assert!(token.symbol.ends_with("..."));
         assert_eq!(token.name, "SPL Token");
@@ -1903,9 +1906,7 @@ mod tests {
             .mock("POST", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(
-                r#"{"jsonrpc":"2.0","result":{"slot":100},"id":1}"#,
-            )
+            .with_body(r#"{"jsonrpc":"2.0","result":{"slot":100},"id":1}"#)
             .create_async()
             .await;
 
@@ -1950,11 +1951,13 @@ mod tests {
             .mock("POST", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"jsonrpc":"2.0","result":{
+            .with_body(
+                r#"{"jsonrpc":"2.0","result":{
                 "slot":100,
                 "transaction":{"message":{"accountKeys":["A","B"]}},
                 "meta":{"fee":5000,"preBalances":[1000,500],"postBalances":[1000,500],"err":null}
-            },"id":1}"#)
+            },"id":1}"#,
+            )
             .create_async()
             .await;
 

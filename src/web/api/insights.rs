@@ -27,13 +27,31 @@ pub struct InsightsRequest {
 
 /// POST /api/insights — Unified insights for any target.
 ///
+/// Supports address book shortcuts: pass `@label` as the target to
+/// resolve it from the address book. The chain will also be set from
+/// the book entry unless explicitly overridden.
+///
 /// Returns the insights markdown as JSON `{ "markdown": "..." }` along
 /// with structured metadata about the detected target type.
 pub async fn handle(
     State(state): State<Arc<AppState>>,
     Json(req): Json<InsightsRequest>,
 ) -> impl IntoResponse {
-    let target = insights::infer_target(&req.target, req.chain.as_deref());
+    // Resolve address book shortcuts (@label or direct address match)
+    let resolved = match super::resolve_address_book(&req.target, &state.config) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response();
+        }
+    };
+    let target_str = resolved.value;
+    let chain_override = req.chain.or(resolved.chain);
+
+    let target = insights::infer_target(&target_str, chain_override.as_deref());
 
     let target_type = match &target {
         insights::InferredTarget::Address { chain } => {
@@ -50,8 +68,8 @@ pub async fn handle(
     // Run the insights command which builds markdown output
     // We capture it by running the underlying functions directly
     let args = InsightsArgs {
-        target: req.target.clone(),
-        chain: req.chain,
+        target: target_str.clone(),
+        chain: chain_override,
         decode: req.decode,
         trace: req.trace,
     };
@@ -61,7 +79,7 @@ pub async fn handle(
     match &target {
         insights::InferredTarget::Address { chain } => {
             let addr_args = crate::cli::address::AddressArgs {
-                address: req.target,
+                address: target_str.clone(),
                 chain: chain.clone(),
                 format: None,
                 include_txs: false,
@@ -96,7 +114,7 @@ pub async fn handle(
         }
         insights::InferredTarget::Transaction { chain } => {
             match crate::cli::tx::fetch_transaction_report(
-                &req.target,
+                &target_str,
                 chain,
                 args.decode,
                 args.trace,
@@ -118,7 +136,7 @@ pub async fn handle(
         }
         insights::InferredTarget::Token { chain } => {
             match crate::cli::crawl::fetch_analytics_for_input(
-                &req.target,
+                &target_str,
                 chain,
                 crate::cli::crawl::Period::Hour24,
                 10,
@@ -389,7 +407,14 @@ mod tests {
         use axum::http::StatusCode;
         use axum::response::IntoResponse;
 
-        let config = Config::default();
+        // Use a temp data dir to avoid local address book interfering
+        let tmp = tempfile::tempdir().unwrap();
+        let config = Config {
+            address_book: crate::config::AddressBookConfig {
+                data_dir: Some(tmp.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
         let factory = DefaultClientFactory {
             chains_config: config.chains.clone(),
         };
@@ -406,6 +431,46 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(json["error"].as_str().unwrap().contains("Unsupported chain"));
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap()
+                .contains("Unsupported chain")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_insights_label_not_found() {
+        use crate::chains::DefaultClientFactory;
+        use crate::config::Config;
+        use crate::web::AppState;
+        use axum::extract::State;
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config = Config {
+            address_book: crate::config::AddressBookConfig {
+                data_dir: Some(tmp.path().to_path_buf()),
+            },
+            ..Default::default()
+        };
+        let factory = DefaultClientFactory {
+            chains_config: config.chains.clone(),
+        };
+        let state = std::sync::Arc::new(AppState { config, factory });
+        let req = InsightsRequest {
+            target: "@no-such-label".to_string(),
+            chain: None,
+            decode: false,
+            trace: false,
+        };
+        let response = handle(State(state), axum::Json(req)).await.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"].as_str().unwrap().contains("@no-such-label"));
     }
 }

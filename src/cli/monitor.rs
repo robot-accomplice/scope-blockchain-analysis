@@ -118,8 +118,9 @@ use super::interactive::SessionContext;
 #[derive(Debug, Args)]
 #[command(after_help = "\x1b[1mExamples:\x1b[0m
   scope monitor USDC
+  scope monitor @dai-token                                \x1b[2m# address book shortcut\x1b[0m
   scope monitor PEPE --chain ethereum --layout chart-focus
-  scope monitor PUSD --venue biconomy --pair PUSD_USDT
+  scope monitor DAI --venue binance --pair DAI_USDT
   scope monitor BTC --venue binance --refresh 5 --scale log")]
 pub struct MonitorArgs {
     /// Token address or symbol to monitor.
@@ -127,6 +128,7 @@ pub struct MonitorArgs {
     /// Can be a contract address (0x...) or a token symbol/name.
     /// If a name/symbol is provided, matching tokens will be searched
     /// and you can select from the results.
+    /// Use @label to resolve from the address book (e.g., @dai-token).
     pub token: String,
 
     /// Target blockchain network.
@@ -172,7 +174,7 @@ pub struct MonitorArgs {
     #[arg(long, value_name = "VENUE")]
     pub venue: Option<String>,
 
-    /// Direct trading pair for exchange-only mode (e.g., PUSD_USDT).
+    /// Direct trading pair for exchange-only mode (e.g., DAI_USDT).
     ///
     /// Bypasses DexScreener token resolution entirely and uses the exchange
     /// ticker as the data source. Requires `--venue` to be specified.
@@ -4114,8 +4116,7 @@ pub async fn run_direct(
 ///
 /// When `explicit_pair` is `Some`, token resolution is bypassed and the
 /// exchange ticker is used as the primary data source.  This enables
-/// monitoring tokens that are not indexed by DexScreener (e.g., PUSD on
-/// Biconomy).
+/// monitoring tokens that are not indexed by DexScreener.
 pub async fn run(
     token: Option<String>,
     explicit_pair: Option<String>,
@@ -4155,7 +4156,7 @@ pub async fn run(
             ScopeError::Chain(format!("Failed to fetch ticker for {}: {}", pair_str, e))
         })?;
 
-        // Extract base symbol from pair label (e.g., "PUSD/USDT" → "PUSD")
+        // Extract base symbol from pair label (e.g., "DAI/USDT" → "DAI")
         let base_symbol = ticker
             .pair
             .split('/')
@@ -8227,7 +8228,7 @@ refresh_seconds: 5
         let pairs = vec![crate::chains::DexPair {
             dex_name: "Uniswap V3".to_string(),
             pair_address: "0xabc".to_string(),
-            base_token: "PUSD".to_string(),
+            base_token: "DAI".to_string(),
             quote_token: "USDT".to_string(),
             price_usd: 1.0,
             volume_24h: 50_000.0,
@@ -8242,10 +8243,10 @@ refresh_seconds: 5
             pair_created_at: None,
             url: None,
         }];
-        let book = MonitorState::generate_synthetic_order_book(&pairs, "PUSD", 1.0, 200_000.0);
+        let book = MonitorState::generate_synthetic_order_book(&pairs, "DAI", 1.0, 200_000.0);
         assert!(book.is_some());
         let book = book.unwrap();
-        assert_eq!(book.pair, "PUSD/USDT");
+        assert_eq!(book.pair, "DAI/USDT");
         assert!(!book.asks.is_empty());
         assert!(!book.bids.is_empty());
         // Asks should be ascending
@@ -9343,7 +9344,7 @@ refresh_seconds: 5
     #[test]
     fn test_build_exchange_token_data_from_ticker() {
         let ticker = crate::market::Ticker {
-            pair: "PUSD/USDT".to_string(),
+            pair: "DAI/USDT".to_string(),
             last_price: Some(1.001),
             high_24h: Some(1.005),
             low_24h: Some(0.998),
@@ -9353,10 +9354,10 @@ refresh_seconds: 5
             best_ask: Some(1.0015),
         };
 
-        let data = build_exchange_token_data("PUSD", "PUSD_USDT", &ticker);
+        let data = build_exchange_token_data("DAI", "DAI_USDT", &ticker);
 
-        assert_eq!(data.symbol, "PUSD");
-        assert_eq!(data.name, "PUSD");
+        assert_eq!(data.symbol, "DAI");
+        assert_eq!(data.name, "DAI");
         assert_eq!(data.price_usd, 1.001);
         assert_eq!(data.volume_24h, 500_000.0);
         assert!(data.address.contains("exchange:"));
@@ -9386,7 +9387,7 @@ refresh_seconds: 5
     #[test]
     fn test_monitor_args_with_pair() {
         let args = MonitorArgs {
-            token: "PUSD".to_string(),
+            token: "DAI".to_string(),
             chain: "ethereum".to_string(),
             refresh: None,
             layout: None,
@@ -9394,9 +9395,9 @@ refresh_seconds: 5
             color_scheme: None,
             export: None,
             venue: Some("biconomy".to_string()),
-            pair: Some("PUSD_USDT".to_string()),
+            pair: Some("DAI_USDT".to_string()),
         };
-        assert_eq!(args.pair, Some("PUSD_USDT".to_string()));
+        assert_eq!(args.pair, Some("DAI_USDT".to_string()));
         assert_eq!(args.venue, Some("biconomy".to_string()));
     }
 
@@ -9474,7 +9475,7 @@ refresh_seconds: 5
         // When --pair is set, --venue should also be set.
         // This is a structural test; the runtime validation is in run().
         let args = MonitorArgs {
-            token: "PUSD".to_string(),
+            token: "DAI".to_string(),
             chain: "ethereum".to_string(),
             refresh: None,
             layout: None,
@@ -9482,7 +9483,7 @@ refresh_seconds: 5
             color_scheme: None,
             export: None,
             venue: Some("biconomy".to_string()),
-            pair: Some("PUSD_USDT".to_string()),
+            pair: Some("DAI_USDT".to_string()),
         };
         assert!(args.venue.is_some());
         assert!(args.pair.is_some());
@@ -9493,7 +9494,7 @@ refresh_seconds: 5
         // Verify that run_direct properly propagates the pair field
         let config = Config::default();
         let args = MonitorArgs {
-            token: "PUSD".to_string(),
+            token: "DAI".to_string(),
             chain: "ethereum".to_string(),
             layout: None,
             refresh: None,
@@ -9501,7 +9502,7 @@ refresh_seconds: 5
             color_scheme: None,
             export: None,
             venue: Some("biconomy".to_string()),
-            pair: Some("PUSD_USDT".to_string()),
+            pair: Some("DAI_USDT".to_string()),
         };
 
         // Simulate the config override path from run_direct
@@ -9511,7 +9512,7 @@ refresh_seconds: 5
         }
         assert_eq!(mc.venue, Some("biconomy".to_string()));
         // pair is passed directly to run(), not stored in MonitorConfig
-        assert_eq!(args.pair, Some("PUSD_USDT".to_string()));
+        assert_eq!(args.pair, Some("DAI_USDT".to_string()));
     }
 
     // =========================================================================
@@ -9990,7 +9991,14 @@ refresh_seconds: 5
     // MonitorState::update and synthetic order book tests
     // ========================================================================
 
-    fn make_dex_pair(dex: &str, base: &str, quote: &str, price: f64, vol: f64, liq: f64) -> crate::chains::DexPair {
+    fn make_dex_pair(
+        dex: &str,
+        base: &str,
+        quote: &str,
+        price: f64,
+        vol: f64,
+        liq: f64,
+    ) -> crate::chains::DexPair {
         crate::chains::DexPair {
             dex_name: dex.to_string(),
             base_token: base.to_string(),
@@ -10024,7 +10032,10 @@ refresh_seconds: 5
     fn test_generate_synthetic_order_book_with_pairs() {
         let data = create_test_token_data_with_pairs();
         let book = MonitorState::generate_synthetic_order_book(
-            &data.pairs, &data.symbol, data.price_usd, data.liquidity_usd,
+            &data.pairs,
+            &data.symbol,
+            data.price_usd,
+            data.liquidity_usd,
         );
         assert!(book.is_some());
         let book = book.unwrap();
@@ -10036,9 +10047,7 @@ refresh_seconds: 5
 
     #[test]
     fn test_generate_synthetic_order_book_empty_pairs() {
-        let book = MonitorState::generate_synthetic_order_book(
-            &[], "TEST", 1.0, 500_000.0,
-        );
+        let book = MonitorState::generate_synthetic_order_book(&[], "TEST", 1.0, 500_000.0);
         // Empty pairs with positive price/liquidity still generates a book
         assert!(book.is_some());
     }
@@ -10052,10 +10061,15 @@ refresh_seconds: 5
 
     #[test]
     fn test_generate_synthetic_order_book_high_liquidity() {
-        let pairs = vec![make_dex_pair("uniswap", "WETH", "USDC", 3500.0, 50_000_000.0, 5_000_000.0)];
-        let book = MonitorState::generate_synthetic_order_book(
-            &pairs, "WETH", 3500.0, 5_000_000.0,
-        );
+        let pairs = vec![make_dex_pair(
+            "uniswap",
+            "WETH",
+            "USDC",
+            3500.0,
+            50_000_000.0,
+            5_000_000.0,
+        )];
+        let book = MonitorState::generate_synthetic_order_book(&pairs, "WETH", 3500.0, 5_000_000.0);
         assert!(book.is_some());
         let book = book.unwrap();
         assert!(book.bids.len() > 5);
