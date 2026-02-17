@@ -25,6 +25,11 @@ use std::path::{Path, PathBuf};
 
 /// Arguments for the setup command.
 #[derive(Debug, Args)]
+#[command(after_help = "\x1b[1mExamples:\x1b[0m
+  scope setup
+  scope setup --status
+  scope setup --key etherscan
+  scope setup --reset")]
 pub struct SetupArgs {
     /// Show current configuration status without making changes.
     #[arg(long, short)]

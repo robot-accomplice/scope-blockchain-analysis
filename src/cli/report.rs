@@ -20,6 +20,10 @@ pub enum ReportCommands {
 }
 
 #[derive(Debug, Args)]
+#[command(after_help = "\x1b[1mExamples:\x1b[0m
+  scope report batch --addresses 0x742d...,0xabc1... --output report.md
+  scope report batch --from-file addresses.txt --output report.md --with-risk
+  scope report batch --addresses 0x742d... --chain polygon --output report.md")]
 pub struct BatchArgs {
     /// Addresses to analyze (comma-separated).
     #[arg(long, value_delimiter = ',', value_name = "ADDRESS")]

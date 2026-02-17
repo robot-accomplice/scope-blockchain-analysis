@@ -8,7 +8,7 @@
 # =============================================================================
 
 # Market summary: use Scope CLI (override pair: just summary pair_symbol=XYZ_USDT)
-pair_symbol := "PUSD_USDT"
+pair_symbol := "USDC_USDT"
 
 # Default recipe - show available commands
 default:
@@ -129,7 +129,7 @@ install:
 # One-screen market summary: peg price, spread, orderbook depth, book health.
 # Uses Scope's built-in market command.
 # Usage: just summary  (or just summary pair_symbol=XYZ_USDT)
-summary pair_symbol='PUSD_USDT':
+summary pair_symbol='USDC_USDT':
     cargo run -q -- market summary {{pair_symbol}}
 
 # Pre-commit: format, lint, and test

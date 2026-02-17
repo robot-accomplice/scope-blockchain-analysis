@@ -208,6 +208,15 @@ pub trait ChainClient: Send + Sync {
             "Code lookup not supported on this chain".to_string(),
         ))
     }
+
+    /// Reads a storage slot value at a contract address (EVM: eth_getStorageAt).
+    /// Returns the 32-byte hex value at the given slot position.
+    /// Default: not supported.
+    async fn get_storage_at(&self, _address: &str, _slot: &str) -> Result<String> {
+        Err(crate::error::ScopeError::Chain(
+            "Storage lookup not supported on this chain".to_string(),
+        ))
+    }
 }
 
 /// Factory trait for creating chain clients and DEX data sources.
@@ -587,6 +596,80 @@ pub struct TokenSocial {
 }
 
 // ============================================================================
+// NFT Types
+// ============================================================================
+
+/// NFT token metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NftMetadata {
+    /// Token ID.
+    pub token_id: String,
+    /// NFT name.
+    pub name: Option<String>,
+    /// NFT description.
+    pub description: Option<String>,
+    /// Image URL.
+    pub image_url: Option<String>,
+    /// Token URI (metadata JSON location).
+    pub token_uri: Option<String>,
+    /// Token standard (ERC-721 or ERC-1155).
+    pub standard: String,
+    /// Collection/contract name.
+    pub collection_name: Option<String>,
+    /// Additional attributes.
+    pub attributes: Vec<NftAttribute>,
+}
+
+/// An NFT attribute (trait).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NftAttribute {
+    /// Trait type/name.
+    pub trait_type: String,
+    /// Trait value.
+    pub value: String,
+}
+
+// ============================================================================
+// Gas Analysis Types
+// ============================================================================
+
+/// Gas usage analysis for a contract or address.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GasAnalysis {
+    /// Average gas used per transaction.
+    pub avg_gas_used: u64,
+    /// Maximum gas used in a single transaction.
+    pub max_gas_used: u64,
+    /// Minimum gas used in a single transaction.
+    pub min_gas_used: u64,
+    /// Total gas spent (sum of gas_used * gas_price).
+    pub total_gas_cost_wei: String,
+    /// Total gas cost in ETH/native token.
+    pub total_gas_cost_formatted: String,
+    /// Number of transactions analyzed.
+    pub tx_count: u64,
+    /// Gas usage by function selector (top callers).
+    pub gas_by_function: Vec<GasByFunction>,
+    /// Failed transaction count and wasted gas.
+    pub failed_tx_count: u64,
+    /// Gas wasted on failed transactions.
+    pub wasted_gas: u64,
+}
+
+/// Gas usage breakdown by function.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GasByFunction {
+    /// Function selector or name.
+    pub function: String,
+    /// Number of calls.
+    pub call_count: u64,
+    /// Average gas per call.
+    pub avg_gas: u64,
+    /// Total gas for this function.
+    pub total_gas: u64,
+}
+
+// ============================================================================
 // Chain Metadata
 // ============================================================================
 
@@ -768,6 +851,106 @@ pub fn infer_chain_from_hash(hash: &str) -> Option<&'static str> {
     }
 
     None
+}
+
+/// Analyze gas usage from a set of transactions.
+///
+/// Computes statistics on gas consumption, identifies gas-heavy functions,
+/// and flags failed transactions.
+pub fn analyze_gas_usage(transactions: &[Transaction]) -> GasAnalysis {
+    if transactions.is_empty() {
+        return GasAnalysis {
+            avg_gas_used: 0,
+            max_gas_used: 0,
+            min_gas_used: 0,
+            total_gas_cost_wei: "0".to_string(),
+            total_gas_cost_formatted: "0".to_string(),
+            tx_count: 0,
+            gas_by_function: vec![],
+            failed_tx_count: 0,
+            wasted_gas: 0,
+        };
+    }
+
+    let mut total_gas: u64 = 0;
+    let mut max_gas: u64 = 0;
+    let mut min_gas: u64 = u64::MAX;
+    let mut failed_count: u64 = 0;
+    let mut wasted_gas: u64 = 0;
+    let mut function_gas: std::collections::HashMap<String, (u64, u64)> =
+        std::collections::HashMap::new();
+
+    for tx in transactions {
+        let gas_used = tx.gas_used.unwrap_or(0);
+        total_gas += gas_used;
+        if gas_used > max_gas {
+            max_gas = gas_used;
+        }
+        if gas_used < min_gas {
+            min_gas = gas_used;
+        }
+
+        // Track failed transactions
+        if tx.status == Some(false) {
+            failed_count += 1;
+            wasted_gas += gas_used;
+        }
+
+        // Group by function selector
+        let selector = if tx.input.len() >= 10 {
+            tx.input[..10].to_string()
+        } else if tx.input.is_empty() || tx.input == "0x" {
+            "transfer()".to_string()
+        } else {
+            tx.input.clone()
+        };
+
+        let entry = function_gas.entry(selector).or_insert((0, 0));
+        entry.0 += 1; // call count
+        entry.1 += gas_used; // total gas
+    }
+
+    let tx_count = transactions.len() as u64;
+    let avg_gas = if tx_count > 0 {
+        total_gas / tx_count
+    } else {
+        0
+    };
+
+    if min_gas == u64::MAX {
+        min_gas = 0;
+    }
+
+    // Sort functions by total gas usage
+    let mut gas_by_function: Vec<GasByFunction> = function_gas
+        .into_iter()
+        .map(|(function, (call_count, total_gas_fn))| GasByFunction {
+            function,
+            call_count,
+            avg_gas: if call_count > 0 {
+                total_gas_fn / call_count
+            } else {
+                0
+            },
+            total_gas: total_gas_fn,
+        })
+        .collect();
+    gas_by_function.sort_by(|a, b| b.total_gas.cmp(&a.total_gas));
+
+    // Format total gas cost (rough estimate using average gas price)
+    let total_gas_cost_formatted = format!("{} gas units", total_gas);
+
+    GasAnalysis {
+        avg_gas_used: avg_gas,
+        max_gas_used: max_gas,
+        min_gas_used: min_gas,
+        total_gas_cost_wei: total_gas.to_string(),
+        total_gas_cost_formatted,
+        tx_count,
+        gas_by_function,
+        failed_tx_count: failed_count,
+        wasted_gas,
+    }
 }
 
 // ============================================================================
@@ -1169,6 +1352,52 @@ mod tests {
         assert_eq!(client.unwrap().chain_name(), "tron");
     }
 
+    #[test]
+    fn test_default_client_factory_create_arbitrum_client() {
+        let config = crate::config::ChainsConfig::default();
+        let factory = DefaultClientFactory {
+            chains_config: config,
+        };
+        let client = factory.create_chain_client("arbitrum");
+        assert!(client.is_ok());
+        assert_eq!(client.unwrap().chain_name(), "arbitrum");
+    }
+
+    #[test]
+    fn test_default_client_factory_create_optimism_client() {
+        let config = crate::config::ChainsConfig::default();
+        let factory = DefaultClientFactory {
+            chains_config: config,
+        };
+        let client = factory.create_chain_client("optimism");
+        assert!(client.is_ok());
+        assert_eq!(client.unwrap().chain_name(), "optimism");
+    }
+
+    #[test]
+    fn test_default_client_factory_create_base_client() {
+        let config = crate::config::ChainsConfig::default();
+        let factory = DefaultClientFactory {
+            chains_config: config,
+        };
+        let client = factory.create_chain_client("base");
+        assert!(client.is_ok());
+        assert_eq!(client.unwrap().chain_name(), "base");
+    }
+
+    #[test]
+    fn test_default_client_factory_create_unsupported_chain_returns_err() {
+        let config = crate::config::ChainsConfig::default();
+        let factory = DefaultClientFactory {
+            chains_config: config,
+        };
+        let client = factory.create_chain_client("avalanche");
+        match &client {
+            Err(e) => assert!(e.to_string().contains("Unsupported")),
+            Ok(_) => panic!("expected Err for unsupported chain"),
+        }
+    }
+
     // ============================================================================
     // ChainClient trait default method tests
     // ============================================================================
@@ -1516,6 +1745,132 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("not supported"));
+    }
+
+    // ============================================================================
+    // analyze_gas_usage Tests
+    // ============================================================================
+
+    fn tx(hash: &str, gas_used: Option<u64>, input: &str, status: Option<bool>) -> Transaction {
+        Transaction {
+            hash: hash.to_string(),
+            block_number: Some(1),
+            timestamp: Some(1700000000),
+            from: "0xfrom".to_string(),
+            to: Some("0xto".to_string()),
+            value: "0".to_string(),
+            gas_limit: 21000,
+            gas_used,
+            gas_price: "20000000000".to_string(),
+            nonce: 0,
+            input: input.to_string(),
+            status,
+        }
+    }
+
+    #[test]
+    fn test_analyze_gas_usage_empty_transactions() {
+        let txs: Vec<Transaction> = vec![];
+        let result = super::analyze_gas_usage(&txs);
+        assert_eq!(result.avg_gas_used, 0);
+        assert_eq!(result.max_gas_used, 0);
+        assert_eq!(result.min_gas_used, 0);
+        assert_eq!(result.tx_count, 0);
+        assert_eq!(result.failed_tx_count, 0);
+        assert_eq!(result.wasted_gas, 0);
+        assert!(result.gas_by_function.is_empty());
+    }
+
+    #[test]
+    fn test_analyze_gas_usage_single_tx() {
+        let txs = vec![tx("0x1", Some(100_000), "0x", Some(true))];
+        let result = super::analyze_gas_usage(&txs);
+        assert_eq!(result.avg_gas_used, 100_000);
+        assert_eq!(result.max_gas_used, 100_000);
+        assert_eq!(result.min_gas_used, 100_000);
+        assert_eq!(result.tx_count, 1);
+    }
+
+    #[test]
+    fn test_analyze_gas_usage_multiple_txs() {
+        let txs = vec![
+            tx("0x1", Some(50_000), "0xa9059cbb", Some(true)),
+            tx("0x2", Some(150_000), "0xa9059cbb", Some(true)),
+            tx("0x3", Some(100_000), "0xa9059cbb", Some(true)),
+        ];
+        let result = super::analyze_gas_usage(&txs);
+        assert_eq!(result.avg_gas_used, 100_000); // (50+150+100)/3
+        assert_eq!(result.max_gas_used, 150_000);
+        assert_eq!(result.min_gas_used, 50_000);
+        assert_eq!(result.tx_count, 3);
+    }
+
+    #[test]
+    fn test_analyze_gas_usage_failed_tx() {
+        let txs = vec![
+            tx("0x1", Some(80_000), "0x", Some(true)),
+            tx("0x2", Some(120_000), "0x", Some(false)),
+        ];
+        let result = super::analyze_gas_usage(&txs);
+        assert_eq!(result.failed_tx_count, 1);
+        assert_eq!(result.wasted_gas, 120_000);
+    }
+
+    #[test]
+    fn test_analyze_gas_usage_gas_by_function() {
+        // Selector is first 10 chars (0x + 8 hex) of input
+        let txs = vec![
+            tx("0x1", Some(100_000), "0xa9059cbb0000", Some(true)),
+            tx("0x2", Some(200_000), "0xa9059cbb0000", Some(true)),
+            tx("0x3", Some(50_000), "0x095ea7b30000", Some(true)),
+        ];
+        let result = super::analyze_gas_usage(&txs);
+        assert_eq!(result.gas_by_function.len(), 2);
+        let by_sel: std::collections::HashMap<_, _> = result
+            .gas_by_function
+            .iter()
+            .map(|g| (g.function.as_str(), g))
+            .collect();
+        let transfer = by_sel.get("0xa9059cbb").unwrap();
+        assert_eq!(transfer.call_count, 2);
+        assert_eq!(transfer.total_gas, 300_000);
+        assert_eq!(transfer.avg_gas, 150_000);
+        let approve = by_sel.get("0x095ea7b3").unwrap();
+        assert_eq!(approve.call_count, 1);
+        assert_eq!(approve.total_gas, 50_000);
+    }
+
+    #[test]
+    fn test_analyze_gas_usage_input_0x_transfer() {
+        let txs = vec![tx("0x1", Some(21_000), "0x", Some(true))];
+        let result = super::analyze_gas_usage(&txs);
+        assert_eq!(result.gas_by_function.len(), 1);
+        assert_eq!(result.gas_by_function[0].function, "transfer()");
+    }
+
+    #[test]
+    fn test_analyze_gas_usage_input_empty_transfer() {
+        let txs = vec![tx("0x1", Some(21_000), "", Some(true))];
+        let result = super::analyze_gas_usage(&txs);
+        assert_eq!(result.gas_by_function.len(), 1);
+        assert_eq!(result.gas_by_function[0].function, "transfer()");
+    }
+
+    #[test]
+    fn test_analyze_gas_usage_gas_used_none() {
+        let txs = vec![tx("0x1", None, "0x", Some(true))];
+        let result = super::analyze_gas_usage(&txs);
+        assert_eq!(result.avg_gas_used, 0);
+        assert_eq!(result.max_gas_used, 0);
+        assert_eq!(result.min_gas_used, 0);
+    }
+
+    #[test]
+    fn test_analyze_gas_usage_short_input_uses_full_input_as_selector() {
+        let txs = vec![tx("0x1", Some(50_000), "0x1234567", Some(true))];
+        let result = super::analyze_gas_usage(&txs);
+        assert_eq!(result.gas_by_function.len(), 1);
+        assert_eq!(result.gas_by_function[0].function, "0x1234567");
     }
 }
 

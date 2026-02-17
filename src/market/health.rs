@@ -7,8 +7,8 @@ use super::types::{ExecutionEstimate, HealthCheck, OrderBook, OrderBookLevel};
 
 /// Health check thresholds for order book validation.
 ///
-/// Default values (min_levels=6, min_depth=3000, peg_range=0.001) originated from
-/// the PUSD Hummingbot market-making config. Override via CLI (`--min-levels`,
+/// Default values (min_levels=6, min_depth=3000, peg_range=0.001) are sensible
+/// stablecoin defaults. Override via CLI (`--min-levels`,
 /// `--min-depth`, `--peg-range`, `--min-bid-ask-ratio`, `--max-bid-ask-ratio`).
 #[derive(Debug, Clone)]
 pub struct HealthThresholds {
@@ -42,7 +42,7 @@ impl Default for HealthThresholds {
 /// Aggregated market summary with order book snapshot and health results.
 #[derive(Debug, Clone)]
 pub struct MarketSummary {
-    /// Pair label (e.g., "PUSD/USDT").
+    /// Pair label (e.g., "USDC/USDT").
     pub pair: String,
     /// Peg target.
     pub peg_target: f64,
@@ -393,7 +393,7 @@ mod tests {
     fn test_market_summary_from_order_book() {
         // Use quantities large enough to exceed min_depth (3000 USDT) per side
         let book = OrderBook {
-            pair: "PUSD/USDT".to_string(),
+            pair: "USDC/USDT".to_string(),
             bids: vec![
                 OrderBookLevel {
                     price: 0.9998,
@@ -461,7 +461,7 @@ mod tests {
     #[test]
     fn test_format_text_with_chain() {
         let book = OrderBook {
-            pair: "PUSD/USDT".to_string(),
+            pair: "USDC/USDT".to_string(),
             bids: vec![OrderBookLevel {
                 price: 1.0,
                 quantity: 100.0,
@@ -498,7 +498,7 @@ mod tests {
     #[test]
     fn test_health_check_sells_below_peg() {
         let book = OrderBook {
-            pair: "PUSD/USDT".to_string(),
+            pair: "USDC/USDT".to_string(),
             bids: vec![OrderBookLevel {
                 price: 0.9995,
                 quantity: 1000.0,
@@ -578,7 +578,7 @@ mod tests {
             quantity: 100.0,
         });
         let book = OrderBook {
-            pair: "PUSD/USDT".to_string(),
+            pair: "USDC/USDT".to_string(),
             bids: vec![
                 OrderBookLevel {
                     price: 0.9999,
@@ -636,5 +636,40 @@ mod tests {
         assert!(out.contains("Exec 10K buy"));
         assert!(out.contains("Exec 10K sell"));
         assert!(out.contains("slippage") || out.contains("insufficient"));
+    }
+
+    #[test]
+    fn test_format_text_bid_outliers_and_many_bid_levels() {
+        // Many bid levels + bid outlier → covers lines 328-330, 354-355
+        let mut bids: Vec<OrderBookLevel> = (0..12)
+            .map(|i| OrderBookLevel {
+                price: 1.0 - 0.0001 * (i + 1) as f64,
+                quantity: 500.0,
+            })
+            .collect();
+        bids.push(OrderBookLevel {
+            price: 0.98, // bid outlier far below peg
+            quantity: 100.0,
+        });
+        let book = OrderBook {
+            pair: "USDC/USDT".to_string(),
+            bids,
+            asks: vec![
+                OrderBookLevel {
+                    price: 1.0001,
+                    quantity: 600.0,
+                },
+                OrderBookLevel {
+                    price: 1.0002,
+                    quantity: 600.0,
+                },
+            ],
+        };
+        let summary =
+            MarketSummary::from_order_book(&book, 1.0, &HealthThresholds::default(), None);
+        let out = summary.format_text(None);
+        assert!(summary.bid_outliers > 0);
+        assert!(out.contains("outliers excl."));
+        assert!(out.contains("... +"));
     }
 }
