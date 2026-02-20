@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-02-20
+
+### Added
+- **`ghola.buffer_size` config option**: Configurable read buffer size (default 4096 bytes) for the Ghola sidecar's `fasthttp.Client.ReadBufferSize`. Increase for APIs returning large response headers.
+- **Buffer size in status display**: `scope setup --status` now shows the configured buffer size when Ghola transport is enabled.
+
 ## [0.5.2] - 2026-02-20
 
 ### Added

@@ -95,7 +95,7 @@ async fn serve_ui(uri: axum::http::Uri) -> impl axum::response::IntoResponse {
 /// This is the main entry point called from the CLI `web` command handler.
 pub async fn start_server(addr: SocketAddr, config: Config) -> anyhow::Result<()> {
     let http: std::sync::Arc<dyn crate::http::HttpClient> = if config.ghola.enabled {
-        match crate::http::GholaHttpClient::new(config.ghola.stealth) {
+        match crate::http::GholaHttpClient::new(config.ghola.stealth, config.ghola.buffer_size) {
             Ok(client) => std::sync::Arc::new(client),
             Err(_) => std::sync::Arc::new(
                 crate::http::NativeHttpClient::new().expect("Failed to create HTTP client"),
