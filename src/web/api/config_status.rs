@@ -202,8 +202,11 @@ mod tests {
         use axum::response::IntoResponse;
 
         let config = Config::default();
+        let http: std::sync::Arc<dyn crate::http::HttpClient> =
+            std::sync::Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: config.chains.clone(),
+            http,
         };
         let state = std::sync::Arc::new(AppState { config, factory });
         let response = handle(State(state)).await.into_response();
@@ -228,8 +231,11 @@ mod tests {
         use axum::response::IntoResponse;
 
         let config = Config::default();
+        let http: std::sync::Arc<dyn crate::http::HttpClient> =
+            std::sync::Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: config.chains.clone(),
+            http,
         };
         let state = std::sync::Arc::new(AppState { config, factory });
         let req = SaveConfigRequest {
@@ -267,8 +273,11 @@ mod tests {
         use axum::response::IntoResponse;
 
         let config = Config::default();
+        let http: std::sync::Arc<dyn crate::http::HttpClient> =
+            std::sync::Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: config.chains.clone(),
+            http,
         };
         let state = std::sync::Arc::new(AppState { config, factory });
 
@@ -333,8 +342,11 @@ mod tests {
         std::fs::File::create(&config_as_file).unwrap();
 
         let config = Config::default();
+        let http: std::sync::Arc<dyn crate::http::HttpClient> =
+            std::sync::Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: config.chains.clone(),
+            http,
         };
         let state = std::sync::Arc::new(AppState { config, factory });
 
@@ -378,8 +390,11 @@ mod tests {
         use axum::response::IntoResponse;
 
         let config = Config::default();
+        let http: std::sync::Arc<dyn crate::http::HttpClient> =
+            std::sync::Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: config.chains.clone(),
+            http,
         };
         let state = std::sync::Arc::new(AppState { config, factory });
 

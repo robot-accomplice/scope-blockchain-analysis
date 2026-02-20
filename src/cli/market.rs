@@ -444,7 +444,7 @@ async fn fetch_book_and_volume(
                     .partial_cmp(&b.liquidity_usd)
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
-            .unwrap();
+            .ok_or_else(|| ScopeError::Chain("No DEX pairs after filter".to_string()))?;
         let book = order_book_from_analytics(chain, best_pair, &analytics.token.symbol);
         let volume = Some(best_pair.volume_24h);
         Ok((book, volume))
@@ -687,7 +687,9 @@ async fn run_ohlc(args: OhlcArgs) -> Result<()> {
                     })
                 })
                 .collect();
-            println!("{}", serde_json::to_string_pretty(&json_candles).unwrap());
+            let json_str = serde_json::to_string_pretty(&json_candles)
+                .map_err(|e| ScopeError::Chain(format!("JSON serialization failed: {e}")))?;
+            println!("{json_str}");
         }
         OhlcFormat::Text => {
             println!(
@@ -794,7 +796,9 @@ async fn run_trades(args: TradesArgs) -> Result<()> {
                     })
                 })
                 .collect();
-            println!("{}", serde_json::to_string_pretty(&json_trades).unwrap());
+            let json_str = serde_json::to_string_pretty(&json_trades)
+                .map_err(|e| ScopeError::Chain(format!("JSON serialization failed: {e}")))?;
+            println!("{json_str}");
         }
         OhlcFormat::Text => {
             println!(
@@ -923,8 +927,11 @@ capabilities:
             csv: None,
         };
 
+        let http: std::sync::Arc<dyn crate::http::HttpClient> =
+            std::sync::Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: Default::default(),
+            http,
         };
         // DEX path: will hit real DexScreener API, may fail in offline environments
         let _result = run_summary(args, &factory).await;
@@ -950,8 +957,11 @@ capabilities:
             csv: None,
         };
 
+        let http: std::sync::Arc<dyn crate::http::HttpClient> =
+            std::sync::Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: Default::default(),
+            http,
         };
         let _result = run_summary(args, &factory).await;
     }
@@ -1298,8 +1308,11 @@ capabilities:
             csv: None,
         });
 
+        let http: std::sync::Arc<dyn crate::http::HttpClient> =
+            std::sync::Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: Default::default(),
+            http,
         };
         let config = Config::default();
         let _result = run(args, &config, &factory).await;
@@ -1364,8 +1377,11 @@ capabilities:
             csv: None,
         };
 
+        let http: std::sync::Arc<dyn crate::http::HttpClient> =
+            std::sync::Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: Default::default(),
+            http,
         };
         let _result = run_summary(args, &factory).await;
     }
@@ -1462,8 +1478,11 @@ capabilities:
             limit: 5,
             format: OhlcFormat::Text,
         });
+        let http: std::sync::Arc<dyn crate::http::HttpClient> =
+            std::sync::Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: Default::default(),
+            http,
         };
         let config = Config::default();
         let result = run(cmd, &config, &factory).await;
@@ -1479,8 +1498,11 @@ capabilities:
             limit: 5,
             format: OhlcFormat::Json,
         });
+        let http: std::sync::Arc<dyn crate::http::HttpClient> =
+            std::sync::Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: Default::default(),
+            http,
         };
         let config = Config::default();
         let result = run(cmd, &config, &factory).await;
@@ -1728,8 +1750,11 @@ capabilities:
             report: None,
             csv: None,
         };
+        let http: std::sync::Arc<dyn crate::http::HttpClient> =
+            std::sync::Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: Default::default(),
+            http,
         };
         let result = run_summary(args, &factory).await;
         assert!(result.is_err());
@@ -1761,8 +1786,11 @@ capabilities:
             report: Some(report_path.clone()),
             csv: None,
         };
+        let http: std::sync::Arc<dyn crate::http::HttpClient> =
+            std::sync::Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: Default::default(),
+            http,
         };
         let result = run_summary(args, &factory).await;
         if result.is_ok() {

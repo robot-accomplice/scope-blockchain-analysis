@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-02-20
+
+### Added
+- **Ghola sidecar integration**: New `src/http/` module introduces a pluggable HTTP transport abstraction (`HttpClient` trait) that transparently routes requests through the [Ghola](https://github.com/robot-accomplice/ghola) stealth proxy when available, with graceful fallback to native `reqwest` when absent.
+- **`NativeHttpClient`**: Default `reqwest`-based transport implementation with 30-second timeout.
+- **`GholaHttpClient`**: Sidecar bridge client with support for temporal drift, ghost signing, health checks, and automatic sidecar spawning.
+- **`GholaConfig`**: New configuration section (`ghola.enabled`, `ghola.stealth`) with serde support and defaults.
+- **Setup status**: `scope setup --status` now displays Ghola sidecar availability, transport mode, and stealth status with install instructions when the binary is absent.
+- **Integration documentation**: `docs/GHOLA_INTEGRATION.md` with architecture diagram, key files, configuration reference, verification steps, and troubleshooting guide.
+
+### Changed
+- **Chain client architecture**: All chain clients (`EthereumClient`, `SolanaClient`, `TronClient`, `DexClient`) refactored from direct `reqwest::Client` usage to `Arc<dyn HttpClient>` via dependency injection. Each now has `_with_http` constructor variants.
+- **`DefaultClientFactory`**: Now carries and propagates a shared `Arc<dyn HttpClient>` to all created chain clients, enabling consistent transport selection across the application.
+- **Runtime transport selection**: `main.rs` and `web/mod.rs` auto-select Ghola or native transport based on config, with warning and install instructions on fallback.
+- **Test coverage**: 2,770 tests (up from 2,731), 90.23% coverage. New tests cover HTTP module (53 cases), config serialization, setup status, factory transport sharing, and chain client injection.
+
 ## [0.5.1] - 2026-02-17
 
 ### Added

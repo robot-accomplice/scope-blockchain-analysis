@@ -96,8 +96,10 @@ pub use solana::{SolanaClient, validate_solana_address, validate_solana_signatur
 pub use tron::{TronClient, validate_tron_address, validate_tron_tx_hash};
 
 use crate::error::Result;
+use crate::http::HttpClient;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// Trait defining common blockchain client operations.
 ///
@@ -228,10 +230,13 @@ pub trait ChainClient: Send + Sync {
 ///
 /// ```rust,no_run
 /// use scope::chains::{ChainClientFactory, DefaultClientFactory};
+/// use scope::http::NativeHttpClient;
 /// use scope::Config;
+/// use std::sync::Arc;
 ///
 /// let config = Config::default();
-/// let factory = DefaultClientFactory { chains_config: config.chains.clone() };
+/// let http = Arc::new(NativeHttpClient::new().unwrap());
+/// let factory = DefaultClientFactory { chains_config: config.chains.clone(), http };
 /// let client = factory.create_chain_client("ethereum").unwrap();
 /// ```
 pub trait ChainClientFactory: Send + Sync {
@@ -247,25 +252,37 @@ pub trait ChainClientFactory: Send + Sync {
 }
 
 /// Default factory that creates real chain clients from configuration.
+///
+/// Holds a shared [`HttpClient`] transport so all chain clients route
+/// through the same backend (native `reqwest` or Ghola sidecar).
 pub struct DefaultClientFactory {
     /// Chain configuration containing API keys and endpoints.
     pub chains_config: crate::config::ChainsConfig,
+    /// Shared HTTP transport injected into every client.
+    pub http: Arc<dyn HttpClient>,
 }
 
 impl ChainClientFactory for DefaultClientFactory {
     fn create_chain_client(&self, chain: &str) -> Result<Box<dyn ChainClient>> {
         match chain.to_lowercase().as_str() {
-            "solana" | "sol" => Ok(Box::new(SolanaClient::new(&self.chains_config)?)),
-            "tron" | "trx" => Ok(Box::new(TronClient::new(&self.chains_config)?)),
-            _ => Ok(Box::new(EthereumClient::for_chain(
+            "solana" | "sol" => Ok(Box::new(SolanaClient::new_with_http(
+                &self.chains_config,
+                self.http.clone(),
+            )?)),
+            "tron" | "trx" => Ok(Box::new(TronClient::new_with_http(
+                &self.chains_config,
+                self.http.clone(),
+            )?)),
+            _ => Ok(Box::new(EthereumClient::for_chain_with_http(
                 chain,
                 &self.chains_config,
+                self.http.clone(),
             )?)),
         }
     }
 
     fn create_dex_client(&self) -> Box<dyn DexDataSource> {
-        Box::new(DexClient::new())
+        Box::new(DexClient::new_with_http(self.http.clone()))
     }
 }
 
@@ -1277,8 +1294,10 @@ mod tests {
     #[test]
     fn test_default_client_factory_create_dex_client() {
         let config = crate::config::ChainsConfig::default();
+        let http: Arc<dyn HttpClient> = Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: config,
+            http,
         };
         let dex = factory.create_dex_client();
         // Just verify it returns without panicking - the client is a Box<dyn DexDataSource>
@@ -1288,8 +1307,10 @@ mod tests {
     #[test]
     fn test_default_client_factory_create_ethereum_client() {
         let config = crate::config::ChainsConfig::default();
+        let http: Arc<dyn HttpClient> = Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: config,
+            http,
         };
         // ethereum, polygon, etc use EthereumClient::for_chain
         let client = factory.create_chain_client("ethereum");
@@ -1300,8 +1321,10 @@ mod tests {
     #[test]
     fn test_default_client_factory_create_polygon_client() {
         let config = crate::config::ChainsConfig::default();
+        let http: Arc<dyn HttpClient> = Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: config,
+            http,
         };
         let client = factory.create_chain_client("polygon");
         assert!(client.is_ok());
@@ -1311,8 +1334,10 @@ mod tests {
     #[test]
     fn test_default_client_factory_create_solana_client() {
         let config = crate::config::ChainsConfig::default();
+        let http: Arc<dyn HttpClient> = Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: config,
+            http,
         };
         let client = factory.create_chain_client("solana");
         assert!(client.is_ok());
@@ -1322,8 +1347,10 @@ mod tests {
     #[test]
     fn test_default_client_factory_create_sol_alias() {
         let config = crate::config::ChainsConfig::default();
+        let http: Arc<dyn HttpClient> = Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: config,
+            http,
         };
         let client = factory.create_chain_client("sol");
         assert!(client.is_ok());
@@ -1333,8 +1360,10 @@ mod tests {
     #[test]
     fn test_default_client_factory_create_tron_client() {
         let config = crate::config::ChainsConfig::default();
+        let http: Arc<dyn HttpClient> = Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: config,
+            http,
         };
         let client = factory.create_chain_client("tron");
         assert!(client.is_ok());
@@ -1344,8 +1373,10 @@ mod tests {
     #[test]
     fn test_default_client_factory_create_trx_alias() {
         let config = crate::config::ChainsConfig::default();
+        let http: Arc<dyn HttpClient> = Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: config,
+            http,
         };
         let client = factory.create_chain_client("trx");
         assert!(client.is_ok());
@@ -1355,8 +1386,10 @@ mod tests {
     #[test]
     fn test_default_client_factory_create_arbitrum_client() {
         let config = crate::config::ChainsConfig::default();
+        let http: Arc<dyn HttpClient> = Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: config,
+            http,
         };
         let client = factory.create_chain_client("arbitrum");
         assert!(client.is_ok());
@@ -1366,8 +1399,10 @@ mod tests {
     #[test]
     fn test_default_client_factory_create_optimism_client() {
         let config = crate::config::ChainsConfig::default();
+        let http: Arc<dyn HttpClient> = Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: config,
+            http,
         };
         let client = factory.create_chain_client("optimism");
         assert!(client.is_ok());
@@ -1377,8 +1412,10 @@ mod tests {
     #[test]
     fn test_default_client_factory_create_base_client() {
         let config = crate::config::ChainsConfig::default();
+        let http: Arc<dyn HttpClient> = Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: config,
+            http,
         };
         let client = factory.create_chain_client("base");
         assert!(client.is_ok());
@@ -1388,14 +1425,84 @@ mod tests {
     #[test]
     fn test_default_client_factory_create_unsupported_chain_returns_err() {
         let config = crate::config::ChainsConfig::default();
+        let http: Arc<dyn HttpClient> = Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: config,
+            http,
         };
         let client = factory.create_chain_client("avalanche");
         match &client {
             Err(e) => assert!(e.to_string().contains("Unsupported")),
             Ok(_) => panic!("expected Err for unsupported chain"),
         }
+    }
+
+    // ============================================================================
+    // HttpClient injection tests
+    // ============================================================================
+
+    #[test]
+    fn test_solana_client_new_with_http() {
+        let config = crate::config::ChainsConfig::default();
+        let http: Arc<dyn HttpClient> = Arc::new(crate::http::NativeHttpClient::new().unwrap());
+        let client = SolanaClient::new_with_http(&config, http);
+        assert!(client.is_ok());
+        assert_eq!(client.unwrap().chain_name(), "solana");
+    }
+
+    #[test]
+    fn test_tron_client_new_with_http() {
+        let config = crate::config::ChainsConfig::default();
+        let http: Arc<dyn HttpClient> = Arc::new(crate::http::NativeHttpClient::new().unwrap());
+        let client = TronClient::new_with_http(&config, http);
+        assert!(client.is_ok());
+        assert_eq!(client.unwrap().chain_name(), "tron");
+    }
+
+    #[test]
+    fn test_dex_client_new_with_http() {
+        let http: Arc<dyn HttpClient> = Arc::new(crate::http::NativeHttpClient::new().unwrap());
+        let client = DexClient::new_with_http(http);
+        let _ = format!("{}", std::mem::size_of_val(&client));
+    }
+
+    #[test]
+    fn test_factory_shares_http_transport() {
+        let config = crate::config::ChainsConfig::default();
+        let http: Arc<dyn HttpClient> = Arc::new(crate::http::NativeHttpClient::new().unwrap());
+        let weak = Arc::downgrade(&http);
+        let factory = DefaultClientFactory {
+            chains_config: config,
+            http,
+        };
+        // Factory holds a clone of the Arc; original strong count was 1,
+        // factory clone makes 2 minus the 1 we moved = factory has it.
+        // Creating clients bumps the count via Arc::clone inside each
+        // constructor.
+        let _eth = factory.create_chain_client("ethereum").unwrap();
+        let _sol = factory.create_chain_client("solana").unwrap();
+        let _trx = factory.create_chain_client("tron").unwrap();
+        let _dex = factory.create_dex_client();
+        // The weak ref should still be valid (Arc not fully dropped)
+        assert!(weak.upgrade().is_some());
+    }
+
+    #[test]
+    fn test_ethereum_client_new_with_http() {
+        let config = crate::config::ChainsConfig::default();
+        let http: Arc<dyn HttpClient> = Arc::new(crate::http::NativeHttpClient::new().unwrap());
+        let client = EthereumClient::new_with_http(&config, http);
+        assert!(client.is_ok());
+        assert_eq!(client.unwrap().chain_name(), "ethereum");
+    }
+
+    #[test]
+    fn test_ethereum_client_for_chain_with_http() {
+        let config = crate::config::ChainsConfig::default();
+        let http: Arc<dyn HttpClient> = Arc::new(crate::http::NativeHttpClient::new().unwrap());
+        let client = EthereumClient::for_chain_with_http("polygon", &config, http);
+        assert!(client.is_ok());
+        assert_eq!(client.unwrap().chain_name(), "polygon");
     }
 
     // ============================================================================

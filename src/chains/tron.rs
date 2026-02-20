@@ -31,11 +31,12 @@
 use crate::chains::{Balance, ChainClient, Token, TokenHolder, Transaction};
 use crate::config::ChainsConfig;
 use crate::error::{Result, ScopeError};
+use crate::http::{HttpClient, Request};
 use async_trait::async_trait;
-use reqwest::Client;
 use serde::Deserialize;
 use serde_json;
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
 
 /// Default TronGrid API endpoint.
 const DEFAULT_TRON_API: &str = "https://api.trongrid.io";
@@ -52,10 +53,10 @@ const TRX_DECIMALS: u8 = 6;
 /// Tron blockchain client.
 ///
 /// Uses TronGrid REST API for data retrieval.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TronClient {
     /// HTTP client for API requests.
-    client: Client,
+    http: Arc<dyn HttpClient>,
 
     /// TronGrid API base URL.
     api_url: String,
@@ -167,11 +168,12 @@ impl TronClient {
     /// let client = TronClient::new(&config).unwrap();
     /// ```
     pub fn new(config: &ChainsConfig) -> Result<Self> {
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|e| ScopeError::Chain(format!("Failed to create HTTP client: {}", e)))?;
+        let http: Arc<dyn HttpClient> = Arc::new(crate::http::NativeHttpClient::new()?);
+        Self::new_with_http(config, http)
+    }
 
+    /// Creates a new Tron client with a pre-built HTTP transport.
+    pub fn new_with_http(config: &ChainsConfig, http: Arc<dyn HttpClient>) -> Result<Self> {
         let api_url = config
             .tron_api
             .as_deref()
@@ -179,7 +181,7 @@ impl TronClient {
             .to_string();
 
         Ok(Self {
-            client,
+            http,
             api_url,
             api_key: config.api_keys.get("tronscan").cloned(),
         })
@@ -192,7 +194,9 @@ impl TronClient {
     /// * `api_url` - The TronGrid API endpoint URL
     pub fn with_api_url(api_url: &str) -> Self {
         Self {
-            client: Client::new(),
+            http: Arc::new(
+                crate::http::NativeHttpClient::new().expect("failed to create HTTP client"),
+            ),
             api_url: api_url.to_string(),
             api_key: None,
         }
@@ -230,12 +234,12 @@ impl TronClient {
 
         tracing::debug!(url = %url, address = %address, "Fetching Tron balance");
 
-        let mut request = self.client.get(&url);
+        let mut req = Request::get(&url);
         if let Some(ref key) = self.api_key {
-            request = request.header("TRON-PRO-API-KEY", key);
+            req = req.with_header("TRON-PRO-API-KEY", key);
         }
 
-        let response: AccountResponse = request.send().await?.json().await?;
+        let response: AccountResponse = self.http.send(req).await?.json()?;
 
         if !response.success {
             return Err(ScopeError::Chain(format!(
@@ -269,12 +273,12 @@ impl TronClient {
 
         tracing::debug!(url = %url, "Fetching TRC-20 token balances");
 
-        let mut request = self.client.get(&url);
+        let mut req = Request::get(&url);
         if let Some(ref key) = self.api_key {
-            request = request.header("TRON-PRO-API-KEY", key);
+            req = req.with_header("TRON-PRO-API-KEY", key);
         }
 
-        let response: AccountResponse = request.send().await?.json().await?;
+        let response: AccountResponse = self.http.send(req).await?.json()?;
 
         if !response.success {
             return Err(ScopeError::Chain(format!(
@@ -318,14 +322,13 @@ impl TronClient {
 
         tracing::debug!(url = %url, "Fetching TRC-20 token info via Tronscan");
 
-        let mut request = self.client.get(&url);
+        let mut req = Request::get(&url);
         if let Some(ref key) = self.api_key {
-            request = request.header("TRON-PRO-API-KEY", key);
+            req = req.with_header("TRON-PRO-API-KEY", key);
         }
 
-        let response = request.send().await?;
-        let text = response.text().await?;
-        let json: serde_json::Value = serde_json::from_str(&text)
+        let resp = self.http.send(req).await?;
+        let json: serde_json::Value = serde_json::from_str(&resp.body)
             .map_err(|e| ScopeError::Api(format!("Failed to parse Tronscan response: {}", e)))?;
 
         let tokens = json
@@ -387,14 +390,13 @@ impl TronClient {
 
         tracing::debug!(url = %url, "Fetching TRC-20 token holders via Tronscan");
 
-        let mut request = self.client.get(&url);
+        let mut req = Request::get(&url);
         if let Some(ref key) = self.api_key {
-            request = request.header("TRON-PRO-API-KEY", key);
+            req = req.with_header("TRON-PRO-API-KEY", key);
         }
 
-        let response = request.send().await?;
-        let text = response.text().await?;
-        let json: serde_json::Value = serde_json::from_str(&text)
+        let resp = self.http.send(req).await?;
+        let json: serde_json::Value = serde_json::from_str(&resp.body)
             .map_err(|e| ScopeError::Api(format!("Failed to parse Tronscan holders: {}", e)))?;
 
         let holders_data: &[serde_json::Value] = json
@@ -451,15 +453,14 @@ impl TronClient {
             TRONSCAN_API, contract_address
         );
 
-        let mut request = self.client.get(&url);
+        let mut req = Request::get(&url);
         if let Some(ref key) = self.api_key {
-            request = request.header("TRON-PRO-API-KEY", key);
+            req = req.with_header("TRON-PRO-API-KEY", key);
         }
 
-        let response = request.send().await?;
-        let json: serde_json::Value = response
+        let resp = self.http.send(req).await?;
+        let json: serde_json::Value = resp
             .json()
-            .await
             .map_err(|e| ScopeError::Api(format!("Failed to parse Tronscan response: {}", e)))?;
 
         let count = json.get("rangeTotal").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -474,9 +475,8 @@ impl TronClient {
     pub async fn enrich_balance_usd(&self, balance: &mut Balance) {
         // Try to get TRX price from DexScreener search API
         let url = DEXSCREENER_TRX_SEARCH;
-        if let Ok(response) = self.client.get(url).send().await
-            && let Ok(text) = response.text().await
-            && let Ok(search_result) = serde_json::from_str::<DexSearchResponse>(&text)
+        if let Ok(resp) = self.http.send(Request::get(url)).await
+            && let Ok(search_result) = serde_json::from_str::<DexSearchResponse>(&resp.body)
             && let Some(pairs) = search_result.pairs
         {
             for pair in &pairs {
@@ -510,12 +510,12 @@ impl TronClient {
 
         tracing::debug!(url = %url, hash = %hash, "Fetching Tron transaction");
 
-        let mut request = self.client.get(&url);
+        let mut req = Request::get(&url);
         if let Some(ref key) = self.api_key {
-            request = request.header("TRON-PRO-API-KEY", key);
+            req = req.with_header("TRON-PRO-API-KEY", key);
         }
 
-        let response: TransactionListResponse = request.send().await?.json().await?;
+        let response: TransactionListResponse = self.http.send(req).await?.json()?;
 
         if !response.success {
             return Err(ScopeError::Chain(format!(
@@ -588,12 +588,12 @@ impl TronClient {
 
         tracing::debug!(url = %url, address = %address, "Fetching Tron transactions");
 
-        let mut request = self.client.get(&url);
+        let mut req = Request::get(&url);
         if let Some(ref key) = self.api_key {
-            request = request.header("TRON-PRO-API-KEY", key);
+            req = req.with_header("TRON-PRO-API-KEY", key);
         }
 
-        let response: TransactionListResponse = request.send().await?.json().await?;
+        let response: TransactionListResponse = self.http.send(req).await?.json()?;
 
         if !response.success {
             return Err(ScopeError::Chain(format!(
@@ -666,7 +666,8 @@ impl TronClient {
             number: Option<u64>,
         }
 
-        let response: BlockResponse = self.client.post(&url).send().await?.json().await?;
+        let resp = self.http.send(Request::post_json(&url, "")).await?;
+        let response: BlockResponse = resp.json()?;
 
         response
             .block_header
@@ -679,7 +680,9 @@ impl TronClient {
 impl Default for TronClient {
     fn default() -> Self {
         Self {
-            client: Client::new(),
+            http: Arc::new(
+                crate::http::NativeHttpClient::new().expect("failed to create HTTP client"),
+            ),
             api_url: DEFAULT_TRON_API.to_string(),
             api_key: None,
         }

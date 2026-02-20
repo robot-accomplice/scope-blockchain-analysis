@@ -32,6 +32,10 @@
 //!
 //! address_book:
 //!   data_dir: "~/.local/share/scope"
+//!
+//! ghola:
+//!   enabled: false   # route HTTP through Ghola sidecar
+//!   stealth: false   # apply temporal drift + ghost signing
 //! ```
 //!
 //! ## Error Handling
@@ -74,6 +78,9 @@ pub struct Config {
 
     /// Monitor TUI configuration (layout, widgets, refresh rate).
     pub monitor: crate::cli::monitor::MonitorConfig,
+
+    /// Ghola sidecar configuration for stealth HTTP transport.
+    pub ghola: GholaConfig,
 }
 
 /// Blockchain client configuration.
@@ -141,6 +148,26 @@ pub struct AddressBookConfig {
     ///
     /// Defaults to `~/.local/share/scope` on Linux/macOS.
     pub data_dir: Option<PathBuf>,
+}
+
+/// Ghola sidecar configuration.
+///
+/// Controls whether HTTP requests are routed through the
+/// [Ghola](https://github.com/robot-accomplice/ghola) sidecar for
+/// stealth analysis (temporal drift, ghost signing, chain-aware headers).
+///
+/// Ghola is an external Go binary; all fields default to `false` so
+/// existing installations see no behavior change.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct GholaConfig {
+    /// When `true`, route HTTP requests through the Ghola sidecar
+    /// (`127.0.0.1:18789`) instead of using `reqwest` directly.
+    pub enabled: bool,
+
+    /// When `true` (and `enabled` is `true`), the sidecar applies
+    /// temporal drift and ghost signing to every outgoing request.
+    pub stealth: bool,
 }
 
 /// Available output formats for analysis results.
@@ -628,5 +655,77 @@ output:
         let path = Config::default_path();
         // Should always return some path (may or may not exist)
         assert!(path.to_str().unwrap().contains("scope"));
+    }
+
+    // ========================================================================
+    // Ghola Configuration Tests
+    // ========================================================================
+
+    #[test]
+    fn test_ghola_config_default() {
+        let ghola = GholaConfig::default();
+        assert!(!ghola.enabled);
+        assert!(!ghola.stealth);
+    }
+
+    #[test]
+    fn test_config_default_ghola_disabled() {
+        let config = Config::default();
+        assert!(!config.ghola.enabled);
+        assert!(!config.ghola.stealth);
+    }
+
+    #[test]
+    fn test_load_ghola_enabled() {
+        let yaml = r#"
+ghola:
+  enabled: true
+  stealth: true
+"#;
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(yaml.as_bytes()).unwrap();
+
+        let config = Config::load(Some(file.path())).unwrap();
+        assert!(config.ghola.enabled);
+        assert!(config.ghola.stealth);
+    }
+
+    #[test]
+    fn test_load_ghola_partial() {
+        let yaml = r#"
+ghola:
+  enabled: true
+"#;
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(yaml.as_bytes()).unwrap();
+
+        let config = Config::load(Some(file.path())).unwrap();
+        assert!(config.ghola.enabled);
+        assert!(!config.ghola.stealth); // defaults to false
+    }
+
+    #[test]
+    fn test_load_ghola_absent_uses_defaults() {
+        let yaml = r#"
+chains:
+  ethereum_rpc: "https://example.com"
+"#;
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(yaml.as_bytes()).unwrap();
+
+        let config = Config::load(Some(file.path())).unwrap();
+        assert!(!config.ghola.enabled);
+        assert!(!config.ghola.stealth);
+    }
+
+    #[test]
+    fn test_ghola_config_serialization_roundtrip() {
+        let mut config = Config::default();
+        config.ghola.enabled = true;
+        config.ghola.stealth = true;
+
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        let deserialized: Config = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(config.ghola, deserialized.ghola);
     }
 }

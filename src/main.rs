@@ -62,7 +62,9 @@ use scope::chains::DefaultClientFactory;
 use scope::cli::errors::display_error;
 use scope::cli::{Cli, Commands};
 use scope::config::OutputFormat;
+use scope::http::HttpClient;
 use std::io::{self, Write};
+use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 
 /// ASCII art banner featuring a Portia jumping spider.
@@ -159,9 +161,13 @@ async fn main() -> Result<()> {
         return run_command(cli.command, &config).await;
     }
 
+    // Create the HTTP transport (Ghola sidecar or native reqwest)
+    let http: Arc<dyn HttpClient> = create_http_client(&config);
+
     // Create the client factory for dependency injection
     let factory = DefaultClientFactory {
         chains_config: config.chains.clone(),
+        http,
     };
 
     // Print version on stderr for non-interactive commands
@@ -284,8 +290,10 @@ async fn run_command(command: Commands, config: &Config) -> Result<()> {
         eprintln!("Scope v{}", scope::VERSION);
     }
 
+    let http: Arc<dyn HttpClient> = create_http_client(config);
     let factory = DefaultClientFactory {
         chains_config: config.chains.clone(),
+        http,
     };
     let result = match command {
         Commands::Completions(args) => {
@@ -362,6 +370,29 @@ async fn run_command(command: Commands, config: &Config) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Creates the appropriate HTTP transport based on Ghola configuration.
+///
+/// When `config.ghola.enabled` is `true`, attempts to create a Ghola
+/// sidecar client. Falls back to native `reqwest` if Ghola fails to start
+/// or is not installed.
+fn create_http_client(config: &Config) -> Arc<dyn HttpClient> {
+    if config.ghola.enabled {
+        match scope::http::GholaHttpClient::new(config.ghola.stealth) {
+            Ok(client) => {
+                tracing::info!("Using Ghola sidecar for HTTP transport");
+                return Arc::new(client);
+            }
+            Err(e) => {
+                eprintln!("  ⚠ Ghola sidecar enabled but unavailable: {}", e);
+                eprintln!("    Install: go install github.com/robot-accomplice/ghola@latest");
+                eprintln!("    Falling back to native HTTP transport");
+            }
+        }
+    }
+
+    Arc::new(scope::http::NativeHttpClient::new().expect("Failed to create HTTP client"))
 }
 
 /// Initializes the tracing subscriber for logging.
@@ -510,5 +541,32 @@ mod tests {
     fn test_cli_completions_parsing() {
         let result = Cli::try_parse_from(["scope", "completions", "bash"]);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_create_http_client_default_config() {
+        let config = Config::default();
+        let client = create_http_client(&config);
+        // Default config has ghola.enabled = false, so should get NativeHttpClient
+        let _: &dyn HttpClient = &*client;
+    }
+
+    #[test]
+    fn test_create_http_client_ghola_enabled() {
+        let mut config = Config::default();
+        config.ghola.enabled = true;
+        config.ghola.stealth = true;
+        let client = create_http_client(&config);
+        // Should still succeed (falls back to native if ghola not installed)
+        let _: &dyn HttpClient = &*client;
+    }
+
+    #[test]
+    fn test_create_http_client_ghola_no_stealth() {
+        let mut config = Config::default();
+        config.ghola.enabled = true;
+        config.ghola.stealth = false;
+        let client = create_http_client(&config);
+        let _: &dyn HttpClient = &*client;
     }
 }

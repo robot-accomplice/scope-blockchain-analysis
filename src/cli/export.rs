@@ -855,8 +855,11 @@ mod tests {
             limit: 1000,
         };
 
+        let http: std::sync::Arc<dyn crate::http::HttpClient> =
+            std::sync::Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = crate::chains::DefaultClientFactory {
             chains_config: crate::config::ChainsConfig::default(),
+            http,
         };
         let result = run(args, &config, &factory).await;
         assert!(result.is_err());
