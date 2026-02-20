@@ -36,6 +36,7 @@ struct BridgeRequest {
     drift: bool,
     ghost: bool,
     retries: i32,
+    buffer_size: u32,
 }
 
 #[derive(Deserialize)]
@@ -53,12 +54,13 @@ struct BridgeResponse {
 pub struct GholaHttpClient {
     client: reqwest::Client,
     stealth: bool,
+    buffer_size: u32,
     base_url: String,
 }
 
 impl GholaHttpClient {
     /// Creates a new client that talks to an already-running sidecar.
-    pub fn new(stealth: bool) -> Result<Self, ScopeError> {
+    pub fn new(stealth: bool, buffer_size: u32) -> Result<Self, ScopeError> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
@@ -68,13 +70,18 @@ impl GholaHttpClient {
         Ok(Self {
             client,
             stealth,
+            buffer_size,
             base_url: SIDECAR_URL.to_string(),
         })
     }
 
     /// Creates a client pointing at a custom URL (for testing).
     #[cfg(test)]
-    pub fn with_base_url(stealth: bool, base_url: &str) -> Result<Self, ScopeError> {
+    pub fn with_base_url(
+        stealth: bool,
+        buffer_size: u32,
+        base_url: &str,
+    ) -> Result<Self, ScopeError> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(5))
             .build()
@@ -84,18 +91,19 @@ impl GholaHttpClient {
         Ok(Self {
             client,
             stealth,
+            buffer_size,
             base_url: base_url.to_string(),
         })
     }
 
     /// Ensures the sidecar is reachable. If not, spawns `ghola --serve`
     /// and waits for it to become ready. Returns a configured client.
-    pub async fn ensure_ready(stealth: bool) -> Result<Self, ScopeError> {
+    pub async fn ensure_ready(stealth: bool, buffer_size: u32) -> Result<Self, ScopeError> {
         if !is_bridge_running() {
             spawn_sidecar()?;
             wait_for_bridge(SPAWN_TIMEOUT).await?;
         }
-        Self::new(stealth)
+        Self::new(stealth, buffer_size)
     }
 }
 
@@ -110,6 +118,7 @@ impl HttpClient for GholaHttpClient {
             drift: self.stealth,
             ghost: self.stealth,
             retries: 0,
+            buffer_size: self.buffer_size,
         };
 
         let resp = self
@@ -207,11 +216,13 @@ mod tests {
             drift: true,
             ghost: false,
             retries: 3,
+            buffer_size: 4096,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"drift\":true"));
         assert!(json.contains("\"ghost\":false"));
         assert!(json.contains("\"retries\":3"));
+        assert!(json.contains("\"buffer_size\":4096"));
     }
 
     #[test]
@@ -239,13 +250,13 @@ mod tests {
 
     #[test]
     fn test_ghola_client_creation() {
-        let client = GholaHttpClient::new(true);
+        let client = GholaHttpClient::new(true, 4096);
         assert!(client.is_ok());
     }
 
     #[test]
     fn test_ghola_client_creation_stealth_off() {
-        let client = GholaHttpClient::new(false);
+        let client = GholaHttpClient::new(false, 4096);
         assert!(client.is_ok());
     }
 
@@ -272,12 +283,14 @@ mod tests {
             drift: false,
             ghost: true,
             retries: 0,
+            buffer_size: 8192,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"method\":\"POST\""));
         assert!(json.contains("\"ghost\":true"));
         assert!(json.contains("\"drift\":false"));
         assert!(json.contains("\"retries\":0"));
+        assert!(json.contains("\"buffer_size\":8192"));
         assert!(json.contains("Authorization"));
     }
 
@@ -324,7 +337,7 @@ mod tests {
             .create_async()
             .await;
 
-        let ghola = GholaHttpClient::with_base_url(true, &server.url()).unwrap();
+        let ghola = GholaHttpClient::with_base_url(true, 4096, &server.url()).unwrap();
 
         let req = Request::get("https://api.example.com/data");
         let resp = ghola.send(req).await.unwrap();
@@ -358,7 +371,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = GholaHttpClient::with_base_url(true, &server.url()).unwrap();
+        let client = GholaHttpClient::with_base_url(true, 4096, &server.url()).unwrap();
         let req = Request::get("https://api.example.com/v1");
         let resp = client.send(req).await.unwrap();
 
@@ -380,7 +393,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = GholaHttpClient::with_base_url(false, &server.url()).unwrap();
+        let client = GholaHttpClient::with_base_url(false, 4096, &server.url()).unwrap();
         let req = Request::post_json("https://api.example.com", r#"{"q":1}"#);
         let resp = client.send(req).await.unwrap();
 
@@ -400,7 +413,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = GholaHttpClient::with_base_url(true, &server.url()).unwrap();
+        let client = GholaHttpClient::with_base_url(true, 4096, &server.url()).unwrap();
         let req = Request::get("https://api.example.com");
         let result = client.send(req).await;
 
@@ -419,7 +432,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = GholaHttpClient::with_base_url(true, &server.url()).unwrap();
+        let client = GholaHttpClient::with_base_url(true, 4096, &server.url()).unwrap();
         let req = Request::get("https://api.example.com");
         let result = client.send(req).await;
 
@@ -442,7 +455,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = GholaHttpClient::with_base_url(false, &server.url()).unwrap();
+        let client = GholaHttpClient::with_base_url(false, 4096, &server.url()).unwrap();
         let req = Request::get("https://api.example.com");
         let resp = client.send(req).await.unwrap();
 
@@ -463,7 +476,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = GholaHttpClient::with_base_url(true, &server.url()).unwrap();
+        let client = GholaHttpClient::with_base_url(true, 4096, &server.url()).unwrap();
         let req = Request::get("https://api.example.com")
             .with_header("Authorization", "Bearer token")
             .with_header("X-Chain", "ethereum");
@@ -475,7 +488,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_connection_refused() {
-        let client = GholaHttpClient::with_base_url(true, "http://127.0.0.1:1").unwrap();
+        let client = GholaHttpClient::with_base_url(true, 4096, "http://127.0.0.1:1").unwrap();
         let req = Request::get("https://api.example.com");
         let result = client.send(req).await;
 
@@ -484,5 +497,39 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("failed to reach ghola sidecar"));
+    }
+
+    #[tokio::test]
+    async fn test_send_includes_buffer_size() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::PartialJsonString(
+                r#"{"buffer_size":8192}"#.to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"status_code":200,"headers":{},"body":"ok","error":""}"#)
+            .create_async()
+            .await;
+
+        let client = GholaHttpClient::with_base_url(true, 8192, &server.url()).unwrap();
+        let req = Request::get("https://api.example.com");
+        let resp = client.send(req).await.unwrap();
+
+        assert_eq!(resp.status_code, 200);
+        mock.assert_async().await;
+    }
+
+    #[test]
+    fn test_custom_buffer_size_stored() {
+        let client = GholaHttpClient::new(true, 16384).unwrap();
+        assert_eq!(client.buffer_size, 16384);
+    }
+
+    #[test]
+    fn test_default_buffer_size() {
+        let client = GholaHttpClient::new(false, 4096).unwrap();
+        assert_eq!(client.buffer_size, 4096);
     }
 }

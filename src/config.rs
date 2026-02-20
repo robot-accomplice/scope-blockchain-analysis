@@ -34,8 +34,9 @@
 //!   data_dir: "~/.local/share/scope"
 //!
 //! ghola:
-//!   enabled: false   # route HTTP through Ghola sidecar
-//!   stealth: false   # apply temporal drift + ghost signing
+//!   enabled: false        # route HTTP through Ghola sidecar
+//!   stealth: false        # apply temporal drift + ghost signing
+//!   buffer_size: 4096     # read buffer for large response headers
 //! ```
 //!
 //! ## Error Handling
@@ -156,9 +157,9 @@ pub struct AddressBookConfig {
 /// [Ghola](https://github.com/robot-accomplice/ghola) sidecar for
 /// stealth analysis (temporal drift, ghost signing, chain-aware headers).
 ///
-/// Ghola is an external Go binary; all fields default to `false` so
-/// existing installations see no behavior change.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+/// Ghola is an external Go binary; all fields default to `false` / sensible
+/// values so existing installations see no behavior change.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GholaConfig {
     /// When `true`, route HTTP requests through the Ghola sidecar
@@ -168,6 +169,21 @@ pub struct GholaConfig {
     /// When `true` (and `enabled` is `true`), the sidecar applies
     /// temporal drift and ghost signing to every outgoing request.
     pub stealth: bool,
+
+    /// Read buffer size (in bytes) for handling large response headers.
+    /// Passed to the Ghola sidecar which uses it as `fasthttp.Client.ReadBufferSize`.
+    /// Default: 4096. Increase for APIs that return very large headers.
+    pub buffer_size: u32,
+}
+
+impl Default for GholaConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            stealth: false,
+            buffer_size: 4096,
+        }
+    }
 }
 
 /// Available output formats for analysis results.
@@ -666,6 +682,7 @@ output:
         let ghola = GholaConfig::default();
         assert!(!ghola.enabled);
         assert!(!ghola.stealth);
+        assert_eq!(ghola.buffer_size, 4096);
     }
 
     #[test]
@@ -673,6 +690,7 @@ output:
         let config = Config::default();
         assert!(!config.ghola.enabled);
         assert!(!config.ghola.stealth);
+        assert_eq!(config.ghola.buffer_size, 4096);
     }
 
     #[test]
@@ -681,6 +699,7 @@ output:
 ghola:
   enabled: true
   stealth: true
+  buffer_size: 8192
 "#;
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(yaml.as_bytes()).unwrap();
@@ -688,6 +707,7 @@ ghola:
         let config = Config::load(Some(file.path())).unwrap();
         assert!(config.ghola.enabled);
         assert!(config.ghola.stealth);
+        assert_eq!(config.ghola.buffer_size, 8192);
     }
 
     #[test]
@@ -702,6 +722,7 @@ ghola:
         let config = Config::load(Some(file.path())).unwrap();
         assert!(config.ghola.enabled);
         assert!(!config.ghola.stealth); // defaults to false
+        assert_eq!(config.ghola.buffer_size, 4096); // defaults to 4096
     }
 
     #[test]
@@ -716,6 +737,22 @@ chains:
         let config = Config::load(Some(file.path())).unwrap();
         assert!(!config.ghola.enabled);
         assert!(!config.ghola.stealth);
+        assert_eq!(config.ghola.buffer_size, 4096);
+    }
+
+    #[test]
+    fn test_load_ghola_custom_buffer_size() {
+        let yaml = r#"
+ghola:
+  enabled: false
+  buffer_size: 16384
+"#;
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(yaml.as_bytes()).unwrap();
+
+        let config = Config::load(Some(file.path())).unwrap();
+        assert!(!config.ghola.enabled);
+        assert_eq!(config.ghola.buffer_size, 16384);
     }
 
     #[test]
@@ -723,6 +760,7 @@ chains:
         let mut config = Config::default();
         config.ghola.enabled = true;
         config.ghola.stealth = true;
+        config.ghola.buffer_size = 8192;
 
         let yaml = serde_yaml::to_string(&config).unwrap();
         let deserialized: Config = serde_yaml::from_str(&yaml).unwrap();

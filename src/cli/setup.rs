@@ -175,6 +175,10 @@ fn show_status(config: &Config) {
                 )
             );
         }
+        println!(
+            "{}",
+            t::kv_row("Buffer size", &format!("{} bytes", config.ghola.buffer_size))
+        );
     } else {
         println!(
             "{}",
@@ -798,6 +802,7 @@ fn save_config_to_path(config: &Config, config_path: &Path) -> Result<()> {
     yaml.push_str("\nghola:\n");
     yaml.push_str(&format!("  enabled: {}\n", config.ghola.enabled));
     yaml.push_str(&format!("  stealth: {}\n", config.ghola.stealth));
+    yaml.push_str(&format!("  buffer_size: {}\n", config.ghola.buffer_size));
 
     std::fs::write(config_path, yaml).map_err(|e| ScopeError::Io(e.to_string()))?;
 
@@ -1555,6 +1560,7 @@ mod tests {
         let mut config = Config::default();
         config.ghola.enabled = true;
         config.ghola.stealth = true;
+        config.ghola.buffer_size = 8192;
 
         save_config_to_path(&config, &config_path).unwrap();
 
@@ -1562,6 +1568,7 @@ mod tests {
         assert!(contents.contains("ghola:"));
         assert!(contents.contains("enabled: true"));
         assert!(contents.contains("stealth: true"));
+        assert!(contents.contains("buffer_size: 8192"));
     }
 
     #[test]
@@ -1576,6 +1583,7 @@ mod tests {
         assert!(contents.contains("ghola:"));
         assert!(contents.contains("enabled: false"));
         assert!(contents.contains("stealth: false"));
+        assert!(contents.contains("buffer_size: 4096"));
     }
 
     #[test]
