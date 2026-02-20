@@ -379,7 +379,7 @@ async fn run_command(command: Commands, config: &Config) -> Result<()> {
 /// or is not installed.
 fn create_http_client(config: &Config) -> Arc<dyn HttpClient> {
     if config.ghola.enabled {
-        match scope::http::GholaHttpClient::new(config.ghola.stealth) {
+        match scope::http::GholaHttpClient::new(config.ghola.stealth, config.ghola.buffer_size) {
             Ok(client) => {
                 tracing::info!("Using Ghola sidecar for HTTP transport");
                 return Arc::new(client);

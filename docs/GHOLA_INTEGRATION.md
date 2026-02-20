@@ -49,7 +49,7 @@ through to every chain client.
 | `src/http/mod.rs` | `HttpClient` trait, `Request`, `Response` types |
 | `src/http/native.rs` | `NativeHttpClient` — direct `reqwest` transport |
 | `src/http/ghola.rs` | `GholaHttpClient` — sidecar bridge transport |
-| `src/config.rs` | `GholaConfig` struct (`enabled`, `stealth`) |
+| `src/config.rs` | `GholaConfig` struct (`enabled`, `stealth`, `buffer_size`) |
 | `src/chains/mod.rs` | `DefaultClientFactory` holds `Arc<dyn HttpClient>` |
 
 ### Decoupling Guarantees
@@ -87,8 +87,9 @@ Enable the ghola sidecar in `~/.config/scope/config.yaml`:
 
 ```yaml
 ghola:
-  enabled: true    # Route HTTP requests through ghola sidecar (default: false)
-  stealth: false   # Enable temporal drift + ghost signing (default: false)
+  enabled: true        # Route HTTP requests through ghola sidecar (default: false)
+  stealth: false       # Enable temporal drift + ghost signing (default: false)
+  buffer_size: 4096    # Read buffer for large response headers, bytes (default: 4096)
 ```
 
 The full config schema with ghola:
@@ -108,6 +109,7 @@ output:
 ghola:
   enabled: true
   stealth: true
+  buffer_size: 4096
 ```
 
 ## Verifying the Integration
@@ -119,6 +121,7 @@ Run `scope setup --status` to check whether ghola is detected:
 │  ✓ ghola binary found in PATH
 │  ✓ Ghola transport enabled in config
 │  ✓ Stealth mode active (temporal drift + ghost signing)
+│  Buffer size     4096 bytes
 ```
 
 If ghola is not installed:
@@ -140,6 +143,8 @@ When `ghola.enabled` is `true` in your config, Scope:
 5. Falls back to native HTTP if the sidecar is unavailable
 
 With `ghola.stealth` enabled, every request through the sidecar additionally gets temporal drift jitter and ghost signing applied.
+
+The `buffer_size` setting (default 4096) controls the read buffer for responses with large headers. If you encounter truncated header errors, increase it (e.g. `8192` or `16384`).
 
 ## Troubleshooting
 
