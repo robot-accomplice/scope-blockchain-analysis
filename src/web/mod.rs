@@ -94,8 +94,21 @@ async fn serve_ui(uri: axum::http::Uri) -> impl axum::response::IntoResponse {
 ///
 /// This is the main entry point called from the CLI `web` command handler.
 pub async fn start_server(addr: SocketAddr, config: Config) -> anyhow::Result<()> {
+    let http: std::sync::Arc<dyn crate::http::HttpClient> = if config.ghola.enabled {
+        match crate::http::GholaHttpClient::new(config.ghola.stealth) {
+            Ok(client) => std::sync::Arc::new(client),
+            Err(_) => std::sync::Arc::new(
+                crate::http::NativeHttpClient::new().expect("Failed to create HTTP client"),
+            ),
+        }
+    } else {
+        std::sync::Arc::new(
+            crate::http::NativeHttpClient::new().expect("Failed to create HTTP client"),
+        )
+    };
     let factory = DefaultClientFactory {
         chains_config: config.chains.clone(),
+        http,
     };
     let state = Arc::new(AppState { config, factory });
     let app = build_router(state);
@@ -255,8 +268,11 @@ mod tests {
     #[test]
     fn test_build_router() {
         let config = Config::default();
+        let http: std::sync::Arc<dyn crate::http::HttpClient> =
+            std::sync::Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: config.chains.clone(),
+            http,
         };
         let state = Arc::new(AppState { config, factory });
         let _router = build_router(state);
@@ -423,8 +439,11 @@ mod tests {
     #[test]
     fn test_app_state_construction() {
         let config = Config::default();
+        let http: std::sync::Arc<dyn crate::http::HttpClient> =
+            std::sync::Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: config.chains.clone(),
+            http,
         };
         let state = AppState { config, factory };
         // Verify state fields are accessible
@@ -451,8 +470,11 @@ mod tests {
     // Helper to create the test app state
     fn test_state() -> Arc<AppState> {
         let config = Config::default();
+        let http: std::sync::Arc<dyn crate::http::HttpClient> =
+            std::sync::Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: config.chains.clone(),
+            http,
         };
         Arc::new(AppState { config, factory })
     }

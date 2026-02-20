@@ -112,8 +112,11 @@ mod tests {
     #[test]
     fn test_routes_construction() {
         let config = Config::default();
+        let http: std::sync::Arc<dyn crate::http::HttpClient> =
+            std::sync::Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: config.chains.clone(),
+            http,
         };
         let state = Arc::new(AppState { config, factory });
         let _router = routes(state);

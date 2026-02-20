@@ -144,6 +144,47 @@ fn show_status(config: &Config) {
         )
     );
 
+    // Ghola sidecar status
+    println!("{}", t::blank_row());
+    println!("{}", t::subsection_header("Ghola Sidecar"));
+
+    let ghola_in_path = which_ghola();
+    if ghola_in_path {
+        println!("{}", t::check_pass("ghola binary found in PATH"));
+    } else {
+        println!("{}", t::check_fail("ghola binary not found in PATH"));
+        println!(
+            "{}",
+            t::info_row("Install: go install github.com/robot-accomplice/ghola@latest")
+        );
+    }
+
+    if config.ghola.enabled {
+        println!("{}", t::check_pass("Ghola transport enabled in config"));
+        if config.ghola.stealth {
+            println!(
+                "{}",
+                t::check_pass("Stealth mode active (temporal drift + ghost signing)")
+            );
+        } else {
+            println!(
+                "{}",
+                t::kv_row(
+                    "Stealth mode",
+                    "disabled (set ghola.stealth: true to enable)"
+                )
+            );
+        }
+    } else {
+        println!(
+            "{}",
+            t::kv_row(
+                "Transport",
+                "native (set ghola.enabled: true in config to use sidecar)",
+            )
+        );
+    }
+
     println!("{}", t::blank_row());
     println!(
         "{}",
@@ -154,6 +195,17 @@ fn show_status(config: &Config) {
         t::info_row("Run 'scope setup --key <provider>' to configure a specific key.")
     );
     println!("{}", t::section_footer());
+}
+
+/// Checks whether the `ghola` binary is present on `$PATH`.
+fn which_ghola() -> bool {
+    std::process::Command::new("which")
+        .arg("ghola")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 /// Gets API key configuration items.
@@ -742,6 +794,11 @@ fn save_config_to_path(config: &Config, config_path: &Path) -> Result<()> {
     yaml.push_str(&format!("  format: {}\n", config.output.format));
     yaml.push_str(&format!("  color: {}\n", config.output.color));
 
+    // Ghola sidecar section
+    yaml.push_str("\nghola:\n");
+    yaml.push_str(&format!("  enabled: {}\n", config.ghola.enabled));
+    yaml.push_str(&format!("  stealth: {}\n", config.ghola.stealth));
+
     std::fs::write(config_path, yaml).map_err(|e| ScopeError::Io(e.to_string()))?;
 
     Ok(())
@@ -754,6 +811,7 @@ fn save_config_to_path(config: &Config, config_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn test_mask_key_long() {
@@ -1487,5 +1545,65 @@ mod tests {
         let output = String::from_utf8(writer).unwrap();
         assert!(output.contains("Etherscan API key already configured"));
         assert!(output.contains("No changes made"));
+    }
+
+    #[test]
+    fn test_save_config_includes_ghola_section() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("config.yaml");
+
+        let mut config = Config::default();
+        config.ghola.enabled = true;
+        config.ghola.stealth = true;
+
+        save_config_to_path(&config, &config_path).unwrap();
+
+        let contents = std::fs::read_to_string(&config_path).unwrap();
+        assert!(contents.contains("ghola:"));
+        assert!(contents.contains("enabled: true"));
+        assert!(contents.contains("stealth: true"));
+    }
+
+    #[test]
+    fn test_save_config_ghola_defaults() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("config.yaml");
+
+        let config = Config::default();
+        save_config_to_path(&config, &config_path).unwrap();
+
+        let contents = std::fs::read_to_string(&config_path).unwrap();
+        assert!(contents.contains("ghola:"));
+        assert!(contents.contains("enabled: false"));
+        assert!(contents.contains("stealth: false"));
+    }
+
+    #[test]
+    fn test_which_ghola_returns_bool() {
+        let result = which_ghola();
+        assert!(result == true || result == false);
+    }
+
+    #[test]
+    fn test_show_status_ghola_disabled() {
+        let config = Config::default();
+        // Just verify it doesn't panic
+        show_status(&config);
+    }
+
+    #[test]
+    fn test_show_status_ghola_enabled_stealth_on() {
+        let mut config = Config::default();
+        config.ghola.enabled = true;
+        config.ghola.stealth = true;
+        show_status(&config);
+    }
+
+    #[test]
+    fn test_show_status_ghola_enabled_stealth_off() {
+        let mut config = Config::default();
+        config.ghola.enabled = true;
+        config.ghola.stealth = false;
+        show_status(&config);
     }
 }

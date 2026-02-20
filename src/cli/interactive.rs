@@ -1164,8 +1164,11 @@ mod tests {
     }
 
     fn test_factory() -> crate::chains::DefaultClientFactory {
+        let http: std::sync::Arc<dyn crate::http::HttpClient> =
+            std::sync::Arc::new(crate::http::NativeHttpClient::new().unwrap());
         crate::chains::DefaultClientFactory {
             chains_config: crate::config::ChainsConfig::default(),
+            http,
         }
     }
 

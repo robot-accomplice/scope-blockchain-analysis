@@ -7,7 +7,7 @@ Dataflow for `scope token-health [TOKEN]` and `scope health [TOKEN]` — composi
 ```mermaid
 flowchart TB
     subgraph Input
-        A[CLI: token, chain, --with-market, --market-venue, format]
+        A[CLI: token, chain, --with-market, --venue, format]
         A --> B[crawl::fetch_analytics_for_input]
         B --> C[ChainClientFactory]
     end

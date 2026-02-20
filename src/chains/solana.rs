@@ -33,9 +33,10 @@
 use crate::chains::{Balance, ChainClient, Token, Transaction};
 use crate::config::ChainsConfig;
 use crate::error::{Result, ScopeError};
+use crate::http::{HttpClient, Request};
 use async_trait::async_trait;
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// Default Solana mainnet RPC endpoint.
 const DEFAULT_SOLANA_RPC: &str = "https://api.mainnet-beta.solana.com";
@@ -51,10 +52,10 @@ const SOL_DECIMALS: u8 = 9;
 ///
 /// Supports balance queries via JSON-RPC and optional transaction
 /// history via Solscan API.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SolanaClient {
     /// HTTP client for API requests.
-    client: Client,
+    http: Arc<dyn HttpClient>,
 
     /// Solana JSON-RPC endpoint URL.
     rpc_url: String,
@@ -259,11 +260,12 @@ impl SolanaClient {
     /// let client = SolanaClient::new(&config).unwrap();
     /// ```
     pub fn new(config: &ChainsConfig) -> Result<Self> {
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|e| ScopeError::Chain(format!("Failed to create HTTP client: {}", e)))?;
+        let http: Arc<dyn HttpClient> = Arc::new(crate::http::NativeHttpClient::new()?);
+        Self::new_with_http(config, http)
+    }
 
+    /// Creates a new Solana client with a pre-built HTTP transport.
+    pub fn new_with_http(config: &ChainsConfig, http: Arc<dyn HttpClient>) -> Result<Self> {
         let rpc_url = config
             .solana_rpc
             .as_deref()
@@ -271,7 +273,7 @@ impl SolanaClient {
             .to_string();
 
         Ok(Self {
-            client,
+            http,
             rpc_url,
             solscan_api_key: config.api_keys.get("solscan").cloned(),
         })
@@ -284,7 +286,9 @@ impl SolanaClient {
     /// * `rpc_url` - The Solana JSON-RPC endpoint URL
     pub fn with_rpc_url(rpc_url: &str) -> Self {
         Self {
-            client: Client::new(),
+            http: Arc::new(
+                crate::http::NativeHttpClient::new().expect("failed to create HTTP client"),
+            ),
             rpc_url: rpc_url.to_string(),
             solscan_api_key: None,
         }
@@ -327,14 +331,12 @@ impl SolanaClient {
 
         tracing::debug!(url = %self.rpc_url, address = %address, "Fetching Solana balance");
 
+        let body = serde_json::to_string(&request)?;
         let response: RpcResponse<BalanceResponse> = self
-            .client
-            .post(&self.rpc_url)
-            .json(&request)
-            .send()
+            .http
+            .send(Request::post_json(&self.rpc_url, body))
             .await?
-            .json()
-            .await?;
+            .json()?;
 
         if let Some(error) = response.error {
             return Err(ScopeError::Chain(format!(
@@ -388,14 +390,12 @@ impl SolanaClient {
             data: Option<Vec<String>>,
         }
 
+        let body = serde_json::to_string(&request)?;
         let response: RpcResponse<AccountInfoResult> = self
-            .client
-            .post(&self.rpc_url)
-            .json(&request)
-            .send()
+            .http
+            .send(Request::post_json(&self.rpc_url, body))
             .await?
-            .json()
-            .await?;
+            .json()?;
 
         if let Some(error) = response.error {
             return Err(ScopeError::Chain(format!(
@@ -487,14 +487,12 @@ impl SolanaClient {
 
         tracing::debug!(url = %self.rpc_url, address = %address, "Fetching SPL token balances");
 
+        let body = serde_json::to_string(&request)?;
         let response: RpcResponse<TokenAccountsResponse> = self
-            .client
-            .post(&self.rpc_url)
-            .json(&request)
-            .send()
+            .http
+            .send(Request::post_json(&self.rpc_url, body))
             .await?
-            .json()
-            .await?;
+            .json()?;
 
         if let Some(error) = response.error {
             return Err(ScopeError::Chain(format!(
@@ -580,14 +578,12 @@ impl SolanaClient {
             "Fetching Solana transaction signatures"
         );
 
+        let body = serde_json::to_string(&request)?;
         let response: RpcResponse<Vec<SignatureInfo>> = self
-            .client
-            .post(&self.rpc_url)
-            .json(&request)
-            .send()
+            .http
+            .send(Request::post_json(&self.rpc_url, body))
             .await?
-            .json()
-            .await?;
+            .json()?;
 
         if let Some(error) = response.error {
             return Err(ScopeError::Chain(format!(
@@ -633,14 +629,12 @@ impl SolanaClient {
             "Fetching Solana transaction"
         );
 
+        let body = serde_json::to_string(&request)?;
         let response: RpcResponse<SolanaTransactionResult> = self
-            .client
-            .post(&self.rpc_url)
-            .json(&request)
-            .send()
+            .http
+            .send(Request::post_json(&self.rpc_url, body))
             .await?
-            .json()
-            .await?;
+            .json()?;
 
         if let Some(error) = response.error {
             return Err(ScopeError::Chain(format!(
@@ -773,14 +767,12 @@ impl SolanaClient {
             params: (),
         };
 
+        let body = serde_json::to_string(&request)?;
         let response: RpcResponse<u64> = self
-            .client
-            .post(&self.rpc_url)
-            .json(&request)
-            .send()
+            .http
+            .send(Request::post_json(&self.rpc_url, body))
             .await?
-            .json()
-            .await?;
+            .json()?;
 
         if let Some(error) = response.error {
             return Err(ScopeError::Chain(format!(
@@ -798,7 +790,9 @@ impl SolanaClient {
 impl Default for SolanaClient {
     fn default() -> Self {
         Self {
-            client: Client::new(),
+            http: Arc::new(
+                crate::http::NativeHttpClient::new().expect("failed to create HTTP client"),
+            ),
             rpc_url: DEFAULT_SOLANA_RPC.to_string(),
             solscan_api_key: None,
         }

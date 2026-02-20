@@ -141,8 +141,11 @@ mod tests {
         use axum::response::IntoResponse;
 
         let config = Config::default();
+        let http: std::sync::Arc<dyn crate::http::HttpClient> =
+            std::sync::Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: config.chains.clone(),
+            http,
         };
         let state = std::sync::Arc::new(AppState { config, factory });
         let req = ComplianceRiskRequest {
@@ -169,8 +172,11 @@ mod tests {
         unsafe { std::env::set_var("ETHERSCAN_API_KEY", "test_key_for_coverage") };
 
         let config = Config::default();
+        let http: std::sync::Arc<dyn crate::http::HttpClient> =
+            std::sync::Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: config.chains.clone(),
+            http,
         };
         let state = std::sync::Arc::new(AppState { config, factory });
         let req = ComplianceRiskRequest {
@@ -202,8 +208,11 @@ mod tests {
         use axum::response::IntoResponse;
 
         let config = Config::default();
+        let http: std::sync::Arc<dyn crate::http::HttpClient> =
+            std::sync::Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: config.chains.clone(),
+            http,
         };
         let state = std::sync::Arc::new(AppState { config, factory });
         let req = ComplianceRiskRequest {
@@ -239,8 +248,11 @@ mod tests {
             },
             ..Default::default()
         };
+        let http: std::sync::Arc<dyn crate::http::HttpClient> =
+            std::sync::Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: config.chains.clone(),
+            http,
         };
         let state = std::sync::Arc::new(AppState { config, factory });
         let req = ComplianceRiskRequest {
