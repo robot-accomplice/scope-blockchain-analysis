@@ -218,8 +218,11 @@ mod tests {
         use axum::response::IntoResponse;
 
         let config = Config::default();
+        let http: std::sync::Arc<dyn crate::http::HttpClient> =
+            std::sync::Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: config.chains.clone(),
+            http,
         };
         let state = std::sync::Arc::new(AppState { config, factory });
         let response = handle_list(State(state)).await.into_response();
@@ -236,8 +239,11 @@ mod tests {
         use axum::response::IntoResponse;
 
         let config = Config::default();
+        let http: std::sync::Arc<dyn crate::http::HttpClient> =
+            std::sync::Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: config.chains.clone(),
+            http,
         };
         let state = std::sync::Arc::new(AppState { config, factory });
         let req = AddAddressBookRequest {
@@ -271,8 +277,11 @@ mod tests {
         use axum::response::IntoResponse;
 
         let config = Config::default();
+        let http: std::sync::Arc<dyn crate::http::HttpClient> =
+            std::sync::Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: config.chains.clone(),
+            http,
         };
         let state = std::sync::Arc::new(AppState { config, factory });
         let req = RemoveAddressBookRequest {
@@ -299,8 +308,11 @@ mod tests {
         use axum::response::IntoResponse;
 
         let config = Config::default();
+        let http: std::sync::Arc<dyn crate::http::HttpClient> =
+            std::sync::Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: config.chains.clone(),
+            http,
         };
         let state = std::sync::Arc::new(AppState { config, factory });
         let req = RemoveAddressBookRequest {
@@ -325,8 +337,11 @@ mod tests {
         use axum::extract::State;
 
         let config = Config::default();
+        let http: std::sync::Arc<dyn crate::http::HttpClient> =
+            std::sync::Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: config.chains.clone(),
+            http,
         };
         let state = std::sync::Arc::new(AppState { config, factory });
         let response = handle_list(State(state)).await.into_response();
@@ -353,8 +368,11 @@ mod tests {
         let mut config = Config::default();
         config.address_book.data_dir = Some(data_dir.clone());
 
+        let http: std::sync::Arc<dyn crate::http::HttpClient> =
+            std::sync::Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: config.chains.clone(),
+            http,
         };
         let state = std::sync::Arc::new(AppState { config, factory });
 
@@ -409,8 +427,11 @@ mod tests {
 
         let mut config = Config::default();
         config.address_book.data_dir = Some(tmp_dir.path().to_path_buf());
+        let http: std::sync::Arc<dyn crate::http::HttpClient> =
+            std::sync::Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: config.chains.clone(),
+            http,
         };
         let state = std::sync::Arc::new(AppState { config, factory });
         let response = handle_list(State(state)).await.into_response();

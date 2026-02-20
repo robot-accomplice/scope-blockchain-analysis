@@ -169,8 +169,11 @@ mod tests {
         use axum::response::IntoResponse;
 
         let config = Config::default();
+        let http: std::sync::Arc<dyn crate::http::HttpClient> =
+            std::sync::Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: config.chains.clone(),
+            http,
         };
         let state = std::sync::Arc::new(AppState { config, factory });
         let req = ExportRequest {
@@ -195,8 +198,11 @@ mod tests {
         use axum::response::IntoResponse;
 
         let config = Config::default();
+        let http: std::sync::Arc<dyn crate::http::HttpClient> =
+            std::sync::Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: config.chains.clone(),
+            http,
         };
         let state = std::sync::Arc::new(AppState { config, factory });
         let req = ExportRequest {
@@ -259,8 +265,11 @@ mod tests {
             },
             ..Default::default()
         };
+        let http: std::sync::Arc<dyn crate::http::HttpClient> =
+            std::sync::Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: config.chains.clone(),
+            http,
         };
         let state = std::sync::Arc::new(AppState { config, factory });
         let req = ExportRequest {
@@ -300,8 +309,11 @@ mod tests {
             },
             ..Default::default()
         };
+        let http: std::sync::Arc<dyn crate::http::HttpClient> =
+            std::sync::Arc::new(crate::http::NativeHttpClient::new().unwrap());
         let factory = DefaultClientFactory {
             chains_config: config.chains.clone(),
+            http,
         };
         let state = std::sync::Arc::new(AppState { config, factory });
         let req = ExportRequest {

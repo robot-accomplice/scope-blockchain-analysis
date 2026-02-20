@@ -845,8 +845,11 @@ mod tests {
             Ok(Box::new(MockChainClient))
         }
         fn create_dex_client(&self) -> Box<dyn DexDataSource> {
+            let http: std::sync::Arc<dyn crate::http::HttpClient> =
+                std::sync::Arc::new(crate::http::NativeHttpClient::new().unwrap());
             crate::chains::DefaultClientFactory {
                 chains_config: Default::default(),
+                http,
             }
             .create_dex_client()
         }
@@ -917,8 +920,11 @@ mod tests {
             Ok(Box::new(MockContractClient))
         }
         fn create_dex_client(&self) -> Box<dyn DexDataSource> {
+            let http: std::sync::Arc<dyn crate::http::HttpClient> =
+                std::sync::Arc::new(crate::http::NativeHttpClient::new().unwrap());
             crate::chains::DefaultClientFactory {
                 chains_config: Default::default(),
+                http,
             }
             .create_dex_client()
         }

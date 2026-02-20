@@ -66,7 +66,7 @@ scope crawl 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --chain ethereum
 
 # Quick health check: DEX + optional order book
 scope token-health USDC
-scope health USDC --with-market --market-venue binance
+scope health USDC --with-market --venue binance
 
 # Full report with risk scoring
 scope crawl PEPE --report token-report.md --period 7d
@@ -182,7 +182,7 @@ scope report batch --from-file addresses.txt --output batch-report.md
 ```bash
 # One-shot summary (default: Binance)
 scope market summary USDC
-scope market summary DAI --market-venue binance
+scope market summary DAI --venue binance
 
 # Repeat mode for monitoring
 scope market summary USDC --every 30s --duration 10m

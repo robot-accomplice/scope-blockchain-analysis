@@ -242,6 +242,13 @@ pub mod compliance;
 /// and external intelligence (GitHub linking, audit reports).
 pub mod contract;
 
+/// HTTP transport abstraction.
+///
+/// Provides a trait-based abstraction over HTTP clients, enabling
+/// transparent switching between direct `reqwest` calls and the
+/// Ghola sidecar proxy for stealth analysis.
+pub mod http;
+
 /// Market module for peg and order book health analysis.
 ///
 /// Fetches level-2 order book data from exchange APIs and runs

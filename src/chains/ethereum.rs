@@ -37,9 +37,10 @@
 use crate::chains::{Balance, ChainClient, Token, TokenBalance, TokenHolder, Transaction};
 use crate::config::ChainsConfig;
 use crate::error::{Result, ScopeError};
+use crate::http::{HttpClient, Request};
 use async_trait::async_trait;
-use reqwest::Client;
 use serde::Deserialize;
+use std::sync::Arc;
 
 /// Default Etherscan V2 API base URL.
 ///
@@ -66,10 +67,10 @@ pub enum ApiType {
 ///
 /// Uses block explorer APIs (Etherscan, etc.) or JSON-RPC for data retrieval.
 /// Supports multiple networks through configuration.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct EthereumClient {
-    /// HTTP client for API requests.
-    client: Client,
+    /// HTTP transport (native reqwest or Ghola sidecar).
+    http: Arc<dyn HttpClient>,
 
     /// Base URL for the block explorer API or JSON-RPC endpoint.
     base_url: String,
@@ -95,6 +96,16 @@ pub struct EthereumClient {
     /// Optional RPC URL for balance fallback when block explorer free tier blocks the chain.
     /// Used for BSC: Etherscan V2 free keys don't support chainid=56.
     rpc_fallback_url: Option<String>,
+}
+
+impl std::fmt::Debug for EthereumClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EthereumClient")
+            .field("base_url", &self.base_url)
+            .field("chain_name", &self.chain_name)
+            .field("api_type", &self.api_type)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Response from Etherscan-compatible APIs.
@@ -224,13 +235,20 @@ impl EthereumClient {
     /// let client = EthereumClient::new(&config).unwrap();
     /// ```
     pub fn new(config: &ChainsConfig) -> Result<Self> {
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|e| ScopeError::Chain(format!("Failed to create HTTP client: {}", e)))?;
+        Self::new_with_http(
+            config,
+            Arc::new(
+                crate::http::NativeHttpClient::new().map_err(|e| {
+                    ScopeError::Chain(format!("Failed to create HTTP client: {}", e))
+                })?,
+            ),
+        )
+    }
 
+    /// Creates a new Ethereum client with an injected HTTP transport.
+    pub fn new_with_http(config: &ChainsConfig, http: Arc<dyn HttpClient>) -> Result<Self> {
         Ok(Self {
-            client,
+            http,
             base_url: ETHERSCAN_V2_API.to_string(),
             chain_id: Some("1".to_string()),
             api_key: config.api_keys.get("etherscan").cloned(),
@@ -249,7 +267,9 @@ impl EthereumClient {
     /// * `base_url` - The base URL for the block explorer API
     pub fn with_base_url(base_url: &str) -> Self {
         Self {
-            client: Client::new(),
+            http: Arc::new(
+                crate::http::NativeHttpClient::new().expect("failed to build reqwest client"),
+            ),
             base_url: base_url.to_string(),
             chain_id: None,
             api_key: None,
@@ -264,7 +284,9 @@ impl EthereumClient {
     #[cfg(test)]
     fn with_base_url_and_rpc_fallback(base_url: &str, rpc_fallback_url: Option<String>) -> Self {
         Self {
-            client: Client::new(),
+            http: Arc::new(
+                crate::http::NativeHttpClient::new().expect("failed to build reqwest client"),
+            ),
             base_url: base_url.to_string(),
             chain_id: Some("56".to_string()),
             api_key: None,
@@ -297,8 +319,19 @@ impl EthereumClient {
     /// Uses Etherscan V2 API format which requires an API key for most endpoints.
     /// Get a free API key at <https://etherscan.io/apis>
     pub fn for_chain(chain: &str, config: &ChainsConfig) -> Result<Self> {
-        // Etherscan V2 API uses chainid parameter
-        // V2 format: https://api.etherscan.io/v2/api?chainid=X&module=...
+        let http: Arc<dyn HttpClient> = Arc::new(
+            crate::http::NativeHttpClient::new()
+                .map_err(|e| ScopeError::Chain(format!("Failed to create HTTP client: {}", e)))?,
+        );
+        Self::for_chain_with_http(chain, config, http)
+    }
+
+    /// Creates a chain-specific client with an injected HTTP transport.
+    pub fn for_chain_with_http(
+        chain: &str,
+        config: &ChainsConfig,
+        http: Arc<dyn HttpClient>,
+    ) -> Result<Self> {
         let (base_url, chain_id, api_key_name, symbol) = match chain {
             "ethereum" => (ETHERSCAN_V2_API, "1", "etherscan", "ETH"),
             "polygon" => (ETHERSCAN_V2_API, "137", "polygonscan", "MATIC"),
@@ -307,22 +340,14 @@ impl EthereumClient {
             "base" => (ETHERSCAN_V2_API, "8453", "basescan", "ETH"),
             "bsc" => (ETHERSCAN_V2_API, "56", "bscscan", "BNB"),
             "aegis" => {
-                // Aegis/Wraith uses direct JSON-RPC, not block explorer API.
-                // Fall back to localhost if not configured.
                 let rpc_url = config.aegis_rpc.as_deref().unwrap_or(DEFAULT_AEGIS_RPC);
-                return Self::for_aegis(rpc_url, config);
+                return Self::for_aegis(rpc_url, http);
             }
             _ => {
                 return Err(ScopeError::Chain(format!("Unsupported chain: {}", chain)));
             }
         };
 
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|e| ScopeError::Chain(format!("Failed to create HTTP client: {}", e)))?;
-
-        // BSC: Etherscan V2 free tier blocks chainid=56. Fall back to BSC RPC for balance.
         let rpc_fallback_url = if chain == "bsc" {
             Some(
                 config
@@ -335,7 +360,7 @@ impl EthereumClient {
         };
 
         Ok(Self {
-            client,
+            http,
             base_url: base_url.to_string(),
             chain_id: Some(chain_id.to_string()),
             api_key: config.api_keys.get(api_key_name).cloned(),
@@ -353,14 +378,9 @@ impl EthereumClient {
     ///
     /// * `rpc_url` - The JSON-RPC endpoint URL
     /// * `_config` - Chain configuration (reserved for future use)
-    fn for_aegis(rpc_url: &str, _config: &ChainsConfig) -> Result<Self> {
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|e| ScopeError::Chain(format!("Failed to create HTTP client: {}", e)))?;
-
+    fn for_aegis(rpc_url: &str, http: Arc<dyn HttpClient>) -> Result<Self> {
         Ok(Self {
-            client,
+            http,
             base_url: rpc_url.to_string(),
             chain_id: None,
             api_key: None,
@@ -448,7 +468,7 @@ impl EthereumClient {
 
         tracing::debug!(url = %url, "Fetching balance via block explorer");
 
-        let response: ApiResponse<String> = self.client.get(&url).send().await?.json().await?;
+        let response: ApiResponse<String> = self.http.send(Request::get(&url)).await?.json()?;
 
         if response.status != "1" {
             // BscScan/Etherscan put the actual reason in result (e.g. "Invalid API Key", "Max rate limit reached")
@@ -499,13 +519,13 @@ impl EthereumClient {
         tracing::debug!(url = %rpc_url, address = %address, "Fetching balance via JSON-RPC");
 
         let response: RpcResponse = self
-            .client
-            .post(rpc_url)
-            .json(&request)
-            .send()
+            .http
+            .send(Request::post_json(
+                rpc_url,
+                serde_json::to_string(&request)?,
+            ))
             .await?
-            .json()
-            .await?;
+            .json()?;
 
         if let Some(error) = response.error {
             return Err(ScopeError::Chain(format!("RPC error: {}", error.message)));
@@ -580,7 +600,7 @@ impl EthereumClient {
         tracing::debug!(url = %tx_url, "Fetching transaction via block explorer proxy");
 
         let tx_response: ProxyResponse<ProxyTransaction> =
-            self.client.get(&tx_url).send().await?.json().await?;
+            self.http.send(Request::get(&tx_url)).await?.json()?;
 
         let proxy_tx = tx_response
             .result
@@ -595,7 +615,7 @@ impl EthereumClient {
         tracing::debug!(url = %receipt_url, "Fetching transaction receipt");
 
         let receipt_response: ProxyResponse<ProxyTransactionReceipt> =
-            self.client.get(&receipt_url).send().await?.json().await?;
+            self.http.send(Request::get(&receipt_url)).await?.json()?;
 
         let receipt = receipt_response.result;
 
@@ -687,13 +707,13 @@ impl EthereumClient {
         };
 
         let response: ProxyResponse<ProxyTransaction> = self
-            .client
-            .post(&self.base_url)
-            .json(&request)
-            .send()
+            .http
+            .send(Request::post_json(
+                &self.base_url,
+                serde_json::to_string(&request)?,
+            ))
             .await?
-            .json()
-            .await?;
+            .json()?;
 
         let proxy_tx = response
             .result
@@ -708,13 +728,13 @@ impl EthereumClient {
         };
 
         let receipt_response: ProxyResponse<ProxyTransactionReceipt> = self
-            .client
-            .post(&self.base_url)
-            .json(&receipt_request)
-            .send()
+            .http
+            .send(Request::post_json(
+                &self.base_url,
+                serde_json::to_string(&receipt_request)?,
+            ))
             .await?
-            .json()
-            .await?;
+            .json()?;
 
         let receipt = receipt_response.result;
 
@@ -789,7 +809,7 @@ impl EthereumClient {
         }
 
         let response: ProxyResponse<BlockResult> =
-            self.client.get(&url).send().await?.json().await?;
+            self.http.send(Request::get(&url)).await?.json()?;
 
         let block = response
             .result
@@ -823,7 +843,7 @@ impl EthereumClient {
         tracing::debug!(url = %url, "Fetching transactions");
 
         let response: ApiResponse<Vec<TxListItem>> =
-            self.client.get(&url).send().await?.json().await?;
+            self.http.send(Request::get(&url)).await?.json()?;
 
         if response.status != "1" && response.message != "No transactions found" {
             return Err(ScopeError::Chain(format!(
@@ -863,7 +883,7 @@ impl EthereumClient {
             result: String,
         }
 
-        let response: BlockResponse = self.client.get(&url).send().await?.json().await?;
+        let response: BlockResponse = self.http.send(Request::get(&url)).await?.json()?;
 
         // Parse hex block number
         let block_hex = response.result.trim_start_matches("0x");
@@ -887,7 +907,7 @@ impl EthereumClient {
             result: Option<String>,
         }
 
-        let response: CodeResponse = self.client.get(&url).send().await?.json().await?;
+        let response: CodeResponse = self.http.send(Request::get(&url)).await?.json()?;
         Ok(response.result.unwrap_or_else(|| "0x".to_string()))
     }
 
@@ -905,7 +925,7 @@ impl EthereumClient {
             result: Option<String>,
         }
 
-        let response: StorageResponse = self.client.get(&url).send().await?.json().await?;
+        let response: StorageResponse = self.http.send(Request::get(&url)).await?.json()?;
         Ok(response.result.unwrap_or_else(|| {
             "0x0000000000000000000000000000000000000000000000000000000000000000".to_string()
         }))
@@ -929,7 +949,7 @@ impl EthereumClient {
 
         tracing::debug!(url = %url, "Fetching ERC-20 token transfers");
 
-        let response = self.client.get(&url).send().await?.text().await?;
+        let response = self.http.send(Request::get(&url)).await?.body;
 
         #[derive(Deserialize)]
         struct TokenTxItem {
@@ -967,8 +987,8 @@ impl EthereumClient {
                 token_tx.contract_address, address
             ));
 
-            if let Ok(resp) = self.client.get(&balance_url).send().await {
-                if let Ok(bal_resp) = resp.json::<ApiResponse<String>>().await {
+            if let Ok(resp) = self.http.send(Request::get(&balance_url)).await {
+                if let Ok(bal_resp) = resp.json::<ApiResponse<String>>() {
                     if bal_resp.status == "1" {
                         let raw_balance = bal_resp.result;
                         let decimals: u8 = token_tx.token_decimal.parse().unwrap_or(18);
@@ -1020,8 +1040,8 @@ impl EthereumClient {
 
         tracing::debug!(url = %url, "Fetching token info (Pro API)");
 
-        let response = self.client.get(&url).send().await?;
-        let response_text = response.text().await?;
+        let response = self.http.send(Request::get(&url)).await?;
+        let response_text = response.body;
 
         // Try to parse as successful response
         if let Ok(api_response) =
@@ -1062,8 +1082,8 @@ impl EthereumClient {
 
         tracing::debug!(url = %url, "Fetching token supply");
 
-        let response = self.client.get(&url).send().await?;
-        let response_text = response.text().await?;
+        let response = self.http.send(Request::get(&url)).await?;
+        let response_text = response.body;
 
         // Check if the token supply call succeeded (indicates valid ERC20)
         if let Ok(api_response) = serde_json::from_str::<ApiResponse<String>>(&response_text) {
@@ -1110,8 +1130,8 @@ impl EthereumClient {
             token_address
         ));
 
-        let response = self.client.get(&url).send().await.ok()?;
-        let text = response.text().await.ok()?;
+        let response = self.http.send(Request::get(&url)).await.ok()?;
+        let text = response.body;
 
         // Parse the response to get ContractName
         #[derive(serde::Deserialize)]
@@ -1185,8 +1205,8 @@ impl EthereumClient {
 
         tracing::debug!(url = %url, "Fetching token holders");
 
-        let response = self.client.get(&url).send().await?;
-        let response_text = response.text().await?;
+        let response = self.http.send(Request::get(&url)).await?;
+        let response_text = response.body;
 
         // Parse the response
         let api_response: ApiResponse<serde_json::Value> = serde_json::from_str(&response_text)
@@ -1272,7 +1292,7 @@ impl EthereumClient {
                     token_address, page, max_page_size
                 ));
                 let response: std::result::Result<ApiResponse<Vec<TokenHolderItem>>, _> =
-                    self.client.get(&url).send().await?.json().await;
+                    self.http.send(Request::get(&url)).await?.json();
 
                 match response {
                     Ok(api_resp) if api_resp.status == "1" => {
@@ -1295,7 +1315,9 @@ impl EthereumClient {
 impl Default for EthereumClient {
     fn default() -> Self {
         Self {
-            client: Client::new(),
+            http: Arc::new(
+                crate::http::NativeHttpClient::new().expect("failed to build default HTTP client"),
+            ),
             base_url: ETHERSCAN_V2_API.to_string(),
             chain_id: Some("1".to_string()),
             api_key: None,
@@ -1896,7 +1918,7 @@ mod tests {
             .await;
 
         let client = EthereumClient {
-            client: Client::new(),
+            http: Arc::new(crate::http::NativeHttpClient::new().unwrap()),
             base_url: server.url(),
             chain_id: None,
             api_key: None,
@@ -1923,7 +1945,7 @@ mod tests {
             .await;
 
         let client = EthereumClient {
-            client: Client::new(),
+            http: Arc::new(crate::http::NativeHttpClient::new().unwrap()),
             base_url: server.url(),
             chain_id: None,
             api_key: None,
@@ -1950,7 +1972,7 @@ mod tests {
             .await;
 
         let client = EthereumClient {
-            client: Client::new(),
+            http: Arc::new(crate::http::NativeHttpClient::new().unwrap()),
             base_url: server.url(),
             chain_id: None,
             api_key: None,
@@ -2092,7 +2114,7 @@ mod tests {
             .await;
 
         let client = EthereumClient {
-            client: Client::new(),
+            http: Arc::new(crate::http::NativeHttpClient::new().unwrap()),
             base_url: server.url(),
             chain_id: None,
             api_key: None,

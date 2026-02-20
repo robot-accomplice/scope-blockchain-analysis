@@ -42,10 +42,10 @@
 
 use crate::chains::{DexPair, PricePoint, VolumePoint};
 use crate::error::{Result, ScopeError};
+use crate::http::{HttpClient, Request};
 use async_trait::async_trait;
-use reqwest::Client;
 use serde::Deserialize;
-use std::time::Duration;
+use std::sync::Arc;
 
 /// DexScreener API base URL.
 const DEXSCREENER_API_BASE: &str = "https://api.dexscreener.com";
@@ -73,9 +73,9 @@ pub trait DexDataSource: Send + Sync {
 }
 
 /// Client for fetching DEX aggregator data.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DexClient {
-    http: Client,
+    http: Arc<dyn HttpClient>,
     base_url: String,
 }
 
@@ -361,11 +361,13 @@ struct DexScreenerSearchResponse {
 impl DexClient {
     /// Creates a new DEX client.
     pub fn new() -> Self {
-        let http = Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .expect("Failed to build HTTP client");
+        let http: Arc<dyn HttpClient> =
+            Arc::new(crate::http::NativeHttpClient::new().expect("Failed to build HTTP client"));
+        Self::new_with_http(http)
+    }
 
+    /// Creates a new DEX client with a pre-built HTTP transport.
+    pub fn new_with_http(http: Arc<dyn HttpClient>) -> Self {
         Self {
             http,
             base_url: DEXSCREENER_API_BASE.to_string(),
@@ -376,7 +378,9 @@ impl DexClient {
     #[cfg(test)]
     pub(crate) fn with_base_url(base_url: &str) -> Self {
         Self {
-            http: Client::new(),
+            http: Arc::new(
+                crate::http::NativeHttpClient::new().expect("failed to create HTTP client"),
+            ),
             base_url: base_url.to_string(),
         }
     }
@@ -402,8 +406,8 @@ impl DexClient {
     pub async fn get_token_price(&self, chain: &str, token_address: &str) -> Option<f64> {
         let url = format!("{}/latest/dex/tokens/{}", self.base_url, token_address);
 
-        let response = self.http.get(&url).send().await.ok()?;
-        let dex_response: DexScreenerTokenResponse = response.json().await.ok()?;
+        let resp = self.http.send(Request::get(&url)).await.ok()?;
+        let dex_response: DexScreenerTokenResponse = resp.json().ok()?;
 
         let dex_chain = Self::map_chain_to_dexscreener(chain);
 
@@ -450,23 +454,17 @@ impl DexClient {
 
         tracing::debug!(url = %url, "Fetching token data from DexScreener");
 
-        let response = self
-            .http
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| ScopeError::Network(e.to_string()))?;
+        let resp = self.http.send(Request::get(&url)).await?;
 
-        if !response.status().is_success() {
+        if !resp.is_success() {
             return Err(ScopeError::Api(format!(
                 "DexScreener API error: {}",
-                response.status()
+                resp.status_code
             )));
         }
 
-        let data: DexScreenerTokenResponse = response
+        let data: DexScreenerTokenResponse = resp
             .json()
-            .await
             .map_err(|e| ScopeError::Api(format!("Failed to parse DexScreener response: {}", e)))?;
 
         let pairs = data.pairs.unwrap_or_default();
@@ -711,23 +709,17 @@ impl DexClient {
 
         tracing::debug!(url = %url, "Searching tokens on DexScreener");
 
-        let response = self
-            .http
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| ScopeError::Network(e.to_string()))?;
+        let resp = self.http.send(Request::get(&url)).await?;
 
-        if !response.status().is_success() {
+        if !resp.is_success() {
             return Err(ScopeError::Api(format!(
                 "DexScreener search API error: {}",
-                response.status()
+                resp.status_code
             )));
         }
 
-        let data: DexScreenerSearchResponse = response
+        let data: DexScreenerSearchResponse = resp
             .json()
-            .await
             .map_err(|e| ScopeError::Api(format!("Failed to parse search response: {}", e)))?;
 
         let pairs = data.pairs.unwrap_or_default();
@@ -855,17 +847,12 @@ impl DexClient {
     }
 
     async fn fetch_discover_tokens(&self, url: &str) -> Result<Vec<DiscoverToken>> {
-        let response = self
-            .http
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| ScopeError::Network(e.to_string()))?;
+        let resp = self.http.send(Request::get(url)).await?;
 
-        if !response.status().is_success() {
+        if !resp.is_success() {
             return Err(ScopeError::Api(format!(
                 "DexScreener API error: {}",
-                response.status()
+                resp.status_code
             )));
         }
 
@@ -888,9 +875,8 @@ impl DexClient {
             url: Option<String>,
         }
 
-        let raw: Vec<TokenProfileRaw> = response
+        let raw: Vec<TokenProfileRaw> = resp
             .json()
-            .await
             .map_err(|e| ScopeError::Api(format!("Failed to parse response: {}", e)))?;
 
         let tokens: Vec<DiscoverToken> = raw
