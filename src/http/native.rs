@@ -109,10 +109,7 @@ mod tests {
             .await;
 
         let client = NativeHttpClient::new().unwrap();
-        let req = Request::post_json(
-            &format!("{}/api", server.url()),
-            r#"{"key":"val"}"#,
-        );
+        let req = Request::post_json(&format!("{}/api", server.url()), r#"{"key":"val"}"#);
         let resp = client.send(req).await.unwrap();
 
         assert_eq!(resp.status_code, 201);
