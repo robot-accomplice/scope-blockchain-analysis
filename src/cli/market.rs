@@ -260,22 +260,58 @@ pub async fn run(
 }
 
 /// Parse duration strings like "30s", "5m", "1h", "24h" into seconds.
-/// Extract base symbol from pair (e.g. "DAI_USDT" -> "DAI", "USDCUSDT" -> "USDC", "USDC" -> "USDC").
-fn base_symbol_from_pair(pair: &str) -> &str {
+/// Normalize a pair argument to tolerate `key=value` style invocations.
+///
+/// Examples:
+/// - `USDC_USDT` -> `USDC_USDT`
+/// - `pair=USDC_USDT` -> `USDC_USDT`
+/// - `pair_symbol=USDC_USDT` -> `USDC_USDT`
+fn normalize_pair_input(pair: &str) -> &str {
     let p = pair.trim();
-    if let Some(i) = p.find("_USDT") {
-        return &p[..i];
-    }
-    if let Some(i) = p.find("_usdt") {
-        return &p[..i];
-    }
-    if let Some(i) = p.find("/USDT") {
-        return &p[..i];
-    }
-    if p.to_uppercase().ends_with("USDT") && p.len() > 4 {
-        return &p[..p.len() - 4];
+    if let Some((lhs, rhs)) = p.split_once('=')
+        && !rhs.is_empty()
+        && lhs
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return rhs;
     }
     p
+}
+
+/// Parse base/quote symbols from user input.
+///
+/// Supports:
+/// - Delimited forms: `BASE_QUOTE`, `BASE/QUOTE`, `BASE-QUOTE`
+/// - Concatenated common quote forms: `BASEUSDT`, `BASEUSDC`, `BASEUSD`, `BASEBTC`
+/// - Fallback: treat input as base-only and let venue default quote apply.
+fn parse_pair_components(pair: &str) -> (&str, Option<&str>) {
+    let p = normalize_pair_input(pair);
+
+    for sep in ['_', '/', '-'] {
+        if let Some((base, quote)) = p.split_once(sep)
+            && !base.is_empty()
+            && !quote.is_empty()
+        {
+            return (base, Some(quote));
+        }
+    }
+
+    const COMMON_QUOTES: [&str; 7] = ["USDT", "USDC", "USD", "BTC", "ETH", "EUR", "TRY"];
+    for quote in COMMON_QUOTES {
+        if p.len() > quote.len() && p.to_uppercase().ends_with(quote) {
+            let base_len = p.len() - quote.len();
+            return (&p[..base_len], Some(quote));
+        }
+    }
+
+    (p, None)
+}
+
+/// Extract base symbol from pair (e.g. "DAI_USDT" -> "DAI", "USDCUSDT" -> "USDC", "USDC" -> "USDC").
+#[cfg(test)]
+fn base_symbol_from_pair(pair: &str) -> &str {
+    parse_pair_components(pair).0
 }
 
 fn parse_duration(s: &str) -> Result<u64> {
@@ -422,7 +458,8 @@ async fn fetch_book_and_volume(
     args: &SummaryArgs,
     factory: &dyn ChainClientFactory,
 ) -> Result<(OrderBook, Option<f64>)> {
-    let base = base_symbol_from_pair(&args.pair).to_string();
+    let (base, quote) = parse_pair_components(&args.pair);
+    let base = base.to_string();
 
     if is_dex_venue(&args.venue) {
         // DEX path: synthesize from DexScreener analytics
@@ -452,7 +489,10 @@ async fn fetch_book_and_volume(
         // CEX path: use VenueRegistry + ExchangeClient
         let registry = VenueRegistry::load()?;
         let exchange = registry.create_exchange_client(&args.venue)?;
-        let pair = exchange.format_pair(&base);
+        let pair = match quote {
+            Some(q) => exchange.format_pair_with_quote(&base, q),
+            None => exchange.format_pair(&base),
+        };
         let book = exchange.fetch_order_book(&pair).await?;
 
         // Get volume from ticker if available
@@ -667,7 +707,11 @@ async fn run_ohlc(args: OhlcArgs) -> Result<()> {
     })?;
 
     let client = crate::market::ExchangeClient::from_descriptor(descriptor);
-    let pair = client.format_pair(base_symbol_from_pair(&args.pair));
+    let (base, quote) = parse_pair_components(&args.pair);
+    let pair = match quote {
+        Some(q) => client.format_pair_with_quote(base, q),
+        None => client.format_pair(base),
+    };
 
     let candles = client.fetch_ohlc(&pair, &args.interval, args.limit).await?;
 
@@ -778,7 +822,11 @@ async fn run_trades(args: TradesArgs) -> Result<()> {
     })?;
 
     let client = crate::market::ExchangeClient::from_descriptor(descriptor);
-    let pair = client.format_pair(base_symbol_from_pair(&args.pair));
+    let (base, quote) = parse_pair_components(&args.pair);
+    let pair = match quote {
+        Some(q) => client.format_pair_with_quote(base, q),
+        None => client.format_pair(base),
+    };
 
     let trades = client.fetch_recent_trades(&pair, args.limit).await?;
 
@@ -1049,6 +1097,27 @@ capabilities:
     #[test]
     fn test_base_symbol_from_pair_whitespace() {
         assert_eq!(base_symbol_from_pair("  DAI_USDT  "), "DAI");
+    }
+
+    #[test]
+    fn test_normalize_pair_input_key_value() {
+        assert_eq!(normalize_pair_input("pair=USDT_PUSD"), "USDT_PUSD");
+        assert_eq!(normalize_pair_input("pair_symbol=USDT_PUSD"), "USDT_PUSD");
+        assert_eq!(normalize_pair_input("USDT_PUSD"), "USDT_PUSD");
+    }
+
+    #[test]
+    fn test_parse_pair_components_delimited() {
+        assert_eq!(parse_pair_components("USDT_PUSD"), ("USDT", Some("PUSD")));
+        assert_eq!(parse_pair_components("ETH/USDC"), ("ETH", Some("USDC")));
+        assert_eq!(parse_pair_components("BTC-USDT"), ("BTC", Some("USDT")));
+    }
+
+    #[test]
+    fn test_parse_pair_components_concat_common_quote() {
+        assert_eq!(parse_pair_components("BTCUSDT"), ("BTC", Some("USDT")));
+        assert_eq!(parse_pair_components("ETHUSD"), ("ETH", Some("USD")));
+        assert_eq!(parse_pair_components("ARB"), ("ARB", None));
     }
 
     // ====================================================================
