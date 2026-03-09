@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-02-20
+
+### Fixed
+- **Market pair parsing robustness**: `scope market` commands now normalize `key=value` style pair inputs (for example `pair_symbol=USDT_PUSD`) and correctly parse explicit base/quote pairs across `_`, `/`, and `-` delimiters before applying venue-specific symbol formatting.
+- **Binance invalid symbol diagnostics**: Non-2xx API errors now include response body previews, and Binance `-1121` invalid symbol responses include a targeted hint about pair ordering, venue format expectations, and market availability.
+
 ## [0.5.3] - 2026-02-20
 
 ### Added
