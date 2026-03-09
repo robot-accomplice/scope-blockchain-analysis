@@ -15,6 +15,30 @@ use reqwest::Client;
 use serde_json::Value;
 use std::time::Duration;
 
+fn format_http_api_error(venue: &str, status: reqwest::StatusCode, body: &str) -> ScopeError {
+    let body = body.trim();
+    let binance_invalid_symbol = venue.to_lowercase().contains("binance")
+        && (body.contains("\"code\":-1121")
+            || body.contains("\"code\": -1121")
+            || body.to_lowercase().contains("invalid symbol"));
+
+    if body.is_empty() {
+        ScopeError::Chain(format!("{venue} API error: HTTP {status}"))
+    } else if binance_invalid_symbol {
+        let preview: String = body.chars().take(200).collect();
+        ScopeError::Chain(format!(
+            "{venue} API error: HTTP {status} — response: {preview}\n\
+             Hint: Binance returned 'Invalid symbol'. Verify pair ordering and venue format \
+             (e.g. BASE/QUOTE -> BASEQUOTE), or try another venue if the market is unavailable."
+        ))
+    } else {
+        let preview: String = body.chars().take(200).collect();
+        ScopeError::Chain(format!(
+            "{venue} API error: HTTP {status} — response: {preview}"
+        ))
+    }
+}
+
 /// A generic exchange client driven entirely by a [`VenueDescriptor`].
 ///
 /// No venue-specific Rust code — all behavior comes from the YAML descriptor.
@@ -83,11 +107,9 @@ impl ConfigurableExchangeClient {
 
                 let resp = req.send().await?;
                 if !resp.status().is_success() {
-                    return Err(ScopeError::Chain(format!(
-                        "{} API error: HTTP {}",
-                        self.descriptor.name,
-                        resp.status()
-                    )));
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
+                    return Err(format_http_api_error(&self.descriptor.name, status, &body));
                 }
                 resp.json::<Value>().await.map_err(|e| {
                     ScopeError::Chain(format!("{} JSON parse error: {}", self.descriptor.name, e))
@@ -106,11 +128,9 @@ impl ConfigurableExchangeClient {
 
                 let resp = req.send().await?;
                 if !resp.status().is_success() {
-                    return Err(ScopeError::Chain(format!(
-                        "{} API error: HTTP {}",
-                        self.descriptor.name,
-                        resp.status()
-                    )));
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
+                    return Err(format_http_api_error(&self.descriptor.name, status, &body));
                 }
                 resp.json::<Value>().await.map_err(|e| {
                     ScopeError::Chain(format!("{} JSON parse error: {}", self.descriptor.name, e))
@@ -214,11 +234,9 @@ impl ConfigurableExchangeClient {
                 }
                 let resp = req.send().await?;
                 if !resp.status().is_success() {
-                    return Err(ScopeError::Chain(format!(
-                        "{} API error: HTTP {}",
-                        self.descriptor.name,
-                        resp.status()
-                    )));
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
+                    return Err(format_http_api_error(&self.descriptor.name, status, &body));
                 }
                 resp.json::<Value>().await.map_err(|e| {
                     ScopeError::Chain(format!("{} JSON parse error: {}", self.descriptor.name, e))
@@ -236,11 +254,9 @@ impl ConfigurableExchangeClient {
                 }
                 let resp = req.send().await?;
                 if !resp.status().is_success() {
-                    return Err(ScopeError::Chain(format!(
-                        "{} API error: HTTP {}",
-                        self.descriptor.name,
-                        resp.status()
-                    )));
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
+                    return Err(format_http_api_error(&self.descriptor.name, status, &body));
                 }
                 resp.json::<Value>().await.map_err(|e| {
                     ScopeError::Chain(format!("{} JSON parse error: {}", self.descriptor.name, e))
@@ -1622,6 +1638,32 @@ mod tests {
             "expected error message to contain 'API error: HTTP 500', got: {}",
             err_msg
         );
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_fetch_order_book_binance_invalid_symbol_hint() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/v1/depth")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "symbol".into(),
+                "USDTPUSD".into(),
+            ))
+            .with_status(400)
+            .with_body(r#"{"code":-1121,"msg":"Invalid symbol."}"#)
+            .create_async()
+            .await;
+
+        let mut desc = make_http_test_descriptor(&server.url());
+        desc.name = "Binance Spot".to_string();
+        let client = ConfigurableExchangeClient::new(desc);
+        let err = client.fetch_order_book("USDTPUSD").await.unwrap_err();
+        let err_msg = err.to_string();
+
+        assert!(err_msg.contains("API error: HTTP 400"));
+        assert!(err_msg.contains("Invalid symbol"));
+        assert!(err_msg.contains("Hint: Binance returned 'Invalid symbol'"));
         mock.assert_async().await;
     }
 
