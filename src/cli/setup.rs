@@ -177,7 +177,10 @@ fn show_status(config: &Config) {
         }
         println!(
             "{}",
-            t::kv_row("Buffer size", &format!("{} bytes", config.ghola.buffer_size))
+            t::kv_row(
+                "Buffer size",
+                &format!("{} bytes", config.ghola.buffer_size)
+            )
         );
     } else {
         println!(

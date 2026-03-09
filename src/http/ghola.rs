@@ -437,10 +437,12 @@ mod tests {
         let result = client.send(req).await;
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("invalid sidecar response"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("invalid sidecar response")
+        );
         mock.assert_async().await;
     }
 
@@ -493,10 +495,12 @@ mod tests {
         let result = client.send(req).await;
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("failed to reach ghola sidecar"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("failed to reach ghola sidecar")
+        );
     }
 
     #[tokio::test]

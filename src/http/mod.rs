@@ -209,8 +209,8 @@ mod tests {
 
     #[test]
     fn test_request_clone() {
-        let req = Request::post_json("https://example.com", r#"{"a":1}"#)
-            .with_header("X-Test", "yes");
+        let req =
+            Request::post_json("https://example.com", r#"{"a":1}"#).with_header("X-Test", "yes");
         let cloned = req.clone();
         assert_eq!(cloned.method, "POST");
         assert_eq!(cloned.url, "https://example.com");
@@ -288,10 +288,7 @@ mod tests {
         let req = Request::get("https://example.com")
             .with_header("X-Key", "first")
             .with_header("X-Key", "second");
-        assert_eq!(
-            req.headers.get("X-Key").map(String::as_str),
-            Some("second")
-        );
+        assert_eq!(req.headers.get("X-Key").map(String::as_str), Some("second"));
     }
 
     #[test]
