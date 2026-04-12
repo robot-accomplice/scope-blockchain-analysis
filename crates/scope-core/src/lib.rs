@@ -179,12 +179,12 @@
 //! ## Modules
 //!
 //! - [`chains`]: Blockchain client implementations (Ethereum/EVM, Solana, Tron, DexScreener)
-//! - [`cli`]: Command-line interface definitions (address, tx, crawl, monitor, market, address-book, export)
 //! - [`config`]: Configuration management
 //! - [`market`]: Peg and order book health for stablecoin markets
 //! - [`display`]: Terminal output utilities and markdown report generation
 //! - [`error`]: Error types and result aliases
 //! - [`tokens`]: Token alias storage for friendly name lookups
+//! - [`domain`]: Shared domain logic (address book, resolution)
 
 // Re-export commonly used types at crate root
 pub use config::Config;

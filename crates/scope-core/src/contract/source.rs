@@ -212,7 +212,7 @@ pub async fn fetch_contract_source(
 
     let text = &response.body;
 
-    let api_response: EtherscanSourceResponse = serde_json::from_str(&text)
+    let api_response: EtherscanSourceResponse = serde_json::from_str(text)
         .map_err(|e| ScopeError::Api(format!("Failed to parse Etherscan response: {}", e)))?;
 
     if api_response.status != "1" || api_response.result.is_empty() {
