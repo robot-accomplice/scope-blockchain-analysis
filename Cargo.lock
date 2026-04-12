@@ -2333,13 +2333,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "scope-bca"
+name = "scope-cli"
 version = "0.5.4"
 dependencies = [
  "anyhow",
  "assert_cmd",
  "async-trait",
- "axum",
  "base64",
  "bs58",
  "chrono",
@@ -2350,7 +2349,6 @@ dependencies = [
  "futures",
  "hex",
  "indicatif",
- "libc",
  "mockito",
  "owo-colors",
  "predicates",
@@ -2358,6 +2356,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rustyline",
+ "scope-core",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -2367,11 +2366,67 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-test",
+ "tracing",
+ "tracing-subscriber",
+ "urlencoding",
+]
+
+[[package]]
+name = "scope-core"
+version = "0.5.4"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64",
+ "bs58",
+ "chrono",
+ "clap",
+ "crossterm",
+ "dirs",
+ "hex",
+ "mockito",
+ "owo-colors",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "tempfile",
+ "textplots",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-test",
+ "tracing",
+ "tracing-subscriber",
+ "urlencoding",
+]
+
+[[package]]
+name = "scope-web"
+version = "0.5.4"
+dependencies = [
+ "anyhow",
+ "assert_cmd",
+ "axum",
+ "chrono",
+ "clap",
+ "clap_complete",
+ "futures",
+ "libc",
+ "predicates",
+ "scope-cli",
+ "scope-core",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
+ "tokio-test",
  "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",
- "urlencoding",
 ]
 
 [[package]]
