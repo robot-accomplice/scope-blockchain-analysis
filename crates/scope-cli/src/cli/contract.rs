@@ -1,0 +1,731 @@
+//! # Contract Analysis Command
+//!
+//! Performs comprehensive smart contract analysis including source code
+//! retrieval, proxy detection, access control mapping, vulnerability scanning,
+//! DeFi protocol checks, and external intelligence gathering.
+
+use clap::Args;
+use scope::chains::ChainClientFactory;
+use scope::config::Config;
+use scope::contract;
+use scope::error::Result;
+
+/// Arguments for the contract analysis command.
+#[derive(Debug, Args)]
+#[command(
+    after_help = "\x1b[1mExamples:\x1b[0m
+  scope contract 0xdAC17F958D2ee523a2206206994597C13D831ec7
+  scope ct @usdt-contract                                 \x1b[2m# address book shortcut\x1b[0m
+  scope ct 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --chain polygon
+  scope contract 0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D --json",
+    after_long_help = "\x1b[1mExamples:\x1b[0m
+
+  \x1b[1m$ scope contract 0xdAC17F958D2ee523a2206206994597C13D831ec7\x1b[0m
+
+  ┌─ Contract Analysis: 0xdAC17F958D2ee523a2206206994597C13D831ec7 ─
+  │  Chain             ethereum
+  │  Verified          Yes
+  │
+  │  Security Score    [████████████████────] 80/100
+  │
+  ├── Source Code
+  │  Contract Name    TetherToken
+  │  Compiler         v0.4.18+commit.9cf6e910
+  │  Optimization     No
+  │
+  ├── Proxy Detection
+  │  ✓ Not a proxy contract
+  │
+  ├── Access Control
+  │  Ownership        Ownable
+  │  Renounced        No
+  │    • pause (High): Can pause transfers
+  │    • addBlacklist (High): Can blacklist addresses
+  │
+  ├── Vulnerability Findings
+  │  ℹ SC-TX-ORIGIN — tx.origin authorization (Low)
+  │
+  ├── DeFi Analysis
+  │  Protocol Type    Token
+  │  Token Standards  ERC-20
+  │
+  ├── External Intelligence
+  │  Explorer         https://etherscan.io/address/0xdAC17...
+  │  ✓ Sourcify verified
+  │    • Trail of Bits (TetherToken)
+  └──────────────────────────────────────────────────
+
+  \x1b[1m$ scope ct 0xA0b86991... --json\x1b[0m
+
+  {
+    \"address\": \"0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48\",
+    \"chain\": \"ethereum\",
+    \"is_verified\": true,
+    \"security_score\": 85,
+    \"security_summary\": \"Verified contract with ...\",
+    \"source_info\": { ... },
+    \"proxy_info\": { ... },
+    \"vulnerabilities\": [ ... ],
+    ...
+  }"
+)]
+pub struct ContractArgs {
+    /// Contract address to analyze.
+    ///
+    /// Must be a valid address on the target chain. The address must be
+    /// a deployed smart contract (not an externally owned account).
+    /// Use @label to resolve from the address book (e.g., @usdt-contract).
+    #[arg(value_name = "ADDRESS")]
+    pub address: String,
+
+    /// Target blockchain network.
+    ///
+    /// EVM chains with Etherscan-compatible APIs:
+    /// ethereum, polygon, arbitrum, optimism, base, bsc
+    #[arg(long, short, default_value = "ethereum")]
+    pub chain: String,
+
+    /// Output raw JSON instead of formatted report.
+    ///
+    /// Useful for piping to `jq` or feeding to other tools.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Run the contract analysis command.
+pub async fn run(
+    args: &ContractArgs,
+    _config: &Config,
+    clients: &dyn ChainClientFactory,
+) -> Result<()> {
+    let spinner = crate::cli::progress::Spinner::new("Analyzing contract...");
+
+    let client = clients.create_chain_client(&args.chain)?;
+    let http_client = scope::http::NativeHttpClient::new()?;
+
+    let analysis =
+        contract::analyze_contract(&args.address, &args.chain, client.as_ref(), &http_client)
+            .await?;
+
+    spinner.finish("Contract analysis complete");
+
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&analysis)
+                .unwrap_or_else(|_| "Failed to serialize".to_string())
+        );
+    } else {
+        print_contract_report(&analysis);
+    }
+
+    Ok(())
+}
+
+/// Print a formatted contract analysis report to the terminal.
+///
+/// Uses `display::terminal` helpers for consistent box-drawing, color,
+/// and TTY-awareness matching the rest of the CLI.
+fn print_contract_report(analysis: &contract::ContractAnalysis) {
+    use scope::display::terminal as t;
+
+    let title = format!("Contract Analysis: {}", analysis.address);
+    println!("{}", t::section_header(&title));
+    println!("{}", t::kv_row("Chain", &analysis.chain));
+    println!(
+        "{}",
+        t::kv_row("Verified", if analysis.is_verified { "Yes" } else { "No" })
+    );
+    println!("{}", t::blank_row());
+    println!(
+        "{}",
+        t::score_bar("Security Score", analysis.security_score, 100)
+    );
+    println!("{}", t::detail_row(&analysis.security_summary));
+
+    if !analysis.is_verified {
+        println!("{}", t::blank_row());
+        println!(
+            "{}",
+            t::warning_row("Source code is NOT verified — analysis is limited")
+        );
+    }
+
+    // Source Info
+    if let Some(src) = &analysis.source_info {
+        println!("{}", t::subsection_header("Source Code"));
+        println!("{}", t::kv_row("Contract Name", &src.contract_name));
+        println!("{}", t::kv_row("Compiler", &src.compiler_version));
+        println!("{}", t::kv_row("EVM Version", &src.evm_version));
+        println!("{}", t::kv_row("License", &src.license_type));
+        println!(
+            "{}",
+            t::kv_row(
+                "Optimization",
+                &if src.optimization_used {
+                    format!("Yes ({} runs)", src.optimization_runs)
+                } else {
+                    "No".to_string()
+                }
+            )
+        );
+        println!(
+            "{}",
+            t::kv_row("ABI Functions", &src.parsed_abi.len().to_string())
+        );
+    }
+
+    // Proxy Info
+    if let Some(proxy) = &analysis.proxy_info {
+        println!("{}", t::subsection_header("Proxy Detection"));
+        if proxy.is_proxy {
+            println!("{}", t::kv_row("Type", &proxy.proxy_type));
+            if let Some(impl_addr) = &proxy.implementation_address {
+                println!("{}", t::kv_row("Implementation", impl_addr));
+            }
+            if let Some(admin) = &proxy.admin_address {
+                println!("{}", t::kv_row("Admin", admin));
+            }
+        } else {
+            println!("{}", t::check_pass("Not a proxy contract"));
+        }
+        for detail in &proxy.details {
+            println!("{}", t::bullet_row(detail));
+        }
+    }
+
+    // Access Control
+    if let Some(ac) = &analysis.access_control {
+        println!("{}", t::subsection_header("Access Control"));
+        if let Some(pattern) = &ac.ownership_pattern {
+            println!("{}", t::kv_row("Ownership", pattern));
+        }
+        println!(
+            "{}",
+            t::kv_row(
+                "Renounced",
+                if ac.has_renounced_ownership {
+                    "Yes"
+                } else {
+                    "No"
+                }
+            )
+        );
+        println!(
+            "{}",
+            t::kv_row(
+                "Role-based",
+                if ac.has_role_based_access {
+                    "Yes"
+                } else {
+                    "No"
+                }
+            )
+        );
+        if ac.uses_tx_origin {
+            println!("{}", t::warning_row("Uses tx.origin for authorization"));
+        }
+        if !ac.roles.is_empty() {
+            println!("{}", t::kv_row("Roles", &ac.roles.join(", ")));
+        }
+        if !ac.privileged_functions.is_empty() {
+            println!("{}", t::blank_row());
+            for pf in &ac.privileged_functions {
+                let sev = t::severity_label(&format!("{:?}", pf.risk));
+                println!(
+                    "{}",
+                    t::bullet_row(&format!("{} ({}): {}", pf.name, sev, pf.capability))
+                );
+            }
+        }
+        println!("{}", t::blank_row());
+        println!("{}", t::kv_row("Auth", &ac.auth_analysis.summary));
+    }
+
+    // Vulnerabilities
+    println!("{}", t::subsection_header("Vulnerability Findings"));
+    if !analysis.vulnerabilities.is_empty() {
+        for vuln in &analysis.vulnerabilities {
+            let sev_str = format!("{}", vuln.severity);
+            let sev = t::severity_label(&sev_str);
+            match vuln.severity {
+                contract::vulnerability::Severity::Critical
+                | contract::vulnerability::Severity::High => {
+                    println!(
+                        "{}",
+                        t::check_fail(&format!("{} — {} ({})", vuln.id, vuln.title, sev))
+                    );
+                }
+                _ => {
+                    println!(
+                        "{}",
+                        t::info_row(&format!("{} — {} ({})", vuln.id, vuln.title, sev))
+                    );
+                }
+            }
+            println!("{}", t::detail_row(&vuln.description));
+            println!(
+                "{}",
+                t::detail_row(&format!("Fix: {}", vuln.recommendation))
+            );
+        }
+    } else {
+        println!("{}", t::check_pass("No heuristic findings triggered"));
+    }
+
+    // DeFi Analysis
+    if let Some(defi) = &analysis.defi_analysis {
+        println!("{}", t::subsection_header("DeFi Analysis"));
+        println!(
+            "{}",
+            t::kv_row("Protocol Type", &defi.protocol_type.to_string())
+        );
+        if !defi.token_standards.is_empty() {
+            let standards: Vec<String> =
+                defi.token_standards.iter().map(|s| s.to_string()).collect();
+            println!("{}", t::kv_row("Token Standards", &standards.join(", ")));
+        }
+        if defi.has_oracle_dependency {
+            for oracle in &defi.oracle_info {
+                println!(
+                    "{}",
+                    t::kv_row("Oracle", &format!("{} ({})", oracle.provider, oracle.usage))
+                );
+            }
+        }
+        if defi.has_flash_loan_risk {
+            println!("{}", t::warning_row("Flash loan risk detected"));
+        }
+        for dex in &defi.dex_integrations {
+            let slippage = if dex.has_slippage_protection {
+                "✓"
+            } else {
+                "✗"
+            };
+            let deadline = if dex.has_deadline_protection {
+                "✓"
+            } else {
+                "✗"
+            };
+            println!(
+                "{}",
+                t::bullet_row(&format!(
+                    "{} — slippage: {} deadline: {}",
+                    dex.dex, slippage, deadline
+                ))
+            );
+        }
+        if !defi.risk_factors.is_empty() {
+            println!("{}", t::blank_row());
+            for rf in &defi.risk_factors {
+                println!(
+                    "{}",
+                    t::bullet_row(&format!(
+                        "{} ({}/10): {}",
+                        rf.name, rf.severity, rf.description
+                    ))
+                );
+            }
+        }
+    }
+
+    // External Info
+    if let Some(ext) = &analysis.external_info {
+        println!("{}", t::subsection_header("External Intelligence"));
+        println!("{}", t::link_row("Explorer", &ext.explorer_url));
+        if let Some(repo) = &ext.github_repo {
+            println!("{}", t::link_row("GitHub", repo));
+        }
+        if let Some(verified) = &ext.sourcify_verified {
+            if *verified {
+                println!("{}", t::check_pass("Sourcify verified"));
+            } else {
+                println!("{}", t::check_fail("Sourcify not verified"));
+            }
+        }
+        if !ext.audit_reports.is_empty() {
+            println!("{}", t::blank_row());
+            for report in &ext.audit_reports {
+                println!(
+                    "{}",
+                    t::bullet_row(&format!("{} ({})", report.auditor, report.scope))
+                );
+                if !report.url.is_empty() {
+                    println!("{}", t::detail_row(&report.url));
+                }
+            }
+        } else {
+            println!("{}", t::blank_row());
+            println!(
+                "{}",
+                t::info_row("No audit reports found — check block explorer manually")
+            );
+        }
+    }
+
+    println!("{}", t::section_footer());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use scope::contract::ContractAnalysis;
+
+    fn minimal_analysis() -> ContractAnalysis {
+        ContractAnalysis {
+            address: "0xtest".to_string(),
+            chain: "ethereum".to_string(),
+            is_verified: false,
+            source_info: None,
+            proxy_info: None,
+            access_control: None,
+            vulnerabilities: vec![],
+            defi_analysis: None,
+            external_info: None,
+            security_score: 30,
+            security_summary: "Unverified contract".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_print_report_minimal() {
+        print_contract_report(&minimal_analysis());
+    }
+
+    #[test]
+    fn test_print_report_verified_with_source() {
+        let mut a = minimal_analysis();
+        a.is_verified = true;
+        a.security_score = 75;
+        a.source_info = Some(scope::contract::source::ContractSource {
+            contract_name: "TestToken".to_string(),
+            source_code: "contract T {}".to_string(),
+            abi: "[]".to_string(),
+            compiler_version: "v0.8.19".to_string(),
+            optimization_used: true,
+            optimization_runs: 200,
+            evm_version: "paris".to_string(),
+            license_type: "MIT".to_string(),
+            is_proxy: false,
+            implementation_address: None,
+            constructor_arguments: String::new(),
+            library: String::new(),
+            swarm_source: String::new(),
+            parsed_abi: vec![],
+        });
+        print_contract_report(&a);
+    }
+
+    #[test]
+    fn test_print_report_source_no_optimization() {
+        let mut a = minimal_analysis();
+        a.is_verified = true;
+        a.source_info = Some(scope::contract::source::ContractSource {
+            contract_name: "T".to_string(),
+            source_code: String::new(),
+            abi: "[]".to_string(),
+            compiler_version: "v0.8.19".to_string(),
+            optimization_used: false,
+            optimization_runs: 0,
+            evm_version: "paris".to_string(),
+            license_type: "MIT".to_string(),
+            is_proxy: false,
+            implementation_address: None,
+            constructor_arguments: String::new(),
+            library: String::new(),
+            swarm_source: String::new(),
+            parsed_abi: vec![],
+        });
+        print_contract_report(&a);
+    }
+
+    #[test]
+    fn test_print_report_with_proxy() {
+        let mut a = minimal_analysis();
+        a.proxy_info = Some(scope::contract::proxy::ProxyInfo {
+            is_proxy: true,
+            proxy_type: "EIP-1967".to_string(),
+            implementation_address: Some("0ximpl".to_string()),
+            admin_address: Some("0xadmin".to_string()),
+            beacon_address: None,
+            details: vec!["Proxy detected".to_string()],
+        });
+        print_contract_report(&a);
+    }
+
+    #[test]
+    fn test_print_report_not_proxy() {
+        let mut a = minimal_analysis();
+        a.proxy_info = Some(scope::contract::proxy::ProxyInfo {
+            is_proxy: false,
+            proxy_type: "None".to_string(),
+            implementation_address: None,
+            admin_address: None,
+            beacon_address: None,
+            details: vec![],
+        });
+        print_contract_report(&a);
+    }
+
+    #[test]
+    fn test_print_report_access_control() {
+        let mut a = minimal_analysis();
+        a.access_control = Some(scope::contract::access::AccessControlMap {
+            ownership_pattern: Some("Ownable".to_string()),
+            has_renounced_ownership: true,
+            has_role_based_access: true,
+            uses_tx_origin: true,
+            tx_origin_locations: vec![],
+            modifiers: vec![],
+            privileged_functions: vec![scope::contract::access::PrivilegedFunction {
+                name: "mint".to_string(),
+                modifiers: vec!["onlyOwner".to_string()],
+                capability: "Mint tokens".to_string(),
+                risk: scope::contract::access::PrivilegeRisk::Critical,
+            }],
+            roles: vec!["MINTER_ROLE".to_string()],
+            auth_analysis: scope::contract::access::AuthAnalysis {
+                msg_sender_checks: 1,
+                tx_origin_checks: 1,
+                has_origin_sender_comparison: false,
+                summary: "Mixed auth".to_string(),
+            },
+        });
+        print_contract_report(&a);
+    }
+
+    #[test]
+    fn test_print_report_vulns() {
+        let mut a = minimal_analysis();
+        a.vulnerabilities = vec![
+            contract::vulnerability::VulnerabilityFinding {
+                id: "V-1".to_string(),
+                title: "Critical issue".to_string(),
+                severity: contract::vulnerability::Severity::Critical,
+                category: contract::vulnerability::VulnCategory::Reentrancy,
+                description: "desc".to_string(),
+                source_location: None,
+                recommendation: "fix".to_string(),
+            },
+            contract::vulnerability::VulnerabilityFinding {
+                id: "V-2".to_string(),
+                title: "High issue".to_string(),
+                severity: contract::vulnerability::Severity::High,
+                category: contract::vulnerability::VulnCategory::UncheckedCall,
+                description: "desc".to_string(),
+                source_location: None,
+                recommendation: "fix".to_string(),
+            },
+            contract::vulnerability::VulnerabilityFinding {
+                id: "V-3".to_string(),
+                title: "Medium".to_string(),
+                severity: contract::vulnerability::Severity::Medium,
+                category: contract::vulnerability::VulnCategory::Delegatecall,
+                description: "desc".to_string(),
+                source_location: None,
+                recommendation: "fix".to_string(),
+            },
+            contract::vulnerability::VulnerabilityFinding {
+                id: "V-4".to_string(),
+                title: "Low".to_string(),
+                severity: contract::vulnerability::Severity::Low,
+                category: contract::vulnerability::VulnCategory::TxOrigin,
+                description: "desc".to_string(),
+                source_location: None,
+                recommendation: "fix".to_string(),
+            },
+            contract::vulnerability::VulnerabilityFinding {
+                id: "V-5".to_string(),
+                title: "Info".to_string(),
+                severity: contract::vulnerability::Severity::Informational,
+                category: contract::vulnerability::VulnCategory::Informational,
+                description: "desc".to_string(),
+                source_location: None,
+                recommendation: "fix".to_string(),
+            },
+        ];
+        print_contract_report(&a);
+    }
+
+    #[test]
+    fn test_print_report_defi() {
+        let mut a = minimal_analysis();
+        a.defi_analysis = Some(scope::contract::defi::DefiAnalysis {
+            protocol_type: scope::contract::defi::ProtocolType::DEX,
+            has_oracle_dependency: true,
+            oracle_info: vec![scope::contract::defi::OracleInfo {
+                provider: "Chainlink".to_string(),
+                usage: "Price feed".to_string(),
+                risks: vec![],
+            }],
+            has_flash_loan_risk: true,
+            flash_loan_info: vec!["Flash loan detected".to_string()],
+            dex_integrations: vec![scope::contract::defi::DexIntegration {
+                dex: "Uniswap".to_string(),
+                integration_type: "Swap".to_string(),
+                has_slippage_protection: false,
+                has_deadline_protection: true,
+            }],
+            lending_patterns: vec![],
+            token_standards: vec![scope::contract::defi::TokenStandard::ERC20],
+            staking_patterns: vec![],
+            risk_factors: vec![scope::contract::defi::DefiRiskFactor {
+                name: "Test risk".to_string(),
+                description: "A risk".to_string(),
+                severity: 7,
+            }],
+        });
+        print_contract_report(&a);
+    }
+
+    #[test]
+    fn test_print_report_external() {
+        let mut a = minimal_analysis();
+        a.external_info = Some(scope::contract::external::ExternalInfo {
+            explorer_url: "https://etherscan.io/address/0xtest".to_string(),
+            github_repo: Some("https://github.com/test/repo".to_string()),
+            sourcify_verified: Some(true),
+            deployer: None,
+            audit_reports: vec![scope::contract::external::AuditReport {
+                auditor: "Trail of Bits".to_string(),
+                scope: "Token".to_string(),
+                url: "https://audit.com".to_string(),
+                date: None,
+            }],
+            metadata: vec![],
+        });
+        print_contract_report(&a);
+    }
+
+    #[test]
+    fn test_print_report_external_sourcify_false() {
+        let mut a = minimal_analysis();
+        a.external_info = Some(scope::contract::external::ExternalInfo {
+            explorer_url: "https://etherscan.io/address/0xtest".to_string(),
+            github_repo: None,
+            sourcify_verified: Some(false),
+            deployer: None,
+            audit_reports: vec![],
+            metadata: vec![],
+        });
+        print_contract_report(&a);
+    }
+
+    #[test]
+    fn test_print_report_access_control_empty_roles() {
+        let mut a = minimal_analysis();
+        a.access_control = Some(scope::contract::access::AccessControlMap {
+            ownership_pattern: Some("Ownable".to_string()),
+            has_renounced_ownership: false,
+            has_role_based_access: false,
+            uses_tx_origin: false,
+            tx_origin_locations: vec![],
+            modifiers: vec![],
+            privileged_functions: vec![],
+            roles: vec![],
+            auth_analysis: scope::contract::access::AuthAnalysis {
+                msg_sender_checks: 0,
+                tx_origin_checks: 0,
+                has_origin_sender_comparison: false,
+                summary: "No auth checks".to_string(),
+            },
+        });
+        print_contract_report(&a);
+    }
+
+    #[test]
+    fn test_print_report_external_audit_with_url() {
+        let mut a = minimal_analysis();
+        a.external_info = Some(scope::contract::external::ExternalInfo {
+            explorer_url: "https://etherscan.io/address/0xtest".to_string(),
+            github_repo: None,
+            sourcify_verified: None,
+            deployer: None,
+            audit_reports: vec![scope::contract::external::AuditReport {
+                auditor: "CertiK".to_string(),
+                scope: "Full".to_string(),
+                url: "https://certik.com/audit.pdf".to_string(),
+                date: None,
+            }],
+            metadata: vec![],
+        });
+        print_contract_report(&a);
+    }
+
+    #[test]
+    fn test_print_report_access_control_with_roles() {
+        let mut a = minimal_analysis();
+        a.access_control = Some(scope::contract::access::AccessControlMap {
+            ownership_pattern: None,
+            has_renounced_ownership: false,
+            has_role_based_access: true,
+            uses_tx_origin: false,
+            tx_origin_locations: vec![],
+            modifiers: vec![],
+            privileged_functions: vec![],
+            roles: vec!["ADMIN_ROLE".to_string(), "MINTER_ROLE".to_string()],
+            auth_analysis: scope::contract::access::AuthAnalysis {
+                msg_sender_checks: 2,
+                tx_origin_checks: 0,
+                has_origin_sender_comparison: false,
+                summary: "Role-based".to_string(),
+            },
+        });
+        print_contract_report(&a);
+    }
+
+    #[test]
+    fn test_print_report_defi_empty_token_standards() {
+        let mut a = minimal_analysis();
+        a.defi_analysis = Some(scope::contract::defi::DefiAnalysis {
+            protocol_type: scope::contract::defi::ProtocolType::Other,
+            has_oracle_dependency: false,
+            oracle_info: vec![],
+            has_flash_loan_risk: false,
+            flash_loan_info: vec![],
+            dex_integrations: vec![],
+            lending_patterns: vec![],
+            token_standards: vec![],
+            staking_patterns: vec![],
+            risk_factors: vec![],
+        });
+        print_contract_report(&a);
+    }
+
+    #[test]
+    fn test_print_report_proxy_no_impl_or_admin() {
+        let mut a = minimal_analysis();
+        a.proxy_info = Some(scope::contract::proxy::ProxyInfo {
+            is_proxy: true,
+            proxy_type: "Minimal Proxy".to_string(),
+            implementation_address: None,
+            admin_address: None,
+            beacon_address: None,
+            details: vec!["Minimal proxy".to_string()],
+        });
+        print_contract_report(&a);
+    }
+
+    #[test]
+    fn test_print_report_defi_slippage_protected_no_deadline() {
+        let mut a = minimal_analysis();
+        a.defi_analysis = Some(scope::contract::defi::DefiAnalysis {
+            protocol_type: scope::contract::defi::ProtocolType::DEX,
+            has_oracle_dependency: false,
+            oracle_info: vec![],
+            has_flash_loan_risk: false,
+            flash_loan_info: vec![],
+            dex_integrations: vec![scope::contract::defi::DexIntegration {
+                dex: "SushiSwap".to_string(),
+                integration_type: "Swap".to_string(),
+                has_slippage_protection: true,
+                has_deadline_protection: false,
+            }],
+            lending_patterns: vec![],
+            token_standards: vec![],
+            staking_patterns: vec![],
+            risk_factors: vec![],
+        });
+        print_contract_report(&a);
+    }
+}

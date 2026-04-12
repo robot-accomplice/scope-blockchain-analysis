@@ -1,0 +1,72 @@
+[package]
+name = "scope-web"
+description = "Scope Blockchain Analysis - Web server and REST API"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["blockchain", "ethereum", "web", "api"]
+categories = ["web-programming::http-server"]
+readme = "../../README.md"
+exclude = [
+    ".github/",
+]
+
+[lib]
+name = "scope_web"
+path = "src/lib.rs"
+
+[[bin]]
+name = "scope"
+path = "src/main.rs"
+
+[dependencies]
+# Core library (same `use scope::*` import path)
+scope = { path = "../scope-core", package = "scope-core" }
+
+# CLI library (for shared handler functions & data types)
+scope_cli = { path = "../scope-cli", package = "scope-cli" }
+
+# Web framework
+axum = { version = "0.7", features = ["json", "ws", "macros"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
+# Async runtime
+tokio = { version = "1.0", features = ["full"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+anyhow = "1.0"
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Serialization (YAML for config save)
+serde_yaml = "0.9"
+
+# CLI framework (needed by the binary)
+clap = { version = "4.0", features = ["derive", "cargo"] }
+clap_complete = "4"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utilities
+futures = "0.3"
+
+# Daemon support (Unix signal handling)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+tokio-test = "0.4"
+tempfile = "3.10"
+assert_cmd = "2.0"
+predicates = "3.0"
