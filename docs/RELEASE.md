@@ -46,17 +46,33 @@ Optionally create a GitHub Release from the tag with release notes from CHANGELO
 
 ### Publish
 
-```bash
-# Dry run to verify package metadata and dependencies
-cargo publish --dry-run
+Since the v0.5.5 workspace split the project publishes three crates under the
+`scope-bca` umbrella:
 
-# Actual publish (requires crates.io account)
-cargo publish
+| Workspace dir         | Published name     | Purpose                                           |
+|-----------------------|--------------------|---------------------------------------------------|
+| `crates/scope-core/`  | `scope-bca-core`   | Core library (`use scope::*`)                     |
+| `crates/scope-cli/`   | `scope-bca-cli`    | CLI handler library                                |
+| `crates/scope-web/`   | `scope-bca`        | `scope` binary + web server — this is what users  |
+|                       |                    | install with `cargo install scope-bca`            |
+
+Crates must be published in dependency order. The `just publish` recipe and the
+GitHub Actions release workflow both handle this automatically:
+
+```bash
+# Publish all three via the interactive recipe
+just publish
+
+# Or manually, in order, with a sleep to let the sparse index settle:
+cargo publish -p scope-bca-core --dry-run
+cargo publish -p scope-bca-core && sleep 45 \
+  && cargo publish -p scope-bca-cli && sleep 45 \
+  && cargo publish -p scope-bca
 ```
 
 ### Post-Publish
 
-- Package appears at https://crates.io/crates/scope-bca
+- Packages appear at https://crates.io/crates/scope-bca (+ `-cli`, `-core`)
 - Install with: `cargo install scope-bca`
 - Update README badges if needed
 

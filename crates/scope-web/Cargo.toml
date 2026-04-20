@@ -1,14 +1,17 @@
 [package]
-name = "scope-web"
-description = "Scope Blockchain Analysis - Web server and REST API"
+# Published to crates.io as `scope-bca` — this is the crate users install with
+# `cargo install scope-bca`. It owns the `scope` binary and the `scope_web`
+# library. The workspace directory stays `scope-web`.
+name = "scope-bca"
+description = "Scope Blockchain Analysis - A production-grade tool for blockchain data analysis, address management, and transaction investigation"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-keywords = ["blockchain", "ethereum", "web", "api"]
-categories = ["web-programming::http-server"]
+keywords = ["blockchain", "ethereum", "cli", "analysis", "crypto"]
+categories = ["command-line-utilities", "cryptography::cryptocurrencies"]
 readme = "../../README.md"
 exclude = [
     ".github/",
@@ -23,11 +26,12 @@ name = "scope"
 path = "src/main.rs"
 
 [dependencies]
-# Core library (same `use scope::*` import path)
-scope = { path = "../scope-core", package = "scope-core" }
+# Core library (same `use scope::*` import path). Version pin required for
+# crates.io publish; bump with the workspace version on each release.
+scope = { path = "../scope-core", package = "scope-bca-core", version = "0.5.6" }
 
-# CLI library (for shared handler functions & data types)
-scope_cli = { path = "../scope-cli", package = "scope-cli" }
+# CLI library (for shared handler functions & data types).
+scope_cli = { path = "../scope-cli", package = "scope-bca-cli", version = "0.5.6" }
 
 # Web framework
 axum = { version = "0.7", features = ["json", "ws", "macros"] }

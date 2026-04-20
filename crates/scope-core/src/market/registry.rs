@@ -14,20 +14,17 @@ use std::path::PathBuf;
 // =============================================================================
 
 const BUILT_IN_VENUES: &[(&str, &str)] = &[
-    ("binance", include_str!("../../../../venues/binance.yaml")),
-    ("biconomy", include_str!("../../../../venues/biconomy.yaml")),
-    ("mexc", include_str!("../../../../venues/mexc.yaml")),
-    ("bitget", include_str!("../../../../venues/bitget.yaml")),
-    ("gateio", include_str!("../../../../venues/gateio.yaml")),
-    ("bybit", include_str!("../../../../venues/bybit.yaml")),
-    ("okx", include_str!("../../../../venues/okx.yaml")),
-    ("coinbase", include_str!("../../../../venues/coinbase.yaml")),
-    ("kraken", include_str!("../../../../venues/kraken.yaml")),
-    ("htx", include_str!("../../../../venues/htx.yaml")),
-    (
-        "crypto_com",
-        include_str!("../../../../venues/crypto_com.yaml"),
-    ),
+    ("binance", include_str!("../../venues/binance.yaml")),
+    ("biconomy", include_str!("../../venues/biconomy.yaml")),
+    ("mexc", include_str!("../../venues/mexc.yaml")),
+    ("bitget", include_str!("../../venues/bitget.yaml")),
+    ("gateio", include_str!("../../venues/gateio.yaml")),
+    ("bybit", include_str!("../../venues/bybit.yaml")),
+    ("okx", include_str!("../../venues/okx.yaml")),
+    ("coinbase", include_str!("../../venues/coinbase.yaml")),
+    ("kraken", include_str!("../../venues/kraken.yaml")),
+    ("htx", include_str!("../../venues/htx.yaml")),
+    ("crypto_com", include_str!("../../venues/crypto_com.yaml")),
 ];
 
 // =============================================================================
