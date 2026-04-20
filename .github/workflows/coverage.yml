@@ -19,7 +19,7 @@ jobs:
     name: Code Coverage
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       
       - uses: dtolnay/rust-toolchain@stable
       
@@ -29,7 +29,7 @@ jobs:
         run: cargo tarpaulin --verbose --all-features --workspace --timeout 120 --out xml
       
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v6
         with:
           use_oidc: true
           slug: robot-accomplice/scope-blockchain-analysis

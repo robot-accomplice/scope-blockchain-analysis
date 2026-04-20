@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-04-20
+
+### Fixed
+- **Release pipeline**: Upgraded `softprops/action-gh-release` from v1 to v2 and added `make_latest: true` so tagged releases publish assets directly instead of failing with "Cannot upload assets to an immutable release." This unblocks the automated GitHub Release + asset flow that was silently broken for v0.5.1 through v0.5.4.
+- **Clippy 1.95 compliance**: `chains::analyze_gas_usage` now uses `checked_div().unwrap_or(0)` for divide-by-zero guards and `sort_by_key(|g| Reverse(g.total_gas))` for descending sorts, satisfying the new `manual_checked_ops` and `unnecessary_sort_by` lints.
+- **Security advisories**: Bumped `rustls-webpki` to 0.103.12 via `cargo update` to address RUSTSEC-2026-0098 and RUSTSEC-2026-0099.
+
+### Changed
+- **CI actions modernized**: Bumped `actions/checkout` v4→v6, `actions/upload-artifact` v4→v7, `actions/download-artifact` v4→v8, and `codecov/codecov-action` v4→v6 to run on Node.js 24 ahead of the June 2026 platform-wide deprecation of Node.js 20 actions.
+
 ## [0.5.4] - 2026-02-20
 
 ### Fixed
