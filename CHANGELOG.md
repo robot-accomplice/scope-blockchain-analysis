@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **Release pipeline**: Upgraded `softprops/action-gh-release` from v1 to v2 and added `make_latest: true` so tagged releases publish assets directly instead of failing with "Cannot upload assets to an immutable release." This unblocks the automated GitHub Release + asset flow that was silently broken for v0.5.1 through v0.5.4.
+- **Linux arm64 cross-compile**: Switched `reqwest` from native-tls (OpenSSL) to `rustls-tls`, eliminating the `openssl-sys` cross-compilation failure that was blocking the `aarch64-unknown-linux-gnu` release binary. All four release targets (linux-x64, linux-arm64, macos-x64, macos-arm64) now build cleanly in a single workflow run. Also retains `gzip` and `brotli` response decompression that were in reqwest's default feature set.
 - **Clippy 1.95 compliance**: `chains::analyze_gas_usage` now uses `checked_div().unwrap_or(0)` for divide-by-zero guards and `sort_by_key(|g| Reverse(g.total_gas))` for descending sorts, satisfying the new `manual_checked_ops` and `unnecessary_sort_by` lints.
 - **Security advisories**: Bumped `rustls-webpki` to 0.103.12 via `cargo update` to address RUSTSEC-2026-0098 and RUSTSEC-2026-0099.
 
