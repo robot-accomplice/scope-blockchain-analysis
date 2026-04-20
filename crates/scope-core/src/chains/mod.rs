@@ -928,11 +928,7 @@ pub fn analyze_gas_usage(transactions: &[Transaction]) -> GasAnalysis {
     }
 
     let tx_count = transactions.len() as u64;
-    let avg_gas = if tx_count > 0 {
-        total_gas / tx_count
-    } else {
-        0
-    };
+    let avg_gas = total_gas.checked_div(tx_count).unwrap_or(0);
 
     if min_gas == u64::MAX {
         min_gas = 0;
@@ -944,15 +940,11 @@ pub fn analyze_gas_usage(transactions: &[Transaction]) -> GasAnalysis {
         .map(|(function, (call_count, total_gas_fn))| GasByFunction {
             function,
             call_count,
-            avg_gas: if call_count > 0 {
-                total_gas_fn / call_count
-            } else {
-                0
-            },
+            avg_gas: total_gas_fn.checked_div(call_count).unwrap_or(0),
             total_gas: total_gas_fn,
         })
         .collect();
-    gas_by_function.sort_by(|a, b| b.total_gas.cmp(&a.total_gas));
+    gas_by_function.sort_by_key(|g| std::cmp::Reverse(g.total_gas));
 
     // Format total gas cost (rough estimate using average gas price)
     let total_gas_cost_formatted = format!("{} gas units", total_gas);
