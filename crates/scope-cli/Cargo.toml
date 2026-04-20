@@ -57,7 +57,7 @@ chrono = { version = "0.4", features = ["serde"] }
 owo-colors = "4.2.3"
 
 # Utilities used by CLI handlers
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip", "brotli"] }
 regex = "1"
 textplots = "0.8"
 dirs = "5.0"
