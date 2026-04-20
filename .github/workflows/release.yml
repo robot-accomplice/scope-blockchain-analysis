@@ -80,14 +80,15 @@ jobs:
           merge-multiple: true
       
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: |
             ./artifacts/*.tar.gz
             ./artifacts/*.sha256
-          draft: true
+          draft: false
           prerelease: false
           generate_release_notes: true
+          make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
