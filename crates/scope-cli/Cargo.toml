@@ -1,6 +1,8 @@
 [package]
-name = "scope-cli"
-description = "Scope Blockchain Analysis - Command-line interface"
+# Published to crates.io as `scope-bca-cli` because the bare `scope-cli` name
+# is owned by an unrelated project. The workspace directory stays `scope-cli`.
+name = "scope-bca-cli"
+description = "Scope Blockchain Analysis - Command-line interface library"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -19,8 +21,9 @@ name = "scope_cli"
 path = "src/lib.rs"
 
 [dependencies]
-# Core library (same `use scope::*` import path)
-scope = { path = "../scope-core", package = "scope-core" }
+# Core library (same `use scope::*` import path). The `version` pin is
+# required by crates.io publish and must be bumped with the workspace version.
+scope = { path = "../scope-core", package = "scope-bca-core", version = "0.5.6" }
 
 # CLI framework
 clap = { version = "4.0", features = ["derive", "cargo"] }
@@ -70,7 +73,7 @@ thiserror = "1.0"
 base64 = "0.22"
 
 [dev-dependencies]
-scope = { path = "../scope-core", package = "scope-core", features = ["test-support"] }
+scope = { path = "../scope-core", package = "scope-bca-core", version = "0.5.6", features = ["test-support"] }
 tempfile = "3.10"
 assert_cmd = "2.0"
 predicates = "3.0"

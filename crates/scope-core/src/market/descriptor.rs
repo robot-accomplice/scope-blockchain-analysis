@@ -973,7 +973,7 @@ capabilities:
     #[test]
     fn test_deserialize_biconomy_venue_yaml() {
         let yaml = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../venues/biconomy.yaml"),
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("venues/biconomy.yaml"),
         )
         .expect("biconomy.yaml should exist");
         let desc: VenueDescriptor = serde_yaml::from_str(&yaml).unwrap();

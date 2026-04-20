@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.6] - 2026-04-20
+
+### Fixed
+- **crates.io publish pipeline (broken since v0.5.5)**: The v0.5.5 workspace split replaced the published `scope-bca` crate with three unpublished workspace members (`scope-core` / `scope-cli` / `scope-web`), silently breaking `cargo install scope-bca` for any user who hadn't cached v0.5.4. The release workflow's publish-crate job kept failing on `cargo publish --dry-run` (missing version requirements on internal path deps, and `include_str!` paths pointing outside the packaged tarball) with no alert path back to the release script.
+- **Multi-crate publish under the `scope-bca` umbrella**: Each workspace crate now publishes under a crates.io name while keeping its workspace directory and `use` paths unchanged:
+  - `crates/scope-core/` → `scope-bca-core` (library; `use scope::*`)
+  - `crates/scope-cli/`  → `scope-bca-cli` (CLI handler library)
+  - `crates/scope-web/`  → `scope-bca` (owns the `scope` binary, so `cargo install scope-bca` continues to install the CLI that users have bookmarked since v0.4.0)
+  Internal path dependencies now carry explicit `version = "0.5.6"` pins (required for crates.io publish) and the release workflow publishes them in dependency order with sparse-index settle sleeps between steps.
+- **Self-contained `scope-bca-core` tarball**: Moved the workspace-level `venues/` directory into `crates/scope-core/venues/` and updated the 11 `include_str!` paths plus one test `CARGO_MANIFEST_DIR`-relative path so the crate packages cleanly on its own. `cargo publish -p scope-bca-core --dry-run` now verifies end-to-end. User venue overrides at `~/.config/scope/venues/` are unaffected.
+- **`just publish` and `just yank` recipes**: Updated to operate across all three crates in dependency order, with clear manual-fallback instructions.
+
 ## [0.5.5] - 2026-04-20
 
 ### Fixed

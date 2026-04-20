@@ -2378,8 +2378,35 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a50f4cf475b65d88e057964e0e9bb1f0aa9bbb2036dc65c64596b42932536984"
 
 [[package]]
-name = "scope-cli"
-version = "0.5.5"
+name = "scope-bca"
+version = "0.5.6"
+dependencies = [
+ "anyhow",
+ "assert_cmd",
+ "axum",
+ "chrono",
+ "clap",
+ "clap_complete",
+ "futures",
+ "libc",
+ "predicates",
+ "scope-bca-cli",
+ "scope-bca-core",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
+ "tokio-test",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "scope-bca-cli"
+version = "0.5.6"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2401,7 +2428,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rustyline",
- "scope-core",
+ "scope-bca-core",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -2417,8 +2444,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "scope-core"
-version = "0.5.5"
+name = "scope-bca-core"
+version = "0.5.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2445,33 +2472,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "urlencoding",
-]
-
-[[package]]
-name = "scope-web"
-version = "0.5.5"
-dependencies = [
- "anyhow",
- "assert_cmd",
- "axum",
- "chrono",
- "clap",
- "clap_complete",
- "futures",
- "libc",
- "predicates",
- "scope-cli",
- "scope-core",
- "serde",
- "serde_json",
- "serde_yaml",
- "tempfile",
- "tokio",
- "tokio-test",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

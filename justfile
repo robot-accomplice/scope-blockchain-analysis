@@ -218,17 +218,27 @@ publish:
     echo "✓ All tests passed"
     echo ""
 
-    # Step 3: Dry-run to verify packaging
+    # Step 3: Dry-run to verify packaging (scope-bca-core only — downstream
+    # crates can only dry-run against already-published core).
     echo "Step 3/4: Verifying package (dry-run)..."
-    cargo publish --dry-run
-    echo "✓ Package verified"
+    cargo publish -p scope-bca-core --dry-run
+    echo "✓ scope-bca-core packaging verified"
     echo ""
 
-    # Step 4: Publish
+    # Step 4: Publish the three crates in dependency order.
+    #   scope-bca-core  →  scope-bca-cli  →  scope-bca
+    # The sleep gives the crates.io sparse index time to pick up the newly
+    # published version before the next verify step runs.
     echo "Step 4/4: Publishing..."
     read -p "Publish scope-bca v$VERSION to crates.io? (y/N): " CONFIRM
     if [ "$CONFIRM" = "y" ] || [ "$CONFIRM" = "Y" ]; then
-        cargo publish
+        cargo publish -p scope-bca-core
+        echo "  → scope-bca-core uploaded; waiting 45s for index..."
+        sleep 45
+        cargo publish -p scope-bca-cli
+        echo "  → scope-bca-cli uploaded; waiting 45s for index..."
+        sleep 45
+        cargo publish -p scope-bca
         echo ""
         echo "═══════════════════════════════════════════════════════════════════"
         echo "✓ scope-bca v$VERSION published to crates.io!"
@@ -237,14 +247,19 @@ publish:
         echo "Install with: cargo install scope-bca"
         echo "Crate page:   https://crates.io/crates/scope-bca"
     else
-        echo "Aborted. To publish manually: cargo publish"
+        echo "Aborted. To publish manually:"
+        echo "  cargo publish -p scope-bca-core && sleep 45 \\"
+        echo "    && cargo publish -p scope-bca-cli && sleep 45 \\"
+        echo "    && cargo publish -p scope-bca"
     fi
 
-# Dry-run crates.io publish (verify packaging without uploading)
+# Dry-run crates.io publish for scope-bca-core (downstream crates need core
+# to be on crates.io before they can dry-run).
 publish-dry-run:
-    cargo publish --dry-run
+    cargo publish -p scope-bca-core --dry-run
 
-# Yank a version from crates.io (prevents new deps, existing builds unaffected)
+# Yank a version from crates.io (prevents new deps, existing builds unaffected).
+# Yanks all three published crates at the given version.
 yank VERSION:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -252,18 +267,22 @@ yank VERSION:
         echo "❌ CARGO_REGISTRY_TOKEN not set. Add it to .env or export it."
         exit 1
     fi
-    echo "Yanking scope-bca@{{VERSION}} from crates.io..."
+    echo "Yanking scope-bca{,-cli,-core}@{{VERSION}} from crates.io..."
     read -p "Are you sure? This cannot be undone. (y/N): " CONFIRM
     if [ "$CONFIRM" = "y" ] || [ "$CONFIRM" = "Y" ]; then
         cargo yank --version {{VERSION}} scope-bca
-        echo "✓ scope-bca@{{VERSION}} yanked"
+        cargo yank --version {{VERSION}} scope-bca-cli
+        cargo yank --version {{VERSION}} scope-bca-core
+        echo "✓ scope-bca{,-cli,-core}@{{VERSION}} yanked"
     else
         echo "Aborted."
     fi
 
-# Un-yank a previously yanked version
+# Un-yank a previously yanked version (all three crates)
 unyank VERSION:
     cargo yank --version {{VERSION}} --undo scope-bca
+    cargo yank --version {{VERSION}} --undo scope-bca-cli
+    cargo yank --version {{VERSION}} --undo scope-bca-core
 
 # Create a new release (interactive)
 release:

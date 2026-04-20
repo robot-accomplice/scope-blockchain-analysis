@@ -1,5 +1,8 @@
 [package]
-name = "scope-core"
+# Published to crates.io as `scope-bca-core` for naming consistency with the
+# historical `scope-bca` crate. The workspace directory stays `scope-core` and
+# `[lib] name = "scope"` keeps the `use scope::*` import path unchanged.
+name = "scope-bca-core"
 description = "Scope Blockchain Analysis - Core library for blockchain data analysis"
 version.workspace = true
 edition.workspace = true
