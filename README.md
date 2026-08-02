@@ -1,4 +1,10 @@
-# Scope Blockchain Analysis
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/robot-accomplice/scope-blockchain-analysis/HEAD/docs/assets/scope-dark.svg">
+    <img alt="" width="28" height="28" align="top" src="https://raw.githubusercontent.com/robot-accomplice/scope-blockchain-analysis/HEAD/docs/assets/scope-light.svg">
+  </picture>
+  Scope Blockchain Analysis
+</h1>
 
 [![CI](https://github.com/robot-accomplice/scope-blockchain-analysis/actions/workflows/ci.yml/badge.svg)](https://github.com/robot-accomplice/scope-blockchain-analysis/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/robot-accomplice/scope-blockchain-analysis/branch/main/graph/badge.svg)](https://codecov.io/gh/robot-accomplice/scope-blockchain-analysis)
