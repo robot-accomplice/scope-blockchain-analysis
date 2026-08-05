@@ -136,6 +136,15 @@ pub async fn handle_save(
 mod tests {
     use super::*;
 
+    // `handle_save` resolves the config directory from the global `HOME` env
+    // var. The tests below mutate `HOME` across an `.await`, so without
+    // serialization they race under parallel execution (one test's restore of
+    // `HOME` lands inside another's window, flipping an expected 500 into a
+    // 200). A shared async lock forces these HOME-dependent tests to run one at
+    // a time. `tokio::sync::Mutex` (not `std::sync`) is used deliberately so it
+    // can be held across `.await` without tripping `clippy::await_holding_lock`.
+    static HOME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     #[test]
     fn test_deserialize_save_config_full() {
         let json = serde_json::json!({
@@ -272,6 +281,8 @@ mod tests {
         use scope::chains::DefaultClientFactory;
         use scope::config::Config;
 
+        let _home_guard = HOME_LOCK.lock().await;
+
         let config = Config::default();
         let http: std::sync::Arc<dyn scope::http::HttpClient> =
             std::sync::Arc::new(scope::http::NativeHttpClient::new().unwrap());
@@ -335,6 +346,8 @@ mod tests {
         use scope::chains::DefaultClientFactory;
         use scope::config::Config;
 
+        let _home_guard = HOME_LOCK.lock().await;
+
         let tmp = tempfile::tempdir().unwrap();
         let fake_home = tmp.path().join("fake_home");
         std::fs::create_dir_all(&fake_home).unwrap();
@@ -388,6 +401,8 @@ mod tests {
         use axum::response::IntoResponse;
         use scope::chains::DefaultClientFactory;
         use scope::config::Config;
+
+        let _home_guard = HOME_LOCK.lock().await;
 
         let config = Config::default();
         let http: std::sync::Arc<dyn scope::http::HttpClient> =
