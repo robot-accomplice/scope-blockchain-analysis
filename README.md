@@ -1,4 +1,19 @@
-# Scope Blockchain Analysis
+<table border="0" cellspacing="0" cellpadding="0">
+  <tr>
+    <td valign="middle" width="80">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/robot-accomplice/scope-blockchain-analysis/HEAD/docs/assets/scope-dark.svg">
+        <img alt="Scope logo" width="72" height="72" src="https://raw.githubusercontent.com/robot-accomplice/scope-blockchain-analysis/HEAD/docs/assets/scope-light.svg">
+      </picture>
+    </td>
+    <td valign="middle">
+      <h1>Scope Blockchain Analysis</h1>
+    </td>
+    <td valign="middle">
+      &nbsp;<em>Blockchain analysis and compliance for the command line</em>
+    </td>
+  </tr>
+</table>
 
 [![CI](https://github.com/robot-accomplice/scope-blockchain-analysis/actions/workflows/ci.yml/badge.svg)](https://github.com/robot-accomplice/scope-blockchain-analysis/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/robot-accomplice/scope-blockchain-analysis/branch/main/graph/badge.svg)](https://codecov.io/gh/robot-accomplice/scope-blockchain-analysis)
@@ -6,7 +21,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org/)
 
-A production-grade command-line tool for blockchain data analysis, portfolio tracking, transaction investigation, and **compliance-grade risk assessment**.
+A command-line tool for blockchain data analysis, portfolio tracking, transaction investigation, and **risk assessment**.
 
 ## Features
 
@@ -14,7 +29,7 @@ A production-grade command-line tool for blockchain data analysis, portfolio tra
 - **Transaction Analysis**: Look up and decode blockchain transactions across all supported chains
 - **Token Crawling**: Crawl DEX data for any token -- price, volume, liquidity, holder analysis, and risk scoring with markdown report generation
 - **Live Monitoring**: Real-time TUI dashboard with five layout presets (Dashboard, Chart, Feed, Compact, Exchange), responsive terminal sizing, config-driven widget visibility, price/volume/candlestick charts, price alerts, whale detection, CSV export, and auto-pause on input
-- **Exchange Venues**: Data-driven CEX integration via YAML descriptors — 11 built-in venues (Binance, Biconomy, Bitget, Bybit, Coinbase, Crypto.com, Gate.io, HTX, Kraken, MEXC, OKX) with order book, ticker, trades, and OHLC support; add custom venues by dropping a YAML file in `~/.config/scope/venues/`
+- **Exchange Venues**: Data-driven CEX integration via YAML descriptors, with 11 built-in venues (Binance, Biconomy, Bitget, Bybit, Coinbase, Crypto.com, Gate.io, HTX, Kraken, MEXC, OKX) with order book, ticker, trades, and OHLC support; add custom venues by dropping a YAML file in `~/.config/scope/venues/`
 - **Portfolio Management**: Track multiple addresses across chains with labels, tags, and aggregated balance views; `@label` shortcuts work in both CLI and web UI for instant address recall
 - **Compliance & Risk Assessment**: Risk scoring, transaction pattern detection, taint analysis, and compliance reporting
 - **Data Export**: Export address history and portfolio data to JSON or CSV with date range filtering
@@ -22,7 +37,7 @@ A production-grade command-line tool for blockchain data analysis, portfolio tra
 - **Market Command** (`scope market summary`, `ohlc`, `trades`): Peg and order book health; OHLC/candlestick data; recent trades; any CEX venue from the registry or DEX (Ethereum, Solana); repeat mode with `--every`/`--duration`; `--report` and `--csv` export
 - **Token Health Suite** (`scope token-health` / `scope health`): DEX analytics with optional order book summary; any venue from the registry or DEX
 - **Venue Management** (`scope venues` / `scope ven`): List available venues, view the YAML schema, initialise user venues directory, validate custom descriptors
-- **Contract Analysis** (`scope contract` / `scope ct`): Comprehensive smart contract security analysis — source code verification, proxy detection (EIP-1967/1822/1167/Diamond), access control mapping, vulnerability heuristics (reentrancy, selfdestruct, unchecked calls, tx.origin, overflow), DeFi protocol checks (oracle, flash loan, DEX slippage), external intelligence (GitHub linking, audit reports, Sourcify), and security scoring (0-100)
+- **Contract Analysis** (`scope contract` / `scope ct`): Smart contract security analysis covering source code verification, proxy detection (EIP-1967/1822/1167/Diamond), access control mapping, vulnerability heuristics (reentrancy, selfdestruct, unchecked calls, tx.origin, overflow), DeFi protocol checks (oracle, flash loan, DEX slippage), external intelligence (GitHub linking, audit reports, Sourcify), and security scoring (0-100)
 - **Insights** (`scope insights` / `insight`): Infer chain and type (address, tx, token) from input; run relevant analyses and present unified observations
 - **Agent Output** (`scope --ai`): Global flag for markdown output to stdout (address, tx, crawl, discover, portfolio, export, token-health)
 - **Reporting**: Markdown reports for address, token, portfolio, and market commands; batch reports for multiple addresses (`scope report batch`); address dossier (address + risk combined)
@@ -83,7 +98,7 @@ Use `--format json` when piping output to other tools or scripts. Use `--ai` whe
 
 ## Quick Start
 
-**-> [Full Quickstart Guide](docs/QUICKSTART.md)** — workflow-oriented guide for due diligence, token research, compliance, monitoring, and more.
+**-> [Full Quickstart Guide](docs/QUICKSTART.md)**: workflow-oriented guide for due diligence, token research, compliance, monitoring, and more.
 
 ```bash
 # Analyze an Ethereum address (auto-detects chain from address format)
@@ -146,7 +161,7 @@ scope market summary USDC --venue kraken
 scope market ohlc USDC --venue binance --interval 1h --limit 100
 scope market trades USDC --venue binance --limit 50
 
-# Unified insights — infer type and chain from any target
+# Unified insights: infer type and chain from any target
 scope insights 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2   # address -> balance, tokens
 scope insights 0xabc123...                                   # tx hash -> decoded tx
 scope insights USDC                                          # token symbol -> DEX analytics
@@ -191,12 +206,12 @@ scope serve --port 9090
 
 The web UI provides:
 - All CLI commands accessible via browser forms
-- **Address Book integration** — type `@label` in any input field for autocomplete; the backend resolves the label and auto-fills the chain
+- **Address Book integration**: type `@label` in any input field for autocomplete; the backend resolves the label and auto-fills the chain
 - Contract Analysis panel with security scoring, vulnerability cards, proxy detection, and access control visualization
 - JSON REST API at `/api/*` for programmatic access (exchange: snapshot, OHLC, trades, contract analysis)
 - Live WebSocket monitor with real-time price charts
 - Exchange venue selector and market snapshots
-- Rich data rendering with download options (JSON, CSV, Markdown)
+- Data rendering with download options (JSON, CSV, Markdown)
 - Configuration status and setup page
 
 See the [Web Interface](#web-interface) section below for screenshots.
@@ -513,37 +528,37 @@ Scope includes a locally-hosted web UI (`scope web`) that provides browser-based
 
 <p align="center">
   <img src="docs/screenshots/web-insights.png" alt="Insights panel" width="800">
-  <br><em>Unified Insights — auto-detect address, tx hash, or token and run all relevant analyses</em>
+  <br><em>Unified Insights: auto-detect address, tx hash, or token and run all relevant analyses</em>
 </p>
 
 <p align="center">
   <img src="docs/screenshots/web-address.png" alt="Address analysis panel" width="800">
-  <br><em>Address Analysis — balance, tokens, transactions, and optional dossier (risk) mode</em>
+  <br><em>Address Analysis: balance, tokens, transactions, and optional dossier (risk) mode</em>
 </p>
 
 <p align="center">
   <img src="docs/screenshots/web-contract.png" alt="Contract analysis panel" width="800">
-  <br><em>Contract Analysis — security scoring, proxy detection, vulnerability findings</em>
+  <br><em>Contract Analysis: security scoring, proxy detection, vulnerability findings</em>
 </p>
 
 <p align="center">
   <img src="docs/screenshots/web-address-book.png" alt="Address Book" width="800">
-  <br><em>Address Book — save addresses with labels; use <code>@label</code> in any input for instant recall</em>
+  <br><em>Address Book: save addresses with labels; use <code>@label</code> in any input for instant recall</em>
 </p>
 
 <p align="center">
   <img src="docs/screenshots/web-market.png" alt="Market summary panel" width="800">
-  <br><em>Market Summary — peg analysis, order book depth, and health checks for any CEX venue</em>
+  <br><em>Market Summary: peg analysis, order book depth, and health checks for any CEX venue</em>
 </p>
 
 <p align="center">
   <img src="docs/screenshots/web-setup.png" alt="Configuration panel" width="800">
-  <br><em>Configuration — API key status, RPC endpoints, and inline key management</em>
+  <br><em>Configuration: API key status, RPC endpoints, and inline key management</em>
 </p>
 
 ## Exchange Venues
 
-Scope uses **YAML descriptor files** to define CEX API integrations. This data-driven approach means adding a new exchange requires zero code changes — just a YAML file.
+Scope uses **YAML descriptor files** to define CEX API integrations. This data-driven approach means adding a new exchange requires zero code changes, just a YAML file.
 
 ### Built-in Venues
 
@@ -593,7 +608,7 @@ The DEX venues (`eth`, `solana`) are still available and use on-chain liquidity 
 
 ## Compliance Features
 
-Scope includes enterprise-grade compliance and risk analysis. All compliance commands live under `scope compliance`:
+Scope includes compliance and risk analysis. All compliance commands live under `scope compliance`:
 
 ### Risk Assessment
 
@@ -649,7 +664,7 @@ Compliance output formats: `table` (default), `json`, `yaml`, `markdown`.
 
 ## Token Crawling
 
-Crawl DEX data for any token by address or name. Supports searching by symbol, displaying ASCII charts, and generating markdown reports. Token health output format is similar — see [Output Examples](#output-examples).
+Crawl DEX data for any token by address or name. Supports searching by symbol, displaying ASCII charts, and generating markdown reports. Token health output format is similar; see [Output Examples](#output-examples).
 
 ```bash
 # Crawl by contract address
@@ -924,9 +939,9 @@ You can use Scope with **Solana** and **BSC** without paying for APIs.
 
 Dataflow and C4 architecture diagrams are in [`docs/architecture/`](docs/architecture/README.md):
 
-- **C4 Context** — Scope and external systems (Etherscan, DexScreener, RPCs, CEX APIs)
-- **C4 Containers** — CLI, Chains, Compliance, Market, Display, Config
-- **Dataflow** — Per-command diagrams for address, crawl, discover, compliance, market, token-health, portfolio, export, report, monitor, interactive
+- **C4 Context**: Scope and external systems (Etherscan, DexScreener, RPCs, CEX APIs)
+- **C4 Containers**: CLI, Chains, Compliance, Market, Display, Config
+- **Dataflow**: Per-command diagrams for address, crawl, discover, compliance, market, token-health, portfolio, export, report, monitor, interactive
 
 ## Development
 
@@ -960,15 +975,15 @@ just summary   # USDC market summary (peg, spread, volume, execution, health che
 
 The `scope market` command has three subcommands:
 
-**`scope market summary`** — Fetches level-2 order book data from any CEX venue in the registry or DEX (Ethereum, Solana) and reports peg, book health, volume, and execution checks:
+**`scope market summary`** fetches level-2 order book data from any CEX venue in the registry or DEX (Ethereum, Solana) and reports peg, book health, volume, and execution checks:
 
 - **Peg**: Target, best bid/ask deviation (%), mid price, spread
 - **Volume**: 24h quote volume (from venue ticker; omitted for DEX venues)
 - **Execution**: Simulated 10k USDT buy/sell slippage or "insufficient liquidity"
 - **Order book**: Ask/bid levels with depth (base and quote amounts)
 - **Health checks**: No sells below peg, bid/ask ratio, minimum levels and depth per side
-- **Output**: Text (default) or JSON — see [Output Examples](#output-examples) for sample
-- **Tunable thresholds**: All health-check thresholds are configurable. Defaults (min-levels=6, min-depth=3000, peg-range=0.001, bid/ask ratio 0.2-5.0x) are sensible stablecoin defaults—override for other markets.
+- **Output**: Text (default) or JSON; see [Output Examples](#output-examples) for sample
+- **Tunable thresholds**: All health-check thresholds are configurable. Defaults (min-levels=6, min-depth=3000, peg-range=0.001, bid/ask ratio 0.2-5.0x) are sensible stablecoin defaults; override for other markets.
 
 ```bash
 scope market summary                           # USDC on Binance (default, one shot)
@@ -986,14 +1001,14 @@ scope market summary --duration 24h               # Every 60s for 24h (default i
 scope market summary --every 1m                   # Every 1 min for 1h (default duration)
 ```
 
-**`scope market ohlc`** — Fetches real OHLC/candlestick data from CEX venues:
+**`scope market ohlc`** fetches real OHLC/candlestick data from CEX venues:
 
 ```bash
 scope market ohlc USDC --venue binance --interval 1h --limit 100
 scope market ohlc BTC --venue kraken --interval 15m --format json
 ```
 
-**`scope market trades`** — Fetches recent trades from CEX venues:
+**`scope market trades`** fetches recent trades from CEX venues:
 
 ```bash
 scope market trades USDC --venue binance --limit 50
