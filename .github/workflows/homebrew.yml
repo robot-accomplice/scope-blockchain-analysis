@@ -1,0 +1,142 @@
+name: Homebrew
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish to the tap (e.g. v0.5.6)"
+        required: true
+        type: string
+
+jobs:
+  bump-formula:
+    name: Bump Homebrew formula
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' || !github.event.release.prerelease }}
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - name: Compute release download URLs and SHAs
+        id: assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          version="${TAG#v}"
+          base_url="https://github.com/robot-accomplice/scope-blockchain-analysis/releases/download/${TAG}"
+
+          tmpdir="$(mktemp -d)"
+          trap 'rm -rf "${tmpdir}"' EXIT
+
+          fetch_sha_with_retry() {
+            local suffix="$1"
+            local out="${tmpdir}/scope-${suffix}.tar.gz.sha256"
+            local attempt=0
+            local max_attempts=30
+            while [ "${attempt}" -lt "${max_attempts}" ]; do
+              if curl -fsSL "${base_url}/scope-${suffix}.tar.gz.sha256" -o "${out}"; then
+                awk '{print $1}' "${out}"
+                return 0
+              fi
+              attempt=$((attempt + 1))
+              echo "Waiting for scope-${suffix}.tar.gz.sha256 (attempt ${attempt}/${max_attempts})..." >&2
+              sleep 20
+            done
+            echo "Timed out waiting for scope-${suffix}.tar.gz.sha256" >&2
+            return 1
+          }
+
+          sha_macos_arm64="$(fetch_sha_with_retry "macos-arm64")"
+          sha_macos_x64="$(fetch_sha_with_retry "macos-x64")"
+          sha_linux_x64="$(fetch_sha_with_retry "linux-x64")"
+          sha_linux_arm64="$(fetch_sha_with_retry "linux-arm64")"
+
+          {
+            echo "version=${version}"
+            echo "base_url=${base_url}"
+            echo "sha_macos_arm64=${sha_macos_arm64}"
+            echo "sha_macos_x64=${sha_macos_x64}"
+            echo "sha_linux_x64=${sha_linux_x64}"
+            echo "sha_linux_arm64=${sha_linux_arm64}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Checkout homebrew-tap
+        uses: actions/checkout@v6
+        with:
+          repository: robot-accomplice/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          path: homebrew-tap
+          ref: main
+
+      - name: Render scope.rb
+        env:
+          VERSION: ${{ steps.assets.outputs.version }}
+          BASE_URL: ${{ steps.assets.outputs.base_url }}
+          SHA_MACOS_ARM64: ${{ steps.assets.outputs.sha_macos_arm64 }}
+          SHA_MACOS_X64: ${{ steps.assets.outputs.sha_macos_x64 }}
+          SHA_LINUX_X64: ${{ steps.assets.outputs.sha_linux_x64 }}
+          SHA_LINUX_ARM64: ${{ steps.assets.outputs.sha_linux_arm64 }}
+        run: |
+          set -euo pipefail
+
+          formula="homebrew-tap/scope.rb"
+
+          cat > "${formula}" <<FORMULA
+          class Scope < Formula
+            desc "Blockchain analysis CLI for venue metadata, gas analytics, and on-chain forensics"
+            homepage "https://github.com/robot-accomplice/scope-blockchain-analysis"
+            version "${VERSION}"
+            license "MIT"
+
+            on_macos do
+              on_arm do
+                url "${BASE_URL}/scope-macos-arm64.tar.gz"
+                sha256 "${SHA_MACOS_ARM64}"
+              end
+              on_intel do
+                url "${BASE_URL}/scope-macos-x64.tar.gz"
+                sha256 "${SHA_MACOS_X64}"
+              end
+            end
+
+            on_linux do
+              on_intel do
+                url "${BASE_URL}/scope-linux-x64.tar.gz"
+                sha256 "${SHA_LINUX_X64}"
+              end
+              on_arm do
+                url "${BASE_URL}/scope-linux-arm64.tar.gz"
+                sha256 "${SHA_LINUX_ARM64}"
+              end
+            end
+
+            def install
+              bin.install "scope"
+            end
+
+            test do
+              assert_match "scope", shell_output("#{bin}/scope --version")
+            end
+          end
+          FORMULA
+
+      - name: Commit and push formula update
+        working-directory: homebrew-tap
+        env:
+          VERSION: ${{ steps.assets.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "robot-accomplice-bot"
+          git config user.email "bot@robot-accomplice.github.io"
+
+          if git diff --quiet -- scope.rb; then
+            echo "No changes to scope.rb; skipping commit."
+            exit 0
+          fi
+
+          git add scope.rb
+          git commit -m "scope: bump to v${VERSION}"
+          git push origin main
