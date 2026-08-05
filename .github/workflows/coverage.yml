@@ -26,7 +26,25 @@ jobs:
       - uses: taiki-e/install-action@cargo-tarpaulin
       
       - name: Generate coverage
-        run: cargo tarpaulin --verbose --all-features --workspace --timeout 120 --out xml
+        # cargo-tarpaulin's ptrace engine intermittently misreports a forked
+        # child process's exit as `Error: "Test failed during run"` even when
+        # every test passes (0 failed). The authoritative correctness gate is
+        # the CI "Test" job, so retrying here only absorbs that flake and can
+        # never mask a real test failure. Bounded to 3 attempts.
+        run: |
+          for attempt in 1 2 3; do
+            echo "::group::tarpaulin (attempt ${attempt}/3)"
+            if cargo tarpaulin --verbose --all-features --workspace --timeout 120 --out xml; then
+              echo "::endgroup::"
+              echo "Coverage generated on attempt ${attempt}."
+              exit 0
+            fi
+            echo "::endgroup::"
+            echo "::warning::tarpaulin attempt ${attempt} failed; retrying after 5s"
+            sleep 5
+          done
+          echo "::error::tarpaulin failed after 3 attempts"
+          exit 1
       
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v6
