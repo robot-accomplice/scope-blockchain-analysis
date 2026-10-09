@@ -62,6 +62,8 @@ cargo install scope-bca
 Or install with Homebrew (macOS and Linux, prebuilt binaries):
 
 ```bash
+# Homebrew loads formulae from a third-party tap only after you trust it
+brew trust --formula robot-accomplice/tap/scope
 brew install robot-accomplice/tap/scope
 ```
 
