@@ -145,7 +145,6 @@ pub async fn run(
                 let volume_24h = Some(best_pair.volume_24h);
                 Some(MarketSummary::from_order_book(
                     &book,
-                    1.0,
                     &thresholds,
                     volume_24h,
                 ))
@@ -181,7 +180,6 @@ pub async fn run(
                             };
                             Some(MarketSummary::from_order_book(
                                 &book,
-                                1.0,
                                 &thresholds,
                                 volume_24h,
                             ))
@@ -862,6 +860,71 @@ mod tests {
         };
 
         let result = run(args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    fn dex_market_args(venue: &str) -> TokenHealthArgs {
+        TokenHealthArgs {
+            token: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+            chain: "ethereum".to_string(),
+            with_market: true,
+            venue: venue.to_string(),
+            format: OutputFormat::Json,
+            health: Default::default(),
+        }
+    }
+
+    fn pair_with_liquidity(liquidity_usd: f64) -> DexPair {
+        DexPair {
+            dex_name: "Uniswap V3".to_string(),
+            pair_address: format!("0xpair{liquidity_usd}"),
+            base_token: "USDC".to_string(),
+            quote_token: "USDT".to_string(),
+            price_usd: 1.0,
+            volume_24h: 1_000.0,
+            liquidity_usd,
+            price_change_24h: 0.0,
+            buys_24h: 0,
+            sells_24h: 0,
+            buys_6h: 0,
+            sells_6h: 0,
+            buys_1h: 0,
+            sells_1h: 0,
+            pair_created_at: None,
+            url: None,
+        }
+    }
+
+    /// Several pools: the market section picks the deepest one.
+    #[tokio::test]
+    async fn test_run_token_health_dex_market_multiple_pairs() {
+        let mut factory = MockClientFactory::new();
+        factory.mock_dex.token_data = Some(make_test_dex_token_data(vec![
+            pair_with_liquidity(1_000.0),
+            pair_with_liquidity(90_000.0),
+            pair_with_liquidity(5_000.0),
+        ]));
+        let result = run(dex_market_args("eth"), &Config::default(), &factory).await;
+        assert!(result.is_ok());
+    }
+
+    /// Missing market data only warns: the token report must still succeed.
+    #[tokio::test]
+    async fn test_run_token_health_dex_market_chain_mismatch_still_reports() {
+        let mut factory = MockClientFactory::new();
+        factory.mock_dex.token_data =
+            Some(make_test_dex_token_data(vec![pair_with_liquidity(1_000.0)]));
+        // Token is on ethereum; the solana venue cannot price it.
+        let result = run(dex_market_args("solana"), &Config::default(), &factory).await;
+        assert!(result.is_ok());
+    }
+
+    /// No DEX pools only warns: the token report must still succeed.
+    #[tokio::test]
+    async fn test_run_token_health_dex_market_no_pairs_still_reports() {
+        let mut factory = MockClientFactory::new();
+        factory.mock_dex.token_data = Some(make_test_dex_token_data(vec![]));
+        let result = run(dex_market_args("eth"), &Config::default(), &factory).await;
         assert!(result.is_ok());
     }
 

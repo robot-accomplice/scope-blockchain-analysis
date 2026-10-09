@@ -163,14 +163,14 @@ pub struct MarketSummary {
 }
 
 impl MarketSummary {
-    /// Build summary from order book with given peg and thresholds.
+    /// Build summary from order book; the peg is `thresholds.peg_target`.
     /// Optionally includes 24h volume (from venue ticker) and execution estimates for 10k USDT.
     pub fn from_order_book(
         book: &OrderBook,
-        peg_target: f64,
         thresholds: &HealthThresholds,
         volume_24h: Option<f64>,
     ) -> Self {
+        let peg_target = thresholds.peg_target;
         let price_lo = peg_target - thresholds.peg_range * 5.0;
         let price_hi = peg_target + thresholds.peg_range * 5.0;
 
@@ -530,7 +530,7 @@ mod tests {
     }
 
     fn summarize(book: &OrderBook) -> MarketSummary {
-        MarketSummary::from_order_book(book, 1.0, &HealthThresholds::default(), None)
+        MarketSummary::from_order_book(book, &HealthThresholds::default(), None)
     }
 
     fn failed(summary: &MarketSummary) -> Vec<String> {
@@ -553,6 +553,24 @@ mod tests {
         assert_eq!(summary.asks.len(), 10);
         assert!(summary.bid_depth > 3000.0);
         assert!(summary.ask_depth > 3000.0);
+    }
+
+    #[test]
+    fn test_peg_comes_from_thresholds() {
+        // Asks at 1.0001+ are below a 1.01 peg, so the peg check must fail.
+        // Before, callers passed a literal 1.0 and --peg had no effect.
+        let thresholds = HealthThresholds {
+            peg_target: 1.01,
+            peg_range: 0.01,
+            ..HealthThresholds::default()
+        };
+        let summary = MarketSummary::from_order_book(&healthy_book(), &thresholds, None);
+        assert_eq!(summary.peg_target, 1.01);
+        assert!(
+            failed(&summary).iter().any(|m| m.contains("below peg")),
+            "{:?}",
+            failed(&summary)
+        );
     }
 
     #[test]
@@ -660,8 +678,7 @@ mod tests {
                 quantity: 100.0,
             }],
         };
-        let summary =
-            MarketSummary::from_order_book(&book, 1.0, &HealthThresholds::default(), None);
+        let summary = MarketSummary::from_order_book(&book, &HealthThresholds::default(), None);
         let out = summary.format_text(Some("biconomy"));
         assert!(out.contains("biconomy"));
         assert!(out.contains("Venue"));
@@ -677,8 +694,7 @@ mod tests {
             }],
             asks: vec![],
         };
-        let summary =
-            MarketSummary::from_order_book(&book, 1.0, &HealthThresholds::default(), None);
+        let summary = MarketSummary::from_order_book(&book, &HealthThresholds::default(), None);
         let out = summary.format_text(None);
         assert!(out.contains("X/Y"));
         assert!(!out.contains("Venue"));
@@ -704,8 +720,7 @@ mod tests {
             ],
         };
 
-        let summary =
-            MarketSummary::from_order_book(&book, 1.0, &HealthThresholds::default(), None);
+        let summary = MarketSummary::from_order_book(&book, &HealthThresholds::default(), None);
 
         assert!(!summary.healthy);
         let has_fail = summary
@@ -740,12 +755,8 @@ mod tests {
                 },
             ],
         };
-        let summary = MarketSummary::from_order_book(
-            &book,
-            1.0,
-            &HealthThresholds::default(),
-            Some(50_000.0),
-        );
+        let summary =
+            MarketSummary::from_order_book(&book, &HealthThresholds::default(), Some(50_000.0));
         let out = summary.format_text(Some("binance"));
         assert!(out.contains("Volume (24h)"));
         assert!(out.contains("50000"));
@@ -796,8 +807,7 @@ mod tests {
             ],
             asks,
         };
-        let summary =
-            MarketSummary::from_order_book(&book, 1.0, &HealthThresholds::default(), None);
+        let summary = MarketSummary::from_order_book(&book, &HealthThresholds::default(), None);
         let out = summary.format_text(None);
         assert!(
             out.contains("outliers excl.") || summary.ask_outliers > 0 || summary.bid_outliers > 0
@@ -819,8 +829,7 @@ mod tests {
                 quantity: 20_000.0,
             }],
         };
-        let summary =
-            MarketSummary::from_order_book(&book, 1.0, &HealthThresholds::default(), None);
+        let summary = MarketSummary::from_order_book(&book, &HealthThresholds::default(), None);
         let out = summary.format_text(Some("cex"));
         assert!(out.contains("Exec 10K buy"));
         assert!(out.contains("Exec 10K sell"));
@@ -854,8 +863,7 @@ mod tests {
                 },
             ],
         };
-        let summary =
-            MarketSummary::from_order_book(&book, 1.0, &HealthThresholds::default(), None);
+        let summary = MarketSummary::from_order_book(&book, &HealthThresholds::default(), None);
         let out = summary.format_text(None);
         assert!(summary.bid_outliers > 0);
         assert!(out.contains("outliers excl."));

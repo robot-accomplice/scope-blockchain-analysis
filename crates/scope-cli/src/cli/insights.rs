@@ -398,7 +398,7 @@ pub async fn run(
                             None
                         };
                         let summary =
-                            MarketSummary::from_order_book(&book, 1.0, &thresholds, volume_24h);
+                            MarketSummary::from_order_book(&book, &thresholds, volume_24h);
                         let deviation_bps = summary
                             .mid_price
                             .map(|m| (m - 1.0) * 10_000.0)

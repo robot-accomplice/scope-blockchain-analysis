@@ -129,12 +129,7 @@ pub async fn handle(
                 } else {
                     None
                 };
-                let summary = MarketSummary::from_order_book(
-                    &book,
-                    thresholds.peg_target,
-                    &thresholds,
-                    volume_24h,
-                );
+                let summary = MarketSummary::from_order_book(&book, &thresholds, volume_24h);
                 Json(summary_to_json(&summary)).into_response()
             }
             Err(e) => (
@@ -176,12 +171,8 @@ pub async fn handle(
                     .unwrap();
                 let book =
                     order_book_from_analytics(venue_chain, best_pair, &analytics.token.symbol);
-                let summary = MarketSummary::from_order_book(
-                    &book,
-                    thresholds.peg_target,
-                    &thresholds,
-                    Some(best_pair.volume_24h),
-                );
+                let summary =
+                    MarketSummary::from_order_book(&book, &thresholds, Some(best_pair.volume_24h));
                 Json(summary_to_json(&summary)).into_response()
             }
             Err(e) => (
@@ -513,7 +504,7 @@ mod tests {
         };
         let thresholds = scope::market::HealthThresholds::default();
         let summary =
-            scope::market::MarketSummary::from_order_book(&book, 1.0, &thresholds, Some(50_000.0));
+            scope::market::MarketSummary::from_order_book(&book, &thresholds, Some(50_000.0));
         let json = summary_to_json(&summary);
 
         assert_eq!(json["pair"], "USDC/USDT");

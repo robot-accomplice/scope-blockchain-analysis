@@ -105,7 +105,6 @@ pub async fn handle(
                         };
                         Some(MarketSummary::from_order_book(
                             &book,
-                            1.0,
                             &thresholds,
                             volume_24h,
                         ))
@@ -134,7 +133,6 @@ pub async fn handle(
                 let volume_24h = Some(best_pair.volume_24h);
                 Some(MarketSummary::from_order_book(
                     &book,
-                    1.0,
                     &thresholds,
                     volume_24h,
                 ))

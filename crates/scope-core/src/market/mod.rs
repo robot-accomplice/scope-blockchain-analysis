@@ -23,7 +23,7 @@
 //!     let exchange = registry.create_exchange_client("binance")?;
 //!     let pair = exchange.format_pair("USDC");
 //!     let book = exchange.fetch_order_book(&pair).await?;
-//!     let summary = MarketSummary::from_order_book(&book, 1.0, &HealthThresholds::default(), None);
+//!     let summary = MarketSummary::from_order_book(&book, &HealthThresholds::default(), None);
 //!     print!("{}", summary.format_text(Some("binance")));
 //!     Ok(())
 //! }

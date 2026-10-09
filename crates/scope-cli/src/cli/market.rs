@@ -503,8 +503,7 @@ async fn run_summary_once(
     }
 
     let (book, volume_24h) = fetch_book_and_volume(args, factory).await?;
-    let summary =
-        MarketSummary::from_order_book(&book, thresholds.peg_target, thresholds, volume_24h);
+    let summary = MarketSummary::from_order_book(&book, thresholds, volume_24h);
 
     let venue_label = args.venue.clone();
 
@@ -1833,42 +1832,6 @@ capabilities:
         );
     }
 
-    #[tokio::test]
-    async fn test_run_summary_one_shot_with_report() {
-        let report_dir = tempfile::tempdir().unwrap();
-        let report_path = report_dir.path().join("report.md");
-        let args = SummaryArgs {
-            pair: "USDC".to_string(),
-            venue: "eth".to_string(),
-            chain: "ethereum".to_string(),
-            health: HealthArgs {
-                peg_target: Some(1.0),
-                peg_range: Some(0.01),
-                min_levels: Some(1),
-                min_depth: Some(50.0),
-                min_bid_ask_ratio: Some(0.1),
-                max_bid_ask_ratio: Some(10.0),
-                ..Default::default()
-            },
-            format: SummaryFormat::Text,
-            every: None,
-            duration: None,
-            report: Some(report_path.clone()),
-            csv: None,
-        };
-        let http: std::sync::Arc<dyn scope::http::HttpClient> =
-            std::sync::Arc::new(scope::http::NativeHttpClient::new().unwrap());
-        let factory = DefaultClientFactory {
-            chains_config: Default::default(),
-            http,
-        };
-        let result = run_summary(args, &Config::default(), &factory).await;
-        if result.is_ok() {
-            let content = std::fs::read_to_string(&report_path).unwrap();
-            assert!(content.contains("Market Health Report"));
-        }
-    }
-
     // ====================================================================
     // MarketCommands and struct Debug/construction
     // ====================================================================
@@ -1993,5 +1956,143 @@ capabilities:
         };
         assert_eq!(args.pair, "USDC");
         assert_eq!(args.venue, "binance");
+    }
+
+    // ------------------------------------------------------------------
+    // Offline DEX-path tests (mock factory, no network)
+    // ------------------------------------------------------------------
+
+    const USDC_ADDR: &str = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
+
+    /// Mock factory whose DEX data has the given pairs (liquidity, volume).
+    fn dex_factory(pairs: &[(f64, f64)]) -> scope::chains::mocks::MockClientFactory {
+        let mut factory = scope::chains::mocks::MockClientFactory::new();
+        let data = factory.mock_dex.token_data.as_mut().unwrap();
+        data.symbol = "USDC".to_string();
+        data.pairs = pairs
+            .iter()
+            .enumerate()
+            .map(|(i, &(liquidity_usd, volume_24h))| scope::chains::DexPair {
+                dex_name: format!("DEX {i}"),
+                pair_address: format!("0xpair{i}"),
+                base_token: "USDC".to_string(),
+                quote_token: "USDT".to_string(),
+                price_usd: 1.0,
+                volume_24h,
+                liquidity_usd,
+                price_change_24h: 0.0,
+                buys_24h: 0,
+                sells_24h: 0,
+                buys_6h: 0,
+                sells_6h: 0,
+                buys_1h: 0,
+                sells_1h: 0,
+                pair_created_at: None,
+                url: None,
+            })
+            .collect();
+        factory
+    }
+
+    fn dex_args(format: SummaryFormat) -> SummaryArgs {
+        SummaryArgs {
+            pair: USDC_ADDR.to_string(),
+            venue: "eth".to_string(),
+            chain: "ethereum".to_string(),
+            health: HealthArgs::default(),
+            format,
+            every: None,
+            duration: None,
+            report: None,
+            csv: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dex_book_uses_most_liquid_pair() {
+        // The synthetic book must come from the deepest pool, not the first one.
+        let factory = dex_factory(&[(1_000.0, 10.0), (50_000.0, 777.0), (2_000.0, 20.0)]);
+        let (book, volume) = fetch_book_and_volume(&dex_args(SummaryFormat::Text), &factory)
+            .await
+            .unwrap();
+        assert_eq!(volume, Some(777.0));
+        let depth: f64 = book.bids.iter().chain(&book.asks).map(|l| l.value()).sum();
+        assert!((depth - 50_000.0).abs() < 1.0, "depth {depth}");
+    }
+
+    #[tokio::test]
+    async fn test_dex_no_pairs_is_error() {
+        let factory = dex_factory(&[]);
+        let err = fetch_book_and_volume(&dex_args(SummaryFormat::Text), &factory)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("No DEX pairs found"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_run_summary_once_json_reflects_resolved_thresholds() {
+        let factory = dex_factory(&[(50_000.0, 1_000.0)]);
+        let mut args = dex_args(SummaryFormat::Json);
+        // A one-level synthetic book is healthy only with loosened thresholds.
+        args.health = HealthArgs {
+            min_levels: Some(1),
+            min_top10_depth: Some(1.0),
+            ..Default::default()
+        };
+        let thresholds = args.health.resolve(&Config::default());
+        let summary = run_summary_once(&args, &factory, &thresholds, Some(1))
+            .await
+            .unwrap();
+        assert!(summary.healthy, "{:?}", summary.checks);
+
+        let strict = HealthThresholds::default();
+        let summary = run_summary_once(&args, &factory, &strict, None)
+            .await
+            .unwrap();
+        assert!(!summary.healthy);
+    }
+
+    #[tokio::test]
+    async fn test_run_summary_one_shot_writes_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let report = dir.path().join("report.md");
+        let factory = dex_factory(&[(50_000.0, 1_000.0)]);
+        let mut args = dex_args(SummaryFormat::Text);
+        args.report = Some(report.clone());
+        run_summary(args, &Config::default(), &factory)
+            .await
+            .unwrap();
+        let md = std::fs::read_to_string(&report).unwrap();
+        assert!(md.contains("Market Health Report"), "{md}");
+        assert!(md.contains(USDC_ADDR), "{md}");
+    }
+
+    #[tokio::test]
+    async fn test_run_summary_repeat_mode_writes_csv_rows_and_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv = dir.path().join("series.csv");
+        let report = dir.path().join("final.md");
+        let factory = dex_factory(&[(50_000.0, 1_000.0)]);
+        let mut args = dex_args(SummaryFormat::Json);
+        args.every = Some("1s".to_string());
+        args.duration = Some("1s".to_string());
+        args.csv = Some(csv.clone());
+        args.report = Some(report.clone());
+        run_summary(args, &Config::default(), &factory)
+            .await
+            .unwrap();
+
+        let body = std::fs::read_to_string(&csv).unwrap();
+        let mut lines = body.lines();
+        assert_eq!(
+            lines.next(),
+            Some("timestamp,run,best_bid,best_ask,mid_price,spread,bid_depth,ask_depth,healthy")
+        );
+        // One run at t=0, one after the 1s sleep: the loop must not stop early.
+        let rows: Vec<_> = lines.collect();
+        assert_eq!(rows.len(), 2, "{body}");
+        assert!(rows[0].split(',').nth(1) == Some("1"));
+        assert!(rows[1].split(',').nth(1) == Some("2"));
+        assert!(report.exists());
     }
 }
