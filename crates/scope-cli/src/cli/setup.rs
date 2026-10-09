@@ -1591,8 +1591,8 @@ mod tests {
 
     #[test]
     fn test_which_ghola_returns_bool() {
-        let result = which_ghola();
-        assert!(result == true || result == false);
+        // Smoke test: the result depends on the host; the probe must not panic.
+        let _ = which_ghola();
     }
 
     #[test]
