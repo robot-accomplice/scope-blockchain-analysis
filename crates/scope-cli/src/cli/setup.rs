@@ -503,7 +503,7 @@ fn run_setup_wizard_impl(
     .map_err(|e| ScopeError::Io(e.to_string()))?;
     writeln!(
         writer,
-        "║                    Scope Setup Wizard                          ║"
+        "║                    Scope Setup Wizard                        ║"
     )
     .map_err(|e| ScopeError::Io(e.to_string()))?;
     writeln!(
