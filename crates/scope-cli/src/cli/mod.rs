@@ -41,7 +41,7 @@
 //!   report       Batch and combined reports
 //!
 //! Config & interactive:
-//!   interactive  REPL with preserved context (alias: shell)
+//!   interactive  REPL with preserved context (alias: tui, shell)
 //!   setup        Configure API keys and preferences (alias: config)
 //!   completions  Generate shell completions for bash/zsh/fish
 //!
@@ -260,7 +260,7 @@ pub enum Commands {
     ///
     /// Launch a REPL where chain, format, and other settings persist
     /// between commands for faster workflow.
-    #[command(visible_alias = "shell")]
+    #[command(visible_aliases = ["tui", "shell"])]
     Interactive(InteractiveArgs),
 
     /// Configure Scope settings and API keys.
@@ -456,6 +456,14 @@ mod tests {
     #[test]
     fn test_cli_parse_interactive_command() {
         let cli = Cli::try_parse_from(["scope", "interactive"]).unwrap();
+
+        assert!(matches!(cli.command, Commands::Interactive(_)));
+    }
+
+    #[test]
+    fn test_cli_parse_tui_alias() {
+        // `scope tui` is the short name for interactive mode (#47).
+        let cli = Cli::try_parse_from(["scope", "tui"]).unwrap();
 
         assert!(matches!(cli.command, Commands::Interactive(_)));
     }

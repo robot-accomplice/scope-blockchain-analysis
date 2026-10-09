@@ -189,6 +189,7 @@ scope --ai address 0x742d...
 
 # Interactive mode (includes live monitor, portfolio, and all commands)
 scope interactive
+scope tui          # same as `scope interactive`
 ```
 
 ### Browser Mode
