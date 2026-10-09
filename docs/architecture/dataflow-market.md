@@ -67,8 +67,11 @@ flowchart TB
 |-------|-------------|
 | No sells below peg | Ask levels below peg_target flagged |
 | Bid/ask ratio | Depth ratio within min/max |
-| Min levels | At least N levels per side |
-| Min depth | Total depth ≥ threshold |
+| Min levels | At least N valid levels (price > 0, qty > 0) per side (default 10) |
+| Max spread | Best valid bid/ask spread ≤ N% of mid (default 3%) |
+| Min depth | Total in-band depth ≥ threshold (default 3000) |
+| Top-3 depth | Sum of top 3 valid levels ≥ threshold per side (default 300) |
+| Top-10 depth | Sum of top 10 valid levels ≥ threshold per side (default 2000) |
 
 ## Volume & Execution
 

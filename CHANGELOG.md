@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-09
+
+### Changed (breaking)
+- **Stricter default order book health rules.** A book is healthy only when each side meets all of these defaults:
+  - 10 or more valid levels. A valid level has a price above 0 and a quantity above 0. The previous minimum was 6 levels.
+  - A best bid/ask spread of 3% of mid or less.
+  - 300 USDT or more in the top 3 valid levels.
+  - 2,000 USDT or more in the top 10 valid levels.
+
+  The existing checks stay: no sells below peg, bid/ask ratio 0.2–5.0x, and total in-band depth of 3,000 USDT. Markets with 6 to 9 levels that were healthy before are now unhealthy.
+- **`MarketSummary::from_order_book` signature (`scope-bca-core`).** The `peg_target` argument is removed. The peg now comes only from `HealthThresholds::peg_target`. Callers change `from_order_book(&book, peg, &thresholds, vol)` to `from_order_book(&book, &thresholds, vol)`.
+- **`HealthThresholds` has three new fields:** `max_spread_pct`, `min_top3_depth`, and `min_top10_depth`. Struct literals must set them or use `..HealthThresholds::default()`.
+
+### Added
+- **All 9 health thresholds are overridable on every surface.** The order of precedence is: CLI flag or web request field, then `market.health` in `config.yaml`, then the built-in default.
+  - New config section `market.health`. Keys that you do not set keep the built-in default.
+  - New CLI flags `--max-spread-pct`, `--min-top3-depth`, and `--min-top10-depth`.
+  - `token-health --with-market` and `insights` now accept the same 9 threshold flags as `market summary`.
+  - Web `/api/market` and `/api/token-health` accept all 9 threshold keys in the JSON body. Before, `/api/market` accepted 4 and `/api/token-health` accepted none.
+  - `--help` shows the built-in default for each threshold flag.
+
+### Fixed
+- **`--peg` had no effect** on `token-health` (CLI and web) and `insights`. These paths passed a fixed peg of 1.0.
+- **Clippy on Rust 1.99:** updated `async-trait` to 0.1.92 (`double_must_use`), and removed always-true test assertions (`bool_comparison`).
+- **Security advisories:** updated `h2` to 0.4.20 (RUSTSEC-2026-0258) and `rustls` to 0.23.45 (RUSTSEC-2026-0285).
+- **Coverage depended on the network.** Market summary, token-health market, and Etherscan source parsing now have offline tests on mock clients. One live-API test that could not fail is removed.
+
 ## [0.5.6] - 2026-04-20
 
 ### Fixed
@@ -243,7 +270,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Configuration system with YAML support
 - Support for ERC-20, SPL, and TRC-20 tokens
 
-[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.6.0...HEAD
 [0.4.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.3.1...v0.4.0
 [1.0.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.3.1...v1.0.0
 [0.3.1]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.3.0...v0.3.1
@@ -252,3 +279,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.2.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.1.0...v0.2.0
 [0.2.1]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.2.0...v0.2.1
 [0.2.2]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.2.1...v0.2.2
+[0.6.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.5.6...v0.6.0

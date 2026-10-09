@@ -37,6 +37,18 @@
 //!   enabled: false        # route HTTP through Ghola sidecar
 //!   stealth: false        # apply temporal drift + ghost signing
 //!   buffer_size: 4096     # read buffer for large response headers
+//!
+//! market:
+//!   health:               # order book health thresholds; omitted keys keep defaults
+//!     min_levels: 10      # valid levels (price > 0, qty > 0) per side
+//!     max_spread_pct: 3.0 # best bid/ask spread, % of mid
+//!     min_top3_depth: 300
+//!     min_top10_depth: 2000
+//!     min_depth: 3000     # total in-band depth per side
+//!     peg_target: 1.0
+//!     peg_range: 0.001
+//!     min_bid_ask_ratio: 0.2
+//!     max_bid_ask_ratio: 5.0
 //! ```
 //!
 //! ## Error Handling
@@ -45,6 +57,7 @@
 //! context about which source caused the failure.
 
 use crate::error::{ConfigError, Result, ScopeError};
+use crate::market::HealthThresholds;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -85,6 +98,9 @@ pub struct Config {
 
     /// Web server configuration.
     pub web: WebConfig,
+
+    /// Market analysis configuration (order book health thresholds).
+    pub market: MarketConfig,
 }
 
 /// Blockchain client configuration.
@@ -187,6 +203,14 @@ impl Default for GholaConfig {
             buffer_size: 4096,
         }
     }
+}
+
+/// Market analysis configuration.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct MarketConfig {
+    /// Order book health thresholds. Keys left out keep the built-in default.
+    pub health: HealthThresholds,
 }
 
 /// Web server configuration.
@@ -759,6 +783,31 @@ chains:
         assert!(config.chains.api_keys.is_empty());
         assert_eq!(config.output.format, OutputFormat::Table);
         assert!(config.output.color);
+        assert_eq!(config.market.health, HealthThresholds::default());
+    }
+
+    #[test]
+    fn test_load_market_health_overrides_only_given_keys() {
+        let yaml = r#"
+market:
+  health:
+    min_levels: 20
+    max_spread_pct: 1.5
+"#;
+
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(yaml.as_bytes()).unwrap();
+
+        let config = Config::load(Some(file.path())).unwrap();
+        let health = &config.market.health;
+
+        assert_eq!(health.min_levels, 20);
+        assert_eq!(health.max_spread_pct, 1.5);
+        // Keys not in the file keep the built-in default.
+        let defaults = HealthThresholds::default();
+        assert_eq!(health.min_top3_depth, defaults.min_top3_depth);
+        assert_eq!(health.min_top10_depth, defaults.min_top10_depth);
+        assert_eq!(health.min_depth, defaults.min_depth);
     }
 
     #[test]

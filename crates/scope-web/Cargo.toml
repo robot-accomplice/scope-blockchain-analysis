@@ -28,10 +28,10 @@ path = "src/main.rs"
 [dependencies]
 # Core library (same `use scope::*` import path). Version pin required for
 # crates.io publish; bump with the workspace version on each release.
-scope = { path = "../scope-core", package = "scope-bca-core", version = "0.5.6" }
+scope = { path = "../scope-core", package = "scope-bca-core", version = "0.6.0" }
 
 # CLI library (for shared handler functions & data types).
-scope_cli = { path = "../scope-cli", package = "scope-bca-cli", version = "0.5.6" }
+scope_cli = { path = "../scope-cli", package = "scope-bca-cli", version = "0.6.0" }
 
 # Web framework
 axum = { version = "0.7", features = ["json", "ws", "macros"] }

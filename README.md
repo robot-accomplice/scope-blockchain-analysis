@@ -981,9 +981,19 @@ The `scope market` command has three subcommands:
 - **Volume**: 24h quote volume (from venue ticker; omitted for DEX venues)
 - **Execution**: Simulated 10k USDT buy/sell slippage or "insufficient liquidity"
 - **Order book**: Ask/bid levels with depth (base and quote amounts)
-- **Health checks**: No sells below peg, bid/ask ratio, minimum levels and depth per side
+- **Health checks**: No sells below peg, bid/ask ratio, spread, minimum valid levels, total depth, and top-3/top-10 depth per side
 - **Output**: Text (default) or JSON; see [Output Examples](#output-examples) for sample
-- **Tunable thresholds**: All health-check thresholds are configurable. Defaults (min-levels=6, min-depth=3000, peg-range=0.001, bid/ask ratio 0.2-5.0x) are sensible stablecoin defaults; override for other markets.
+- **Tunable thresholds**: All 9 health-check thresholds are overridable defaults. Built-in defaults: min-levels=10, max-spread-pct=3, min-top3-depth=300, min-top10-depth=2000, min-depth=3000, peg-range=0.001, bid/ask ratio 0.2-5.0x. Order of precedence: CLI flag or web request field > `market.health` in `config.yaml` > built-in default. The same flags work on `market summary`, `token-health --with-market`, and `insights`. The web `/api/market` and `/api/token-health` endpoints accept the same keys (snake_case) in the JSON body.
+
+```yaml
+# ~/.config/scope/config.yaml — omitted keys keep the built-in default
+market:
+  health:
+    min_levels: 10
+    max_spread_pct: 3.0
+    min_top3_depth: 300
+    min_top10_depth: 2000
+```
 
 ```bash
 scope market summary                           # USDC on Binance (default, one shot)

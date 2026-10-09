@@ -1,42 +1,126 @@
 //! Order book health analysis and market summary.
 //!
 //! Provides configurable health checks for stablecoin market monitoring:
-//! peg deviation, spread, bid/ask balance, and minimum depth thresholds.
+//! peg deviation, spread, bid/ask balance, level count, and depth thresholds.
 
 use super::types::{ExecutionEstimate, HealthCheck, OrderBook, OrderBookLevel};
+use serde::{Deserialize, Serialize};
+
+/// Default peg target (USD stablecoins).
+pub const DEFAULT_PEG_TARGET: f64 = 1.0;
+/// Default peg range for outlier filtering (peg ± range×5).
+pub const DEFAULT_PEG_RANGE: f64 = 0.001;
+/// Default minimum valid levels per side.
+pub const DEFAULT_MIN_LEVELS: usize = 10;
+/// Default minimum in-band depth per side (quote, e.g. USDT).
+pub const DEFAULT_MIN_DEPTH: f64 = 3000.0;
+/// Default bid/ask ratio floor.
+pub const DEFAULT_MIN_BID_ASK_RATIO: f64 = 0.2;
+/// Default bid/ask ratio ceiling.
+pub const DEFAULT_MAX_BID_ASK_RATIO: f64 = 5.0;
+/// Default maximum best-bid/best-ask spread, in percent of mid price.
+pub const DEFAULT_MAX_SPREAD_PCT: f64 = 3.0;
+/// Default minimum depth of the top 3 valid levels per side (quote).
+pub const DEFAULT_MIN_TOP3_DEPTH: f64 = 300.0;
+/// Default minimum depth of the top 10 valid levels per side (quote).
+pub const DEFAULT_MIN_TOP10_DEPTH: f64 = 2000.0;
+
+/// Number of levels summed for the top-3 depth check.
+pub const TOP3_LEVELS: usize = 3;
+/// Number of levels summed for the top-10 depth check.
+pub const TOP10_LEVELS: usize = 10;
 
 /// Health check thresholds for order book validation.
 ///
-/// Default values (min_levels=6, min_depth=3000, peg_range=0.001) are sensible
-/// stablecoin defaults. Override via CLI (`--min-levels`,
-/// `--min-depth`, `--peg-range`, `--min-bid-ask-ratio`, `--max-bid-ask-ratio`).
-#[derive(Debug, Clone)]
+/// Built-in defaults are the `DEFAULT_*` constants in this module. The
+/// `market.health` section of the config file replaces any of them, and
+/// [`HealthOverrides`] (CLI flags, web request fields) replaces the result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct HealthThresholds {
     /// Peg target (e.g., 1.0 for USD stablecoins).
     pub peg_target: f64,
     /// Price range for "near peg" orders (outliers excluded outside peg ± range×5).
     pub peg_range: f64,
-    /// Minimum levels per side.
+    /// Minimum valid levels (price > 0, quantity > 0) per side.
     pub min_levels: usize,
-    /// Minimum depth per side in quote terms (e.g., USDT).
+    /// Minimum in-band depth per side in quote terms (e.g., USDT).
     pub min_depth: f64,
     /// Bid/ask ratio below which to warn (bid side thin).
     pub min_bid_ask_ratio: f64,
     /// Bid/ask ratio above which to warn (ask side thin).
     pub max_bid_ask_ratio: f64,
+    /// Maximum spread between best valid bid and ask, in percent of mid price.
+    pub max_spread_pct: f64,
+    /// Minimum depth of the top 3 valid levels per side (quote).
+    pub min_top3_depth: f64,
+    /// Minimum depth of the top 10 valid levels per side (quote).
+    pub min_top10_depth: f64,
 }
 
 impl Default for HealthThresholds {
     fn default() -> Self {
         Self {
-            peg_target: 1.0,
-            peg_range: 0.001,
-            min_levels: 6,
-            min_depth: 3000.0,
-            min_bid_ask_ratio: 0.2,
-            max_bid_ask_ratio: 5.0,
+            peg_target: DEFAULT_PEG_TARGET,
+            peg_range: DEFAULT_PEG_RANGE,
+            min_levels: DEFAULT_MIN_LEVELS,
+            min_depth: DEFAULT_MIN_DEPTH,
+            min_bid_ask_ratio: DEFAULT_MIN_BID_ASK_RATIO,
+            max_bid_ask_ratio: DEFAULT_MAX_BID_ASK_RATIO,
+            max_spread_pct: DEFAULT_MAX_SPREAD_PCT,
+            min_top3_depth: DEFAULT_MIN_TOP3_DEPTH,
+            min_top10_depth: DEFAULT_MIN_TOP10_DEPTH,
         }
     }
+}
+
+/// Per-request threshold overrides. A `None` field keeps the base value.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HealthOverrides {
+    /// Peg target. The web API sends this as `peg`.
+    #[serde(alias = "peg")]
+    pub peg_target: Option<f64>,
+    pub peg_range: Option<f64>,
+    pub min_levels: Option<usize>,
+    pub min_depth: Option<f64>,
+    pub min_bid_ask_ratio: Option<f64>,
+    pub max_bid_ask_ratio: Option<f64>,
+    pub max_spread_pct: Option<f64>,
+    pub min_top3_depth: Option<f64>,
+    pub min_top10_depth: Option<f64>,
+}
+
+impl HealthThresholds {
+    /// Returns a copy of `self` with each `Some` field in `o` applied.
+    pub fn with_overrides(&self, o: &HealthOverrides) -> Self {
+        Self {
+            peg_target: o.peg_target.unwrap_or(self.peg_target),
+            peg_range: o.peg_range.unwrap_or(self.peg_range),
+            min_levels: o.min_levels.unwrap_or(self.min_levels),
+            min_depth: o.min_depth.unwrap_or(self.min_depth),
+            min_bid_ask_ratio: o.min_bid_ask_ratio.unwrap_or(self.min_bid_ask_ratio),
+            max_bid_ask_ratio: o.max_bid_ask_ratio.unwrap_or(self.max_bid_ask_ratio),
+            max_spread_pct: o.max_spread_pct.unwrap_or(self.max_spread_pct),
+            min_top3_depth: o.min_top3_depth.unwrap_or(self.min_top3_depth),
+            min_top10_depth: o.min_top10_depth.unwrap_or(self.min_top10_depth),
+        }
+    }
+}
+
+/// A level is valid when it has a positive price and quantity.
+fn is_valid_level(level: &OrderBookLevel) -> bool {
+    level.price > 0.0 && level.quantity > 0.0
+}
+
+/// Sum of quote value over the first `n` valid levels (book order = best first).
+fn top_n_depth(levels: &[OrderBookLevel], n: usize) -> f64 {
+    levels
+        .iter()
+        .filter(|l| is_valid_level(l))
+        .take(n)
+        .map(OrderBookLevel::value)
+        .sum()
 }
 
 /// Aggregated market summary with order book snapshot and health results.
@@ -79,14 +163,14 @@ pub struct MarketSummary {
 }
 
 impl MarketSummary {
-    /// Build summary from order book with given peg and thresholds.
+    /// Build summary from order book; the peg is `thresholds.peg_target`.
     /// Optionally includes 24h volume (from venue ticker) and execution estimates for 10k USDT.
     pub fn from_order_book(
         book: &OrderBook,
-        peg_target: f64,
         thresholds: &HealthThresholds,
         volume_24h: Option<f64>,
     ) -> Self {
+        let peg_target = thresholds.peg_target;
         let price_lo = peg_target - thresholds.peg_range * 5.0;
         let price_hi = peg_target + thresholds.peg_range * 5.0;
 
@@ -136,12 +220,34 @@ impl MarketSummary {
             checks.push(HealthCheck::Pass(format!("Bid/Ask ratio: {:.2}x", ratio)));
         }
 
+        let valid_bids = book.bids.iter().filter(|l| is_valid_level(l)).count();
+        let valid_asks = book.asks.iter().filter(|l| is_valid_level(l)).count();
+
+        // Spread between best valid bid and best valid ask
+        let best_valid_bid = book.bids.iter().find(|l| is_valid_level(l));
+        let best_valid_ask = book.asks.iter().find(|l| is_valid_level(l));
+        match (best_valid_bid, best_valid_ask) {
+            (Some(b), Some(a)) => {
+                let mid = (a.price + b.price) / 2.0;
+                let spread_pct = (a.price - b.price) / mid * 100.0;
+                let msg = format!(
+                    "Spread: {:.3}% (max {:.1}%)",
+                    spread_pct, thresholds.max_spread_pct
+                );
+                if spread_pct > thresholds.max_spread_pct {
+                    checks.push(HealthCheck::Fail(msg));
+                } else {
+                    checks.push(HealthCheck::Pass(msg));
+                }
+            }
+            _ => checks.push(HealthCheck::Fail("Spread: no valid bid or ask".to_string())),
+        }
+
         // Bid levels
-        if bids.len() < thresholds.min_levels {
+        if valid_bids < thresholds.min_levels {
             checks.push(HealthCheck::Fail(format!(
                 "Bid levels: {} < {} minimum",
-                bids.len(),
-                thresholds.min_levels
+                valid_bids, thresholds.min_levels
             )));
         }
 
@@ -154,11 +260,10 @@ impl MarketSummary {
         }
 
         // Ask levels
-        if asks.len() < thresholds.min_levels {
+        if valid_asks < thresholds.min_levels {
             checks.push(HealthCheck::Fail(format!(
                 "Ask levels: {} < {} minimum",
-                asks.len(),
-                thresholds.min_levels
+                valid_asks, thresholds.min_levels
             )));
         }
 
@@ -168,6 +273,21 @@ impl MarketSummary {
                 "Ask depth: {:.0} USDT < {:.0} USDT minimum",
                 ask_depth, thresholds.min_depth
             )));
+        }
+
+        // Top-N depth per side (valid levels, best first)
+        for (side, levels) in [("Bid", &book.bids), ("Ask", &book.asks)] {
+            for (n, min) in [
+                (TOP3_LEVELS, thresholds.min_top3_depth),
+                (TOP10_LEVELS, thresholds.min_top10_depth),
+            ] {
+                let depth = top_n_depth(levels, n);
+                if depth < min {
+                    checks.push(HealthCheck::Fail(format!(
+                        "{side} top-{n} depth: {depth:.0} USDT < {min:.0} USDT minimum"
+                    )));
+                }
+            }
         }
 
         let healthy = checks.iter().all(|c| matches!(c, HealthCheck::Pass(_)));
@@ -389,73 +509,160 @@ impl MarketSummary {
 mod tests {
     use super::*;
 
+    /// Side of `qtys.len()` levels stepping away from `start` by `step` per level.
+    fn side(start: f64, step: f64, qtys: &[f64]) -> Vec<OrderBookLevel> {
+        qtys.iter()
+            .enumerate()
+            .map(|(i, &quantity)| OrderBookLevel {
+                price: start + step * i as f64,
+                quantity,
+            })
+            .collect()
+    }
+
+    /// Book that passes every default check: 10 levels × 400 per side near peg.
+    fn healthy_book() -> OrderBook {
+        OrderBook {
+            pair: "USDC/USDT".to_string(),
+            bids: side(0.9999, -0.0001, &[400.0; 10]),
+            asks: side(1.0001, 0.0001, &[400.0; 10]),
+        }
+    }
+
+    fn summarize(book: &OrderBook) -> MarketSummary {
+        MarketSummary::from_order_book(book, &HealthThresholds::default(), None)
+    }
+
+    fn failed(summary: &MarketSummary) -> Vec<String> {
+        summary
+            .checks
+            .iter()
+            .filter_map(|c| match c {
+                HealthCheck::Fail(m) => Some(m.clone()),
+                HealthCheck::Pass(_) => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn test_market_summary_from_order_book() {
-        // Use quantities large enough to exceed min_depth (3000 USDT) per side
-        let book = OrderBook {
-            pair: "USDC/USDT".to_string(),
-            bids: vec![
-                OrderBookLevel {
-                    price: 0.9998,
-                    quantity: 600.0,
-                },
-                OrderBookLevel {
-                    price: 0.9997,
-                    quantity: 600.0,
-                },
-                OrderBookLevel {
-                    price: 0.9996,
-                    quantity: 600.0,
-                },
-                OrderBookLevel {
-                    price: 0.9995,
-                    quantity: 600.0,
-                },
-                OrderBookLevel {
-                    price: 0.9994,
-                    quantity: 600.0,
-                },
-                OrderBookLevel {
-                    price: 0.9993,
-                    quantity: 600.0,
-                },
-            ],
-            asks: vec![
-                OrderBookLevel {
-                    price: 1.0001,
-                    quantity: 600.0,
-                },
-                OrderBookLevel {
-                    price: 1.0002,
-                    quantity: 600.0,
-                },
-                OrderBookLevel {
-                    price: 1.0003,
-                    quantity: 600.0,
-                },
-                OrderBookLevel {
-                    price: 1.0004,
-                    quantity: 600.0,
-                },
-                OrderBookLevel {
-                    price: 1.0005,
-                    quantity: 600.0,
-                },
-                OrderBookLevel {
-                    price: 1.0006,
-                    quantity: 600.0,
-                },
-            ],
-        };
+        let summary = summarize(&healthy_book());
 
-        let thresholds = HealthThresholds::default();
-        let summary = MarketSummary::from_order_book(&book, 1.0, &thresholds, None);
-
-        assert!(summary.healthy);
-        assert_eq!(summary.bids.len(), 6);
-        assert_eq!(summary.asks.len(), 6);
+        assert!(summary.healthy, "{:?}", failed(&summary));
+        assert_eq!(summary.bids.len(), 10);
+        assert_eq!(summary.asks.len(), 10);
         assert!(summary.bid_depth > 3000.0);
         assert!(summary.ask_depth > 3000.0);
+    }
+
+    #[test]
+    fn test_peg_comes_from_thresholds() {
+        // Asks at 1.0001+ are below a 1.01 peg, so the peg check must fail.
+        // Before, callers passed a literal 1.0 and --peg had no effect.
+        let thresholds = HealthThresholds {
+            peg_target: 1.01,
+            peg_range: 0.01,
+            ..HealthThresholds::default()
+        };
+        let summary = MarketSummary::from_order_book(&healthy_book(), &thresholds, None);
+        assert_eq!(summary.peg_target, 1.01);
+        assert!(
+            failed(&summary).iter().any(|m| m.contains("below peg")),
+            "{:?}",
+            failed(&summary)
+        );
+    }
+
+    #[test]
+    fn test_default_criteria_values() {
+        // Pins the agreed "healthy" spec so a silent default change fails here.
+        let t = HealthThresholds::default();
+        assert_eq!(t.min_levels, 10);
+        assert_eq!(t.max_spread_pct, 3.0);
+        assert_eq!(t.min_top3_depth, 300.0);
+        assert_eq!(t.min_top10_depth, 2000.0);
+        assert_eq!(t.min_depth, 3000.0);
+    }
+
+    #[test]
+    fn test_nine_levels_is_unhealthy() {
+        let mut book = healthy_book();
+        // Keep total depth high so only the level-count rule can fail.
+        book.bids = side(0.9999, -0.0001, &[1000.0; 9]);
+        let summary = summarize(&book);
+        assert!(!summary.healthy);
+        assert_eq!(failed(&summary), vec!["Bid levels: 9 < 10 minimum"]);
+    }
+
+    #[test]
+    fn test_zero_quantity_level_is_not_valid() {
+        let mut book = healthy_book();
+        book.asks[9].quantity = 0.0;
+        book.asks.push(OrderBookLevel {
+            price: 1.0011,
+            quantity: 0.0,
+        });
+        let summary = summarize(&book);
+        assert!(
+            failed(&summary).contains(&"Ask levels: 9 < 10 minimum".to_string()),
+            "{:?}",
+            failed(&summary)
+        );
+    }
+
+    #[test]
+    fn test_spread_over_three_percent_is_unhealthy() {
+        let mut book = healthy_book();
+        // Best ask 1.0400 vs best bid 0.9999: ~3.94% of mid.
+        book.asks = side(1.04, 0.0001, &[400.0; 10]);
+        let summary = summarize(&book);
+        assert!(!summary.healthy);
+        assert!(
+            failed(&summary).iter().any(|m| m.starts_with("Spread:")),
+            "{:?}",
+            failed(&summary)
+        );
+    }
+
+    #[test]
+    fn test_spread_under_three_percent_passes_spread_check() {
+        let mut book = healthy_book();
+        // Best ask 1.0200 vs best bid 0.9999: ~1.98% of mid.
+        book.asks = side(1.02, 0.0001, &[400.0; 10]);
+        let summary = summarize(&book);
+        assert!(
+            !failed(&summary).iter().any(|m| m.starts_with("Spread:")),
+            "{:?}",
+            failed(&summary)
+        );
+    }
+
+    #[test]
+    fn test_thin_top3_is_unhealthy_even_with_deep_book() {
+        let mut book = healthy_book();
+        // Top 3 hold ~150 USDT; levels 4-10 hold 3500, so only top-3 fails.
+        let mut qtys = vec![50.0; 3];
+        qtys.extend([500.0; 7]);
+        book.bids = side(0.9999, -0.0001, &qtys);
+        let summary = summarize(&book);
+        assert_eq!(
+            failed(&summary),
+            vec!["Bid top-3 depth: 150 USDT < 300 USDT minimum"]
+        );
+    }
+
+    #[test]
+    fn test_top10_counts_only_first_ten_levels() {
+        let mut book = healthy_book();
+        // First 10 levels hold ~1500; level 11 adds 2000 so total depth passes.
+        let mut qtys = vec![150.0; 10];
+        qtys.push(2000.0);
+        book.asks = side(1.0001, 0.0001, &qtys);
+        let summary = summarize(&book);
+        assert!(summary.ask_depth >= 3000.0);
+        let fails = failed(&summary);
+        assert_eq!(fails.len(), 1, "{fails:?}");
+        assert!(fails[0].starts_with("Ask top-10 depth:"), "{fails:?}");
     }
 
     #[test]
@@ -471,8 +678,7 @@ mod tests {
                 quantity: 100.0,
             }],
         };
-        let summary =
-            MarketSummary::from_order_book(&book, 1.0, &HealthThresholds::default(), None);
+        let summary = MarketSummary::from_order_book(&book, &HealthThresholds::default(), None);
         let out = summary.format_text(Some("biconomy"));
         assert!(out.contains("biconomy"));
         assert!(out.contains("Venue"));
@@ -488,8 +694,7 @@ mod tests {
             }],
             asks: vec![],
         };
-        let summary =
-            MarketSummary::from_order_book(&book, 1.0, &HealthThresholds::default(), None);
+        let summary = MarketSummary::from_order_book(&book, &HealthThresholds::default(), None);
         let out = summary.format_text(None);
         assert!(out.contains("X/Y"));
         assert!(!out.contains("Venue"));
@@ -515,8 +720,7 @@ mod tests {
             ],
         };
 
-        let summary =
-            MarketSummary::from_order_book(&book, 1.0, &HealthThresholds::default(), None);
+        let summary = MarketSummary::from_order_book(&book, &HealthThresholds::default(), None);
 
         assert!(!summary.healthy);
         let has_fail = summary
@@ -551,12 +755,8 @@ mod tests {
                 },
             ],
         };
-        let summary = MarketSummary::from_order_book(
-            &book,
-            1.0,
-            &HealthThresholds::default(),
-            Some(50_000.0),
-        );
+        let summary =
+            MarketSummary::from_order_book(&book, &HealthThresholds::default(), Some(50_000.0));
         let out = summary.format_text(Some("binance"));
         assert!(out.contains("Volume (24h)"));
         assert!(out.contains("50000"));
@@ -607,8 +807,7 @@ mod tests {
             ],
             asks,
         };
-        let summary =
-            MarketSummary::from_order_book(&book, 1.0, &HealthThresholds::default(), None);
+        let summary = MarketSummary::from_order_book(&book, &HealthThresholds::default(), None);
         let out = summary.format_text(None);
         assert!(
             out.contains("outliers excl.") || summary.ask_outliers > 0 || summary.bid_outliers > 0
@@ -630,8 +829,7 @@ mod tests {
                 quantity: 20_000.0,
             }],
         };
-        let summary =
-            MarketSummary::from_order_book(&book, 1.0, &HealthThresholds::default(), None);
+        let summary = MarketSummary::from_order_book(&book, &HealthThresholds::default(), None);
         let out = summary.format_text(Some("cex"));
         assert!(out.contains("Exec 10K buy"));
         assert!(out.contains("Exec 10K sell"));
@@ -665,8 +863,7 @@ mod tests {
                 },
             ],
         };
-        let summary =
-            MarketSummary::from_order_book(&book, 1.0, &HealthThresholds::default(), None);
+        let summary = MarketSummary::from_order_book(&book, &HealthThresholds::default(), None);
         let out = summary.format_text(None);
         assert!(summary.bid_outliers > 0);
         assert!(out.contains("outliers excl."));

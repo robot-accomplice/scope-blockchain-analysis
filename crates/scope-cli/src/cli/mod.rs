@@ -63,6 +63,7 @@ pub mod crawl;
 pub mod discover;
 pub mod errors;
 pub mod export;
+pub mod health_args;
 pub mod insights;
 pub mod interactive;
 pub mod market;
@@ -821,9 +822,9 @@ mod tests {
         ])
         .unwrap();
         if let Commands::Market(market::MarketCommands::Summary(args)) = cli.command {
-            assert_eq!(args.peg_range, 0.002);
-            assert_eq!(args.min_bid_ask_ratio, 0.1);
-            assert_eq!(args.max_bid_ask_ratio, 10.0);
+            assert_eq!(args.health.peg_range, Some(0.002));
+            assert_eq!(args.health.min_bid_ask_ratio, Some(0.1));
+            assert_eq!(args.health.max_bid_ask_ratio, Some(10.0));
         } else {
             panic!("Expected Market Summary command");
         }

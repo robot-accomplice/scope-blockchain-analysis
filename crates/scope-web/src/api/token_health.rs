@@ -5,7 +5,7 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use scope::market::{HealthThresholds, MarketSummary, VenueRegistry, order_book_from_analytics};
+use scope::market::{HealthOverrides, MarketSummary, VenueRegistry, order_book_from_analytics};
 use scope_cli::cli::crawl::{self, Period};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -24,6 +24,10 @@ pub struct TokenHealthRequest {
     /// Market venue: "binance", "biconomy", "eth", "solana".
     #[serde(default = "default_venue")]
     pub market_venue: String,
+    /// Health threshold overrides for `with_market` (top-level JSON keys).
+    /// Unset keys use config `market.health`.
+    #[serde(flatten)]
+    pub health: HealthOverrides,
 }
 
 fn default_chain() -> String {
@@ -80,14 +84,7 @@ pub async fn handle(
     // Optionally fetch market data
     let venue_id = &req.market_venue;
     let market_summary = if req.with_market {
-        let thresholds = HealthThresholds {
-            peg_target: 1.0,
-            peg_range: 0.001,
-            min_levels: 6,
-            min_depth: 3000.0,
-            min_bid_ask_ratio: 0.2,
-            max_bid_ask_ratio: 5.0,
-        };
+        let thresholds = state.config.market.health.with_overrides(&req.health);
 
         if !is_dex_venue(venue_id) {
             // CEX venue — use venue registry
@@ -108,7 +105,6 @@ pub async fn handle(
                         };
                         Some(MarketSummary::from_order_book(
                             &book,
-                            1.0,
                             &thresholds,
                             volume_24h,
                         ))
@@ -137,7 +133,6 @@ pub async fn handle(
                 let volume_24h = Some(best_pair.volume_24h);
                 Some(MarketSummary::from_order_book(
                     &book,
-                    1.0,
                     &thresholds,
                     volume_24h,
                 ))
@@ -265,6 +260,7 @@ mod tests {
             chain: "ethereum".to_string(),
             with_market: false,
             market_venue: "binance".to_string(),
+            health: HealthOverrides::default(),
         };
         let response = handle(State(state), axum::Json(req)).await.into_response();
         let status = response.status();
@@ -292,6 +288,7 @@ mod tests {
             chain: "ethereum".to_string(),
             with_market: true,
             market_venue: "eth".to_string(),
+            health: HealthOverrides::default(),
         };
         let response = handle(State(state), axum::Json(req)).await.into_response();
         let status = response.status();
@@ -319,6 +316,7 @@ mod tests {
             chain: "ethereum".to_string(),
             with_market: true,
             market_venue: "binance".to_string(), // CEX path
+            health: HealthOverrides::default(),
         };
         let response = handle(State(state), axum::Json(req)).await.into_response();
         let status = response.status();
@@ -371,6 +369,7 @@ mod tests {
             chain: "ethereum".to_string(),
             with_market: false,
             market_venue: "binance".to_string(),
+            health: HealthOverrides::default(),
         };
         let response = handle(State(state), axum::Json(req)).await.into_response();
         let status = response.status();
@@ -385,6 +384,7 @@ mod tests {
             chain: "ethereum".to_string(),
             with_market: true,
             market_venue: "binance".to_string(),
+            health: HealthOverrides::default(),
         };
         let debug = format!("{:?}", req);
         assert!(debug.contains("TokenHealthRequest"));
@@ -423,6 +423,7 @@ mod tests {
             chain: "ethereum".to_string(),
             with_market: false,
             market_venue: "binance".to_string(),
+            health: HealthOverrides::default(),
         };
         let response = handle(State(state), axum::Json(req)).await.into_response();
         if response.status().is_success() {
@@ -463,6 +464,7 @@ mod tests {
             chain: "ethereum".to_string(),
             with_market: false,
             market_venue: "binance".to_string(),
+            health: HealthOverrides::default(),
         };
         let response = handle(State(state), axum::Json(req)).await.into_response();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);

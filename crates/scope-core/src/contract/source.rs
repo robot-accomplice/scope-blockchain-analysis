@@ -831,4 +831,127 @@ mod tests {
         assert!(sel.starts_with("0x"));
         assert_eq!(sel.len(), 10);
     }
+
+    // ------------------------------------------------------------------
+    // fetch_contract_source with a canned HTTP response (no network)
+    // ------------------------------------------------------------------
+
+    struct CannedHttp(String);
+
+    #[async_trait::async_trait]
+    impl crate::http::HttpClient for CannedHttp {
+        async fn send(&self, _req: crate::http::Request) -> Result<crate::http::Response> {
+            Ok(crate::http::Response {
+                status_code: 200,
+                headers: Default::default(),
+                body: self.0.clone(),
+            })
+        }
+    }
+
+    fn etherscan_body(
+        status: &str,
+        source: &str,
+        abi: &str,
+        proxy: &str,
+        impl_addr: &str,
+    ) -> String {
+        serde_json::json!({
+            "status": status,
+            "message": "OK",
+            "result": [{
+                "SourceCode": source,
+                "ABI": abi,
+                "ContractName": "Token",
+                "CompilerVersion": "v0.8.20",
+                "OptimizationUsed": "1",
+                "Runs": "999",
+                "ConstructorArguments": "",
+                "EVMVersion": "paris",
+                "Library": "",
+                "LicenseType": "MIT",
+                "Proxy": proxy,
+                "Implementation": impl_addr,
+                "SwarmSource": ""
+            }]
+        })
+        .to_string()
+    }
+
+    const ADDR: &str = "0x0000000000000000000000000000000000000001";
+
+    #[tokio::test]
+    async fn test_fetch_source_verified_proxy() {
+        let abi = r#"[{"type":"function","name":"transfer","inputs":[],"outputs":[]}]"#;
+        let http = CannedHttp(etherscan_body("1", "contract Token {}", abi, "1", "0xImpl"));
+        let src = fetch_contract_source(ADDR, "ethereum", &http)
+            .await
+            .unwrap();
+        assert_eq!(src.contract_name, "Token");
+        assert!(src.optimization_used);
+        assert_eq!(src.optimization_runs, 999);
+        assert!(src.is_proxy);
+        assert_eq!(src.implementation_address.as_deref(), Some("0xImpl"));
+        assert_eq!(src.parsed_abi.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_source_non_json_abi_and_bad_runs_use_fallbacks() {
+        let mut body: serde_json::Value = serde_json::from_str(&etherscan_body(
+            "1",
+            "contract Token {}",
+            "not-json",
+            "0",
+            "",
+        ))
+        .unwrap();
+        body["result"][0]["Runs"] = "x".into();
+        let http = CannedHttp(body.to_string());
+        let src = fetch_contract_source(ADDR, "ethereum", &http)
+            .await
+            .unwrap();
+        assert!(src.parsed_abi.is_empty());
+        assert_eq!(src.optimization_runs, 200);
+        assert!(!src.is_proxy);
+        assert_eq!(src.implementation_address, None);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_source_unverified_is_not_found() {
+        let http = CannedHttp(etherscan_body(
+            "1",
+            "",
+            "Contract source code not verified",
+            "0",
+            "",
+        ));
+        let err = fetch_contract_source(ADDR, "ethereum", &http)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ScopeError::NotFound(_)), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_source_status_zero_is_not_found() {
+        let http = CannedHttp(r#"{"status":"0","message":"NOTOK","result":[]}"#.to_string());
+        let err = fetch_contract_source(ADDR, "ethereum", &http)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ScopeError::NotFound(_)), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_source_unsupported_chain_makes_no_request() {
+        struct PanicHttp;
+        #[async_trait::async_trait]
+        impl crate::http::HttpClient for PanicHttp {
+            async fn send(&self, _req: crate::http::Request) -> Result<crate::http::Response> {
+                panic!("no request expected for an unsupported chain");
+            }
+        }
+        let err = fetch_contract_source(ADDR, "solana", &PanicHttp)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("does not have Etherscan"), "{err}");
+    }
 }

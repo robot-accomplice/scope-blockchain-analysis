@@ -23,7 +23,7 @@
 //!     let exchange = registry.create_exchange_client("binance")?;
 //!     let pair = exchange.format_pair("USDC");
 //!     let book = exchange.fetch_order_book(&pair).await?;
-//!     let summary = MarketSummary::from_order_book(&book, 1.0, &HealthThresholds::default(), None);
+//!     let summary = MarketSummary::from_order_book(&book, &HealthThresholds::default(), None);
 //!     print!("{}", summary.format_text(Some("binance")));
 //!     Ok(())
 //! }
@@ -48,8 +48,8 @@ pub use configurable_client::ConfigurableExchangeClient;
 pub use descriptor::VenueDescriptor;
 pub use exchange::ExchangeClient;
 pub use orderbook::{
-    Candle, ExecutionEstimate, ExecutionSide, HealthCheck, HealthThresholds, MarketSnapshot,
-    MarketSummary, OhlcClient, OrderBook, OrderBookClient, OrderBookLevel, Ticker, TickerClient,
-    Trade, TradeHistoryClient, TradeSide, order_book_from_analytics,
+    Candle, ExecutionEstimate, ExecutionSide, HealthCheck, HealthOverrides, HealthThresholds,
+    MarketSnapshot, MarketSummary, OhlcClient, OrderBook, OrderBookClient, OrderBookLevel, Ticker,
+    TickerClient, Trade, TradeHistoryClient, TradeSide, order_book_from_analytics,
 };
 pub use registry::VenueRegistry;

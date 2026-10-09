@@ -11,9 +11,11 @@ use scope::chains::{
     ChainClientFactory, infer_chain_from_address, infer_chain_from_hash, native_symbol,
 };
 use scope::config::Config;
+
+use super::health_args::HealthArgs;
 use scope::display::report;
 use scope::error::Result;
-use scope::market::{HealthThresholds, MarketSummary, VenueRegistry};
+use scope::market::{MarketSummary, VenueRegistry};
 use scope::tokens::TokenAliases;
 
 /// Target type inferred from user input.
@@ -60,6 +62,10 @@ pub struct InsightsArgs {
     /// Include internal transaction trace (for tx targets).
     #[arg(long)]
     pub trace: bool,
+
+    /// Health threshold overrides for the stablecoin market check.
+    #[command(flatten)]
+    pub health: HealthArgs,
 }
 
 /// Infers the target type and chain from the input string.
@@ -381,14 +387,7 @@ pub async fn run(
                 if let Ok(exchange) = registry.create_exchange_client(venue_id) {
                     let pair = exchange.format_pair(&analytics.token.symbol);
                     if let Ok(book) = exchange.fetch_order_book(&pair).await {
-                        let thresholds = HealthThresholds {
-                            peg_target: 1.0,
-                            peg_range: 0.001,
-                            min_levels: 6,
-                            min_depth: 3000.0,
-                            min_bid_ask_ratio: 0.2,
-                            max_bid_ask_ratio: 5.0,
-                        };
+                        let thresholds = args.health.resolve(config);
                         let volume_24h = if exchange.has_ticker() {
                             exchange
                                 .fetch_ticker(&pair)
@@ -399,7 +398,7 @@ pub async fn run(
                             None
                         };
                         let summary =
-                            MarketSummary::from_order_book(&book, 1.0, &thresholds, volume_24h);
+                            MarketSummary::from_order_book(&book, &thresholds, volume_24h);
                         let deviation_bps = summary
                             .mid_price
                             .map(|m| (m - 1.0) * 10_000.0)
@@ -1137,6 +1136,7 @@ mod tests {
             chain: None,
             decode: false,
             trace: false,
+            health: Default::default(),
         };
         let result = run(args, &config, &factory).await;
         assert!(result.is_ok());
@@ -1151,6 +1151,7 @@ mod tests {
             chain: None,
             decode: false,
             trace: false,
+            health: Default::default(),
         };
         let result = run(args, &config, &factory).await;
         assert!(result.is_ok());
@@ -1166,6 +1167,7 @@ mod tests {
             chain: None,
             decode: false,
             trace: false,
+            health: Default::default(),
         };
         let result = run(args, &config, &factory).await;
         assert!(result.is_ok());
@@ -1181,6 +1183,7 @@ mod tests {
             chain: Some("ethereum".to_string()),
             decode: true,
             trace: false,
+            health: Default::default(),
         };
         let result = run(args, &config, &factory).await;
         assert!(result.is_ok());
@@ -1195,6 +1198,7 @@ mod tests {
             chain: Some("polygon".to_string()),
             decode: false,
             trace: false,
+            health: Default::default(),
         };
         let result = run(args, &config, &factory).await;
         assert!(result.is_ok());
@@ -1209,6 +1213,7 @@ mod tests {
             chain: Some("ethereum".to_string()),
             decode: false,
             trace: false,
+            health: Default::default(),
         };
         let result = run(args, &config, &factory).await;
         assert!(result.is_ok());
@@ -1223,6 +1228,7 @@ mod tests {
             chain: Some("ethereum".to_string()),
             decode: false,
             trace: false,
+            health: Default::default(),
         };
         let result = run(args, &config, &factory).await;
         assert!(result.is_ok());
@@ -1902,6 +1908,7 @@ mod tests {
             chain: Some("ethereum".to_string()),
             decode: true,
             trace: false,
+            health: Default::default(),
         };
         let debug_str = format!("{:?}", args);
         assert!(debug_str.contains("InsightsArgs"));

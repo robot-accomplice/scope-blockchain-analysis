@@ -8,9 +8,11 @@ use crate::cli::crawl::{self, Period};
 use clap::Args;
 use scope::chains::{ChainClientFactory, TokenAnalytics};
 use scope::config::Config;
+
+use super::health_args::HealthArgs;
 use scope::display::report;
 use scope::error::{Result, ScopeError};
-use scope::market::{HealthThresholds, MarketSummary, VenueRegistry, order_book_from_analytics};
+use scope::market::{MarketSummary, VenueRegistry, order_book_from_analytics};
 
 /// Arguments for the token-health command.
 #[derive(Debug, Args)]
@@ -80,6 +82,10 @@ pub struct TokenHealthArgs {
     /// Output format.
     #[arg(short, long, default_value = "table")]
     pub format: scope::config::OutputFormat,
+
+    /// Health threshold overrides for --with-market.
+    #[command(flatten)]
+    pub health: HealthArgs,
 }
 
 /// Runs the token-health command.
@@ -119,14 +125,7 @@ pub async fn run(
     // 2. Optionally fetch market summary for stablecoin
     let market_summary = if args.with_market {
         sp.set_message("Fetching market data...");
-        let thresholds = HealthThresholds {
-            peg_target: 1.0,
-            peg_range: 0.001,
-            min_levels: 6,
-            min_depth: 3000.0,
-            min_bid_ask_ratio: 0.2,
-            max_bid_ask_ratio: 5.0,
-        };
+        let thresholds = args.health.resolve(config);
         if is_dex_venue(&args.venue) {
             // DEX venues: synthesize from analytics (only when chain matches venue)
             let venue_chain = dex_venue_to_chain(&args.venue);
@@ -146,7 +145,6 @@ pub async fn run(
                 let volume_24h = Some(best_pair.volume_24h);
                 Some(MarketSummary::from_order_book(
                     &book,
-                    1.0,
                     &thresholds,
                     volume_24h,
                 ))
@@ -182,7 +180,6 @@ pub async fn run(
                             };
                             Some(MarketSummary::from_order_book(
                                 &book,
-                                1.0,
                                 &thresholds,
                                 volume_24h,
                             ))
@@ -600,6 +597,7 @@ mod tests {
             with_market: false,
             venue: "binance".to_string(),
             format: scope::config::OutputFormat::Table,
+            health: Default::default(),
         };
         let debug = format!("{:?}", args);
         assert!(debug.contains("TokenHealthArgs"));
@@ -778,6 +776,7 @@ mod tests {
             with_market: false,
             venue: "binance".to_string(),
             format: OutputFormat::Table,
+            health: Default::default(),
         };
 
         let result = run(args, &config, &factory).await;
@@ -800,6 +799,7 @@ mod tests {
             with_market: false,
             venue: "binance".to_string(),
             format: OutputFormat::Json,
+            health: Default::default(),
         };
 
         let result = run(args, &config, &factory).await;
@@ -818,6 +818,7 @@ mod tests {
             with_market: false,
             venue: "binance".to_string(),
             format: OutputFormat::Markdown,
+            health: Default::default(),
         };
 
         let result = run(args, &config, &factory).await;
@@ -855,9 +856,75 @@ mod tests {
             with_market: true,
             venue: "eth".to_string(),
             format: OutputFormat::Table,
+            health: Default::default(),
         };
 
         let result = run(args, &config, &factory).await;
+        assert!(result.is_ok());
+    }
+
+    fn dex_market_args(venue: &str) -> TokenHealthArgs {
+        TokenHealthArgs {
+            token: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+            chain: "ethereum".to_string(),
+            with_market: true,
+            venue: venue.to_string(),
+            format: OutputFormat::Json,
+            health: Default::default(),
+        }
+    }
+
+    fn pair_with_liquidity(liquidity_usd: f64) -> DexPair {
+        DexPair {
+            dex_name: "Uniswap V3".to_string(),
+            pair_address: format!("0xpair{liquidity_usd}"),
+            base_token: "USDC".to_string(),
+            quote_token: "USDT".to_string(),
+            price_usd: 1.0,
+            volume_24h: 1_000.0,
+            liquidity_usd,
+            price_change_24h: 0.0,
+            buys_24h: 0,
+            sells_24h: 0,
+            buys_6h: 0,
+            sells_6h: 0,
+            buys_1h: 0,
+            sells_1h: 0,
+            pair_created_at: None,
+            url: None,
+        }
+    }
+
+    /// Several pools: the market section picks the deepest one.
+    #[tokio::test]
+    async fn test_run_token_health_dex_market_multiple_pairs() {
+        let mut factory = MockClientFactory::new();
+        factory.mock_dex.token_data = Some(make_test_dex_token_data(vec![
+            pair_with_liquidity(1_000.0),
+            pair_with_liquidity(90_000.0),
+            pair_with_liquidity(5_000.0),
+        ]));
+        let result = run(dex_market_args("eth"), &Config::default(), &factory).await;
+        assert!(result.is_ok());
+    }
+
+    /// Missing market data only warns: the token report must still succeed.
+    #[tokio::test]
+    async fn test_run_token_health_dex_market_chain_mismatch_still_reports() {
+        let mut factory = MockClientFactory::new();
+        factory.mock_dex.token_data =
+            Some(make_test_dex_token_data(vec![pair_with_liquidity(1_000.0)]));
+        // Token is on ethereum; the solana venue cannot price it.
+        let result = run(dex_market_args("solana"), &Config::default(), &factory).await;
+        assert!(result.is_ok());
+    }
+
+    /// No DEX pools only warns: the token report must still succeed.
+    #[tokio::test]
+    async fn test_run_token_health_dex_market_no_pairs_still_reports() {
+        let mut factory = MockClientFactory::new();
+        factory.mock_dex.token_data = Some(make_test_dex_token_data(vec![]));
+        let result = run(dex_market_args("eth"), &Config::default(), &factory).await;
         assert!(result.is_ok());
     }
 
@@ -950,6 +1017,7 @@ mod tests {
                 with_market: false,
                 venue: "binance".to_string(),
                 format,
+                health: Default::default(),
             };
             assert_eq!(args.format, format);
         }
@@ -967,6 +1035,7 @@ mod tests {
             with_market: false,
             venue: "binance".to_string(),
             format: OutputFormat::Csv,
+            health: Default::default(),
         };
 
         let result = run(args, &config, &factory).await;
@@ -986,6 +1055,7 @@ mod tests {
             with_market: false,
             venue: "binance".to_string(),
             format: OutputFormat::Table, // Args say Table, config overrides to Markdown
+            health: Default::default(),
         };
 
         let result = run(args, &config, &factory).await;

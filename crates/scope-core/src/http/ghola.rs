@@ -267,8 +267,8 @@ mod tests {
 
     #[test]
     fn test_is_bridge_running_returns_bool() {
-        let result = is_bridge_running();
-        assert!(result == true || result == false);
+        // Smoke test: the result depends on the host; the probe must not panic.
+        let _ = is_bridge_running();
     }
 
     #[test]
@@ -348,8 +348,8 @@ mod tests {
 
     #[test]
     fn test_ghola_in_path_returns_bool() {
-        let result = ghola_in_path();
-        assert!(result == true || result == false);
+        // Smoke test: the result depends on the host; the probe must not panic.
+        let _ = ghola_in_path();
     }
 
     #[test]

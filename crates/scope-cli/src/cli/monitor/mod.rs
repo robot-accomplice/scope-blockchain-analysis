@@ -598,11 +598,10 @@ fn format_monitor_number(value: f64) -> String {
 mod tests {
     use super::config::*;
     use super::input::*;
-    use super::state::*;
     use super::widgets::*;
     use super::*;
 
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyModifiers};
     use ratatui::layout::{Constraint, Direction, Layout, Rect};
     use scope::chains::ChainClient;
     use scope::market::{Trade, TradeSide};

@@ -16,6 +16,10 @@ lcov.info
 *.swp
 *.swo
 *~
+.cursor/
+.cursor/rules
+.serena/
+.claude/
 
 # OS files
 .DS_Store

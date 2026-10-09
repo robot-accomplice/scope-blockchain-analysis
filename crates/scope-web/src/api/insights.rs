@@ -72,6 +72,7 @@ pub async fn handle(
         chain: chain_override,
         decode: req.decode,
         trace: req.trace,
+        health: Default::default(),
     };
 
     // Run insights - it prints to stdout so we need to capture

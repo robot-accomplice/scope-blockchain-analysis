@@ -9,6 +9,8 @@ use crate::cli::crawl::{self, Period};
 use clap::{Args, Subcommand};
 use scope::chains::ChainClientFactory;
 use scope::config::Config;
+
+use super::health_args::HealthArgs;
 use scope::display::terminal as t;
 use scope::error::{Result, ScopeError};
 use scope::market::{
@@ -24,6 +26,7 @@ pub const DEFAULT_DURATION_SECS: u64 = 3600;
 
 /// Market subcommands.
 #[derive(Debug, Subcommand)]
+#[allow(clippy::large_enum_variant)]
 pub enum MarketCommands {
     /// One-screen peg and order book health summary.
     ///
@@ -68,7 +71,7 @@ pub enum MarketCommands {
   |-- Health Checks                                     |
   |  + No sells below peg                               |
   |  + Bid/Ask ratio: 0.93x                             |
-  |  + Bid levels: 8 >= 6 minimum                       |
+  |  + Bid levels: 12 >= 10 minimum                     |
   |  + Bid depth: 42000 USDT >= 3000 USDT minimum       |
   |                                                     |
   |  HEALTHY                                            |
@@ -96,30 +99,9 @@ pub struct SummaryArgs {
     #[arg(long, default_value = "ethereum", value_name = "CHAIN")]
     pub chain: String,
 
-    /// Peg target (e.g., 1.0 for USD stablecoins).
-    #[arg(long, default_value = "1.0", value_name = "TARGET")]
-    pub peg: f64,
-
-    /// Minimum order book levels per side.
-    #[arg(long, default_value = "6", value_name = "N")]
-    pub min_levels: usize,
-
-    /// Minimum depth per side in quote terms, e.g. USDT.
-    #[arg(long, default_value = "3000", value_name = "USDT")]
-    pub min_depth: f64,
-
-    /// Peg range for outlier filtering (orders outside peg ± range×5 excluded).
-    /// E.g., 0.001 = ±0.5% around peg.
-    #[arg(long, default_value = "0.001", value_name = "RANGE")]
-    pub peg_range: f64,
-
-    /// Min bid/ask depth ratio (warn if ratio below this).
-    #[arg(long, default_value = "0.2", value_name = "RATIO")]
-    pub min_bid_ask_ratio: f64,
-
-    /// Max bid/ask depth ratio (warn if ratio above this).
-    #[arg(long, default_value = "5.0", value_name = "RATIO")]
-    pub max_bid_ask_ratio: f64,
+    /// Health threshold overrides (flag > config `market.health` > default).
+    #[command(flatten)]
+    pub health: HealthArgs,
 
     /// Output format.
     #[arg(short, long, default_value = "text")]
@@ -249,11 +231,11 @@ pub enum OhlcFormat {
 /// Run the market command.
 pub async fn run(
     args: MarketCommands,
-    _config: &Config,
+    config: &Config,
     factory: &dyn ChainClientFactory,
 ) -> Result<()> {
     match args {
-        MarketCommands::Summary(summary_args) => run_summary(summary_args, factory).await,
+        MarketCommands::Summary(summary_args) => run_summary(summary_args, config, factory).await,
         MarketCommands::Ohlc(ohlc_args) => run_ohlc(ohlc_args).await,
         MarketCommands::Trades(trades_args) => run_trades(trades_args).await,
     }
@@ -521,7 +503,7 @@ async fn run_summary_once(
     }
 
     let (book, volume_24h) = fetch_book_and_volume(args, factory).await?;
-    let summary = MarketSummary::from_order_book(&book, args.peg, thresholds, volume_24h);
+    let summary = MarketSummary::from_order_book(&book, thresholds, volume_24h);
 
     let venue_label = args.venue.clone();
 
@@ -565,15 +547,12 @@ async fn run_summary_once(
     Ok(summary)
 }
 
-async fn run_summary(args: SummaryArgs, factory: &dyn ChainClientFactory) -> Result<()> {
-    let thresholds = HealthThresholds {
-        peg_target: args.peg,
-        peg_range: args.peg_range,
-        min_levels: args.min_levels,
-        min_depth: args.min_depth,
-        min_bid_ask_ratio: args.min_bid_ask_ratio,
-        max_bid_ask_ratio: args.max_bid_ask_ratio,
-    };
+async fn run_summary(
+    args: SummaryArgs,
+    config: &Config,
+    factory: &dyn ChainClientFactory,
+) -> Result<()> {
+    let thresholds = args.health.resolve(config);
 
     let repeat_mode = args.every.is_some() || args.duration.is_some();
 
@@ -962,12 +941,15 @@ capabilities:
             pair: "USDC".to_string(),
             venue: "eth".to_string(),
             chain: "ethereum".to_string(),
-            peg: 1.0,
-            min_levels: 1,
-            min_depth: 50.0,
-            peg_range: 0.01,
-            min_bid_ask_ratio: 0.1,
-            max_bid_ask_ratio: 10.0,
+            health: HealthArgs {
+                peg_target: Some(1.0),
+                peg_range: Some(0.01),
+                min_levels: Some(1),
+                min_depth: Some(50.0),
+                min_bid_ask_ratio: Some(0.1),
+                max_bid_ask_ratio: Some(10.0),
+                ..Default::default()
+            },
             format: SummaryFormat::Text,
             every: None,
             duration: None,
@@ -982,7 +964,7 @@ capabilities:
             http,
         };
         // DEX path: will hit real DexScreener API, may fail in offline environments
-        let _result = run_summary(args, &factory).await;
+        let _result = run_summary(args, &Config::default(), &factory).await;
         // We don't assert success because it depends on network, just confirm no panic
     }
 
@@ -992,12 +974,15 @@ capabilities:
             pair: "USDC".to_string(),
             venue: "eth".to_string(),
             chain: "ethereum".to_string(),
-            peg: 1.0,
-            min_levels: 1,
-            min_depth: 50.0,
-            peg_range: 0.01,
-            min_bid_ask_ratio: 0.1,
-            max_bid_ask_ratio: 10.0,
+            health: HealthArgs {
+                peg_target: Some(1.0),
+                peg_range: Some(0.01),
+                min_levels: Some(1),
+                min_depth: Some(50.0),
+                min_bid_ask_ratio: Some(0.1),
+                max_bid_ask_ratio: Some(10.0),
+                ..Default::default()
+            },
             format: SummaryFormat::Json,
             every: None,
             duration: None,
@@ -1011,7 +996,7 @@ capabilities:
             chains_config: Default::default(),
             http,
         };
-        let _result = run_summary(args, &factory).await;
+        let _result = run_summary(args, &Config::default(), &factory).await;
     }
 
     #[test]
@@ -1290,12 +1275,15 @@ capabilities:
             pair: "USDC".to_string(),
             venue: "binance".to_string(),
             chain: "ethereum".to_string(),
-            peg: 1.0,
-            min_levels: 6,
-            min_depth: 3000.0,
-            peg_range: 0.001,
-            min_bid_ask_ratio: 0.2,
-            max_bid_ask_ratio: 5.0,
+            health: HealthArgs {
+                peg_target: Some(1.0),
+                peg_range: Some(0.001),
+                min_levels: Some(6),
+                min_depth: Some(3000.0),
+                min_bid_ask_ratio: Some(0.2),
+                max_bid_ask_ratio: Some(5.0),
+                ..Default::default()
+            },
             format: SummaryFormat::Text,
             every: None,
             duration: None,
@@ -1364,12 +1352,15 @@ capabilities:
             pair: "USDC".to_string(),
             venue: "eth".to_string(),
             chain: "ethereum".to_string(),
-            peg: 1.0,
-            min_levels: 1,
-            min_depth: 50.0,
-            peg_range: 0.01,
-            min_bid_ask_ratio: 0.1,
-            max_bid_ask_ratio: 10.0,
+            health: HealthArgs {
+                peg_target: Some(1.0),
+                peg_range: Some(0.01),
+                min_levels: Some(1),
+                min_depth: Some(50.0),
+                min_bid_ask_ratio: Some(0.1),
+                max_bid_ask_ratio: Some(10.0),
+                ..Default::default()
+            },
             format: SummaryFormat::Text,
             every: None,
             duration: None,
@@ -1433,12 +1424,15 @@ capabilities:
             pair: "USDC".to_string(),
             venue: "eth".to_string(),
             chain: "ethereum".to_string(),
-            peg: 1.0,
-            min_levels: 1,
-            min_depth: 50.0,
-            peg_range: 0.01,
-            min_bid_ask_ratio: 0.1,
-            max_bid_ask_ratio: 10.0,
+            health: HealthArgs {
+                peg_target: Some(1.0),
+                peg_range: Some(0.01),
+                min_levels: Some(1),
+                min_depth: Some(50.0),
+                min_bid_ask_ratio: Some(0.1),
+                max_bid_ask_ratio: Some(10.0),
+                ..Default::default()
+            },
             format: SummaryFormat::Json,
             every: None,
             duration: None,
@@ -1452,7 +1446,7 @@ capabilities:
             chains_config: Default::default(),
             http,
         };
-        let _result = run_summary(args, &factory).await;
+        let _result = run_summary(args, &Config::default(), &factory).await;
     }
 
     // ====================================================================
@@ -1807,12 +1801,15 @@ capabilities:
             pair: "USDC".to_string(),
             venue: "eth".to_string(),
             chain: "ethereum".to_string(),
-            peg: 1.0,
-            min_levels: 1,
-            min_depth: 50.0,
-            peg_range: 0.01,
-            min_bid_ask_ratio: 0.1,
-            max_bid_ask_ratio: 10.0,
+            health: HealthArgs {
+                peg_target: Some(1.0),
+                peg_range: Some(0.01),
+                min_levels: Some(1),
+                min_depth: Some(50.0),
+                min_bid_ask_ratio: Some(0.1),
+                max_bid_ask_ratio: Some(10.0),
+                ..Default::default()
+            },
             format: SummaryFormat::Text,
             every: Some("0.1s".to_string()),
             duration: Some("1m".to_string()),
@@ -1825,7 +1822,7 @@ capabilities:
             chains_config: Default::default(),
             http,
         };
-        let result = run_summary(args, &factory).await;
+        let result = run_summary(args, &Config::default(), &factory).await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -1833,39 +1830,6 @@ capabilities:
             "expected interval error, got: {}",
             err
         );
-    }
-
-    #[tokio::test]
-    async fn test_run_summary_one_shot_with_report() {
-        let report_dir = tempfile::tempdir().unwrap();
-        let report_path = report_dir.path().join("report.md");
-        let args = SummaryArgs {
-            pair: "USDC".to_string(),
-            venue: "eth".to_string(),
-            chain: "ethereum".to_string(),
-            peg: 1.0,
-            min_levels: 1,
-            min_depth: 50.0,
-            peg_range: 0.01,
-            min_bid_ask_ratio: 0.1,
-            max_bid_ask_ratio: 10.0,
-            format: SummaryFormat::Text,
-            every: None,
-            duration: None,
-            report: Some(report_path.clone()),
-            csv: None,
-        };
-        let http: std::sync::Arc<dyn scope::http::HttpClient> =
-            std::sync::Arc::new(scope::http::NativeHttpClient::new().unwrap());
-        let factory = DefaultClientFactory {
-            chains_config: Default::default(),
-            http,
-        };
-        let result = run_summary(args, &factory).await;
-        if result.is_ok() {
-            let content = std::fs::read_to_string(&report_path).unwrap();
-            assert!(content.contains("Market Health Report"));
-        }
     }
 
     // ====================================================================
@@ -1878,12 +1842,15 @@ capabilities:
             pair: "USDC".to_string(),
             venue: "binance".to_string(),
             chain: "ethereum".to_string(),
-            peg: 1.0,
-            min_levels: 6,
-            min_depth: 3000.0,
-            peg_range: 0.001,
-            min_bid_ask_ratio: 0.2,
-            max_bid_ask_ratio: 5.0,
+            health: HealthArgs {
+                peg_target: Some(1.0),
+                peg_range: Some(0.001),
+                min_levels: Some(6),
+                min_depth: Some(3000.0),
+                min_bid_ask_ratio: Some(0.2),
+                max_bid_ask_ratio: Some(5.0),
+                ..Default::default()
+            },
             format: SummaryFormat::Text,
             every: None,
             duration: None,
@@ -1917,12 +1884,15 @@ capabilities:
             pair: "DAI".to_string(),
             venue: "binance".to_string(),
             chain: "ethereum".to_string(),
-            peg: 1.0,
-            min_levels: 6,
-            min_depth: 3000.0,
-            peg_range: 0.001,
-            min_bid_ask_ratio: 0.2,
-            max_bid_ask_ratio: 5.0,
+            health: HealthArgs {
+                peg_target: Some(1.0),
+                peg_range: Some(0.001),
+                min_levels: Some(6),
+                min_depth: Some(3000.0),
+                min_bid_ask_ratio: Some(0.2),
+                max_bid_ask_ratio: Some(5.0),
+                ..Default::default()
+            },
             format: SummaryFormat::Json,
             every: Some("30s".to_string()),
             duration: Some("1h".to_string()),
@@ -1986,5 +1956,143 @@ capabilities:
         };
         assert_eq!(args.pair, "USDC");
         assert_eq!(args.venue, "binance");
+    }
+
+    // ------------------------------------------------------------------
+    // Offline DEX-path tests (mock factory, no network)
+    // ------------------------------------------------------------------
+
+    const USDC_ADDR: &str = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
+
+    /// Mock factory whose DEX data has the given pairs (liquidity, volume).
+    fn dex_factory(pairs: &[(f64, f64)]) -> scope::chains::mocks::MockClientFactory {
+        let mut factory = scope::chains::mocks::MockClientFactory::new();
+        let data = factory.mock_dex.token_data.as_mut().unwrap();
+        data.symbol = "USDC".to_string();
+        data.pairs = pairs
+            .iter()
+            .enumerate()
+            .map(|(i, &(liquidity_usd, volume_24h))| scope::chains::DexPair {
+                dex_name: format!("DEX {i}"),
+                pair_address: format!("0xpair{i}"),
+                base_token: "USDC".to_string(),
+                quote_token: "USDT".to_string(),
+                price_usd: 1.0,
+                volume_24h,
+                liquidity_usd,
+                price_change_24h: 0.0,
+                buys_24h: 0,
+                sells_24h: 0,
+                buys_6h: 0,
+                sells_6h: 0,
+                buys_1h: 0,
+                sells_1h: 0,
+                pair_created_at: None,
+                url: None,
+            })
+            .collect();
+        factory
+    }
+
+    fn dex_args(format: SummaryFormat) -> SummaryArgs {
+        SummaryArgs {
+            pair: USDC_ADDR.to_string(),
+            venue: "eth".to_string(),
+            chain: "ethereum".to_string(),
+            health: HealthArgs::default(),
+            format,
+            every: None,
+            duration: None,
+            report: None,
+            csv: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dex_book_uses_most_liquid_pair() {
+        // The synthetic book must come from the deepest pool, not the first one.
+        let factory = dex_factory(&[(1_000.0, 10.0), (50_000.0, 777.0), (2_000.0, 20.0)]);
+        let (book, volume) = fetch_book_and_volume(&dex_args(SummaryFormat::Text), &factory)
+            .await
+            .unwrap();
+        assert_eq!(volume, Some(777.0));
+        let depth: f64 = book.bids.iter().chain(&book.asks).map(|l| l.value()).sum();
+        assert!((depth - 50_000.0).abs() < 1.0, "depth {depth}");
+    }
+
+    #[tokio::test]
+    async fn test_dex_no_pairs_is_error() {
+        let factory = dex_factory(&[]);
+        let err = fetch_book_and_volume(&dex_args(SummaryFormat::Text), &factory)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("No DEX pairs found"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_run_summary_once_json_reflects_resolved_thresholds() {
+        let factory = dex_factory(&[(50_000.0, 1_000.0)]);
+        let mut args = dex_args(SummaryFormat::Json);
+        // A one-level synthetic book is healthy only with loosened thresholds.
+        args.health = HealthArgs {
+            min_levels: Some(1),
+            min_top10_depth: Some(1.0),
+            ..Default::default()
+        };
+        let thresholds = args.health.resolve(&Config::default());
+        let summary = run_summary_once(&args, &factory, &thresholds, Some(1))
+            .await
+            .unwrap();
+        assert!(summary.healthy, "{:?}", summary.checks);
+
+        let strict = HealthThresholds::default();
+        let summary = run_summary_once(&args, &factory, &strict, None)
+            .await
+            .unwrap();
+        assert!(!summary.healthy);
+    }
+
+    #[tokio::test]
+    async fn test_run_summary_one_shot_writes_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let report = dir.path().join("report.md");
+        let factory = dex_factory(&[(50_000.0, 1_000.0)]);
+        let mut args = dex_args(SummaryFormat::Text);
+        args.report = Some(report.clone());
+        run_summary(args, &Config::default(), &factory)
+            .await
+            .unwrap();
+        let md = std::fs::read_to_string(&report).unwrap();
+        assert!(md.contains("Market Health Report"), "{md}");
+        assert!(md.contains(USDC_ADDR), "{md}");
+    }
+
+    #[tokio::test]
+    async fn test_run_summary_repeat_mode_writes_csv_rows_and_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv = dir.path().join("series.csv");
+        let report = dir.path().join("final.md");
+        let factory = dex_factory(&[(50_000.0, 1_000.0)]);
+        let mut args = dex_args(SummaryFormat::Json);
+        args.every = Some("1s".to_string());
+        args.duration = Some("1s".to_string());
+        args.csv = Some(csv.clone());
+        args.report = Some(report.clone());
+        run_summary(args, &Config::default(), &factory)
+            .await
+            .unwrap();
+
+        let body = std::fs::read_to_string(&csv).unwrap();
+        let mut lines = body.lines();
+        assert_eq!(
+            lines.next(),
+            Some("timestamp,run,best_bid,best_ask,mid_price,spread,bid_depth,ask_depth,healthy")
+        );
+        // One run at t=0, one after the 1s sleep: the loop must not stop early.
+        let rows: Vec<_> = lines.collect();
+        assert_eq!(rows.len(), 2, "{body}");
+        assert!(rows[0].split(',').nth(1) == Some("1"));
+        assert!(rows[1].split(',').nth(1) == Some("2"));
+        assert!(report.exists());
     }
 }
