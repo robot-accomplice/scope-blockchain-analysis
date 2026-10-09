@@ -12,7 +12,7 @@ use scope::config::Config;
 use scope::display::terminal as t;
 use scope::error::{Result, ScopeError};
 use scope::market::{
-    HealthThresholds, MarketSummary, OrderBook, VenueRegistry, order_book_from_analytics,
+    HealthThresholds, MarketSummary, OrderBook, VenueRegistry, health, order_book_from_analytics,
 };
 use std::time::Duration;
 
@@ -97,29 +97,41 @@ pub struct SummaryArgs {
     pub chain: String,
 
     /// Peg target (e.g., 1.0 for USD stablecoins).
-    #[arg(long, default_value = "1.0", value_name = "TARGET")]
+    #[arg(long, default_value_t = health::DEFAULT_PEG_TARGET, value_name = "TARGET")]
     pub peg: f64,
 
-    /// Minimum order book levels per side.
-    #[arg(long, default_value = "6", value_name = "N")]
+    /// Minimum valid order book levels (price > 0, quantity > 0) per side.
+    #[arg(long, default_value_t = health::DEFAULT_MIN_LEVELS, value_name = "N")]
     pub min_levels: usize,
 
-    /// Minimum depth per side in quote terms, e.g. USDT.
-    #[arg(long, default_value = "3000", value_name = "USDT")]
+    /// Minimum in-band depth per side in quote terms, e.g. USDT.
+    #[arg(long, default_value_t = health::DEFAULT_MIN_DEPTH, value_name = "USDT")]
     pub min_depth: f64,
 
     /// Peg range for outlier filtering (orders outside peg ± range×5 excluded).
     /// E.g., 0.001 = ±0.5% around peg.
-    #[arg(long, default_value = "0.001", value_name = "RANGE")]
+    #[arg(long, default_value_t = health::DEFAULT_PEG_RANGE, value_name = "RANGE")]
     pub peg_range: f64,
 
     /// Min bid/ask depth ratio (warn if ratio below this).
-    #[arg(long, default_value = "0.2", value_name = "RATIO")]
+    #[arg(long, default_value_t = health::DEFAULT_MIN_BID_ASK_RATIO, value_name = "RATIO")]
     pub min_bid_ask_ratio: f64,
 
     /// Max bid/ask depth ratio (warn if ratio above this).
-    #[arg(long, default_value = "5.0", value_name = "RATIO")]
+    #[arg(long, default_value_t = health::DEFAULT_MAX_BID_ASK_RATIO, value_name = "RATIO")]
     pub max_bid_ask_ratio: f64,
+
+    /// Max spread between best bid and best ask, in percent of mid price.
+    #[arg(long, default_value_t = health::DEFAULT_MAX_SPREAD_PCT, value_name = "PCT")]
+    pub max_spread_pct: f64,
+
+    /// Min depth of the top 3 valid levels per side, in quote terms.
+    #[arg(long, default_value_t = health::DEFAULT_MIN_TOP3_DEPTH, value_name = "USDT")]
+    pub min_top3_depth: f64,
+
+    /// Min depth of the top 10 valid levels per side, in quote terms.
+    #[arg(long, default_value_t = health::DEFAULT_MIN_TOP10_DEPTH, value_name = "USDT")]
+    pub min_top10_depth: f64,
 
     /// Output format.
     #[arg(short, long, default_value = "text")]
@@ -573,6 +585,9 @@ async fn run_summary(args: SummaryArgs, factory: &dyn ChainClientFactory) -> Res
         min_depth: args.min_depth,
         min_bid_ask_ratio: args.min_bid_ask_ratio,
         max_bid_ask_ratio: args.max_bid_ask_ratio,
+        max_spread_pct: args.max_spread_pct,
+        min_top3_depth: args.min_top3_depth,
+        min_top10_depth: args.min_top10_depth,
     };
 
     let repeat_mode = args.every.is_some() || args.duration.is_some();
@@ -968,6 +983,9 @@ capabilities:
             peg_range: 0.01,
             min_bid_ask_ratio: 0.1,
             max_bid_ask_ratio: 10.0,
+            max_spread_pct: health::DEFAULT_MAX_SPREAD_PCT,
+            min_top3_depth: health::DEFAULT_MIN_TOP3_DEPTH,
+            min_top10_depth: health::DEFAULT_MIN_TOP10_DEPTH,
             format: SummaryFormat::Text,
             every: None,
             duration: None,
@@ -998,6 +1016,9 @@ capabilities:
             peg_range: 0.01,
             min_bid_ask_ratio: 0.1,
             max_bid_ask_ratio: 10.0,
+            max_spread_pct: health::DEFAULT_MAX_SPREAD_PCT,
+            min_top3_depth: health::DEFAULT_MIN_TOP3_DEPTH,
+            min_top10_depth: health::DEFAULT_MIN_TOP10_DEPTH,
             format: SummaryFormat::Json,
             every: None,
             duration: None,
@@ -1296,6 +1317,9 @@ capabilities:
             peg_range: 0.001,
             min_bid_ask_ratio: 0.2,
             max_bid_ask_ratio: 5.0,
+            max_spread_pct: health::DEFAULT_MAX_SPREAD_PCT,
+            min_top3_depth: health::DEFAULT_MIN_TOP3_DEPTH,
+            min_top10_depth: health::DEFAULT_MIN_TOP10_DEPTH,
             format: SummaryFormat::Text,
             every: None,
             duration: None,
@@ -1370,6 +1394,9 @@ capabilities:
             peg_range: 0.01,
             min_bid_ask_ratio: 0.1,
             max_bid_ask_ratio: 10.0,
+            max_spread_pct: health::DEFAULT_MAX_SPREAD_PCT,
+            min_top3_depth: health::DEFAULT_MIN_TOP3_DEPTH,
+            min_top10_depth: health::DEFAULT_MIN_TOP10_DEPTH,
             format: SummaryFormat::Text,
             every: None,
             duration: None,
@@ -1439,6 +1466,9 @@ capabilities:
             peg_range: 0.01,
             min_bid_ask_ratio: 0.1,
             max_bid_ask_ratio: 10.0,
+            max_spread_pct: health::DEFAULT_MAX_SPREAD_PCT,
+            min_top3_depth: health::DEFAULT_MIN_TOP3_DEPTH,
+            min_top10_depth: health::DEFAULT_MIN_TOP10_DEPTH,
             format: SummaryFormat::Json,
             every: None,
             duration: None,
@@ -1813,6 +1843,9 @@ capabilities:
             peg_range: 0.01,
             min_bid_ask_ratio: 0.1,
             max_bid_ask_ratio: 10.0,
+            max_spread_pct: health::DEFAULT_MAX_SPREAD_PCT,
+            min_top3_depth: health::DEFAULT_MIN_TOP3_DEPTH,
+            min_top10_depth: health::DEFAULT_MIN_TOP10_DEPTH,
             format: SummaryFormat::Text,
             every: Some("0.1s".to_string()),
             duration: Some("1m".to_string()),
@@ -1849,6 +1882,9 @@ capabilities:
             peg_range: 0.01,
             min_bid_ask_ratio: 0.1,
             max_bid_ask_ratio: 10.0,
+            max_spread_pct: health::DEFAULT_MAX_SPREAD_PCT,
+            min_top3_depth: health::DEFAULT_MIN_TOP3_DEPTH,
+            min_top10_depth: health::DEFAULT_MIN_TOP10_DEPTH,
             format: SummaryFormat::Text,
             every: None,
             duration: None,
@@ -1884,6 +1920,9 @@ capabilities:
             peg_range: 0.001,
             min_bid_ask_ratio: 0.2,
             max_bid_ask_ratio: 5.0,
+            max_spread_pct: health::DEFAULT_MAX_SPREAD_PCT,
+            min_top3_depth: health::DEFAULT_MIN_TOP3_DEPTH,
+            min_top10_depth: health::DEFAULT_MIN_TOP10_DEPTH,
             format: SummaryFormat::Text,
             every: None,
             duration: None,
@@ -1923,6 +1962,9 @@ capabilities:
             peg_range: 0.001,
             min_bid_ask_ratio: 0.2,
             max_bid_ask_ratio: 5.0,
+            max_spread_pct: health::DEFAULT_MAX_SPREAD_PCT,
+            min_top3_depth: health::DEFAULT_MIN_TOP3_DEPTH,
+            min_top10_depth: health::DEFAULT_MIN_TOP10_DEPTH,
             format: SummaryFormat::Json,
             every: Some("30s".to_string()),
             duration: Some("1h".to_string()),

@@ -981,9 +981,9 @@ The `scope market` command has three subcommands:
 - **Volume**: 24h quote volume (from venue ticker; omitted for DEX venues)
 - **Execution**: Simulated 10k USDT buy/sell slippage or "insufficient liquidity"
 - **Order book**: Ask/bid levels with depth (base and quote amounts)
-- **Health checks**: No sells below peg, bid/ask ratio, minimum levels and depth per side
+- **Health checks**: No sells below peg, bid/ask ratio, spread, minimum valid levels, total depth, and top-3/top-10 depth per side
 - **Output**: Text (default) or JSON; see [Output Examples](#output-examples) for sample
-- **Tunable thresholds**: All health-check thresholds are configurable. Defaults (min-levels=6, min-depth=3000, peg-range=0.001, bid/ask ratio 0.2-5.0x) are sensible stablecoin defaults; override for other markets.
+- **Tunable thresholds**: All health-check thresholds are configurable. Defaults (min-levels=10, max-spread-pct=3, min-top3-depth=300, min-top10-depth=2000, min-depth=3000, peg-range=0.001, bid/ask ratio 0.2-5.0x) are sensible stablecoin defaults; override for other markets.
 
 ```bash
 scope market summary                           # USDC on Binance (default, one shot)

@@ -119,14 +119,7 @@ pub async fn run(
     // 2. Optionally fetch market summary for stablecoin
     let market_summary = if args.with_market {
         sp.set_message("Fetching market data...");
-        let thresholds = HealthThresholds {
-            peg_target: 1.0,
-            peg_range: 0.001,
-            min_levels: 6,
-            min_depth: 3000.0,
-            min_bid_ask_ratio: 0.2,
-            max_bid_ask_ratio: 5.0,
-        };
+        let thresholds = HealthThresholds::default();
         if is_dex_venue(&args.venue) {
             // DEX venues: synthesize from analytics (only when chain matches venue)
             let venue_chain = dex_venue_to_chain(&args.venue);

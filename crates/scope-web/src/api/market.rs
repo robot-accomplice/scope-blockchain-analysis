@@ -5,7 +5,9 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use scope::market::{HealthThresholds, MarketSummary, VenueRegistry, order_book_from_analytics};
+use scope::market::{
+    HealthThresholds, MarketSummary, VenueRegistry, health, order_book_from_analytics,
+};
 use scope_cli::cli::crawl::{self, Period};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -46,16 +48,16 @@ fn default_chain() -> String {
     "ethereum".to_string()
 }
 fn default_peg() -> f64 {
-    1.0
+    health::DEFAULT_PEG_TARGET
 }
 fn default_min_levels() -> usize {
-    6
+    health::DEFAULT_MIN_LEVELS
 }
 fn default_min_depth() -> f64 {
-    3000.0
+    health::DEFAULT_MIN_DEPTH
 }
 fn default_peg_range() -> f64 {
-    0.001
+    health::DEFAULT_PEG_RANGE
 }
 
 /// Converts a MarketSummary to a JSON Value.
@@ -117,8 +119,7 @@ pub async fn handle(
         peg_range: req.peg_range,
         min_levels: req.min_levels,
         min_depth: req.min_depth,
-        min_bid_ask_ratio: 0.2,
-        max_bid_ask_ratio: 5.0,
+        ..HealthThresholds::default()
     };
 
     if !is_dex_venue(venue_id) {
@@ -263,7 +264,7 @@ mod tests {
         assert_eq!(req.market_venue, "binance");
         assert_eq!(req.chain, "ethereum");
         assert_eq!(req.peg, 1.0);
-        assert_eq!(req.min_levels, 6);
+        assert_eq!(req.min_levels, 10);
         assert_eq!(req.min_depth, 3000.0);
         assert_eq!(req.peg_range, 0.001);
     }
@@ -274,7 +275,7 @@ mod tests {
         assert_eq!(default_venue(), "binance");
         assert_eq!(default_chain(), "ethereum");
         assert_eq!(default_peg(), 1.0);
-        assert_eq!(default_min_levels(), 6);
+        assert_eq!(default_min_levels(), 10);
         assert_eq!(default_min_depth(), 3000.0);
         assert_eq!(default_peg_range(), 0.001);
     }

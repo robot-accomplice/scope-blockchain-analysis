@@ -80,14 +80,7 @@ pub async fn handle(
     // Optionally fetch market data
     let venue_id = &req.market_venue;
     let market_summary = if req.with_market {
-        let thresholds = HealthThresholds {
-            peg_target: 1.0,
-            peg_range: 0.001,
-            min_levels: 6,
-            min_depth: 3000.0,
-            min_bid_ask_ratio: 0.2,
-            max_bid_ask_ratio: 5.0,
-        };
+        let thresholds = HealthThresholds::default();
 
         if !is_dex_venue(venue_id) {
             // CEX venue — use venue registry

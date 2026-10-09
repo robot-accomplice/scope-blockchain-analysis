@@ -381,14 +381,7 @@ pub async fn run(
                 if let Ok(exchange) = registry.create_exchange_client(venue_id) {
                     let pair = exchange.format_pair(&analytics.token.symbol);
                     if let Ok(book) = exchange.fetch_order_book(&pair).await {
-                        let thresholds = HealthThresholds {
-                            peg_target: 1.0,
-                            peg_range: 0.001,
-                            min_levels: 6,
-                            min_depth: 3000.0,
-                            min_bid_ask_ratio: 0.2,
-                            max_bid_ask_ratio: 5.0,
-                        };
+                        let thresholds = HealthThresholds::default();
                         let volume_24h = if exchange.has_ticker() {
                             exchange
                                 .fetch_ticker(&pair)
