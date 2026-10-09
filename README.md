@@ -59,6 +59,12 @@ A command-line tool for blockchain data analysis, portfolio tracking, transactio
 cargo install scope-bca
 ```
 
+Or install with Homebrew (macOS and Linux, prebuilt binaries):
+
+```bash
+brew install robot-accomplice/tap/scope
+```
+
 Or build from source:
 
 ```bash
