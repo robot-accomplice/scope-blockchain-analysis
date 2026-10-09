@@ -8,9 +8,11 @@ use crate::cli::crawl::{self, Period};
 use clap::Args;
 use scope::chains::{ChainClientFactory, TokenAnalytics};
 use scope::config::Config;
+
+use super::health_args::HealthArgs;
 use scope::display::report;
 use scope::error::{Result, ScopeError};
-use scope::market::{HealthThresholds, MarketSummary, VenueRegistry, order_book_from_analytics};
+use scope::market::{MarketSummary, VenueRegistry, order_book_from_analytics};
 
 /// Arguments for the token-health command.
 #[derive(Debug, Args)]
@@ -80,6 +82,10 @@ pub struct TokenHealthArgs {
     /// Output format.
     #[arg(short, long, default_value = "table")]
     pub format: scope::config::OutputFormat,
+
+    /// Health threshold overrides for --with-market.
+    #[command(flatten)]
+    pub health: HealthArgs,
 }
 
 /// Runs the token-health command.
@@ -119,7 +125,7 @@ pub async fn run(
     // 2. Optionally fetch market summary for stablecoin
     let market_summary = if args.with_market {
         sp.set_message("Fetching market data...");
-        let thresholds = HealthThresholds::default();
+        let thresholds = args.health.resolve(config);
         if is_dex_venue(&args.venue) {
             // DEX venues: synthesize from analytics (only when chain matches venue)
             let venue_chain = dex_venue_to_chain(&args.venue);
@@ -593,6 +599,7 @@ mod tests {
             with_market: false,
             venue: "binance".to_string(),
             format: scope::config::OutputFormat::Table,
+            health: Default::default(),
         };
         let debug = format!("{:?}", args);
         assert!(debug.contains("TokenHealthArgs"));
@@ -771,6 +778,7 @@ mod tests {
             with_market: false,
             venue: "binance".to_string(),
             format: OutputFormat::Table,
+            health: Default::default(),
         };
 
         let result = run(args, &config, &factory).await;
@@ -793,6 +801,7 @@ mod tests {
             with_market: false,
             venue: "binance".to_string(),
             format: OutputFormat::Json,
+            health: Default::default(),
         };
 
         let result = run(args, &config, &factory).await;
@@ -811,6 +820,7 @@ mod tests {
             with_market: false,
             venue: "binance".to_string(),
             format: OutputFormat::Markdown,
+            health: Default::default(),
         };
 
         let result = run(args, &config, &factory).await;
@@ -848,6 +858,7 @@ mod tests {
             with_market: true,
             venue: "eth".to_string(),
             format: OutputFormat::Table,
+            health: Default::default(),
         };
 
         let result = run(args, &config, &factory).await;
@@ -943,6 +954,7 @@ mod tests {
                 with_market: false,
                 venue: "binance".to_string(),
                 format,
+                health: Default::default(),
             };
             assert_eq!(args.format, format);
         }
@@ -960,6 +972,7 @@ mod tests {
             with_market: false,
             venue: "binance".to_string(),
             format: OutputFormat::Csv,
+            health: Default::default(),
         };
 
         let result = run(args, &config, &factory).await;
@@ -979,6 +992,7 @@ mod tests {
             with_market: false,
             venue: "binance".to_string(),
             format: OutputFormat::Table, // Args say Table, config overrides to Markdown
+            health: Default::default(),
         };
 
         let result = run(args, &config, &factory).await;

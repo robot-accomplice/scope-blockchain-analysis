@@ -4,6 +4,7 @@
 //! peg deviation, spread, bid/ask balance, level count, and depth thresholds.
 
 use super::types::{ExecutionEstimate, HealthCheck, OrderBook, OrderBookLevel};
+use serde::{Deserialize, Serialize};
 
 /// Default peg target (USD stablecoins).
 pub const DEFAULT_PEG_TARGET: f64 = 1.0;
@@ -31,10 +32,11 @@ pub const TOP10_LEVELS: usize = 10;
 
 /// Health check thresholds for order book validation.
 ///
-/// Defaults are the `DEFAULT_*` constants in this module. Override via CLI
-/// (`--min-levels`, `--min-depth`, `--peg-range`, `--min-bid-ask-ratio`,
-/// `--max-bid-ask-ratio`, `--max-spread-pct`, `--min-top3-depth`, `--min-top10-depth`).
-#[derive(Debug, Clone)]
+/// Built-in defaults are the `DEFAULT_*` constants in this module. The
+/// `market.health` section of the config file replaces any of them, and
+/// [`HealthOverrides`] (CLI flags, web request fields) replaces the result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct HealthThresholds {
     /// Peg target (e.g., 1.0 for USD stablecoins).
     pub peg_target: f64,
@@ -68,6 +70,40 @@ impl Default for HealthThresholds {
             max_spread_pct: DEFAULT_MAX_SPREAD_PCT,
             min_top3_depth: DEFAULT_MIN_TOP3_DEPTH,
             min_top10_depth: DEFAULT_MIN_TOP10_DEPTH,
+        }
+    }
+}
+
+/// Per-request threshold overrides. A `None` field keeps the base value.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HealthOverrides {
+    /// Peg target. The web API sends this as `peg`.
+    #[serde(alias = "peg")]
+    pub peg_target: Option<f64>,
+    pub peg_range: Option<f64>,
+    pub min_levels: Option<usize>,
+    pub min_depth: Option<f64>,
+    pub min_bid_ask_ratio: Option<f64>,
+    pub max_bid_ask_ratio: Option<f64>,
+    pub max_spread_pct: Option<f64>,
+    pub min_top3_depth: Option<f64>,
+    pub min_top10_depth: Option<f64>,
+}
+
+impl HealthThresholds {
+    /// Returns a copy of `self` with each `Some` field in `o` applied.
+    pub fn with_overrides(&self, o: &HealthOverrides) -> Self {
+        Self {
+            peg_target: o.peg_target.unwrap_or(self.peg_target),
+            peg_range: o.peg_range.unwrap_or(self.peg_range),
+            min_levels: o.min_levels.unwrap_or(self.min_levels),
+            min_depth: o.min_depth.unwrap_or(self.min_depth),
+            min_bid_ask_ratio: o.min_bid_ask_ratio.unwrap_or(self.min_bid_ask_ratio),
+            max_bid_ask_ratio: o.max_bid_ask_ratio.unwrap_or(self.max_bid_ask_ratio),
+            max_spread_pct: o.max_spread_pct.unwrap_or(self.max_spread_pct),
+            min_top3_depth: o.min_top3_depth.unwrap_or(self.min_top3_depth),
+            min_top10_depth: o.min_top10_depth.unwrap_or(self.min_top10_depth),
         }
     }
 }

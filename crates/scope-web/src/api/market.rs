@@ -5,9 +5,7 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use scope::market::{
-    HealthThresholds, MarketSummary, VenueRegistry, health, order_book_from_analytics,
-};
+use scope::market::{HealthOverrides, MarketSummary, VenueRegistry, order_book_from_analytics};
 use scope_cli::cli::crawl::{self, Period};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -24,18 +22,10 @@ pub struct MarketRequest {
     /// Chain for DEX venues.
     #[serde(default = "default_chain")]
     pub chain: String,
-    /// Peg target (default: 1.0).
-    #[serde(default = "default_peg")]
-    pub peg: f64,
-    /// Min order book levels per side.
-    #[serde(default = "default_min_levels")]
-    pub min_levels: usize,
-    /// Min depth per side in quote terms.
-    #[serde(default = "default_min_depth")]
-    pub min_depth: f64,
-    /// Peg range for outlier filtering.
-    #[serde(default = "default_peg_range")]
-    pub peg_range: f64,
+    /// Health threshold overrides (top-level JSON keys, e.g. `peg`,
+    /// `min_levels`, `max_spread_pct`). Unset keys use config `market.health`.
+    #[serde(flatten)]
+    pub health: HealthOverrides,
 }
 
 fn default_pair() -> String {
@@ -46,18 +36,6 @@ fn default_venue() -> String {
 }
 fn default_chain() -> String {
     "ethereum".to_string()
-}
-fn default_peg() -> f64 {
-    health::DEFAULT_PEG_TARGET
-}
-fn default_min_levels() -> usize {
-    health::DEFAULT_MIN_LEVELS
-}
-fn default_min_depth() -> f64 {
-    health::DEFAULT_MIN_DEPTH
-}
-fn default_peg_range() -> f64 {
-    health::DEFAULT_PEG_RANGE
 }
 
 /// Converts a MarketSummary to a JSON Value.
@@ -114,13 +92,7 @@ pub async fn handle(
 ) -> impl IntoResponse {
     let venue_id = &req.market_venue;
 
-    let thresholds = HealthThresholds {
-        peg_target: req.peg,
-        peg_range: req.peg_range,
-        min_levels: req.min_levels,
-        min_depth: req.min_depth,
-        ..HealthThresholds::default()
-    };
+    let thresholds = state.config.market.health.with_overrides(&req.health);
 
     if !is_dex_venue(venue_id) {
         // CEX venue — use the venue registry
@@ -157,8 +129,12 @@ pub async fn handle(
                 } else {
                     None
                 };
-                let summary =
-                    MarketSummary::from_order_book(&book, req.peg, &thresholds, volume_24h);
+                let summary = MarketSummary::from_order_book(
+                    &book,
+                    thresholds.peg_target,
+                    &thresholds,
+                    volume_24h,
+                );
                 Json(summary_to_json(&summary)).into_response()
             }
             Err(e) => (
@@ -202,7 +178,7 @@ pub async fn handle(
                     order_book_from_analytics(venue_chain, best_pair, &analytics.token.symbol);
                 let summary = MarketSummary::from_order_book(
                     &book,
-                    req.peg,
+                    thresholds.peg_target,
                     &thresholds,
                     Some(best_pair.volume_24h),
                 );
@@ -250,10 +226,10 @@ mod tests {
         assert_eq!(req.pair, "DAI");
         assert_eq!(req.market_venue, "binance");
         assert_eq!(req.chain, "polygon");
-        assert_eq!(req.peg, 1.0);
-        assert_eq!(req.min_levels, 10);
-        assert_eq!(req.min_depth, 5000.0);
-        assert_eq!(req.peg_range, 0.002);
+        assert_eq!(req.health.peg_target, Some(1.0));
+        assert_eq!(req.health.min_levels, Some(10));
+        assert_eq!(req.health.min_depth, Some(5000.0));
+        assert_eq!(req.health.peg_range, Some(0.002));
     }
 
     #[test]
@@ -263,10 +239,8 @@ mod tests {
         assert_eq!(req.pair, "USDC");
         assert_eq!(req.market_venue, "binance");
         assert_eq!(req.chain, "ethereum");
-        assert_eq!(req.peg, 1.0);
-        assert_eq!(req.min_levels, 10);
-        assert_eq!(req.min_depth, 3000.0);
-        assert_eq!(req.peg_range, 0.001);
+        // No threshold keys: every value comes from config `market.health`.
+        assert_eq!(req.health, HealthOverrides::default());
     }
 
     #[test]
@@ -274,10 +248,35 @@ mod tests {
         assert_eq!(default_pair(), "USDC");
         assert_eq!(default_venue(), "binance");
         assert_eq!(default_chain(), "ethereum");
-        assert_eq!(default_peg(), 1.0);
-        assert_eq!(default_min_levels(), 10);
-        assert_eq!(default_min_depth(), 3000.0);
-        assert_eq!(default_peg_range(), 0.001);
+    }
+
+    #[test]
+    fn test_new_thresholds_accepted() {
+        let json = serde_json::json!({
+            "max_spread_pct": 1.5,
+            "min_top3_depth": 500.0,
+            "min_top10_depth": 4000.0,
+            "min_bid_ask_ratio": 0.5,
+            "max_bid_ask_ratio": 2.0
+        });
+        let req: MarketRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.health.max_spread_pct, Some(1.5));
+        assert_eq!(req.health.min_top3_depth, Some(500.0));
+        assert_eq!(req.health.min_top10_depth, Some(4000.0));
+        assert_eq!(req.health.min_bid_ask_ratio, Some(0.5));
+        assert_eq!(req.health.max_bid_ask_ratio, Some(2.0));
+    }
+
+    #[test]
+    fn test_request_overrides_config() {
+        let mut config = scope::config::Config::default();
+        config.market.health.min_levels = 20;
+        config.market.health.max_spread_pct = 5.0;
+        let req: MarketRequest =
+            serde_json::from_value(serde_json::json!({ "max_spread_pct": 1.0 })).unwrap();
+        let t = config.market.health.with_overrides(&req.health);
+        assert_eq!(t.max_spread_pct, 1.0);
+        assert_eq!(t.min_levels, 20);
     }
 
     #[test]
@@ -288,14 +287,14 @@ mod tests {
             "peg_range": 0.005
         });
         let req: MarketRequest = serde_json::from_value(json).unwrap();
-        assert_eq!(req.min_levels, 20);
-        assert_eq!(req.min_depth, 10000.0);
-        assert_eq!(req.peg_range, 0.005);
+        assert_eq!(req.health.min_levels, Some(20));
+        assert_eq!(req.health.min_depth, Some(10000.0));
+        assert_eq!(req.health.peg_range, Some(0.005));
         // Other fields should use defaults
         assert_eq!(req.pair, "USDC");
         assert_eq!(req.market_venue, "binance");
         assert_eq!(req.chain, "ethereum");
-        assert_eq!(req.peg, 1.0);
+        assert_eq!(req.health.peg_target, None);
     }
 
     #[tokio::test]
@@ -318,10 +317,7 @@ mod tests {
             pair: "USDC".to_string(),
             market_venue: "binance".to_string(),
             chain: "ethereum".to_string(),
-            peg: 1.0,
-            min_levels: 6,
-            min_depth: 3000.0,
-            peg_range: 0.001,
+            health: HealthOverrides::default(),
         };
         let response = handle(State(state), axum::Json(req)).await.into_response();
         let status = response.status();
@@ -348,10 +344,7 @@ mod tests {
             pair: "USDC".to_string(),
             market_venue: "eth".to_string(),
             chain: "ethereum".to_string(),
-            peg: 1.0,
-            min_levels: 6,
-            min_depth: 3000.0,
-            peg_range: 0.001,
+            health: HealthOverrides::default(),
         };
         let response = handle(State(state), axum::Json(req)).await.into_response();
         let status = response.status();
@@ -378,10 +371,7 @@ mod tests {
             pair: "BTC".to_string(),
             market_venue: "binance".to_string(),
             chain: "ethereum".to_string(),
-            peg: 1.0,
-            min_levels: 1,
-            min_depth: 50.0,
-            peg_range: 0.01,
+            health: HealthOverrides::default(),
         };
         let response = handle(State(state), axum::Json(req)).await.into_response();
         let status = response.status();
@@ -415,10 +405,7 @@ mod tests {
             pair: "USDC".to_string(),
             market_venue: "binance".to_string(),
             chain: "ethereum".to_string(),
-            peg: 1.0,
-            min_levels: 6,
-            min_depth: 3000.0,
-            peg_range: 0.001,
+            health: HealthOverrides::default(),
         };
         let debug = format!("{:?}", req);
         assert!(debug.contains("MarketRequest"));
@@ -444,10 +431,7 @@ mod tests {
             pair: "USDC".to_string(),
             market_venue: "nonexistent_venue_xyz".to_string(),
             chain: "ethereum".to_string(),
-            peg: 1.0,
-            min_levels: 6,
-            min_depth: 3000.0,
-            peg_range: 0.001,
+            health: HealthOverrides::default(),
         };
         let response = handle(State(state), axum::Json(req)).await.into_response();
         let status = response.status();
@@ -476,10 +460,7 @@ mod tests {
             pair: "USDC".to_string(),
             market_venue: "binance".to_string(),
             chain: "ethereum".to_string(),
-            peg: 1.0,
-            min_levels: 6,
-            min_depth: 3000.0,
-            peg_range: 0.001,
+            health: HealthOverrides::default(),
         };
         let response = handle(State(state), axum::Json(req)).await.into_response();
         if response.status().is_success() {
@@ -530,7 +511,7 @@ mod tests {
                 },
             ],
         };
-        let thresholds = HealthThresholds::default();
+        let thresholds = scope::market::HealthThresholds::default();
         let summary =
             scope::market::MarketSummary::from_order_book(&book, 1.0, &thresholds, Some(50_000.0));
         let json = summary_to_json(&summary);

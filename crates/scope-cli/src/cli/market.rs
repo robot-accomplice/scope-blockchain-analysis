@@ -9,10 +9,12 @@ use crate::cli::crawl::{self, Period};
 use clap::{Args, Subcommand};
 use scope::chains::ChainClientFactory;
 use scope::config::Config;
+
+use super::health_args::HealthArgs;
 use scope::display::terminal as t;
 use scope::error::{Result, ScopeError};
 use scope::market::{
-    HealthThresholds, MarketSummary, OrderBook, VenueRegistry, health, order_book_from_analytics,
+    HealthThresholds, MarketSummary, OrderBook, VenueRegistry, order_book_from_analytics,
 };
 use std::time::Duration;
 
@@ -24,6 +26,7 @@ pub const DEFAULT_DURATION_SECS: u64 = 3600;
 
 /// Market subcommands.
 #[derive(Debug, Subcommand)]
+#[allow(clippy::large_enum_variant)]
 pub enum MarketCommands {
     /// One-screen peg and order book health summary.
     ///
@@ -68,7 +71,7 @@ pub enum MarketCommands {
   |-- Health Checks                                     |
   |  + No sells below peg                               |
   |  + Bid/Ask ratio: 0.93x                             |
-  |  + Bid levels: 8 >= 6 minimum                       |
+  |  + Bid levels: 12 >= 10 minimum                     |
   |  + Bid depth: 42000 USDT >= 3000 USDT minimum       |
   |                                                     |
   |  HEALTHY                                            |
@@ -96,42 +99,9 @@ pub struct SummaryArgs {
     #[arg(long, default_value = "ethereum", value_name = "CHAIN")]
     pub chain: String,
 
-    /// Peg target (e.g., 1.0 for USD stablecoins).
-    #[arg(long, default_value_t = health::DEFAULT_PEG_TARGET, value_name = "TARGET")]
-    pub peg: f64,
-
-    /// Minimum valid order book levels (price > 0, quantity > 0) per side.
-    #[arg(long, default_value_t = health::DEFAULT_MIN_LEVELS, value_name = "N")]
-    pub min_levels: usize,
-
-    /// Minimum in-band depth per side in quote terms, e.g. USDT.
-    #[arg(long, default_value_t = health::DEFAULT_MIN_DEPTH, value_name = "USDT")]
-    pub min_depth: f64,
-
-    /// Peg range for outlier filtering (orders outside peg ± range×5 excluded).
-    /// E.g., 0.001 = ±0.5% around peg.
-    #[arg(long, default_value_t = health::DEFAULT_PEG_RANGE, value_name = "RANGE")]
-    pub peg_range: f64,
-
-    /// Min bid/ask depth ratio (warn if ratio below this).
-    #[arg(long, default_value_t = health::DEFAULT_MIN_BID_ASK_RATIO, value_name = "RATIO")]
-    pub min_bid_ask_ratio: f64,
-
-    /// Max bid/ask depth ratio (warn if ratio above this).
-    #[arg(long, default_value_t = health::DEFAULT_MAX_BID_ASK_RATIO, value_name = "RATIO")]
-    pub max_bid_ask_ratio: f64,
-
-    /// Max spread between best bid and best ask, in percent of mid price.
-    #[arg(long, default_value_t = health::DEFAULT_MAX_SPREAD_PCT, value_name = "PCT")]
-    pub max_spread_pct: f64,
-
-    /// Min depth of the top 3 valid levels per side, in quote terms.
-    #[arg(long, default_value_t = health::DEFAULT_MIN_TOP3_DEPTH, value_name = "USDT")]
-    pub min_top3_depth: f64,
-
-    /// Min depth of the top 10 valid levels per side, in quote terms.
-    #[arg(long, default_value_t = health::DEFAULT_MIN_TOP10_DEPTH, value_name = "USDT")]
-    pub min_top10_depth: f64,
+    /// Health threshold overrides (flag > config `market.health` > default).
+    #[command(flatten)]
+    pub health: HealthArgs,
 
     /// Output format.
     #[arg(short, long, default_value = "text")]
@@ -261,11 +231,11 @@ pub enum OhlcFormat {
 /// Run the market command.
 pub async fn run(
     args: MarketCommands,
-    _config: &Config,
+    config: &Config,
     factory: &dyn ChainClientFactory,
 ) -> Result<()> {
     match args {
-        MarketCommands::Summary(summary_args) => run_summary(summary_args, factory).await,
+        MarketCommands::Summary(summary_args) => run_summary(summary_args, config, factory).await,
         MarketCommands::Ohlc(ohlc_args) => run_ohlc(ohlc_args).await,
         MarketCommands::Trades(trades_args) => run_trades(trades_args).await,
     }
@@ -533,7 +503,8 @@ async fn run_summary_once(
     }
 
     let (book, volume_24h) = fetch_book_and_volume(args, factory).await?;
-    let summary = MarketSummary::from_order_book(&book, args.peg, thresholds, volume_24h);
+    let summary =
+        MarketSummary::from_order_book(&book, thresholds.peg_target, thresholds, volume_24h);
 
     let venue_label = args.venue.clone();
 
@@ -577,18 +548,12 @@ async fn run_summary_once(
     Ok(summary)
 }
 
-async fn run_summary(args: SummaryArgs, factory: &dyn ChainClientFactory) -> Result<()> {
-    let thresholds = HealthThresholds {
-        peg_target: args.peg,
-        peg_range: args.peg_range,
-        min_levels: args.min_levels,
-        min_depth: args.min_depth,
-        min_bid_ask_ratio: args.min_bid_ask_ratio,
-        max_bid_ask_ratio: args.max_bid_ask_ratio,
-        max_spread_pct: args.max_spread_pct,
-        min_top3_depth: args.min_top3_depth,
-        min_top10_depth: args.min_top10_depth,
-    };
+async fn run_summary(
+    args: SummaryArgs,
+    config: &Config,
+    factory: &dyn ChainClientFactory,
+) -> Result<()> {
+    let thresholds = args.health.resolve(config);
 
     let repeat_mode = args.every.is_some() || args.duration.is_some();
 
@@ -977,15 +942,15 @@ capabilities:
             pair: "USDC".to_string(),
             venue: "eth".to_string(),
             chain: "ethereum".to_string(),
-            peg: 1.0,
-            min_levels: 1,
-            min_depth: 50.0,
-            peg_range: 0.01,
-            min_bid_ask_ratio: 0.1,
-            max_bid_ask_ratio: 10.0,
-            max_spread_pct: health::DEFAULT_MAX_SPREAD_PCT,
-            min_top3_depth: health::DEFAULT_MIN_TOP3_DEPTH,
-            min_top10_depth: health::DEFAULT_MIN_TOP10_DEPTH,
+            health: HealthArgs {
+                peg_target: Some(1.0),
+                peg_range: Some(0.01),
+                min_levels: Some(1),
+                min_depth: Some(50.0),
+                min_bid_ask_ratio: Some(0.1),
+                max_bid_ask_ratio: Some(10.0),
+                ..Default::default()
+            },
             format: SummaryFormat::Text,
             every: None,
             duration: None,
@@ -1000,7 +965,7 @@ capabilities:
             http,
         };
         // DEX path: will hit real DexScreener API, may fail in offline environments
-        let _result = run_summary(args, &factory).await;
+        let _result = run_summary(args, &Config::default(), &factory).await;
         // We don't assert success because it depends on network, just confirm no panic
     }
 
@@ -1010,15 +975,15 @@ capabilities:
             pair: "USDC".to_string(),
             venue: "eth".to_string(),
             chain: "ethereum".to_string(),
-            peg: 1.0,
-            min_levels: 1,
-            min_depth: 50.0,
-            peg_range: 0.01,
-            min_bid_ask_ratio: 0.1,
-            max_bid_ask_ratio: 10.0,
-            max_spread_pct: health::DEFAULT_MAX_SPREAD_PCT,
-            min_top3_depth: health::DEFAULT_MIN_TOP3_DEPTH,
-            min_top10_depth: health::DEFAULT_MIN_TOP10_DEPTH,
+            health: HealthArgs {
+                peg_target: Some(1.0),
+                peg_range: Some(0.01),
+                min_levels: Some(1),
+                min_depth: Some(50.0),
+                min_bid_ask_ratio: Some(0.1),
+                max_bid_ask_ratio: Some(10.0),
+                ..Default::default()
+            },
             format: SummaryFormat::Json,
             every: None,
             duration: None,
@@ -1032,7 +997,7 @@ capabilities:
             chains_config: Default::default(),
             http,
         };
-        let _result = run_summary(args, &factory).await;
+        let _result = run_summary(args, &Config::default(), &factory).await;
     }
 
     #[test]
@@ -1311,15 +1276,15 @@ capabilities:
             pair: "USDC".to_string(),
             venue: "binance".to_string(),
             chain: "ethereum".to_string(),
-            peg: 1.0,
-            min_levels: 6,
-            min_depth: 3000.0,
-            peg_range: 0.001,
-            min_bid_ask_ratio: 0.2,
-            max_bid_ask_ratio: 5.0,
-            max_spread_pct: health::DEFAULT_MAX_SPREAD_PCT,
-            min_top3_depth: health::DEFAULT_MIN_TOP3_DEPTH,
-            min_top10_depth: health::DEFAULT_MIN_TOP10_DEPTH,
+            health: HealthArgs {
+                peg_target: Some(1.0),
+                peg_range: Some(0.001),
+                min_levels: Some(6),
+                min_depth: Some(3000.0),
+                min_bid_ask_ratio: Some(0.2),
+                max_bid_ask_ratio: Some(5.0),
+                ..Default::default()
+            },
             format: SummaryFormat::Text,
             every: None,
             duration: None,
@@ -1388,15 +1353,15 @@ capabilities:
             pair: "USDC".to_string(),
             venue: "eth".to_string(),
             chain: "ethereum".to_string(),
-            peg: 1.0,
-            min_levels: 1,
-            min_depth: 50.0,
-            peg_range: 0.01,
-            min_bid_ask_ratio: 0.1,
-            max_bid_ask_ratio: 10.0,
-            max_spread_pct: health::DEFAULT_MAX_SPREAD_PCT,
-            min_top3_depth: health::DEFAULT_MIN_TOP3_DEPTH,
-            min_top10_depth: health::DEFAULT_MIN_TOP10_DEPTH,
+            health: HealthArgs {
+                peg_target: Some(1.0),
+                peg_range: Some(0.01),
+                min_levels: Some(1),
+                min_depth: Some(50.0),
+                min_bid_ask_ratio: Some(0.1),
+                max_bid_ask_ratio: Some(10.0),
+                ..Default::default()
+            },
             format: SummaryFormat::Text,
             every: None,
             duration: None,
@@ -1460,15 +1425,15 @@ capabilities:
             pair: "USDC".to_string(),
             venue: "eth".to_string(),
             chain: "ethereum".to_string(),
-            peg: 1.0,
-            min_levels: 1,
-            min_depth: 50.0,
-            peg_range: 0.01,
-            min_bid_ask_ratio: 0.1,
-            max_bid_ask_ratio: 10.0,
-            max_spread_pct: health::DEFAULT_MAX_SPREAD_PCT,
-            min_top3_depth: health::DEFAULT_MIN_TOP3_DEPTH,
-            min_top10_depth: health::DEFAULT_MIN_TOP10_DEPTH,
+            health: HealthArgs {
+                peg_target: Some(1.0),
+                peg_range: Some(0.01),
+                min_levels: Some(1),
+                min_depth: Some(50.0),
+                min_bid_ask_ratio: Some(0.1),
+                max_bid_ask_ratio: Some(10.0),
+                ..Default::default()
+            },
             format: SummaryFormat::Json,
             every: None,
             duration: None,
@@ -1482,7 +1447,7 @@ capabilities:
             chains_config: Default::default(),
             http,
         };
-        let _result = run_summary(args, &factory).await;
+        let _result = run_summary(args, &Config::default(), &factory).await;
     }
 
     // ====================================================================
@@ -1837,15 +1802,15 @@ capabilities:
             pair: "USDC".to_string(),
             venue: "eth".to_string(),
             chain: "ethereum".to_string(),
-            peg: 1.0,
-            min_levels: 1,
-            min_depth: 50.0,
-            peg_range: 0.01,
-            min_bid_ask_ratio: 0.1,
-            max_bid_ask_ratio: 10.0,
-            max_spread_pct: health::DEFAULT_MAX_SPREAD_PCT,
-            min_top3_depth: health::DEFAULT_MIN_TOP3_DEPTH,
-            min_top10_depth: health::DEFAULT_MIN_TOP10_DEPTH,
+            health: HealthArgs {
+                peg_target: Some(1.0),
+                peg_range: Some(0.01),
+                min_levels: Some(1),
+                min_depth: Some(50.0),
+                min_bid_ask_ratio: Some(0.1),
+                max_bid_ask_ratio: Some(10.0),
+                ..Default::default()
+            },
             format: SummaryFormat::Text,
             every: Some("0.1s".to_string()),
             duration: Some("1m".to_string()),
@@ -1858,7 +1823,7 @@ capabilities:
             chains_config: Default::default(),
             http,
         };
-        let result = run_summary(args, &factory).await;
+        let result = run_summary(args, &Config::default(), &factory).await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -1876,15 +1841,15 @@ capabilities:
             pair: "USDC".to_string(),
             venue: "eth".to_string(),
             chain: "ethereum".to_string(),
-            peg: 1.0,
-            min_levels: 1,
-            min_depth: 50.0,
-            peg_range: 0.01,
-            min_bid_ask_ratio: 0.1,
-            max_bid_ask_ratio: 10.0,
-            max_spread_pct: health::DEFAULT_MAX_SPREAD_PCT,
-            min_top3_depth: health::DEFAULT_MIN_TOP3_DEPTH,
-            min_top10_depth: health::DEFAULT_MIN_TOP10_DEPTH,
+            health: HealthArgs {
+                peg_target: Some(1.0),
+                peg_range: Some(0.01),
+                min_levels: Some(1),
+                min_depth: Some(50.0),
+                min_bid_ask_ratio: Some(0.1),
+                max_bid_ask_ratio: Some(10.0),
+                ..Default::default()
+            },
             format: SummaryFormat::Text,
             every: None,
             duration: None,
@@ -1897,7 +1862,7 @@ capabilities:
             chains_config: Default::default(),
             http,
         };
-        let result = run_summary(args, &factory).await;
+        let result = run_summary(args, &Config::default(), &factory).await;
         if result.is_ok() {
             let content = std::fs::read_to_string(&report_path).unwrap();
             assert!(content.contains("Market Health Report"));
@@ -1914,15 +1879,15 @@ capabilities:
             pair: "USDC".to_string(),
             venue: "binance".to_string(),
             chain: "ethereum".to_string(),
-            peg: 1.0,
-            min_levels: 6,
-            min_depth: 3000.0,
-            peg_range: 0.001,
-            min_bid_ask_ratio: 0.2,
-            max_bid_ask_ratio: 5.0,
-            max_spread_pct: health::DEFAULT_MAX_SPREAD_PCT,
-            min_top3_depth: health::DEFAULT_MIN_TOP3_DEPTH,
-            min_top10_depth: health::DEFAULT_MIN_TOP10_DEPTH,
+            health: HealthArgs {
+                peg_target: Some(1.0),
+                peg_range: Some(0.001),
+                min_levels: Some(6),
+                min_depth: Some(3000.0),
+                min_bid_ask_ratio: Some(0.2),
+                max_bid_ask_ratio: Some(5.0),
+                ..Default::default()
+            },
             format: SummaryFormat::Text,
             every: None,
             duration: None,
@@ -1956,15 +1921,15 @@ capabilities:
             pair: "DAI".to_string(),
             venue: "binance".to_string(),
             chain: "ethereum".to_string(),
-            peg: 1.0,
-            min_levels: 6,
-            min_depth: 3000.0,
-            peg_range: 0.001,
-            min_bid_ask_ratio: 0.2,
-            max_bid_ask_ratio: 5.0,
-            max_spread_pct: health::DEFAULT_MAX_SPREAD_PCT,
-            min_top3_depth: health::DEFAULT_MIN_TOP3_DEPTH,
-            min_top10_depth: health::DEFAULT_MIN_TOP10_DEPTH,
+            health: HealthArgs {
+                peg_target: Some(1.0),
+                peg_range: Some(0.001),
+                min_levels: Some(6),
+                min_depth: Some(3000.0),
+                min_bid_ask_ratio: Some(0.2),
+                max_bid_ask_ratio: Some(5.0),
+                ..Default::default()
+            },
             format: SummaryFormat::Json,
             every: Some("30s".to_string()),
             duration: Some("1h".to_string()),
