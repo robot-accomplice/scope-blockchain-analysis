@@ -746,6 +746,26 @@ mod tests {
     }
 
     #[test]
+    fn test_render_shows_live_output_of_a_running_command() {
+        // Output must appear while the command runs, not only when it ends.
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let mut s = state();
+        let inv = Invocation {
+            command: venues_list(),
+            route: Route::Pane,
+            ai: false,
+            argv: vec![],
+        };
+        let out = s.start("market summary USDC --every 30s", &inv);
+        crate::outln!(out, "\x1b[32mrun 1: HEALTHY\x1b[0m").unwrap();
+        let text = screen(&s, 80, 15);
+        assert!(text.contains("run 1: HEALTHY"), "{}", text);
+        assert!(text.contains("running 0s · Esc cancels"), "{}", text);
+        s.finish(Ending::Finished(Ok(())));
+        assert!(s.scrollback_text().contains("run 1: HEALTHY"));
+    }
+
+    #[test]
     fn test_newest_line_is_on_the_last_pane_row() {
         // A gap under the newest output hides it behind blank rows on short
         // terminals.
