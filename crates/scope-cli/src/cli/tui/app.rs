@@ -588,6 +588,39 @@ mod tests {
     }
 
     #[test]
+    fn test_cursor_keys_and_idle_escape() {
+        let mut s = state();
+        type_str(&mut s, "bc");
+        s.handle_key(key(KeyCode::Home));
+        type_str(&mut s, "a");
+        s.handle_key(ctrl('e'));
+        type_str(&mut s, "d");
+        assert_eq!(s.input, "abcd");
+        s.handle_key(ctrl('a'));
+        s.handle_key(key(KeyCode::Delete));
+        assert_eq!(s.input, "bcd");
+        s.handle_key(key(KeyCode::End));
+        s.handle_key(key(KeyCode::Delete));
+        assert_eq!(s.input, "bcd", "Delete at the end does nothing");
+        s.handle_key(key(KeyCode::Right));
+        type_str(&mut s, "e");
+        assert_eq!(s.input, "bcde");
+        // Alt-modified chars are not text.
+        s.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT));
+        assert_eq!(s.input, "bcde");
+        s.handle_key(key(KeyCode::Esc));
+        assert_eq!(s.input, "", "Esc clears the line when idle");
+        // Ctrl-C on an empty idle line explains how to leave.
+        s.handle_key(ctrl('c'));
+        assert!(s.scrollback_text().contains("Ctrl-D to leave"));
+        // History keys with no history do nothing.
+        s.handle_key(key(KeyCode::Up));
+        s.handle_key(key(KeyCode::Down));
+        assert_eq!(s.input, "");
+        s.handle_key(key(KeyCode::PageDown));
+    }
+
+    #[test]
     fn test_multibyte_input_does_not_panic() {
         let mut s = state();
         type_str(&mut s, "tokens add €UR");

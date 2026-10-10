@@ -132,21 +132,35 @@ impl SessionContext {
     /// Loads session context from file, or returns default if not found.
     pub fn load() -> Self {
         Self::context_path()
-            .and_then(|path| std::fs::read_to_string(&path).ok())
+            .map(|path| Self::load_from(&path))
+            .unwrap_or_default()
+    }
+
+    /// Loads session context from `path`. A missing or unreadable file is
+    /// the default context.
+    pub fn load_from(path: &std::path::Path) -> Self {
+        std::fs::read_to_string(path)
+            .ok()
             .and_then(|contents| serde_yaml::from_str(&contents).ok())
             .unwrap_or_default()
     }
 
     /// Saves session context to file.
     pub fn save(&self) -> Result<()> {
-        if let Some(path) = Self::context_path() {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            let contents = serde_yaml::to_string(self)
-                .map_err(|e| scope::error::ScopeError::Export(e.to_string()))?;
-            std::fs::write(&path, contents)?;
+        match Self::context_path() {
+            Some(path) => self.save_to(&path),
+            None => Ok(()),
         }
+    }
+
+    /// Saves session context to `path`, creating its directory.
+    pub fn save_to(&self, path: &std::path::Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let contents = serde_yaml::to_string(self)
+            .map_err(|e| scope::error::ScopeError::Export(e.to_string()))?;
+        std::fs::write(path, contents)?;
         Ok(())
     }
 }
@@ -269,5 +283,32 @@ mod tests {
             ..Default::default()
         };
         assert!(!pinned_ctx.is_auto_chain());
+    }
+
+    #[test]
+    fn test_session_context_save_to_and_load_from() {
+        // The TUI restores the pinned chain and toggles on the next start.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("session.yaml");
+        let ctx = SessionContext {
+            chain: "solana".into(),
+            include_txs: true,
+            last_address: Some("addr".into()),
+            ..Default::default()
+        };
+        ctx.save_to(&path).unwrap();
+        let back = SessionContext::load_from(&path);
+        assert_eq!(back.chain, "solana");
+        assert!(back.include_txs);
+        assert_eq!(back.last_address.as_deref(), Some("addr"));
+    }
+
+    #[test]
+    fn test_session_context_load_from_missing_or_corrupt_is_default() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(SessionContext::load_from(&dir.path().join("none.yaml")).is_auto_chain());
+        let bad = dir.path().join("bad.yaml");
+        std::fs::write(&bad, "chain: [unclosed").unwrap();
+        assert!(SessionContext::load_from(&bad).is_auto_chain());
     }
 }

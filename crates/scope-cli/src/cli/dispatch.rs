@@ -238,4 +238,49 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("scope web"));
     }
+
+    // ---- dispatch_with routes to the real handlers (offline, mocks) ----
+
+    const ADDR: &str = "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2";
+
+    async fn run_line(args: &[&str]) -> (Result<()>, String) {
+        let mut argv = vec!["scope"];
+        argv.extend_from_slice(args);
+        let cli = Cli::try_parse_from(argv).unwrap();
+        let (o, cap) = Output::capture_merged();
+        let factory = scope::chains::mocks::MockClientFactory::new();
+        let res = dispatch_with(cli.command, &Config::default(), &factory, &o).await;
+        (res, cap.out())
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_with_crawl_by_address() {
+        let (res, out) = run_line(&["crawl", ADDR, "--yes", "--no-charts"]).await;
+        res.unwrap();
+        assert!(!out.trim().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_with_token_health() {
+        let (res, out) = run_line(&["token-health", ADDR]).await;
+        res.unwrap();
+        assert!(!out.trim().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_with_report_batch_writes_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("batch.md");
+        let (res, _) = run_line(&[
+            "report",
+            "batch",
+            "--addresses",
+            ADDR,
+            "--output",
+            path.to_str().unwrap(),
+        ])
+        .await;
+        res.unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains(ADDR));
+    }
 }

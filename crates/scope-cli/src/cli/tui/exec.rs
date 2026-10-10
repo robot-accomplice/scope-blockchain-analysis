@@ -172,7 +172,7 @@ pub fn plan(
             return Ok(Plan::Done);
         }
         "tokens" | "aliases" => {
-            tokens_command(&rest, out)?;
+            tokens_command(&rest, &mut TokenAliases::load(), &TokenAliases::save, out)?;
             return Ok(Plan::Done);
         }
         _ => {}
@@ -449,9 +449,16 @@ fn set_limit(ctx: &mut SessionContext, arg: Option<&str>, out: &Output) -> io::R
     }
 }
 
+/// Saves the token aliases. Injected so tests never write the user's file.
+type SaveAliases<'a> = dyn Fn(&TokenAliases) -> scope::error::Result<()> + 'a;
+
 /// The `tokens` session command: list, add and remove saved token aliases.
-fn tokens_command(args: &[&str], out: &Output) -> io::Result<()> {
-    let mut aliases = TokenAliases::load();
+fn tokens_command(
+    args: &[&str],
+    aliases: &mut TokenAliases,
+    save: &SaveAliases<'_>,
+    out: &Output,
+) -> io::Result<()> {
     match args.first().map(|s| s.to_lowercase()).as_deref() {
         None | Some("list") | Some("ls") => {
             let tokens = aliases.list();
@@ -491,7 +498,7 @@ fn tokens_command(args: &[&str], out: &Output) -> io::Result<()> {
                 _ => None,
             };
             aliases.remove(symbol, chain);
-            match aliases.save() {
+            match save(aliases) {
                 Ok(()) => outln!(out, "Removed alias: {}", symbol),
                 Err(e) => errln!(out, "Failed to save the token aliases: {}", e),
             }
@@ -508,7 +515,7 @@ fn tokens_command(args: &[&str], out: &Output) -> io::Result<()> {
                 symbol.to_string()
             };
             aliases.add(symbol, chain, address, &name);
-            match aliases.save() {
+            match save(aliases) {
                 Ok(()) => outln!(out, "Added alias: {} -> {} on {}", symbol, address, chain),
                 Err(e) => errln!(out, "Failed to save the token aliases: {}", e),
             }
@@ -769,6 +776,81 @@ mod tests {
         ] {
             assert!(cap.out().contains(word), "help is missing {}", word);
         }
+    }
+
+    // ---- tokens ----
+
+    /// Runs `tokens …` against an in-memory store; returns output and how
+    /// many times it saved.
+    fn tokens(line: &str, aliases: &mut TokenAliases, fail_save: bool) -> (String, String, usize) {
+        let saves = std::cell::Cell::new(0);
+        let save = |_: &TokenAliases| {
+            saves.set(saves.get() + 1);
+            if fail_save {
+                Err(scope::error::ScopeError::Io("disk full".into()))
+            } else {
+                Ok(())
+            }
+        };
+        let (o, cap) = Output::capture();
+        let args: Vec<&str> = line.split_whitespace().collect();
+        tokens_command(&args, aliases, &save, &o).unwrap();
+        (cap.out(), cap.err(), saves.get())
+    }
+
+    #[test]
+    fn test_tokens_add_list_recent_remove() {
+        let mut a = TokenAliases::default();
+        let (out, _, saves) = tokens(
+            &format!("add USDN ethereum {} Nova USD", ADDR),
+            &mut a,
+            false,
+        );
+        assert!(out.contains("Added alias: USDN"));
+        assert_eq!(saves, 1);
+        assert_eq!(a.get("USDN", None).unwrap().name, "Nova USD");
+
+        for cmd in ["", "list", "ls"] {
+            let (out, _, _) = tokens(cmd, &mut a, false);
+            assert!(
+                out.contains("Saved Token Aliases") && out.contains("USDN"),
+                "{}",
+                cmd
+            );
+        }
+        let (out, _, _) = tokens("recent", &mut a, false);
+        assert!(out.contains("No recently used tokens") || out.contains("USDN"));
+
+        let (out, _, saves) = tokens("rm USDN --chain ethereum", &mut a, false);
+        assert!(out.contains("Removed alias: USDN"));
+        assert_eq!(saves, 1);
+        assert!(a.get("USDN", None).is_none());
+        let (out, _, _) = tokens("list", &mut a, false);
+        assert!(out.contains("No saved token aliases"));
+    }
+
+    #[test]
+    fn test_tokens_usage_errors_do_not_save() {
+        let mut a = TokenAliases::default();
+        for line in ["add USDN ethereum", "remove", "frobnicate"] {
+            let (out, err, saves) = tokens(line, &mut a, false);
+            assert_eq!(out, "", "{}", line);
+            assert!(!err.is_empty(), "{}", line);
+            assert_eq!(saves, 0, "{}", line);
+        }
+    }
+
+    #[test]
+    fn test_tokens_save_failure_is_reported() {
+        let mut a = TokenAliases::default();
+        let (out, err, _) = tokens(&format!("add USDN ethereum {}", ADDR), &mut a, true);
+        assert!(!out.contains("Added"));
+        assert!(
+            err.contains("Failed to save the token aliases: "),
+            "{}",
+            err
+        );
+        assert!(err.contains("disk full"));
     }
 
     // ---- CLI parsing and context injection ----
