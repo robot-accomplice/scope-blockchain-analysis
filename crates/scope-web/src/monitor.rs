@@ -301,6 +301,7 @@ mod tests {
         let snapshot = MarketSnapshot {
             order_book: Some(OrderBook {
                 pair: "BTC/USDT".to_string(),
+                source: scope::market::BookSource::Exchange,
                 bids: vec![OrderBookLevel {
                     price: 50000.0,
                     quantity: 1.5,
@@ -387,6 +388,7 @@ mod tests {
         let snapshot = MarketSnapshot {
             order_book: Some(OrderBook {
                 pair: "ETH/USDT".to_string(),
+                source: scope::market::BookSource::Exchange,
                 bids: vec![OrderBookLevel {
                     price: 2000.0,
                     quantity: 2.0,

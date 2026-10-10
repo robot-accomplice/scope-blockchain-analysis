@@ -378,6 +378,7 @@ fn market_summary_to_markdown(summary: &MarketSummary, venue: &str, pair: &str) 
         | Metric | Value |  \n\
         |--------|-------|  \n\
         | Peg Target | {:.4} |  \n\
+        | Book | {} |  \n\
         | Best Bid | {} |  \n\
         | Best Ask | {} |  \n\
         | Mid Price | {} |  \n\
@@ -393,6 +394,7 @@ fn market_summary_to_markdown(summary: &MarketSummary, venue: &str, pair: &str) 
         venue,
         chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC"),
         summary.peg_target,
+        summary.source.label(),
         summary
             .best_bid
             .map(|b| format!("{:.4} ({:+.3}%)", b, bid_dev.unwrap_or(0.0)))
@@ -417,11 +419,7 @@ fn market_summary_to_markdown(summary: &MarketSummary, venue: &str, pair: &str) 
         if summary.healthy { "✓" } else { "✗" }
     );
     for check in &summary.checks {
-        let (icon, msg) = match check {
-            scope::market::HealthCheck::Pass(m) => ("✓", m.as_str()),
-            scope::market::HealthCheck::Fail(m) => ("✗", m.as_str()),
-        };
-        md.push_str(&format!("- {} {}\n", icon, msg));
+        md.push_str(&format!("- {} {}\n", check.icon(), check.message()));
     }
     md.push_str(&scope::display::report::report_footer());
     md
@@ -443,6 +441,7 @@ fn dex_venue_to_chain(venue: &str) -> &str {
 
 async fn fetch_book_and_volume(
     args: &SummaryArgs,
+    thresholds: &HealthThresholds,
     factory: &dyn ChainClientFactory,
     out: &Output,
 ) -> Result<(OrderBook, Option<f64>)> {
@@ -470,7 +469,7 @@ async fn fetch_book_and_volume(
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
             .ok_or_else(|| ScopeError::Chain("No DEX pairs after filter".to_string()))?;
-        let book = order_book_from_analytics(chain, best_pair, &analytics.token.symbol);
+        let book = order_book_from_analytics(chain, best_pair, &analytics.token.symbol, thresholds);
         let volume = Some(best_pair.volume_24h);
         Ok((book, volume))
     } else {
@@ -509,7 +508,7 @@ async fn run_summary_once(
         errln!(out, "  --- Run #{} at {} ---\n", n, ts)?;
     }
 
-    let (book, volume_24h) = fetch_book_and_volume(args, factory, out).await?;
+    let (book, volume_24h) = fetch_book_and_volume(args, thresholds, factory, out).await?;
     let summary = MarketSummary::from_order_book(&book, thresholds, volume_24h);
 
     let venue_label = args.venue.clone();
@@ -529,6 +528,7 @@ async fn run_summary_once(
                 "mid_price": summary.mid_price,
                 "spread": summary.spread,
                 "volume_24h": summary.volume_24h,
+                "book_source": summary.source,
                 "execution_10k_buy": summary.execution_10k_buy.as_ref().map(|e| serde_json::json!({
                     "fillable": e.fillable,
                     "slippage_bps": e.slippage_bps
@@ -542,10 +542,7 @@ async fn run_summary_once(
                 "ask_levels": summary.asks.len(),
                 "bid_levels": summary.bids.len(),
                 "healthy": summary.healthy,
-                "checks": summary.checks.iter().map(|c| match c {
-                    scope::market::HealthCheck::Pass(m) => serde_json::json!({"status": "pass", "message": m}),
-                    scope::market::HealthCheck::Fail(m) => serde_json::json!({"status": "fail", "message": m}),
-                }).collect::<Vec<_>>(),
+                "checks": &summary.checks,
             });
             outln!(out, "{}", serde_json::to_string_pretty(&json)?)?;
         }
@@ -1137,6 +1134,7 @@ capabilities:
         use scope::market::{HealthCheck, MarketSummary};
         let summary = MarketSummary {
             pair: "USDCUSDT".to_string(),
+            source: scope::market::BookSource::Exchange,
             peg_target: 1.0,
             best_bid: Some(0.9999),
             best_ask: Some(1.0001),
@@ -1168,6 +1166,7 @@ capabilities:
         use scope::market::{HealthCheck, MarketSummary};
         let summary = MarketSummary {
             pair: "TESTUSDT".to_string(),
+            source: scope::market::BookSource::Exchange,
             peg_target: 1.0,
             best_bid: None,
             best_ask: None,
@@ -1329,6 +1328,7 @@ capabilities:
         use scope::market::{ExecutionEstimate, ExecutionSide, HealthCheck, MarketSummary};
         let summary = MarketSummary {
             pair: "TESTUSDT".to_string(),
+            source: scope::market::BookSource::Exchange,
             peg_target: 1.0,
             best_bid: Some(0.9999),
             best_ask: Some(1.0001),
@@ -1742,6 +1742,7 @@ capabilities:
         use scope::market::{HealthCheck, MarketSummary};
         let summary = MarketSummary {
             pair: "TESTUSDT".to_string(),
+            source: scope::market::BookSource::Exchange,
             peg_target: 1.0,
             best_bid: Some(0.9999),
             best_ask: Some(1.0001),
@@ -1773,6 +1774,7 @@ capabilities:
         use scope::market::MarketSummary;
         let summary = MarketSummary {
             pair: "X".to_string(),
+            source: scope::market::BookSource::Exchange,
             peg_target: 1.0,
             best_bid: Some(1.0),
             best_ask: Some(1.0),
@@ -1941,6 +1943,7 @@ capabilities:
         use scope::market::{HealthCheck, MarketSummary};
         let summary = MarketSummary {
             pair: "X".to_string(),
+            source: scope::market::BookSource::Exchange,
             peg_target: 1.0,
             best_bid: Some(0.99),
             best_ask: Some(1.01),
@@ -2003,6 +2006,7 @@ capabilities:
                 price_usd: 1.0,
                 volume_24h,
                 liquidity_usd,
+                liquidity_base: None,
                 price_change_24h: 0.0,
                 buys_24h: 0,
                 sells_24h: 0,
@@ -2035,10 +2039,14 @@ capabilities:
     async fn test_dex_book_uses_most_liquid_pair() {
         // The synthetic book must come from the deepest pool, not the first one.
         let factory = dex_factory(&[(1_000.0, 10.0), (50_000.0, 777.0), (2_000.0, 20.0)]);
-        let (book, volume) =
-            fetch_book_and_volume(&dex_args(SummaryFormat::Text), &factory, &quiet())
-                .await
-                .unwrap();
+        let (book, volume) = fetch_book_and_volume(
+            &dex_args(SummaryFormat::Text),
+            &HealthThresholds::default(),
+            &factory,
+            &quiet(),
+        )
+        .await
+        .unwrap();
         assert_eq!(volume, Some(777.0));
         let depth: f64 = book.bids.iter().chain(&book.asks).map(|l| l.value()).sum();
         assert!((depth - 50_000.0).abs() < 1.0, "depth {depth}");
@@ -2047,9 +2055,14 @@ capabilities:
     #[tokio::test]
     async fn test_dex_no_pairs_is_error() {
         let factory = dex_factory(&[]);
-        let err = fetch_book_and_volume(&dex_args(SummaryFormat::Text), &factory, &quiet())
-            .await
-            .unwrap_err();
+        let err = fetch_book_and_volume(
+            &dex_args(SummaryFormat::Text),
+            &HealthThresholds::default(),
+            &factory,
+            &quiet(),
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("No DEX pairs found"), "{err}");
     }
 
@@ -2074,6 +2087,51 @@ capabilities:
             .await
             .unwrap();
         assert!(!summary.healthy);
+    }
+
+    #[tokio::test]
+    async fn test_dex_json_shows_amm_source_and_na_checks() {
+        // #37 acceptance: JSON shows "status": "n/a", and the book source.
+        let mut factory = dex_factory(&[(20_000_000.0, 1_000.0)]);
+        factory.mock_dex.token_data.as_mut().unwrap().pairs[0].liquidity_base = Some(10_000_000.0);
+        let args = dex_args(SummaryFormat::Json);
+        let thresholds = args.health.resolve(&Config::default());
+        let (o, cap) = Output::capture();
+        let summary = run_summary_once(&args, &factory, &thresholds, None, &o)
+            .await
+            .unwrap();
+        assert!(summary.healthy, "{:?}", summary.checks);
+        let v: serde_json::Value = serde_json::from_str(&cap.out()).unwrap();
+        assert_eq!(v["book_source"], "synthetic_amm");
+        let statuses: Vec<&str> = v["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["status"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            statuses.iter().filter(|s| **s == "n/a").count(),
+            3,
+            "{:?}",
+            statuses
+        );
+        assert!(!statuses.contains(&"fail"));
+    }
+
+    #[tokio::test]
+    async fn test_dex_without_reserves_says_estimate() {
+        let factory = dex_factory(&[(50_000.0, 1_000.0)]);
+        let args = dex_args(SummaryFormat::Text);
+        let thresholds = args.health.resolve(&Config::default());
+        let (o, cap) = Output::capture();
+        run_summary_once(&args, &factory, &thresholds, None, &o)
+            .await
+            .unwrap();
+        assert!(
+            cap.out().contains("pool reserves not reported"),
+            "{}",
+            cap.out()
+        );
     }
 
     #[tokio::test]

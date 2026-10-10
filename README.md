@@ -990,9 +990,10 @@ The `scope market` command has three subcommands:
 - **Volume**: 24h quote volume (from venue ticker; omitted for DEX venues)
 - **Execution**: Simulated 10k USDT buy/sell slippage or "insufficient liquidity"
 - **Order book**: Ask/bid levels with depth (base and quote amounts)
-- **Health checks**: No sells below peg, bid/ask ratio, spread, minimum valid levels, total depth, and top-3/top-10 depth per side
+- **Health checks**: No sells below peg, bid/ask ratio, spread, minimum valid levels, total depth, and top-3/top-10 depth per side. Each check is `pass`, `fail` or `n/a`. An `n/a` check does not apply to the book, is always shown, and does not count against "healthy".
+- **DEX venues** (`eth`, `solana`): there is no real order book, so scope builds a synthetic one from the pool's reserves on the constant-product curve (x·y=k), with one level at each `amm-step-pct` (default 0.1%). Level count and spread are `n/a` for this book: the step sets the level count, and the real spread is the pool fee, which DexScreener does not report. Top-3 and top-10 depth apply; with a 0.1% step they mean depth within ±0.3% and ±1%. When DexScreener does not report the reserves, scope falls back to a single-level estimate and labels the book as such. The output names the book source in every format (`book_source` in JSON: `exchange`, `synthetic_amm` or `synthetic_estimate`). Concentrated-liquidity (v3) pools are treated as constant-product pools, because DexScreener does not supply tick data.
 - **Output**: Text (default) or JSON; see [Output Examples](#output-examples) for sample
-- **Tunable thresholds**: All 9 health-check thresholds are overridable defaults. Built-in defaults: min-levels=10, max-spread-pct=3, min-top3-depth=300, min-top10-depth=2000, min-depth=3000, peg-range=0.001, bid/ask ratio 0.2-5.0x. Order of precedence: CLI flag or web request field > `market.health` in `config.yaml` > built-in default. The same flags work on `market summary`, `token-health --with-market`, and `insights`. The web `/api/market` and `/api/token-health` endpoints accept the same keys (snake_case) in the JSON body.
+- **Tunable thresholds**: All 10 health-check thresholds are overridable defaults. Built-in defaults: min-levels=10, max-spread-pct=3, min-top3-depth=300, min-top10-depth=2000, min-depth=3000, peg-range=0.001, bid/ask ratio 0.2-5.0x, amm-step-pct=0.1. Order of precedence: CLI flag or web request field > `market.health` in `config.yaml` > built-in default. The same flags work on `market summary`, `token-health --with-market`, and `insights`. The web `/api/market` and `/api/token-health` endpoints accept the same keys (snake_case) in the JSON body.
 
 ```yaml
 # ~/.config/scope/config.yaml — omitted keys keep the built-in default
@@ -1002,6 +1003,7 @@ market:
     max_spread_pct: 3.0
     min_top3_depth: 300
     min_top10_depth: 2000
+    amm_step_pct: 0.1     # synthetic AMM book step for DEX venues, in percent
 ```
 
 ```bash

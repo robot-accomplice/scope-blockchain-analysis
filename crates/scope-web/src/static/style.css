@@ -1006,6 +1006,7 @@ button.btn-secondary:hover {
 
 .check-item.pass { color: var(--green); }
 .check-item.fail { color: var(--red); }
+.check-item.na { color: var(--text-secondary); }
 
 .check-icon {
   font-size: 14px;

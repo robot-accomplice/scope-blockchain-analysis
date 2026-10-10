@@ -48,8 +48,9 @@ pub use configurable_client::ConfigurableExchangeClient;
 pub use descriptor::VenueDescriptor;
 pub use exchange::ExchangeClient;
 pub use orderbook::{
-    Candle, ExecutionEstimate, ExecutionSide, HealthCheck, HealthOverrides, HealthThresholds,
-    MarketSnapshot, MarketSummary, OhlcClient, OrderBook, OrderBookClient, OrderBookLevel, Ticker,
-    TickerClient, Trade, TradeHistoryClient, TradeSide, order_book_from_analytics,
+    BookSource, Candle, ExecutionEstimate, ExecutionSide, HealthCheck, HealthOverrides,
+    HealthThresholds, MarketSnapshot, MarketSummary, OhlcClient, OrderBook, OrderBookClient,
+    OrderBookLevel, Ticker, TickerClient, Trade, TradeHistoryClient, TradeSide,
+    order_book_from_analytics,
 };
 pub use registry::VenueRegistry;

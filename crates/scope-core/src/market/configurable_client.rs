@@ -482,7 +482,12 @@ impl OrderBookClient for ConfigurableExchangeClient {
         // Build display pair name
         let pair = format_display_pair(pair_symbol, &self.descriptor.symbol.template);
 
-        Ok(OrderBook { pair, bids, asks })
+        Ok(OrderBook {
+            pair,
+            source: super::types::BookSource::Exchange,
+            bids,
+            asks,
+        })
     }
 }
 

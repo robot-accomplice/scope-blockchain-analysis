@@ -59,6 +59,7 @@ fn summary_to_json(summary: &MarketSummary) -> serde_json::Value {
 
     serde_json::json!({
         "pair": summary.pair,
+        "book_source": summary.source,
         "peg_target": summary.peg_target,
         "best_bid": summary.best_bid,
         "best_ask": summary.best_ask,
@@ -78,10 +79,7 @@ fn summary_to_json(summary: &MarketSummary) -> serde_json::Value {
         "asks": summary.asks.iter().take(20).map(|l| {
             serde_json::json!({"price": l.price, "quantity": l.quantity, "value": l.value()})
         }).collect::<Vec<_>>(),
-        "checks": summary.checks.iter().map(|c| match c {
-            scope::market::HealthCheck::Pass(msg) => serde_json::json!({"status": "pass", "message": msg}),
-            scope::market::HealthCheck::Fail(msg) => serde_json::json!({"status": "fail", "message": msg}),
-        }).collect::<Vec<_>>(),
+        "checks": &summary.checks,
     })
 }
 
@@ -170,8 +168,12 @@ pub async fn handle(
                             .unwrap_or(std::cmp::Ordering::Equal)
                     })
                     .unwrap();
-                let book =
-                    order_book_from_analytics(venue_chain, best_pair, &analytics.token.symbol);
+                let book = order_book_from_analytics(
+                    venue_chain,
+                    best_pair,
+                    &analytics.token.symbol,
+                    &thresholds,
+                );
                 let summary =
                     MarketSummary::from_order_book(&book, &thresholds, Some(best_pair.volume_24h));
                 Json(summary_to_json(&summary)).into_response()
@@ -257,6 +259,18 @@ mod tests {
         assert_eq!(req.health.min_top10_depth, Some(4000.0));
         assert_eq!(req.health.min_bid_ask_ratio, Some(0.5));
         assert_eq!(req.health.max_bid_ask_ratio, Some(2.0));
+    }
+
+    #[test]
+    fn test_request_accepts_amm_step_pct() {
+        // #37: the AMM step is a request field like the other thresholds.
+        let req: MarketRequest =
+            serde_json::from_value(serde_json::json!({ "amm_step_pct": 0.05 })).unwrap();
+        let t = scope::config::Config::default()
+            .market
+            .health
+            .with_overrides(&req.health);
+        assert_eq!(t.amm_step_pct, 0.05);
     }
 
     #[test]
@@ -482,6 +496,7 @@ mod tests {
 
         let book = scope::market::OrderBook {
             pair: "USDC/USDT".to_string(),
+            source: scope::market::BookSource::Exchange,
             bids: vec![
                 OrderBookLevel {
                     price: 0.9999,

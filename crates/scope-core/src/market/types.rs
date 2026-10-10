@@ -24,11 +24,40 @@ impl OrderBookLevel {
     }
 }
 
+/// Where an order book came from. Health checks and displays depend on it:
+/// a synthetic book has no real level count or spread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BookSource {
+    /// A real level-2 book from an exchange API.
+    #[default]
+    Exchange,
+    /// Built from a DEX pool's reserves on the constant-product curve
+    /// (x·y=k), one level per fixed price step.
+    SyntheticAmm,
+    /// A rough estimate from total DEX liquidity, used when the pool
+    /// reserves are not reported. Its depth is not depth near the price.
+    SyntheticEstimate,
+}
+
+impl BookSource {
+    /// Short label for text and markdown output.
+    pub fn label(self) -> &'static str {
+        match self {
+            BookSource::Exchange => "exchange order book",
+            BookSource::SyntheticAmm => "synthetic (AMM curve x·y=k)",
+            BookSource::SyntheticEstimate => "synthetic estimate (pool reserves not reported)",
+        }
+    }
+}
+
 /// Full order book snapshot with bids and asks.
 #[derive(Debug, Clone)]
 pub struct OrderBook {
     /// Trading pair label (e.g., "DAI/USDT").
     pub pair: String,
+    /// Where the book came from.
+    pub source: BookSource,
     /// Bids sorted by price descending (best bid first).
     pub bids: Vec<OrderBookLevel>,
     /// Asks sorted by price ascending (best ask first).
@@ -172,10 +201,65 @@ pub struct ExecutionEstimate {
 }
 
 /// Outcome of a single health check.
+///
+/// Serializes as `{"status": "pass" | "fail" | "n/a", "message": "…"}`.
+/// JSON consumers must handle `n/a`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum HealthCheck {
     Pass(String),
     Fail(String),
+    /// The check does not apply to this book; the message says why.
+    /// It does not count against `healthy`.
+    NotApplicable(String),
+}
+
+impl HealthCheck {
+    /// `pass`, `fail` or `n/a`.
+    pub fn status(&self) -> &'static str {
+        match self {
+            HealthCheck::Pass(_) => "pass",
+            HealthCheck::Fail(_) => "fail",
+            HealthCheck::NotApplicable(_) => "n/a",
+        }
+    }
+
+    /// The check's message.
+    pub fn message(&self) -> &str {
+        match self {
+            HealthCheck::Pass(m) | HealthCheck::Fail(m) | HealthCheck::NotApplicable(m) => m,
+        }
+    }
+}
+
+impl HealthCheck {
+    /// The plain icon for markdown and plain-text reports: ✓, ✗ or –.
+    pub fn icon(&self) -> &'static str {
+        match self {
+            HealthCheck::Pass(_) => "✓",
+            HealthCheck::Fail(_) => "✗",
+            HealthCheck::NotApplicable(_) => "–",
+        }
+    }
+
+    /// One text row for terminal reports (✓, ✗ or –).
+    pub fn render_text(&self) -> String {
+        use crate::display::terminal as t;
+        match self {
+            HealthCheck::Pass(m) => t::check_pass(m),
+            HealthCheck::Fail(m) => t::check_fail(m),
+            HealthCheck::NotApplicable(m) => t::check_na(m),
+        }
+    }
+}
+
+impl serde::Serialize for HealthCheck {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut st = s.serialize_struct("HealthCheck", 2)?;
+        st.serialize_field("status", self.status())?;
+        st.serialize_field("message", self.message())?;
+        st.end()
+    }
 }
 
 // =============================================================================
@@ -279,6 +363,7 @@ mod tests {
     fn test_order_book_empty() {
         let book = OrderBook {
             pair: "DAI/USDT".to_string(),
+            source: crate::market::types::BookSource::Exchange,
             bids: vec![],
             asks: vec![],
         };
@@ -293,6 +378,7 @@ mod tests {
     fn test_order_book_with_levels() {
         let book = OrderBook {
             pair: "DAI/USDT".to_string(),
+            source: crate::market::types::BookSource::Exchange,
             bids: vec![
                 OrderBookLevel {
                     price: 0.9998,
@@ -432,6 +518,7 @@ mod tests {
         let snapshot = MarketSnapshot {
             order_book: Some(OrderBook {
                 pair: "BTC/USDT".to_string(),
+                source: crate::market::types::BookSource::Exchange,
                 bids: vec![OrderBookLevel {
                     price: 42_000.0,
                     quantity: 1.0,
@@ -486,6 +573,7 @@ mod tests {
         // Bids and asks both at price 0 -> mid_price = 0 -> returns None
         let book = OrderBook {
             pair: "X/Y".to_string(),
+            source: crate::market::types::BookSource::Exchange,
             bids: vec![OrderBookLevel {
                 price: 0.0,
                 quantity: 100.0,
@@ -502,6 +590,7 @@ mod tests {
     fn test_estimate_sell_zero_mid_price() {
         let book = OrderBook {
             pair: "X/Y".to_string(),
+            source: crate::market::types::BookSource::Exchange,
             bids: vec![OrderBookLevel {
                 price: 0.0,
                 quantity: 100.0,
@@ -519,6 +608,7 @@ mod tests {
         // Valid mid price but one ask level has price 0 -> take_qty branch = 0.0
         let book = OrderBook {
             pair: "X/Y".to_string(),
+            source: crate::market::types::BookSource::Exchange,
             bids: vec![OrderBookLevel {
                 price: 1.0,
                 quantity: 100.0,
@@ -543,6 +633,7 @@ mod tests {
         // Valid mid price but one bid level has price 0
         let book = OrderBook {
             pair: "X/Y".to_string(),
+            source: crate::market::types::BookSource::Exchange,
             bids: vec![
                 OrderBookLevel {
                     price: 0.0,
@@ -567,6 +658,7 @@ mod tests {
         // All ask levels have price 0 -> filled_qty stays 0 -> vwap = mid
         let book = OrderBook {
             pair: "X/Y".to_string(),
+            source: crate::market::types::BookSource::Exchange,
             bids: vec![OrderBookLevel {
                 price: 1.0,
                 quantity: 100.0,
@@ -588,6 +680,7 @@ mod tests {
         // All bid levels have price 0 and value 0
         let book = OrderBook {
             pair: "X/Y".to_string(),
+            source: crate::market::types::BookSource::Exchange,
             bids: vec![OrderBookLevel {
                 price: 0.0,
                 quantity: 0.0,

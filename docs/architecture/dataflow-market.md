@@ -23,7 +23,7 @@ flowchart TB
 
     subgraph DEX["DEX (Ethereum, Solana)"]
         B -->|No| D1[crawl::fetch_analytics_for_input]
-        D1 --> D2[order_book_from_analytics]
+        D1 --> D2[order_book_from_analytics: x·y=k levels per amm_step_pct, or single-level estimate]
         D2 --> D3[best_pair.volume_24h]
         D3 --> D4[OrderBook + volume_24h]
     end
@@ -58,8 +58,16 @@ flowchart TB
 |---------|---------------|-------------------|----------------------------------|
 | Binance | USDCUSDT      | Ticker 24hr       | Order book walk (10k USDT)       |
 | Biconomy| USDC_USDT     | —                 | Order book walk                  |
-| Ethereum| DEX           | DexPair.volume_24h | Synthesized book walk            |
-| Solana  | DEX           | DexPair.volume_24h | Synthesized book walk            |
+| Ethereum| DEX           | DexPair.volume_24h | Synthetic AMM book walk          |
+| Solana  | DEX           | DexPair.volume_24h | Synthetic AMM book walk          |
+
+### Synthetic DEX book (#37)
+
+A DEX pool has no level-2 book. `order_book_from_analytics` builds one:
+
+- **`BookSource::SyntheticAmm`** when DexScreener reports the base reserve `x0` (`liquidity.base`). The pool holds `x(P) = x0·√(P0/P)` base at price `P` (constant product). One level sits at each `amm_step_pct` step from the price, out to the outlier band (peg ± `peg_range`×5) and to at least 10 steps, so top-10 depth is defined. A level's quantity is the base the pool buys (bids) or sells (asks) between two steps.
+- **`BookSource::SyntheticEstimate`** when the reserve is missing: one level per side at ±0.1% holding half the pool's USD liquidity. The usual rules apply, and the output labels the book as an estimate.
+- Concentrated-liquidity (v3) pools are treated as constant product. Exact v3 depth needs on-chain tick data, which DexScreener does not supply.
 
 ## Health Checks
 
@@ -72,6 +80,8 @@ flowchart TB
 | Min depth | Total in-band depth ≥ threshold (default 3000) |
 | Top-3 depth | Sum of top 3 valid levels ≥ threshold per side (default 300) |
 | Top-10 depth | Sum of top 10 valid levels ≥ threshold per side (default 2000) |
+
+Each check is `pass`, `fail` or `n/a`. On a `SyntheticAmm` book, *min levels* and *max spread* are `n/a`: the step sets the level count, and the real spread is the pool fee, which the data source does not report. `n/a` checks are always shown and are left out of `healthy`. JSON: `{"status": "pass" | "fail" | "n/a", "message": "…"}`.
 
 ## Volume & Execution
 
