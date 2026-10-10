@@ -4,6 +4,8 @@
 //! retrieval, proxy detection, access control mapping, vulnerability scanning,
 //! DeFi protocol checks, and external intelligence gathering.
 
+use crate::cli::output::Output;
+use crate::outln;
 use clap::Args;
 use scope::chains::ChainClientFactory;
 use scope::config::Config;
@@ -97,8 +99,9 @@ pub async fn run(
     args: &ContractArgs,
     _config: &Config,
     clients: &dyn ChainClientFactory,
+    out: &Output,
 ) -> Result<()> {
-    let spinner = crate::cli::progress::Spinner::new("Analyzing contract...");
+    let spinner = crate::cli::progress::Spinner::new("Analyzing contract...", out)?;
 
     let client = clients.create_chain_client(&args.chain)?;
     let http_client = scope::http::NativeHttpClient::new()?;
@@ -110,13 +113,14 @@ pub async fn run(
     spinner.finish("Contract analysis complete");
 
     if args.json {
-        println!(
+        outln!(
+            out,
             "{}",
             serde_json::to_string_pretty(&analysis)
                 .unwrap_or_else(|_| "Failed to serialize".to_string())
-        );
+        )?;
     } else {
-        print_contract_report(&analysis);
+        print_contract_report(&analysis, out)?;
     }
 
     Ok(())
@@ -126,39 +130,46 @@ pub async fn run(
 ///
 /// Uses `display::terminal` helpers for consistent box-drawing, color,
 /// and TTY-awareness matching the rest of the CLI.
-fn print_contract_report(analysis: &contract::ContractAnalysis) {
+fn print_contract_report(
+    analysis: &contract::ContractAnalysis,
+    out: &Output,
+) -> std::io::Result<()> {
     use scope::display::terminal as t;
 
     let title = format!("Contract Analysis: {}", analysis.address);
-    println!("{}", t::section_header(&title));
-    println!("{}", t::kv_row("Chain", &analysis.chain));
-    println!(
+    outln!(out, "{}", t::section_header(&title))?;
+    outln!(out, "{}", t::kv_row("Chain", &analysis.chain))?;
+    outln!(
+        out,
         "{}",
         t::kv_row("Verified", if analysis.is_verified { "Yes" } else { "No" })
-    );
-    println!("{}", t::blank_row());
-    println!(
+    )?;
+    outln!(out, "{}", t::blank_row())?;
+    outln!(
+        out,
         "{}",
         t::score_bar("Security Score", analysis.security_score, 100)
-    );
-    println!("{}", t::detail_row(&analysis.security_summary));
+    )?;
+    outln!(out, "{}", t::detail_row(&analysis.security_summary))?;
 
     if !analysis.is_verified {
-        println!("{}", t::blank_row());
-        println!(
+        outln!(out, "{}", t::blank_row())?;
+        outln!(
+            out,
             "{}",
             t::warning_row("Source code is NOT verified — analysis is limited")
-        );
+        )?;
     }
 
     // Source Info
     if let Some(src) = &analysis.source_info {
-        println!("{}", t::subsection_header("Source Code"));
-        println!("{}", t::kv_row("Contract Name", &src.contract_name));
-        println!("{}", t::kv_row("Compiler", &src.compiler_version));
-        println!("{}", t::kv_row("EVM Version", &src.evm_version));
-        println!("{}", t::kv_row("License", &src.license_type));
-        println!(
+        outln!(out, "{}", t::subsection_header("Source Code"))?;
+        outln!(out, "{}", t::kv_row("Contract Name", &src.contract_name))?;
+        outln!(out, "{}", t::kv_row("Compiler", &src.compiler_version))?;
+        outln!(out, "{}", t::kv_row("EVM Version", &src.evm_version))?;
+        outln!(out, "{}", t::kv_row("License", &src.license_type))?;
+        outln!(
+            out,
             "{}",
             t::kv_row(
                 "Optimization",
@@ -168,39 +179,41 @@ fn print_contract_report(analysis: &contract::ContractAnalysis) {
                     "No".to_string()
                 }
             )
-        );
-        println!(
+        )?;
+        outln!(
+            out,
             "{}",
             t::kv_row("ABI Functions", &src.parsed_abi.len().to_string())
-        );
+        )?;
     }
 
     // Proxy Info
     if let Some(proxy) = &analysis.proxy_info {
-        println!("{}", t::subsection_header("Proxy Detection"));
+        outln!(out, "{}", t::subsection_header("Proxy Detection"))?;
         if proxy.is_proxy {
-            println!("{}", t::kv_row("Type", &proxy.proxy_type));
+            outln!(out, "{}", t::kv_row("Type", &proxy.proxy_type))?;
             if let Some(impl_addr) = &proxy.implementation_address {
-                println!("{}", t::kv_row("Implementation", impl_addr));
+                outln!(out, "{}", t::kv_row("Implementation", impl_addr))?;
             }
             if let Some(admin) = &proxy.admin_address {
-                println!("{}", t::kv_row("Admin", admin));
+                outln!(out, "{}", t::kv_row("Admin", admin))?;
             }
         } else {
-            println!("{}", t::check_pass("Not a proxy contract"));
+            outln!(out, "{}", t::check_pass("Not a proxy contract"))?;
         }
         for detail in &proxy.details {
-            println!("{}", t::bullet_row(detail));
+            outln!(out, "{}", t::bullet_row(detail))?;
         }
     }
 
     // Access Control
     if let Some(ac) = &analysis.access_control {
-        println!("{}", t::subsection_header("Access Control"));
+        outln!(out, "{}", t::subsection_header("Access Control"))?;
         if let Some(pattern) = &ac.ownership_pattern {
-            println!("{}", t::kv_row("Ownership", pattern));
+            outln!(out, "{}", t::kv_row("Ownership", pattern))?;
         }
-        println!(
+        outln!(
+            out,
             "{}",
             t::kv_row(
                 "Renounced",
@@ -210,8 +223,9 @@ fn print_contract_report(analysis: &contract::ContractAnalysis) {
                     "No"
                 }
             )
-        );
-        println!(
+        )?;
+        outln!(
+            out,
             "{}",
             t::kv_row(
                 "Role-based",
@@ -221,29 +235,34 @@ fn print_contract_report(analysis: &contract::ContractAnalysis) {
                     "No"
                 }
             )
-        );
+        )?;
         if ac.uses_tx_origin {
-            println!("{}", t::warning_row("Uses tx.origin for authorization"));
+            outln!(
+                out,
+                "{}",
+                t::warning_row("Uses tx.origin for authorization")
+            )?;
         }
         if !ac.roles.is_empty() {
-            println!("{}", t::kv_row("Roles", &ac.roles.join(", ")));
+            outln!(out, "{}", t::kv_row("Roles", &ac.roles.join(", ")))?;
         }
         if !ac.privileged_functions.is_empty() {
-            println!("{}", t::blank_row());
+            outln!(out, "{}", t::blank_row())?;
             for pf in &ac.privileged_functions {
                 let sev = t::severity_label(&format!("{:?}", pf.risk));
-                println!(
+                outln!(
+                    out,
                     "{}",
                     t::bullet_row(&format!("{} ({}): {}", pf.name, sev, pf.capability))
-                );
+                )?;
             }
         }
-        println!("{}", t::blank_row());
-        println!("{}", t::kv_row("Auth", &ac.auth_analysis.summary));
+        outln!(out, "{}", t::blank_row())?;
+        outln!(out, "{}", t::kv_row("Auth", &ac.auth_analysis.summary))?;
     }
 
     // Vulnerabilities
-    println!("{}", t::subsection_header("Vulnerability Findings"));
+    outln!(out, "{}", t::subsection_header("Vulnerability Findings"))?;
     if !analysis.vulnerabilities.is_empty() {
         for vuln in &analysis.vulnerabilities {
             let sev_str = format!("{}", vuln.severity);
@@ -251,50 +270,59 @@ fn print_contract_report(analysis: &contract::ContractAnalysis) {
             match vuln.severity {
                 contract::vulnerability::Severity::Critical
                 | contract::vulnerability::Severity::High => {
-                    println!(
+                    outln!(
+                        out,
                         "{}",
                         t::check_fail(&format!("{} — {} ({})", vuln.id, vuln.title, sev))
-                    );
+                    )?;
                 }
                 _ => {
-                    println!(
+                    outln!(
+                        out,
                         "{}",
                         t::info_row(&format!("{} — {} ({})", vuln.id, vuln.title, sev))
-                    );
+                    )?;
                 }
             }
-            println!("{}", t::detail_row(&vuln.description));
-            println!(
+            outln!(out, "{}", t::detail_row(&vuln.description))?;
+            outln!(
+                out,
                 "{}",
                 t::detail_row(&format!("Fix: {}", vuln.recommendation))
-            );
+            )?;
         }
     } else {
-        println!("{}", t::check_pass("No heuristic findings triggered"));
+        outln!(out, "{}", t::check_pass("No heuristic findings triggered"))?;
     }
 
     // DeFi Analysis
     if let Some(defi) = &analysis.defi_analysis {
-        println!("{}", t::subsection_header("DeFi Analysis"));
-        println!(
+        outln!(out, "{}", t::subsection_header("DeFi Analysis"))?;
+        outln!(
+            out,
             "{}",
             t::kv_row("Protocol Type", &defi.protocol_type.to_string())
-        );
+        )?;
         if !defi.token_standards.is_empty() {
             let standards: Vec<String> =
                 defi.token_standards.iter().map(|s| s.to_string()).collect();
-            println!("{}", t::kv_row("Token Standards", &standards.join(", ")));
+            outln!(
+                out,
+                "{}",
+                t::kv_row("Token Standards", &standards.join(", "))
+            )?;
         }
         if defi.has_oracle_dependency {
             for oracle in &defi.oracle_info {
-                println!(
+                outln!(
+                    out,
                     "{}",
                     t::kv_row("Oracle", &format!("{} ({})", oracle.provider, oracle.usage))
-                );
+                )?;
             }
         }
         if defi.has_flash_loan_risk {
-            println!("{}", t::warning_row("Flash loan risk detected"));
+            outln!(out, "{}", t::warning_row("Flash loan risk detected"))?;
         }
         for dex in &defi.dex_integrations {
             let slippage = if dex.has_slippage_protection {
@@ -307,69 +335,78 @@ fn print_contract_report(analysis: &contract::ContractAnalysis) {
             } else {
                 "✗"
             };
-            println!(
+            outln!(
+                out,
                 "{}",
                 t::bullet_row(&format!(
                     "{} — slippage: {} deadline: {}",
                     dex.dex, slippage, deadline
                 ))
-            );
+            )?;
         }
         if !defi.risk_factors.is_empty() {
-            println!("{}", t::blank_row());
+            outln!(out, "{}", t::blank_row())?;
             for rf in &defi.risk_factors {
-                println!(
+                outln!(
+                    out,
                     "{}",
                     t::bullet_row(&format!(
                         "{} ({}/10): {}",
                         rf.name, rf.severity, rf.description
                     ))
-                );
+                )?;
             }
         }
     }
 
     // External Info
     if let Some(ext) = &analysis.external_info {
-        println!("{}", t::subsection_header("External Intelligence"));
-        println!("{}", t::link_row("Explorer", &ext.explorer_url));
+        outln!(out, "{}", t::subsection_header("External Intelligence"))?;
+        outln!(out, "{}", t::link_row("Explorer", &ext.explorer_url))?;
         if let Some(repo) = &ext.github_repo {
-            println!("{}", t::link_row("GitHub", repo));
+            outln!(out, "{}", t::link_row("GitHub", repo))?;
         }
         if let Some(verified) = &ext.sourcify_verified {
             if *verified {
-                println!("{}", t::check_pass("Sourcify verified"));
+                outln!(out, "{}", t::check_pass("Sourcify verified"))?;
             } else {
-                println!("{}", t::check_fail("Sourcify not verified"));
+                outln!(out, "{}", t::check_fail("Sourcify not verified"))?;
             }
         }
         if !ext.audit_reports.is_empty() {
-            println!("{}", t::blank_row());
+            outln!(out, "{}", t::blank_row())?;
             for report in &ext.audit_reports {
-                println!(
+                outln!(
+                    out,
                     "{}",
                     t::bullet_row(&format!("{} ({})", report.auditor, report.scope))
-                );
+                )?;
                 if !report.url.is_empty() {
-                    println!("{}", t::detail_row(&report.url));
+                    outln!(out, "{}", t::detail_row(&report.url))?;
                 }
             }
         } else {
-            println!("{}", t::blank_row());
-            println!(
+            outln!(out, "{}", t::blank_row())?;
+            outln!(
+                out,
                 "{}",
                 t::info_row("No audit reports found — check block explorer manually")
-            );
+            )?;
         }
     }
 
-    println!("{}", t::section_footer());
+    outln!(out, "{}", t::section_footer())?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use scope::contract::ContractAnalysis;
+
+    fn quiet() -> crate::cli::output::Output {
+        crate::cli::output::Output::capture().0
+    }
 
     fn minimal_analysis() -> ContractAnalysis {
         ContractAnalysis {
@@ -389,7 +426,7 @@ mod tests {
 
     #[test]
     fn test_print_report_minimal() {
-        print_contract_report(&minimal_analysis());
+        print_contract_report(&minimal_analysis(), &quiet()).unwrap();
     }
 
     #[test]
@@ -413,7 +450,7 @@ mod tests {
             swarm_source: String::new(),
             parsed_abi: vec![],
         });
-        print_contract_report(&a);
+        print_contract_report(&a, &quiet()).unwrap();
     }
 
     #[test]
@@ -436,7 +473,7 @@ mod tests {
             swarm_source: String::new(),
             parsed_abi: vec![],
         });
-        print_contract_report(&a);
+        print_contract_report(&a, &quiet()).unwrap();
     }
 
     #[test]
@@ -450,7 +487,7 @@ mod tests {
             beacon_address: None,
             details: vec!["Proxy detected".to_string()],
         });
-        print_contract_report(&a);
+        print_contract_report(&a, &quiet()).unwrap();
     }
 
     #[test]
@@ -464,7 +501,7 @@ mod tests {
             beacon_address: None,
             details: vec![],
         });
-        print_contract_report(&a);
+        print_contract_report(&a, &quiet()).unwrap();
     }
 
     #[test]
@@ -491,7 +528,7 @@ mod tests {
                 summary: "Mixed auth".to_string(),
             },
         });
-        print_contract_report(&a);
+        print_contract_report(&a, &quiet()).unwrap();
     }
 
     #[test]
@@ -544,7 +581,7 @@ mod tests {
                 recommendation: "fix".to_string(),
             },
         ];
-        print_contract_report(&a);
+        print_contract_report(&a, &quiet()).unwrap();
     }
 
     #[test]
@@ -575,7 +612,7 @@ mod tests {
                 severity: 7,
             }],
         });
-        print_contract_report(&a);
+        print_contract_report(&a, &quiet()).unwrap();
     }
 
     #[test]
@@ -594,7 +631,7 @@ mod tests {
             }],
             metadata: vec![],
         });
-        print_contract_report(&a);
+        print_contract_report(&a, &quiet()).unwrap();
     }
 
     #[test]
@@ -608,7 +645,7 @@ mod tests {
             audit_reports: vec![],
             metadata: vec![],
         });
-        print_contract_report(&a);
+        print_contract_report(&a, &quiet()).unwrap();
     }
 
     #[test]
@@ -630,7 +667,7 @@ mod tests {
                 summary: "No auth checks".to_string(),
             },
         });
-        print_contract_report(&a);
+        print_contract_report(&a, &quiet()).unwrap();
     }
 
     #[test]
@@ -649,7 +686,7 @@ mod tests {
             }],
             metadata: vec![],
         });
-        print_contract_report(&a);
+        print_contract_report(&a, &quiet()).unwrap();
     }
 
     #[test]
@@ -671,7 +708,7 @@ mod tests {
                 summary: "Role-based".to_string(),
             },
         });
-        print_contract_report(&a);
+        print_contract_report(&a, &quiet()).unwrap();
     }
 
     #[test]
@@ -689,7 +726,7 @@ mod tests {
             staking_patterns: vec![],
             risk_factors: vec![],
         });
-        print_contract_report(&a);
+        print_contract_report(&a, &quiet()).unwrap();
     }
 
     #[test]
@@ -703,7 +740,7 @@ mod tests {
             beacon_address: None,
             details: vec!["Minimal proxy".to_string()],
         });
-        print_contract_report(&a);
+        print_contract_report(&a, &quiet()).unwrap();
     }
 
     #[test]
@@ -726,6 +763,6 @@ mod tests {
             staking_patterns: vec![],
             risk_factors: vec![],
         });
-        print_contract_report(&a);
+        print_contract_report(&a, &quiet()).unwrap();
     }
 }

@@ -17,6 +17,8 @@
 //! scope address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 --format json
 //! ```
 
+use crate::cli::output::Output;
+use crate::{errln, outln};
 use clap::Args;
 use scope::chains::{
     ChainClient, ChainClientFactory, validate_solana_address, validate_tron_address,
@@ -217,6 +219,7 @@ pub async fn run(
     mut args: AddressArgs,
     config: &Config,
     clients: &dyn ChainClientFactory,
+    out: &Output,
 ) -> Result<()> {
     // Resolve address book label → address + chain
     if let Some((address, chain)) =
@@ -234,7 +237,7 @@ pub async fn run(
         && inferred != "ethereum"
     {
         tracing::info!("Auto-detected chain: {}", inferred);
-        println!("Auto-detected chain: {}", inferred);
+        outln!(out, "Auto-detected chain: {}", inferred)?;
         args.chain = inferred.to_string();
     }
 
@@ -254,10 +257,13 @@ pub async fn run(
         analysis_args.include_tokens = true;
     }
 
-    let sp = crate::cli::progress::Spinner::new(&format!("Analyzing address on {}...", args.chain));
+    let sp = crate::cli::progress::Spinner::new(
+        &format!("Analyzing address on {}...", args.chain),
+        out,
+    )?;
 
     let client = clients.create_chain_client(&args.chain)?;
-    let report = analyze_address(&analysis_args, client.as_ref()).await?;
+    let report = analyze_address(&analysis_args, client.as_ref(), out).await?;
 
     // Dossier: fetch risk assessment (uses ETHERSCAN_API_KEY for Ethereum)
     let risk_assessment = if args.dossier {
@@ -278,25 +284,27 @@ pub async fn run(
     if format == OutputFormat::Markdown {
         if args.dossier && risk_assessment.as_ref().is_some() {
             let risk = risk_assessment.as_ref().unwrap();
-            println!(
+            outln!(
+                out,
                 "{}",
                 crate::cli::address_report::generate_dossier_report(&report, risk)
-            );
+            )?;
         } else {
-            println!(
+            outln!(
+                out,
                 "{}",
                 crate::cli::address_report::generate_address_report(&report)
-            );
+            )?;
         }
     } else if args.dossier && risk_assessment.is_some() {
         let risk = risk_assessment.as_ref().unwrap();
-        output_report(&report, format)?;
-        println!();
+        output_report(&report, format, out)?;
+        outln!(out)?;
         let risk_output =
             scope::display::format_risk_report(risk, scope::display::OutputFormat::Table, true);
-        println!("{}", risk_output);
+        outln!(out, "{}", risk_output)?;
     } else {
-        output_report(&report, format)?;
+        output_report(&report, format, out)?;
     }
 
     // Generate report if requested
@@ -310,7 +318,7 @@ pub async fn run(
             crate::cli::address_report::generate_address_report(&report)
         };
         crate::cli::address_report::save_address_report(&markdown_report, report_path)?;
-        println!("\nReport saved to: {}", report_path.display());
+        outln!(out, "\nReport saved to: {}", report_path.display())?;
     }
 
     Ok(())
@@ -321,6 +329,7 @@ pub async fn run(
 pub async fn analyze_address(
     args: &AddressArgs,
     client: &dyn ChainClient,
+    out: &Output,
 ) -> Result<AddressReport> {
     // Fetch balance
     let mut chain_balance = client.get_balance(&args.address).await?;
@@ -349,7 +358,10 @@ pub async fn analyze_address(
                     .collect(),
             ),
             Err(e) => {
-                eprintln!("  ⚠ Transaction history unavailable (use -v for details)");
+                errln!(
+                    out,
+                    "  ⚠ Transaction history unavailable (use -v for details)"
+                )?;
                 tracing::debug!("Failed to fetch transactions: {}", e);
                 Some(vec![])
             }
@@ -378,7 +390,7 @@ pub async fn analyze_address(
                     .collect(),
             ),
             Err(e) => {
-                eprintln!("  ⚠ Token balances unavailable (use -v for details)");
+                errln!(out, "  ⚠ Token balances unavailable (use -v for details)")?;
                 tracing::debug!("Failed to fetch token balances: {}", e);
                 Some(vec![])
             }
@@ -441,48 +453,56 @@ fn validate_address(address: &str, chain: &str) -> Result<()> {
 }
 
 /// Outputs the address report in the specified format.
-fn output_report(report: &AddressReport, format: OutputFormat) -> Result<()> {
+fn output_report(report: &AddressReport, format: OutputFormat, out: &Output) -> Result<()> {
     match format {
         OutputFormat::Json => {
             let json = serde_json::to_string_pretty(report)?;
-            println!("{}", json);
+            outln!(out, "{}", json)?;
         }
         OutputFormat::Csv => {
             // CSV format for address is a single row
-            println!("address,chain,balance,transaction_count");
-            println!(
+            outln!(out, "address,chain,balance,transaction_count")?;
+            outln!(
+                out,
                 "{},{},{},{}",
-                report.address, report.chain, report.balance.formatted, report.transaction_count
-            );
+                report.address,
+                report.chain,
+                report.balance.formatted,
+                report.transaction_count
+            )?;
         }
         OutputFormat::Table => {
-            println!("Address Analysis Report");
-            println!("=======================");
-            println!("Address:      {}", report.address);
-            println!("Chain:        {}", report.chain);
-            println!("Balance:      {}", report.balance.formatted);
+            outln!(out, "Address Analysis Report")?;
+            outln!(out, "=======================")?;
+            outln!(out, "Address:      {}", report.address)?;
+            outln!(out, "Chain:        {}", report.chain)?;
+            outln!(out, "Balance:      {}", report.balance.formatted)?;
             if let Some(usd) = report.balance.usd {
-                println!("Value (USD):  ${:.2}", usd);
+                outln!(out, "Value (USD):  ${:.2}", usd)?;
             }
-            println!("Transactions: {}", report.transaction_count);
+            outln!(out, "Transactions: {}", report.transaction_count)?;
 
             if let Some(ref tokens) = report.tokens
                 && !tokens.is_empty()
             {
-                println!("\nToken Balances:");
+                outln!(out, "\nToken Balances:")?;
                 for token in tokens {
-                    println!(
+                    outln!(
+                        out,
                         "  {} ({}): {}",
-                        token.name, token.symbol, token.formatted_balance
-                    );
+                        token.name,
+                        token.symbol,
+                        token.formatted_balance
+                    )?;
                 }
             }
         }
         OutputFormat::Markdown => {
-            println!(
+            outln!(
+                out,
                 "{}",
                 crate::cli::address_report::generate_address_report(report)
-            );
+            )?;
         }
     }
     Ok(())
@@ -495,6 +515,10 @@ fn output_report(report: &AddressReport, format: OutputFormat) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn quiet() -> crate::cli::output::Output {
+        crate::cli::output::Output::capture().0
+    }
 
     #[test]
     fn test_validate_address_valid_ethereum() {
@@ -844,21 +868,21 @@ mod tests {
     #[test]
     fn test_output_report_json() {
         let report = make_test_report();
-        let result = output_report(&report, OutputFormat::Json);
+        let result = output_report(&report, OutputFormat::Json, &quiet());
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_output_report_csv() {
         let report = make_test_report();
-        let result = output_report(&report, OutputFormat::Csv);
+        let result = output_report(&report, OutputFormat::Csv, &quiet());
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_output_report_table() {
         let report = make_test_report();
-        let result = output_report(&report, OutputFormat::Table);
+        let result = output_report(&report, OutputFormat::Table, &quiet());
         assert!(result.is_ok());
     }
 
@@ -866,7 +890,7 @@ mod tests {
     fn test_output_report_table_no_usd() {
         let mut report = make_test_report();
         report.balance.usd = None;
-        let result = output_report(&report, OutputFormat::Table);
+        let result = output_report(&report, OutputFormat::Table, &quiet());
         assert!(result.is_ok());
     }
 
@@ -874,7 +898,7 @@ mod tests {
     fn test_output_report_table_no_tokens() {
         let mut report = make_test_report();
         report.tokens = None;
-        let result = output_report(&report, OutputFormat::Table);
+        let result = output_report(&report, OutputFormat::Table, &quiet());
         assert!(result.is_ok());
     }
 
@@ -882,14 +906,14 @@ mod tests {
     fn test_output_report_table_empty_tokens() {
         let mut report = make_test_report();
         report.tokens = Some(vec![]);
-        let result = output_report(&report, OutputFormat::Table);
+        let result = output_report(&report, OutputFormat::Table, &quiet());
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_output_report_markdown() {
         let report = make_test_report();
-        let result = output_report(&report, OutputFormat::Markdown);
+        let result = output_report(&report, OutputFormat::Markdown, &quiet());
         assert!(result.is_ok());
     }
 
@@ -985,7 +1009,7 @@ mod tests {
             dossier: false,
         };
         let client = MockClient;
-        let result = analyze_address(&args, &client).await;
+        let result = analyze_address(&args, &client, &quiet()).await;
         assert!(result.is_ok());
         let report = result.unwrap();
         assert_eq!(report.address, "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2");
@@ -1007,7 +1031,7 @@ mod tests {
             dossier: false,
         };
         let client = MockClient;
-        let result = analyze_address(&args, &client).await;
+        let result = analyze_address(&args, &client, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1171,7 +1195,7 @@ mod tests {
             dossier: false,
         };
         let client = FailTxMockClient;
-        let result = analyze_address(&args, &client).await;
+        let result = analyze_address(&args, &client, &quiet()).await;
         assert!(result.is_ok());
         let report = result.unwrap();
         assert!(
@@ -1196,7 +1220,7 @@ mod tests {
             dossier: false,
         };
         let client = FailTokenBalancesMockClient;
-        let result = analyze_address(&args, &client).await;
+        let result = analyze_address(&args, &client, &quiet()).await;
         assert!(result.is_ok());
         let report = result.unwrap();
         assert!(
@@ -1221,7 +1245,7 @@ mod tests {
             dossier: false,
         };
         let client = PartialTxMockClient;
-        let result = analyze_address(&args, &client).await;
+        let result = analyze_address(&args, &client, &quiet()).await;
         assert!(result.is_ok());
         let report = result.unwrap();
         let txs = report.transactions.unwrap();
@@ -1256,7 +1280,7 @@ mod tests {
             report: None,
             dossier: false,
         };
-        let result = super::run(args, &config, &factory).await;
+        let result = super::run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1275,7 +1299,7 @@ mod tests {
             report: None,
             dossier: false,
         };
-        let result = super::run(args, &config, &factory).await;
+        let result = super::run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1304,7 +1328,7 @@ mod tests {
             report: None,
             dossier: false,
         };
-        let result = super::run(args, &config, &factory).await;
+        let result = super::run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1324,7 +1348,7 @@ mod tests {
             report: None,
             dossier: false,
         };
-        let result = super::run(args, &config, &factory).await;
+        let result = super::run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1342,7 +1366,7 @@ mod tests {
             report: None,
             dossier: false,
         };
-        let result = super::run(args, &config, &factory).await;
+        let result = super::run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1388,7 +1412,7 @@ mod tests {
             report: None,
             dossier: false,
         };
-        let result = super::run(args, &config, &factory).await;
+        let result = super::run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 }

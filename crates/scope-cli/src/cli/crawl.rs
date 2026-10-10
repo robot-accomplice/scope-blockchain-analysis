@@ -24,6 +24,8 @@
 //! scope crawl USDC --format json
 //! ```
 
+use crate::cli::output::Output;
+use crate::{errln, outln};
 use clap::Args;
 use scope::chains::{
     ChainClientFactory, DexClient, DexDataSource, DexPair, Token, TokenAnalytics, TokenHolder,
@@ -219,6 +221,7 @@ async fn resolve_token_input(
     aliases: &mut TokenAliases,
     dex_client: &dyn DexDataSource,
     spinner: Option<&crate::cli::progress::Spinner>,
+    out: &Output,
 ) -> Result<ResolvedToken> {
     let input = args.token.trim();
 
@@ -253,7 +256,7 @@ async fn resolve_token_input(
         if let Some(sp) = spinner {
             sp.set_message(msg);
         } else {
-            eprintln!("  {}", msg);
+            errln!(out, "  {}", msg)?;
         }
         return Ok(ResolvedToken {
             address: token_info.address.clone(),
@@ -267,7 +270,7 @@ async fn resolve_token_input(
     if let Some(sp) = spinner {
         sp.set_message(search_msg);
     } else {
-        eprintln!("  {}", search_msg);
+        errln!(out, "  {}", search_msg)?;
     }
 
     let mut search_results = dex_client.search_tokens(input, chain_filter).await?;
@@ -281,9 +284,9 @@ async fn resolve_token_input(
             fallback.symbol, fallback.chain
         );
         if let Some(sp) = spinner {
-            sp.println(&msg);
+            sp.println(&msg)?;
         } else {
-            eprintln!("  {}", msg);
+            errln!(out, "  {}", msg)?;
         }
         search_results.push(fallback);
     }
@@ -333,9 +336,9 @@ async fn resolve_token_input(
             sp.println(&format!(
                 "Saved {} as alias for future use.",
                 selected.symbol
-            ));
+            ))?;
         } else {
-            println!("Saved {} as alias for future use.", selected.symbol);
+            outln!(out, "Saved {} as alias for future use.", selected.symbol)?;
         }
     }
 
@@ -475,6 +478,7 @@ pub async fn fetch_analytics_for_input(
     holders_limit: u32,
     clients: &dyn ChainClientFactory,
     spinner: Option<&crate::cli::progress::Spinner>,
+    out: &Output,
 ) -> Result<TokenAnalytics> {
     let args = CrawlArgs {
         token: token_input.to_string(),
@@ -489,7 +493,8 @@ pub async fn fetch_analytics_for_input(
     };
     let mut aliases = TokenAliases::load();
     let dex_client = clients.create_dex_client();
-    let resolved = resolve_token_input(&args, &mut aliases, dex_client.as_ref(), spinner).await?;
+    let resolved =
+        resolve_token_input(&args, &mut aliases, dex_client.as_ref(), spinner, out).await?;
     if let Some(sp) = spinner {
         sp.set_message(format!(
             "Fetching analytics for {} on {}...",
@@ -515,6 +520,7 @@ pub async fn run(
     mut args: CrawlArgs,
     config: &Config,
     clients: &dyn ChainClientFactory,
+    out: &Output,
 ) -> Result<()> {
     // Resolve address book label → address + chain before token resolution
     if let Some((address, chain)) =
@@ -530,14 +536,15 @@ pub async fn run(
     let mut aliases = TokenAliases::load();
 
     // Start spinner early so resolution messages route through it
-    let sp = crate::cli::progress::Spinner::new(&format!(
-        "Crawling token {} on {}...",
-        args.token, args.chain
-    ));
+    let sp = crate::cli::progress::Spinner::new(
+        &format!("Crawling token {} on {}...", args.token, args.chain),
+        out,
+    )?;
 
     // Resolve the token input to an address (uses factory's dex client for search)
     let dex_client = clients.create_dex_client();
-    let resolved = resolve_token_input(&args, &mut aliases, dex_client.as_ref(), Some(&sp)).await?;
+    let resolved =
+        resolve_token_input(&args, &mut aliases, dex_client.as_ref(), Some(&sp), out).await?;
 
     tracing::info!(
         token = %resolved.address,
@@ -569,17 +576,17 @@ pub async fn run(
     match args.format {
         OutputFormat::Json => {
             let json = serde_json::to_string_pretty(&analytics)?;
-            println!("{}", json);
+            outln!(out, "{}", json)?;
         }
         OutputFormat::Csv => {
-            output_csv(&analytics)?;
+            output_csv(&analytics, out)?;
         }
         OutputFormat::Table => {
-            output_table(&analytics, &args)?;
+            output_table(&analytics, &args, out)?;
         }
         OutputFormat::Markdown => {
             let md = report::generate_report(&analytics);
-            println!("{}", md);
+            outln!(out, "{}", md)?;
         }
     }
 
@@ -587,7 +594,7 @@ pub async fn run(
     if let Some(ref report_path) = args.report {
         let markdown_report = report::generate_report(&analytics);
         report::save_report(&markdown_report, report_path)?;
-        println!("\nReport saved to: {}", report_path.display());
+        outln!(out, "\nReport saved to: {}", report_path.display())?;
     }
 
     Ok(())
@@ -869,23 +876,23 @@ async fn fetch_holders(
 }
 
 /// Outputs analytics in table format with optional charts.
-fn output_table(analytics: &TokenAnalytics, args: &CrawlArgs) -> Result<()> {
-    println!();
+fn output_table(analytics: &TokenAnalytics, args: &CrawlArgs, out: &Output) -> Result<()> {
+    outln!(out)?;
 
     // Check if we have DEX data (price > 0 indicates DEX data)
     let has_dex_data = analytics.price_usd > 0.0;
 
     if has_dex_data {
         // Full output with DEX data
-        output_table_with_dex(analytics, args)
+        output_table_with_dex(analytics, args, out)
     } else {
         // Explorer-only output
-        output_table_explorer_only(analytics)
+        output_table_explorer_only(analytics, out)
     }
 }
 
 /// Outputs full analytics table with DEX data.
-fn output_table_with_dex(analytics: &TokenAnalytics, args: &CrawlArgs) -> Result<()> {
+fn output_table_with_dex(analytics: &TokenAnalytics, args: &CrawlArgs, out: &Output) -> Result<()> {
     use scope::display::terminal as t;
 
     // Display charts if not disabled
@@ -897,39 +904,44 @@ fn output_table_with_dex(analytics: &TokenAnalytics, args: &CrawlArgs) -> Result
             &analytics.token.symbol,
             &analytics.chain,
         );
-        println!("{}", dashboard);
+        outln!(out, "{}", dashboard)?;
     } else {
         // Display text-only summary
-        println!(
+        outln!(
+            out,
             "{}",
             t::section_header(&format!(
                 "{} ({})",
                 analytics.token.name, analytics.token.symbol
             ))
-        );
-        println!("{}", t::kv_row("Chain", &analytics.chain));
-        println!(
+        )?;
+        outln!(out, "{}", t::kv_row("Chain", &analytics.chain))?;
+        outln!(
+            out,
             "{}",
             t::kv_row("Contract", &analytics.token.contract_address)
-        );
-        println!("{}", t::blank_row());
+        )?;
+        outln!(out, "{}", t::blank_row())?;
     }
 
     // Key metrics
-    println!("{}", t::subsection_header("Key Metrics"));
-    println!(
+    outln!(out, "{}", t::subsection_header("Key Metrics"))?;
+    outln!(
+        out,
         "{}",
         t::kv_row("Price", &format!("${:.6}", analytics.price_usd))
-    );
-    println!(
+    )?;
+    outln!(
+        out,
         "{}",
         t::kv_row_delta(
             "24h Change",
             analytics.price_change_24h,
             &format!("{:+.2}%", analytics.price_change_24h)
         )
-    );
-    println!(
+    )?;
+    outln!(
+        out,
         "{}",
         t::kv_row(
             "24h Volume",
@@ -938,8 +950,9 @@ fn output_table_with_dex(analytics: &TokenAnalytics, args: &CrawlArgs) -> Result
                 scope::display::format_large_number(analytics.volume_24h)
             )
         )
-    );
-    println!(
+    )?;
+    outln!(
+        out,
         "{}",
         t::kv_row(
             "Liquidity",
@@ -948,32 +961,34 @@ fn output_table_with_dex(analytics: &TokenAnalytics, args: &CrawlArgs) -> Result
                 scope::display::format_large_number(analytics.liquidity_usd)
             )
         )
-    );
+    )?;
 
     if let Some(mc) = analytics.market_cap {
-        println!(
+        outln!(
+            out,
             "{}",
             t::kv_row(
                 "Market Cap",
                 &format!("${}", scope::display::format_large_number(mc))
             )
-        );
+        )?;
     }
 
     if let Some(fdv) = analytics.fdv {
-        println!(
+        outln!(
+            out,
             "{}",
             t::kv_row(
                 "FDV",
                 &format!("${}", scope::display::format_large_number(fdv))
             )
-        );
+        )?;
     }
 
     // Trading pairs
     if !analytics.dex_pairs.is_empty() {
-        println!("{}", t::blank_row());
-        println!("{}", t::subsection_header("Top Trading Pairs"));
+        outln!(out, "{}", t::blank_row())?;
+        outln!(out, "{}", t::subsection_header("Top Trading Pairs"))?;
 
         for (i, pair) in analytics.dex_pairs.iter().take(5).enumerate() {
             let pair_str = format!(
@@ -984,77 +999,83 @@ fn output_table_with_dex(analytics: &TokenAnalytics, args: &CrawlArgs) -> Result
                 scope::display::format_large_number(pair.volume_24h),
                 scope::display::format_large_number(pair.liquidity_usd)
             );
-            println!("{}", t::numbered_row(i + 1, &pair_str));
+            outln!(out, "{}", t::numbered_row(i + 1, &pair_str))?;
         }
     }
 
     // Concentration summary
     if let Some(top_10) = analytics.top_10_concentration {
-        println!("{}", t::blank_row());
-        println!("{}", t::subsection_header("Holder Concentration"));
-        println!(
+        outln!(out, "{}", t::blank_row())?;
+        outln!(out, "{}", t::subsection_header("Holder Concentration"))?;
+        outln!(
+            out,
             "{}",
             t::kv_row("Top 10 holders", &format!("{:.1}% of supply", top_10))
-        );
+        )?;
 
         if let Some(top_50) = analytics.top_50_concentration {
-            println!(
+            outln!(
+                out,
                 "{}",
                 t::kv_row("Top 50 holders", &format!("{:.1}% of supply", top_50))
-            );
+            )?;
         }
     }
 
     if args.no_charts {
-        println!("{}", t::section_footer());
+        outln!(out, "{}", t::section_footer())?;
     }
 
     Ok(())
 }
 
 /// Outputs basic token info from block explorer (no DEX data).
-fn output_table_explorer_only(analytics: &TokenAnalytics) -> Result<()> {
+fn output_table_explorer_only(analytics: &TokenAnalytics, out: &Output) -> Result<()> {
     use scope::display::terminal as t;
 
-    println!("{}", t::section_header("Token Info (Block Explorer)"));
+    outln!(out, "{}", t::section_header("Token Info (Block Explorer)"))?;
 
     // Basic token info
-    println!("{}", t::kv_row("Name", &analytics.token.name));
-    println!("{}", t::kv_row("Symbol", &analytics.token.symbol));
-    println!(
+    outln!(out, "{}", t::kv_row("Name", &analytics.token.name))?;
+    outln!(out, "{}", t::kv_row("Symbol", &analytics.token.symbol))?;
+    outln!(
+        out,
         "{}",
         t::kv_row("Contract", &analytics.token.contract_address)
-    );
-    println!("{}", t::kv_row("Chain", &analytics.chain));
-    println!(
+    )?;
+    outln!(out, "{}", t::kv_row("Chain", &analytics.chain))?;
+    outln!(
+        out,
         "{}",
         t::kv_row("Decimals", &analytics.token.decimals.to_string())
-    );
+    )?;
 
     if analytics.total_holders > 0 {
-        println!(
+        outln!(
+            out,
             "{}",
             t::kv_row("Total Holders", &analytics.total_holders.to_string())
-        );
+        )?;
     }
 
     if let Some(supply) = &analytics.total_supply {
-        println!("{}", t::kv_row("Total Supply", supply));
+        outln!(out, "{}", t::kv_row("Total Supply", supply))?;
     }
 
     // Note about missing DEX data
-    println!("{}", t::blank_row());
-    println!(
+    outln!(out, "{}", t::blank_row())?;
+    outln!(
+        out,
         "{}",
         t::info_row(
             "No DEX trading data available for this token. Price, volume, and liquidity data require active DEX pairs."
         )
-    );
+    )?;
 
     // Top holders if available
     if !analytics.holders.is_empty() {
-        println!("{}", t::blank_row());
-        println!("{}", t::subsection_header("Top Holders"));
+        outln!(out, "{}", t::blank_row())?;
+        outln!(out, "{}", t::subsection_header("Top Holders"))?;
 
         let cols = [
             t::Col {
@@ -1078,7 +1099,7 @@ fn output_table_explorer_only(analytics: &TokenAnalytics) -> Result<()> {
                 align: '<',
             },
         ];
-        println!("{}", t::table_header(&cols));
+        outln!(out, "{}", t::table_header(&cols))?;
 
         for holder in analytics.holders.iter().take(10) {
             // Truncate address for display
@@ -1100,73 +1121,79 @@ fn output_table_explorer_only(analytics: &TokenAnalytics) -> Result<()> {
                 holder.formatted_balance.as_str(),
                 addr_display.as_str(),
             ];
-            println!("{}", t::table_row(&cols, &values));
+            outln!(out, "{}", t::table_row(&cols, &values))?;
         }
     }
 
     // Concentration summary
     if let Some(top_10) = analytics.top_10_concentration {
-        println!("{}", t::blank_row());
-        println!("{}", t::subsection_header("Holder Concentration"));
-        println!(
+        outln!(out, "{}", t::blank_row())?;
+        outln!(out, "{}", t::subsection_header("Holder Concentration"))?;
+        outln!(
+            out,
             "{}",
             t::kv_row("Top 10 holders", &format!("{:.1}% of supply", top_10))
-        );
+        )?;
 
         if let Some(top_50) = analytics.top_50_concentration {
-            println!(
+            outln!(
+                out,
                 "{}",
                 t::kv_row("Top 50 holders", &format!("{:.1}% of supply", top_50))
-            );
+            )?;
         }
     }
 
-    println!("{}", t::section_footer());
+    outln!(out, "{}", t::section_footer())?;
 
     Ok(())
 }
 
 /// Outputs analytics in CSV format.
-fn output_csv(analytics: &TokenAnalytics) -> Result<()> {
+fn output_csv(analytics: &TokenAnalytics, out: &Output) -> Result<()> {
     // Header
-    println!("metric,value");
+    outln!(out, "metric,value")?;
 
     // Basic info
-    println!("symbol,{}", analytics.token.symbol);
-    println!("name,{}", analytics.token.name);
-    println!("chain,{}", analytics.chain);
-    println!("contract,{}", analytics.token.contract_address);
+    outln!(out, "symbol,{}", analytics.token.symbol)?;
+    outln!(out, "name,{}", analytics.token.name)?;
+    outln!(out, "chain,{}", analytics.chain)?;
+    outln!(out, "contract,{}", analytics.token.contract_address)?;
 
     // Metrics
-    println!("price_usd,{}", analytics.price_usd);
-    println!("price_change_24h,{}", analytics.price_change_24h);
-    println!("volume_24h,{}", analytics.volume_24h);
-    println!("volume_7d,{}", analytics.volume_7d);
-    println!("liquidity_usd,{}", analytics.liquidity_usd);
+    outln!(out, "price_usd,{}", analytics.price_usd)?;
+    outln!(out, "price_change_24h,{}", analytics.price_change_24h)?;
+    outln!(out, "volume_24h,{}", analytics.volume_24h)?;
+    outln!(out, "volume_7d,{}", analytics.volume_7d)?;
+    outln!(out, "liquidity_usd,{}", analytics.liquidity_usd)?;
 
     if let Some(mc) = analytics.market_cap {
-        println!("market_cap,{}", mc);
+        outln!(out, "market_cap,{}", mc)?;
     }
 
     if let Some(fdv) = analytics.fdv {
-        println!("fdv,{}", fdv);
+        outln!(out, "fdv,{}", fdv)?;
     }
 
-    println!("total_holders,{}", analytics.total_holders);
+    outln!(out, "total_holders,{}", analytics.total_holders)?;
 
     if let Some(top_10) = analytics.top_10_concentration {
-        println!("top_10_concentration,{}", top_10);
+        outln!(out, "top_10_concentration,{}", top_10)?;
     }
 
     // Holders section
     if !analytics.holders.is_empty() {
-        println!();
-        println!("rank,address,balance,percentage");
+        outln!(out)?;
+        outln!(out, "rank,address,balance,percentage")?;
         for holder in &analytics.holders {
-            println!(
+            outln!(
+                out,
                 "{},{},{},{}",
-                holder.rank, holder.address, holder.balance, holder.percentage
-            );
+                holder.rank,
+                holder.address,
+                holder.balance,
+                holder.percentage
+            )?;
         }
     }
 
@@ -1189,6 +1216,10 @@ fn abbreviate_address(addr: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn quiet() -> crate::cli::output::Output {
+        crate::cli::output::Output::capture().0
+    }
 
     #[test]
     fn test_period_as_seconds() {
@@ -1431,7 +1462,7 @@ mod tests {
     fn test_output_table_with_dex_data() {
         let analytics = make_test_analytics(true);
         let args = make_test_crawl_args();
-        let result = output_table(&analytics, &args);
+        let result = output_table(&analytics, &args, &quiet());
         assert!(result.is_ok());
     }
 
@@ -1439,7 +1470,7 @@ mod tests {
     fn test_output_table_explorer_only() {
         let analytics = make_test_analytics(false);
         let args = make_test_crawl_args();
-        let result = output_table(&analytics, &args);
+        let result = output_table(&analytics, &args, &quiet());
         assert!(result.is_ok());
     }
 
@@ -1451,14 +1482,14 @@ mod tests {
         analytics.top_10_concentration = None;
         analytics.top_50_concentration = None;
         let args = make_test_crawl_args();
-        let result = output_table(&analytics, &args);
+        let result = output_table(&analytics, &args, &quiet());
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_output_csv() {
         let analytics = make_test_analytics(true);
-        let result = output_csv(&analytics);
+        let result = output_csv(&analytics, &quiet());
         assert!(result.is_ok());
     }
 
@@ -1468,7 +1499,7 @@ mod tests {
         analytics.market_cap = None;
         analytics.fdv = None;
         analytics.top_10_concentration = None;
-        let result = output_csv(&analytics);
+        let result = output_csv(&analytics, &quiet());
         assert!(result.is_ok());
     }
 
@@ -1476,7 +1507,7 @@ mod tests {
     fn test_output_csv_no_holders() {
         let mut analytics = make_test_analytics(true);
         analytics.holders = vec![];
-        let result = output_csv(&analytics);
+        let result = output_csv(&analytics, &quiet());
         assert!(result.is_ok());
     }
 
@@ -1485,7 +1516,7 @@ mod tests {
         let analytics = make_test_analytics(true);
         let mut args = make_test_crawl_args();
         args.no_charts = true;
-        let result = output_table_with_dex(&analytics, &args);
+        let result = output_table_with_dex(&analytics, &args, &quiet());
         assert!(result.is_ok());
     }
 
@@ -1496,7 +1527,7 @@ mod tests {
         analytics.fdv = None;
         analytics.top_10_concentration = None;
         let args = make_test_crawl_args();
-        let result = output_table_with_dex(&analytics, &args);
+        let result = output_table_with_dex(&analytics, &args, &quiet());
         assert!(result.is_ok());
     }
 
@@ -1505,7 +1536,7 @@ mod tests {
         let mut analytics = make_test_analytics(false);
         analytics.top_10_concentration = Some(40.0);
         analytics.top_50_concentration = Some(60.0);
-        let result = output_table_explorer_only(&analytics);
+        let result = output_table_explorer_only(&analytics, &quiet());
         assert!(result.is_ok());
     }
 
@@ -1513,7 +1544,7 @@ mod tests {
     fn test_output_table_explorer_no_supply() {
         let mut analytics = make_test_analytics(false);
         analytics.total_supply = None;
-        let result = output_table_explorer_only(&analytics);
+        let result = output_table_explorer_only(&analytics, &quiet());
         assert!(result.is_ok());
     }
 
@@ -1522,7 +1553,7 @@ mod tests {
         let mut analytics = make_test_analytics(false);
         analytics.total_supply = Some("1000000000".to_string());
         analytics.total_holders = 50_000;
-        let result = output_table_explorer_only(&analytics);
+        let result = output_table_explorer_only(&analytics, &quiet());
         assert!(result.is_ok());
     }
 
@@ -1551,7 +1582,7 @@ mod tests {
         }
         let args = make_test_crawl_args();
         // Should only show top 5
-        let result = output_table_with_dex(&analytics, &args);
+        let result = output_table_with_dex(&analytics, &args, &quiet());
         assert!(result.is_ok());
     }
 
@@ -1692,7 +1723,7 @@ mod tests {
             yes: true,
             save: false,
         };
-        let result = super::run(args, &config, &factory).await;
+        let result = super::run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1711,7 +1742,7 @@ mod tests {
             yes: true,
             save: false,
         };
-        let result = super::run(args, &config, &factory).await;
+        let result = super::run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1730,7 +1761,7 @@ mod tests {
             yes: true,
             save: false,
         };
-        let result = super::run(args, &config, &factory).await;
+        let result = super::run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1765,7 +1796,7 @@ mod tests {
             yes: true,
             save: false,
         };
-        let result = super::run(args, &config, &factory).await;
+        let result = super::run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1791,7 +1822,7 @@ mod tests {
             yes: true,
             save: false,
         };
-        let result = super::run(args, &config, &factory).await;
+        let result = super::run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1810,7 +1841,7 @@ mod tests {
             yes: true,
             save: false,
         };
-        let result = super::run(args, &config, &factory).await;
+        let result = super::run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1829,7 +1860,7 @@ mod tests {
             yes: true,
             save: false,
         };
-        let result = super::run(args, &config, &factory).await;
+        let result = super::run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1848,7 +1879,7 @@ mod tests {
             yes: true,
             save: false,
         };
-        let result = super::run(args, &config, &factory).await;
+        let result = super::run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1867,7 +1898,7 @@ mod tests {
             yes: true,
             save: false,
         };
-        let result = super::run(args, &config, &factory).await;
+        let result = super::run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1890,7 +1921,7 @@ mod tests {
             yes: true,
             save: false,
         };
-        let result = super::run(args, &config, &factory).await;
+        let result = super::run(args, &config, &factory, &quiet()).await;
         assert!(result.is_err());
         let err_str = result.unwrap_err().to_string();
         assert!(
@@ -1917,7 +1948,7 @@ mod tests {
             yes: true,
             save: false,
         };
-        let result = super::run(args, &config, &factory).await;
+        let result = super::run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1926,7 +1957,7 @@ mod tests {
         let analytics = make_test_analytics(true);
         let mut args = make_test_crawl_args();
         args.no_charts = false; // Enable charts
-        let result = output_table_with_dex(&analytics, &args);
+        let result = output_table_with_dex(&analytics, &args, &quiet());
         assert!(result.is_ok());
     }
 
@@ -1940,14 +1971,14 @@ mod tests {
             percentage: 1.0,
             rank: 1,
         }];
-        let result = output_table_explorer_only(&analytics);
+        let result = output_table_explorer_only(&analytics, &quiet());
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_output_csv_with_all_fields() {
         let analytics = make_test_analytics(true);
-        let result = output_csv(&analytics);
+        let result = output_csv(&analytics, &quiet());
         assert!(result.is_ok());
     }
 
@@ -1961,6 +1992,7 @@ mod tests {
             5,
             &factory,
             None,
+            &quiet(),
         )
         .await;
         assert!(result.is_ok());
@@ -1988,7 +2020,7 @@ mod tests {
             yes: true,
             save: false,
         };
-        let result = super::run(args, &config, &factory).await;
+        let result = super::run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -2008,7 +2040,7 @@ mod tests {
             yes: true,
             save: false,
         };
-        let result = super::run(args, &config, &factory).await;
+        let result = super::run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
         // Report file should exist and contain markdown
         let content = std::fs::read_to_string(tmp.path()).unwrap();
@@ -2029,7 +2061,7 @@ mod tests {
             percentage: 50.0,
             rank: 1,
         }];
-        let result = output_table_explorer_only(&analytics);
+        let result = output_table_explorer_only(&analytics, &quiet());
         assert!(result.is_ok());
     }
 
@@ -2038,7 +2070,7 @@ mod tests {
         let mut analytics = make_test_analytics(true);
         analytics.dex_pairs = vec![];
         let args = make_test_crawl_args();
-        let result = output_table_with_dex(&analytics, &args);
+        let result = output_table_with_dex(&analytics, &args, &quiet());
         assert!(result.is_ok());
     }
 
@@ -2048,7 +2080,7 @@ mod tests {
         analytics.top_10_concentration = None;
         analytics.top_50_concentration = None;
         analytics.top_100_concentration = None;
-        let result = output_table_explorer_only(&analytics);
+        let result = output_table_explorer_only(&analytics, &quiet());
         assert!(result.is_ok());
     }
 
@@ -2059,7 +2091,7 @@ mod tests {
         analytics.top_50_concentration = None;
         analytics.top_100_concentration = None;
         let args = make_test_crawl_args();
-        let result = output_table_with_dex(&analytics, &args);
+        let result = output_table_with_dex(&analytics, &args, &quiet());
         assert!(result.is_ok());
     }
 
@@ -2070,7 +2102,7 @@ mod tests {
         analytics.top_50_concentration = Some(45.0);
         analytics.top_100_concentration = Some(65.0);
         let args = make_test_crawl_args();
-        let result = output_table_with_dex(&analytics, &args);
+        let result = output_table_with_dex(&analytics, &args, &quiet());
         assert!(result.is_ok());
     }
 
@@ -2079,7 +2111,7 @@ mod tests {
         let mut analytics = make_test_analytics(true);
         analytics.market_cap = Some(1_000_000_000.0);
         analytics.fdv = Some(1_500_000_000.0);
-        let result = output_csv(&analytics);
+        let result = output_csv(&analytics, &quiet());
         assert!(result.is_ok());
     }
 
@@ -2088,7 +2120,7 @@ mod tests {
         let analytics = make_test_analytics(true);
         assert!(analytics.price_usd > 0.0);
         let args = make_test_crawl_args();
-        let result = output_table(&analytics, &args);
+        let result = output_table(&analytics, &args, &quiet());
         assert!(result.is_ok());
     }
 
@@ -2097,7 +2129,7 @@ mod tests {
         let analytics = make_test_analytics(false);
         assert_eq!(analytics.price_usd, 0.0);
         let args = make_test_crawl_args();
-        let result = output_table(&analytics, &args);
+        let result = output_table(&analytics, &args, &quiet());
         assert!(result.is_ok());
     }
 
@@ -2160,7 +2192,7 @@ mod tests {
             },
         ];
         let args = make_test_crawl_args();
-        let result = output_table_with_dex(&analytics, &args);
+        let result = output_table_with_dex(&analytics, &args, &quiet());
         assert!(result.is_ok());
     }
 
@@ -2493,7 +2525,7 @@ mod tests {
     #[test]
     fn test_output_csv_no_panic() {
         let analytics = create_test_analytics_minimal();
-        let result = output_csv(&analytics);
+        let result = output_csv(&analytics, &quiet());
         assert!(result.is_ok());
     }
 
@@ -2512,7 +2544,7 @@ mod tests {
             yes: false,
             save: false,
         };
-        let result = output_table(&analytics, &args);
+        let result = output_table(&analytics, &args, &quiet());
         assert!(result.is_ok());
     }
 
@@ -2536,7 +2568,7 @@ mod tests {
             yes: false,
             save: false,
         };
-        let result = output_table(&analytics, &args);
+        let result = output_table(&analytics, &args, &quiet());
         assert!(result.is_ok());
     }
 
@@ -2578,7 +2610,7 @@ mod tests {
             yes: false,
             save: false,
         };
-        let result = output_table(&analytics, &args);
+        let result = output_table(&analytics, &args, &quiet());
         assert!(result.is_ok());
     }
 

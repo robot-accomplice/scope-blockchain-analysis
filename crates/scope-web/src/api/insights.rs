@@ -100,7 +100,13 @@ pub async fn handle(
                             .into_response();
                     }
                 };
-            match scope_cli::cli::address::analyze_address(&addr_args, client.as_ref()).await {
+            match scope_cli::cli::address::analyze_address(
+                &addr_args,
+                client.as_ref(),
+                &scope_cli::cli::output::Output::stdio(),
+            )
+            .await
+            {
                 Ok(report) => Json(serde_json::json!({
                     "target_info": target_type,
                     "data": report,
@@ -143,6 +149,7 @@ pub async fn handle(
                 10,
                 &state.factory,
                 None,
+                &scope_cli::cli::output::Output::stdio(),
             )
             .await
             {

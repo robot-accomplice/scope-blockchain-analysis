@@ -55,16 +55,14 @@
 //! ```
 
 use anyhow::Result;
-use clap::{CommandFactory, Parser};
-use clap_complete::generate;
+use clap::Parser;
 use scope::Config;
-use scope::chains::DefaultClientFactory;
 use scope::config::OutputFormat;
-use scope::http::HttpClient;
 use scope_cli::cli::errors::display_error;
+use scope_cli::cli::output::Output;
 use scope_cli::cli::{Cli, Commands};
+use scope_cli::errln;
 use std::io::{self, Write};
-use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 
 /// ASCII art banner featuring a Portia jumping spider.
@@ -150,7 +148,7 @@ async fn main() -> Result<()> {
             key: None,
             reset: false,
         };
-        if let Err(e) = scope_cli::cli::setup::run(setup_args, &config).await {
+        if let Err(e) = scope_cli::cli::setup::run(setup_args, &config, &Output::stdio()).await {
             eprintln!("Setup failed: {}", e);
         }
         // Reload config after setup
@@ -194,132 +192,26 @@ fn prompt_for_setup() -> bool {
     response.is_empty() || response == "y" || response == "yes"
 }
 
-/// Unified command dispatcher.
+/// Runs one command through the shared dispatcher with stdout/stderr output.
 ///
-/// Creates the HTTP transport and client factory, then routes the command
-/// to the appropriate handler. Called from both the main flow and the
-/// post-setup-wizard path.
+/// Prints the version line for non-interactive commands, and on failure
+/// prints the error with remediation hints and exits with status 1.
 async fn dispatch(command: Commands, config: &Config) -> Result<()> {
+    let out = Output::stdio();
     // Print version on stderr for non-interactive commands
     if !command.is_interactive() {
-        eprintln!("Scope v{}", scope::VERSION);
+        errln!(out, "Scope v{}", scope::VERSION)?;
     }
 
-    let http: Arc<dyn HttpClient> = create_http_client(config);
-    let factory = DefaultClientFactory {
-        chains_config: config.chains.clone(),
-        http,
-    };
-
-    let result = match command {
-        Commands::Completions(args) => {
-            let mut cmd = Cli::command();
-            generate(args.shell, &mut cmd, "scope", &mut io::stdout());
-            Ok(())
-        }
-        Commands::Address(args) => scope_cli::cli::address::run(args, config, &factory).await,
-        Commands::Tx(args) => scope_cli::cli::tx::run(args, config, &factory).await,
-        Commands::Crawl(args) => scope_cli::cli::crawl::run(args, config, &factory).await,
-        Commands::AddressBook(args) => {
-            scope_cli::cli::address_book::run(args, config, &factory).await
-        }
-        Commands::Export(args) => scope_cli::cli::export::run(args, config, &factory).await,
-        Commands::Interactive(args) => {
-            scope_cli::cli::interactive::run(args, config, &factory).await
-        }
-        Commands::Monitor(args) => {
-            scope_cli::cli::monitor::run_direct(args, config, &factory).await
-        }
-        Commands::Setup(args) => scope_cli::cli::setup::run(args, config).await,
-        Commands::Compliance(compliance_cmd) => match compliance_cmd {
-            scope_cli::cli::compliance::ComplianceCommands::Risk(mut args) => {
-                if let Some((addr, chain)) =
-                    scope_cli::cli::address_book::resolve_address_book_input(&args.address, config)?
-                {
-                    args.address = addr;
-                    if args.chain.is_none() {
-                        args.chain = Some(chain);
-                    }
-                }
-                scope_cli::cli::compliance::handle_risk(args)
-                    .await
-                    .map_err(|e| scope::error::ScopeError::Compliance(e.to_string()))
-            }
-            scope_cli::cli::compliance::ComplianceCommands::Trace(args) => {
-                scope_cli::cli::compliance::handle_trace(args)
-                    .await
-                    .map_err(|e| scope::error::ScopeError::Compliance(e.to_string()))
-            }
-            scope_cli::cli::compliance::ComplianceCommands::Analyze(mut args) => {
-                if let Some((addr, _chain)) =
-                    scope_cli::cli::address_book::resolve_address_book_input(&args.address, config)?
-                {
-                    args.address = addr;
-                }
-                scope_cli::cli::compliance::handle_analyze(args)
-                    .await
-                    .map_err(|e| scope::error::ScopeError::Compliance(e.to_string()))
-            }
-            scope_cli::cli::compliance::ComplianceCommands::ComplianceReport(mut args) => {
-                if !std::path::Path::new(&args.target).exists()
-                    && let Some((addr, _chain)) =
-                        scope_cli::cli::address_book::resolve_address_book_input(
-                            &args.target,
-                            config,
-                        )?
-                {
-                    args.target = addr;
-                }
-                scope_cli::cli::compliance::handle_compliance_report(args)
-                    .await
-                    .map_err(|e| scope::error::ScopeError::Compliance(e.to_string()))
-            }
-        },
-        Commands::Market(cmd) => scope_cli::cli::market::run(cmd, config, &factory).await,
-        Commands::TokenHealth(args) => {
-            scope_cli::cli::token_health::run(args, config, &factory).await
-        }
-        Commands::Venues(cmd) => scope_cli::cli::venues::run(cmd),
-        Commands::Report(cmd) => scope_cli::cli::report::run(cmd, config, &factory).await,
-        Commands::Discover(args) => scope_cli::cli::discover::run(args, config.output.format)
-            .await
-            .map_err(|e| scope::error::ScopeError::Discovery(e.to_string())),
-        Commands::Insights(args) => scope_cli::cli::insights::run(args, config, &factory).await,
-        Commands::Contract(ref args) => scope_cli::cli::contract::run(args, config, &factory).await,
-        // Web command is handled in main() before dispatch
-        Commands::Web(_) => unreachable!("Web command handled before dispatch"),
-    };
-
-    if let Err(e) = result {
+    if let Err(e) = scope_cli::cli::dispatch::dispatch(command, config, &out).await {
         tracing::debug!("Command failed: {}", e);
-        display_error(&e);
+        // If stderr itself fails there is no channel left to report on;
+        // the non-zero exit status still tells the caller that it failed.
+        let _ = display_error(&e, &out);
         std::process::exit(1);
     }
 
     Ok(())
-}
-
-/// Creates the appropriate HTTP transport based on Ghola configuration.
-///
-/// When `config.ghola.enabled` is `true`, attempts to create a Ghola
-/// sidecar client. Falls back to native `reqwest` if Ghola fails to start
-/// or is not installed.
-fn create_http_client(config: &Config) -> Arc<dyn HttpClient> {
-    if config.ghola.enabled {
-        match scope::http::GholaHttpClient::new(config.ghola.stealth, config.ghola.buffer_size) {
-            Ok(client) => {
-                tracing::info!("Using Ghola sidecar for HTTP transport");
-                return Arc::new(client);
-            }
-            Err(e) => {
-                eprintln!("  ⚠ Ghola sidecar enabled but unavailable: {}", e);
-                eprintln!("    Install: go install github.com/robot-accomplice/ghola@latest");
-                eprintln!("    Falling back to native HTTP transport");
-            }
-        }
-    }
-
-    Arc::new(scope::http::NativeHttpClient::new().expect("Failed to create HTTP client"))
 }
 
 /// Initializes the tracing subscriber for logging.
@@ -468,32 +360,5 @@ mod tests {
     fn test_cli_completions_parsing() {
         let result = Cli::try_parse_from(["scope", "completions", "bash"]);
         assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_create_http_client_default_config() {
-        let config = Config::default();
-        let client = create_http_client(&config);
-        // Default config has ghola.enabled = false, so should get NativeHttpClient
-        let _: &dyn HttpClient = &*client;
-    }
-
-    #[test]
-    fn test_create_http_client_ghola_enabled() {
-        let mut config = Config::default();
-        config.ghola.enabled = true;
-        config.ghola.stealth = true;
-        let client = create_http_client(&config);
-        // Should still succeed (falls back to native if ghola not installed)
-        let _: &dyn HttpClient = &*client;
-    }
-
-    #[test]
-    fn test_create_http_client_ghola_no_stealth() {
-        let mut config = Config::default();
-        config.ghola.enabled = true;
-        config.ghola.stealth = false;
-        let client = create_http_client(&config);
-        let _: &dyn HttpClient = &*client;
     }
 }

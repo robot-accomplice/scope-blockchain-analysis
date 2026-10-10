@@ -86,7 +86,13 @@ pub async fn handle(
             }
         };
 
-    match address::analyze_address(&args, client.as_ref()).await {
+    match address::analyze_address(
+        &args,
+        client.as_ref(),
+        &scope_cli::cli::output::Output::stdio(),
+    )
+    .await
+    {
         Ok(report) => Json(serde_json::json!(report)).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,

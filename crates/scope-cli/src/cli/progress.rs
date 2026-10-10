@@ -7,27 +7,37 @@
 //! ## Usage
 //!
 //! ```rust,ignore
-//! use scope::cli::progress::Spinner;
+//! use scope_cli::cli::{output::Output, progress::Spinner};
 //!
-//! let sp = Spinner::new("Fetching address data...");
+//! let out = Output::stdio();
+//! let sp = Spinner::new("Fetching address data...", &out);
 //! // ... do work ...
 //! sp.finish("Address data loaded.");
 //! ```
 
+use crate::cli::output::Output;
+use crate::errln;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::time::Duration;
 
 /// A simple spinner for single-step or short sequential operations.
 ///
-/// Automatically disables itself when stdout is not a TTY (e.g. piped output).
+/// Automatically disables itself when stderr is not a TTY (e.g. piped output)
+/// or when the output does not allow progress (e.g. inside the TUI). A hidden
+/// spinner writes its messages as plain lines to the output's error channel.
 pub struct Spinner {
     bar: ProgressBar,
+    output: Output,
 }
 
 impl Spinner {
     /// Creates and starts a spinner with the given message.
-    pub fn new(message: &str) -> Self {
-        let bar = if atty_stderr() {
+    ///
+    /// # Errors
+    ///
+    /// Returns the output's error when the status line cannot be written.
+    pub fn new(message: &str, output: &Output) -> std::io::Result<Self> {
+        let bar = if output.progress_enabled() && atty_stderr() {
             let pb = ProgressBar::new_spinner();
             pb.set_style(
                 ProgressStyle::with_template("{spinner:.cyan} {msg}")
@@ -38,11 +48,14 @@ impl Spinner {
             pb.enable_steady_tick(Duration::from_millis(80));
             pb
         } else {
-            // Non-TTY: print a simple status line to stderr instead
-            eprintln!("{}", message);
+            // No animation: write a simple status line instead
+            errln!(output, "{}", message)?;
             ProgressBar::hidden()
         };
-        Self { bar }
+        Ok(Self {
+            bar,
+            output: output.clone(),
+        })
     }
 
     /// Updates the spinner message in-place.
@@ -71,14 +84,20 @@ impl Spinner {
 
     /// Prints a line above the spinner without garbling the animation.
     ///
+    /// # Errors
+    ///
+    /// Returns the output's error when the spinner is hidden and the line
+    /// cannot be written.
+    ///
     /// Uses `indicatif`'s built-in `println` which clears the spinner line,
     /// writes the message, then redraws the spinner below it.
-    pub fn println(&self, message: &str) {
+    pub fn println(&self, message: &str) -> std::io::Result<()> {
         if self.bar.is_hidden() {
-            eprintln!("{}", message);
+            errln!(self.output, "{}", message)?;
         } else {
             self.bar.println(message);
         }
+        Ok(())
     }
 
     /// Temporarily suspends the spinner while running a closure, returning its result.
@@ -101,8 +120,12 @@ pub struct StepProgress {
 
 impl StepProgress {
     /// Creates a progress bar for `total` steps with the given prefix.
-    pub fn new(total: u64, prefix: &str) -> Self {
-        let bar = if atty_stderr() {
+    ///
+    /// # Errors
+    ///
+    /// Returns the output's error when the status line cannot be written.
+    pub fn new(total: u64, prefix: &str, output: &Output) -> std::io::Result<Self> {
+        let bar = if output.progress_enabled() && atty_stderr() {
             let pb = ProgressBar::new(total);
             pb.set_style(
                 ProgressStyle::with_template("{prefix} [{bar:30.cyan/dim}] {pos}/{len} {msg}")
@@ -112,10 +135,10 @@ impl StepProgress {
             pb.set_prefix(prefix.to_string());
             pb
         } else {
-            eprintln!("{} (0/{})", prefix, total);
+            errln!(output, "{} (0/{})", prefix, total)?;
             ProgressBar::hidden()
         };
-        Self { bar }
+        Ok(Self { bar })
     }
 
     /// Increments progress by one and updates the message.
@@ -146,29 +169,45 @@ fn atty_stderr() -> bool {
 mod tests {
     use super::*;
 
+    fn quiet() -> Output {
+        Output::capture().0
+    }
+
+    #[test]
+    fn test_hidden_spinner_writes_status_to_err_channel() {
+        // Inside the TUI the spinner must not draw; its message must still
+        // reach the user through the error channel, never through data.
+        let (o, cap) = Output::capture();
+        let sp = Spinner::new("Fetching...", &o).unwrap();
+        sp.println("note").unwrap();
+        sp.finish("done");
+        assert_eq!(cap.err(), "Fetching...\nnote\n");
+        assert_eq!(cap.out(), "");
+    }
+
     #[test]
     fn test_spinner_create_and_finish() {
         // In test context, stderr is not a TTY, so spinner is hidden
-        let sp = Spinner::new("Testing...");
+        let sp = Spinner::new("Testing...", &quiet()).unwrap();
         sp.set_message("Updated");
         sp.finish("Done");
     }
 
     #[test]
     fn test_spinner_finish_and_clear() {
-        let sp = Spinner::new("Testing...");
+        let sp = Spinner::new("Testing...", &quiet()).unwrap();
         sp.finish_and_clear();
     }
 
     #[test]
     fn test_spinner_finish_warn() {
-        let sp = Spinner::new("Testing...");
+        let sp = Spinner::new("Testing...", &quiet()).unwrap();
         sp.finish_warn("Warning");
     }
 
     #[test]
     fn test_step_progress_create_and_finish() {
-        let prog = StepProgress::new(3, "Processing");
+        let prog = StepProgress::new(3, "Processing", &quiet()).unwrap();
         prog.inc("Step 1");
         prog.inc("Step 2");
         prog.inc("Step 3");
@@ -177,7 +216,7 @@ mod tests {
 
     #[test]
     fn test_spinner_multiple_set_message() {
-        let sp = Spinner::new("Initial");
+        let sp = Spinner::new("Initial", &quiet()).unwrap();
         sp.set_message("First update");
         sp.set_message("Second update");
         sp.set_message("Third update");
@@ -186,7 +225,7 @@ mod tests {
 
     #[test]
     fn test_step_progress_multiple_inc() {
-        let prog = StepProgress::new(5, "Processing");
+        let prog = StepProgress::new(5, "Processing", &quiet()).unwrap();
         prog.inc("Step 1");
         prog.inc("Step 2");
         prog.inc("Step 3");
@@ -197,14 +236,14 @@ mod tests {
 
     #[test]
     fn test_step_progress_single_step() {
-        let prog = StepProgress::new(1, "Single");
+        let prog = StepProgress::new(1, "Single", &quiet()).unwrap();
         prog.inc("Only step");
         prog.finish("Complete");
     }
 
     #[test]
     fn test_step_progress_large_total() {
-        let prog = StepProgress::new(100, "Large");
+        let prog = StepProgress::new(100, "Large", &quiet()).unwrap();
         for i in 1..=100 {
             prog.inc(&format!("Step {}", i));
         }
@@ -213,19 +252,19 @@ mod tests {
 
     #[test]
     fn test_step_progress_zero_total() {
-        let prog = StepProgress::new(0, "Empty");
+        let prog = StepProgress::new(0, "Empty", &quiet()).unwrap();
         prog.finish("Complete");
     }
 
     #[test]
     fn test_spinner_finish_warn_with_message() {
-        let sp = Spinner::new("Warning test");
+        let sp = Spinner::new("Warning test", &quiet()).unwrap();
         sp.finish_warn("Something went wrong");
     }
 
     #[test]
     fn test_spinner_finish_warn_multiple_calls() {
-        let sp = Spinner::new("Test");
+        let sp = Spinner::new("Test", &quiet()).unwrap();
         sp.finish_warn("First warning");
         // finish_warn can be called multiple times (though unusual)
         sp.finish_warn("Second warning");
@@ -233,14 +272,14 @@ mod tests {
 
     #[test]
     fn test_spinner_println() {
-        let sp = Spinner::new("Working...");
-        sp.println("A message above the spinner");
+        let sp = Spinner::new("Working...", &quiet()).unwrap();
+        sp.println("A message above the spinner").unwrap();
         sp.finish("Done");
     }
 
     #[test]
     fn test_spinner_suspend() {
-        let sp = Spinner::new("Working...");
+        let sp = Spinner::new("Working...", &quiet()).unwrap();
         sp.suspend(|| {
             // Code that prints directly
             eprintln!("Suspended output");
