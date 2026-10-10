@@ -6,6 +6,8 @@
 //! Supports one-shot or repeated runs with configurable frequency and duration.
 
 use crate::cli::crawl::{self, Period};
+use crate::cli::output::Output;
+use crate::{errln, out, outln};
 use clap::{Args, Subcommand};
 use scope::chains::ChainClientFactory;
 use scope::config::Config;
@@ -233,11 +235,14 @@ pub async fn run(
     args: MarketCommands,
     config: &Config,
     factory: &dyn ChainClientFactory,
+    out: &Output,
 ) -> Result<()> {
     match args {
-        MarketCommands::Summary(summary_args) => run_summary(summary_args, config, factory).await,
-        MarketCommands::Ohlc(ohlc_args) => run_ohlc(ohlc_args).await,
-        MarketCommands::Trades(trades_args) => run_trades(trades_args).await,
+        MarketCommands::Summary(summary_args) => {
+            run_summary(summary_args, config, factory, out).await
+        }
+        MarketCommands::Ohlc(ohlc_args) => run_ohlc(ohlc_args, out).await,
+        MarketCommands::Trades(trades_args) => run_trades(trades_args, out).await,
     }
 }
 
@@ -439,6 +444,7 @@ fn dex_venue_to_chain(venue: &str) -> &str {
 async fn fetch_book_and_volume(
     args: &SummaryArgs,
     factory: &dyn ChainClientFactory,
+    out: &Output,
 ) -> Result<(OrderBook, Option<f64>)> {
     let (base, quote) = parse_pair_components(&args.pair);
     let base = base.to_string();
@@ -447,7 +453,7 @@ async fn fetch_book_and_volume(
         // DEX path: synthesize from DexScreener analytics
         let chain = dex_venue_to_chain(&args.venue);
         let analytics =
-            crawl::fetch_analytics_for_input(&base, chain, Period::Hour24, 10, factory, None)
+            crawl::fetch_analytics_for_input(&base, chain, Period::Hour24, 10, factory, None, out)
                 .await?;
         if analytics.dex_pairs.is_empty() {
             return Err(ScopeError::Chain(format!(
@@ -496,20 +502,21 @@ async fn run_summary_once(
     factory: &dyn ChainClientFactory,
     thresholds: &HealthThresholds,
     run_num: Option<u64>,
+    out: &Output,
 ) -> Result<MarketSummary> {
     if let Some(n) = run_num {
         let ts = chrono::Utc::now().format("%H:%M:%S");
-        eprintln!("  --- Run #{} at {} ---\n", n, ts);
+        errln!(out, "  --- Run #{} at {} ---\n", n, ts)?;
     }
 
-    let (book, volume_24h) = fetch_book_and_volume(args, factory).await?;
+    let (book, volume_24h) = fetch_book_and_volume(args, factory, out).await?;
     let summary = MarketSummary::from_order_book(&book, thresholds, volume_24h);
 
     let venue_label = args.venue.clone();
 
     match args.format {
         SummaryFormat::Text => {
-            print!("{}", summary.format_text(Some(&venue_label)));
+            out!(out, "{}", summary.format_text(Some(&venue_label)))?;
         }
         SummaryFormat::Json => {
             let json = serde_json::json!({
@@ -540,7 +547,7 @@ async fn run_summary_once(
                     scope::market::HealthCheck::Fail(m) => serde_json::json!({"status": "fail", "message": m}),
                 }).collect::<Vec<_>>(),
             });
-            println!("{}", serde_json::to_string_pretty(&json)?);
+            outln!(out, "{}", serde_json::to_string_pretty(&json)?)?;
         }
     }
 
@@ -551,18 +558,19 @@ async fn run_summary(
     args: SummaryArgs,
     config: &Config,
     factory: &dyn ChainClientFactory,
+    out: &Output,
 ) -> Result<()> {
     let thresholds = args.health.resolve(config);
 
     let repeat_mode = args.every.is_some() || args.duration.is_some();
 
     if !repeat_mode {
-        let summary = run_summary_once(&args, factory, &thresholds, None).await?;
+        let summary = run_summary_once(&args, factory, &thresholds, None, out).await?;
         if let Some(ref report_path) = args.report {
             let venue_label = args.venue.clone();
             let md = market_summary_to_markdown(&summary, &venue_label, &args.pair);
             std::fs::write(report_path, md)?;
-            eprintln!("\nReport saved to: {}", report_path.display());
+            errln!(out, "\nReport saved to: {}", report_path.display())?;
         }
         return Ok(());
     }
@@ -589,10 +597,12 @@ async fn run_summary(
     let start = std::time::Instant::now();
     let duration = Duration::from_secs(duration_secs);
 
-    eprintln!(
+    errln!(
+        out,
         "Running market summary every {}s for {}s (Ctrl+C to stop early)\n",
-        every_secs, duration_secs
-    );
+        every_secs,
+        duration_secs
+    )?;
 
     let mut run_num: u64 = 1;
     #[allow(unused_assignments)]
@@ -606,7 +616,7 @@ async fn run_summary(
     }
 
     loop {
-        let summary = run_summary_once(&args, factory, &thresholds, Some(run_num)).await?;
+        let summary = run_summary_once(&args, factory, &thresholds, Some(run_num), out).await?;
         last_summary = Some(summary.clone());
 
         // Append CSV row
@@ -646,7 +656,12 @@ async fn run_summary(
         }
 
         if start.elapsed() >= duration {
-            eprintln!("\nCompleted {} run(s) over {}s.", run_num, duration_secs);
+            errln!(
+                out,
+                "\nCompleted {} run(s) over {}s.",
+                run_num,
+                duration_secs
+            )?;
             break;
         }
 
@@ -662,10 +677,10 @@ async fn run_summary(
         let venue_label = args.venue.clone();
         let md = market_summary_to_markdown(summary, &venue_label, &args.pair);
         std::fs::write(report_path, md)?;
-        eprintln!("Report saved to: {}", report_path.display());
+        errln!(out, "Report saved to: {}", report_path.display())?;
     }
     if let Some(ref csv_path) = args.csv {
-        eprintln!("Time-series CSV saved to: {}", csv_path.display());
+        errln!(out, "Time-series CSV saved to: {}", csv_path.display())?;
     }
 
     Ok(())
@@ -676,7 +691,7 @@ async fn run_summary(
 // =============================================================================
 
 /// Execute the `scope market ohlc` command.
-async fn run_ohlc(args: OhlcArgs) -> Result<()> {
+async fn run_ohlc(args: OhlcArgs, out: &Output) -> Result<()> {
     let registry = VenueRegistry::load()?;
     let descriptor = registry.get(&args.venue).ok_or_else(|| {
         ScopeError::NotFound(format!(
@@ -712,15 +727,16 @@ async fn run_ohlc(args: OhlcArgs) -> Result<()> {
                 .collect();
             let json_str = serde_json::to_string_pretty(&json_candles)
                 .map_err(|e| ScopeError::Chain(format!("JSON serialization failed: {e}")))?;
-            println!("{json_str}");
+            outln!(out, "{json_str}")?;
         }
         OhlcFormat::Text => {
-            println!(
+            outln!(
+                out,
                 "{}",
                 t::section_header(&format!("OHLC — {} ({})", pair, args.venue))
-            );
-            println!("{}", t::kv_row("Interval", &args.interval));
-            println!("{}", t::kv_row("Limit", &args.limit.to_string()));
+            )?;
+            outln!(out, "{}", t::kv_row("Interval", &args.interval))?;
+            outln!(out, "{}", t::kv_row("Limit", &args.limit.to_string()))?;
 
             let cols = [
                 t::Col {
@@ -754,7 +770,7 @@ async fn run_ohlc(args: OhlcArgs) -> Result<()> {
                     align: '>',
                 },
             ];
-            println!("{}", t::table_header(&cols));
+            outln!(out, "{}", t::table_header(&cols))?;
 
             for c in &candles {
                 let dt = chrono::DateTime::from_timestamp_millis(c.open_time as i64)
@@ -773,14 +789,15 @@ async fn run_ohlc(args: OhlcArgs) -> Result<()> {
                     close_str.as_str(),
                     volume_str.as_str(),
                 ];
-                println!("{}", t::table_row(&cols, &values));
+                outln!(out, "{}", t::table_row(&cols, &values))?;
             }
 
-            println!(
+            outln!(
+                out,
                 "{}",
                 t::info_row(&format!("{} candles returned", candles.len()))
-            );
-            println!("{}", t::section_footer());
+            )?;
+            outln!(out, "{}", t::section_footer())?;
         }
     }
     Ok(())
@@ -791,7 +808,7 @@ async fn run_ohlc(args: OhlcArgs) -> Result<()> {
 // =============================================================================
 
 /// Execute the `scope market trades` command.
-async fn run_trades(args: TradesArgs) -> Result<()> {
+async fn run_trades(args: TradesArgs, out: &Output) -> Result<()> {
     let registry = VenueRegistry::load()?;
     let descriptor = registry.get(&args.venue).ok_or_else(|| {
         ScopeError::NotFound(format!(
@@ -825,13 +842,14 @@ async fn run_trades(args: TradesArgs) -> Result<()> {
                 .collect();
             let json_str = serde_json::to_string_pretty(&json_trades)
                 .map_err(|e| ScopeError::Chain(format!("JSON serialization failed: {e}")))?;
-            println!("{json_str}");
+            outln!(out, "{json_str}")?;
         }
         OhlcFormat::Text => {
-            println!(
+            outln!(
+                out,
                 "{}",
                 t::section_header(&format!("Recent Trades — {} ({})", pair, args.venue))
-            );
+            )?;
 
             let cols = [
                 t::Col {
@@ -855,7 +873,7 @@ async fn run_trades(args: TradesArgs) -> Result<()> {
                     align: '>',
                 },
             ];
-            println!("{}", t::table_header(&cols));
+            outln!(out, "{}", t::table_header(&cols))?;
 
             for t in &trades {
                 let time = chrono::DateTime::from_timestamp_millis(t.timestamp_ms as i64)
@@ -873,14 +891,15 @@ async fn run_trades(args: TradesArgs) -> Result<()> {
                     price_str.as_str(),
                     qty_str.as_str(),
                 ];
-                println!("{}", t::table_row(&cols, &values));
+                outln!(out, "{}", t::table_row(&cols, &values))?;
             }
 
-            println!(
+            outln!(
+                out,
                 "{}",
                 t::info_row(&format!("{} trades returned", trades.len()))
-            );
-            println!("{}", t::section_footer());
+            )?;
+            outln!(out, "{}", t::section_footer())?;
         }
     }
     Ok(())
@@ -890,6 +909,10 @@ async fn run_trades(args: TradesArgs) -> Result<()> {
 mod tests {
     use super::*;
     use scope::chains::DefaultClientFactory;
+
+    fn quiet() -> crate::cli::output::Output {
+        crate::cli::output::Output::capture().0
+    }
 
     /// Helper to create a mock venue YAML pointing at the given mock server URL.
     /// Writes a temporary venue descriptor to the user venues directory so the
@@ -964,7 +987,7 @@ capabilities:
             http,
         };
         // DEX path: will hit real DexScreener API, may fail in offline environments
-        let _result = run_summary(args, &Config::default(), &factory).await;
+        let _result = run_summary(args, &Config::default(), &factory, &quiet()).await;
         // We don't assert success because it depends on network, just confirm no panic
     }
 
@@ -996,7 +1019,7 @@ capabilities:
             chains_config: Default::default(),
             http,
         };
-        let _result = run_summary(args, &Config::default(), &factory).await;
+        let _result = run_summary(args, &Config::default(), &factory, &quiet()).await;
     }
 
     #[test]
@@ -1375,7 +1398,7 @@ capabilities:
             http,
         };
         let config = Config::default();
-        let _result = run(args, &config, &factory).await;
+        let _result = run(args, &config, &factory, &quiet()).await;
         // Don't assert success - depends on network
     }
 
@@ -1446,7 +1469,7 @@ capabilities:
             chains_config: Default::default(),
             http,
         };
-        let _result = run_summary(args, &Config::default(), &factory).await;
+        let _result = run_summary(args, &Config::default(), &factory, &quiet()).await;
     }
 
     // ====================================================================
@@ -1504,7 +1527,7 @@ capabilities:
             limit: 10,
             format: OhlcFormat::Text,
         };
-        let result = run_ohlc(args).await;
+        let result = run_ohlc(args, &quiet()).await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -1522,7 +1545,7 @@ capabilities:
             limit: 10,
             format: OhlcFormat::Text,
         };
-        let result = run_trades(args).await;
+        let result = run_trades(args, &quiet()).await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -1548,7 +1571,7 @@ capabilities:
             http,
         };
         let config = Config::default();
-        let result = run(cmd, &config, &factory).await;
+        let result = run(cmd, &config, &factory, &quiet()).await;
         // Should error with venue not found
         assert!(result.is_err());
     }
@@ -1568,7 +1591,7 @@ capabilities:
             http,
         };
         let config = Config::default();
-        let result = run(cmd, &config, &factory).await;
+        let result = run(cmd, &config, &factory, &quiet()).await;
         assert!(result.is_err());
     }
 
@@ -1583,7 +1606,7 @@ capabilities:
             limit: 3,
             format: OhlcFormat::Text,
         };
-        let _result = run_ohlc(args).await;
+        let _result = run_ohlc(args, &quiet()).await;
         // Don't assert success — depends on network
     }
 
@@ -1596,7 +1619,7 @@ capabilities:
             limit: 2,
             format: OhlcFormat::Json,
         };
-        let _result = run_ohlc(args).await;
+        let _result = run_ohlc(args, &quiet()).await;
     }
 
     #[tokio::test]
@@ -1607,7 +1630,7 @@ capabilities:
             limit: 5,
             format: OhlcFormat::Text,
         };
-        let _result = run_trades(args).await;
+        let _result = run_trades(args, &quiet()).await;
     }
 
     #[tokio::test]
@@ -1618,7 +1641,7 @@ capabilities:
             limit: 3,
             format: OhlcFormat::Json,
         };
-        let _result = run_trades(args).await;
+        let _result = run_trades(args, &quiet()).await;
     }
 
     #[tokio::test]
@@ -1632,7 +1655,7 @@ capabilities:
                 limit: 2,
                 format: OhlcFormat::Json,
             };
-            let _result = run_ohlc(args).await;
+            let _result = run_ohlc(args, &quiet()).await;
         }
     }
 
@@ -1645,7 +1668,7 @@ capabilities:
                 limit: 3,
                 format: OhlcFormat::Text,
             };
-            let _result = run_trades(args).await;
+            let _result = run_trades(args, &quiet()).await;
         }
     }
 
@@ -1822,7 +1845,7 @@ capabilities:
             chains_config: Default::default(),
             http,
         };
-        let result = run_summary(args, &Config::default(), &factory).await;
+        let result = run_summary(args, &Config::default(), &factory, &quiet()).await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -2012,9 +2035,10 @@ capabilities:
     async fn test_dex_book_uses_most_liquid_pair() {
         // The synthetic book must come from the deepest pool, not the first one.
         let factory = dex_factory(&[(1_000.0, 10.0), (50_000.0, 777.0), (2_000.0, 20.0)]);
-        let (book, volume) = fetch_book_and_volume(&dex_args(SummaryFormat::Text), &factory)
-            .await
-            .unwrap();
+        let (book, volume) =
+            fetch_book_and_volume(&dex_args(SummaryFormat::Text), &factory, &quiet())
+                .await
+                .unwrap();
         assert_eq!(volume, Some(777.0));
         let depth: f64 = book.bids.iter().chain(&book.asks).map(|l| l.value()).sum();
         assert!((depth - 50_000.0).abs() < 1.0, "depth {depth}");
@@ -2023,7 +2047,7 @@ capabilities:
     #[tokio::test]
     async fn test_dex_no_pairs_is_error() {
         let factory = dex_factory(&[]);
-        let err = fetch_book_and_volume(&dex_args(SummaryFormat::Text), &factory)
+        let err = fetch_book_and_volume(&dex_args(SummaryFormat::Text), &factory, &quiet())
             .await
             .unwrap_err();
         assert!(err.to_string().contains("No DEX pairs found"), "{err}");
@@ -2040,13 +2064,13 @@ capabilities:
             ..Default::default()
         };
         let thresholds = args.health.resolve(&Config::default());
-        let summary = run_summary_once(&args, &factory, &thresholds, Some(1))
+        let summary = run_summary_once(&args, &factory, &thresholds, Some(1), &quiet())
             .await
             .unwrap();
         assert!(summary.healthy, "{:?}", summary.checks);
 
         let strict = HealthThresholds::default();
-        let summary = run_summary_once(&args, &factory, &strict, None)
+        let summary = run_summary_once(&args, &factory, &strict, None, &quiet())
             .await
             .unwrap();
         assert!(!summary.healthy);
@@ -2059,7 +2083,7 @@ capabilities:
         let factory = dex_factory(&[(50_000.0, 1_000.0)]);
         let mut args = dex_args(SummaryFormat::Text);
         args.report = Some(report.clone());
-        run_summary(args, &Config::default(), &factory)
+        run_summary(args, &Config::default(), &factory, &quiet())
             .await
             .unwrap();
         let md = std::fs::read_to_string(&report).unwrap();
@@ -2078,7 +2102,7 @@ capabilities:
         args.duration = Some("1s".to_string());
         args.csv = Some(csv.clone());
         args.report = Some(report.clone());
-        run_summary(args, &Config::default(), &factory)
+        run_summary(args, &Config::default(), &factory, &quiet())
             .await
             .unwrap();
 

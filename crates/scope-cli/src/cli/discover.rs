@@ -2,6 +2,8 @@
 //!
 //! Browse trending and boosted tokens from DexScreener.
 
+use crate::cli::output::Output;
+use crate::outln;
 use clap::{Args, ValueEnum};
 use scope::chains::{DexClient, DiscoverToken};
 use scope::config::OutputFormat;
@@ -55,8 +57,8 @@ struct DiscoverRow {
 }
 
 /// Run the discover command.
-pub async fn run(args: DiscoverArgs, format: OutputFormat) -> Result<()> {
-    run_with_client(args, format, &DexClient::new()).await
+pub async fn run(args: DiscoverArgs, format: OutputFormat, out: &Output) -> Result<()> {
+    run_with_client(args, format, &DexClient::new(), out).await
 }
 
 /// Run the discover command with a provided DEX client (for testing).
@@ -64,15 +66,19 @@ pub async fn run_with_client(
     args: DiscoverArgs,
     format: OutputFormat,
     client: &DexClient,
+    out: &Output,
 ) -> Result<()> {
-    let sp = crate::cli::progress::Spinner::new(&format!(
-        "Discovering {} tokens...",
-        match args.source {
-            DiscoverSource::Profiles => "featured",
-            DiscoverSource::Boosts => "boosted",
-            DiscoverSource::TopBoosts => "top boosted",
-        }
-    ));
+    let sp = crate::cli::progress::Spinner::new(
+        &format!(
+            "Discovering {} tokens...",
+            match args.source {
+                DiscoverSource::Profiles => "featured",
+                DiscoverSource::Boosts => "boosted",
+                DiscoverSource::TopBoosts => "top boosted",
+            }
+        ),
+        out,
+    )?;
 
     let tokens = match args.source {
         DiscoverSource::Profiles => client.get_token_profiles().await?,
@@ -94,7 +100,7 @@ pub async fn run_with_client(
     };
 
     if filtered.is_empty() {
-        println!("No tokens found.");
+        outln!(out, "No tokens found.")?;
         return Ok(());
     }
 
@@ -111,7 +117,7 @@ pub async fn run_with_client(
                     url: t.url.clone(),
                 })
                 .collect();
-            println!("{}", serde_json::to_string_pretty(&rows)?);
+            outln!(out, "{}", serde_json::to_string_pretty(&rows)?)?;
         }
         OutputFormat::Table | OutputFormat::Markdown => {
             use scope::display::terminal as t;
@@ -125,8 +131,8 @@ pub async fn run_with_client(
                 },
                 filtered.len()
             );
-            println!("{}", t::section_header(&title));
-            println!("{}", t::kv_row("Results", &filtered.len().to_string()));
+            outln!(out, "{}", t::section_header(&title))?;
+            outln!(out, "{}", t::kv_row("Results", &filtered.len().to_string()))?;
 
             for (i, t) in filtered.iter().enumerate() {
                 let desc = t.description.as_deref().unwrap_or("-");
@@ -136,21 +142,28 @@ pub async fn run_with_client(
                     truncate_address(&t.token_address),
                     desc
                 );
-                println!("{}", t::numbered_row(i + 1, &row_text));
-                println!("{}", t::detail_row(&t.url));
+                outln!(out, "{}", t::numbered_row(i + 1, &row_text))?;
+                outln!(out, "{}", t::detail_row(&t.url))?;
             }
 
-            println!("{}", t::section_footer());
+            outln!(out, "{}", t::section_footer())?;
         }
         OutputFormat::Csv => {
-            println!("chain,address,description,url");
+            outln!(out, "chain,address,description,url")?;
             for t in &filtered {
                 let desc = t
                     .description
                     .as_ref()
                     .map(|d| d.replace(',', ";").replace('\n', " "))
                     .unwrap_or_else(|| "-".to_string());
-                println!("{},{},\"{}\",{}", t.chain_id, t.token_address, desc, t.url);
+                outln!(
+                    out,
+                    "{},{},\"{}\",{}",
+                    t.chain_id,
+                    t.token_address,
+                    desc,
+                    t.url
+                )?;
             }
         }
     }
@@ -171,6 +184,10 @@ mod tests {
     use super::*;
     use scope::chains::DexClient;
     use scope::config::OutputFormat;
+
+    fn quiet() -> crate::cli::output::Output {
+        crate::cli::output::Output::capture().0
+    }
 
     fn discover_json_body() -> String {
         r#"[
@@ -208,7 +225,7 @@ mod tests {
             limit: 15,
             format: None,
         };
-        let result = run_with_client(args, OutputFormat::Table, &client).await;
+        let result = run_with_client(args, OutputFormat::Table, &client, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -230,7 +247,7 @@ mod tests {
             limit: 5,
             format: None,
         };
-        let result = run_with_client(args, OutputFormat::Table, &client).await;
+        let result = run_with_client(args, OutputFormat::Table, &client, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -252,7 +269,7 @@ mod tests {
             limit: 10,
             format: Some(OutputFormat::Json),
         };
-        let result = run_with_client(args, OutputFormat::Json, &client).await;
+        let result = run_with_client(args, OutputFormat::Json, &client, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -274,7 +291,7 @@ mod tests {
             limit: 15,
             format: None,
         };
-        let result = run_with_client(args, OutputFormat::Table, &client).await;
+        let result = run_with_client(args, OutputFormat::Table, &client, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -296,7 +313,7 @@ mod tests {
             limit: 15,
             format: Some(OutputFormat::Csv),
         };
-        let result = run_with_client(args, OutputFormat::Csv, &client).await;
+        let result = run_with_client(args, OutputFormat::Csv, &client, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -316,7 +333,7 @@ mod tests {
             limit: 15,
             format: None,
         };
-        let result = run_with_client(args, OutputFormat::Table, &client).await;
+        let result = run_with_client(args, OutputFormat::Table, &client, &quiet()).await;
         assert!(result.is_err());
     }
 

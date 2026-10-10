@@ -1,5 +1,7 @@
 //! CLI commands for compliance and risk analysis
 
+use crate::cli::output::Output;
+use crate::{errln, outln};
 use clap::{Args, Subcommand};
 use scope::compliance::datasource::{BlockchainDataClient, DataSources, analyze_patterns};
 use scope::compliance::risk::RiskEngine;
@@ -147,14 +149,15 @@ pub enum ReportType {
 }
 
 /// Handle risk assessment command
-pub async fn handle_risk(args: RiskArgs) -> anyhow::Result<()> {
-    handle_risk_with_client(args, None).await
+pub async fn handle_risk(args: RiskArgs, out: &Output) -> anyhow::Result<()> {
+    handle_risk_with_client(args, None, out).await
 }
 
 /// Handle risk assessment with an optional pre-built client (for testability).
 pub async fn handle_risk_with_client(
     args: RiskArgs,
     client: Option<BlockchainDataClient>,
+    out: &Output,
 ) -> anyhow::Result<()> {
     // Auto-detect chain if not specified
     let chain = match args.chain {
@@ -162,10 +165,10 @@ pub async fn handle_risk_with_client(
         None => detect_chain(&args.address)?,
     };
 
-    let sp = crate::cli::progress::Spinner::new(&format!(
-        "Assessing risk for {} on {}...",
-        args.address, chain
-    ));
+    let sp = crate::cli::progress::Spinner::new(
+        &format!("Assessing risk for {} on {}...", args.address, chain),
+        out,
+    )?;
 
     let engine = if let Some(c) = client {
         sp.set_message("Using Etherscan API for enhanced analysis...");
@@ -180,7 +183,7 @@ pub async fn handle_risk_with_client(
             sp.set_message("Using Etherscan API for enhanced analysis...");
             RiskEngine::with_data_client(client)
         } else {
-            eprintln!("Note: Set ETHERSCAN_API_KEY for enhanced analysis");
+            errln!(out, "Note: Set ETHERSCAN_API_KEY for enhanced analysis")?;
             RiskEngine::new()
         }
     };
@@ -190,7 +193,7 @@ pub async fn handle_risk_with_client(
 
     // Format and display output
     let output = format_risk_report(&assessment, args.format, args.detailed);
-    println!("{}", output);
+    outln!(out, "{}", output)?;
 
     // Export to file if requested (respects format: json, yaml, markdown from path extension)
     if let Some(path) = args.output {
@@ -207,27 +210,28 @@ pub async fn handle_risk_with_client(
             _ => format_risk_report(&assessment, OutputFormat::Json, args.detailed),
         };
         std::fs::write(&path, content)?;
-        println!("\nReport exported to: {}", path);
+        outln!(out, "\nReport exported to: {}", path)?;
     }
 
     Ok(())
 }
 
 /// Handle transaction tracing command
-pub async fn handle_trace(args: TraceArgs) -> anyhow::Result<()> {
-    handle_trace_with_client(args, None).await
+pub async fn handle_trace(args: TraceArgs, out: &Output) -> anyhow::Result<()> {
+    handle_trace_with_client(args, None, out).await
 }
 
 /// Handle transaction tracing with an optional pre-built client (for testability).
 pub async fn handle_trace_with_client(
     args: TraceArgs,
     client: Option<BlockchainDataClient>,
+    out: &Output,
 ) -> anyhow::Result<()> {
-    println!("Tracing transaction {}...", args.tx_hash);
-    println!("Depth: {} hops", args.depth);
+    outln!(out, "Tracing transaction {}...", args.tx_hash)?;
+    outln!(out, "Depth: {} hops", args.depth)?;
 
     if args.flag_suspicious {
-        println!("Flagging suspicious addresses enabled");
+        outln!(out, "Flagging suspicious addresses enabled")?;
     }
 
     let resolved_client = if let Some(c) = client {
@@ -242,42 +246,46 @@ pub async fn handle_trace_with_client(
     if let Some(client) = resolved_client {
         match client.trace_transaction(&args.tx_hash, args.depth).await {
             Ok(trace) => {
-                println!("\nTransaction Trace");
-                println!("=================");
-                println!("Root: {}", trace.root_hash);
-                println!("Hops: {}", trace.hops.len());
+                outln!(out, "\nTransaction Trace")?;
+                outln!(out, "=================")?;
+                outln!(out, "Root: {}", trace.root_hash)?;
+                outln!(out, "Hops: {}", trace.hops.len())?;
 
                 for hop in &trace.hops {
-                    println!(
+                    outln!(
+                        out,
                         "  Depth {}: {} ({} ETH)",
-                        hop.depth, hop.address, hop.amount
-                    );
+                        hop.depth,
+                        hop.address,
+                        hop.amount
+                    )?;
                 }
             }
             Err(e) => {
-                eprintln!("Error tracing transaction: {}", e);
+                errln!(out, "Error tracing transaction: {}", e)?;
             }
         }
     } else {
-        println!("Set ETHERSCAN_API_KEY to enable transaction tracing");
+        outln!(out, "Set ETHERSCAN_API_KEY to enable transaction tracing")?;
     }
 
     Ok(())
 }
 
 /// Handle pattern analysis command
-pub async fn handle_analyze(args: AnalyzeArgs) -> anyhow::Result<()> {
-    handle_analyze_with_client(args, None).await
+pub async fn handle_analyze(args: AnalyzeArgs, out: &Output) -> anyhow::Result<()> {
+    handle_analyze_with_client(args, None, out).await
 }
 
 /// Handle pattern analysis with an optional pre-built client (for testability).
 pub async fn handle_analyze_with_client(
     args: AnalyzeArgs,
     client: Option<BlockchainDataClient>,
+    out: &Output,
 ) -> anyhow::Result<()> {
-    println!("Analyzing patterns for {}...", args.address);
-    println!("Patterns: {:?}", args.patterns);
-    println!("Time range: {}", args.range);
+    outln!(out, "Analyzing patterns for {}...", args.address)?;
+    outln!(out, "Patterns: {:?}", args.patterns)?;
+    outln!(out, "Time range: {}", args.range)?;
 
     let resolved_client = if let Some(c) = client {
         Some(c)
@@ -299,39 +307,51 @@ pub async fn handle_analyze_with_client(
             Ok(txs) => {
                 let analysis = analyze_patterns(&txs);
 
-                println!("\nPattern Analysis Results");
-                println!("========================");
-                println!("Total transactions: {}", analysis.total_transactions);
-                println!("Velocity: {:.2} tx/day", analysis.velocity_score);
-                println!("Structuring detected: {}", analysis.structuring_detected);
-                println!("Round number pattern: {}", analysis.round_number_pattern);
-                println!("Unusual hour transactions: {}", analysis.unusual_hours);
+                outln!(out, "\nPattern Analysis Results")?;
+                outln!(out, "========================")?;
+                outln!(out, "Total transactions: {}", analysis.total_transactions)?;
+                outln!(out, "Velocity: {:.2} tx/day", analysis.velocity_score)?;
+                outln!(
+                    out,
+                    "Structuring detected: {}",
+                    analysis.structuring_detected
+                )?;
+                outln!(
+                    out,
+                    "Round number pattern: {}",
+                    analysis.round_number_pattern
+                )?;
+                outln!(out, "Unusual hour transactions: {}", analysis.unusual_hours)?;
             }
             Err(e) => {
-                eprintln!("  ⚠ Could not fetch transactions (use -v for details)");
+                errln!(out, "  ⚠ Could not fetch transactions (use -v for details)")?;
                 tracing::debug!("Error fetching transactions: {}", e);
             }
         }
     } else {
-        println!("Set ETHERSCAN_API_KEY to enable pattern analysis");
+        outln!(out, "Set ETHERSCAN_API_KEY to enable pattern analysis")?;
     }
 
     Ok(())
 }
 
 /// Handle compliance report generation
-pub async fn handle_compliance_report(args: ComplianceReportArgs) -> anyhow::Result<()> {
+pub async fn handle_compliance_report(
+    args: ComplianceReportArgs,
+    out: &Output,
+) -> anyhow::Result<()> {
     let addresses = resolve_compliance_targets(&args.target)?;
     if addresses.is_empty() {
         anyhow::bail!("No addresses to analyze");
     }
 
-    println!(
+    outln!(
+        out,
         "Generating {:?} compliance report for {} address(es) ({:?} jurisdiction)...",
         args.report_type,
         addresses.len(),
         args.jurisdiction
-    );
+    )?;
 
     let client = std::env::var("ETHERSCAN_API_KEY").ok().map(|key| {
         let sources = DataSources::new(key);
@@ -340,11 +360,11 @@ pub async fn handle_compliance_report(args: ComplianceReportArgs) -> anyhow::Res
 
     let engine = match &client {
         Some(c) => {
-            println!("Using Etherscan API for enhanced analysis");
+            outln!(out, "Using Etherscan API for enhanced analysis")?;
             RiskEngine::with_data_client(c.clone())
         }
         None => {
-            println!("Note: Set ETHERSCAN_API_KEY for enhanced analysis");
+            outln!(out, "Note: Set ETHERSCAN_API_KEY for enhanced analysis")?;
             RiskEngine::new()
         }
     };
@@ -379,7 +399,7 @@ pub async fn handle_compliance_report(args: ComplianceReportArgs) -> anyhow::Res
     );
 
     std::fs::write(&args.output, &content)?;
-    println!("\nCompliance report saved to: {}", args.output);
+    outln!(out, "\nCompliance report saved to: {}", args.output)?;
 
     Ok(())
 }
@@ -521,6 +541,10 @@ fn detect_chain(address: &str) -> anyhow::Result<String> {
 mod tests {
     use super::*;
 
+    fn quiet() -> crate::cli::output::Output {
+        crate::cli::output::Output::capture().0
+    }
+
     #[test]
     fn test_detect_chain_ethereum() {
         let result = detect_chain("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2");
@@ -631,7 +655,7 @@ mod tests {
             detailed: false,
             output: None,
         };
-        let result = handle_risk(args).await;
+        let result = handle_risk(args, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -645,7 +669,7 @@ mod tests {
             detailed: true,
             output: None,
         };
-        let result = handle_risk(args).await;
+        let result = handle_risk(args, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -661,7 +685,7 @@ mod tests {
             detailed: false,
             output: Some(path.clone()),
         };
-        let result = handle_risk(args).await;
+        let result = handle_risk(args, &quiet()).await;
         assert!(result.is_ok());
         assert!(std::path::Path::new(&path).exists());
     }
@@ -679,7 +703,7 @@ mod tests {
             detailed: false,
             output: Some(path_str.clone()),
         };
-        let result = handle_risk(args).await;
+        let result = handle_risk(args, &quiet()).await;
         assert!(result.is_ok());
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("Risk") || content.contains("risk"));
@@ -698,7 +722,7 @@ mod tests {
             detailed: false,
             output: Some(path_str.clone()),
         };
-        let result = handle_risk(args).await;
+        let result = handle_risk(args, &quiet()).await;
         assert!(result.is_ok());
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("address") || content.contains("chain"));
@@ -714,7 +738,7 @@ mod tests {
             detailed: false,
             output: None,
         };
-        let result = handle_risk(args).await;
+        let result = handle_risk(args, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -727,7 +751,7 @@ mod tests {
             flag_suspicious: true,
             format: OutputFormat::Table,
         };
-        let result = handle_trace(args).await;
+        let result = handle_trace(args, &quiet()).await;
         assert!(result.is_ok()); // No API key → prints message, doesn't error
     }
 
@@ -740,7 +764,7 @@ mod tests {
             range: "30d".to_string(),
             format: OutputFormat::Table,
         };
-        let result = handle_analyze(args).await;
+        let result = handle_analyze(args, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -752,7 +776,7 @@ mod tests {
             report_type: ReportType::Summary,
             output: "/tmp/test_compliance.json".to_string(),
         };
-        let result = handle_compliance_report(args).await;
+        let result = handle_compliance_report(args, &quiet()).await;
         assert!(result.is_ok()); // Not yet implemented → prints message
     }
 
@@ -764,7 +788,7 @@ mod tests {
             report_type: ReportType::Detailed,
             output: "/tmp/test_compliance_eu.json".to_string(),
         };
-        let result = handle_compliance_report(args).await;
+        let result = handle_compliance_report(args, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -776,7 +800,7 @@ mod tests {
             report_type: ReportType::SAR,
             output: "/tmp/test_compliance_uk.json".to_string(),
         };
-        let result = handle_compliance_report(args).await;
+        let result = handle_compliance_report(args, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -788,7 +812,7 @@ mod tests {
             report_type: ReportType::TravelRule,
             output: "/tmp/test_compliance_sg.json".to_string(),
         };
-        let result = handle_compliance_report(args).await;
+        let result = handle_compliance_report(args, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -800,7 +824,7 @@ mod tests {
             report_type: ReportType::Summary,
             output: "/tmp/test_compliance_ch.json".to_string(),
         };
-        let result = handle_compliance_report(args).await;
+        let result = handle_compliance_report(args, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -814,7 +838,7 @@ mod tests {
             detailed: false,
             output: None,
         };
-        let result = handle_risk(args).await;
+        let result = handle_risk(args, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -854,7 +878,7 @@ mod tests {
             detailed: true,
             output: None,
         };
-        let result = handle_risk_with_client(args, Some(client)).await;
+        let result = handle_risk_with_client(args, Some(client), &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -879,7 +903,7 @@ mod tests {
             detailed: false,
             output: Some(path.clone()),
         };
-        let result = handle_risk_with_client(args, Some(client)).await;
+        let result = handle_risk_with_client(args, Some(client), &quiet()).await;
         assert!(result.is_ok());
         assert!(std::path::Path::new(&path).exists());
     }
@@ -912,7 +936,7 @@ mod tests {
             flag_suspicious: true,
             format: OutputFormat::Table,
         };
-        let result = handle_trace_with_client(args, Some(client)).await;
+        let result = handle_trace_with_client(args, Some(client), &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -926,7 +950,7 @@ mod tests {
             flag_suspicious: false,
             format: OutputFormat::Table,
         };
-        let result = handle_trace_with_client(args, Some(client)).await;
+        let result = handle_trace_with_client(args, Some(client), &quiet()).await;
         assert!(result.is_ok()); // Handler catches error, prints to stderr
     }
 
@@ -948,7 +972,7 @@ mod tests {
             format: OutputFormat::Table,
         };
         // Error path: should print error but return Ok
-        let result = handle_trace_with_client(args, Some(client)).await;
+        let result = handle_trace_with_client(args, Some(client), &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -980,7 +1004,7 @@ mod tests {
             range: "30d".to_string(),
             format: OutputFormat::Table,
         };
-        let result = handle_analyze_with_client(args, Some(client)).await;
+        let result = handle_analyze_with_client(args, Some(client), &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1002,7 +1026,7 @@ mod tests {
             format: OutputFormat::Table,
         };
         // Error path in analyze
-        let result = handle_analyze_with_client(args, Some(client)).await;
+        let result = handle_analyze_with_client(args, Some(client), &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1024,7 +1048,7 @@ mod tests {
             range: "1y".to_string(),
             format: OutputFormat::Json,
         };
-        let result = handle_analyze_with_client(args, Some(client)).await;
+        let result = handle_analyze_with_client(args, Some(client), &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1038,7 +1062,7 @@ mod tests {
             detailed: true,
             output: None,
         };
-        let result = handle_risk(args).await;
+        let result = handle_risk(args, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1051,7 +1075,7 @@ mod tests {
             flag_suspicious: false,
             format: OutputFormat::Json,
         };
-        let result = handle_trace(args).await;
+        let result = handle_trace(args, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1070,7 +1094,7 @@ mod tests {
             range: "6m".to_string(),
             format: OutputFormat::Json,
         };
-        let result = handle_analyze(args).await;
+        let result = handle_analyze(args, &quiet()).await;
         assert!(result.is_ok());
     }
 

@@ -4,6 +4,8 @@
 
 use crate::cli::address::{self, AddressArgs, AddressReport};
 use crate::cli::address_report;
+use crate::cli::output::Output;
+use crate::{errln, outln};
 use clap::{Args, Subcommand};
 use scope::chains::{ChainClientFactory, infer_chain_from_address};
 use scope::config::Config;
@@ -51,9 +53,10 @@ pub async fn run(
     args: ReportCommands,
     config: &Config,
     clients: &dyn ChainClientFactory,
+    out: &Output,
 ) -> Result<()> {
     match args {
-        ReportCommands::Batch(batch_args) => run_batch(batch_args, config, clients).await,
+        ReportCommands::Batch(batch_args) => run_batch(batch_args, config, clients, out).await,
     }
 }
 
@@ -61,6 +64,7 @@ async fn run_batch(
     args: BatchArgs,
     config: &Config,
     clients: &dyn ChainClientFactory,
+    out: &Output,
 ) -> Result<()> {
     let targets = resolve_targets(&args)?;
     if targets.is_empty() {
@@ -75,7 +79,8 @@ async fn run_batch(
             "Batch report{}",
             if args.with_risk { " (with risk)" } else { "" }
         ),
-    );
+        out,
+    )?;
     let mut reports = Vec::new();
     let mut risk_assessments: Vec<Option<scope::compliance::risk::RiskAssessment>> = Vec::new();
 
@@ -104,7 +109,7 @@ async fn run_batch(
         };
 
         let client = clients.create_chain_client(chain)?;
-        match address::analyze_address(&addr_args, client.as_ref()).await {
+        match address::analyze_address(&addr_args, client.as_ref(), out).await {
             Ok(report) => {
                 let risk = if args.with_risk {
                     engine.assess_address(address, chain).await.ok()
@@ -115,7 +120,7 @@ async fn run_batch(
                 risk_assessments.push(risk);
             }
             Err(e) => {
-                eprintln!("Warning: Failed to analyze {}: {}", address, e);
+                errln!(out, "Warning: Failed to analyze {}: {}", address, e)?;
             }
         }
     }
@@ -123,7 +128,7 @@ async fn run_batch(
     prog.finish("All addresses analyzed.");
     let md = batch_report_to_markdown(&reports, &risk_assessments, args.with_risk);
     std::fs::write(&args.output, &md)?;
-    println!("Batch report saved to: {}", args.output.display());
+    outln!(out, "Batch report saved to: {}", args.output.display())?;
     Ok(())
 }
 
@@ -223,6 +228,10 @@ mod tests {
     use super::*;
     use crate::cli::address::{AddressReport, Balance, TokenBalance, TransactionSummary};
     use tempfile::NamedTempFile;
+
+    fn quiet() -> crate::cli::output::Output {
+        crate::cli::output::Output::capture().0
+    }
 
     #[test]
     fn test_resolve_targets_addresses_only() {
@@ -507,7 +516,7 @@ mod tests {
         let config = Config::default();
         let factory = MockClientFactory::new();
 
-        let result = run_batch(args, &config, &factory).await;
+        let result = run_batch(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
 
         // Verify the report was written
@@ -535,7 +544,7 @@ mod tests {
         let config = Config::default();
         let factory = MockClientFactory::new();
 
-        let result = run_batch(args, &config, &factory).await;
+        let result = run_batch(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
         let content = std::fs::read_to_string(&output_path).unwrap();
         assert!(content.contains("Risk Assessment"));
@@ -559,7 +568,7 @@ mod tests {
         let config = Config::default();
         let factory = MockClientFactory::new();
 
-        let result = run_batch(args, &config, &factory).await;
+        let result = run_batch(args, &config, &factory, &quiet()).await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("No addresses"));
@@ -583,7 +592,7 @@ mod tests {
         let config = Config::default();
         let factory = MockClientFactory::new();
 
-        let result = run(args, &config, &factory).await;
+        let result = run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 }

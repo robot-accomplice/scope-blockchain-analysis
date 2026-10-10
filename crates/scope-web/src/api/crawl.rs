@@ -69,6 +69,7 @@ pub async fn handle(
         req.holders_limit,
         &state.factory,
         None,
+        &scope_cli::cli::output::Output::stdio(),
     )
     .await
     {

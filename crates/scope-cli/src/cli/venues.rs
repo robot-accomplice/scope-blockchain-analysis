@@ -3,6 +3,8 @@
 //! Provides venue discovery, schema documentation, initialisation of user
 //! venue directories, and YAML validation.
 
+use crate::cli::output::Output;
+use crate::outln;
 use clap::{Args, Subcommand};
 use scope::display::terminal::{
     check_fail, check_pass, kv_row, section_footer, section_header, separator,
@@ -143,12 +145,12 @@ pub struct ValidateArgs {
 }
 
 /// Run the venues command.
-pub fn run(cmd: VenuesCommands) -> Result<()> {
+pub fn run(cmd: VenuesCommands, out: &Output) -> Result<()> {
     match cmd {
-        VenuesCommands::List(args) => run_list(args),
-        VenuesCommands::Schema(args) => run_schema(args),
-        VenuesCommands::Init(args) => run_init(args),
-        VenuesCommands::Validate(args) => run_validate(args),
+        VenuesCommands::List(args) => run_list(args, out),
+        VenuesCommands::Schema(args) => run_schema(args, out),
+        VenuesCommands::Init(args) => run_init(args, out),
+        VenuesCommands::Validate(args) => run_validate(args, out),
     }
 }
 
@@ -156,24 +158,25 @@ pub fn run(cmd: VenuesCommands) -> Result<()> {
 // List
 // =============================================================================
 
-fn run_list(args: ListArgs) -> Result<()> {
+fn run_list(args: ListArgs, out: &Output) -> Result<()> {
     let registry = VenueRegistry::load()?;
 
     match args.format {
         ListFormat::Table => {
-            println!("{}", section_header("Available Venues"));
+            outln!(out, "{}", section_header("Available Venues"))?;
             for id in registry.list() {
                 if let Some(desc) = registry.get(id) {
                     let caps = desc.capability_names().join(", ");
-                    println!("{}", kv_row(id, &caps));
+                    outln!(out, "{}", kv_row(id, &caps))?;
                 }
             }
-            println!("{}", separator());
+            outln!(out, "{}", separator())?;
             let user_dir = VenueRegistry::user_venues_dir();
             let user_count = count_user_venues(&user_dir);
             let total = registry.len();
             let built_in = total - user_count;
-            println!(
+            outln!(
+                out,
                 "{}",
                 kv_row(
                     "Loaded",
@@ -182,9 +185,13 @@ fn run_list(args: ListArgs) -> Result<()> {
                         total, built_in, user_count
                     )
                 )
-            );
-            println!("{}", kv_row("User dir", &user_dir.display().to_string()));
-            println!("{}", section_footer());
+            )?;
+            outln!(
+                out,
+                "{}",
+                kv_row("User dir", &user_dir.display().to_string())
+            )?;
+            outln!(out, "{}", section_footer())?;
         }
         ListFormat::Json => {
             let venues: Vec<serde_json::Value> = registry
@@ -206,7 +213,7 @@ fn run_list(args: ListArgs) -> Result<()> {
                 "total": registry.len(),
                 "user_venues_dir": VenueRegistry::user_venues_dir().display().to_string(),
             });
-            println!("{}", serde_json::to_string_pretty(&output).unwrap());
+            outln!(out, "{}", serde_json::to_string_pretty(&output).unwrap())?;
         }
     }
 
@@ -237,17 +244,18 @@ fn count_user_venues(dir: &std::path::Path) -> usize {
 // Schema
 // =============================================================================
 
-fn run_schema(args: SchemaArgs) -> Result<()> {
+fn run_schema(args: SchemaArgs, out: &Output) -> Result<()> {
     match args.format {
-        SchemaFormat::Text => print_annotated_schema(),
-        SchemaFormat::Json => print_json_schema(),
+        SchemaFormat::Text => print_annotated_schema(out)?,
+        SchemaFormat::Json => print_json_schema(out)?,
     }
     Ok(())
 }
 
-fn print_annotated_schema() {
-    println!("{}", section_header("Venue Descriptor Schema"));
-    println!(
+fn print_annotated_schema(out: &Output) -> std::io::Result<()> {
+    outln!(out, "{}", section_header("Venue Descriptor Schema"))?;
+    outln!(
+        out,
         r#"
 A venue descriptor is a YAML file that tells Scope how to talk to
 an exchange API. Place custom descriptors in:
@@ -312,11 +320,12 @@ Each file defines one venue with the following structure:
 Validate your file with:  scope venues validate <file>
 "#,
         VenueRegistry::user_venues_dir().display()
-    );
-    println!("{}", section_footer());
+    )?;
+    outln!(out, "{}", section_footer())?;
+    Ok(())
 }
 
-fn print_json_schema() {
+fn print_json_schema(out: &Output) -> std::io::Result<()> {
     use serde_json::{Map, Value};
 
     fn str_prop(desc: &str) -> Value {
@@ -421,19 +430,20 @@ fn print_json_schema() {
         }
     });
 
-    println!("{}", serde_json::to_string_pretty(&schema).unwrap());
+    outln!(out, "{}", serde_json::to_string_pretty(&schema).unwrap())?;
+    Ok(())
 }
 
 // =============================================================================
 // Init
 // =============================================================================
 
-fn run_init(args: InitArgs) -> Result<()> {
-    run_init_impl(args, VenueRegistry::user_venues_dir())
+fn run_init(args: InitArgs, out: &Output) -> Result<()> {
+    run_init_impl(args, VenueRegistry::user_venues_dir(), out)
 }
 
 /// Core init logic with explicit destination path (used by tests).
-fn run_init_impl(args: InitArgs, dest: std::path::PathBuf) -> Result<()> {
+fn run_init_impl(args: InitArgs, dest: std::path::PathBuf, out: &Output) -> Result<()> {
     // Ensure directory exists
     if !dest.exists() {
         std::fs::create_dir_all(&dest).map_err(|e| {
@@ -443,7 +453,7 @@ fn run_init_impl(args: InitArgs, dest: std::path::PathBuf) -> Result<()> {
                 e
             ))
         })?;
-        println!("Created {}", dest.display());
+        outln!(out, "Created {}", dest.display())?;
     }
 
     // Get built-in venues to copy
@@ -457,7 +467,11 @@ fn run_init_impl(args: InitArgs, dest: std::path::PathBuf) -> Result<()> {
 
         if target.exists() && !args.force {
             skipped += 1;
-            println!("  skip {} (exists, use --force to overwrite)", filename);
+            outln!(
+                out,
+                "  skip {} (exists, use --force to overwrite)",
+                filename
+            )?;
             continue;
         }
 
@@ -477,21 +491,22 @@ fn run_init_impl(args: InitArgs, dest: std::path::PathBuf) -> Result<()> {
                 ))
             })?;
             copied += 1;
-            println!("  {}", check_pass(&filename));
+            outln!(out, "  {}", check_pass(&filename))?;
         }
     }
 
-    println!();
-    println!("{}", section_header("Venues Init"));
-    println!("{}", kv_row("Directory", &dest.display().to_string()));
-    println!("{}", kv_row("Copied", &format!("{} files", copied)));
+    outln!(out)?;
+    outln!(out, "{}", section_header("Venues Init"))?;
+    outln!(out, "{}", kv_row("Directory", &dest.display().to_string()))?;
+    outln!(out, "{}", kv_row("Copied", &format!("{} files", copied)))?;
     if skipped > 0 {
-        println!(
+        outln!(
+            out,
             "{}",
             kv_row("Skipped", &format!("{} files (already exist)", skipped))
-        );
+        )?;
     }
-    println!("{}", section_footer());
+    outln!(out, "{}", section_footer())?;
 
     Ok(())
 }
@@ -647,14 +662,15 @@ fn append_endpoint_yaml(
 // Validate
 // =============================================================================
 
-fn run_validate(args: ValidateArgs) -> Result<()> {
+fn run_validate(args: ValidateArgs, out: &Output) -> Result<()> {
     let path = &args.file;
 
     if !path.exists() {
-        println!(
+        outln!(
+            out,
             "{}",
             check_fail(&format!("File not found: {}", path.display()))
-        );
+        )?;
         return Err(scope::error::ScopeError::Chain(format!(
             "File not found: {}",
             path.display()
@@ -665,66 +681,74 @@ fn run_validate(args: ValidateArgs) -> Result<()> {
         scope::error::ScopeError::Chain(format!("Failed to read {}: {}", path.display(), e))
     })?;
 
-    println!("{}", section_header("Venue Validation"));
-    println!("{}", kv_row("File", &path.display().to_string()));
-    println!("{}", separator());
+    outln!(out, "{}", section_header("Venue Validation"))?;
+    outln!(out, "{}", kv_row("File", &path.display().to_string()))?;
+    outln!(out, "{}", separator())?;
 
     match VenueRegistry::validate_yaml(&content) {
         Ok(desc) => {
-            println!("{}", check_pass("Valid YAML syntax"));
-            println!("{}", check_pass(&format!("Venue ID: {}", desc.id)));
-            println!("{}", check_pass(&format!("Name: {}", desc.name)));
-            println!("{}", check_pass(&format!("Base URL: {}", desc.base_url)));
+            outln!(out, "{}", check_pass("Valid YAML syntax"))?;
+            outln!(out, "{}", check_pass(&format!("Venue ID: {}", desc.id)))?;
+            outln!(out, "{}", check_pass(&format!("Name: {}", desc.name)))?;
+            outln!(
+                out,
+                "{}",
+                check_pass(&format!("Base URL: {}", desc.base_url))
+            )?;
 
             // Check capabilities
             let caps = desc.capability_names();
             if caps.is_empty() {
-                println!(
+                outln!(
+                    out,
                     "{}",
                     check_fail(
                         "No capabilities defined (need at least one of: order_book, ticker, trades)"
                     )
-                );
+                )?;
             } else {
                 for cap in &caps {
-                    println!("{}", check_pass(&format!("Capability: {}", cap)));
+                    outln!(out, "{}", check_pass(&format!("Capability: {}", cap)))?;
                 }
             }
 
             // Validate symbol template
             if desc.symbol.template.contains("{base}") {
-                println!(
+                outln!(
+                    out,
                     "{}",
                     check_pass("Symbol template contains {base} placeholder")
-                );
+                )?;
             } else {
-                println!(
+                outln!(
+                    out,
                     "{}",
                     check_fail("Symbol template missing {base} placeholder")
-                );
+                )?;
             }
 
-            println!("{}", separator());
+            outln!(out, "{}", separator())?;
             if caps.is_empty() {
-                println!("{}", check_fail("Validation completed with warnings"));
+                outln!(out, "{}", check_fail("Validation completed with warnings"))?;
             } else {
-                println!("{}", check_pass("Validation passed"));
+                outln!(out, "{}", check_pass("Validation passed"))?;
             }
-            println!("{}", section_footer());
+            outln!(out, "{}", section_footer())?;
             Ok(())
         }
         Err(e) => {
-            println!("{}", check_fail("Invalid YAML"));
-            println!("{}", check_fail(&format!("Error: {}", e)));
-            println!("{}", separator());
-            println!(
+            outln!(out, "{}", check_fail("Invalid YAML"))?;
+            outln!(out, "{}", check_fail(&format!("Error: {}", e)))?;
+            outln!(out, "{}", separator())?;
+            outln!(
+                out,
                 "{}",
                 kv_row(
                     "Hint",
                     "Run `scope venues schema` to see the expected format"
                 )
-            );
-            println!("{}", section_footer());
+            )?;
+            outln!(out, "{}", section_footer())?;
             Err(e)
         }
     }
@@ -737,6 +761,10 @@ fn run_validate(args: ValidateArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn quiet() -> Output {
+        Output::capture().0
+    }
 
     #[test]
     fn test_list_format_default() {
@@ -755,7 +783,7 @@ mod tests {
         let args = ListArgs {
             format: ListFormat::Table,
         };
-        let result = run_list(args);
+        let result = run_list(args, &quiet());
         assert!(result.is_ok());
     }
 
@@ -764,8 +792,15 @@ mod tests {
         let args = ListArgs {
             format: ListFormat::Json,
         };
-        let result = run_list(args);
-        assert!(result.is_ok());
+        let (o, cap) = Output::capture();
+        run_list(args, &o).unwrap();
+        // Scripts parse this: it must be one JSON document on the data channel.
+        let v: serde_json::Value = serde_json::from_str(&cap.out()).unwrap();
+        assert!(v["venues"].as_array().is_some_and(|a| !a.is_empty()));
+        assert_eq!(
+            v["total"].as_u64().unwrap() as usize,
+            v["venues"].as_array().unwrap().len()
+        );
     }
 
     #[test]
@@ -773,7 +808,7 @@ mod tests {
         let args = SchemaArgs {
             format: SchemaFormat::Text,
         };
-        let result = run_schema(args);
+        let result = run_schema(args, &quiet());
         assert!(result.is_ok());
     }
 
@@ -782,8 +817,10 @@ mod tests {
         let args = SchemaArgs {
             format: SchemaFormat::Json,
         };
-        let result = run_schema(args);
-        assert!(result.is_ok());
+        let (o, cap) = Output::capture();
+        run_schema(args, &o).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&cap.out()).unwrap();
+        assert!(v.is_object());
     }
 
     #[test]
@@ -791,7 +828,7 @@ mod tests {
         let args = ValidateArgs {
             file: std::path::PathBuf::from("/tmp/nonexistent_venue_test.yaml"),
         };
-        let result = run_validate(args);
+        let result = run_validate(args, &quiet());
         assert!(result.is_err());
     }
 
@@ -819,8 +856,10 @@ capabilities:
         std::fs::write(&path, yaml).unwrap();
 
         let args = ValidateArgs { file: path };
-        let result = run_validate(args);
-        assert!(result.is_ok());
+        let (o, cap) = Output::capture();
+        run_validate(args, &o).unwrap();
+        assert!(cap.out().contains("Venue ID: test_venue"));
+        assert!(cap.out().contains("Validation passed"));
     }
 
     #[test]
@@ -831,7 +870,7 @@ capabilities:
         std::fs::write(&path, yaml).unwrap();
 
         let args = ValidateArgs { file: path };
-        let result = run_validate(args);
+        let result = run_validate(args, &quiet());
         assert!(result.is_err());
     }
 
@@ -883,7 +922,7 @@ capabilities:
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().to_path_buf();
         let args = InitArgs { force: true };
-        let result = run_init_impl(args, dest.clone());
+        let result = run_init_impl(args, dest.clone(), &quiet());
         assert!(result.is_ok());
 
         // Verify venue files were created (registry has 11 built-in venues)
@@ -1023,7 +1062,7 @@ capabilities:
 
         // Run init with force=false
         let args = InitArgs { force: false };
-        let result = run_init_impl(args, dest.clone());
+        let result = run_init_impl(args, dest.clone(), &quiet());
         assert!(result.is_ok());
 
         // Verify binance.yaml was NOT overwritten (content unchanged)
@@ -1041,7 +1080,7 @@ capabilities:
         // Ensure parent doesn't exist
         assert!(!dest.exists());
         let args = InitArgs { force: true };
-        let result = run_init_impl(args, dest.clone());
+        let result = run_init_impl(args, dest.clone(), &quiet());
         assert!(result.is_ok());
         assert!(dest.exists());
         assert!(dest.is_dir());
@@ -1071,7 +1110,7 @@ capabilities:
         std::fs::write(&path, yaml).unwrap();
 
         let args = ValidateArgs { file: path };
-        let result = run_validate(args);
+        let result = run_validate(args, &quiet());
         assert!(result.is_ok()); // YAML parses; check_fail is printed for missing {base}
     }
 
@@ -1091,19 +1130,25 @@ capabilities: {}
         std::fs::write(&path, yaml).unwrap();
 
         let args = ValidateArgs { file: path };
-        let result = run_validate(args);
+        let result = run_validate(args, &quiet());
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_run_venues_command_routes_to_subcommands() {
-        let result = run(VenuesCommands::List(ListArgs {
-            format: ListFormat::Table,
-        }));
+        let result = run(
+            VenuesCommands::List(ListArgs {
+                format: ListFormat::Table,
+            }),
+            &quiet(),
+        );
         assert!(result.is_ok());
-        let result = run(VenuesCommands::Schema(SchemaArgs {
-            format: SchemaFormat::Text,
-        }));
+        let result = run(
+            VenuesCommands::Schema(SchemaArgs {
+                format: SchemaFormat::Text,
+            }),
+            &quiet(),
+        );
         assert!(result.is_ok());
     }
 }

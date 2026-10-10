@@ -443,7 +443,13 @@ async fn execute_input(
             context.last_address = Some(addr);
 
             // Execute
-            address::run(address_args, config, clients).await?;
+            address::run(
+                address_args,
+                config,
+                clients,
+                &crate::cli::output::Output::stdio(),
+            )
+            .await?;
         }
 
         // Transaction command
@@ -504,7 +510,13 @@ async fn execute_input(
             context.last_tx = Some(hash);
 
             // Execute
-            tx::run(tx_args, config, clients).await?;
+            tx::run(
+                tx_args,
+                config,
+                clients,
+                &crate::cli::output::Output::stdio(),
+            )
+            .await?;
         }
 
         // Contract analysis command
@@ -537,7 +549,13 @@ async fn execute_input(
                 json: json_output,
             };
 
-            crate::cli::contract::run(&ct_args, config, clients).await?;
+            crate::cli::contract::run(
+                &ct_args,
+                config,
+                clients,
+                &crate::cli::output::Output::stdio(),
+            )
+            .await?;
         }
 
         // Crawl command for token analytics
@@ -621,7 +639,13 @@ async fn execute_input(
                 save: false, // Will prompt if alias should be saved
             };
 
-            crawl::run(crawl_args, config, clients).await?;
+            crawl::run(
+                crawl_args,
+                config,
+                clients,
+                &crate::cli::output::Output::stdio(),
+            )
+            .await?;
         }
 
         // Address book command (pass through to existing; portfolio/port as aliases)
@@ -651,7 +675,7 @@ async fn execute_input(
                     }),
                 reset: args.contains(&"--reset"),
             };
-            setup_run(setup_args, config).await?;
+            setup_run(setup_args, config, &crate::cli::output::Output::stdio()).await?;
         }
 
         // Live monitor command
@@ -984,7 +1008,13 @@ async fn execute_address_book(
         }
     };
 
-    address_book::run(address_book_args, config, clients).await
+    address_book::run(
+        address_book_args,
+        config,
+        clients,
+        &crate::cli::output::Output::stdio(),
+    )
+    .await
 }
 
 /// Print help message for interactive mode.

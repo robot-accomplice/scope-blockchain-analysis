@@ -68,6 +68,7 @@ pub async fn handle(
         10,
         &state.factory,
         None,
+        &scope_cli::cli::output::Output::stdio(),
     )
     .await
     {

@@ -17,6 +17,8 @@
 //! scope tx 0xabc123... --trace
 //! ```
 
+use crate::cli::output::Output;
+use crate::outln;
 use clap::Args;
 use scope::chains::{ChainClientFactory, validate_solana_signature, validate_tron_tx_hash};
 use scope::config::{Config, OutputFormat};
@@ -213,6 +215,7 @@ pub async fn run(
     mut args: TxArgs,
     config: &Config,
     clients: &dyn ChainClientFactory,
+    out: &Output,
 ) -> Result<()> {
     // Auto-infer chain if using default and hash format is recognizable
     if args.chain == "ethereum"
@@ -220,7 +223,7 @@ pub async fn run(
         && inferred != "ethereum"
     {
         tracing::info!("Auto-detected chain: {}", inferred);
-        println!("Auto-detected chain: {}", inferred);
+        outln!(out, "Auto-detected chain: {}", inferred)?;
         args.chain = inferred.to_string();
     }
 
@@ -233,8 +236,10 @@ pub async fn run(
     // Validate transaction hash
     validate_tx_hash(&args.hash, &args.chain)?;
 
-    let sp =
-        crate::cli::progress::Spinner::new(&format!("Analyzing transaction on {}...", args.chain));
+    let sp = crate::cli::progress::Spinner::new(
+        &format!("Analyzing transaction on {}...", args.chain),
+        out,
+    )?;
 
     let report =
         fetch_transaction_report(&args.hash, &args.chain, args.decode, args.trace, clients).await?;
@@ -243,7 +248,7 @@ pub async fn run(
 
     // Output based on format
     let format = args.format.unwrap_or(config.output.format);
-    output_report(&report, format)?;
+    output_report(&report, format, out)?;
 
     Ok(())
 }
@@ -365,15 +370,16 @@ fn validate_tx_hash(hash: &str, chain: &str) -> Result<()> {
 }
 
 /// Outputs the transaction report in the specified format.
-fn output_report(report: &TransactionReport, format: OutputFormat) -> Result<()> {
+fn output_report(report: &TransactionReport, format: OutputFormat, out: &Output) -> Result<()> {
     match format {
         OutputFormat::Json => {
             let json = serde_json::to_string_pretty(report)?;
-            println!("{}", json);
+            outln!(out, "{}", json)?;
         }
         OutputFormat::Csv => {
-            println!("hash,chain,block,from,to,value,status,gas_used,fee");
-            println!(
+            outln!(out, "hash,chain,block,from,to,value,status,gas_used,fee")?;
+            outln!(
+                out,
                 "{},{},{},{},{},{},{},{},{}",
                 report.hash,
                 report.chain,
@@ -384,23 +390,28 @@ fn output_report(report: &TransactionReport, format: OutputFormat) -> Result<()>
                 report.transaction.status,
                 report.gas.gas_used,
                 report.gas.transaction_fee
-            );
+            )?;
         }
         OutputFormat::Table => {
             use scope::display::terminal as t;
 
-            println!("{}", t::section_header("Transaction Analysis"));
-            println!("{}", t::kv_row("Hash", &report.hash));
-            println!("{}", t::kv_row("Chain", &report.chain));
-            println!("{}", t::kv_row("Block", &report.block.number.to_string()));
+            outln!(out, "{}", t::section_header("Transaction Analysis"))?;
+            outln!(out, "{}", t::kv_row("Hash", &report.hash))?;
+            outln!(out, "{}", t::kv_row("Chain", &report.chain))?;
+            outln!(
+                out,
+                "{}",
+                t::kv_row("Block", &report.block.number.to_string())
+            )?;
             if report.transaction.status {
-                println!("{}", t::check_pass("Success"));
+                outln!(out, "{}", t::check_pass("Success"))?;
             } else {
-                println!("{}", t::check_fail("Failed"));
+                outln!(out, "{}", t::check_fail("Failed"))?;
             }
-            println!("{}", t::blank_row());
-            println!("{}", t::kv_row("From", &report.transaction.from));
-            println!(
+            outln!(out, "{}", t::blank_row())?;
+            outln!(out, "{}", t::kv_row("From", &report.transaction.from))?;
+            outln!(
+                out,
                 "{}",
                 t::kv_row(
                     "To",
@@ -410,34 +421,41 @@ fn output_report(report: &TransactionReport, format: OutputFormat) -> Result<()>
                         .as_deref()
                         .unwrap_or("Contract Creation")
                 )
-            );
-            println!("{}", t::kv_row("Value", &report.transaction.value));
-            println!("{}", t::blank_row());
-            println!(
+            )?;
+            outln!(out, "{}", t::kv_row("Value", &report.transaction.value))?;
+            outln!(out, "{}", t::blank_row())?;
+            outln!(
+                out,
                 "{}",
                 t::kv_row("Gas Limit", &report.gas.gas_limit.to_string())
-            );
-            println!(
+            )?;
+            outln!(
+                out,
                 "{}",
                 t::kv_row("Gas Used", &report.gas.gas_used.to_string())
-            );
-            println!("{}", t::kv_row("Gas Price", &report.gas.gas_price));
-            println!("{}", t::kv_row("Fee", &report.gas.transaction_fee));
+            )?;
+            outln!(out, "{}", t::kv_row("Gas Price", &report.gas.gas_price))?;
+            outln!(out, "{}", t::kv_row("Fee", &report.gas.transaction_fee))?;
 
             if let Some(ref decoded) = report.decoded_input {
-                println!("{}", t::blank_row());
-                println!("{}", t::subsection_header("Decoded Input"));
-                println!("{}", t::kv_row("Function", &decoded.function_name));
-                println!("{}", t::kv_row("Signature", &decoded.function_signature));
+                outln!(out, "{}", t::blank_row())?;
+                outln!(out, "{}", t::subsection_header("Decoded Input"))?;
+                outln!(out, "{}", t::kv_row("Function", &decoded.function_name))?;
+                outln!(
+                    out,
+                    "{}",
+                    t::kv_row("Signature", &decoded.function_signature)
+                )?;
                 if !decoded.parameters.is_empty() {
                     for param in &decoded.parameters {
-                        println!(
+                        outln!(
+                            out,
                             "{}",
                             t::bullet_row(&format!(
                                 "{} ({}): {}",
                                 param.name, param.param_type, param.value
                             ))
-                        );
+                        )?;
                     }
                 }
             }
@@ -445,27 +463,29 @@ fn output_report(report: &TransactionReport, format: OutputFormat) -> Result<()>
             if let Some(ref traces) = report.internal_transactions
                 && !traces.is_empty()
             {
-                println!("{}", t::blank_row());
-                println!(
+                outln!(out, "{}", t::blank_row())?;
+                outln!(
+                    out,
                     "{}",
                     t::subsection_header(&format!("Internal Transactions ({})", traces.len()))
-                );
+                )?;
                 for (i, trace) in traces.iter().enumerate() {
-                    println!(
+                    outln!(
+                        out,
                         "{}",
                         t::bullet_row(&format!(
                             "[{}] {} {} -> {}",
                             i, trace.call_type, trace.from, trace.to
                         ))
-                    );
+                    )?;
                 }
             }
 
-            println!("{}", t::section_footer());
+            outln!(out, "{}", t::section_footer())?;
         }
         OutputFormat::Markdown => {
             let md = format_tx_markdown(report);
-            println!("{}", md);
+            outln!(out, "{}", md)?;
         }
     }
     Ok(())
@@ -542,6 +562,10 @@ pub fn format_tx_markdown(report: &TransactionReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn quiet() -> crate::cli::output::Output {
+        crate::cli::output::Output::capture().0
+    }
 
     const VALID_TX_HASH: &str =
         "0xabc123def456789012345678901234567890123456789012345678901234abcd";
@@ -860,21 +884,21 @@ mod tests {
     #[test]
     fn test_output_report_json() {
         let report = make_test_tx_report();
-        let result = output_report(&report, OutputFormat::Json);
+        let result = output_report(&report, OutputFormat::Json, &quiet());
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_output_report_csv() {
         let report = make_test_tx_report();
-        let result = output_report(&report, OutputFormat::Csv);
+        let result = output_report(&report, OutputFormat::Csv, &quiet());
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_output_report_table() {
         let report = make_test_tx_report();
-        let result = output_report(&report, OutputFormat::Table);
+        let result = output_report(&report, OutputFormat::Table, &quiet());
         assert!(result.is_ok());
     }
 
@@ -883,7 +907,7 @@ mod tests {
         let mut report = make_test_tx_report();
         report.decoded_input = None;
         report.internal_transactions = None;
-        let result = output_report(&report, OutputFormat::Table);
+        let result = output_report(&report, OutputFormat::Table, &quiet());
         assert!(result.is_ok());
     }
 
@@ -892,7 +916,7 @@ mod tests {
         let mut report = make_test_tx_report();
         report.transaction.status = false;
         report.transaction.to = None; // Contract creation
-        let result = output_report(&report, OutputFormat::Table);
+        let result = output_report(&report, OutputFormat::Table, &quiet());
         assert!(result.is_ok());
     }
 
@@ -900,7 +924,7 @@ mod tests {
     fn test_output_report_table_empty_traces() {
         let mut report = make_test_tx_report();
         report.internal_transactions = Some(vec![]);
-        let result = output_report(&report, OutputFormat::Table);
+        let result = output_report(&report, OutputFormat::Table, &quiet());
         assert!(result.is_ok());
     }
 
@@ -908,7 +932,7 @@ mod tests {
     fn test_output_report_csv_no_to() {
         let mut report = make_test_tx_report();
         report.transaction.to = None;
-        let result = output_report(&report, OutputFormat::Csv);
+        let result = output_report(&report, OutputFormat::Csv, &quiet());
         assert!(result.is_ok());
     }
 
@@ -1047,7 +1071,7 @@ mod tests {
             trace: false,
             decode: false,
         };
-        let result = super::run(args, &config, &factory).await;
+        let result = super::run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1063,7 +1087,7 @@ mod tests {
             trace: false,
             decode: true,
         };
-        let result = super::run(args, &config, &factory).await;
+        let result = super::run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1078,7 +1102,7 @@ mod tests {
             trace: true,
             decode: false,
         };
-        let result = super::run(args, &config, &factory).await;
+        let result = super::run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1093,7 +1117,7 @@ mod tests {
             trace: false,
             decode: false,
         };
-        let result = super::run(args, &config, &factory).await;
+        let result = super::run(args, &config, &factory, &quiet()).await;
         assert!(result.is_err());
     }
 
@@ -1109,7 +1133,7 @@ mod tests {
             trace: false,
             decode: false,
         };
-        let result = super::run(args, &config, &factory).await;
+        let result = super::run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 

@@ -5,7 +5,9 @@
 
 use crate::cli::address::{self, AddressArgs};
 use crate::cli::crawl::{Period, fetch_analytics_for_input};
+use crate::cli::output::Output;
 use crate::cli::tx::{fetch_transaction_report, format_tx_markdown};
+use crate::outln;
 use clap::Args;
 use scope::chains::{
     ChainClientFactory, infer_chain_from_address, infer_chain_from_hash, native_symbol,
@@ -110,6 +112,7 @@ pub async fn run(
     mut args: InsightsArgs,
     config: &Config,
     clients: &dyn ChainClientFactory,
+    out: &Output,
 ) -> Result<()> {
     // Resolve address book label → address + chain
     if let Some((address, chain)) =
@@ -124,11 +127,14 @@ pub async fn run(
     let chain_override = args.chain.as_deref();
     let target = infer_target(&args.target, chain_override);
 
-    let sp = crate::cli::progress::Spinner::new(&format!(
-        "Analyzing {} on {}...",
-        target_type_label(&target),
-        chain_label(&target)
-    ));
+    let sp = crate::cli::progress::Spinner::new(
+        &format!(
+            "Analyzing {} on {}...",
+            target_type_label(&target),
+            chain_label(&target)
+        ),
+        out,
+    )?;
 
     let mut output = String::new();
     output.push_str("# Scope Insights\n\n");
@@ -154,7 +160,7 @@ pub async fn run(
                 dossier: false,
             };
             let client = clients.create_chain_client(chain)?;
-            let report = address::analyze_address(&addr_args, client.as_ref()).await?;
+            let report = address::analyze_address(&addr_args, client.as_ref(), out).await?;
 
             // Contract vs EOA (EVM chains support get_code)
             let code_result = client.get_code(&args.target).await;
@@ -320,6 +326,7 @@ pub async fn run(
                 10,
                 clients,
                 Some(&sp),
+                out,
             )
             .await?;
 
@@ -446,7 +453,7 @@ pub async fn run(
     }
 
     sp.finish("Insights complete.");
-    println!("{}", output);
+    outln!(out, "{}", output)?;
     Ok(())
 }
 
@@ -749,6 +756,10 @@ mod tests {
         Balance as ChainBalance, ChainClient, ChainClientFactory, DexDataSource,
         Token as ChainToken, TokenBalance as ChainTokenBalance, Transaction as ChainTransaction,
     };
+
+    fn quiet() -> crate::cli::output::Output {
+        crate::cli::output::Output::capture().0
+    }
 
     // ====================================================================
     // Mock Chain Client for testing run() paths
@@ -1138,7 +1149,7 @@ mod tests {
             trace: false,
             health: Default::default(),
         };
-        let result = run(args, &config, &factory).await;
+        let result = run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1153,7 +1164,7 @@ mod tests {
             trace: false,
             health: Default::default(),
         };
-        let result = run(args, &config, &factory).await;
+        let result = run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1169,7 +1180,7 @@ mod tests {
             trace: false,
             health: Default::default(),
         };
-        let result = run(args, &config, &factory).await;
+        let result = run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1185,7 +1196,7 @@ mod tests {
             trace: false,
             health: Default::default(),
         };
-        let result = run(args, &config, &factory).await;
+        let result = run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1200,7 +1211,7 @@ mod tests {
             trace: false,
             health: Default::default(),
         };
-        let result = run(args, &config, &factory).await;
+        let result = run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1215,7 +1226,7 @@ mod tests {
             trace: false,
             health: Default::default(),
         };
-        let result = run(args, &config, &factory).await;
+        let result = run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1230,7 +1241,7 @@ mod tests {
             trace: false,
             health: Default::default(),
         };
-        let result = run(args, &config, &factory).await;
+        let result = run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 

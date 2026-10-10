@@ -17,6 +17,8 @@
 //! scope setup --key etherscan
 //! ```
 
+use crate::cli::output::Output;
+use crate::outln;
 use clap::Args;
 use scope::config::{Config, OutputFormat};
 use scope::error::{ConfigError, Result, ScopeError};
@@ -55,9 +57,9 @@ struct ConfigItem {
 }
 
 /// Runs the setup command.
-pub async fn run(args: SetupArgs, config: &Config) -> Result<()> {
+pub async fn run(args: SetupArgs, config: &Config, out: &Output) -> Result<()> {
     if args.status {
-        show_status(config);
+        show_status(config, out)?;
         return Ok(());
     }
 
@@ -74,20 +76,20 @@ pub async fn run(args: SetupArgs, config: &Config) -> Result<()> {
 }
 
 /// Shows the current configuration status.
-fn show_status(config: &Config) {
+fn show_status(config: &Config, out: &Output) -> std::io::Result<()> {
     use scope::display::terminal as t;
 
-    println!("{}", t::section_header("Scope Configuration Status"));
+    outln!(out, "{}", t::section_header("Scope Configuration Status"))?;
 
     // Config file location
     let config_path = Config::config_path()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "Not found".to_string());
-    println!("{}", t::kv_row("Config file", &config_path));
-    println!("{}", t::blank_row());
+    outln!(out, "{}", t::kv_row("Config file", &config_path))?;
+    outln!(out, "{}", t::blank_row())?;
 
     // API Keys
-    println!("{}", t::subsection_header("API Keys"));
+    outln!(out, "{}", t::subsection_header("API Keys"))?;
 
     let api_keys = get_api_key_items(config);
     let mut missing_keys = Vec::new();
@@ -101,38 +103,41 @@ fn show_status(config: &Config) {
             } else {
                 format!("{} {}", item.name, hint)
             };
-            println!("{}", t::check_pass(&msg));
+            outln!(out, "{}", t::check_pass(&msg))?;
         } else {
             missing_keys.push(item.name);
-            println!("{}", t::check_fail(item.name));
+            outln!(out, "{}", t::check_fail(item.name))?;
         }
-        println!("{}", t::kv_row("Chain", info.chain));
+        outln!(out, "{}", t::kv_row("Chain", info.chain))?;
     }
 
     // Show where to get missing keys
     if !missing_keys.is_empty() {
-        println!("{}", t::blank_row());
-        println!("{}", t::subsection_header("Missing API Keys"));
+        outln!(out, "{}", t::blank_row())?;
+        outln!(out, "{}", t::subsection_header("Missing API Keys"))?;
         for key_name in missing_keys {
             let info = get_api_key_info(key_name);
-            println!("{}", t::link_row(key_name, info.url));
+            outln!(out, "{}", t::link_row(key_name, info.url))?;
         }
     }
 
-    println!("{}", t::blank_row());
-    println!("{}", t::subsection_header("Defaults"));
-    println!(
+    outln!(out, "{}", t::blank_row())?;
+    outln!(out, "{}", t::subsection_header("Defaults"))?;
+    outln!(
+        out,
         "{}",
         t::kv_row(
             "Chain",
             config.chains.ethereum_rpc.as_deref().unwrap_or("ethereum")
         )
-    );
-    println!(
+    )?;
+    outln!(
+        out,
         "{}",
         t::kv_row("Output format", &format!("{:?}", config.output.format))
-    );
-    println!(
+    )?;
+    outln!(
+        out,
         "{}",
         t::kv_row(
             "Color output",
@@ -142,66 +147,78 @@ fn show_status(config: &Config) {
                 "disabled"
             }
         )
-    );
+    )?;
 
     // Ghola sidecar status
-    println!("{}", t::blank_row());
-    println!("{}", t::subsection_header("Ghola Sidecar"));
+    outln!(out, "{}", t::blank_row())?;
+    outln!(out, "{}", t::subsection_header("Ghola Sidecar"))?;
 
     let ghola_in_path = which_ghola();
     if ghola_in_path {
-        println!("{}", t::check_pass("ghola binary found in PATH"));
+        outln!(out, "{}", t::check_pass("ghola binary found in PATH"))?;
     } else {
-        println!("{}", t::check_fail("ghola binary not found in PATH"));
-        println!(
+        outln!(out, "{}", t::check_fail("ghola binary not found in PATH"))?;
+        outln!(
+            out,
             "{}",
             t::info_row("Install: go install github.com/robot-accomplice/ghola@latest")
-        );
+        )?;
     }
 
     if config.ghola.enabled {
-        println!("{}", t::check_pass("Ghola transport enabled in config"));
+        outln!(
+            out,
+            "{}",
+            t::check_pass("Ghola transport enabled in config")
+        )?;
         if config.ghola.stealth {
-            println!(
+            outln!(
+                out,
                 "{}",
                 t::check_pass("Stealth mode active (temporal drift + ghost signing)")
-            );
+            )?;
         } else {
-            println!(
+            outln!(
+                out,
                 "{}",
                 t::kv_row(
                     "Stealth mode",
                     "disabled (set ghola.stealth: true to enable)"
                 )
-            );
+            )?;
         }
-        println!(
+        outln!(
+            out,
             "{}",
             t::kv_row(
                 "Buffer size",
                 &format!("{} bytes", config.ghola.buffer_size)
             )
-        );
+        )?;
     } else {
-        println!(
+        outln!(
+            out,
             "{}",
             t::kv_row(
                 "Transport",
                 "native (set ghola.enabled: true in config to use sidecar)",
             )
-        );
+        )?;
     }
 
-    println!("{}", t::blank_row());
-    println!(
+    outln!(out, "{}", t::blank_row())?;
+    outln!(
+        out,
         "{}",
         t::info_row("Run 'scope setup' to configure missing settings.")
-    );
-    println!(
+    )?;
+    outln!(
+        out,
         "{}",
         t::info_row("Run 'scope setup --key <provider>' to configure a specific key.")
-    );
-    println!("{}", t::section_footer());
+    )?;
+    outln!(out, "{}", t::section_footer())?;
+    Ok(())
 }
 
 /// Checks whether the `ghola` binary is present on `$PATH`.
@@ -821,6 +838,10 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    fn quiet() -> crate::cli::output::Output {
+        crate::cli::output::Output::capture().0
+    }
+
     #[test]
     fn test_mask_key_long() {
         let masked = mask_key("ABCDEFGHIJKLMNOP");
@@ -1024,7 +1045,7 @@ mod tests {
     #[test]
     fn test_show_status_no_panic() {
         let config = Config::default();
-        show_status(&config);
+        show_status(&config, &quiet()).unwrap();
     }
 
     #[test]
@@ -1038,7 +1059,7 @@ mod tests {
             .chains
             .api_keys
             .insert("bscscan".to_string(), "xyz".to_string());
-        show_status(&config);
+        show_status(&config, &quiet()).unwrap();
     }
 
     // ========================================================================
@@ -1053,7 +1074,7 @@ mod tests {
             key: None,
             reset: false,
         };
-        let result = run(args, &config).await;
+        let result = run(args, &config, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1066,7 +1087,7 @@ mod tests {
             reset: false,
         };
         // This should print "Unknown API key" but still return Ok
-        let result = run(args, &config).await;
+        let result = run(args, &config, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1089,7 +1110,7 @@ mod tests {
             .chains
             .api_keys
             .insert("bscscan".to_string(), "bsc".to_string()); // Short key
-        show_status(&config);
+        show_status(&config, &quiet()).unwrap();
     }
 
     #[test]
@@ -1109,7 +1130,7 @@ mod tests {
                 .insert(key.to_string(), format!("{}_key_12345678", key));
         }
         // No missing keys → should skip "where to get" section
-        show_status(&config);
+        show_status(&config, &quiet()).unwrap();
     }
 
     #[test]
@@ -1118,7 +1139,7 @@ mod tests {
         config.chains.ethereum_rpc = Some("https://custom.rpc.example.com".to_string());
         config.output.format = OutputFormat::Json;
         config.output.color = false;
-        show_status(&config);
+        show_status(&config, &quiet()).unwrap();
     }
 
     #[test]
@@ -1599,7 +1620,7 @@ mod tests {
     fn test_show_status_ghola_disabled() {
         let config = Config::default();
         // Just verify it doesn't panic
-        show_status(&config);
+        show_status(&config, &quiet()).unwrap();
     }
 
     #[test]
@@ -1607,7 +1628,7 @@ mod tests {
         let mut config = Config::default();
         config.ghola.enabled = true;
         config.ghola.stealth = true;
-        show_status(&config);
+        show_status(&config, &quiet()).unwrap();
     }
 
     #[test]
@@ -1615,6 +1636,6 @@ mod tests {
         let mut config = Config::default();
         config.ghola.enabled = true;
         config.ghola.stealth = false;
-        show_status(&config);
+        show_status(&config, &quiet()).unwrap();
     }
 }
