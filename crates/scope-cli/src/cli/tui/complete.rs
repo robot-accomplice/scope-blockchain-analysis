@@ -31,7 +31,10 @@ pub fn complete(line: &str, vocab: &Vocab) -> Completion {
     }
     let before: Vec<&str> = line[..start].split_whitespace().collect();
 
-    let root = Cli::command();
+    let mut root = Cli::command();
+    // build() copies global flags (--ai, address-book's --format) down to
+    // the subcommands, so they complete there too.
+    root.build();
     let mut cmd: &Command = &root;
     let mut positional_seen = false;
     for w in &before {
@@ -162,6 +165,17 @@ mod tests {
     fn test_start_points_at_the_word() {
         let c = complete("market su", &vocab());
         assert_eq!(c.start, "market ".len());
+    }
+
+    #[test]
+    fn test_global_flags_complete_under_subcommands() {
+        // Review I2: `--format` on address-book is `global = true`, and the
+        // root flags (--ai, --config) are global too. Spec 5.2's example.
+        assert_eq!(
+            cands("address-book list --format "),
+            vec!["csv", "json", "markdown", "table"]
+        );
+        assert!(cands("market summary USDC --a").contains(&"--ai".to_string()));
     }
 
     #[test]

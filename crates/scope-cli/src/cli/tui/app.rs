@@ -163,6 +163,15 @@ impl TuiState {
     /// Applies one key event.
     pub fn handle_key(&mut self, key: KeyEvent) -> Action {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        // Ctrl-C closes the palette and keeps its normal meaning (cancel a
+        // running command, clear the line), so a command can always be
+        // stopped with one key.
+        if ctrl
+            && key.code == KeyCode::Char('c')
+            && matches!(self.overlay, Some(Overlay::Palette(_)))
+        {
+            self.overlay = None;
+        }
         if let Some(Overlay::Palette(p)) = &mut self.overlay {
             let count = p.matches().len();
             match key.code {
@@ -913,6 +922,24 @@ mod tests {
         assert_eq!(s.handle_key(key(KeyCode::Enter)), Action::None);
         assert_eq!(s.input, "market summary ");
         assert!(s.overlay.is_none());
+    }
+
+    #[test]
+    fn test_ctrl_c_in_palette_still_cancels_a_running_command() {
+        // Review I1: the palette must not swallow the cancel key.
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let mut s = state();
+        let inv = Invocation {
+            command: venues_list(),
+            route: Route::Pane,
+            ai: false,
+            argv: vec![],
+        };
+        s.start("venues list", &inv);
+        s.handle_key(ctrl_k());
+        assert_eq!(s.handle_key(ctrl('c')), Action::Cancel);
+        assert!(s.overlay.is_none(), "Ctrl-C also closes the palette");
+        s.finish(Ending::Cancelled);
     }
 
     #[test]
