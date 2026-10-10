@@ -26,6 +26,7 @@
 pub mod app;
 pub mod complete;
 pub mod exec;
+pub mod hint;
 pub mod journal;
 pub mod vocab;
 

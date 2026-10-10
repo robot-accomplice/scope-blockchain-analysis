@@ -534,9 +534,10 @@ impl TuiState {
 
     /// Draws the screen: output pane, input line, status line.
     pub fn render(&self, f: &mut Frame) {
-        let [pane, input, status] = Layout::vertical([
+        let [pane, input, hint_row, status] = Layout::vertical([
             Constraint::Min(3),
             Constraint::Length(3),
+            Constraint::Length(1),
             Constraint::Length(1),
         ])
         .areas(f.area());
@@ -600,6 +601,19 @@ impl TuiState {
             f.render_widget(Paragraph::new(lines).block(Block::bordered()), area);
         }
 
+        if let Some(h) = super::hint::hint(&self.input) {
+            let mut spans = vec![Span::styled(
+                format!(" {}", h.text),
+                Style::new().fg(Color::DarkGray),
+            )];
+            if let Some(next) = h.next {
+                spans.push(Span::styled(
+                    format!("  next: {}", next),
+                    Style::new().fg(Color::Yellow),
+                ));
+            }
+            f.render_widget(Paragraph::new(Line::from(spans)), hint_row);
+        }
         f.render_widget(Paragraph::new(self.status_line()), status);
     }
 
@@ -1020,9 +1034,18 @@ mod tests {
             s.push_ansi(&format!("line {}\n", i));
         }
         let rows: Vec<String> = screen(&s, 40, 15).lines().map(str::to_string).collect();
-        // Layout: pane rows 0..=10 (border at 0 and 10), input 11..=13, status 14.
-        assert!(rows[9].contains("line 39"), "{:#?}", rows);
-        assert!(rows[10].starts_with('└'), "{:#?}", rows);
+        // Layout: pane rows 0..=9 (border at 0 and 9), input 10..=12, hint 13, status 14.
+        assert!(rows[8].contains("line 39"), "{:#?}", rows);
+        assert!(rows[9].starts_with('└'), "{:#?}", rows);
+    }
+
+    #[test]
+    fn test_hint_row_shows_usage_while_typing() {
+        let mut s = state();
+        type_str(&mut s, "market summary");
+        let text = screen(&s, 100, 15);
+        assert!(text.contains("scope market summary"), "{}", text);
+        assert!(text.contains("next: <SYMBOL>"), "{}", text);
     }
 
     #[test]
