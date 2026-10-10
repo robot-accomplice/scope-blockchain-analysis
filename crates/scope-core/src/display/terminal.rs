@@ -1521,6 +1521,19 @@ mod tests {
     }
 
     #[test]
+    fn test_check_na_plain_and_tty_wrap() {
+        // n/a rows (#37) must read as neither pass nor fail.
+        let long = "Spread: n/a (synthetic AMM book; the real spread is the pool fee, which the data source does not report)";
+        for tty in [false, true] {
+            let row = check_na_styled(long, tty);
+            assert!(row.contains("–"), "tty={}", tty);
+            assert!(!row.contains("✓") && !row.contains("✗"), "tty={}", tty);
+            assert!(row.lines().count() > 1, "should wrap, tty={}", tty);
+        }
+        assert!(check_na_styled("short", false).starts_with("│  – short"));
+    }
+
+    #[test]
     fn test_warning_row_wraps_tty() {
         let long = "Source code is NOT verified — unable to perform full source-level analysis on this contract. Consider requesting verification from the deployer.";
         let row = warning_row_styled(long, true);

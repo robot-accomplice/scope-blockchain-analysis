@@ -41,11 +41,6 @@ pub enum BookSource {
 }
 
 impl BookSource {
-    /// True for a book that is not a real exchange book.
-    pub fn is_synthetic(self) -> bool {
-        !matches!(self, BookSource::Exchange)
-    }
-
     /// Short label for text and markdown output.
     pub fn label(self) -> &'static str {
         match self {

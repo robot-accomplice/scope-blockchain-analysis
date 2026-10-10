@@ -659,6 +659,31 @@ mod tests {
     }
 
     #[test]
+    fn test_book_source_labels_and_json_names() {
+        // JSON consumers match on these names; the labels name the source
+        // in text and markdown reports.
+        for (src, json, label) in [
+            (BookSource::Exchange, "exchange", "exchange order book"),
+            (
+                BookSource::SyntheticAmm,
+                "synthetic_amm",
+                "synthetic (AMM curve x·y=k)",
+            ),
+            (
+                BookSource::SyntheticEstimate,
+                "synthetic_estimate",
+                "synthetic estimate (pool reserves not reported)",
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(src).unwrap(), serde_json::json!(json));
+            assert_eq!(src.label(), label);
+        }
+        assert_eq!(BookSource::default(), BookSource::Exchange);
+        let na = HealthCheck::NotApplicable("x".into());
+        assert_eq!((na.icon(), na.status(), na.message()), ("–", "n/a", "x"));
+    }
+
+    #[test]
     fn test_check_json_shape_includes_na() {
         // JSON consumers (the web UI among them) match on these strings.
         let v = serde_json::to_value(HealthCheck::NotApplicable("x".into())).unwrap();
