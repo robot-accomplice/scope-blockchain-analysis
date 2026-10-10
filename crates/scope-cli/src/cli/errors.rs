@@ -34,7 +34,23 @@ fn display_error_styled(e: &ScopeError, tty: bool, out: &Output) -> std::io::Res
         errln!(out, "\n  ✗ {}", msg)?;
     }
 
-    if let Some(hint) = error_suggestion(e) {
+    // The source chain names the real cause (for example a TLS failure
+    // under "error sending request"). Show each link once.
+    let causes = cause_chain(e, &msg);
+    for cause in &causes {
+        if tty {
+            errln!(out, "    {} {}", "caused by:".dimmed(), cause)?;
+        } else {
+            errln!(out, "    caused by: {}", cause)?;
+        }
+    }
+
+    let hint = if causes.iter().any(|c| is_non_tls_reply(c)) {
+        Some(INTERCEPTION_HINT)
+    } else {
+        error_suggestion(e)
+    };
+    if let Some(hint) = hint {
         if tty {
             errln!(out, "\n  {}", hint.dimmed())?;
         } else {
@@ -43,6 +59,32 @@ fn display_error_styled(e: &ScopeError, tty: bool, out: &Output) -> std::io::Res
     }
     errln!(out)?;
     Ok(())
+}
+
+/// Shown when a TLS handshake got a non-TLS reply.
+const INTERCEPTION_HINT: &str = "The server's reply was not TLS. A router, firewall, proxy or VPN on your\n      \
+     network may be blocking this host and answering with its own block page.\n      \
+     Allow the host in that device, or try another network.";
+
+/// The messages of `e`'s source chain, without links whose text is already
+/// in `shown` (the top-level message usually repeats the first source).
+fn cause_chain(e: &ScopeError, shown: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut src = std::error::Error::source(e);
+    while let Some(s) = src {
+        let text = s.to_string();
+        if !shown.contains(&text) && !out.contains(&text) {
+            out.push(text);
+        }
+        src = s.source();
+    }
+    out
+}
+
+/// True when a cause says the peer answered a TLS handshake with non-TLS
+/// data (rustls: InvalidContentType; OpenSSL: wrong version number).
+fn is_non_tls_reply(cause: &str) -> bool {
+    cause.contains("InvalidContentType") || cause.contains("wrong version number")
 }
 
 /// Returns a user-facing suggestion for common error types.
@@ -81,6 +123,62 @@ pub fn error_suggestion(e: &ScopeError) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reproduces a router block page: a TCP server on 127.0.0.1 that answers
+    /// the TLS ClientHello with plaintext HTTP (what ASUS AiProtection did to
+    /// api.dexscreener.com). Returns the error reqwest gives for it.
+    async fn plaintext_reply_error() -> ScopeError {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((mut s, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = s.read(&mut buf);
+                let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+            }
+        });
+        let err = reqwest::Client::new()
+            .get(format!("https://127.0.0.1:{port}/"))
+            .send()
+            .await
+            .unwrap_err();
+        ScopeError::Request(err)
+    }
+
+    #[tokio::test]
+    async fn test_request_error_shows_its_cause_chain() {
+        // "error sending request" alone hid the real cause for an hour.
+        let e = plaintext_reply_error().await;
+        let (o, cap) = crate::cli::output::Output::capture();
+        display_error_styled(&e, false, &o).unwrap();
+        let text = cap.err();
+        assert!(text.contains("caused by:"), "{}", text);
+        assert!(
+            text.contains("InvalidContentType") || text.contains("corrupt message"),
+            "{}",
+            text
+        );
+    }
+
+    #[tokio::test]
+    async fn test_non_tls_reply_gets_an_interception_hint() {
+        // A plaintext reply to a TLS handshake means something on the
+        // network path answered instead of the server.
+        let e = plaintext_reply_error().await;
+        let (o, cap) = crate::cli::output::Output::capture();
+        display_error_styled(&e, false, &o).unwrap();
+        let text = cap.err();
+        assert!(text.contains("router, firewall, proxy or VPN"), "{}", text);
+        assert!(!text.contains("Check your network connection"), "{}", text);
+    }
+
+    #[test]
+    fn test_error_without_source_prints_no_cause_lines() {
+        let (o, cap) = crate::cli::output::Output::capture();
+        display_error_styled(&ScopeError::Other("plain".into()), false, &o).unwrap();
+        assert!(!cap.err().contains("caused by"));
+    }
 
     fn quiet() -> crate::cli::output::Output {
         crate::cli::output::Output::capture().0
