@@ -384,7 +384,7 @@ fn on_off(b: bool) -> &'static str {
 }
 
 /// Chains the `chain` session command accepts.
-const CHAINS: &[&str] = &[
+pub(crate) const CHAINS: &[&str] = &[
     "ethereum", "polygon", "arbitrum", "optimism", "base", "bsc", "aegis", "solana", "tron",
 ];
 
@@ -558,31 +558,40 @@ where
     outln!(out, "{}", t::section_footer())
 }
 
+/// The session commands: (word, usage, description). Help, completion and
+/// the palette read this list.
+pub(crate) const SESSION_COMMANDS: &[(&str, &str, &str)] = &[
+    ("chain", "chain [name|auto]", "Show, pin or unpin the chain"),
+    (
+        "format",
+        "format [table|json|csv|markdown]",
+        "Show or set the output format",
+    ),
+    ("+tokens", "+tokens", "Toggle token balances for address"),
+    ("+txs", "+txs", "Toggle transactions for address"),
+    ("trace", "trace", "Toggle trace for tx"),
+    ("decode", "decode", "Toggle decode for tx"),
+    (
+        "limit",
+        "limit [n]",
+        "Show or set the transaction limit for address",
+    ),
+    (
+        "tokens",
+        "tokens [list|recent|add|remove]",
+        "Manage saved token aliases",
+    ),
+    ("ctx", "ctx", "Show the session context"),
+    ("clear", "clear", "Reset the session context"),
+    ("help", "help", "Show this help"),
+    ("exit", "exit", "Leave the TUI (also Ctrl-D)"),
+];
+
 /// Writes the TUI help: the session commands, then every CLI command.
 fn write_help(out: &Output) -> io::Result<()> {
     outln!(out, "Session commands:")?;
-    for (cmd, what) in [
-        ("chain [name|auto]", "Show, pin or unpin the chain"),
-        (
-            "format [table|json|csv|markdown]",
-            "Show or set the output format",
-        ),
-        (
-            "+tokens, +txs",
-            "Toggle token balances / transactions for address",
-        ),
-        ("trace, decode", "Toggle trace / decode for tx"),
-        ("limit [n]", "Show or set the transaction limit for address"),
-        (
-            "tokens [list|recent|add|remove]",
-            "Manage saved token aliases",
-        ),
-        ("ctx", "Show the session context"),
-        ("clear", "Reset the session context"),
-        ("help", "Show this help"),
-        ("exit", "Leave the TUI (also Ctrl-D)"),
-    ] {
-        outln!(out, "  {:<34} {}", cmd, what)?;
+    for (_, usage, what) in SESSION_COMMANDS {
+        outln!(out, "  {:<34} {}", usage, what)?;
     }
     outln!(out)?;
     outln!(
@@ -599,7 +608,7 @@ fn write_help(out: &Output) -> io::Result<()> {
     outln!(out)?;
     outln!(
         out,
-        "Keys: Enter run · ↑/↓ history · PgUp/PgDn scroll · Esc or Ctrl-C cancel a running command"
+        "Keys: Enter run · Tab complete · Ctrl-K palette · ↑/↓ history · PgUp/PgDn scroll · Esc or Ctrl-C cancel"
     )
 }
 
@@ -814,13 +823,7 @@ mod tests {
     #[test]
     fn test_help_lists_session_and_cli_commands() {
         let (_, cap) = plan_line("help", &mut SessionContext::default());
-        for word in [
-            "chain [name|auto]",
-            "address",
-            "market",
-            "compliance",
-            "venues",
-        ] {
+        for word in ["+tokens", "address", "market", "compliance", "venues"] {
             assert!(cap.out().contains(word), "help is missing {}", word);
         }
     }

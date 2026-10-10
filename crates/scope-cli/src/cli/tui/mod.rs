@@ -26,6 +26,7 @@
 pub mod app;
 pub mod exec;
 pub mod journal;
+pub mod vocab;
 
 use app::{Action, Ending, TuiState, run_invocation};
 use crossterm::event::{Event, EventStream, KeyEventKind};
