@@ -60,7 +60,11 @@ const BANNER: &str = include_str!("../../../assets/banner.txt");
 /// Returns a terminal I/O error, or the error from saving the history or
 /// the session context on exit.
 pub async fn run(no_banner: bool, config: &Config, clients: &dyn ChainClientFactory) -> Result<()> {
-    let mut state = TuiState::new(SessionContext::load(), Journal::in_data_dir());
+    let mut state = TuiState::new(
+        SessionContext::load(),
+        Journal::in_data_dir(),
+        vocab::Vocab::load(config),
+    );
     welcome(&mut state, no_banner);
     let mut host = RealHost {
         terminal: ratatui::init(),
@@ -301,7 +305,11 @@ mod tests {
     /// Runs a line through the TUI path; returns the pane text.
     async fn via_tui(line: &str, factory: &MockClientFactory) -> String {
         let config = Config::default();
-        let mut s = TuiState::new(SessionContext::default(), Journal::default());
+        let mut s = TuiState::new(
+            SessionContext::default(),
+            Journal::default(),
+            vocab::Vocab::default(),
+        );
         let Plan::Run(inv) = s.submit(line, &config) else {
             panic!("`{}` did not plan a run", line)
         };
@@ -447,7 +455,11 @@ mod tests {
             suspends: 0,
             resumes: 0,
         };
-        let mut state = TuiState::new(SessionContext::default(), Journal::default());
+        let mut state = TuiState::new(
+            SessionContext::default(),
+            Journal::default(),
+            vocab::Vocab::default(),
+        );
         welcome(&mut state, true);
         let factory = MockClientFactory::new();
         let res = event_loop(&mut host, &mut state, &Config::default(), &factory).await;
@@ -550,7 +562,11 @@ mod tests {
         // scope-core warnings use diag::notice; while a pane command runs
         // they must join its output, not print over the TUI screen.
         let _lock = DIAG_LOCK.lock().await;
-        let mut s = TuiState::new(SessionContext::default(), Journal::default());
+        let mut s = TuiState::new(
+            SessionContext::default(),
+            Journal::default(),
+            vocab::Vocab::default(),
+        );
         let Plan::Run(inv) = s.submit("venues list", &Config::default()) else {
             panic!()
         };
