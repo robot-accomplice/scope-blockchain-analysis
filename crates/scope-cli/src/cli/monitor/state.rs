@@ -562,6 +562,7 @@ impl MonitorState {
 
         Some(OrderBook {
             pair: format!("{}/{}", symbol, quote),
+            source: scope::market::BookSource::Exchange,
             bids,
             asks,
         })

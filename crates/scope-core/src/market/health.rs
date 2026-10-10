@@ -3,7 +3,7 @@
 //! Provides configurable health checks for stablecoin market monitoring:
 //! peg deviation, spread, bid/ask balance, level count, and depth thresholds.
 
-use super::types::{ExecutionEstimate, HealthCheck, OrderBook, OrderBookLevel};
+use super::types::{BookSource, ExecutionEstimate, HealthCheck, OrderBook, OrderBookLevel};
 use serde::{Deserialize, Serialize};
 
 /// Default peg target (USD stablecoins).
@@ -24,6 +24,9 @@ pub const DEFAULT_MAX_SPREAD_PCT: f64 = 3.0;
 pub const DEFAULT_MIN_TOP3_DEPTH: f64 = 300.0;
 /// Default minimum depth of the top 10 valid levels per side (quote).
 pub const DEFAULT_MIN_TOP10_DEPTH: f64 = 2000.0;
+
+/// Default price step between levels of a synthetic AMM book, in percent.
+pub const DEFAULT_AMM_STEP_PCT: f64 = 0.1;
 
 /// Number of levels summed for the top-3 depth check.
 pub const TOP3_LEVELS: usize = 3;
@@ -56,6 +59,9 @@ pub struct HealthThresholds {
     pub min_top3_depth: f64,
     /// Minimum depth of the top 10 valid levels per side (quote).
     pub min_top10_depth: f64,
+    /// Price step between levels of a synthetic AMM book, in percent.
+    /// With 0.1%, top-3 and top-10 depth mean depth within ±0.3% and ±1%.
+    pub amm_step_pct: f64,
 }
 
 impl Default for HealthThresholds {
@@ -70,6 +76,7 @@ impl Default for HealthThresholds {
             max_spread_pct: DEFAULT_MAX_SPREAD_PCT,
             min_top3_depth: DEFAULT_MIN_TOP3_DEPTH,
             min_top10_depth: DEFAULT_MIN_TOP10_DEPTH,
+            amm_step_pct: DEFAULT_AMM_STEP_PCT,
         }
     }
 }
@@ -89,6 +96,7 @@ pub struct HealthOverrides {
     pub max_spread_pct: Option<f64>,
     pub min_top3_depth: Option<f64>,
     pub min_top10_depth: Option<f64>,
+    pub amm_step_pct: Option<f64>,
 }
 
 impl HealthThresholds {
@@ -104,6 +112,7 @@ impl HealthThresholds {
             max_spread_pct: o.max_spread_pct.unwrap_or(self.max_spread_pct),
             min_top3_depth: o.min_top3_depth.unwrap_or(self.min_top3_depth),
             min_top10_depth: o.min_top10_depth.unwrap_or(self.min_top10_depth),
+            amm_step_pct: o.amm_step_pct.unwrap_or(self.amm_step_pct),
         }
     }
 }
@@ -128,6 +137,8 @@ fn top_n_depth(levels: &[OrderBookLevel], n: usize) -> f64 {
 pub struct MarketSummary {
     /// Pair label (e.g., "USDC/USDT").
     pub pair: String,
+    /// Where the order book came from.
+    pub source: BookSource,
     /// Peg target.
     pub peg_target: f64,
     /// Best bid (raw, no outlier filtering).
@@ -222,11 +233,18 @@ impl MarketSummary {
 
         let valid_bids = book.bids.iter().filter(|l| is_valid_level(l)).count();
         let valid_asks = book.asks.iter().filter(|l| is_valid_level(l)).count();
+        // A synthetic AMM book has no real level count or spread (#37).
+        let amm = book.source == BookSource::SyntheticAmm;
 
         // Spread between best valid bid and best valid ask
         let best_valid_bid = book.bids.iter().find(|l| is_valid_level(l));
         let best_valid_ask = book.asks.iter().find(|l| is_valid_level(l));
         match (best_valid_bid, best_valid_ask) {
+            _ if amm => checks.push(HealthCheck::NotApplicable(
+                "Spread: n/a (synthetic AMM book; the real spread is the pool fee, \
+                 which the data source does not report)"
+                    .to_string(),
+            )),
             (Some(b), Some(a)) => {
                 let mid = (a.price + b.price) / 2.0;
                 let spread_pct = (a.price - b.price) / mid * 100.0;
@@ -244,7 +262,12 @@ impl MarketSummary {
         }
 
         // Bid levels
-        if valid_bids < thresholds.min_levels {
+        if amm {
+            checks.push(HealthCheck::NotApplicable(
+                "Bid levels: n/a (synthetic AMM book; the step size sets the level count)"
+                    .to_string(),
+            ));
+        } else if valid_bids < thresholds.min_levels {
             checks.push(HealthCheck::Fail(format!(
                 "Bid levels: {} < {} minimum",
                 valid_bids, thresholds.min_levels
@@ -260,7 +283,12 @@ impl MarketSummary {
         }
 
         // Ask levels
-        if valid_asks < thresholds.min_levels {
+        if amm {
+            checks.push(HealthCheck::NotApplicable(
+                "Ask levels: n/a (synthetic AMM book; the step size sets the level count)"
+                    .to_string(),
+            ));
+        } else if valid_asks < thresholds.min_levels {
             checks.push(HealthCheck::Fail(format!(
                 "Ask levels: {} < {} minimum",
                 valid_asks, thresholds.min_levels
@@ -290,13 +318,15 @@ impl MarketSummary {
             }
         }
 
-        let healthy = checks.iter().all(|c| matches!(c, HealthCheck::Pass(_)));
+        // n/a checks do not count (#37 decision A).
+        let healthy = !checks.iter().any(|c| matches!(c, HealthCheck::Fail(_)));
 
         let execution_10k_buy = book.estimate_buy_execution(10_000.0);
         let execution_10k_sell = book.estimate_sell_execution(10_000.0);
 
         Self {
             pair: book.pair.clone(),
+            source: book.source,
             peg_target,
             best_bid: book.best_bid(),
             best_ask: book.best_ask(),
@@ -337,6 +367,8 @@ impl MarketSummary {
             out.push_str(&t::kv_row("Venue", c));
             out.push('\n');
         }
+        out.push_str(&t::kv_row("Book", self.source.label()));
+        out.push('\n');
         out.push_str(&t::kv_row("Peg Target", &format!("{:.4}", self.peg_target)));
         out.push('\n');
 
@@ -479,16 +511,8 @@ impl MarketSummary {
         out.push_str(&t::subsection_header("Health Checks"));
         out.push('\n');
         for check in &self.checks {
-            match check {
-                HealthCheck::Pass(msg) => {
-                    out.push_str(&t::check_pass(msg));
-                    out.push('\n');
-                }
-                HealthCheck::Fail(msg) => {
-                    out.push_str(&t::check_fail(msg));
-                    out.push('\n');
-                }
-            }
+            out.push_str(&check.render_text());
+            out.push('\n');
         }
         out.push_str(&t::blank_row());
         out.push('\n');
@@ -524,6 +548,7 @@ mod tests {
     fn healthy_book() -> OrderBook {
         OrderBook {
             pair: "USDC/USDT".to_string(),
+            source: crate::market::types::BookSource::Exchange,
             bids: side(0.9999, -0.0001, &[400.0; 10]),
             asks: side(1.0001, 0.0001, &[400.0; 10]),
         }
@@ -539,9 +564,115 @@ mod tests {
             .iter()
             .filter_map(|c| match c {
                 HealthCheck::Fail(m) => Some(m.clone()),
-                HealthCheck::Pass(_) => None,
+                HealthCheck::Pass(_) | HealthCheck::NotApplicable(_) => None,
             })
             .collect()
+    }
+
+    // ---- #37: synthetic AMM books ----
+
+    fn amm_summary(base_reserve: f64) -> MarketSummary {
+        let pair = crate::chains::DexPair {
+            dex_name: "Uniswap V2".into(),
+            pair_address: "0xpool".into(),
+            base_token: "USDC".into(),
+            quote_token: "USDT".into(),
+            price_usd: 1.0,
+            volume_24h: 0.0,
+            liquidity_usd: 2.0 * base_reserve,
+            liquidity_base: Some(base_reserve),
+            price_change_24h: 0.0,
+            buys_24h: 0,
+            sells_24h: 0,
+            buys_6h: 0,
+            sells_6h: 0,
+            buys_1h: 0,
+            sells_1h: 0,
+            pair_created_at: None,
+            url: None,
+        };
+        let t = HealthThresholds::default();
+        let book =
+            super::super::analytics::order_book_from_analytics("ethereum", &pair, "USDC", &t);
+        MarketSummary::from_order_book(&book, &t, None)
+    }
+
+    fn status_of<'a>(s: &'a MarketSummary, prefix: &str) -> Vec<&'a HealthCheck> {
+        s.checks
+            .iter()
+            .filter(|c| c.message().starts_with(prefix))
+            .collect()
+    }
+
+    #[test]
+    fn test_amm_levels_and_spread_are_not_applicable_and_shown() {
+        // #37 decision A: n/a checks are always shown and never fail.
+        let s = amm_summary(10_000_000.0);
+        assert_eq!(s.source, BookSource::SyntheticAmm);
+        let spread = status_of(&s, "Spread");
+        assert_eq!(spread.len(), 1);
+        assert!(matches!(spread[0], HealthCheck::NotApplicable(_)));
+        for side in ["Bid levels", "Ask levels"] {
+            let c = status_of(&s, side);
+            assert_eq!(c.len(), 1, "{} must always be shown", side);
+            assert!(matches!(c[0], HealthCheck::NotApplicable(_)), "{}", side);
+        }
+    }
+
+    #[test]
+    fn test_deep_amm_pool_can_be_healthy() {
+        // 10M base at $1: ±0.5% band depth ≈ 25k per side, top-3 ≈ 15k,
+        // top-10 ≈ 50k. Every applicable rule passes.
+        let s = amm_summary(10_000_000.0);
+        assert!(s.healthy, "{:?}", failed(&s));
+    }
+
+    #[test]
+    fn test_shallow_amm_pool_fails_the_depth_rules() {
+        // 1,000 base at $1: band depth ≈ 2.5 USDT per side.
+        let s = amm_summary(1_000.0);
+        assert!(!s.healthy);
+        let f = failed(&s);
+        assert!(f.iter().any(|m| m.starts_with("Bid depth")), "{:?}", f);
+        assert!(
+            f.iter().any(|m| m.starts_with("Ask top-3 depth")),
+            "{:?}",
+            f
+        );
+        assert!(
+            f.iter().any(|m| m.starts_with("Bid top-10 depth")),
+            "{:?}",
+            f
+        );
+    }
+
+    #[test]
+    fn test_exchange_book_rules_are_unchanged() {
+        // n/a applies to synthetic AMM books only.
+        let s = summarize(&healthy_book());
+        assert_eq!(s.source, BookSource::Exchange);
+        assert!(
+            s.checks
+                .iter()
+                .all(|c| !matches!(c, HealthCheck::NotApplicable(_)))
+        );
+    }
+
+    #[test]
+    fn test_check_json_shape_includes_na() {
+        // JSON consumers (the web UI among them) match on these strings.
+        let v = serde_json::to_value(HealthCheck::NotApplicable("x".into())).unwrap();
+        assert_eq!(v, serde_json::json!({"status": "n/a", "message": "x"}));
+        let v = serde_json::to_value(HealthCheck::Fail("y".into())).unwrap();
+        assert_eq!(v, serde_json::json!({"status": "fail", "message": "y"}));
+    }
+
+    #[test]
+    fn test_text_report_names_the_book_source() {
+        let s = amm_summary(10_000_000.0);
+        let text = s.format_text(Some("eth"));
+        assert!(text.contains("synthetic (AMM curve x·y=k)"), "{}", text);
+        assert!(text.contains("– "), "n/a rows use the dash icon: {}", text);
     }
 
     #[test]
@@ -669,6 +800,7 @@ mod tests {
     fn test_format_text_with_chain() {
         let book = OrderBook {
             pair: "USDC/USDT".to_string(),
+            source: crate::market::types::BookSource::Exchange,
             bids: vec![OrderBookLevel {
                 price: 1.0,
                 quantity: 100.0,
@@ -688,6 +820,7 @@ mod tests {
     fn test_format_text_without_chain() {
         let book = OrderBook {
             pair: "X/Y".to_string(),
+            source: crate::market::types::BookSource::Exchange,
             bids: vec![OrderBookLevel {
                 price: 1.0,
                 quantity: 10.0,
@@ -704,6 +837,7 @@ mod tests {
     fn test_health_check_sells_below_peg() {
         let book = OrderBook {
             pair: "USDC/USDT".to_string(),
+            source: crate::market::types::BookSource::Exchange,
             bids: vec![OrderBookLevel {
                 price: 0.9995,
                 quantity: 1000.0,
@@ -734,6 +868,7 @@ mod tests {
     fn test_format_text_with_volume_and_spread() {
         let book = OrderBook {
             pair: "USDC/USDT".to_string(),
+            source: crate::market::types::BookSource::Exchange,
             bids: vec![
                 OrderBookLevel {
                     price: 0.9999,
@@ -779,6 +914,7 @@ mod tests {
         });
         let book = OrderBook {
             pair: "USDC/USDT".to_string(),
+            source: crate::market::types::BookSource::Exchange,
             bids: vec![
                 OrderBookLevel {
                     price: 0.9999,
@@ -820,6 +956,7 @@ mod tests {
         // Sufficient liquidity for 10k buy/sell -> fillable
         let book = OrderBook {
             pair: "USDC/USDT".to_string(),
+            source: crate::market::types::BookSource::Exchange,
             bids: vec![OrderBookLevel {
                 price: 0.9999,
                 quantity: 20_000.0,
@@ -851,6 +988,7 @@ mod tests {
         });
         let book = OrderBook {
             pair: "USDC/USDT".to_string(),
+            source: crate::market::types::BookSource::Exchange,
             bids,
             asks: vec![
                 OrderBookLevel {

@@ -246,6 +246,36 @@ fn check_fail_styled(msg: &str, tty: bool) -> String {
     out
 }
 
+/// Formats a check that does not apply (dim dash, message in grey).
+///
+/// ```text
+/// │  – Spread: n/a (synthetic AMM book: the real spread is the pool fee)
+/// ```
+pub fn check_na(msg: &str) -> String {
+    check_na_styled(msg, is_tty())
+}
+
+fn check_na_styled(msg: &str, tty: bool) -> String {
+    // Prefix: "│  – " = 5 visible columns
+    let avail = content_width_for(5);
+    let wrapped = wrap_lines(msg, avail);
+
+    let mut out = if tty {
+        format!("{}  {} {}", "│".cyan(), "–".dimmed(), wrapped[0].dimmed())
+    } else {
+        format!("│  – {}", wrapped[0])
+    };
+
+    for line in &wrapped[1..] {
+        if tty {
+            out.push_str(&format!("\n{}    {}", "│".cyan(), line.dimmed()));
+        } else {
+            out.push_str(&format!("\n│    {}", line));
+        }
+    }
+    out
+}
+
 /// Overall status line (healthy / unhealthy).
 pub fn status_line(healthy: bool) -> String {
     status_line_styled(healthy, is_tty())

@@ -144,8 +144,12 @@ pub async fn run(
                             .unwrap_or(std::cmp::Ordering::Equal)
                     })
                     .unwrap();
-                let book =
-                    order_book_from_analytics(&analytics.chain, best_pair, &analytics.token.symbol);
+                let book = order_book_from_analytics(
+                    &analytics.chain,
+                    best_pair,
+                    &analytics.token.symbol,
+                    &thresholds,
+                );
                 let volume_24h = Some(best_pair.volume_24h);
                 Some(MarketSummary::from_order_book(
                     &book,
@@ -264,6 +268,7 @@ fn token_health_to_markdown(
         md.push_str(&format!(
             "| Metric | Value |\n|--------|-------|\n\
              | Peg Target | {:.4} |\n\
+             | Book | {} |\n\
              | Best Bid | {} |\n\
              | Best Ask | {} |\n\
              | Mid Price | {} |\n\
@@ -272,6 +277,7 @@ fn token_health_to_markdown(
              | Ask Depth | {:.0} |\n\
              | Healthy | {} |\n",
             summary.peg_target,
+            summary.source.label(),
             summary
                 .best_bid
                 .map(|b| format!("{:.4}", b))
@@ -295,11 +301,7 @@ fn token_health_to_markdown(
         if !summary.checks.is_empty() {
             md.push_str("\n**Health Checks:**\n");
             for check in &summary.checks {
-                let (icon, msg) = match check {
-                    scope::market::HealthCheck::Pass(m) => ("✓", m.as_str()),
-                    scope::market::HealthCheck::Fail(m) => ("✗", m.as_str()),
-                };
-                md.push_str(&format!("- {} {}\n", icon, msg));
+                md.push_str(&format!("- {} {}\n", check.icon(), check.message()));
             }
         }
     }
@@ -315,6 +317,7 @@ fn token_health_to_json(
     let market_json = market.map(|m| {
         serde_json::json!({
             "peg_target": m.peg_target,
+            "book_source": m.source,
             "best_bid": m.best_bid,
             "best_ask": m.best_ask,
             "mid_price": m.mid_price,
@@ -322,10 +325,7 @@ fn token_health_to_json(
             "bid_depth": m.bid_depth,
             "ask_depth": m.ask_depth,
             "healthy": m.healthy,
-            "checks": m.checks.iter().map(|c| match c {
-                scope::market::HealthCheck::Pass(msg) => serde_json::json!({"status": "pass", "message": msg}),
-                scope::market::HealthCheck::Fail(msg) => serde_json::json!({"status": "fail", "message": msg}),
-            }).collect::<Vec<_>>()
+            "checks": &m.checks
         })
     });
     let json = serde_json::json!({
@@ -448,10 +448,7 @@ fn output_token_health_table(
 
         // Health checks
         for check in &summary.checks {
-            match check {
-                scope::market::HealthCheck::Pass(m) => outln!(out, "{}", t::check_pass(m))?,
-                scope::market::HealthCheck::Fail(m) => outln!(out, "{}", t::check_fail(m))?,
-            }
+            outln!(out, "{}", check.render_text())?;
         }
         outln!(out, "{}", t::blank_row())?;
         outln!(out, "{}", t::status_line(summary.healthy))?;
@@ -554,6 +551,7 @@ mod tests {
         use scope::market::{ExecutionEstimate, ExecutionSide};
         MarketSummary {
             pair: "USDC/USDT".to_string(),
+            source: scope::market::BookSource::Exchange,
             peg_target: 1.0,
             best_bid: Some(0.9999),
             best_ask: Some(1.0001),

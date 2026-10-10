@@ -12,6 +12,6 @@ pub use super::analytics::order_book_from_analytics;
 pub use super::health::{HealthOverrides, HealthThresholds, MarketSummary};
 pub use super::traits::{OhlcClient, OrderBookClient, TickerClient, TradeHistoryClient};
 pub use super::types::{
-    Candle, ExecutionEstimate, ExecutionSide, HealthCheck, MarketSnapshot, OrderBook,
+    BookSource, Candle, ExecutionEstimate, ExecutionSide, HealthCheck, MarketSnapshot, OrderBook,
     OrderBookLevel, Ticker, Trade, TradeSide,
 };
