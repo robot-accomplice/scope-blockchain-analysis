@@ -92,6 +92,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_stderr_writer_flushes_with_and_without_redirect() {
+        // tracing calls flush on its writer; both routes must accept it.
+        let mut w = Stderr;
+        assert!(w.flush().is_ok());
+        let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let _g = redirect(buf.clone());
+        assert!(w.flush().is_ok());
+    }
+
+    #[test]
     fn test_redirect_captures_and_restores() {
         // While the TUI owns the screen, library warnings must land in its
         // pane; after it exits they must reach stderr again.

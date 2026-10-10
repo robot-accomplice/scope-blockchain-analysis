@@ -757,6 +757,53 @@ mod tests {
     }
 
     #[test]
+    fn test_bare_session_commands_show_current_values() {
+        let mut ctx = SessionContext::default();
+        let (_, cap) = plan_line("chain", &mut ctx);
+        assert!(cap.out().contains("Current chain: auto"));
+        plan_line("chain tron", &mut ctx);
+        let (_, cap) = plan_line("chain", &mut ctx);
+        assert!(cap.out().contains("Current chain: tron (pinned)"));
+        let (_, cap) = plan_line("format", &mut ctx);
+        assert!(cap.out().contains("Current format: Table"));
+        let (_, cap) = plan_line("limit", &mut ctx);
+        assert!(cap.out().contains("Current limit: 100"));
+    }
+
+    #[test]
+    fn test_tokens_session_command_is_routed_not_parsed_by_clap() {
+        // `tokens` is not a CLI command; it must reach the alias manager.
+        // An unknown subcommand neither reads nor writes anything to save.
+        let (p, cap) = plan_line("tokens frobnicate", &mut SessionContext::default());
+        assert!(matches!(p, Plan::Done));
+        assert!(cap.err().contains("Unknown tokens subcommand: frobnicate"));
+    }
+
+    #[test]
+    fn test_missing_target_on_other_commands_is_not_filled_from_context() {
+        // Only address and tx reuse the last target; crawl must still fail.
+        let mut ctx = SessionContext {
+            last_address: Some(ADDR.into()),
+            ..Default::default()
+        };
+        let (p, cap) = plan_line("crawl", &mut ctx);
+        assert!(matches!(p, Plan::Done));
+        assert!(cap.err().contains("required"));
+    }
+
+    #[test]
+    fn test_context_is_not_injected_before_a_subcommand_is_named() {
+        // `--ai` alone names no command: nothing may be appended to it.
+        let mut ctx = SessionContext {
+            chain: "base".into(),
+            ..Default::default()
+        };
+        let (p, cap) = plan_line("--ai", &mut ctx);
+        assert!(matches!(p, Plan::Done));
+        assert!(!cap.err().contains("--chain"), "{}", cap.err());
+    }
+
+    #[test]
     fn test_ctx_prints_context() {
         let mut ctx = SessionContext::default();
         plan_line("chain base", &mut ctx);

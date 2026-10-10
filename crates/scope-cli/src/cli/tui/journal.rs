@@ -191,6 +191,16 @@ mod tests {
     }
 
     #[test]
+    fn test_data_dir_journal_uses_the_documented_file_names() {
+        // Docs and RCA instructions name these files; keep them stable.
+        let j = Journal::in_data_dir();
+        if let (Some(h), Some(e)) = (&j.history, &j.events) {
+            assert!(h.ends_with("scope/history.txt"));
+            assert!(e.ends_with("scope/tui-events.jsonl"));
+        }
+    }
+
+    #[test]
     fn test_disabled_journal_is_a_no_op() {
         let j = Journal::default();
         assert!(j.load_history().is_empty());
