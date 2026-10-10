@@ -68,6 +68,26 @@ impl Output {
         (output, captured)
     }
 
+    /// Output whose two channels write to one in-memory buffer, in the order
+    /// of the writes, with progress indicators disabled.
+    ///
+    /// The TUI uses it: its output pane shows data and diagnostics as one
+    /// stream, as a terminal does. [`Captured::out`] returns the whole
+    /// stream and [`Captured::err`] returns the same text.
+    pub fn capture_merged() -> (Self, Captured) {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let captured = Captured {
+            out: buf.clone(),
+            err: buf.clone(),
+        };
+        let output = Self {
+            out: buf.clone(),
+            err: buf,
+            progress: false,
+        };
+        (output, captured)
+    }
+
     /// Output bound to the given writers, with progress indicators disabled.
     #[cfg(test)]
     pub(crate) fn from_writers(
@@ -122,6 +142,12 @@ impl Captured {
     /// Everything written to the diagnostic channel so far.
     pub fn err(&self) -> String {
         String::from_utf8_lossy(&lock(&self.err)).into_owned()
+    }
+
+    /// The buffer behind the data channel, as a writer. The TUI gives it to
+    /// [`scope::diag::redirect`] so library warnings join the same stream.
+    pub fn out_sink(&self) -> scope::diag::Sink {
+        self.out.clone()
     }
 }
 
@@ -228,6 +254,17 @@ pub(crate) mod tests {
             errln!(o, "warn").unwrap_err().kind(),
             io::ErrorKind::BrokenPipe
         );
+    }
+
+    #[test]
+    fn test_capture_merged_keeps_write_order() {
+        // The TUI pane must show a warning where it happened, between the
+        // data lines, not after all of them.
+        let (o, cap) = Output::capture_merged();
+        outln!(o, "row 1").unwrap();
+        errln!(o, "warning").unwrap();
+        outln!(o, "row 2").unwrap();
+        assert_eq!(cap.out(), "row 1\nwarning\nrow 2\n");
     }
 
     #[test]

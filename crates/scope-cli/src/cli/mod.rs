@@ -41,7 +41,7 @@
 //!   report       Batch and combined reports
 //!
 //! Config & interactive:
-//!   interactive  REPL with preserved context (alias: tui, shell)
+//!   interactive  Full-screen TUI for every command (alias: tui, shell)
 //!   setup        Configure API keys and preferences (alias: config)
 //!   completions  Generate shell completions for bash/zsh/fish
 //!
@@ -74,6 +74,7 @@ pub mod progress;
 pub mod report;
 pub mod setup;
 pub mod token_health;
+pub mod tui;
 pub mod tx;
 pub mod venues;
 
@@ -258,10 +259,10 @@ pub enum Commands {
     Report(report::ReportCommands),
 
     // -- Config & interactive -------------------------------------------------
-    /// Interactive mode with preserved context.
+    /// Full-screen TUI that runs every command, with preserved context.
     ///
-    /// Launch a REPL where chain, format, and other settings persist
-    /// between commands for faster workflow.
+    /// Every CLI command runs inside it with the same flags. Chain, format,
+    /// and other settings persist between commands.
     #[command(visible_aliases = ["tui", "shell"])]
     Interactive(InteractiveArgs),
 
@@ -289,7 +290,7 @@ pub enum Commands {
 
 impl Commands {
     /// Returns `true` for interactive/long-running commands that manage their
-    /// own UI (TUI, REPL, web server, setup wizard, shell completions).
+    /// own UI (TUI, live monitor, web server, setup wizard, shell completions).
     /// Non-interactive commands return `false` and get a version header.
     pub fn is_interactive(&self) -> bool {
         matches!(
