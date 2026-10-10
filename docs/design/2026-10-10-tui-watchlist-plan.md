@@ -37,7 +37,7 @@
 | **L** (this file) | Completion, hints, palette | 5.1–5.4 | now | Depends only on phase 2, which is merged. |
 | E | Watchlist engine | 2 | #47 phase 5 is merged | Its fetchers and runner consume the phase 5 shared book fetch and runner. Their signatures do not exist yet. |
 | H | Headless `scope watch` | 4 | plan E is merged | It consumes `scope::watch::{Watchlist, Snapshot, Event}` from E. |
-| U | Grid, drill-down, wizard | 3 | plan E is merged | Same reason as H. It also closes #47 phase 6. |
+| U | Grid, drill-down, wizard | 3 | plan E is merged | Same reason as H. It also closes #47 phase 6. Plan U also adds watchlist names to `Vocab` and to the palette (spec 5.1, 5.4). Plan L cannot: no watchlist store exists before plan E. |
 | F | Guided first run | 5.5 | plans U and L are merged | The welcome flow opens the wizard (U) and uses the palette and completion (L). |
 
 Before plan E: #47 phase 3 (monitor-path defects), #37 (synthetic AMM book, `n/a`), #47 phase 5 (shared market core). Their plans are in #47 and #37.
