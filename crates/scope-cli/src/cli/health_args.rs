@@ -41,6 +41,19 @@ pub struct HealthArgs {
 
     #[arg(long, value_name = "USDT", help = with_default("Min depth of the top 10 valid levels per side, in quote terms.", health::DEFAULT_MIN_TOP10_DEPTH))]
     pub min_top10_depth: Option<f64>,
+
+    #[arg(long, value_name = "PCT", value_parser = positive_pct, help = with_default("Price step between levels of a synthetic AMM book (DEX venues), in percent.", health::DEFAULT_AMM_STEP_PCT))]
+    pub amm_step_pct: Option<f64>,
+}
+
+/// Parses a percentage that must be finite and greater than zero.
+fn positive_pct(s: &str) -> Result<f64, String> {
+    let v: f64 = s.parse().map_err(|e| format!("{e}"))?;
+    if v.is_finite() && v > 0.0 {
+        Ok(v)
+    } else {
+        Err(format!("must be a number greater than 0, got {s}"))
+    }
 }
 
 /// Help text with the built-in default, so `--help` names the value in force.
@@ -61,6 +74,7 @@ impl HealthArgs {
             max_spread_pct: self.max_spread_pct,
             min_top3_depth: self.min_top3_depth,
             min_top10_depth: self.min_top10_depth,
+            amm_step_pct: self.amm_step_pct,
         })
     }
 }
@@ -114,5 +128,29 @@ mod tests {
     fn test_peg_flag_sets_peg_target() {
         let t = resolve(&["--peg", "0.98"], &Config::default());
         assert_eq!(t.peg_target, 0.98);
+    }
+
+    #[test]
+    fn test_amm_step_flag_resolves_and_rejects_non_positive() {
+        #[derive(clap::Parser)]
+        struct W {
+            #[command(flatten)]
+            h: HealthArgs,
+        }
+        use clap::Parser;
+        let w = W::try_parse_from(["x", "--amm-step-pct", "0.05"]).unwrap();
+        assert_eq!(w.h.resolve(&Config::default()).amm_step_pct, 0.05);
+        let w = W::try_parse_from(["x"]).unwrap();
+        assert_eq!(
+            w.h.resolve(&Config::default()).amm_step_pct,
+            health::DEFAULT_AMM_STEP_PCT
+        );
+        for bad in ["0", "-1", "nan", "inf", "abc"] {
+            assert!(
+                W::try_parse_from(["x", "--amm-step-pct", bad]).is_err(),
+                "{}",
+                bad
+            );
+        }
     }
 }

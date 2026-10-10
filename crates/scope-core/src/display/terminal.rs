@@ -246,6 +246,36 @@ fn check_fail_styled(msg: &str, tty: bool) -> String {
     out
 }
 
+/// Formats a check that does not apply (dim dash, message in grey).
+///
+/// ```text
+/// │  – Spread: n/a (synthetic AMM book: the real spread is the pool fee)
+/// ```
+pub fn check_na(msg: &str) -> String {
+    check_na_styled(msg, is_tty())
+}
+
+fn check_na_styled(msg: &str, tty: bool) -> String {
+    // Prefix: "│  – " = 5 visible columns
+    let avail = content_width_for(5);
+    let wrapped = wrap_lines(msg, avail);
+
+    let mut out = if tty {
+        format!("{}  {} {}", "│".cyan(), "–".dimmed(), wrapped[0].dimmed())
+    } else {
+        format!("│  – {}", wrapped[0])
+    };
+
+    for line in &wrapped[1..] {
+        if tty {
+            out.push_str(&format!("\n{}    {}", "│".cyan(), line.dimmed()));
+        } else {
+            out.push_str(&format!("\n│    {}", line));
+        }
+    }
+    out
+}
+
 /// Overall status line (healthy / unhealthy).
 pub fn status_line(healthy: bool) -> String {
     status_line_styled(healthy, is_tty())
@@ -1488,6 +1518,19 @@ mod tests {
         let row = check_fail_styled(long, true);
         assert!(row.contains("✗"));
         assert!(row.lines().count() > 1, "should wrap to multiple lines");
+    }
+
+    #[test]
+    fn test_check_na_plain_and_tty_wrap() {
+        // n/a rows (#37) must read as neither pass nor fail.
+        let long = "Spread: n/a (synthetic AMM book; the real spread is the pool fee, which the data source does not report)";
+        for tty in [false, true] {
+            let row = check_na_styled(long, tty);
+            assert!(row.contains("–"), "tty={}", tty);
+            assert!(!row.contains("✓") && !row.contains("✗"), "tty={}", tty);
+            assert!(row.lines().count() > 1, "should wrap, tty={}", tty);
+        }
+        assert!(check_na_styled("short", false).starts_with("│  – short"));
     }
 
     #[test]

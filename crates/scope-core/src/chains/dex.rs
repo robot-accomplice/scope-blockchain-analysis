@@ -551,6 +551,7 @@ impl DexClient {
                 price_usd: pair_price,
                 volume_24h: pair.volume.as_ref().and_then(|v| v.h24).unwrap_or(0.0),
                 liquidity_usd: pair_liquidity,
+                liquidity_base: pair.liquidity.as_ref().and_then(|l| l.base),
                 price_change_24h: price_change,
                 buys_24h: txn_counts_24h.as_ref().map(|t| t.buys).unwrap_or(0),
                 sells_24h: txn_counts_24h.as_ref().map(|t| t.sells).unwrap_or(0),
@@ -1196,6 +1197,8 @@ mod tests {
         assert!(data.volume_24h > 0.0);
         assert!(data.liquidity_usd > 0.0);
         assert_eq!(data.pairs.len(), 1);
+        // The pool's base reserve feeds the synthetic AMM book (#37).
+        assert_eq!(data.pairs[0].liquidity_base, Some(100.0));
         assert!(data.total_buys_24h > 0);
         assert!(data.total_sells_24h > 0);
         assert!(!data.price_history.is_empty());

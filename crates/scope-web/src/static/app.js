@@ -699,6 +699,38 @@ function crawlToMarkdown(data) {
   return md;
 }
 
+// ===== Health checks =====
+// A check's status is 'pass', 'fail' or 'n/a' (#37). n/a checks do not
+// apply to the book (for example spread on a synthetic AMM book) and do
+// not count against "healthy".
+var CHECK_STYLE = {
+  'pass': { cls: 'pass', icon: '\u2713', md: '[x]' },
+  'fail': { cls: 'fail', icon: '\u2717', md: '[ ]' },
+  'n/a':  { cls: 'na',   icon: '\u2013', md: '(n/a)' }
+};
+
+function checkStyle(c) {
+  return CHECK_STYLE[c.status] || CHECK_STYLE['fail'];
+}
+
+function renderCheckList(checks) {
+  var checkList = el('div', { className: 'check-list' });
+  checks.forEach(function(c) {
+    var st = checkStyle(c);
+    var item = el('div', { className: 'check-item ' + st.cls });
+    item.appendChild(el('span', { className: 'check-icon', textContent: st.icon }));
+    item.appendChild(el('span', { textContent: c.message }));
+    checkList.appendChild(item);
+  });
+  return checkList;
+}
+
+var BOOK_SOURCE_LABEL = {
+  'exchange': 'Exchange order book',
+  'synthetic_amm': 'Synthetic (AMM curve x\u00b7y=k)',
+  'synthetic_estimate': 'Synthetic estimate (pool reserves not reported)'
+};
+
 // ===== Market Summary Renderer =====
 function renderMarketSummary(resultEl, data) {
   var view = el('div', { className: 'result-view' });
@@ -718,6 +750,7 @@ function renderMarketSummary(resultEl, data) {
   if (data.volume_24h != null) grid.appendChild(metricCard('Volume (24h)', fmtUsd(data.volume_24h)));
   grid.appendChild(metricCard('Bid Depth', fmtUsd(data.bid_depth)));
   grid.appendChild(metricCard('Ask Depth', fmtUsd(data.ask_depth)));
+  if (data.book_source) grid.appendChild(metricCard('Book', BOOK_SOURCE_LABEL[data.book_source] || data.book_source));
   view.appendChild(grid);
 
   // Execution simulation
@@ -742,15 +775,7 @@ function renderMarketSummary(resultEl, data) {
   // Health checks
   if (data.checks && data.checks.length > 0) {
     view.appendChild(el('div', { className: 'section-title' }, 'Health Checks'));
-    var checkList = el('div', { className: 'check-list' });
-    data.checks.forEach(function(c) {
-      var pass = c.status === 'pass';
-      var item = el('div', { className: 'check-item ' + (pass ? 'pass' : 'fail') });
-      item.appendChild(el('span', { className: 'check-icon', textContent: pass ? '\u2713' : '\u2717' }));
-      item.appendChild(el('span', { textContent: c.message }));
-      checkList.appendChild(item);
-    });
-    view.appendChild(checkList);
+    view.appendChild(renderCheckList(data.checks));
   }
 
   // Order book (reuse exchange renderer components)
@@ -785,11 +810,12 @@ function marketToMarkdown(data) {
   md += '| Best Ask | ' + formatPrice(data.best_ask) + ' |\n';
   md += '| Spread | ' + formatPrice(data.spread) + ' |\n';
   md += '| Mid Price | ' + formatPrice(data.mid_price) + ' |\n';
+  if (data.book_source) md += '| Book | ' + (BOOK_SOURCE_LABEL[data.book_source] || data.book_source) + ' |\n';
   md += '| Healthy | ' + (data.healthy ? 'Yes' : 'No') + ' |\n';
   if (data.checks && data.checks.length > 0) {
     md += '\n## Health Checks\n\n';
     data.checks.forEach(function(c) {
-      md += '- [' + (c.status === 'pass' ? 'x' : ' ') + '] ' + c.message + '\n';
+      md += '- ' + checkStyle(c).md + ' ' + c.message + '\n';
     });
   }
   return md;
@@ -838,15 +864,7 @@ function renderTokenHealth(resultEl, data) {
     view.appendChild(mGrid);
 
     if (m.checks && m.checks.length > 0) {
-      var checkList = el('div', { className: 'check-list' });
-      m.checks.forEach(function(c) {
-        var pass = c.status === 'pass';
-        var item = el('div', { className: 'check-item ' + (pass ? 'pass' : 'fail') });
-        item.appendChild(el('span', { className: 'check-icon', textContent: pass ? '\u2713' : '\u2717' }));
-        item.appendChild(el('span', { textContent: c.message }));
-        checkList.appendChild(item);
-      });
-      view.appendChild(checkList);
+      view.appendChild(renderCheckList(m.checks));
     }
   }
 

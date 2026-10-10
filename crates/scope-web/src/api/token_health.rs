@@ -129,8 +129,12 @@ pub async fn handle(
                             .unwrap_or(std::cmp::Ordering::Equal)
                     })
                     .unwrap();
-                let book =
-                    order_book_from_analytics(&analytics.chain, best_pair, &analytics.token.symbol);
+                let book = order_book_from_analytics(
+                    &analytics.chain,
+                    best_pair,
+                    &analytics.token.symbol,
+                    &thresholds,
+                );
                 let volume_24h = Some(best_pair.volume_24h);
                 Some(MarketSummary::from_order_book(
                     &book,
@@ -150,6 +154,7 @@ pub async fn handle(
         serde_json::json!({
             "pair": m.pair,
             "peg_target": m.peg_target,
+            "book_source": m.source,
             "best_bid": m.best_bid,
             "best_ask": m.best_ask,
             "mid_price": m.mid_price,
@@ -158,10 +163,7 @@ pub async fn handle(
             "ask_depth": m.ask_depth,
             "healthy": m.healthy,
             "volume_24h": m.volume_24h,
-            "checks": m.checks.iter().map(|c| match c {
-                scope::market::HealthCheck::Pass(msg) => serde_json::json!({"status": "pass", "message": msg}),
-                scope::market::HealthCheck::Fail(msg) => serde_json::json!({"status": "fail", "message": msg}),
-            }).collect::<Vec<_>>()
+            "checks": &m.checks
         })
     });
 
