@@ -981,6 +981,7 @@ mod tests {
                     quote_token: "USDC".to_string(),
                     price_usd: 1.5,
                     liquidity_usd: 500_000.0,
+                    liquidity_base: None,
                     volume_24h: 1_000_000.0,
                     price_change_24h: 5.2,
                     buys_24h: 100,

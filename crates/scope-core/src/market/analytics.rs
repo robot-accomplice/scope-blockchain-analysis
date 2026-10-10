@@ -55,6 +55,7 @@ mod tests {
             price_usd: price,
             volume_24h: 0.0,
             liquidity_usd: liquidity,
+            liquidity_base: None,
             price_change_24h: 0.0,
             buys_24h: 0,
             sells_24h: 0,

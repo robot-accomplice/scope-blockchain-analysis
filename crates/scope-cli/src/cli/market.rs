@@ -2003,6 +2003,7 @@ capabilities:
                 price_usd: 1.0,
                 volume_24h,
                 liquidity_usd,
+                liquidity_base: None,
                 price_change_24h: 0.0,
                 buys_24h: 0,
                 sells_24h: 0,

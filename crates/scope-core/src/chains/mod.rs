@@ -456,6 +456,11 @@ pub struct DexPair {
     /// Liquidity in USD.
     pub liquidity_usd: f64,
 
+    /// Base-token reserve of the pool (DexScreener `liquidity.base`), when
+    /// reported. The synthetic AMM order book is built from it.
+    #[serde(default)]
+    pub liquidity_base: Option<f64>,
+
     /// Price change percentage in 24h.
     pub price_change_24h: f64,
 
