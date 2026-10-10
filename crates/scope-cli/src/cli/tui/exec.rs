@@ -1071,6 +1071,29 @@ mod tests {
     }
 
     #[test]
+    fn test_monitor_never_gets_the_auto_chain() {
+        // The REPL passed SessionContext.chain ("auto") straight to the
+        // monitor, which has no "auto" handling. The TUI parses `monitor`
+        // with clap: an auto context adds no --chain, so clap's default
+        // applies; a pinned chain is passed as given.
+        let inv = run_of(plan_line("monitor USDC", &mut SessionContext::default()).0);
+        let Commands::Monitor(m) = inv.command else {
+            panic!("expected monitor")
+        };
+        assert_eq!(m.chain, "ethereum");
+
+        let mut ctx = SessionContext {
+            chain: "solana".into(),
+            ..Default::default()
+        };
+        let inv = run_of(plan_line("monitor USDC", &mut ctx).0);
+        let Commands::Monitor(m) = inv.command else {
+            panic!("expected monitor")
+        };
+        assert_eq!(m.chain, "solana");
+    }
+
+    #[test]
     fn test_nested_tui_and_web_are_refused() {
         for line in ["interactive", "tui", "shell", "web"] {
             let (p, cap) = plan_line(line, &mut SessionContext::default());

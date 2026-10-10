@@ -7,7 +7,14 @@ use scope::market::{OrderBook, OrderBookLevel, Trade, TradeSide};
 use std::collections::VecDeque;
 use std::fs;
 use std::io::{BufWriter, Write as _};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// Default directory for CSV exports when config `export.path` is not set.
+const DEFAULT_EXPORT_DIR: &str = "./scope-exports";
+
+/// The CSV header of a monitor export.
+const EXPORT_HEADER: &str =
+    "timestamp,price_usd,volume_24h,liquidity_usd,buys_24h,sells_24h,market_cap\n";
 use std::time::{Duration, Instant};
 
 use super::config::{
@@ -171,6 +178,9 @@ pub struct MonitorState {
     /// Path to the current export file.
     pub export_path: Option<PathBuf>,
 
+    /// Directory where the E key starts new exports (config `export.path`).
+    pub export_dir: PathBuf,
+
     /// Rolling volume average for spike detection (simple moving average).
     pub volume_avg: f64,
 
@@ -292,6 +302,7 @@ impl MonitorState {
             // Phase 8: Export
             export_active: false,
             export_path: None,
+            export_dir: PathBuf::from(DEFAULT_EXPORT_DIR),
             volume_avg: token_data.volume_24h,
             // Phase 9: Auto-Pause
             auto_pause_on_input: false,
@@ -312,6 +323,11 @@ impl MonitorState {
         self.color_scheme = config.color_scheme;
         self.alerts = config.alerts.clone();
         self.auto_pause_on_input = config.auto_pause_on_input;
+        self.export_dir = config
+            .export
+            .path
+            .as_deref()
+            .map_or_else(|| PathBuf::from(DEFAULT_EXPORT_DIR), PathBuf::from);
     }
 
     /// Toggles between line and candlestick chart modes.
@@ -758,49 +774,69 @@ impl MonitorState {
     }
 
     /// Writes a single CSV row to the export file.
+    ///
+    /// A failed write stops the export and logs the reason, so the REC
+    /// indicator never claims rows that were not written.
     pub(crate) fn write_export_row(&mut self) {
-        if let Some(ref path) = self.export_path {
-            // Open file in append mode
-            if let Ok(file) = fs::OpenOptions::new().append(true).open(path) {
-                let mut writer = BufWriter::new(file);
-                let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-                let market_cap_str = self
-                    .market_cap
-                    .map(|mc| format!("{:.2}", mc))
-                    .unwrap_or_default();
-                let row = format!(
-                    "{},{:.8},{:.2},{:.2},{},{},{}\n",
-                    timestamp,
-                    self.current_price,
-                    self.volume_24h,
-                    self.liquidity_usd,
-                    self.buys_24h,
-                    self.sells_24h,
-                    market_cap_str,
-                );
-                let _ = writer.write_all(row.as_bytes());
-            }
+        let Some(path) = self.export_path.clone() else {
+            return;
+        };
+        if let Err(e) = self.append_export_row(&path) {
+            self.log(format!("Export failed: {}: {}", path.display(), e));
+            self.export_active = false;
+            self.export_path = None;
         }
     }
 
-    /// Starts CSV export: creates the file and writes the header.
+    fn append_export_row(&self, path: &Path) -> std::io::Result<()> {
+        let file = fs::OpenOptions::new().append(true).open(path)?;
+        let mut writer = BufWriter::new(file);
+        let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let market_cap_str = self
+            .market_cap
+            .map(|mc| format!("{:.2}", mc))
+            .unwrap_or_default();
+        let row = format!(
+            "{},{:.8},{:.2},{:.2},{},{},{}\n",
+            timestamp,
+            self.current_price,
+            self.volume_24h,
+            self.liquidity_usd,
+            self.buys_24h,
+            self.sells_24h,
+            market_cap_str,
+        );
+        writer.write_all(row.as_bytes())?;
+        writer.flush()
+    }
+
+    /// Starts CSV export in the export directory, with a timestamped name.
+    /// A failure is logged and leaves the export off.
     pub fn start_export(&mut self) {
-        let base_dir = PathBuf::from("./scope-exports");
-        let _ = fs::create_dir_all(&base_dir);
         let date_str = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
-        let filename = format!("{}_{}.csv", self.symbol, date_str);
-        let path = base_dir.join(filename);
-
-        // Write CSV header
-        if let Ok(mut file) = fs::File::create(&path) {
-            let header =
-                "timestamp,price_usd,volume_24h,liquidity_usd,buys_24h,sells_24h,market_cap\n";
-            let _ = file.write_all(header.as_bytes());
+        let path = self
+            .export_dir
+            .join(format!("{}_{}.csv", self.symbol, date_str));
+        if let Err(e) = self.start_export_to(&path) {
+            self.log(format!("Export failed: {}: {}", path.display(), e));
         }
+    }
 
-        self.export_path = Some(path.clone());
+    /// Starts CSV export at `path`: creates its directory and the file, and
+    /// writes the header.
+    ///
+    /// # Errors
+    ///
+    /// Returns the file system error. The export stays off.
+    pub fn start_export_to(&mut self, path: &Path) -> std::io::Result<()> {
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            fs::create_dir_all(parent)?;
+        }
+        fs::File::create(path)?.write_all(EXPORT_HEADER.as_bytes())?;
+        self.export_path = Some(path.to_path_buf());
         self.export_active = true;
         self.log(format!("Export started: {}", path.display()));
+        Ok(())
     }
 
     /// Stops CSV export and closes the file.

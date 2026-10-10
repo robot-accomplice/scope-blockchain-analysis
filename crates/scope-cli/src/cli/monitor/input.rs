@@ -5,7 +5,7 @@ use crossterm::{
     execute,
 };
 use scope::chains::ChainClient;
-use scope::chains::dex::{DexClient, DexDataSource};
+use scope::chains::dex::DexDataSource;
 use scope::error::{Result, ScopeError};
 use std::io;
 use std::time::{Duration, Instant};
@@ -47,11 +47,15 @@ pub struct MonitorApp<B: ratatui::backend::Backend = ratatui::backend::Crossterm
 
 /// Production constructor and terminal-specific methods.
 impl MonitorApp {
-    /// Creates a new monitor application with a real terminal and live DEX client.
+    /// Creates a new monitor application with a real terminal.
+    ///
+    /// `dex_client` comes from the caller's client factory, so the monitor
+    /// uses the configured HTTP transport (and Ghola) for every refresh.
     pub fn new(
         initial_data: DexTokenData,
         chain: &str,
         monitor_config: &MonitorConfig,
+        dex_client: Box<dyn DexDataSource>,
         chain_client: Option<Box<dyn ChainClient>>,
         exchange_client: Option<scope::market::ExchangeClient>,
     ) -> Result<Self> {
@@ -73,7 +77,7 @@ impl MonitorApp {
         Ok(Self {
             terminal,
             state,
-            dex_client: Box::new(DexClient::new()),
+            dex_client,
             chain_client,
             exchange_client,
             should_exit: false,

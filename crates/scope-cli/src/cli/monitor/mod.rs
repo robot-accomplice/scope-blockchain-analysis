@@ -195,13 +195,36 @@ pub async fn run_direct(
         }
     }
 
+    let (monitor_config, export_file) = monitor_config_from_args(&args, config);
+
     // Build a SessionContext from the CLI args (no interactive session needed)
     let ctx = SessionContext {
         chain: args.chain,
         ..SessionContext::default()
     };
 
-    // Build a MonitorConfig from config-file defaults + CLI overrides
+    // Use a temporary Config with the CLI-overridden monitor settings
+    let mut effective_config = config.clone();
+    effective_config.monitor = monitor_config;
+
+    run(
+        Some(args.token),
+        args.pair,
+        export_file,
+        &ctx,
+        &effective_config,
+        clients,
+    )
+    .await
+}
+
+/// Builds the monitor config from config-file defaults and CLI overrides.
+/// Returns the `--export` file separately: config `export.path` is the
+/// export directory for the E key, `--export` is a file to start at launch.
+pub(crate) fn monitor_config_from_args(
+    args: &MonitorArgs,
+    config: &Config,
+) -> (scope::config::MonitorConfig, Option<PathBuf>) {
     let mut monitor_config = config.monitor.clone();
     if let Some(layout) = args.layout {
         monitor_config.layout = layout;
@@ -215,25 +238,10 @@ pub async fn run_direct(
     if let Some(color_scheme) = args.color_scheme {
         monitor_config.color_scheme = color_scheme;
     }
-    if let Some(ref path) = args.export {
-        monitor_config.export.path = Some(path.to_string_lossy().into_owned());
-    }
     if let Some(ref venue) = args.venue {
         monitor_config.venue = Some(venue.clone());
     }
-
-    // Use a temporary Config with the CLI-overridden monitor settings
-    let mut effective_config = config.clone();
-    effective_config.monitor = monitor_config;
-
-    run(
-        Some(args.token),
-        args.pair,
-        &ctx,
-        &effective_config,
-        clients,
-    )
-    .await
+    (monitor_config, args.export.clone())
 }
 
 /// Entry point for the monitor command from interactive mode.
@@ -244,6 +252,7 @@ pub async fn run_direct(
 pub async fn run(
     token: Option<String>,
     explicit_pair: Option<String>,
+    export_file: Option<PathBuf>,
     ctx: &SessionContext,
     config: &Config,
     clients: &dyn ChainClientFactory,
@@ -324,9 +333,17 @@ pub async fn run(
         initial_data,
         &ctx.chain,
         &config.monitor,
+        clients.create_dex_client(),
         chain_client,
         exchange_client,
     )?;
+
+    if let Some(path) = export_file {
+        // Drop restores the terminal before the error reaches the user.
+        app.state.start_export_to(&path).map_err(|e| {
+            ScopeError::Export(format!("cannot write --export {}: {}", path.display(), e))
+        })?;
+    }
 
     // In explicit-pair mode, override the auto-formatted pair with the user's exact pair
     if let Some(ref pair_str) = explicit_pair {
@@ -3333,6 +3350,8 @@ widgets:
     fn test_export_toggle() {
         let token_data = create_test_token_data();
         let mut state = MonitorState::new(&token_data, "ethereum");
+        let dir = tempfile::tempdir().unwrap();
+        state.export_dir = dir.path().to_path_buf();
 
         state.toggle_export();
         assert!(state.export_active);
@@ -3343,6 +3362,90 @@ widgets:
 
         // Cleanup
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_export_toggle_uses_configured_directory() {
+        // `export.path` in config is the export directory (config.rs docs);
+        // the E key must write there, not to ./scope-exports.
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = MonitorState::new(&create_test_token_data(), "ethereum");
+        let mut cfg = MonitorConfig::default();
+        cfg.export.path = Some(dir.path().to_string_lossy().into_owned());
+        state.apply_config(&cfg);
+        state.toggle_export();
+        let path = state.export_path.clone().unwrap();
+        assert!(path.starts_with(dir.path()), "{}", path.display());
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .starts_with("timestamp,")
+        );
+    }
+
+    #[test]
+    fn test_start_export_to_writes_header_at_the_given_file() {
+        // `--export FILE` starts the export at that exact file.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("usdc.csv");
+        let mut state = MonitorState::new(&create_test_token_data(), "ethereum");
+        state.start_export_to(&path).unwrap();
+        assert!(state.export_active);
+        assert_eq!(state.export_path.as_deref(), Some(path.as_path()));
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .starts_with("timestamp,")
+        );
+    }
+
+    #[test]
+    fn test_start_export_to_unwritable_path_fails_loud() {
+        // A path under a regular file cannot be created: the user must get
+        // the error, and the REC indicator must stay off.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a-file");
+        std::fs::write(&file, "x").unwrap();
+        let mut state = MonitorState::new(&create_test_token_data(), "ethereum");
+        assert!(state.start_export_to(&file.join("out.csv")).is_err());
+        assert!(!state.export_active);
+        assert!(state.export_path.is_none());
+    }
+
+    #[test]
+    fn test_failed_export_row_stops_export_and_logs() {
+        // A row that cannot be written must not be dropped in silence.
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = MonitorState::new(&create_test_token_data(), "ethereum");
+        state.export_path = Some(dir.path().to_path_buf()); // a directory: open fails
+        state.export_active = true;
+        state.write_export_row();
+        assert!(!state.export_active);
+        assert!(
+            state
+                .log_messages
+                .iter()
+                .any(|m| m.contains("Export failed")),
+            "{:?}",
+            state.log_messages
+        );
+    }
+
+    #[test]
+    fn test_cli_export_file_is_not_written_into_export_directory() {
+        // --export is a file to start at launch; config export.path is a
+        // directory. The two must not share one field.
+        use clap::Parser;
+        let cli =
+            crate::cli::Cli::try_parse_from(["scope", "monitor", "USDC", "--export", "out.csv"])
+                .unwrap();
+        let crate::cli::Commands::Monitor(args) = cli.command else {
+            panic!("expected monitor")
+        };
+        let config = Config::default();
+        let (monitor_config, export_file) = monitor_config_from_args(&args, &config);
+        assert_eq!(monitor_config.export.path, config.monitor.export.path);
+        assert_eq!(export_file, Some(PathBuf::from("out.csv")));
     }
 
     #[test]
@@ -3374,6 +3477,8 @@ widgets:
     fn test_keybinding_e_toggles_export() {
         let token_data = create_test_token_data();
         let mut state = MonitorState::new(&token_data, "ethereum");
+        let dir = tempfile::tempdir().unwrap();
+        state.export_dir = dir.path().to_path_buf();
 
         handle_key_event_on_state(make_key_event(KeyCode::Char('e')), &mut state);
         assert!(state.export_active);
@@ -4741,6 +4846,8 @@ refresh_seconds: 5
         assert!(!app.state.paused);
 
         // e = toggle export
+        let dir = tempfile::tempdir().unwrap();
+        app.state.export_dir = dir.path().to_path_buf();
         app.handle_key_event(make_key_event(KeyCode::Char('e')));
         assert!(app.state.export_active);
         // Stop export to avoid file handles
@@ -5171,6 +5278,8 @@ refresh_seconds: 5
             .expect("render");
 
         // 3. Start export
+        let dir = tempfile::tempdir().unwrap();
+        app.state.export_dir = dir.path().to_path_buf();
         app.handle_key_event(make_key_event(KeyCode::Char('e')));
         assert!(app.state.export_active);
 
