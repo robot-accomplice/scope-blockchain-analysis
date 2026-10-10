@@ -1218,7 +1218,7 @@ impl EthereumClient {
                 || api_response.message.contains("API")
                 || api_response.message.contains("NOTOK")
             {
-                eprintln!("  ⚠ Holder data requires a Pro API key — skipping");
+                crate::notice!("  ⚠ Holder data requires a Pro API key — skipping");
                 tracing::debug!("Token holder API unavailable: {}", api_response.message);
                 return Ok(Vec::new());
             }

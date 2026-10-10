@@ -237,7 +237,10 @@ fn init_logging(verbosity: u8) {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(format!("scope={},warn", level)));
 
+    // Logs go to the diagnostics sink: stderr by default, the TUI pane while
+    // the TUI owns the screen. Never stdout, which carries command data.
     let builder = tracing_subscriber::fmt()
+        .with_writer(|| scope::diag::Stderr)
         .with_env_filter(filter)
         .with_target(false)
         .with_thread_ids(false);

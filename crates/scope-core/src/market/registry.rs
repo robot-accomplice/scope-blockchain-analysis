@@ -80,7 +80,7 @@ impl VenueRegistry {
                                 registry.venues.insert(desc.id.clone(), desc);
                             }
                             Err(e) => {
-                                eprintln!(
+                                crate::notice!(
                                     "Warning: failed to parse venue file {}: {}",
                                     path.display(),
                                     e
@@ -88,7 +88,7 @@ impl VenueRegistry {
                             }
                         },
                         Err(e) => {
-                            eprintln!(
+                            crate::notice!(
                                 "Warning: failed to read venue file {}: {}",
                                 path.display(),
                                 e

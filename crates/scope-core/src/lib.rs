@@ -216,6 +216,11 @@ pub mod config;
 /// for token analytics data.
 pub mod display;
 
+/// Diagnostics sink for library warnings.
+///
+/// Routes warnings to stderr, or to a TUI pane while a redirect is active.
+pub mod diag;
+
 /// Error types and result aliases.
 ///
 /// Defines [`ScopeError`] for all error conditions and provides a
