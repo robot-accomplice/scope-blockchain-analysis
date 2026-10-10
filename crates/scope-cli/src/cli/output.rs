@@ -86,7 +86,7 @@ impl Output {
         self.progress
     }
 
-    /// Writes formatted data to the data channel. Use [`outln!`] / [`out!`].
+    /// Writes formatted data to the data channel. Use [`outln!`](crate::outln) / [`out!`](crate::out).
     ///
     /// # Errors
     ///
@@ -96,7 +96,7 @@ impl Output {
         emit(&self.out, args)
     }
 
-    /// Writes formatted text to the diagnostic channel. Use [`errln!`] / [`err!`].
+    /// Writes formatted text to the diagnostic channel. Use [`errln!`](crate::errln) / [`err!`](crate::err).
     ///
     /// # Errors
     ///
