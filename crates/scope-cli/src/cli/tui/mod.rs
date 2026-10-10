@@ -24,6 +24,7 @@
 //! mode: the TUI gives the terminal back while it runs.
 
 pub mod app;
+pub mod complete;
 pub mod exec;
 pub mod journal;
 pub mod vocab;
