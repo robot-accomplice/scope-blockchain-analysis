@@ -486,6 +486,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_loop_suspend_mode_hands_over_the_terminal_and_records() {
+        // A suspend-mode command must release the screen, run on the plain
+        // terminal, take the screen back, and leave a trace in the pane.
+        // `setup --key` with an unknown name returns before reading stdin.
+        let _lock = DIAG_LOCK.lock().await;
+        let (res, state, host, suspended) = drive(script(&["setup --key nosuchkey"])).await;
+        res.unwrap();
+        assert_eq!((host.suspends, host.resumes), (1, 1));
+        assert!(
+            suspended
+                .out()
+                .contains("── scope setup --key nosuchkey ──")
+        );
+        assert!(
+            suspended
+                .out()
+                .contains("Press Enter to return to the TUI.")
+        );
+        assert!(
+            state
+                .scrollback_text()
+                .contains("Ran outside the TUI: setup --key nosuchkey (ok).")
+        );
+    }
+
+    #[tokio::test]
     async fn test_loop_ignores_non_press_keys_and_ends_on_stream_end() {
         let _lock = DIAG_LOCK.lock().await;
         let mut events = vec![Ok(Event::Resize(80, 24))];
