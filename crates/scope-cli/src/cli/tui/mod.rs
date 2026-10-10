@@ -28,6 +28,7 @@ pub mod complete;
 pub mod exec;
 pub mod hint;
 pub mod journal;
+pub mod palette;
 pub mod vocab;
 
 use app::{Action, Ending, TuiState, run_invocation};

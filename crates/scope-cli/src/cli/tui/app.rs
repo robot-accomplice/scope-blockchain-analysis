@@ -34,6 +34,8 @@ const MENU_ROWS: usize = 8;
 pub enum Overlay {
     /// Completion candidates.
     Menu(Menu),
+    /// The Ctrl-K command palette.
+    Palette(super::palette::PaletteState),
 }
 
 /// The open completion menu.
@@ -161,6 +163,36 @@ impl TuiState {
     /// Applies one key event.
     pub fn handle_key(&mut self, key: KeyEvent) -> Action {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if let Some(Overlay::Palette(p)) = &mut self.overlay {
+            let count = p.matches().len();
+            match key.code {
+                KeyCode::Esc => self.overlay = None,
+                KeyCode::Enter => {
+                    let fill = p
+                        .matches()
+                        .get(p.selected)
+                        .map(|&i| p.items[i].fill.clone());
+                    self.overlay = None;
+                    if let Some(fill) = fill {
+                        self.set_input(fill);
+                    }
+                }
+                KeyCode::Down | KeyCode::Tab if count > 0 => p.selected = (p.selected + 1) % count,
+                KeyCode::Up | KeyCode::BackTab if count > 0 => {
+                    p.selected = (p.selected + count - 1) % count
+                }
+                KeyCode::Backspace => {
+                    p.query.pop();
+                    p.selected = 0;
+                }
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    p.query.push(c);
+                    p.selected = 0;
+                }
+                _ => {}
+            }
+            return Action::None;
+        }
         if let Some(Overlay::Menu(menu)) = &mut self.overlay {
             match key.code {
                 KeyCode::Tab | KeyCode::Down => {
@@ -230,6 +262,11 @@ impl TuiState {
             KeyCode::Right => self.cursor = (self.cursor + 1).min(self.char_len()),
             KeyCode::Home => self.cursor = 0,
             KeyCode::End => self.cursor = self.char_len(),
+            KeyCode::Char('k') if ctrl => {
+                self.overlay = Some(Overlay::Palette(super::palette::PaletteState::new(
+                    super::palette::items(&self.history),
+                )));
+            }
             KeyCode::Char('a') if ctrl => self.cursor = 0,
             KeyCode::Char('e') if ctrl => self.cursor = self.char_len(),
             KeyCode::Char('u') if ctrl => {
@@ -614,6 +651,41 @@ impl TuiState {
             }
             f.render_widget(Paragraph::new(Line::from(spans)), hint_row);
         }
+        if let Some(Overlay::Palette(p)) = &self.overlay {
+            let area = f.area();
+            let width = area.width.saturating_sub(4).min(80);
+            let height = area.height.saturating_sub(4).min(16);
+            let rect = ratatui::layout::Rect {
+                x: area.x + (area.width.saturating_sub(width)) / 2,
+                y: area.y + 1,
+                width,
+                height,
+            };
+            let rows = height.saturating_sub(3) as usize;
+            let matches = p.matches();
+            let first = p.selected.saturating_sub(rows.saturating_sub(1));
+            let mut lines = vec![Line::from(format!("> {}", p.query))];
+            for (n, &i) in matches.iter().enumerate().skip(first).take(rows) {
+                let it = &p.items[i];
+                let style = if n == p.selected {
+                    Style::new().add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::new()
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{:<28}", it.label), style),
+                    Span::styled(
+                        format!(" {}", it.description),
+                        Style::new().fg(Color::DarkGray),
+                    ),
+                ]));
+            }
+            f.render_widget(ratatui::widgets::Clear, rect);
+            f.render_widget(
+                Paragraph::new(lines).block(Block::bordered().title(" Commands (Ctrl-K) ")),
+                rect,
+            );
+        }
         f.render_widget(Paragraph::new(self.status_line()), status);
     }
 
@@ -825,6 +897,48 @@ mod tests {
             text
         );
         assert!(!text.contains("v00"), "at most 8 rows: {}", text);
+        screen(&s, 10, 5);
+    }
+
+    fn ctrl_k() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn test_ctrl_k_opens_palette_and_enter_fills_input_without_running() {
+        let mut s = state();
+        s.handle_key(ctrl_k());
+        assert!(matches!(s.overlay, Some(Overlay::Palette(_))));
+        type_str(&mut s, "msum");
+        assert_eq!(s.handle_key(key(KeyCode::Enter)), Action::None);
+        assert_eq!(s.input, "market summary ");
+        assert!(s.overlay.is_none());
+    }
+
+    #[test]
+    fn test_palette_escape_keeps_the_input() {
+        let mut s = state();
+        type_str(&mut s, "draft");
+        s.handle_key(ctrl_k());
+        type_str(&mut s, "zzz");
+        s.handle_key(key(KeyCode::Esc));
+        assert!(s.overlay.is_none());
+        assert_eq!(s.input, "draft");
+    }
+
+    #[test]
+    fn test_palette_with_long_history_renders_bounded() {
+        // Review Focus 4.
+        let mut s = state();
+        for i in 0..60 {
+            type_str(&mut s, &format!("venues list {}", i));
+            s.handle_key(key(KeyCode::Enter));
+        }
+        s.handle_key(ctrl_k());
+        for _ in 0..30 {
+            s.handle_key(key(KeyCode::Down));
+        }
+        screen(&s, 80, 20);
         screen(&s, 10, 5);
     }
 
