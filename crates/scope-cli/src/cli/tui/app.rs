@@ -7,6 +7,7 @@
 
 use super::exec::{self, Invocation, Plan, Route};
 use super::journal::{Event, Journal};
+use super::vocab::Vocab;
 use crate::cli::interactive::SessionContext;
 use crate::cli::output::{Captured, Output};
 use ansi_to_tui::IntoText;
@@ -25,6 +26,45 @@ pub const SCROLLBACK_LIMIT: usize = 5000;
 
 /// Lines moved by one PageUp / PageDown.
 const PAGE: usize = 10;
+
+/// The most completion candidates shown at once.
+const MENU_ROWS: usize = 8;
+
+/// A floating list over the screen.
+pub enum Overlay {
+    /// Completion candidates.
+    Menu(Menu),
+    /// The Ctrl-K command palette.
+    Palette(super::palette::PaletteState),
+}
+
+/// The open completion menu.
+pub struct Menu {
+    /// Byte index where the completed word starts.
+    pub start: usize,
+    /// The candidates.
+    pub candidates: Vec<String>,
+    /// The selected candidate.
+    pub selected: usize,
+}
+
+fn common_prefix(items: &[String]) -> String {
+    let first = &items[0];
+    let mut end = first.len();
+    for s in &items[1..] {
+        end = end.min(
+            first
+                .bytes()
+                .zip(s.bytes())
+                .take_while(|(a, b)| a == b)
+                .count(),
+        );
+    }
+    while !first.is_char_boundary(end) {
+        end -= 1;
+    }
+    first[..end].to_string()
+}
 
 /// What the event loop must do after a key.
 #[derive(Debug, PartialEq, Eq)]
@@ -87,11 +127,15 @@ pub struct TuiState {
     pub running: Option<Running>,
     /// The event log.
     journal: Journal,
+    /// Completion values from the user's stores.
+    vocab: Vocab,
+    /// The open completion menu or palette, if any.
+    pub overlay: Option<Overlay>,
 }
 
 impl TuiState {
     /// Creates the state with a context and a history.
-    pub fn new(ctx: SessionContext, journal: Journal) -> Self {
+    pub fn new(ctx: SessionContext, journal: Journal, vocab: Vocab) -> Self {
         let history = journal.load_history();
         Self {
             input: String::new(),
@@ -104,6 +148,8 @@ impl TuiState {
             ctx,
             running: None,
             journal,
+            vocab,
+            overlay: None,
         }
     }
 
@@ -117,6 +163,69 @@ impl TuiState {
     /// Applies one key event.
     pub fn handle_key(&mut self, key: KeyEvent) -> Action {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        // Ctrl-C closes the palette and keeps its normal meaning (cancel a
+        // running command, clear the line), so a command can always be
+        // stopped with one key.
+        if ctrl
+            && key.code == KeyCode::Char('c')
+            && matches!(self.overlay, Some(Overlay::Palette(_)))
+        {
+            self.overlay = None;
+        }
+        if let Some(Overlay::Palette(p)) = &mut self.overlay {
+            let count = p.matches().len();
+            match key.code {
+                KeyCode::Esc => self.overlay = None,
+                KeyCode::Enter => {
+                    let fill = p
+                        .matches()
+                        .get(p.selected)
+                        .map(|&i| p.items[i].fill.clone());
+                    self.overlay = None;
+                    if let Some(fill) = fill {
+                        self.set_input(fill);
+                    }
+                }
+                KeyCode::Down | KeyCode::Tab if count > 0 => p.selected = (p.selected + 1) % count,
+                KeyCode::Up | KeyCode::BackTab if count > 0 => {
+                    p.selected = (p.selected + count - 1) % count
+                }
+                KeyCode::Backspace => {
+                    p.query.pop();
+                    p.selected = 0;
+                }
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    p.query.push(c);
+                    p.selected = 0;
+                }
+                _ => {}
+            }
+            return Action::None;
+        }
+        if let Some(Overlay::Menu(menu)) = &mut self.overlay {
+            match key.code {
+                KeyCode::Tab | KeyCode::Down => {
+                    menu.selected = (menu.selected + 1) % menu.candidates.len();
+                    return Action::None;
+                }
+                KeyCode::BackTab | KeyCode::Up => {
+                    menu.selected =
+                        (menu.selected + menu.candidates.len() - 1) % menu.candidates.len();
+                    return Action::None;
+                }
+                KeyCode::Enter => {
+                    let (start, pick) = (menu.start, menu.candidates[menu.selected].clone());
+                    self.overlay = None;
+                    self.replace_word(start, &pick, true);
+                    return Action::None;
+                }
+                KeyCode::Esc => {
+                    self.overlay = None;
+                    return Action::None;
+                }
+                _ => self.overlay = None,
+            }
+        }
         match key.code {
             KeyCode::Char('c') if ctrl => {
                 if self.running.is_some() {
@@ -153,6 +262,7 @@ impl TuiState {
                 }
                 return Action::Submit(line);
             }
+            KeyCode::Tab => self.tab_complete(),
             KeyCode::Up => self.history_prev(),
             KeyCode::Down => self.history_next(),
             KeyCode::PageUp => self.scroll = self.scroll.saturating_add(PAGE),
@@ -161,6 +271,11 @@ impl TuiState {
             KeyCode::Right => self.cursor = (self.cursor + 1).min(self.char_len()),
             KeyCode::Home => self.cursor = 0,
             KeyCode::End => self.cursor = self.char_len(),
+            KeyCode::Char('k') if ctrl => {
+                self.overlay = Some(Overlay::Palette(super::palette::PaletteState::new(
+                    super::palette::items(&self.history),
+                )));
+            }
             KeyCode::Char('a') if ctrl => self.cursor = 0,
             KeyCode::Char('e') if ctrl => self.cursor = self.char_len(),
             KeyCode::Char('u') if ctrl => {
@@ -188,6 +303,36 @@ impl TuiState {
             _ => {}
         }
         Action::None
+    }
+
+    fn tab_complete(&mut self) {
+        if self.cursor != self.char_len() {
+            return;
+        }
+        let c = super::complete::complete(&self.input, &self.vocab);
+        match c.candidates.len() {
+            0 => {}
+            1 => self.replace_word(c.start, &c.candidates[0], true),
+            _ => {
+                let prefix = common_prefix(&c.candidates);
+                self.replace_word(c.start, &prefix, false);
+                self.overlay = Some(Overlay::Menu(Menu {
+                    start: c.start,
+                    candidates: c.candidates,
+                    selected: 0,
+                }));
+            }
+        }
+    }
+
+    /// Replaces `input[start..]` with `word`, optionally followed by a space.
+    fn replace_word(&mut self, start: usize, word: &str, space: bool) {
+        self.input.truncate(start);
+        self.input.push_str(word);
+        if space {
+            self.input.push(' ');
+        }
+        self.cursor = self.char_len();
     }
 
     fn char_len(&self) -> usize {
@@ -435,9 +580,10 @@ impl TuiState {
 
     /// Draws the screen: output pane, input line, status line.
     pub fn render(&self, f: &mut Frame) {
-        let [pane, input, status] = Layout::vertical([
+        let [pane, input, hint_row, status] = Layout::vertical([
             Constraint::Min(3),
             Constraint::Length(3),
+            Constraint::Length(1),
             Constraint::Length(1),
         ])
         .areas(f.area());
@@ -468,6 +614,87 @@ impl TuiState {
             input.y + 1,
         ));
 
+        if let Some(Overlay::Menu(m)) = &self.overlay {
+            let rows = m.candidates.len().min(MENU_ROWS);
+            let first = m.selected.saturating_sub(rows - 1);
+            let height = (rows as u16 + 2).min(input.y);
+            let width = m
+                .candidates
+                .iter()
+                .map(|c| c.chars().count())
+                .max()
+                .unwrap_or(0) as u16
+                + 4;
+            let area = ratatui::layout::Rect {
+                x: input.x,
+                y: input.y.saturating_sub(height),
+                width: width.min(input.width),
+                height,
+            };
+            let lines: Vec<Line> = m.candidates[first..first + rows]
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    let style = if first + i == m.selected {
+                        Style::new().add_modifier(Modifier::REVERSED)
+                    } else {
+                        Style::new()
+                    };
+                    Line::styled(c.clone(), style)
+                })
+                .collect();
+            f.render_widget(ratatui::widgets::Clear, area);
+            f.render_widget(Paragraph::new(lines).block(Block::bordered()), area);
+        }
+
+        if let Some(h) = super::hint::hint(&self.input) {
+            let mut spans = vec![Span::styled(
+                format!(" {}", h.text),
+                Style::new().fg(Color::DarkGray),
+            )];
+            if let Some(next) = h.next {
+                spans.push(Span::styled(
+                    format!("  next: {}", next),
+                    Style::new().fg(Color::Yellow),
+                ));
+            }
+            f.render_widget(Paragraph::new(Line::from(spans)), hint_row);
+        }
+        if let Some(Overlay::Palette(p)) = &self.overlay {
+            let area = f.area();
+            let width = area.width.saturating_sub(4).min(80);
+            let height = area.height.saturating_sub(4).min(16);
+            let rect = ratatui::layout::Rect {
+                x: area.x + (area.width.saturating_sub(width)) / 2,
+                y: area.y + 1,
+                width,
+                height,
+            };
+            let rows = height.saturating_sub(3) as usize;
+            let matches = p.matches();
+            let first = p.selected.saturating_sub(rows.saturating_sub(1));
+            let mut lines = vec![Line::from(format!("> {}", p.query))];
+            for (n, &i) in matches.iter().enumerate().skip(first).take(rows) {
+                let it = &p.items[i];
+                let style = if n == p.selected {
+                    Style::new().add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::new()
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{:<28}", it.label), style),
+                    Span::styled(
+                        format!(" {}", it.description),
+                        Style::new().fg(Color::DarkGray),
+                    ),
+                ]));
+            }
+            f.render_widget(ratatui::widgets::Clear, rect);
+            f.render_widget(
+                Paragraph::new(lines).block(Block::bordered().title(" Commands (Ctrl-K) ")),
+                rect,
+            );
+        }
         f.render_widget(Paragraph::new(self.status_line()), status);
     }
 
@@ -545,7 +772,11 @@ mod tests {
     }
 
     fn state() -> TuiState {
-        TuiState::new(SessionContext::default(), Journal::default())
+        TuiState::new(
+            SessionContext::default(),
+            Journal::default(),
+            Vocab::default(),
+        )
     }
 
     fn type_str(s: &mut TuiState, text: &str) {
@@ -566,6 +797,176 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn vocab_state() -> TuiState {
+        TuiState::new(
+            SessionContext::default(),
+            Journal::default(),
+            Vocab {
+                venues: vec!["binance".into(), "bitget".into(), "okx".into()],
+                ..Vocab::default()
+            },
+        )
+    }
+
+    #[test]
+    fn test_tab_single_candidate_completes_and_adds_space() {
+        let mut s = vocab_state();
+        type_str(&mut s, "market su");
+        s.handle_key(key(KeyCode::Tab));
+        assert_eq!(s.input, "market summary ");
+        assert!(s.overlay.is_none());
+    }
+
+    #[test]
+    fn test_tab_many_candidates_fills_prefix_and_opens_menu() {
+        let mut s = vocab_state();
+        type_str(&mut s, "market summary USDC --venue b");
+        s.handle_key(key(KeyCode::Tab));
+        assert_eq!(s.input, "market summary USDC --venue bi");
+        let Some(Overlay::Menu(m)) = &s.overlay else {
+            panic!("menu expected")
+        };
+        assert_eq!(m.candidates, vec!["binance", "bitget"]);
+        s.handle_key(key(KeyCode::Tab));
+        s.handle_key(key(KeyCode::Enter));
+        assert_eq!(s.input, "market summary USDC --venue bitget ");
+        assert!(
+            s.overlay.is_none(),
+            "Enter in the menu accepts; it does not submit"
+        );
+    }
+
+    #[test]
+    fn test_tab_mid_line_does_nothing() {
+        // Review Focus 1.
+        let mut s = vocab_state();
+        type_str(&mut s, "market su");
+        s.handle_key(key(KeyCode::Left));
+        s.handle_key(key(KeyCode::Tab));
+        assert_eq!(s.input, "market su");
+        assert!(s.overlay.is_none());
+    }
+
+    #[test]
+    fn test_menu_escape_and_other_keys_close_it() {
+        let mut s = vocab_state();
+        type_str(&mut s, "ad");
+        s.handle_key(key(KeyCode::Tab));
+        assert!(matches!(s.overlay, Some(Overlay::Menu(_))));
+        s.handle_key(key(KeyCode::Esc));
+        assert!(s.overlay.is_none());
+        assert_eq!(s.input, "address", "Esc closes the menu, not the line");
+        s.handle_key(key(KeyCode::Tab));
+        type_str(&mut s, "-");
+        assert!(s.overlay.is_none());
+        assert_eq!(s.input, "address-");
+    }
+
+    #[test]
+    fn test_tab_works_while_a_command_runs() {
+        // Review Focus 5.
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let mut s = vocab_state();
+        let inv = Invocation {
+            command: venues_list(),
+            route: Route::Pane,
+            ai: false,
+            argv: vec![],
+        };
+        s.start("venues list", &inv);
+        type_str(&mut s, "market su");
+        s.handle_key(key(KeyCode::Tab));
+        assert_eq!(s.input, "market summary ");
+        assert_eq!(s.handle_key(key(KeyCode::Enter)), Action::None);
+        s.finish(Ending::Cancelled);
+    }
+
+    #[test]
+    fn test_menu_renders_bounded_and_tiny_terminal_is_safe() {
+        // Review Focus 4.
+        let mut s = TuiState::new(
+            SessionContext::default(),
+            Journal::default(),
+            Vocab {
+                venues: (0..40).map(|i| format!("v{:02}", i)).collect(),
+                ..Vocab::default()
+            },
+        );
+        type_str(&mut s, "market summary X --venue v");
+        s.handle_key(key(KeyCode::Tab));
+        for _ in 0..20 {
+            s.handle_key(key(KeyCode::Tab));
+        }
+        let text = screen(&s, 60, 20);
+        assert!(
+            text.contains("v20"),
+            "the selection stays visible: {}",
+            text
+        );
+        assert!(!text.contains("v00"), "at most 8 rows: {}", text);
+        screen(&s, 10, 5);
+    }
+
+    fn ctrl_k() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn test_ctrl_k_opens_palette_and_enter_fills_input_without_running() {
+        let mut s = state();
+        s.handle_key(ctrl_k());
+        assert!(matches!(s.overlay, Some(Overlay::Palette(_))));
+        type_str(&mut s, "msum");
+        assert_eq!(s.handle_key(key(KeyCode::Enter)), Action::None);
+        assert_eq!(s.input, "market summary ");
+        assert!(s.overlay.is_none());
+    }
+
+    #[test]
+    fn test_ctrl_c_in_palette_still_cancels_a_running_command() {
+        // Review I1: the palette must not swallow the cancel key.
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let mut s = state();
+        let inv = Invocation {
+            command: venues_list(),
+            route: Route::Pane,
+            ai: false,
+            argv: vec![],
+        };
+        s.start("venues list", &inv);
+        s.handle_key(ctrl_k());
+        assert_eq!(s.handle_key(ctrl('c')), Action::Cancel);
+        assert!(s.overlay.is_none(), "Ctrl-C also closes the palette");
+        s.finish(Ending::Cancelled);
+    }
+
+    #[test]
+    fn test_palette_escape_keeps_the_input() {
+        let mut s = state();
+        type_str(&mut s, "draft");
+        s.handle_key(ctrl_k());
+        type_str(&mut s, "zzz");
+        s.handle_key(key(KeyCode::Esc));
+        assert!(s.overlay.is_none());
+        assert_eq!(s.input, "draft");
+    }
+
+    #[test]
+    fn test_palette_with_long_history_renders_bounded() {
+        // Review Focus 4.
+        let mut s = state();
+        for i in 0..60 {
+            type_str(&mut s, &format!("venues list {}", i));
+            s.handle_key(key(KeyCode::Enter));
+        }
+        s.handle_key(ctrl_k());
+        for _ in 0..30 {
+            s.handle_key(key(KeyCode::Down));
+        }
+        screen(&s, 80, 20);
+        screen(&s, 10, 5);
     }
 
     #[test]
@@ -774,9 +1175,18 @@ mod tests {
             s.push_ansi(&format!("line {}\n", i));
         }
         let rows: Vec<String> = screen(&s, 40, 15).lines().map(str::to_string).collect();
-        // Layout: pane rows 0..=10 (border at 0 and 10), input 11..=13, status 14.
-        assert!(rows[9].contains("line 39"), "{:#?}", rows);
-        assert!(rows[10].starts_with('└'), "{:#?}", rows);
+        // Layout: pane rows 0..=9 (border at 0 and 9), input 10..=12, hint 13, status 14.
+        assert!(rows[8].contains("line 39"), "{:#?}", rows);
+        assert!(rows[9].starts_with('└'), "{:#?}", rows);
+    }
+
+    #[test]
+    fn test_hint_row_shows_usage_while_typing() {
+        let mut s = state();
+        type_str(&mut s, "market summary");
+        let text = screen(&s, 100, 15);
+        assert!(text.contains("scope market summary"), "{}", text);
+        assert!(text.contains("next: <SYMBOL>"), "{}", text);
     }
 
     #[test]
@@ -792,7 +1202,7 @@ mod tests {
         let _lock = super::super::DIAG_LOCK.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let journal = Journal::at(dir.path().join("h"), dir.path().join("e.jsonl"));
-        let mut s = TuiState::new(SessionContext::default(), journal);
+        let mut s = TuiState::new(SessionContext::default(), journal, Vocab::default());
         let inv = Invocation {
             command: venues_list(),
             route: Route::Pane,
