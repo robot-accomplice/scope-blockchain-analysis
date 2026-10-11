@@ -26,7 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The book source is shown** in text, JSON (`book_source`: `exchange`, `synthetic_amm`, `synthetic_estimate`) and markdown reports. (#52)
 - **Errors show their cause chain** (`caused by: …`). When a TLS handshake gets a non-TLS reply, the hint names a router, firewall, proxy or VPN that may block the host. (#54)
 - **`monitor --venue` falls back to the venue** when DexScreener fails (unreachable, blocked, or the token is unknown there), and says why. (#54)
-- **`monitor --pair` accepts any common pair form** (`USDN_USDT`, `USDN/USDT`, `USDN-USDT`, `USDNUSDT`) and converts it to the venue's own format.
+- **`monitor --pair` accepts any common pair form** (`USDN_USDT`, `USDN/USDT`, `USDN-USDT`, `USDNUSDT`) and converts it to the venue's own format. (#56)
 
 ### Fixed
 - The monitor used a hard-coded DEX client for refreshes, which ignored the configured HTTP transport and Ghola. (#51)
