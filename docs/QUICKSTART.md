@@ -119,10 +119,10 @@ scope ct 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --chain polygon
 # JSON output for scripts or piping to jq
 scope contract 0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D --json
 
-# From interactive mode
-scope interactive
-scope> contract 0xdAC17F958D2ee523a2206206994597C13D831ec7
-scope> ct 0xA0b86991... --chain=polygon --json
+# From the TUI
+scope tui
+scope:auto> contract 0xdAC17F958D2ee523a2206206994597C13D831ec7
+scope:auto> ct 0xA0b86991... --chain polygon --json
 ```
 
 **What you get:** Security score (0-100), source code verification, proxy detection (EIP-1967/1822/1167/Diamond), access control mapping, vulnerability heuristics, DeFi protocol analysis (oracles, flash loans, DEX slippage), and external intelligence (audit reports, GitHub links, Sourcify).
@@ -140,10 +140,14 @@ scope> ct 0xA0b86991... --chain=polygon --json
 scope monitor USDC
 scope mon PEPE --chain ethereum --layout chart-focus
 
-# From interactive mode (preserves context)
-scope interactive
-scope> chain ethereum
-scope> monitor USDC
+# From the TUI (preserves context)
+scope tui
+scope:auto> chain ethereum
+scope:ethereum> monitor USDC
+
+# With a CEX venue; works even when DexScreener is unreachable
+scope monitor USDN --venue weex
+scope monitor USDN --venue weex --pair USDN_USDT   # exchange-only mode
 ```
 
 **Keybindings:** `Q` quit, `R` refresh, `P` pause, `E` toggle CSV export, `L` cycle layout, `C` chart mode (line/candlestick/volume).
@@ -198,12 +202,12 @@ scope market summary USDC --report peg-report.md
 
 ---
 
-## Workflow 7: Interactive Mode (Power Users)
+## Workflow 7: The TUI (Power Users)
 
-**Goal:** Chain commands with preserved context—no retyping addresses or chain.
+**Goal:** Run every command in one full-screen UI, with preserved context, completion and a command palette.
 
 ```bash
-scope interactive
+scope tui
 ```
 
 ```text
@@ -219,11 +223,13 @@ scope:solana> crawl USDC
 # Uses solana automatically
 
 scope:solana> monitor USDC
-# Launches TUI; exit with Q to return to prompt
+# Runs the live dashboard; Q returns to the TUI
 
 scope:solana> portfolio summary --report port.md
 scope:solana> exit
 ```
+
+**Keys:** `Tab` completes commands, flags, values, `@labels` and venues. `Ctrl-K` opens a command palette. `Esc` or `Ctrl-C` cancels a running command. `help` lists everything.
 
 ---
 
@@ -240,7 +246,7 @@ scope:solana> exit
 | `monitor` | `mon` |
 | `token-health` | `health` |
 | `discover` | `disc` |
-| `interactive` | `shell` |
+| `tui` | `interactive`, `shell` |
 | `setup` | `config` |
 
 ---
