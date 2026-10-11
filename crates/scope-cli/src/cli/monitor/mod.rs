@@ -270,51 +270,25 @@ pub async fn run(
     eprintln!("  Fetching initial data...");
 
     // Create exchange client if a venue is configured (from MonitorConfig or CLI)
-    let exchange_client = config.monitor.venue.as_ref().and_then(|venue_id| {
-        scope::market::VenueRegistry::load()
-            .ok()
-            .and_then(|r| r.get(venue_id).cloned())
-            .map(|desc| scope::market::ExchangeClient::from_descriptor(&desc))
-    });
+    let venue = config.monitor.venue.as_deref();
+    let exchange_client = exchange_for_venue(venue)?;
 
-    // ---- Exchange-only mode (--pair + --venue) ----
-    // Bypass DexScreener entirely when the user provides a direct pair.
-    let initial_data = if let Some(ref pair_str) = explicit_pair {
-        let ex = exchange_client.as_ref().ok_or_else(|| {
-            ScopeError::Chain("--pair requires --venue to be specified".to_string())
-        })?;
-
-        // Fetch the ticker to get current price data
-        let ticker = ex.fetch_ticker(pair_str).await.map_err(|e| {
-            ScopeError::Chain(format!("Failed to fetch ticker for {}: {}", pair_str, e))
-        })?;
-
-        // Extract base symbol from pair label (e.g., "DAI/USDT" → "DAI")
-        let base_symbol = ticker
-            .pair
-            .split('/')
-            .next()
-            .unwrap_or(&token_input)
-            .to_string();
-
-        eprintln!(
-            "  Exchange-only mode: {} @ ${:.6}",
-            pair_str,
-            ticker.last_price.unwrap_or(0.0)
-        );
-
-        // Build a minimal DexTokenData from the exchange ticker
-        build_exchange_token_data(&base_symbol, pair_str, &ticker)
-    } else {
-        // ---- Normal DexScreener mode ----
-        let dex_client = clients.create_dex_client();
-        let token_address =
-            resolve_token_address(&token_input, &ctx.chain, config, dex_client.as_ref()).await?;
-
-        dex_client
-            .get_token_data(&ctx.chain, &token_address)
-            .await?
-    };
+    let dex_client = clients.create_dex_client();
+    let mut notes = Vec::new();
+    let result = fetch_initial_data(
+        &token_input,
+        explicit_pair.as_deref(),
+        &ctx.chain,
+        config,
+        dex_client.as_ref(),
+        venue.zip(exchange_client.as_ref()),
+        &mut notes,
+    )
+    .await;
+    for note in &notes {
+        eprintln!("  {}", note);
+    }
+    let (initial_data, venue_pair) = result?;
 
     println!(
         "Monitoring {} ({}) on {}",
@@ -345,9 +319,9 @@ pub async fn run(
         })?;
     }
 
-    // In explicit-pair mode, override the auto-formatted pair with the user's exact pair
-    if let Some(ref pair_str) = explicit_pair {
-        app.state.venue_pair = Some(pair_str.clone());
+    // In exchange-only mode, use the exact pair that priced the token
+    if let Some(pair_str) = venue_pair {
+        app.state.venue_pair = Some(pair_str);
     }
 
     let result = app.run().await;
@@ -358,6 +332,106 @@ pub async fn run(
     }
 
     result
+}
+
+/// Looks up the venue's exchange client. An unknown venue is an error
+/// that lists the known ones, not a silently dropped option.
+pub(crate) fn exchange_for_venue(
+    venue: Option<&str>,
+) -> Result<Option<scope::market::ExchangeClient>> {
+    let Some(id) = venue else {
+        return Ok(None);
+    };
+    let registry = scope::market::VenueRegistry::load()?;
+    match registry.get(id) {
+        Some(desc) => Ok(Some(scope::market::ExchangeClient::from_descriptor(desc))),
+        None => Err(ScopeError::Other(format!(
+            "Unknown venue '{}'. Known venues: {}",
+            id,
+            registry.list().join(", ")
+        ))),
+    }
+}
+
+/// Gets the monitor's first data and, in exchange-only mode, the venue
+/// pair that priced it.
+///
+/// - With `explicit_pair`: the venue ticker only.
+/// - Otherwise DexScreener first. When it fails (unreachable, blocked, or
+///   the token is unknown there) and a venue is set, the venue ticker for
+///   `token_input` is used instead, and a note says why.
+///
+/// `notes` receives lines for the user; the caller prints them.
+pub(crate) async fn fetch_initial_data(
+    token_input: &str,
+    explicit_pair: Option<&str>,
+    chain: &str,
+    config: &Config,
+    dex_client: &dyn DexDataSource,
+    venue: Option<(&str, &scope::market::ExchangeClient)>,
+    notes: &mut Vec<String>,
+) -> Result<(DexTokenData, Option<String>)> {
+    if let Some(pair) = explicit_pair {
+        let (_, ex) = venue.ok_or_else(|| {
+            ScopeError::Chain("--pair requires --venue to be specified".to_string())
+        })?;
+        let data = exchange_token_data(ex, pair, token_input, notes).await?;
+        return Ok((data, Some(pair.to_string())));
+    }
+
+    // With a venue set, the venue is the fallback; skip the Binance probe.
+    let dex = async {
+        let address =
+            resolve_token_address(token_input, chain, config, dex_client, venue.is_none()).await?;
+        dex_client.get_token_data(chain, &address).await
+    }
+    .await;
+
+    match (dex, venue) {
+        (Ok(data), _) => Ok((data, None)),
+        (Err(dex_err), Some((venue_id, ex))) => {
+            let pair = ex.format_pair(token_input);
+            notes.push(format!(
+                "DexScreener lookup failed ({}); using the {} ticker {} instead",
+                dex_err, venue_id, pair
+            ));
+            match exchange_token_data(ex, &pair, token_input, notes).await {
+                Ok(data) => Ok((data, Some(pair))),
+                Err(ex_err) => Err(ScopeError::Other(format!(
+                    "DexScreener lookup failed: {}; {} ticker {} failed: {}",
+                    dex_err, venue_id, pair, ex_err
+                ))),
+            }
+        }
+        (Err(e), None) => Err(e),
+    }
+}
+
+/// Prices a token from a venue ticker alone (exchange-only mode).
+async fn exchange_token_data(
+    ex: &scope::market::ExchangeClient,
+    pair: &str,
+    token_input: &str,
+    notes: &mut Vec<String>,
+) -> Result<DexTokenData> {
+    let ticker = ex
+        .fetch_ticker(pair)
+        .await
+        .map_err(|e| ScopeError::Chain(format!("Failed to fetch ticker for {}: {}", pair, e)))?;
+    // Extract base symbol from pair label (e.g., "DAI/USDT" → "DAI")
+    let base_symbol = ticker
+        .pair
+        .split('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(token_input)
+        .to_string();
+    notes.push(format!(
+        "Exchange-only mode: {} @ ${:.6}",
+        pair,
+        ticker.last_price.unwrap_or(0.0)
+    ));
+    Ok(build_exchange_token_data(&base_symbol, pair, &ticker))
 }
 
 /// Builds a minimal [`DexTokenData`] from an exchange ticker.
@@ -413,6 +487,7 @@ async fn resolve_token_address(
     chain: &str,
     _config: &Config,
     dex_client: &dyn DexDataSource,
+    allow_cex_fallback: bool,
 ) -> Result<String> {
     // Check if it's already an address (EVM, Solana, Tron)
     if scope::tokens::TokenAliases::is_address(input) {
@@ -436,6 +511,7 @@ async fn resolve_token_address(
 
     // CEX fallback: if DexScreener has no results, try exchange ticker
     if results.is_empty()
+        && allow_cex_fallback
         && let Some(fallback) = try_cex_fallback(input, chain).await
     {
         eprintln!(
@@ -3450,6 +3526,146 @@ widgets:
         assert_eq!(export_file, Some(PathBuf::from("out.csv")));
     }
 
+    // ---- Initial data: DexScreener first, the venue as fallback ----
+
+    /// A DEX source that fails like a blocked network.
+    #[derive(Clone)]
+    struct BlockedDex;
+
+    #[async_trait::async_trait]
+    impl DexDataSource for BlockedDex {
+        async fn get_token_price(&self, _: &str, _: &str) -> Option<f64> {
+            None
+        }
+        async fn get_native_token_price(&self, _: &str) -> Option<f64> {
+            None
+        }
+        async fn get_token_data(&self, _: &str, _: &str) -> Result<DexTokenData> {
+            Err(ScopeError::Network("blocked by router".into()))
+        }
+        async fn search_tokens(
+            &self,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<Vec<scope::chains::TokenSearchResult>> {
+            Err(ScopeError::Network("blocked by router".into()))
+        }
+    }
+
+    /// A venue whose ticker endpoint is a mockito server.
+    async fn mock_venue(status: usize) -> (mockito::ServerGuard, scope::market::ExchangeClient) {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", mockito::Matcher::Regex(r"^/api/v1/ticker.*".into()))
+            .with_status(status)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"last":"1.0002","vol":"12345"}"#)
+            .create_async()
+            .await;
+        let yaml = format!(
+            r#"
+id: mockvenue
+name: Mock Venue
+base_url: {}
+timeout_secs: 5
+symbol:
+  template: "{{base}}_{{quote}}"
+  default_quote: USDT
+capabilities:
+  ticker:
+    path: /api/v1/ticker
+    params:
+      symbol: "{{pair}}"
+    response:
+      last_price: last
+      volume_24h: vol
+"#,
+            server.url()
+        );
+        let desc: scope::market::VenueDescriptor = serde_yaml::from_str(&yaml).unwrap();
+        (
+            server,
+            scope::market::ExchangeClient::from_descriptor(&desc),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_blocked_dexscreener_falls_back_to_the_venue_ticker() {
+        // `monitor USDN --venue weex` must work when DexScreener is
+        // unreachable: the venue can price the token on its own.
+        let (_server, ex) = mock_venue(200).await;
+        let mut notes = Vec::new();
+        let (data, pair) = fetch_initial_data(
+            "USDN",
+            None,
+            "ethereum",
+            &Config::default(),
+            &BlockedDex,
+            Some(("mockvenue", &ex)),
+            &mut notes,
+        )
+        .await
+        .unwrap();
+        assert_eq!(pair.as_deref(), Some("USDN_USDT"));
+        assert!((data.price_usd - 1.0002).abs() < 1e-9);
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.contains("DexScreener") && n.contains("blocked by router")),
+            "the user must see why: {:?}",
+            notes
+        );
+    }
+
+    #[tokio::test]
+    async fn test_working_dexscreener_does_not_use_the_venue_fallback() {
+        let (_server, ex) = mock_venue(200).await;
+        let mut notes = Vec::new();
+        let dex = scope::chains::mocks::MockDexSource::new();
+        let (data, pair) = fetch_initial_data(
+            "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+            None,
+            "ethereum",
+            &Config::default(),
+            &dex,
+            Some(("mockvenue", &ex)),
+            &mut notes,
+        )
+        .await
+        .unwrap();
+        assert_eq!(data.symbol, "MOCK");
+        assert_eq!(pair, None);
+    }
+
+    #[tokio::test]
+    async fn test_dex_and_venue_both_failing_names_both() {
+        let (_server, ex) = mock_venue(500).await;
+        let mut notes = Vec::new();
+        let err = fetch_initial_data(
+            "USDN",
+            None,
+            "ethereum",
+            &Config::default(),
+            &BlockedDex,
+            Some(("mockvenue", &ex)),
+            &mut notes,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("blocked by router"), "{}", err);
+        assert!(err.contains("USDN_USDT"), "{}", err);
+    }
+
+    #[test]
+    fn test_unknown_venue_is_an_error_not_ignored() {
+        // `--venue nosuch` used to drop the venue without a word.
+        let err = exchange_for_venue(Some("nosuch")).unwrap_err().to_string();
+        assert!(err.contains("nosuch") && err.contains("binance"), "{}", err);
+        assert!(exchange_for_venue(None).unwrap().is_none());
+        assert!(exchange_for_venue(Some("binance")).unwrap().is_some());
+    }
+
     #[test]
     fn test_export_writes_csv_rows() {
         let token_data = create_test_token_data();
@@ -5812,6 +6028,7 @@ refresh_seconds: 5
             "ethereum",
             &config,
             &dex,
+            true,
         )
         .await
         .unwrap();
@@ -5825,7 +6042,7 @@ refresh_seconds: 5
         let dex = DexClient::new();
         // Solana address (base58, 32+ chars) should be returned directly
         let addr = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-        let result = resolve_token_address(addr, "solana", &config, &dex)
+        let result = resolve_token_address(addr, "solana", &config, &dex, true)
             .await
             .unwrap();
         assert_eq!(result, addr);
