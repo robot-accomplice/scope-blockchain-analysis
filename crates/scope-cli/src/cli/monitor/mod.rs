@@ -375,8 +375,9 @@ pub(crate) async fn fetch_initial_data(
         let (_, ex) = venue.ok_or_else(|| {
             ScopeError::Chain("--pair requires --venue to be specified".to_string())
         })?;
-        let data = exchange_token_data(ex, pair, token_input, notes).await?;
-        return Ok((data, Some(pair.to_string())));
+        let pair = crate::cli::market::venue_pair(ex, pair);
+        let data = exchange_token_data(ex, &pair, token_input, notes).await?;
+        return Ok((data, Some(pair)));
     }
 
     // With a venue set, the venue is the fallback; skip the Binance probe.
@@ -417,7 +418,7 @@ async fn exchange_token_data(
     let ticker = ex
         .fetch_ticker(pair)
         .await
-        .map_err(|e| ScopeError::Chain(format!("Failed to fetch ticker for {}: {}", pair, e)))?;
+        .map_err(|e| ScopeError::Other(format!("Failed to fetch ticker for {}: {}", pair, e)))?;
     // Extract base symbol from pair label (e.g., "DAI/USDT" → "DAI")
     let base_symbol = ticker
         .pair
@@ -3655,6 +3656,66 @@ capabilities:
         .to_string();
         assert!(err.contains("blocked by router"), "{}", err);
         assert!(err.contains("USDN_USDT"), "{}", err);
+    }
+
+    #[tokio::test]
+    async fn test_explicit_pair_is_converted_to_the_venue_format() {
+        // WEEX writes pairs as USDNUSDT. `--pair USDN_USDT`, `USDN/USDT`
+        // and `USDNUSDT` must all reach it as USDNUSDT.
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/api/v1/ticker")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "symbol".into(),
+                "USDNUSDT".into(),
+            ))
+            .with_status(200)
+            .with_body(r#"{"last":"0.9999","vol":"841"}"#)
+            .expect(3)
+            .create_async()
+            .await;
+        let yaml = format!(
+            "id: weexlike\nname: WEEX-like\nbase_url: {}\nsymbol:\n  template: \"{{base}}{{quote}}\"\n  default_quote: USDT\ncapabilities:\n  ticker:\n    path: /api/v1/ticker\n    params:\n      symbol: \"{{pair}}\"\n    response:\n      last_price: last\n      volume_24h: vol\n",
+            server.url()
+        );
+        let desc: scope::market::VenueDescriptor = serde_yaml::from_str(&yaml).unwrap();
+        let ex = scope::market::ExchangeClient::from_descriptor(&desc);
+        for input in ["USDN_USDT", "USDN/USDT", "USDNUSDT"] {
+            let mut notes = Vec::new();
+            let (data, pair) = fetch_initial_data(
+                "USDN",
+                Some(input),
+                "ethereum",
+                &Config::default(),
+                &BlockedDex,
+                Some(("weexlike", &ex)),
+                &mut notes,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{input}: {e}"));
+            assert_eq!(pair.as_deref(), Some("USDNUSDT"), "{input}");
+            assert!((data.price_usd - 0.9999).abs() < 1e-9);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ticker_failure_has_one_error_prefix() {
+        // "Chain client error: … Chain client error: …" read as noise.
+        let (_server, ex) = mock_venue(500).await;
+        let mut notes = Vec::new();
+        let err = fetch_initial_data(
+            "USDN",
+            Some("USDN_USDT"),
+            "ethereum",
+            &Config::default(),
+            &BlockedDex,
+            Some(("mockvenue", &ex)),
+            &mut notes,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert_eq!(err.matches("Chain client error").count(), 1, "{}", err);
     }
 
     #[test]

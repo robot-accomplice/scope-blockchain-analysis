@@ -266,6 +266,16 @@ fn normalize_pair_input(pair: &str) -> &str {
     p
 }
 
+/// Writes a pair the way a venue expects it. Accepts `BASE_QUOTE`,
+/// `BASE/QUOTE`, `BASE-QUOTE`, `BASEUSDT` and a bare `BASE` (the venue's
+/// default quote), so users need not know each venue's own format.
+pub(crate) fn venue_pair(exchange: &scope::market::ExchangeClient, input: &str) -> String {
+    match parse_pair_components(input) {
+        (base, Some(quote)) => exchange.format_pair_with_quote(base, quote),
+        (base, None) => exchange.format_pair(base),
+    }
+}
+
 /// Parse base/quote symbols from user input.
 ///
 /// Supports:
@@ -445,7 +455,7 @@ async fn fetch_book_and_volume(
     factory: &dyn ChainClientFactory,
     out: &Output,
 ) -> Result<(OrderBook, Option<f64>)> {
-    let (base, quote) = parse_pair_components(&args.pair);
+    let (base, _) = parse_pair_components(&args.pair);
     let base = base.to_string();
 
     if is_dex_venue(&args.venue) {
@@ -476,10 +486,7 @@ async fn fetch_book_and_volume(
         // CEX path: use VenueRegistry + ExchangeClient
         let registry = VenueRegistry::load()?;
         let exchange = registry.create_exchange_client(&args.venue)?;
-        let pair = match quote {
-            Some(q) => exchange.format_pair_with_quote(&base, q),
-            None => exchange.format_pair(&base),
-        };
+        let pair = venue_pair(&exchange, &args.pair);
         let book = exchange.fetch_order_book(&pair).await?;
 
         // Get volume from ticker if available
@@ -698,11 +705,7 @@ async fn run_ohlc(args: OhlcArgs, out: &Output) -> Result<()> {
     })?;
 
     let client = scope::market::ExchangeClient::from_descriptor(descriptor);
-    let (base, quote) = parse_pair_components(&args.pair);
-    let pair = match quote {
-        Some(q) => client.format_pair_with_quote(base, q),
-        None => client.format_pair(base),
-    };
+    let pair = venue_pair(&client, &args.pair);
 
     let candles = client.fetch_ohlc(&pair, &args.interval, args.limit).await?;
 
@@ -815,11 +818,7 @@ async fn run_trades(args: TradesArgs, out: &Output) -> Result<()> {
     })?;
 
     let client = scope::market::ExchangeClient::from_descriptor(descriptor);
-    let (base, quote) = parse_pair_components(&args.pair);
-    let pair = match quote {
-        Some(q) => client.format_pair_with_quote(base, q),
-        None => client.format_pair(base),
-    };
+    let pair = venue_pair(&client, &args.pair);
 
     let trades = client.fetch_recent_trades(&pair, args.limit).await?;
 
