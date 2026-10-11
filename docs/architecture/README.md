@@ -27,7 +27,7 @@ Architecture and dataflow diagrams for the Scope blockchain analysis tool.
 | [dataflow-export.md](dataflow-export.md) | `scope export` | Address history, portfolio data |
 | [dataflow-report.md](dataflow-report.md) | Report generation | All `--report` / `--output` flows |
 | [dataflow-monitor.md](dataflow-monitor.md) | `scope monitor` | Live TUI dashboard |
-| [dataflow-interactive.md](dataflow-interactive.md) | `scope interactive` | REPL with context |
+| [dataflow-interactive.md](dataflow-interactive.md) | `scope tui` / `scope interactive` | Full-screen TUI for every command |
 | [dataflow-data-sources.md](dataflow-data-sources.md) | Data sources | ChainClientFactory, DexScreener, Etherscan, Biconomy |
 | [dataflow-web.md](dataflow-web.md) | `scope web` / `scope serve` | Browser mode: REST API, WebSocket monitor, daemon (feature-gated) |
 

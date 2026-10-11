@@ -45,7 +45,7 @@ A command-line tool for blockchain data analysis, portfolio tracking, transactio
 - **Progress Indicators**: Spinners and progress bars for all long-running operations; auto-hidden in pipes
 - **Colorized Errors**: Errors in red, remediation hints dimmed, plain text when piped
 - **Browser Mode** (`scope web` / `scope serve`): Locally hosted web UI (feature-gated; build with `--features web`)
-- **Interactive Mode**: REPL with preserved context between commands for faster workflow
+- **TUI** (`scope tui`): A full-screen terminal UI that runs every CLI command with the same flags, with tab completion, inline usage hints, a command palette, and context that persists between commands
 - **Setup Wizard**: Guided first-run configuration with `scope setup` for API keys and preferences
 - **USD Valuation**: Native token balances enriched with real-time USD prices via DexScreener
 - **Multi-Chain Support**:
@@ -72,7 +72,7 @@ Or build from source:
 ```bash
 git clone https://github.com/robot-accomplice/scope-blockchain-analysis.git
 cd scope-blockchain-analysis
-cargo install --path .
+cargo install --path crates/scope-web
 ```
 
 ## Shell Completion
@@ -187,9 +187,9 @@ scope report batch --addresses 0x742d...,0xabc... --output batch-report.md
 # Agent-friendly markdown output
 scope --ai address 0x742d...
 
-# Interactive mode (includes live monitor, portfolio, and all commands)
-scope interactive
-scope tui          # same as `scope interactive`
+# Full-screen TUI: every command, with completion and a command palette
+scope tui
+scope interactive  # same as `scope tui`
 ```
 
 ### Browser Mode
@@ -739,70 +739,72 @@ scope export --address 0x742d... --output history.csv --format csv --from 2025-0
 scope export --portfolio --output portfolio.json
 ```
 
-## Interactive Mode
+## TUI
 
-Launch a REPL where context persists between commands. Interactive mode provides access to all commands plus the live monitor:
+`scope tui` (also `scope interactive` and `scope shell`) opens a full-screen terminal UI. Every CLI command runs inside it, with the same flags, the same output, and the same error messages. Type a command as you would after `scope`:
 
-```bash
-$ scope interactive
-
-scope:ethereum> chain solana
-Chain set to: solana
-
-scope:solana> address 7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU
-# Uses solana chain automatically
-
-scope:solana> format json
-Format set to: json
-
-scope:solana> monitor USDC
-# Launches a real-time TUI dashboard with price/volume charts
-
-scope:solana> venues list
-# List all available exchange venues
-
-scope:solana> exit
+```text
+scope:auto> address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
+scope:auto> market summary USDC --venue binance --every 30s --duration 1h
+scope:auto> compliance risk @cold-wallet
 ```
 
-Available interactive commands:
+**Session commands.** These change the context that later commands use. The context is saved between sessions.
 
-- `address` / `addr` -- Analyze a blockchain address
-- `tx` / `transaction` -- Analyze a transaction
-- `contract` / `ct` -- Analyze a smart contract (security, proxy, vulnerabilities)
-- `crawl` / `token` -- Crawl token analytics
-- `monitor` / `mon` -- Live TUI dashboard with five layout presets, widget toggles, price/volume/candlestick charts, alerts, CSV export, and auto-pause
-- `portfolio` / `port` -- Portfolio management (add, remove, list, summary)
-- `tokens` / `aliases` -- Token alias management (add, remove, list, recent)
-- `venues` / `ven` -- Venue management (list, schema, init, validate)
-- `setup` / `config` -- Configuration commands
-- `chain` -- Set or show current chain
-- `format` -- Set or show output format (table, json, csv)
-- `limit` -- Set or show transaction limit
-- `+tokens` / `+txs` -- Toggle token/transaction display flags for address command
-- `trace` / `decode` -- Toggle trace/decode flags for tx command
-- `ctx` / `context` -- Show current session context
-- `clear` / `reset` -- Reset context to defaults
-- `help` / `?` -- Show help
-- `exit` / `quit` -- Exit interactive mode
+| Command | What it does |
+| --- | --- |
+| `chain [name\|auto]` | Show, pin or unpin the chain. A pinned chain is added as `--chain` to commands that accept it. `auto` lets each command infer the chain. |
+| `format [table\|json\|csv\|markdown]` | Show or set the output format for commands that accept it |
+| `+tokens`, `+txs` | Toggle token balances and transactions for `address` |
+| `trace`, `decode` | Toggle trace and decode for `tx` |
+| `limit [n]` | Show or set the transaction limit for `address` |
+| `tokens [list\|recent\|add\|remove]` | Manage saved token aliases |
+| `ctx` / `clear` | Show or reset the session context |
+| `help` / `exit` | Show help; leave the TUI (also Ctrl-D) |
+
+A flag you type always wins over the context. `address` and `tx` with no target reuse the last one.
+
+**Keys.**
+
+| Key | Action |
+| --- | --- |
+| `Enter` | Run the line |
+| `Tab` | Complete the command, flag, value, `@label`, token alias, venue or chain. Several matches open a menu. |
+| `Ctrl-K` | Command palette: fuzzy search over every command and your history. `Enter` fills the line; it does not run it. |
+| `↑` / `↓` | History |
+| `PgUp` / `PgDn` | Scroll the output |
+| `Esc` / `Ctrl-C` | Cancel the running command (for example a `--every` loop) |
+| `Ctrl-D` | Leave the TUI |
+
+The row under the input shows the usage of the command you type and the next argument it expects.
+
+**Commands that need the terminal.** `setup`, `crawl` with a name or symbol (it asks you to pick a token), and `monitor` run on the plain terminal. The TUI steps aside, runs the command, and returns when you press Enter.
+
+**Files.** The TUI keeps its history in `history.txt` and a log of every submitted line in `tui-events.jsonl` (input, parsed arguments, outcome, error, duration), both in the scope data directory.
 
 ### Live Monitor
 
 The monitor launches a real-time TUI dashboard. You can start it two ways:
 
 ```bash
-# Direct from the command line (no interactive mode needed)
+# Direct from the command line
 scope monitor USDC
 scope mon PEPE --chain ethereum --layout chart-focus --refresh 3
 scope monitor USDC --layout exchange    # Exchange-style: order book + chart + trades
 
-# Or from interactive mode
-scope interactive
-scope> monitor USDC
+# Or from the TUI
+scope tui
+scope:auto> monitor USDC
 ```
 
 **Direct-command flags:** `--chain` / `-c`, `--layout` / `-l`, `--refresh` / `-r`, `--scale` / `-s`, `--color-scheme`, `--export` / `-e`, `--venue` / `-v`.
 
 Use `--venue binance` (or any CEX venue) to fetch real exchange OHLC data instead of synthetic candles. The time period selector (1m, 5m, 15m, 1h, 4h, 1d) maps directly to the venue's candlestick intervals.
+
+- **`--venue`** must name a known venue (`scope venues list`). An unknown venue is an error.
+- **When DexScreener fails** (unreachable, blocked, or the token is unknown there) and `--venue` is set, the monitor uses that venue's ticker for the token and tells you why.
+- **`--pair`** prices the token from the venue alone (exchange-only mode). Write the pair in any common form, `USDN_USDT`, `USDN/USDT`, `USDN-USDT` or `USDNUSDT`; scope converts it to the venue's own format.
+- **`--export FILE`** starts CSV export to that file at launch. The `E` key starts an export in the directory set by `monitor.export.path` in `config.yaml` (default `./scope-exports/`). A file that cannot be written is an error, not a silent no-op.
 
 The monitor supports five layout presets that can be switched at runtime or configured in `config.yaml`:
 
@@ -826,7 +828,7 @@ The monitor automatically selects the best layout for your terminal size (respon
 - **Liquidity depth**: Per-pair liquidity breakdown across DEXes
 - **Exchange view**: Live order book, ticker, and recent trade history from any configured CEX venue
 - **Alerts**: Configurable price min/max, whale detection, and volume spike thresholds
-- **CSV export**: Record live data to `./scope-exports/` with a single keypress
+- **CSV export**: Record live data with a single keypress (`E`), or from launch with `--export FILE`
 - **Auto-pause**: Optionally pause data fetching while interacting
 
 **Monitor keybindings:**

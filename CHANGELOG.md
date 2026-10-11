@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (breaking)
+- **The REPL is replaced by a full-screen TUI.** `scope tui`, `scope interactive` and `scope shell` open it. Every CLI command runs inside it with the same flags and output; the REPL ran 7 of 17 commands. The REPL session commands (`chain`, `format`, `limit`, `+tokens`, `+txs`, `trace`, `decode`, `tokens`, `ctx`, `clear`) stay. Your history and saved context carry over. The `rustyline` dependency is removed. (#50)
+- **Health checks can be `n/a`.** JSON checks are now `{"status": "pass" | "fail" | "n/a", "message": …}`. An `n/a` check does not apply to the book and does not count against `healthy`. Consumers that match only `pass` or `fail` must handle `n/a`. (#52)
+- **DEX venues (`eth`, `solana`) use a synthetic book from the AMM curve.** Results for DEX venues change: level count and spread are `n/a`; top-3 and top-10 depth now mean depth within ±0.3% and ±1%. Without pool reserves, scope keeps the old single-level estimate and labels it. (#52)
+- **`monitor --export FILE` writes to that file at launch.** Config `monitor.export.path` is the directory for the `E` key. Before, `--export` did nothing. (#51)
+- **`monitor --venue` must name a known venue.** An unknown venue is now an error that lists the known ones; before, it was dropped without a word. (#54)
+- **A failed write is an error.** For example `scope completions zsh | true` exits with status 1 and prints the I/O error; before, it panicked with status 101. (#48)
+- **Log output (`-v`) goes to stderr.** Before, it went to stdout and mixed with piped JSON. (#50)
+- **Library API (`scope-bca-cli`, `scope-bca-core`).**
+  - Command handlers take an `&Output`, and the print macros (`outln!`, `errln!`) return `io::Result`. The command router moved from the binary to `scope_cli::cli::dispatch`. `display_error`, `Spinner::new` and `StepProgress::new` return `io::Result`. (#48)
+  - `HealthCheck` has a third variant, `NotApplicable`. `OrderBook` and `MarketSummary` have a `source: BookSource` field. `DexPair` has `liquidity_base`. `HealthThresholds` has `amm_step_pct`. `order_book_from_analytics` takes `&HealthThresholds`. (#52)
+
+### Added
+- **TUI learnability.** `Tab` completes commands, flags, enum values, `@labels`, token aliases, venues and chains. A row under the input shows the command's usage and the next argument. `Ctrl-K` opens a fuzzy command palette. `Esc` or `Ctrl-C` cancels a running command, including `--every` loops. (#50, #53)
+- **TUI event log.** Each submitted line is recorded in `tui-events.jsonl` in the scope data directory: input, parsed arguments, route, outcome, error and duration. (#50)
+- **`market.health.amm_step_pct`** (default 0.1): the price step of the synthetic AMM book, as a config key, the `--amm-step-pct` flag and a web request field. (#52)
+- **The book source is shown** in text, JSON (`book_source`: `exchange`, `synthetic_amm`, `synthetic_estimate`) and markdown reports. (#52)
+- **Errors show their cause chain** (`caused by: …`). When a TLS handshake gets a non-TLS reply, the hint names a router, firewall, proxy or VPN that may block the host. (#54)
+- **`monitor --venue` falls back to the venue** when DexScreener fails (unreachable, blocked, or the token is unknown there), and says why. (#54)
+- **`monitor --pair` accepts any common pair form** (`USDN_USDT`, `USDN/USDT`, `USDN-USDT`, `USDNUSDT`) and converts it to the venue's own format.
+
+### Fixed
+- The monitor used a hard-coded DEX client for refreshes, which ignored the configured HTTP transport and Ghola. (#51)
+- CSV export errors in the monitor were dropped. A failed write now stops the export and logs the reason. (#51)
+- `scope web` through the command router hit `unreachable!`. It now returns an error. (#48)
+- Library warnings (for example the Etherscan Pro key notice) now go to stderr, or into the TUI pane while it runs. (#50)
+- The README build-from-source command failed on the virtual workspace manifest. It is now `cargo install --path crates/scope-web`. (#46)
+
 ## [0.6.0] - 2026-10-09
 
 ### Changed (breaking)
