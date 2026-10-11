@@ -91,8 +91,14 @@ macro_rules! notice {
 mod tests {
     use super::*;
 
+    /// Serializes the tests that redirect the process-global sink. Without
+    /// it, one test's redirect captures the other's notices (34 of 60 runs
+    /// failed with 8 test threads).
+    static REDIRECT_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn test_stderr_writer_flushes_with_and_without_redirect() {
+        let _lock = REDIRECT_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // tracing calls flush on its writer; both routes must accept it.
         let mut w = Stderr;
         assert!(w.flush().is_ok());
@@ -103,6 +109,7 @@ mod tests {
 
     #[test]
     fn test_redirect_captures_and_restores() {
+        let _lock = REDIRECT_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // While the TUI owns the screen, library warnings must land in its
         // pane; after it exits they must reach stderr again.
         let outer: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
