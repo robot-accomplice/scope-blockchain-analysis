@@ -155,10 +155,9 @@ impl StepProgress {
     }
 }
 
-/// Checks if stderr is a TTY (interactive terminal).
+/// Checks if stderr is a TTY that may show a progress bar and color.
 fn atty_stderr() -> bool {
-    use std::io::IsTerminal;
-    std::io::stderr().is_terminal()
+    scope::display::terminal::color_enabled_stderr()
 }
 
 // ============================================================================

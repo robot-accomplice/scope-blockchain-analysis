@@ -62,7 +62,7 @@ use scope_cli::cli::errors::display_error;
 use scope_cli::cli::output::Output;
 use scope_cli::cli::{Cli, Commands};
 use scope_cli::errln;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use tracing_subscriber::EnvFilter;
 
 /// ASCII art banner featuring a Portia jumping spider.
@@ -85,6 +85,24 @@ async fn main() -> Result<()> {
 
     // Initialize logging based on verbosity
     init_logging(cli.verbose);
+
+    if cli.no_color {
+        scope::display::terminal::set_color_override(Some(false));
+    }
+
+    // The TUI needs a terminal. Check before the config load and the setup
+    // prompt, which read stdin.
+    if matches!(cli.command, Commands::Interactive(_)) {
+        let term = std::env::var("TERM").ok();
+        if let Err(message) = scope_cli::cli::tui::tui_terminal_ok(
+            io::stdin().is_terminal(),
+            io::stdout().is_terminal(),
+            term.as_deref(),
+        ) {
+            eprintln!("{message}");
+            std::process::exit(2);
+        }
+    }
 
     // Show banner in verbose mode
     if cli.verbose > 0 {

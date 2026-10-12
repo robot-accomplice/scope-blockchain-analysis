@@ -6,19 +6,14 @@
 use crate::cli::output::Output;
 use crate::errln;
 use owo_colors::OwoColorize;
+use scope::display::terminal::color_enabled_stderr;
 use scope::error::ScopeError;
-use std::io::IsTerminal;
-
-/// Returns `true` when stderr is an interactive terminal.
-fn is_tty_stderr() -> bool {
-    std::io::stderr().is_terminal()
-}
 
 /// Displays an error with a remediation hint when available.
 ///
 /// Uses color when stderr is a TTY, plain text otherwise.
 pub fn display_error(e: &ScopeError, out: &Output) -> std::io::Result<()> {
-    display_error_styled(e, is_tty_stderr(), out)
+    display_error_styled(e, color_enabled_stderr(), out)
 }
 
 /// Internal styled implementation, testable with an explicit `tty` flag.

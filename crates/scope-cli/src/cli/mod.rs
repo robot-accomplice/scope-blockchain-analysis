@@ -70,6 +70,7 @@ pub mod interactive;
 pub mod market;
 pub mod monitor;
 pub mod output;
+pub(crate) mod plain;
 pub mod progress;
 pub mod report;
 pub mod setup;

@@ -105,6 +105,25 @@ impl Signal {
     }
 }
 
+/// Checks that the TUI has a terminal to draw on and read keys from.
+///
+/// `scope tui` needs stdin and stdout on a terminal, and a `TERM` that is
+/// not `dumb`. Pure: the caller passes the facts.
+///
+/// # Errors
+///
+/// Returns the message to print when any of them is missing.
+pub fn tui_terminal_ok(
+    stdin_tty: bool,
+    stdout_tty: bool,
+    term: Option<&str>,
+) -> std::result::Result<(), String> {
+    if stdin_tty && stdout_tty && term != Some("dumb") {
+        return Ok(());
+    }
+    Err("scope tui needs an interactive terminal; run the command directly, e.g. scope market summary …".to_string())
+}
+
 /// Runs the TUI until the user leaves or a signal ends it.
 ///
 /// # Errors
@@ -333,7 +352,10 @@ async fn event_loop<H: Host>(
     loop {
         drain_into(&idle_buf, state);
         host.terminal()
-            .draw(|f| state.render(f))
+            .draw(|f| {
+                state.render(f);
+                crate::cli::plain::finish_frame(f);
+            })
             .map_err(|e| ScopeError::Other(format!("terminal draw failed: {}", e)))?;
 
         // Biased: a finished command is handled before the next key, so
@@ -543,6 +565,23 @@ fn drain_into(buf: &Mutex<Vec<u8>>, state: &mut TuiState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_tui_requires_a_terminal() {
+        assert!(tui_terminal_ok(true, true, Some("xterm-256color")).is_ok());
+        assert!(tui_terminal_ok(true, true, None).is_ok());
+        for (i, o, t) in [
+            (false, true, Some("xterm")),
+            (true, false, Some("xterm")),
+            (true, true, Some("dumb")),
+        ] {
+            let e = tui_terminal_ok(i, o, t).unwrap_err();
+            assert!(
+                e.starts_with("scope tui needs an interactive terminal"),
+                "{e}"
+            );
+        }
+    }
     use crate::cli::Cli;
     use ansi_to_tui::IntoText;
     use clap::Parser;
