@@ -1,0 +1,14 @@
+name: session basics
+tiers: [offline]
+steps:
+  - type: "ctx"
+  - key: Enter
+  - wait_for: { text: "Current Context", timeout: 10s }
+  - expect_journal: { argv_prefix: [], outcome: session }
+  - type: "help"
+  - key: Enter
+  - wait_for: { text: "Keys: Enter run", timeout: 10s }
+  - resize: { cols: 80, rows: 24 }
+  - expect_screen: { not_contains: ["panicked"] }
+  - key: Ctrl-D
+  - expect_exit: 0

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/scope-core", "crates/scope-cli", "crates/scope-web"]
+members = ["crates/scope-core", "crates/scope-cli", "crates/scope-web", "crates/scope-tui-harness"]
 resolver = "2"
 
 [workspace.package]

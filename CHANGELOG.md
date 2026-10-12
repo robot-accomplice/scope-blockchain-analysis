@@ -30,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`monitor --pair` accepts any common pair form** (`USDN_USDT`, `USDN/USDT`, `USDN-USDT`, `USDNUSDT`) and converts it to the venue's own format. (#56)
 - **Library API: new module `http::shared`.** It selects the HTTP transport in one place. `build` makes a transport from config, `init` installs it for the process, and `transport` returns the installed one. (#61)
 - **HTTP record and replay, for tests.** Set `SCOPE_HTTP_MODE=record` and `SCOPE_HTTP_FIXTURES=DIR` to save each response as a fixture file in `DIR`. Set `SCOPE_HTTP_MODE=replay` to answer from those files; a replay run never uses the network, and a request with no fixture is an error. Record does not write a fixture that contains a configured API key, token or RPC secret. Library API: new module `http::replay`. (#62)
+- **TUI test harness.** The new `scope-tui-harness` crate runs YAML scenarios against the real `scope tui` in a pseudo-terminal. It types keys, waits for screen text and checks the screen, the event journal, files and the exit code. Offline scenarios use replayed HTTP fixtures. Run them with `just tui-test`. A failed scenario saves its screen and journal under `target/tui-harness/`.
 
 ### Fixed
 - The monitor used a hard-coded DEX client for refreshes, which ignored the configured HTTP transport and Ghola. (#51)
