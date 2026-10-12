@@ -9,9 +9,6 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-/// Fewer characters than this match text by chance, so a secret this short is not scanned for.
-const MIN_SECRET_LEN: usize = 6;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Replay,
@@ -63,10 +60,7 @@ impl ReplayHttpClient {
     }
 
     pub fn record(dir: PathBuf, inner: Arc<dyn HttpClient>, secrets: Vec<String>) -> Self {
-        let secrets = secrets
-            .into_iter()
-            .filter(|s| s.len() >= MIN_SECRET_LEN)
-            .collect();
+        let secrets = secrets.into_iter().filter(|s| !s.is_empty()).collect();
         Self {
             mode: Mode::Record,
             dir,
@@ -83,6 +77,13 @@ impl ReplayHttpClient {
             req.method,
             clean_url(&req.url)
         ))
+    }
+
+    /// True when the secret appears in the text raw or in its JSON-escaped form.
+    fn leaks(text: &str, secret: &str) -> bool {
+        let quoted = serde_json::to_string(secret).unwrap_or_default();
+        let escaped = quoted.trim_matches('"');
+        text.contains(secret) || (!escaped.is_empty() && text.contains(escaped))
     }
 
     fn read(path: &std::path::Path) -> Option<Fixture> {
@@ -126,7 +127,12 @@ impl HttpClient for ReplayHttpClient {
                 };
                 let mut written = self.written.lock().expect("written lock");
                 let mut fixture = if written.contains(&path) {
-                    Self::read(&path)
+                    Some(Self::read(&path).ok_or_else(|| {
+                        ScopeError::Network(format!(
+                            "fixture {} was written in this run but cannot be read back",
+                            path.display()
+                        ))
+                    })?)
                 } else {
                     None
                 }
@@ -142,7 +148,7 @@ impl HttpClient for ReplayHttpClient {
                 fixture.responses.push(recorded);
                 let text = serde_json::to_string_pretty(&fixture)
                     .map_err(|e| ScopeError::Network(format!("cannot serialize fixture: {e}")))?;
-                if self.secrets.iter().any(|s| text.contains(s.as_str())) {
+                if self.secrets.iter().any(|s| Self::leaks(&text, s)) {
                     return Err(ScopeError::Network(format!(
                         "fixture for {} {} would contain a configured secret; not written",
                         req.method,
@@ -252,6 +258,35 @@ mod tests {
             .map(|p| std::fs::read_to_string(p).unwrap())
             .collect();
         assert!(!text.contains("abc123"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn test_short_secret_blocks_the_write_and_is_not_echoed() {
+        let dir = tempfile::tempdir().unwrap();
+        let inner = Arc::new(Script(Mutex::new(vec![r#"{"echo":"abc"}"#])));
+        let rec = ReplayHttpClient::record(dir.path().into(), inner, vec!["abc".into()]);
+        let err = rec
+            .send(Request::get("https://api.example.com/e"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("configured secret"), "{err}");
+        assert!(!err.contains("abc"), "{err}");
+        assert!(walk(dir.path()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_secret_with_a_quote_blocks_the_write_in_escaped_form() {
+        let dir = tempfile::tempdir().unwrap();
+        let inner = Arc::new(Script(Mutex::new(vec![r#"echo pa"ss123 end"#])));
+        let rec = ReplayHttpClient::record(dir.path().into(), inner, vec![r#"pa"ss123"#.into()]);
+        let err = rec
+            .send(Request::get("https://api.example.com/q"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("configured secret"), "{err}");
+        assert!(walk(dir.path()).is_empty());
     }
 
     fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
