@@ -5,17 +5,22 @@
 //! JSON responses via `response_root`, and mapping fields to common types.
 
 use crate::error::{Result, ScopeError};
+use crate::http::{HttpClient, Request};
 use crate::market::descriptor::{EndpointDescriptor, HttpMethod, ResponseMapping, VenueDescriptor};
 use crate::market::orderbook::{
     Candle, OhlcClient, OrderBook, OrderBookClient, OrderBookLevel, Ticker, TickerClient, Trade,
     TradeHistoryClient, TradeSide,
 };
 use async_trait::async_trait;
-use reqwest::Client;
 use serde_json::Value;
+use std::sync::Arc;
 use std::time::Duration;
 
-fn format_http_api_error(venue: &str, status: reqwest::StatusCode, body: &str) -> ScopeError {
+fn format_http_api_error(venue: &str, status: u16, body: &str) -> ScopeError {
+    // Keep the canonical reason text, such as `400 Bad Request`.
+    let status = reqwest::StatusCode::from_u16(status)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|_| status.to_string());
     let body = body.trim();
     let binance_invalid_symbol = venue.to_lowercase().contains("binance")
         && (body.contains("\"code\":-1121")
@@ -42,21 +47,34 @@ fn format_http_api_error(venue: &str, status: reqwest::StatusCode, body: &str) -
 /// A generic exchange client driven entirely by a [`VenueDescriptor`].
 ///
 /// No venue-specific Rust code — all behavior comes from the YAML descriptor.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ConfigurableExchangeClient {
     descriptor: VenueDescriptor,
-    http: Client,
+    http: Arc<dyn HttpClient>,
+}
+
+impl std::fmt::Debug for ConfigurableExchangeClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConfigurableExchangeClient")
+            .field("descriptor", &self.descriptor)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ConfigurableExchangeClient {
-    /// Create a new client from a venue descriptor.
+    /// Create a new client from a venue descriptor, using the process transport.
     pub fn new(descriptor: VenueDescriptor) -> Self {
-        let timeout = descriptor.timeout_secs.unwrap_or(15);
-        let http = Client::builder()
-            .timeout(Duration::from_secs(timeout))
-            .build()
-            .expect("reqwest client build");
+        Self::with_http(descriptor, crate::http::transport())
+    }
+
+    /// Create a client that sends its requests through `http`.
+    pub fn with_http(descriptor: VenueDescriptor, http: Arc<dyn HttpClient>) -> Self {
         Self { descriptor, http }
+    }
+
+    /// Per-request timeout from the descriptor.
+    fn timeout(&self) -> Duration {
+        Duration::from_secs(self.descriptor.timeout_secs.unwrap_or(15))
     }
 
     /// The venue descriptor driving this client.
@@ -80,73 +98,13 @@ impl ConfigurableExchangeClient {
         pair: &str,
         limit: Option<u32>,
     ) -> Result<Value> {
-        let url = format!(
-            "{}{}",
-            self.descriptor.base_url,
-            self.interpolate_path(&endpoint.path, pair)
-        );
-
-        let limit_str = limit.unwrap_or(100).to_string();
-
-        match endpoint.method {
-            HttpMethod::GET => {
-                let mut req = self.http.get(&url);
-                // Add headers
-                for (k, v) in &self.descriptor.headers {
-                    req = req.header(k, v);
-                }
-                // Add query params with interpolation
-                let params: Vec<(String, String)> = endpoint
-                    .params
-                    .iter()
-                    .map(|(k, v)| (k.clone(), self.interpolate_value(v, pair, &limit_str)))
-                    .collect();
-                if !params.is_empty() {
-                    req = req.query(&params);
-                }
-
-                let resp = req.send().await?;
-                if !resp.status().is_success() {
-                    let status = resp.status();
-                    let body = resp.text().await.unwrap_or_default();
-                    return Err(format_http_api_error(&self.descriptor.name, status, &body));
-                }
-                resp.json::<Value>().await.map_err(|e| {
-                    ScopeError::Chain(format!("{} JSON parse error: {}", self.descriptor.name, e))
-                })
-            }
-            HttpMethod::POST => {
-                let mut req = self.http.post(&url);
-                for (k, v) in &self.descriptor.headers {
-                    req = req.header(k, v);
-                }
-                // Build request body from template with interpolation
-                if let Some(body_template) = &endpoint.request_body {
-                    let body = self.interpolate_json(body_template, pair, &limit_str);
-                    req = req.json(&body);
-                }
-
-                let resp = req.send().await?;
-                if !resp.status().is_success() {
-                    let status = resp.status();
-                    let body = resp.text().await.unwrap_or_default();
-                    return Err(format_http_api_error(&self.descriptor.name, status, &body));
-                }
-                resp.json::<Value>().await.map_err(|e| {
-                    ScopeError::Chain(format!("{} JSON parse error: {}", self.descriptor.name, e))
-                })
-            }
-        }
+        self.fetch_endpoint_with_interval(endpoint, pair, limit, "")
+            .await
     }
 
     /// Interpolate `{pair}` placeholders in a URL path.
     fn interpolate_path(&self, path: &str, pair: &str) -> String {
         path.replace("{pair}", pair)
-    }
-
-    /// Interpolate `{pair}`, `{limit}`, and `{interval}` placeholders in a string value.
-    fn interpolate_value(&self, template: &str, pair: &str, limit: &str) -> String {
-        self.interpolate_value_full(template, pair, limit, "")
     }
 
     /// Full interpolation with all supported placeholders.
@@ -163,7 +121,8 @@ impl ConfigurableExchangeClient {
             .replace("{interval}", interval)
     }
 
-    /// Recursively interpolate `{pair}`, `{limit}`, and `{interval}` in a JSON value template.
+    /// Interpolation with an empty `{interval}`; only the unit tests call it.
+    #[cfg(test)]
     fn interpolate_json(&self, value: &Value, pair: &str, limit: &str) -> Value {
         self.interpolate_json_full(value, pair, limit, "")
     }
@@ -213,12 +172,11 @@ impl ConfigurableExchangeClient {
         );
         let limit_str = limit.unwrap_or(100).to_string();
 
-        match endpoint.method {
+        let mut req = match endpoint.method {
             HttpMethod::GET => {
-                let mut req = self.http.get(&url);
-                for (k, v) in &self.descriptor.headers {
-                    req = req.header(k, v);
-                }
+                let mut full_url = reqwest::Url::parse(&url).map_err(|e| {
+                    ScopeError::Chain(format!("{} invalid URL {url}: {e}", self.descriptor.name))
+                })?;
                 let params: Vec<(String, String)> = endpoint
                     .params
                     .iter()
@@ -230,39 +188,39 @@ impl ConfigurableExchangeClient {
                     })
                     .collect();
                 if !params.is_empty() {
-                    req = req.query(&params);
+                    full_url.query_pairs_mut().extend_pairs(params.iter());
                 }
-                let resp = req.send().await?;
-                if !resp.status().is_success() {
-                    let status = resp.status();
-                    let body = resp.text().await.unwrap_or_default();
-                    return Err(format_http_api_error(&self.descriptor.name, status, &body));
-                }
-                resp.json::<Value>().await.map_err(|e| {
-                    ScopeError::Chain(format!("{} JSON parse error: {}", self.descriptor.name, e))
-                })
+                Request::get(full_url.as_str())
             }
-            HttpMethod::POST => {
-                let mut req = self.http.post(&url);
-                for (k, v) in &self.descriptor.headers {
-                    req = req.header(k, v);
+            HttpMethod::POST => match &endpoint.request_body {
+                Some(template) => {
+                    let body = self.interpolate_json_full(template, pair, &limit_str, interval);
+                    Request::post_json(&url, body.to_string())
                 }
-                if let Some(body_template) = &endpoint.request_body {
-                    let body =
-                        self.interpolate_json_full(body_template, pair, &limit_str, interval);
-                    req = req.json(&body);
-                }
-                let resp = req.send().await?;
-                if !resp.status().is_success() {
-                    let status = resp.status();
-                    let body = resp.text().await.unwrap_or_default();
-                    return Err(format_http_api_error(&self.descriptor.name, status, &body));
-                }
-                resp.json::<Value>().await.map_err(|e| {
-                    ScopeError::Chain(format!("{} JSON parse error: {}", self.descriptor.name, e))
-                })
-            }
+                // No body template: send no body.
+                None => Request {
+                    method: "POST".into(),
+                    body: None,
+                    ..Request::get(&url)
+                },
+            },
         }
+        .with_timeout(self.timeout());
+        for (k, v) in &self.descriptor.headers {
+            req = req.with_header(k, v);
+        }
+
+        let resp = self.http.send(req).await?;
+        if !resp.is_success() {
+            return Err(format_http_api_error(
+                &self.descriptor.name,
+                resp.status_code,
+                &resp.body,
+            ));
+        }
+        serde_json::from_str::<Value>(&resp.body).map_err(|e| {
+            ScopeError::Chain(format!("{} JSON parse error: {}", self.descriptor.name, e))
+        })
     }
 
     // =========================================================================
@@ -2793,5 +2751,77 @@ mod tests {
         assert_eq!(candles[0].open, 100.0);
         assert_eq!(candles[1].close, 110.0);
         mock.assert_async().await;
+    }
+
+    mod transport_tests {
+        use super::*;
+        use crate::http::{HttpClient, Request, Response};
+        use std::sync::{Arc, Mutex};
+
+        /// Records requests and answers with a fixed response.
+        struct Spy {
+            seen: Mutex<Vec<Request>>,
+            status: u16,
+            body: String,
+        }
+
+        #[async_trait::async_trait]
+        impl HttpClient for Spy {
+            async fn send(&self, req: Request) -> crate::error::Result<Response> {
+                self.seen.lock().unwrap().push(req);
+                Ok(Response {
+                    status_code: self.status,
+                    headers: Default::default(),
+                    body: self.body.clone(),
+                })
+            }
+        }
+
+        fn binance_like() -> VenueDescriptor {
+            // Use the built-in binance descriptor so the test follows real config.
+            crate::market::VenueRegistry::load()
+                .unwrap()
+                .get("binance")
+                .unwrap()
+                .clone()
+        }
+
+        #[tokio::test]
+        async fn test_venue_requests_go_through_the_given_transport() {
+            let spy = Arc::new(Spy {
+                seen: Mutex::new(vec![]),
+                status: 200,
+                body: r#"{"bids":[],"asks":[]}"#.into(),
+            });
+            let client = ConfigurableExchangeClient::with_http(binance_like(), spy.clone());
+            let _ = client.fetch_order_book("USDCUSDT").await;
+            let seen = spy.seen.lock().unwrap();
+            assert_eq!(seen.len(), 1);
+            assert!(seen[0].url.contains("symbol=USDCUSDT"), "{}", seen[0].url);
+            assert_eq!(
+                seen[0].timeout,
+                Some(std::time::Duration::from_secs(
+                    binance_like().timeout_secs.unwrap_or(15)
+                ))
+            );
+        }
+
+        #[tokio::test]
+        async fn test_venue_http_error_text_is_unchanged() {
+            // The Binance -1121 hint must survive the move off reqwest::StatusCode.
+            let spy = Arc::new(Spy {
+                seen: Mutex::new(vec![]),
+                status: 400,
+                body: r#"{"code":-1121,"msg":"Invalid symbol."}"#.into(),
+            });
+            let client = ConfigurableExchangeClient::with_http(binance_like(), spy);
+            let err = client
+                .fetch_order_book("BADPAIR")
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("HTTP 400 Bad Request"), "{err}");
+            assert!(err.contains("Invalid symbol"), "{err}");
+        }
     }
 }
