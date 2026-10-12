@@ -88,7 +88,7 @@ pub enum Step {
         rows: u16,
     },
     Snapshot(String),
-    /// Sends a signal to the scope process: TERM, HUP, INT, QUIT, TSTP or CONT.
+    /// Sends a signal to the scope process: TERM, HUP, INT, QUIT, TSTP, CONT or STOP.
     Signal(String),
     ExpectExit(i32),
 }
@@ -203,7 +203,8 @@ pub fn signal_number(name: &str) -> Result<i32> {
         "QUIT" => libc::SIGQUIT,
         "TSTP" => libc::SIGTSTP,
         "CONT" => libc::SIGCONT,
-        _ => bail!("unknown signal name {name:?}; use TERM, HUP, INT, QUIT, TSTP or CONT"),
+        "STOP" => libc::SIGSTOP,
+        _ => bail!("unknown signal name {name:?}; use TERM, HUP, INT, QUIT, TSTP, CONT or STOP"),
     })
 }
 

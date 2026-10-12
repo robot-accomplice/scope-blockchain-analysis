@@ -323,6 +323,9 @@ async fn event_loop<H: Host>(
     let mut idle_diag = Some(scope::diag::redirect(idle_buf.clone()));
     let mut pending: Option<PaneFuture<'_>> = None;
     let mut tick = tokio::time::interval(LIVE_REDRAW);
+    // After a stop (Ctrl-Z, then `fg`), fire once, not once per missed
+    // tick: the tick arm comes before the keys in the biased select.
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // True after the TUI stopped itself: the SIGCONT that continues it
     // needs no second set-up.
     let mut cont_expected = false;
@@ -352,6 +355,11 @@ async fn event_loop<H: Host>(
                     state.record_signal(sig.name(), "session", "", &[]);
                     return Ok(TuiExit { code });
                 }
+                // Merge window: the kernel keeps one pending SIGCONT, and
+                // the handler stream can merge signals too. So a second
+                // SIGCONT that comes before this arm runs arrives as one,
+                // and is taken as ours. That is safe: the screen was
+                // already taken back and cleared after the stop.
                 if sig == Signal::Tstp {
                     cont_expected = stop_and_return(host, state)?;
                 } else if !std::mem::take(&mut cont_expected) {
@@ -663,6 +671,12 @@ mod tests {
         restores: usize,
         stops: usize,
         clears: usize,
+        /// Calls to `terminal()`: one per loop pass (the draw).
+        draws: usize,
+        /// `draws` when the last `stop_self` ran.
+        draws_at_stop: usize,
+        /// `stop_self` fails, as `kill` could.
+        stop_fails: bool,
     }
 
     impl Host for TestHost {
@@ -670,6 +684,7 @@ mod tests {
         type Events = BoxStream<'static, io::Result<Event>>;
         type Signals = mpsc::UnboundedReceiver<Signal>;
         fn terminal(&mut self) -> &mut Terminal<TestBackend> {
+            self.draws += 1;
             &mut self.terminal
         }
         fn streams(&mut self) -> (&mut Self::Events, &mut Self::Signals) {
@@ -688,6 +703,10 @@ mod tests {
         /// does when the shell continues a stopped process.
         fn stop_self(&mut self) -> io::Result<()> {
             self.stops += 1;
+            self.draws_at_stop = self.draws;
+            if self.stop_fails {
+                return Err(io::Error::other("kill failed"));
+            }
             self.signal_tx.unbounded_send(Signal::Cont).unwrap();
             Ok(())
         }
@@ -787,6 +806,9 @@ mod tests {
             restores: 0,
             stops: 0,
             clears: 0,
+            draws: 0,
+            draws_at_stop: 0,
+            stop_fails: false,
         };
         (host, captured)
     }
@@ -936,6 +958,69 @@ mod tests {
         assert!(!state.scrollback_text().contains("Cancelled"));
         let screen = screen_text(&host);
         assert!(screen.contains("Esc cancels"), "{screen}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_a_long_stop_does_not_replay_the_missed_redraw_ticks() {
+        // While the process is stopped the clock runs on, but nothing polls
+        // the 100 ms redraw tick. On `fg` the missed ticks must not fire
+        // one by one: the tick arm comes first in the biased select, so
+        // they would hold back SIGCONT and the keys (10 per second stopped).
+        const STOPPED: Duration = Duration::from_secs(120);
+        const MAX_DRAWS_AFTER_STOP: usize = 10;
+        let _lock = DIAG_LOCK.lock().await;
+        let (mut host, _) = test_host(Vec::new(), Vec::new());
+        // The clock jumps after the stop, before the next key is read.
+        let after_stop = futures::stream::once(async {
+            tokio::time::advance(STOPPED).await;
+            press(KeyCode::Char('x'))
+        });
+        host.keys = futures::stream::iter(vec![ctrl_z()])
+            .chain(after_stop)
+            .boxed();
+        // A command shown as running turns the tick on. A real command
+        // would need the network, and the paused clock fires its timeouts
+        // at once, so the test marks one as running without a future.
+        let mut state = TuiState::new(
+            SessionContext::default(),
+            Journal::default(),
+            vocab::Vocab::default(),
+        );
+        let config = Config::default();
+        let Plan::Run(inv) = state.submit("venues list", &config) else {
+            panic!("`venues list` did not plan a run")
+        };
+        let _out = state.start("venues list", &inv);
+        let factory = MockClientFactory::new();
+        let res = session(&mut host, &mut state, &config, &factory, |_| Ok(())).await;
+        assert_eq!(res.unwrap().code, 0);
+        assert!(state.running.is_some(), "the tick stayed on");
+        assert_eq!(host.stops, 1);
+        assert_eq!(state.input, "x", "the key after the stop is handled");
+        let draws = host.draws - host.draws_at_stop;
+        assert!(
+            draws <= MAX_DRAWS_AFTER_STOP,
+            "{draws} draws between the stop and the end"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_a_failed_stop_says_so_and_keeps_the_tui() {
+        // If kill fails, the TUI must say so and take the screen back. No
+        // SIGCONT follows, so a later outside SIGCONT must still repaint.
+        let _lock = DIAG_LOCK.lock().await;
+        let (mut host, captured) = test_host(vec![ctrl_z()], vec![Signal::Cont]);
+        host.stop_fails = true;
+        let (res, state, host, _) = drive_host(Journal::default(), host, captured).await;
+        assert_eq!(res.unwrap().code, 0);
+        assert!(
+            state
+                .scrollback_text()
+                .contains("Could not stop the process: kill failed")
+        );
+        assert_eq!(host.stops, 1);
+        // One set for the failed stop, one for the outside SIGCONT.
+        assert_eq!((host.suspends, host.resumes, host.clears), (2, 2, 2));
     }
 
     /// Awaits `fut`, failing the test after 10 s: a swallowed signal must

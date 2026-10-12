@@ -81,4 +81,6 @@ tempfile = "3.10"
 assert_cmd = "2.0"
 predicates = "3.0"
 tokio-test = "0.4"
+# Paused clock for the redraw-tick tests
+tokio = { version = "1.0", features = ["test-util"] }
 mockito = "1.2"
