@@ -2518,6 +2518,7 @@ name = "scope-tui-harness"
 version = "0.6.0"
 dependencies = [
  "anyhow",
+ "clap",
  "portable-pty",
  "regex",
  "serde",

@@ -479,3 +479,13 @@ release:
     echo "  3. Update release notes if needed"
     echo ""
     echo "Release complete!"
+
+# -----------------------------------------------------------------------------
+# TUI harness
+# -----------------------------------------------------------------------------
+
+# TUI release gate: build scope, run the harness PTY tests, run the offline scenarios
+tui-test *ARGS:
+    cargo build --bin scope
+    cargo test -p scope-tui-harness -- --ignored
+    cargo run -q -p scope-tui-harness -- run --tier offline {{ARGS}}
