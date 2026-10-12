@@ -8,12 +8,12 @@ steps:
   - key: Enter
   # Ctrl-F opens the search; typing finds the newest match and marks it.
   - key: Ctrl-F
-  - type: "palette"
-  - wait_for: { text: "search: palette \\d+/\\d+", timeout: 5s }
+  - type: "ctrl"
+  - wait_for: { text: "search: ctrl \\d+/\\d+", timeout: 5s }
   - expect_screen: { contains: ["▶"] }
   - key: Enter
   - type: "n"
-  - wait_for: { text: "search: palette" }
+  - wait_for: { text: "search: ctrl 2/", timeout: 5s }
   # No match says so.
   - key: Backspace
   - type: "zzzz"
