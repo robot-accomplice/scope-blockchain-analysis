@@ -28,6 +28,9 @@ pub const SCROLLBACK_LIMIT: usize = 5000;
 /// Lines moved by one PageUp / PageDown.
 const PAGE: usize = 10;
 
+/// Said when Ctrl-D or `exit` is pressed while a command runs.
+pub const BUSY_NOTE: &str = "A command is running; Esc or Ctrl-C cancels it first.";
+
 /// The most completion candidates shown at once.
 const MENU_ROWS: usize = 8;
 
@@ -258,7 +261,9 @@ impl TuiState {
                 }
             }
             KeyCode::Char('d') if ctrl => {
-                if self.input.is_empty() && self.running.is_none() {
+                if self.running.is_some() {
+                    self.push_busy_note();
+                } else if self.input.is_empty() {
                     return Action::Exit;
                 }
             }
@@ -271,6 +276,9 @@ impl TuiState {
             KeyCode::Enter => {
                 // One command at a time; the line stays for after it ends.
                 if self.running.is_some() {
+                    if self.input_is_exit() {
+                        self.push_busy_note();
+                    }
                     return Action::None;
                 }
                 let line = std::mem::take(&mut self.input);
@@ -354,6 +362,24 @@ impl TuiState {
     /// The display column of the cursor: wide characters count as two.
     fn cursor_column(&self) -> usize {
         UnicodeWidthStr::width(&self.input[..self.byte_index(self.cursor)])
+    }
+
+    /// True when the line is an exit command (the same words `exec` takes).
+    fn input_is_exit(&self) -> bool {
+        self.input.split_whitespace().next().is_some_and(|w| {
+            matches!(
+                w.to_lowercase().as_str(),
+                "exit" | "quit" | "q" | ".exit" | ".quit"
+            )
+        })
+    }
+
+    /// Says why exit waits. Does not repeat when the last line is the note.
+    fn push_busy_note(&mut self) {
+        let last = self.scrollback.last().map(|l| l.to_string());
+        if last.as_deref() != Some(BUSY_NOTE) {
+            self.push_note(BUSY_NOTE);
+        }
     }
 
     fn tab_complete(&mut self) {
@@ -1594,5 +1620,79 @@ mod tests {
             .find(|&y| (0..60).any(|x| buf[(x, y)].symbol() == "a"))
             .unwrap();
         assert_eq!(buf[(16, row)].symbol(), "│");
+    }
+
+    fn start_pane_command(s: &mut TuiState) {
+        let inv = Invocation {
+            command: venues_list(),
+            route: Route::Pane,
+            ai: false,
+            argv: vec![],
+        };
+        s.start("venues list", &inv);
+    }
+
+    #[test]
+    fn test_ctrl_d_while_running_explains_and_does_not_exit() {
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let mut s = state();
+        start_pane_command(&mut s);
+        assert_eq!(s.handle_key(ctrl('d')), Action::None);
+        assert!(s.scrollback_text().contains(BUSY_NOTE));
+        s.finish(Ending::Cancelled);
+    }
+
+    #[test]
+    fn test_exit_typed_while_running_explains_and_keeps_the_line() {
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        for word in ["exit", "quit", "q", "EXIT"] {
+            let mut s = state();
+            start_pane_command(&mut s);
+            type_str(&mut s, word);
+            assert_eq!(s.handle_key(key(KeyCode::Enter)), Action::None, "{word}");
+            assert!(s.scrollback_text().contains(BUSY_NOTE), "{word}");
+            assert_eq!(s.input, word, "the line stays");
+            s.finish(Ending::Cancelled);
+        }
+    }
+
+    #[test]
+    fn test_other_lines_typed_while_running_get_no_note() {
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let mut s = state();
+        start_pane_command(&mut s);
+        type_str(&mut s, "ctx");
+        assert_eq!(s.handle_key(key(KeyCode::Enter)), Action::None);
+        assert!(!s.scrollback_text().contains(BUSY_NOTE));
+        s.finish(Ending::Cancelled);
+    }
+
+    #[test]
+    fn test_busy_note_is_not_repeated_in_a_row() {
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let mut s = state();
+        start_pane_command(&mut s);
+        s.handle_key(ctrl('d'));
+        s.handle_key(ctrl('d'));
+        assert_eq!(s.scrollback_text().matches(BUSY_NOTE).count(), 1);
+        s.finish(Ending::Cancelled);
+    }
+
+    #[test]
+    fn test_ctrl_d_exits_once_the_command_ended() {
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let mut s = state();
+        start_pane_command(&mut s);
+        s.handle_key(ctrl('d'));
+        s.finish(Ending::Cancelled);
+        assert_eq!(s.handle_key(ctrl('d')), Action::Exit);
+    }
+
+    #[test]
+    fn test_ctrl_d_with_text_and_no_command_does_nothing() {
+        let mut s = state();
+        type_str(&mut s, "ab");
+        assert_eq!(s.handle_key(ctrl('d')), Action::None);
+        assert!(!s.scrollback_text().contains(BUSY_NOTE));
     }
 }
