@@ -131,8 +131,15 @@ pub fn plan(
         #[cfg(debug_assertions)]
         "__panic" => panic!("__panic: manual crash-log check"),
         "help" | "?" | ".help" => {
-            write_help(out)?;
-            return Ok(Plan::Done);
+            if rest.is_empty() {
+                write_help(out)?;
+                return Ok(Plan::Done);
+            }
+            // `help market summary` is `market summary --help`: the same
+            // text as `scope help market summary`.
+            let mut words: Vec<String> = words[1..].to_vec();
+            words.push("--help".to_string());
+            return parse_cli(words, ctx, config, out);
         }
         "ctx" | "context" | ".ctx" | ".context" => {
             out!(out, "{}", ctx)?;
@@ -843,6 +850,23 @@ mod tests {
         for word in ["+tokens", "address", "market", "compliance", "venues"] {
             assert!(cap.out().contains(word), "help is missing {}", word);
         }
+    }
+
+    #[test]
+    fn test_help_with_a_command_shows_that_commands_help() {
+        let (p, cap) = plan_line("help market summary", &mut SessionContext::default());
+        assert!(matches!(p, Plan::Done));
+        assert!(cap.out().contains("Usage:"), "{}", cap.out());
+        assert!(cap.out().contains("--venue"), "{}", cap.out());
+        assert!(!cap.out().contains("Session commands"), "{}", cap.out());
+    }
+
+    #[test]
+    fn test_help_with_an_unknown_command_is_a_clap_error() {
+        let (p, cap) = plan_line("help nosuchcmd", &mut SessionContext::default());
+        assert!(matches!(p, Plan::Done));
+        assert!(cap.err().contains("nosuchcmd"), "{}", cap.err());
+        assert!(cap.out().is_empty(), "{}", cap.out());
     }
 
     // ---- tokens ----
