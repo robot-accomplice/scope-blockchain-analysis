@@ -23,9 +23,11 @@
 
 pub mod ghola;
 pub mod native;
+pub mod shared;
 
 pub use ghola::GholaHttpClient;
 pub use native::NativeHttpClient;
+pub use shared::{Built, init, transport};
 
 use async_trait::async_trait;
 use std::collections::HashMap;
