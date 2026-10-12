@@ -649,7 +649,7 @@ fn write_help(out: &Output) -> io::Result<()> {
     )?;
     outln!(
         out,
-        "      Ctrl-Y copy last output · Shift-drag selects text"
+        "      Ctrl-Y copy last output · Ctrl-F or / search · Ctrl-R history search · Shift-drag selects text"
     )?;
     outln!(
         out,
@@ -870,6 +870,14 @@ mod tests {
         let (_, cap) = plan_line("help", &mut SessionContext::default());
         for word in ["+tokens", "address", "market", "compliance", "venues"] {
             assert!(cap.out().contains(word), "help is missing {}", word);
+        }
+    }
+
+    #[test]
+    fn test_help_lists_the_search_keys() {
+        let (_, cap) = plan_line("help", &mut SessionContext::default());
+        for keys in ["Ctrl-F or / search", "Ctrl-R history search"] {
+            assert!(cap.out().contains(keys), "help is missing {}", keys);
         }
     }
 

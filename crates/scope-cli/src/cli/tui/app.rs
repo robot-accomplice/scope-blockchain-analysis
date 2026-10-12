@@ -77,6 +77,41 @@ pub enum Overlay {
     Menu(Menu),
     /// The Ctrl-K command palette.
     Palette(super::palette::PaletteState),
+    /// The Ctrl-F search of the scrollback.
+    Search(SearchState),
+    /// The Ctrl-R search of the history.
+    HistorySearch(HistorySearchState),
+}
+
+/// What the status bar says when a search finds nothing.
+const NO_MATCH: &str = "no match";
+
+/// The gutter of a matched row: it marks the match without color.
+const MATCH_MARK: &str = "▶ ";
+
+/// The gutter of a row that is not a match, so rows do not shift.
+const MATCH_BLANK: &str = "  ";
+
+/// The open scrollback search.
+pub struct SearchState {
+    /// What is searched for. Matches ignore case.
+    pub query: String,
+    /// Typing edits the query. Off, `n` and `N` walk the matches.
+    editing: bool,
+    /// The scrollback entry of the match the view shows now.
+    current: Option<usize>,
+    /// The scroll position from before the search opened. Esc restores it.
+    saved_scroll: usize,
+}
+
+/// The open history search.
+pub struct HistorySearchState {
+    /// What is searched for. Matches ignore case.
+    pub query: String,
+    /// The history entry that is in the input now.
+    current: Option<usize>,
+    /// The input line from before the search opened. Esc restores it.
+    draft: String,
 }
 
 /// The open completion menu.
@@ -194,7 +229,7 @@ pub struct TuiState {
     /// Everything shown in the output pane, except the running command.
     scrollback: Vec<Line<'static>>,
     /// How many lines the view is scrolled up from the bottom.
-    scroll: usize,
+    scroll: Cell<usize>,
     /// The last draw was the too-small message. Enter does not run then.
     too_small: Cell<bool>,
     /// The most the view can scroll up, at the last draw. PageUp stops here.
@@ -221,8 +256,14 @@ pub struct TuiState {
     journal: Journal,
     /// Completion values from the user's stores.
     vocab: Vocab,
-    /// The open completion menu or palette, if any.
+    /// The open completion menu, palette or search, if any.
     pub overlay: Option<Overlay>,
+    /// The view must move to the current search match at the next draw,
+    /// which knows the fitted rows.
+    reveal: Cell<bool>,
+    /// The pane width the last search draw used. A resize changes the
+    /// rows, so the view moves to the match again.
+    search_width: Cell<usize>,
 }
 
 impl TuiState {
@@ -236,7 +277,7 @@ impl TuiState {
             hist_pos: None,
             draft: String::new(),
             scrollback: Vec::new(),
-            scroll: 0,
+            scroll: Cell::new(0),
             too_small: Cell::new(false),
             last_max_top: Cell::new(0),
             last_pane_height: Cell::new(0),
@@ -249,6 +290,8 @@ impl TuiState {
             journal,
             vocab,
             overlay: None,
+            reveal: Cell::new(false),
+            search_width: Cell::new(0),
         }
     }
 
@@ -274,15 +317,29 @@ impl TuiState {
         // stopped with one key.
         if ctrl
             && key.code == KeyCode::Char('c')
-            && matches!(self.overlay, Some(Overlay::Palette(_)))
+            && matches!(
+                self.overlay,
+                Some(Overlay::Palette(_) | Overlay::Search(_) | Overlay::HistorySearch(_))
+            )
         {
-            self.overlay = None;
+            self.close_overlay();
         }
         // The overlays are not drawn while the terminal is too small, so
         // they must not act: Esc or any key closes one and does no more.
         if self.too_small.get() && self.overlay.is_some() {
-            self.overlay = None;
+            self.close_overlay();
             return Action::None;
+        }
+        match self.overlay.take() {
+            Some(Overlay::Search(st)) => {
+                self.search_key(st, key);
+                return Action::None;
+            }
+            Some(Overlay::HistorySearch(st)) => {
+                self.history_search_key(st, key);
+                return Action::None;
+            }
+            other => self.overlay = other,
         }
         if let Some(Overlay::Palette(p)) = &mut self.overlay {
             let count = p.matches().len();
@@ -382,7 +439,7 @@ impl TuiState {
                 let line = std::mem::take(&mut self.input);
                 self.cursor = 0;
                 self.hist_pos = None;
-                self.scroll = 0;
+                self.scroll.set(0);
                 if !line.trim().is_empty() && self.history.last() != Some(&line) {
                     self.history.push(line.clone());
                 }
@@ -393,23 +450,41 @@ impl TuiState {
             KeyCode::Down => self.history_next(),
             KeyCode::PageUp => {
                 let max = self.last_max_top.get();
-                self.scroll = self.scroll.min(max).saturating_add(self.page()).min(max);
+                self.scroll.set(
+                    self.scroll
+                        .get()
+                        .min(max)
+                        .saturating_add(self.page())
+                        .min(max),
+                );
             }
             KeyCode::PageDown => {
-                self.scroll = self
-                    .scroll
-                    .min(self.last_max_top.get())
-                    .saturating_sub(self.page());
+                self.scroll.set(
+                    self.scroll
+                        .get()
+                        .min(self.last_max_top.get())
+                        .saturating_sub(self.page()),
+                );
             }
-            KeyCode::Home if ctrl => self.scroll = self.last_max_top.get(),
-            KeyCode::End if ctrl => self.scroll = 0,
+            KeyCode::Home if ctrl => self.scroll.set(self.last_max_top.get()),
+            KeyCode::End if ctrl => self.scroll.set(0),
             KeyCode::Left => self.cursor = self.cursor.saturating_sub(1),
             KeyCode::Right => self.cursor = (self.cursor + 1).min(self.char_len()),
             KeyCode::Home => self.cursor = 0,
             // On an empty line there is no cursor to move: End goes to the
             // newest output.
-            KeyCode::End if self.input.is_empty() => self.scroll = 0,
+            KeyCode::End if self.input.is_empty() => self.scroll.set(0),
             KeyCode::End => self.cursor = self.char_len(),
+            KeyCode::Char('f') if ctrl && !self.too_small.get() => self.open_search(),
+            KeyCode::Char('/')
+                if !ctrl
+                    && !key.modifiers.contains(KeyModifiers::ALT)
+                    && self.input.is_empty()
+                    && !self.too_small.get() =>
+            {
+                self.open_search()
+            }
+            KeyCode::Char('r') if ctrl && !self.too_small.get() => self.open_history_search(),
             KeyCode::Char('k') if ctrl => {
                 self.overlay = Some(Overlay::Palette(super::palette::PaletteState::new(
                     super::palette::items(&self.history),
@@ -424,20 +499,20 @@ impl TuiState {
             }
             KeyCode::Char('w') if ctrl => self.delete_word(),
             KeyCode::Backspace => {
-                self.scroll = 0;
+                self.scroll.set(0);
                 if self.cursor > 0 {
                     self.cursor -= 1;
                     self.remove_char(self.cursor);
                 }
             }
             KeyCode::Delete => {
-                self.scroll = 0;
+                self.scroll.set(0);
                 if self.cursor < self.char_len() {
                     self.remove_char(self.cursor);
                 }
             }
             KeyCode::Char(c) if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) => {
-                self.scroll = 0;
+                self.scroll.set(0);
                 let at = self.byte_index(self.cursor);
                 self.input.insert(at, c);
                 self.cursor += 1;
@@ -464,26 +539,245 @@ impl TuiState {
         if clean.is_empty() {
             return;
         }
-        self.scroll = 0;
+        // A search keeps the view where it is.
+        if !matches!(
+            self.overlay,
+            Some(Overlay::Search(_) | Overlay::HistorySearch(_))
+        ) {
+            self.scroll.set(0);
+        }
         let truncated = clean.chars().count() > PASTE_LIMIT;
         if truncated {
             clean = clean.chars().take(PASTE_LIMIT).collect();
         }
-        if let Some(Overlay::Palette(p)) = &mut self.overlay {
+        match self.overlay.take() {
+            Some(Overlay::Search(st)) => self.search_type(st, &clean),
+            Some(Overlay::HistorySearch(st)) => self.history_search_type(st, &clean),
             // The palette has the focus: the paste goes into its query.
-            p.query.push_str(&clean);
-            p.selected = 0;
-        } else {
-            self.overlay = None;
-            let at = self.byte_index(self.cursor);
-            self.input.insert_str(at, &clean);
-            self.cursor += clean.chars().count();
+            Some(Overlay::Palette(mut p)) => {
+                p.query.push_str(&clean);
+                p.selected = 0;
+                self.overlay = Some(Overlay::Palette(p));
+            }
+            _ => {
+                let at = self.byte_index(self.cursor);
+                self.input.insert_str(at, &clean);
+                self.cursor += clean.chars().count();
+            }
         }
         if lines > 1 {
             self.push_note(&format!("pasted {} lines as one line", lines));
         }
         if truncated {
             self.push_note(&format!("paste truncated to {} characters", PASTE_LIMIT));
+        }
+    }
+
+    // -------------------------------------------------------------- search
+
+    /// Closes any overlay. A search puts back what it moved: the scroll
+    /// position, or the input line.
+    fn close_overlay(&mut self) {
+        match self.overlay.take() {
+            Some(Overlay::Search(st)) => self.scroll.set(st.saved_scroll),
+            Some(Overlay::HistorySearch(st)) => self.set_input(st.draft),
+            _ => {}
+        }
+    }
+
+    fn open_search(&mut self) {
+        self.overlay = Some(Overlay::Search(SearchState {
+            query: String::new(),
+            editing: true,
+            current: None,
+            saved_scroll: self.scroll.get().min(self.last_max_top.get()),
+        }));
+    }
+
+    fn open_history_search(&mut self) {
+        self.hist_pos = None;
+        self.overlay = Some(Overlay::HistorySearch(HistorySearchState {
+            query: String::new(),
+            current: None,
+            draft: self.input.clone(),
+        }));
+    }
+
+    /// The scrollback entries that hold `query`, oldest first.
+    fn search_matches(&self, query: &str) -> Vec<usize> {
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let needle = query.to_lowercase();
+        self.scrollback
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.to_string().to_lowercase().contains(&needle))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// The history entries that hold `query`, oldest first.
+    fn history_matches(&self, query: &str) -> Vec<usize> {
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let needle = query.to_lowercase();
+        self.history
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.to_lowercase().contains(&needle))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Where `current` sits in `matches`, counted from the newest, and how
+    /// many matches there are.
+    fn rank(matches: &[usize], current: Option<usize>) -> Option<(usize, usize)> {
+        let at = matches.binary_search(&current?).ok()?;
+        Some((matches.len() - at, matches.len()))
+    }
+
+    /// The match before (`older`) or after `current`, wrapping.
+    fn step(matches: &[usize], current: Option<usize>, older: bool) -> Option<usize> {
+        let last = matches.len().checked_sub(1)?;
+        let at = current.and_then(|c| matches.binary_search(&c).ok());
+        let next = match (at, older) {
+            (None, _) => last,
+            (Some(0), true) => last,
+            (Some(a), true) => a - 1,
+            (Some(a), false) if a == last => 0,
+            (Some(a), false) => a + 1,
+        };
+        Some(matches[next])
+    }
+
+    /// Adds `text` to the query and jumps to the newest match.
+    fn search_type(&mut self, mut st: SearchState, text: &str) {
+        st.editing = true;
+        st.query.push_str(text);
+        self.search_refind(&mut st);
+        self.overlay = Some(Overlay::Search(st));
+    }
+
+    fn search_refind(&self, st: &mut SearchState) {
+        st.current = self.search_matches(&st.query).last().copied();
+        self.reveal.set(st.current.is_some());
+    }
+
+    fn search_key(&mut self, mut st: SearchState, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let walk = |s: &mut Self, st: &mut SearchState, older: bool| {
+            let found = Self::step(&s.search_matches(&st.query), st.current, older);
+            if found.is_some() {
+                st.current = found;
+                s.reveal.set(true);
+            }
+        };
+        match key.code {
+            KeyCode::Esc => {
+                self.scroll.set(st.saved_scroll);
+                return;
+            }
+            KeyCode::Char('f') if ctrl => st.editing = !st.editing,
+            KeyCode::Enter if st.editing => st.editing = false,
+            KeyCode::Enter => walk(self, &mut st, true),
+            KeyCode::Backspace if st.editing => {
+                st.query.pop();
+                self.search_refind(&mut st);
+            }
+            KeyCode::Backspace => st.editing = true,
+            KeyCode::Char(c) if !ctrl && !alt && st.editing => {
+                let mut buf = [0u8; 4];
+                return self.search_type(st, c.encode_utf8(&mut buf));
+            }
+            KeyCode::Char('n') if !ctrl && !alt => walk(self, &mut st, true),
+            KeyCode::Char('N') if !ctrl && !alt => walk(self, &mut st, false),
+            _ => {}
+        }
+        self.overlay = Some(Overlay::Search(st));
+    }
+
+    /// Adds `text` to the history query and shows the newest match.
+    fn history_search_type(&mut self, mut st: HistorySearchState, text: &str) {
+        st.query.push_str(text);
+        self.history_refind(&mut st);
+        self.overlay = Some(Overlay::HistorySearch(st));
+    }
+
+    /// Shows the newest match in the input, or the draft when none match.
+    fn history_refind(&mut self, st: &mut HistorySearchState) {
+        st.current = self.history_matches(&st.query).last().copied();
+        self.show_history_match(st);
+    }
+
+    fn show_history_match(&mut self, st: &HistorySearchState) {
+        let line = match st.current {
+            Some(i) => self.history[i].clone(),
+            None => st.draft.clone(),
+        };
+        self.set_input(line);
+    }
+
+    fn history_search_key(&mut self, mut st: HistorySearchState, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        match key.code {
+            KeyCode::Esc => {
+                self.set_input(st.draft);
+                return;
+            }
+            // The match stays in the input. It does not run.
+            KeyCode::Enter => return,
+            KeyCode::Char('r') if ctrl => {
+                let found = Self::step(&self.history_matches(&st.query), st.current, true);
+                if found.is_some() {
+                    st.current = found;
+                    self.show_history_match(&st);
+                }
+            }
+            KeyCode::Backspace => {
+                st.query.pop();
+                self.history_refind(&mut st);
+            }
+            KeyCode::Char(c) if !ctrl && !alt => {
+                let mut buf = [0u8; 4];
+                return self.history_search_type(st, c.encode_utf8(&mut buf));
+            }
+            _ => {}
+        }
+        self.overlay = Some(Overlay::HistorySearch(st));
+    }
+
+    /// The status text of an open search, or `None`.
+    fn search_status(&self) -> Option<String> {
+        match &self.overlay {
+            Some(Overlay::Search(st)) => {
+                let matches = self.search_matches(&st.query);
+                let cur = st.current.filter(|c| matches.binary_search(c).is_ok());
+                Some(Self::search_text("search", &st.query, &matches, cur))
+            }
+            Some(Overlay::HistorySearch(st)) => {
+                let matches = self.history_matches(&st.query);
+                Some(Self::search_text(
+                    "history search",
+                    &st.query,
+                    &matches,
+                    st.current,
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    fn search_text(label: &str, query: &str, matches: &[usize], cur: Option<usize>) -> String {
+        if query.is_empty() {
+            return format!("{label}: type to search");
+        }
+        match Self::rank(matches, cur) {
+            Some((n, total)) => format!("{label}: {query} {n}/{total}"),
+            None => format!("{label}: {query} {NO_MATCH}"),
         }
     }
 
@@ -1007,14 +1301,14 @@ impl TuiState {
         .areas(f.area());
 
         // Output pane: scrollback plus the live output of a running command.
-        let mut lines = self.scrollback.clone();
+        let mut live: Vec<Line<'static>> = Vec::new();
         if let Some(run) = &self.running {
             if let Ok(t) = run.captured.out().into_text() {
-                lines.extend(t.lines);
+                live.extend(t.lines);
             }
             // Drawn only: these lines are not output, so they never reach
             // the scrollback, the copy or the journal.
-            lines.extend(self.liveness_lines(run, color_enabled()));
+            live.extend(self.liveness_lines(run, color_enabled()));
         }
         let block = Block::new()
             .borders(Borders::TOP | Borders::BOTTOM)
@@ -1024,12 +1318,37 @@ impl TuiState {
         // Fit the lines to the inner width here, not with ratatui wrap: a
         // wrapped row keeps its gutter and a rule is cut. Every line then
         // is one row, so the newest line sits on the last inner row.
-        let para = Paragraph::new(Text::from(fit::fit(lines, inner.width as usize)));
+        let width = inner.width as usize;
+        // While a search is open, matched rows get a marker and reverse
+        // video, and `starts` holds the first fitted row of each entry.
+        let search = match &self.overlay {
+            Some(Overlay::Search(st)) => Some((self.search_matches(&st.query), st.current)),
+            _ => None,
+        };
+        let (rows, starts) = match &search {
+            Some((matches, current)) => {
+                marked_rows(&self.scrollback, live, matches, *current, width)
+            }
+            None => {
+                let mut lines = self.scrollback.clone();
+                lines.extend(live);
+                (fit::fit(lines, width), Vec::new())
+            }
+        };
+        let para = Paragraph::new(Text::from(rows));
         let total = para.line_count(inner.width);
         let max_top = total.saturating_sub(inner.height as usize);
         self.last_max_top.set(max_top);
         self.last_pane_height.set(inner.height as usize);
-        let top = max_top.saturating_sub(self.scroll.min(max_top));
+        if let Some((_, current)) = &search {
+            let moved = self.search_width.replace(width) != width;
+            if self.reveal.replace(false) || moved {
+                self.reveal_match(&starts, *current, inner.height as usize, max_top);
+            }
+        } else {
+            self.search_width.set(0);
+        }
+        let top = max_top.saturating_sub(self.scroll.get().min(max_top));
         f.render_widget(para.block(block).scroll((top as u16, 0)), pane);
 
         // Input line with the prompt in the border title.
@@ -1145,6 +1464,26 @@ impl TuiState {
         );
     }
 
+    /// Scrolls so the rows of scrollback entry `current` are in the middle
+    /// of the pane. `starts` holds the first fitted row of each entry and,
+    /// last, the row after the scrollback.
+    fn reveal_match(
+        &self,
+        starts: &[usize],
+        current: Option<usize>,
+        height: usize,
+        max_top: usize,
+    ) {
+        let Some(at) = current.filter(|&c| c + 1 < starts.len()) else {
+            return;
+        };
+        let (first, rows) = (starts[at], starts[at + 1] - starts[at]);
+        let top = first
+            .saturating_sub(height.saturating_sub(rows) / 2)
+            .min(max_top);
+        self.scroll.set(max_top - top);
+    }
+
     /// The spinner line and, for a repeating command, its run status.
     fn liveness_lines(&self, run: &Running, color: bool) -> Vec<Line<'static>> {
         let dim = Style::new().fg(Color::DarkGray);
@@ -1196,7 +1535,7 @@ impl TuiState {
             limit,
         ];
         // The view is clamped to the content when it draws; say so here too.
-        let scrolled = self.scroll.min(self.last_max_top.get());
+        let scrolled = self.scroll.get().min(self.last_max_top.get());
         let scrolled = (scrolled > 0).then(|| format!("scrolled up {} lines · PgDn", scrolled));
         let (state, scrolled, command) = match &self.running {
             Some(run) => (
@@ -1218,6 +1557,7 @@ impl TuiState {
             context,
             state,
             scrolled,
+            search: self.search_status(),
             command,
         }
     }
@@ -1233,7 +1573,11 @@ struct StatusParts {
     /// `scrolled up N lines · PgDn` while a command runs. Idle, it is the
     /// state. Dropped after the context and before the command.
     scrolled: Option<String>,
-    /// The command that runs. The last part to go.
+    /// `search: alpha 1/2` or `search: alpha no match` while a search is
+    /// open. Kept before the command text; dropped only after it.
+    search: Option<String>,
+    /// The command that runs. The first of these parts to go once the
+    /// context is gone.
     command: Option<String>,
 }
 
@@ -1303,11 +1647,13 @@ fn fit_status(parts: &StatusParts, width: usize) -> Line<'static> {
         return Line::default();
     }
     let command = |c: &str| format!(" · `{}`", c);
-    let scroll_note = parts
-        .scrolled
-        .as_ref()
-        .map(|s| format!(" · {}", s))
-        .unwrap_or_default();
+    let note = |text: &Option<String>| {
+        text.as_ref()
+            .map(|s| format!(" · {}", s))
+            .unwrap_or_default()
+    };
+    let scroll_note = note(&parts.scrolled);
+    let search_note = note(&parts.search);
     let total = parts.context.len();
     for kept in (0..=total).rev() {
         let left = if kept == 0 {
@@ -1315,7 +1661,7 @@ fn fit_status(parts: &StatusParts, width: usize) -> Line<'static> {
         } else {
             format!(" {}  ", parts.context[..kept].join(" · "))
         };
-        let mut right = format!("{}{}", parts.state, scroll_note);
+        let mut right = format!("{}{}{}", parts.state, scroll_note, search_note);
         if let Some(c) = &parts.command {
             right.push_str(&command(c));
         }
@@ -1326,9 +1672,10 @@ fn fit_status(parts: &StatusParts, width: usize) -> Line<'static> {
             return bar(left, right);
         }
     }
-    // The whole context is gone. Cut the command text to what is left.
-    for note in [scroll_note.as_str(), ""] {
-        let used = 1 + cols(&parts.state) + cols(note) + COMMAND_FRAME_COLS;
+    // The whole context is gone. Cut the command text to what is left. The
+    // search note stays until the command is gone.
+    for note in [format!("{scroll_note}{search_note}"), search_note.clone()] {
+        let used = 1 + cols(&parts.state) + cols(&note) + COMMAND_FRAME_COLS;
         if let Some(c) = &parts.command
             && width >= used + MIN_CUT_COMMAND_COLS
         {
@@ -1340,6 +1687,12 @@ fn fit_status(parts: &StatusParts, width: usize) -> Line<'static> {
         }
     }
     // The command is gone too. A `…` after the state shows it, if it fits.
+    if parts.search.is_some() {
+        let text = format!(" {}{} {}", parts.state, search_note, ELLIPSIS);
+        if cols(&text) <= width {
+            return bar(String::new(), text);
+        }
+    }
     let text = format!(" {} {}", parts.state, ELLIPSIS);
     if cols(&text) <= width {
         return bar(String::new(), text);
@@ -1348,6 +1701,47 @@ fn fit_status(parts: &StatusParts, width: usize) -> Line<'static> {
         String::new(),
         cut_with_ellipsis(&format!(" {}", parts.state), width),
     )
+}
+
+/// Fits the scrollback to `width` for a search: every row gets a two-column
+/// gutter, `▶ ` for a row of a match and blanks for the rest. A match also
+/// gets reverse video, and the current one bold and underline, so the
+/// marker and the style both show it. Returns the rows and the first row
+/// of each scrollback entry, with the row after the scrollback last.
+fn marked_rows(
+    scrollback: &[Line<'static>],
+    live: Vec<Line<'static>>,
+    matches: &[usize],
+    current: Option<usize>,
+    width: usize,
+) -> (Vec<Line<'static>>, Vec<usize>) {
+    let text_width = width.saturating_sub(cols(MATCH_MARK)).max(1);
+    let gutter = |mut row: Line<'static>, hit: bool, now: bool| {
+        let mark = if hit { MATCH_MARK } else { MATCH_BLANK };
+        row.spans.insert(0, Span::raw(mark));
+        if hit {
+            let mut style = Style::new().add_modifier(Modifier::REVERSED);
+            if now {
+                style = style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+            }
+            row = row.patch_style(style);
+        }
+        row
+    };
+    let mut rows = Vec::new();
+    let mut starts = Vec::with_capacity(scrollback.len() + 1);
+    for (i, line) in scrollback.iter().enumerate() {
+        starts.push(rows.len());
+        let hit = matches.binary_search(&i).is_ok();
+        for row in fit::fit(vec![line.clone()], text_width) {
+            rows.push(gutter(row, hit, current == Some(i)));
+        }
+    }
+    starts.push(rows.len());
+    for row in fit::fit(live, text_width) {
+        rows.push(gutter(row, false, false));
+    }
+    (rows, starts)
 }
 
 /// Runs a parsed command with the given output. `--ai` switches this one
@@ -1924,13 +2318,13 @@ mod tests {
         let mut s = scrollable();
         s.handle_key(key(KeyCode::PageUp));
         s.handle_key(key(KeyCode::End));
-        assert_eq!(s.scroll, 0);
+        assert_eq!(s.scroll.get(), 0);
         type_str(&mut s, "abc");
         s.handle_key(key(KeyCode::Home));
         s.handle_key(key(KeyCode::PageUp));
         s.handle_key(key(KeyCode::End));
         assert_eq!(s.cursor, 3, "End moves the cursor on a non-empty input");
-        assert_eq!(s.scroll, 7, "and leaves the view alone");
+        assert_eq!(s.scroll.get(), 7, "and leaves the view alone");
     }
 
     #[test]
@@ -1940,14 +2334,14 @@ mod tests {
             type_str(&mut s, "ab");
             s.handle_key(key(KeyCode::Left));
             s.handle_key(key(KeyCode::PageUp));
-            assert!(s.scroll > 0, "{edit}");
+            assert!(s.scroll.get() > 0, "{edit}");
             match edit {
                 "char" => drop(s.handle_key(key(KeyCode::Char('a')))),
                 "backspace" => drop(s.handle_key(key(KeyCode::Backspace))),
                 "delete" => drop(s.handle_key(key(KeyCode::Delete))),
                 _ => s.paste("x"),
             }
-            assert_eq!(s.scroll, 0, "{edit}");
+            assert_eq!(s.scroll.get(), 0, "{edit}");
         }
     }
 
@@ -1963,7 +2357,7 @@ mod tests {
             key(KeyCode::Tab),
         ] {
             s.handle_key(k);
-            assert_eq!(s.scroll, 7, "{k:?}");
+            assert_eq!(s.scroll.get(), 7, "{k:?}");
         }
     }
 
@@ -2095,7 +2489,7 @@ mod tests {
     fn test_fit_status_never_panics_and_never_exceeds_the_width() {
         // Width math runs on every redraw: width 0 and tiny widths must
         // give a line, and no line may be wider than the bar.
-        let parts = StatusParts {
+        let mut parts = StatusParts {
             context: vec![
                 "chain auto".into(),
                 "format Table".into(),
@@ -2103,13 +2497,18 @@ mod tests {
             ],
             state: "running 12s · Esc cancels".into(),
             scrolled: Some("scrolled up 7 lines · PgDn".into()),
+            search: None,
             command: Some("market summary ✓✓ --every 2s".into()),
         };
-        for w in 0..=130 {
-            let line = fit_status(&parts, w);
-            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-            assert!(cols(&text) <= w, "{w}: {text:?}");
+        for search in [None, Some("search: alpha ✓ 1/2".to_string())] {
+            parts.search = search;
+            for w in 0..=130 {
+                let line = fit_status(&parts, w);
+                let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                assert!(cols(&text) <= w, "{w}: {text:?}");
+            }
         }
+        parts.search = None;
         let text: String = fit_status(&parts, 0)
             .spans
             .iter()
@@ -3025,5 +3424,294 @@ mod tests {
         assert_eq!(s.pane_width(), None, "nothing drawn yet");
         screen(&s, 40, 20);
         assert_eq!(s.pane_width(), Some(40));
+    }
+
+    // ------------------------------------------------------------- search
+
+    fn alpha_state() -> TuiState {
+        let mut s = state();
+        s.push_ansi("alpha\nbeta\nalpha2\n");
+        screen(&s, 80, 20);
+        s
+    }
+
+    fn open_search(s: &mut TuiState, query: &str) {
+        s.handle_key(ctrl('f'));
+        type_str(s, query);
+        screen(s, 80, 20);
+    }
+
+    #[test]
+    fn test_search_goes_to_the_newest_match_and_n_and_shift_n_walk_the_matches() {
+        let mut s = alpha_state();
+        open_search(&mut s, "alpha");
+        assert!(
+            status_row(&s, 80).contains("search: alpha 1/2"),
+            "newest first"
+        );
+        assert_eq!(s.input, "", "typing goes to the query, not the input");
+        s.handle_key(key(KeyCode::Enter));
+        s.handle_key(key(KeyCode::Char('n')));
+        assert!(status_row(&s, 80).contains("search: alpha 2/2"));
+        s.handle_key(key(KeyCode::Char('n')));
+        assert!(status_row(&s, 80).contains("1/2"), "n wraps to the newest");
+        s.handle_key(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT));
+        assert!(status_row(&s, 80).contains("2/2"), "N wraps to the oldest");
+        s.handle_key(key(KeyCode::Esc));
+        assert!(s.overlay.is_none());
+        assert!(!status_row(&s, 80).contains("search:"));
+    }
+
+    #[test]
+    fn test_n_is_a_query_character_while_editing() {
+        let mut s = alpha_state();
+        open_search(&mut s, "an");
+        assert!(status_row(&s, 80).contains("search: an"));
+        assert!(status_row(&s, 80).contains("no match"));
+    }
+
+    #[test]
+    fn test_slash_opens_search_only_on_an_empty_input() {
+        let mut s = alpha_state();
+        s.handle_key(key(KeyCode::Char('/')));
+        assert!(matches!(s.overlay, Some(Overlay::Search(_))));
+        assert_eq!(s.input, "");
+        s.handle_key(key(KeyCode::Esc));
+        type_str(&mut s, "a/b");
+        assert!(s.overlay.is_none());
+        assert_eq!(s.input, "a/b", "a slash inside text is text");
+    }
+
+    #[test]
+    fn test_search_is_case_insensitive_and_marks_matched_rows() {
+        let mut s = alpha_state();
+        open_search(&mut s, "ALPHA");
+        let text = screen(&s, 80, 20);
+        assert!(status_row(&s, 80).contains("1/2"));
+        assert_eq!(text.matches('▶').count(), 2, "{text}");
+    }
+
+    #[test]
+    fn test_no_match_says_so_and_n_does_nothing() {
+        let mut s = alpha_state();
+        open_search(&mut s, "zzz");
+        assert!(status_row(&s, 80).contains("no match"));
+        s.handle_key(key(KeyCode::Enter));
+        s.handle_key(key(KeyCode::Char('n')));
+        s.handle_key(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT));
+        assert!(status_row(&s, 80).contains("no match"));
+        assert!(!screen(&s, 80, 20).contains('▶'));
+    }
+
+    fn needle_state() -> TuiState {
+        let mut s = state();
+        s.push_ansi("needle first\n");
+        for i in 0..40 {
+            s.push_ansi(&format!("line {}\n", i));
+        }
+        screen(&s, 60, 15);
+        s
+    }
+
+    #[test]
+    fn test_search_scrolls_to_an_old_match_and_esc_restores_the_view() {
+        let mut s = needle_state();
+        s.handle_key(key(KeyCode::PageUp));
+        let before = screen(&s, 60, 15);
+        assert!(!before.contains("needle"));
+        s.handle_key(ctrl('f'));
+        type_str(&mut s, "needle");
+        let during = screen(&s, 60, 15);
+        assert!(during.contains("needle first"), "{during}");
+        assert!(during.contains('▶'));
+        s.handle_key(key(KeyCode::Esc));
+        assert_eq!(screen(&s, 60, 15), before, "the view the user had");
+    }
+
+    fn long_match_state() -> TuiState {
+        let mut s = state();
+        s.push_ansi(&format!("needle {}\n", "word ".repeat(40)));
+        for i in 0..30 {
+            s.push_ansi(&format!("line {}\n", i));
+        }
+        screen(&s, 60, 15);
+        s
+    }
+
+    #[test]
+    fn test_a_long_match_highlights_every_row_it_spans() {
+        let mut s = long_match_state();
+        s.handle_key(ctrl('f'));
+        type_str(&mut s, "needle");
+        let text = screen(&s, 60, 15);
+        assert!(text.matches('▶').count() >= 2, "{text}");
+        // The match is drawn with reverse video as well as the marker.
+        let mut term = Terminal::new(TestBackend::new(60, 15)).unwrap();
+        term.draw(|f| s.render(f)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let reversed = (0..15)
+            .filter(|&y| buf[(5, y)].modifier.contains(Modifier::REVERSED))
+            .count();
+        assert!(reversed >= 2, "{text}");
+    }
+
+    #[test]
+    fn test_search_follows_a_resize() {
+        let mut s = long_match_state();
+        s.handle_key(ctrl('f'));
+        type_str(&mut s, "needle");
+        assert!(screen(&s, 60, 15).contains("needle"));
+        assert!(
+            screen(&s, 100, 20).contains("needle"),
+            "visible after a resize"
+        );
+        assert!(screen(&s, 45, 12).contains("needle"), "and again");
+    }
+
+    #[test]
+    fn test_a_paste_goes_into_the_search_query() {
+        let mut s = alpha_state();
+        s.handle_key(ctrl('f'));
+        s.paste("alpha\n");
+        screen(&s, 80, 20);
+        assert_eq!(s.input, "");
+        assert!(status_row(&s, 80).contains("search: alpha 1/2"));
+    }
+
+    #[test]
+    fn test_esc_closes_the_search_before_it_cancels_a_running_command() {
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let (mut s, _out) = running_state("market summary USDC --every 2s");
+        s.handle_key(ctrl('f'));
+        assert_eq!(s.handle_key(key(KeyCode::Esc)), Action::None);
+        assert!(s.overlay.is_none());
+        assert_eq!(s.handle_key(key(KeyCode::Esc)), Action::Cancel);
+    }
+
+    #[test]
+    fn test_ctrl_c_still_cancels_a_running_command_with_a_search_open() {
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let (mut s, _out) = running_state("market summary USDC --every 2s");
+        s.handle_key(ctrl('f'));
+        assert_eq!(s.handle_key(ctrl('c')), Action::Cancel);
+        assert!(s.overlay.is_none());
+    }
+
+    #[test]
+    fn test_status_keeps_search_before_the_command_text_and_always_the_cancel_hint() {
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let (mut s, _out) = running_state("market summary USDC --every 2s");
+        for i in 0..5 {
+            s.push_ansi(&format!("alpha {}\n", i));
+        }
+        screen(&s, 140, 12);
+        s.handle_key(ctrl('f'));
+        type_str(&mut s, "alpha");
+        screen(&s, 140, 12);
+        let wide = status_row(&s, 140);
+        assert!(
+            wide.contains("search: alpha 1/5") && wide.contains("market summary"),
+            "{wide}"
+        );
+        for w in 26..140 {
+            let row = status_row(&s, w);
+            assert!(row.contains("Esc cancels"), "{w}: {row:?}");
+            if row.contains("market") {
+                assert!(
+                    row.contains("search:"),
+                    "{w}: command without search: {row:?}"
+                );
+            }
+        }
+        let search_without_command = (26..140).any(|w| {
+            let row = status_row(&s, w);
+            row.contains("search:") && !row.contains("market")
+        });
+        assert!(search_without_command, "the command goes first");
+    }
+
+    #[test]
+    fn test_search_closes_when_the_terminal_is_too_small_and_restores_the_view() {
+        let mut s = needle_state();
+        s.handle_key(key(KeyCode::PageUp));
+        let before = screen(&s, 60, 15);
+        s.handle_key(ctrl('f'));
+        type_str(&mut s, "needle");
+        screen(&s, 30, 8);
+        assert_eq!(s.handle_key(key(KeyCode::Char('x'))), Action::None);
+        assert!(s.overlay.is_none());
+        assert_eq!(s.input, "");
+        assert_eq!(screen(&s, 60, 15), before);
+    }
+
+    fn history_state() -> TuiState {
+        let mut s = state();
+        s.history = vec![
+            "venues list".into(),
+            "ctx".into(),
+            "market summary USDC".into(),
+        ];
+        s
+    }
+
+    #[test]
+    fn test_ctrl_r_filters_the_history_and_enter_accepts_without_running() {
+        let mut s = history_state();
+        s.handle_key(ctrl('r'));
+        type_str(&mut s, "ven");
+        assert_eq!(s.input, "venues list");
+        screen(&s, 80, 20);
+        assert!(status_row(&s, 80).contains("1/1"), "{}", status_row(&s, 80));
+        assert_eq!(s.handle_key(key(KeyCode::Enter)), Action::None);
+        assert!(s.overlay.is_none());
+        assert_eq!(s.input, "venues list", "accepted into the input, not run");
+    }
+
+    #[test]
+    fn test_ctrl_r_again_cycles_to_older_matches() {
+        let mut s = history_state();
+        s.history.push("venues x".into());
+        s.handle_key(ctrl('r'));
+        type_str(&mut s, "ven");
+        assert_eq!(s.input, "venues x", "most recent first");
+        s.handle_key(ctrl('r'));
+        assert_eq!(s.input, "venues list");
+        s.handle_key(ctrl('r'));
+        assert_eq!(s.input, "venues x", "wraps");
+    }
+
+    #[test]
+    fn test_esc_in_history_search_restores_the_draft() {
+        let mut s = history_state();
+        type_str(&mut s, "dra");
+        s.handle_key(ctrl('r'));
+        type_str(&mut s, "ven");
+        assert_eq!(s.input, "venues list");
+        s.handle_key(key(KeyCode::Esc));
+        assert_eq!(s.input, "dra");
+        assert!(s.overlay.is_none());
+    }
+
+    #[test]
+    fn test_history_search_with_no_match_says_so_and_keeps_the_draft() {
+        let mut s = history_state();
+        type_str(&mut s, "dra");
+        s.handle_key(ctrl('r'));
+        type_str(&mut s, "zzz");
+        screen(&s, 80, 20);
+        assert!(status_row(&s, 80).contains("no match"));
+        assert_eq!(s.input, "dra");
+        for _ in 0..3 {
+            s.handle_key(key(KeyCode::Backspace));
+        }
+        assert_eq!(s.input, "dra", "an empty query matches nothing");
+    }
+
+    #[test]
+    fn test_a_paste_goes_into_the_history_query() {
+        let mut s = history_state();
+        s.handle_key(ctrl('r'));
+        s.paste("market");
+        assert_eq!(s.input, "market summary USDC");
     }
 }

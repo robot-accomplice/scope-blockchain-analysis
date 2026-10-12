@@ -1,0 +1,37 @@
+name: search the scrollback with Ctrl-F and the history with Ctrl-R
+tiers: [offline]
+steps:
+  - type: "help"
+  - key: Enter
+  - wait_for: { text: "Keys: Enter run", timeout: 10s }
+  - type: "ctx"
+  - key: Enter
+  # Ctrl-F opens the search; typing finds the newest match and marks it.
+  - key: Ctrl-F
+  - type: "palette"
+  - wait_for: { text: "search: palette \\d+/\\d+", timeout: 5s }
+  - expect_screen: { contains: ["▶"] }
+  - key: Enter
+  - type: "n"
+  - wait_for: { text: "search: palette" }
+  # No match says so.
+  - key: Backspace
+  - type: "zzzz"
+  - wait_for: { text: "no match" }
+  # Esc closes the search and the status goes back.
+  - key: Esc
+  - wait_for: { text: "help · exit" }
+  - expect_screen: { not_contains: ["search:"] }
+  # A slash on an empty line opens the search too.
+  - type: "/"
+  - wait_for: { text: "search: type to search" }
+  - key: Esc
+  # Ctrl-R finds an earlier line and puts it in the input without running it.
+  - key: Ctrl-R
+  - type: "hel"
+  - wait_for: { text: "history search: hel 1/1" }
+  - key: Enter
+  - wait_for: { text: "│help\\s" }
+  - key: Ctrl-U
+  - key: Ctrl-D
+  - expect_exit: 0
