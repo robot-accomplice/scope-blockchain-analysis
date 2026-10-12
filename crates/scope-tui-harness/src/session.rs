@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::time::{Duration, Instant};
 
 const READ_CHUNK: usize = 8192;
@@ -105,9 +105,13 @@ impl Session {
                 Ok(chunk) => {
                     self.parser.process(&chunk);
                     self.raw.extend_from_slice(&chunk);
+                    if Instant::now() >= until {
+                        return Ok(());
+                    }
                 }
-                Err(_) if Instant::now() >= until => return Ok(()),
-                Err(_) => {}
+                Err(RecvTimeoutError::Disconnected) => return Ok(()),
+                Err(RecvTimeoutError::Timeout) if Instant::now() >= until => return Ok(()),
+                Err(RecvTimeoutError::Timeout) => {}
             }
         }
     }
@@ -130,8 +134,11 @@ impl Session {
         self.status
     }
 
+    /// Kills the child and reaps it. Waits only after a successful kill, so it cannot hang.
     pub fn kill(&mut self) {
-        let _ = self.child.kill();
+        if self.child.kill().is_ok() {
+            let _ = self.child.wait();
+        }
     }
 }
 

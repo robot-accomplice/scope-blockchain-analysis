@@ -113,7 +113,6 @@ pub fn run_scenario(
                 sess.screen()
             ));
             sess.kill();
-            out.argv_seen = journal(home.path()).iter().map(argv_of).collect();
             return Ok((out, sess, home));
         }
     }
@@ -124,6 +123,24 @@ pub fn run_scenario(
         .map(argv_of)
         .collect();
     Ok((out, sess, home))
+}
+
+/// The end of a step's wait, and whether the scenario deadline is what ends it.
+fn wait_end(timeout: Duration, deadline: Instant) -> (Instant, bool) {
+    let step_until = Instant::now() + timeout;
+    if deadline < step_until {
+        (deadline, true)
+    } else {
+        (step_until, false)
+    }
+}
+
+fn timed_out(clamped: bool, scenario: Duration, what: impl FnOnce() -> String) -> anyhow::Error {
+    if clamped {
+        anyhow::anyhow!("scenario timeout {scenario:?} reached")
+    } else {
+        anyhow::anyhow!(what())
+    }
 }
 
 fn exited(sess: &mut Session) -> Result<()> {
@@ -163,7 +180,7 @@ fn run_step(
         }
         Step::WaitFor { text, timeout } => {
             let re = Regex::new(text)?;
-            let until = Instant::now() + timeout.unwrap_or(DEFAULT_STEP_TIMEOUT);
+            let (until, clamped) = wait_end(timeout.unwrap_or(DEFAULT_STEP_TIMEOUT), deadline);
             loop {
                 sess.pump(POLL)?;
                 if re.is_match(&sess.screen()) {
@@ -171,7 +188,9 @@ fn run_step(
                 }
                 exited(sess)?;
                 if Instant::now() >= until {
-                    anyhow::bail!("{text:?} did not appear");
+                    return Err(timed_out(clamped, s.timeout, || {
+                        format!("{text:?} did not appear")
+                    }));
                 }
             }
         }
@@ -179,6 +198,7 @@ fn run_step(
             contains,
             not_contains,
         } => {
+            exited(sess)?;
             sess.pump(SETTLE)?;
             let screen = sess.screen();
             for p in contains {
@@ -197,19 +217,29 @@ fn run_step(
             outcome,
             error,
         } => {
-            let recs = journal(home);
-            let new = &recs[(*journal_seen).min(recs.len())..];
             let err_re = error.as_deref().map(Regex::new).transpose()?;
-            let hit = new.iter().any(|r| {
-                argv_of(r).starts_with(argv_prefix)
-                    && outcome.as_deref().is_none_or(|o| r["outcome"] == o)
-                    && err_re
-                        .as_ref()
-                        .is_none_or(|re| r["error"].as_str().is_some_and(|e| re.is_match(e)))
-            });
-            *journal_seen = recs.len();
-            if !hit {
-                anyhow::bail!("no journal record matches; new records: {new:?}");
+            let (until, clamped) = wait_end(DEFAULT_STEP_TIMEOUT, deadline);
+            loop {
+                let recs = journal(home);
+                let new = &recs[(*journal_seen).min(recs.len())..];
+                let hit = new.iter().any(|r| {
+                    argv_of(r).starts_with(argv_prefix)
+                        && outcome.as_deref().is_none_or(|o| r["outcome"] == o)
+                        && err_re
+                            .as_ref()
+                            .is_none_or(|re| r["error"].as_str().is_some_and(|e| re.is_match(e)))
+                });
+                if hit {
+                    *journal_seen = recs.len();
+                    break;
+                }
+                if Instant::now() >= until {
+                    *journal_seen = recs.len();
+                    return Err(timed_out(clamped, s.timeout, || {
+                        format!("no journal record matches; new records: {new:?}")
+                    }));
+                }
+                sess.pump(POLL)?;
             }
         }
         Step::ExpectFile { path, contains } => {
@@ -223,6 +253,7 @@ fn run_step(
             }
         }
         Step::Snapshot(name) => {
+            exited(sess)?;
             sess.pump(SETTLE)?;
             let masked = mask(&sess.screen(), &s.masks)?;
             match compare_snapshot(&ctx.snapshots_root.join(&ctx.scenario_id), name, &masked)? {
@@ -241,7 +272,7 @@ fn run_step(
             }
         }
         Step::ExpectExit(code) => {
-            let until = Instant::now() + DEFAULT_STEP_TIMEOUT;
+            let (until, clamped) = wait_end(DEFAULT_STEP_TIMEOUT, deadline);
             loop {
                 sess.pump(POLL)?;
                 if let Some(c) = sess.exit_status() {
@@ -251,7 +282,9 @@ fn run_step(
                     break;
                 }
                 if Instant::now() >= until {
-                    anyhow::bail!("process did not exit");
+                    return Err(timed_out(clamped, s.timeout, || {
+                        "process did not exit".to_string()
+                    }));
                 }
             }
         }
@@ -265,28 +298,31 @@ mod tests {
     use crate::scenario::parse;
     use std::path::PathBuf;
 
-    fn ctx() -> Option<RunCtx> {
+    fn ctx() -> (RunCtx, tempfile::TempDir) {
         let bin = std::env::var("SCOPE_BIN")
             .map(PathBuf::from)
             .unwrap_or_else(|_| {
                 PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/scope")
             });
-        if !bin.exists() {
-            eprintln!("skip: build scope first (cargo build --bin scope)");
-            return None;
-        }
-        let d = tempfile::tempdir().unwrap().keep();
-        Some(RunCtx {
+        assert!(
+            bin.exists(),
+            "scope binary missing at {}: run `cargo build --bin scope` or set SCOPE_BIN",
+            bin.display()
+        );
+        let d = tempfile::tempdir().unwrap();
+        let c = RunCtx {
             binary: bin,
-            fixtures_root: d.join("fx"),
-            snapshots_root: d.join("snap"),
+            fixtures_root: d.path().join("fx"),
+            snapshots_root: d.path().join("snap"),
             scenario_id: "t".into(),
-        })
+        };
+        (c, d)
     }
 
     #[test]
+    #[ignore = "needs the scope binary: cargo build --bin scope && cargo test -p scope-tui-harness -- --ignored"]
     fn test_session_command_runs_and_is_journaled() {
-        let Some(c) = ctx() else { return };
+        let (c, _keep) = ctx();
         let s = parse(
             r#"
 name: ctx shows the session
@@ -305,8 +341,9 @@ steps:
     }
 
     #[test]
+    #[ignore = "needs the scope binary: cargo build --bin scope && cargo test -p scope-tui-harness -- --ignored"]
     fn test_wait_for_times_out_with_the_screen_in_the_failure() {
-        let Some(c) = ctx() else { return };
+        let (c, _keep) = ctx();
         let s = parse("name: never\nsteps:\n  - wait_for: { text: \"NEVER-APPEARS\", timeout: 1s }\n  - expect_exit: 0\n").unwrap();
         let (out, _, _) = run_scenario(&s, Tier::Offline, &c).unwrap();
         assert!(!out.passed);
@@ -315,13 +352,27 @@ steps:
     }
 
     #[test]
+    #[ignore = "needs the scope binary: cargo build --bin scope && cargo test -p scope-tui-harness -- --ignored"]
     fn test_early_exit_fails_the_next_step_without_hanging() {
-        let Some(c) = ctx() else { return };
-        let s = parse("name: early\ntimeout: 20s\nsteps:\n  - key: Ctrl-D\n  - wait_for: { text: \"x\", timeout: 10s }\n  - expect_exit: 0\n").unwrap();
+        let (c, _keep) = ctx();
+        let s = parse("name: early\ntimeout: 20s\nsteps:\n  - key: Ctrl-D\n  - wait_for: { text: \"NEVER-APPEARS\", timeout: 10s }\n  - expect_exit: 0\n").unwrap();
         let start = std::time::Instant::now();
         let (out, _, _) = run_scenario(&s, Tier::Offline, &c).unwrap();
         assert!(!out.passed);
         assert!(out.failure.unwrap().contains("process exited"));
         assert!(start.elapsed() < std::time::Duration::from_secs(15));
+    }
+
+    #[test]
+    #[ignore = "needs the scope binary: cargo build --bin scope && cargo test -p scope-tui-harness -- --ignored"]
+    fn test_scenario_deadline_clamps_a_longer_step_wait() {
+        let (c, _keep) = ctx();
+        let s = parse("name: clamp\ntimeout: 1s\nsteps:\n  - wait_for: { text: \"NEVER-APPEARS\", timeout: 10s }\n  - expect_exit: 0\n").unwrap();
+        let start = std::time::Instant::now();
+        let (out, _, _) = run_scenario(&s, Tier::Offline, &c).unwrap();
+        assert!(!out.passed);
+        assert!(out.failure.unwrap().contains("scenario timeout"));
+        assert!(out.argv_seen.is_empty());
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
     }
 }
