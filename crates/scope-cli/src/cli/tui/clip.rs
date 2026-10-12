@@ -102,11 +102,12 @@ pub fn strip_ansi(text: &str) -> String {
 
 /// Where `save` writes `arg`: the checked canonical parent joined with the
 /// file name, so the path that was checked is the path that is written. A
-/// leading `~/` means `home`. A relative path with `..`, or one whose
+/// `~` or a leading `~/` means `home`. A relative path with `..`, or one whose
 /// parent resolves outside `cwd` (a symlink), is refused.
 fn resolve(arg: &str, cwd: &Path, home: Option<&Path>) -> Result<PathBuf, SaveError> {
-    let expanded = match (arg.strip_prefix("~/"), home) {
-        (Some(rest), Some(home)) => home.join(rest),
+    let expanded = match (arg, arg.strip_prefix("~/"), home) {
+        ("~", _, Some(home)) => home.to_path_buf(),
+        (_, Some(rest), Some(home)) => home.join(rest),
         _ => PathBuf::from(arg),
     };
     let absolute = expanded.is_absolute();
@@ -404,6 +405,15 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         save(&["~/h.txt"], Some("t"), cwd.path(), Some(home.path())).unwrap();
         assert!(home.path().join("h.txt").exists());
+        assert!(!cwd.path().join("~").exists());
+    }
+
+    #[test]
+    fn test_save_to_bare_tilde_means_the_home_directory() {
+        let cwd = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let err = save(&["~"], Some("t"), cwd.path(), Some(home.path())).unwrap_err();
+        assert!(format!("{err:?}").contains("is a directory"), "{err:?}");
         assert!(!cwd.path().join("~").exists());
     }
 
