@@ -4,7 +4,14 @@
 
 use std::path::{Path, PathBuf};
 
-const FORBIDDEN: &[&str] = &["reqwest::Client", "NativeHttpClient::new"];
+const FORBIDDEN: &[&str] = &[
+    "reqwest::Client",
+    "reqwest::get(",
+    "NativeHttpClient::new",
+    "GholaHttpClient::new",
+];
+/// Start of a grouped `reqwest` import, which can bring `Client` in unnamed.
+const GROUPED_IMPORT: &str = "use reqwest::{";
 const CFG_TEST: &str = "#[cfg(test)]";
 
 fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -49,10 +56,43 @@ fn production_lines(src: &str) -> Vec<(usize, &str)> {
     out
 }
 
-/// True when the code part of a line (before any `//`) builds a client.
+/// The code part of a line, before any `//`.
+fn code_of(line: &str) -> &str {
+    line.split("//").next().unwrap_or("")
+}
+
+/// True when the code part of a line builds a client.
 fn has_forbidden(line: &str) -> bool {
-    let code = line.split("//").next().unwrap_or("");
+    let code = code_of(line);
     FORBIDDEN.iter().any(|pat| code.contains(pat))
+}
+
+/// Production lines that build a client or import `reqwest::Client` in a
+/// group. A grouped import is reported at its first line, and it is read
+/// through its closing `}`, so a multi-line group is covered.
+fn forbidden_lines<'a>(lines: &[(usize, &'a str)]) -> Vec<(usize, &'a str)> {
+    let mut hits = Vec::new();
+    for (i, &(n, line)) in lines.iter().enumerate() {
+        if has_forbidden(line) {
+            hits.push((n, line));
+            continue;
+        }
+        let code = code_of(line);
+        let Some(start) = code.find(GROUPED_IMPORT) else {
+            continue;
+        };
+        let mut group = code[start..].to_string();
+        for &(_, next) in &lines[i + 1..] {
+            if group.contains('}') {
+                break;
+            }
+            group.push_str(code_of(next));
+        }
+        if group.contains("Client") {
+            hits.push((n, line));
+        }
+    }
+    hits
 }
 
 /// Index of the first line after the item that starts at or after `start`.
@@ -95,10 +135,8 @@ fn test_no_http_client_is_built_outside_the_http_module() {
     let mut hits = Vec::new();
     for f in files.iter().filter(|f| !f.starts_with(&http_dir)) {
         let src = std::fs::read_to_string(f).unwrap();
-        for (n, line) in production_lines(&src) {
-            if has_forbidden(line) {
-                hits.push(format!("{}:{}: {}", f.display(), n, line.trim()));
-            }
+        for (n, line) in forbidden_lines(&production_lines(&src)) {
+            hits.push(format!("{}:{}: {}", f.display(), n, line.trim()));
         }
     }
     assert!(
@@ -145,4 +183,30 @@ fn test_classifier_keeps_cfg_any_test_support_items() {
 fn test_forbidden_pattern_in_a_comment_is_ignored() {
     assert!(!has_forbidden("let x = 1; // NativeHttpClient::new"));
     assert!(has_forbidden("let c = NativeHttpClient::new(); // ok"));
+}
+
+#[test]
+fn test_new_forbidden_patterns_are_caught() {
+    assert!(has_forbidden("let r = reqwest::get(url).await?;"));
+    assert!(has_forbidden("let g = GholaHttpClient::new(true, 1);"));
+}
+
+fn grouped_hits(src: &str) -> Vec<usize> {
+    forbidden_lines(&production_lines(src))
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect()
+}
+
+#[test]
+fn test_grouped_reqwest_import_of_client_is_caught() {
+    assert_eq!(grouped_hits("use reqwest::{Client, Url};\n"), vec![1]);
+    let multi = "fn a() {}\nuse reqwest::{\n    header,\n    Client,\n};\n";
+    assert_eq!(grouped_hits(multi), vec![2], "multi-line group");
+}
+
+#[test]
+fn test_grouped_reqwest_import_without_client_is_allowed() {
+    assert!(grouped_hits("use reqwest::{header, Url};\n").is_empty());
+    assert!(grouped_hits("use reqwest::{\n    Url,\n};\nfn Client() {}\n").is_empty());
 }
