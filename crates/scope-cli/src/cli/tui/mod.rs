@@ -157,12 +157,10 @@ pub async fn run(
     // every listener). Only `scope tui` installs these handlers; a plain
     // CLI run keeps the default Ctrl-C.
     tokio::spawn(cancel_prompts_on(signal_stream()?, &prompt::CANCEL));
-    let mut state = TuiState::new(
-        SessionContext::load(),
-        Journal::in_data_dir(),
-        vocab::Vocab::load(config),
-    );
-    welcome(&mut state, no_banner);
+    // Raw mode before the loads, so keys typed during startup are not
+    // read in cooked mode (issue #63). Nothing below can return an error
+    // before `session`, which restores the terminal; a panic restores it
+    // through the hook.
     let mut host = RealHost {
         terminal: crash::enter_terminal(),
         events: None,
@@ -170,6 +168,12 @@ pub async fn run(
         on_screen: true,
     };
     crash::install_panic_hook();
+    let mut state = TuiState::new(
+        SessionContext::load(),
+        Journal::in_data_dir(),
+        vocab::Vocab::load(config),
+    );
+    welcome(&mut state, no_banner);
     session(&mut host, &mut state, config, clients, SessionContext::save).await
 }
 

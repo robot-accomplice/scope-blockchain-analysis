@@ -60,6 +60,22 @@ pub struct Menu {
     pub selected: usize,
 }
 
+/// Reads a line feed as Enter. Keys typed before raw mode is on pass
+/// through the TTY's ICRNL, so Enter arrives as `\n`, which crossterm
+/// reports as Ctrl-J (or `Char('\n')`). Issue #63.
+fn line_feed_as_enter(key: KeyEvent) -> KeyEvent {
+    let ctrl_j = key.code == KeyCode::Char('j') && key.modifiers.contains(KeyModifiers::CONTROL);
+    if ctrl_j || key.code == KeyCode::Char('\n') {
+        KeyEvent {
+            code: KeyCode::Enter,
+            modifiers: KeyModifiers::NONE,
+            ..key
+        }
+    } else {
+        key
+    }
+}
+
 fn common_prefix(items: &[String]) -> String {
     let first = &items[0];
     let mut end = first.len();
@@ -195,6 +211,7 @@ impl TuiState {
 
     /// Applies one key event.
     pub fn handle_key(&mut self, key: KeyEvent) -> Action {
+        let key = line_feed_as_enter(key);
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         self.busy_hint = false;
         // Raw mode delivers Ctrl-Z as a key, not as SIGTSTP. It works in
@@ -1213,6 +1230,31 @@ mod tests {
         s.handle_key(key(KeyCode::Left));
         s.handle_key(key(KeyCode::Backspace));
         assert_eq!(s.input, "tokens add UR");
+    }
+
+    /// Issue #63: keys typed while the TTY is still in cooked mode pass
+    /// through ICRNL, so Enter reaches raw mode as a line feed, which
+    /// crossterm reports as Ctrl-J. It must still run the line, not be
+    /// dropped or typed into the input.
+    #[test]
+    fn test_line_feed_from_cooked_mode_submits_like_enter() {
+        for lf in [ctrl('j'), key(KeyCode::Char('\n'))] {
+            let mut s = state();
+            type_str(&mut s, "ctx");
+            assert_eq!(s.handle_key(lf), Action::Submit("ctx".into()), "{lf:?}");
+            assert_eq!(s.input, "");
+        }
+    }
+
+    /// The line feed acts as Enter in the palette too: it picks the entry
+    /// instead of typing a newline into the query.
+    #[test]
+    fn test_line_feed_picks_palette_entry_like_enter() {
+        let mut s = state();
+        s.handle_key(ctrl('k'));
+        s.handle_key(ctrl('j'));
+        assert!(s.overlay.is_none());
+        assert!(!s.input.contains('\n'));
     }
 
     #[test]
