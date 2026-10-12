@@ -571,13 +571,15 @@ impl TuiState {
     }
 
     /// Records that signal `name` (for example `TERM`) ended the TUI.
-    pub fn record_signal(&mut self, name: &str) {
+    /// `route` is `session`, or `suspend` with the suspend-mode command
+    /// that was running (`input`, `argv`).
+    pub fn record_signal(&mut self, name: &str, route: &'static str, input: &str, argv: &[String]) {
         self.log(Event {
             started: Utc::now().to_rfc3339(),
             duration_ms: 0,
-            input: "",
-            argv: &[],
-            route: "session",
+            input,
+            argv,
+            route,
             outcome: format!("signal:{}", name).into(),
             error: None,
         });

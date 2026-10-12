@@ -128,6 +128,7 @@ pub async fn run(
         terminal: ratatui::init(),
         events: None,
         signals,
+        on_screen: true,
     };
     session(&mut host, &mut state, config, clients, SessionContext::save).await
 }
@@ -168,7 +169,13 @@ fn signal_stream() -> Result<BoxStream<'static, Signal>> {
     ];
     let mut streams = Vec::with_capacity(kinds.len());
     for (kind, sig) in kinds {
-        let mut handler = signal(kind)?;
+        let mut handler = signal(kind).map_err(|e| {
+            ScopeError::Other(format!(
+                "cannot install the SIG{} handler: {}",
+                sig.name(),
+                e
+            ))
+        })?;
         streams.push(futures::stream::poll_fn(move |cx| {
             handler.poll_recv(cx).map(|got| got.map(|()| sig))
         }));
@@ -214,9 +221,13 @@ pub(crate) trait Host {
     fn restore(&mut self);
     /// The output a suspend-mode command writes to.
     fn suspended_output(&self) -> Output;
-    /// Waits until the user is ready to return to the TUI.
-    fn wait_to_return(&mut self) -> impl Future<Output = io::Result<()>>;
+    /// Waits until the user is ready to return to the TUI. The future does
+    /// not borrow the host, so the caller can watch the signals meanwhile.
+    fn wait_to_return(&mut self) -> WaitFuture;
 }
+
+/// The wait for the user to return to the TUI.
+type WaitFuture = Pin<Box<dyn Future<Output = io::Result<()>> + Send>>;
 
 /// The real terminal.
 struct RealHost {
@@ -225,6 +236,8 @@ struct RealHost {
     /// must not consume the keys that command reads.
     events: Option<EventStream>,
     signals: BoxStream<'static, Signal>,
+    /// True while the TUI owns the screen (raw mode, alternate screen).
+    on_screen: bool,
 }
 
 impl Host for RealHost {
@@ -243,24 +256,31 @@ impl Host for RealHost {
     }
     fn suspend(&mut self) {
         self.events = None;
-        ratatui::restore();
+        self.restore();
     }
     fn resume(&mut self) {
         self.terminal = ratatui::init();
+        self.on_screen = true;
     }
+    /// Does nothing when the screen is already given back: leaving the
+    /// alternate screen twice can move the shell's cursor.
     fn restore(&mut self) {
-        ratatui::restore();
+        if std::mem::take(&mut self.on_screen) {
+            ratatui::restore();
+        }
     }
     fn suspended_output(&self) -> Output {
         Output::stdio()
     }
-    async fn wait_to_return(&mut self) -> io::Result<()> {
-        tokio::task::spawn_blocking(|| {
-            let mut s = String::new();
-            io::stdin().lock().read_line(&mut s).map(|_| ())
+    fn wait_to_return(&mut self) -> WaitFuture {
+        Box::pin(async {
+            tokio::task::spawn_blocking(|| {
+                let mut s = String::new();
+                io::stdin().lock().read_line(&mut s).map(|_| ())
+            })
+            .await
+            .map_err(io::Error::other)?
         })
-        .await
-        .map_err(io::Error::other)?
     }
 }
 
@@ -302,7 +322,7 @@ async fn event_loop<H: Host>(
                     // Drop the command future first: that cancels it.
                     drop(pending.take());
                     state.finish(Ending::Cancelled);
-                    state.record_signal(sig.name());
+                    state.record_signal(sig.name(), "session", "", &[]);
                     return Ok(TuiExit { code });
                 }
             }
@@ -335,7 +355,16 @@ async fn event_loop<H: Host>(
                             Route::Suspend => {
                                 drop(idle_diag.take());
                                 host.suspend();
-                                run_suspended(host, &line, *inv, state, config, clients).await;
+                                let out = host.suspended_output();
+                                let argv = inv.argv.clone();
+                                let command = run_invocation(*inv, config, clients, &out);
+                                let ended =
+                                    run_suspended(host, &line, &argv, &out, command, state).await;
+                                if let Some(exit) = ended {
+                                    // The terminal stays cooked; session()
+                                    // restores and saves.
+                                    return Ok(exit);
+                                }
                                 host.resume();
                                 idle_diag.replace(scope::diag::redirect(idle_buf.clone()));
                             }
@@ -353,26 +382,32 @@ async fn event_loop<H: Host>(
 }
 
 /// Runs one command outside the TUI, then waits for the user to return.
+/// `command` writes to `out`. Returns the exit when TERM, HUP or QUIT ends
+/// the session first; the command is dropped and the signal recorded.
 async fn run_suspended<H: Host>(
     host: &mut H,
     line: &str,
-    inv: exec::Invocation,
+    argv: &[String],
+    out: &Output,
+    command: impl Future<Output = Result<()>>,
     state: &mut TuiState,
-    config: &Config,
-    clients: &dyn ChainClientFactory,
-) {
+) -> Option<TuiExit> {
     let started = Instant::now();
     let started_at = chrono::Utc::now().to_rfc3339();
-    let argv = inv.argv.clone();
-    let out = host.suspended_output();
     let mut terminal_errors = Vec::new();
     if let Err(e) = crate::errln!(out, "\n── scope {} ──", line) {
         terminal_errors.push(e.to_string());
     }
-    let result = run_invocation(inv, config, clients, &out).await;
+    let result = tokio::select! {
+        biased;
+        Some(sig) = ending_signal(host.streams().1) => {
+            return Some(end_suspended(state, line, argv, sig));
+        }
+        result = command => result,
+    };
     let duration = started.elapsed();
     if let Err(e) = &result
-        && let Err(write_err) = crate::cli::errors::display_error(e, &out)
+        && let Err(write_err) = crate::cli::errors::display_error(e, out)
     {
         terminal_errors.push(write_err.to_string());
     }
@@ -381,12 +416,46 @@ async fn run_suspended<H: Host>(
     if let Err(e) = prompt {
         terminal_errors.push(e.to_string());
     }
-    if let Err(e) = host.wait_to_return().await {
+    let wait = host.wait_to_return();
+    let waited = tokio::select! {
+        biased;
+        Some(sig) = ending_signal(host.streams().1) => {
+            return Some(end_suspended(state, line, argv, sig));
+        }
+        waited = wait => waited,
+    };
+    if let Err(e) = waited {
         terminal_errors.push(e.to_string());
     }
-    state.record_suspended(line, &argv, duration, started_at, &result);
+    state.record_suspended(line, argv, duration, started_at, &result);
     for e in terminal_errors {
         state.push_note(&format!("Terminal I/O error while outside the TUI: {}", e));
+    }
+    None
+}
+
+/// Waits for a signal that ends a suspend-mode command: TERM, HUP or
+/// QUIT. It drops the others: INT goes to the command (T5), and TSTP and
+/// CONT get their own handling (T2).
+async fn ending_signal<S: futures::Stream<Item = Signal> + Unpin>(
+    signals: &mut S,
+) -> Option<Signal> {
+    while let Some(sig) = signals.next().await {
+        if matches!(sig, Signal::Term | Signal::Hup | Signal::Quit) {
+            return Some(sig);
+        }
+    }
+    None
+}
+
+/// Records that `sig` ended the suspend-mode command `line`; returns the
+/// exit for it.
+fn end_suspended(state: &mut TuiState, line: &str, argv: &[String], sig: Signal) -> TuiExit {
+    state.record_signal(sig.name(), "suspend", line, argv);
+    TuiExit {
+        code: sig
+            .exit_code()
+            .expect("ending_signal returns only fatal signals"),
     }
 }
 
@@ -522,6 +591,11 @@ mod tests {
         terminal: Terminal<TestBackend>,
         keys: BoxStream<'static, io::Result<Event>>,
         signals: mpsc::UnboundedReceiver<Signal>,
+        signal_tx: mpsc::UnboundedSender<Signal>,
+        /// `wait_to_return` sends these signals first.
+        wait_signals: Vec<Signal>,
+        /// `wait_to_return` never returns: a user who does not press Enter.
+        wait_forever: bool,
         suspended: Output,
         suspends: usize,
         resumes: usize,
@@ -550,8 +624,14 @@ mod tests {
         fn suspended_output(&self) -> Output {
             self.suspended.clone()
         }
-        async fn wait_to_return(&mut self) -> io::Result<()> {
-            Ok(())
+        fn wait_to_return(&mut self) -> WaitFuture {
+            for s in self.wait_signals.drain(..) {
+                self.signal_tx.unbounded_send(s).unwrap();
+            }
+            if self.wait_forever {
+                return Box::pin(futures::future::pending());
+            }
+            Box::pin(async { Ok(()) })
         }
     }
 
@@ -596,8 +676,17 @@ mod tests {
         events: Vec<io::Result<Event>>,
         signals: Vec<Signal>,
     ) -> Driven {
+        let (host, captured) = test_host(events, signals);
+        drive_host(journal, host, captured).await
+    }
+
+    /// A test host over the scripted keys, with `signals` after the last key.
+    fn test_host(
+        events: Vec<io::Result<Event>>,
+        signals: Vec<Signal>,
+    ) -> (TestHost, crate::cli::output::Captured) {
         let (sig_tx, sig_rx) = mpsc::unbounded();
-        let mut then = Some((signals, sig_tx));
+        let mut then = Some((signals, sig_tx.clone()));
         // After the last key, send the signals and stay pending. The send
         // wakes the loop, and its biased select takes the signals before
         // it polls the key stream again and sees the end.
@@ -611,15 +700,27 @@ mod tests {
             _ => Poll::Ready(None),
         });
         let (suspended, captured) = Output::capture_merged();
-        let mut host = TestHost {
+        let host = TestHost {
             terminal: Terminal::new(TestBackend::new(100, 30)).unwrap(),
             keys: futures::stream::iter(events).chain(tail).boxed(),
             signals: sig_rx,
+            signal_tx: sig_tx,
+            wait_signals: Vec::new(),
+            wait_forever: false,
             suspended,
             suspends: 0,
             resumes: 0,
             restores: 0,
         };
+        (host, captured)
+    }
+
+    /// Runs a whole session on `host` with `journal`.
+    async fn drive_host(
+        journal: Journal,
+        mut host: TestHost,
+        captured: crate::cli::output::Captured,
+    ) -> Driven {
         let mut state = TuiState::new(SessionContext::default(), journal, vocab::Vocab::default());
         welcome(&mut state, true);
         let factory = MockClientFactory::new();
@@ -691,6 +792,99 @@ mod tests {
             assert_eq!(res.unwrap().code, 0, "{sig:?}");
             assert_eq!(host.restores, 1, "{sig:?}");
         }
+    }
+
+    /// Awaits `fut`, failing the test after 10 s: a swallowed signal must
+    /// fail the test, not hang it.
+    async fn within_limit<T>(fut: impl Future<Output = T>) -> T {
+        tokio::time::timeout(Duration::from_secs(10), fut)
+            .await
+            .expect("the signal did not end the wait")
+    }
+
+    /// The journal records in `e.jsonl` under `dir`, parsed.
+    fn records(dir: &tempfile::TempDir) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(dir.path().join("e.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_term_signal_during_a_suspended_command_ends_it() {
+        // A suspend-mode command can run for hours (the monitor). On
+        // develop SIGTERM killed it; the handler must not swallow it.
+        let _lock = DIAG_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = TuiState::new(
+            SessionContext::default(),
+            Journal::at(dir.path().join("h"), dir.path().join("e.jsonl")),
+            vocab::Vocab::default(),
+        );
+        let (mut host, _) = test_host(Vec::new(), Vec::new());
+        host.signal_tx.unbounded_send(Signal::Term).unwrap();
+        let out = host.suspended_output();
+        let argv = vec!["monitor".to_string()];
+        let never = futures::future::pending::<Result<()>>();
+        let run = run_suspended(&mut host, "monitor", &argv, &out, never, &mut state);
+        let exit = within_limit(run).await;
+        assert_eq!(exit, Some(TuiExit { code: 143 }));
+        let rec = records(&dir);
+        assert_eq!(rec.len(), 1, "{rec:?}");
+        assert_eq!(rec[0]["outcome"], "signal:TERM");
+        assert_eq!(rec[0]["route"], "suspend");
+        assert_eq!(rec[0]["input"], "monitor");
+    }
+
+    #[tokio::test]
+    async fn test_term_signal_while_waiting_for_enter_ends_the_session() {
+        // After a suspend-mode command, the TUI waits for Enter. A signal
+        // there must end the session through the normal restore and save.
+        let _lock = DIAG_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Journal::at(dir.path().join("h"), dir.path().join("e.jsonl"));
+        let (mut host, captured) = test_host(script(&["setup --key nosuchkey"]), Vec::new());
+        host.wait_signals = vec![Signal::Term];
+        host.wait_forever = true;
+        let (res, _, host, _) = within_limit(drive_host(journal, host, captured)).await;
+        assert_eq!(res.unwrap().code, 143);
+        assert_eq!((host.suspends, host.resumes), (1, 0), "no resume after it");
+        assert_eq!(host.restores, 1);
+        let rec = records(&dir);
+        let last = rec.last().unwrap();
+        assert_eq!(last["outcome"], "signal:TERM", "{rec:?}");
+        assert_eq!(last["route"], "suspend");
+        let history = std::fs::read_to_string(dir.path().join("h")).unwrap();
+        assert!(history.contains("setup --key nosuchkey"), "{history}");
+    }
+
+    #[tokio::test]
+    async fn test_suspended_command_ignores_int_tstp_and_cont() {
+        // INT belongs to the command (T5); TSTP and CONT to T2. None of
+        // them may end the session from suspend mode.
+        let _lock = DIAG_LOCK.lock().await;
+        let (mut host, captured) = test_host(script(&["setup --key nosuchkey"]), Vec::new());
+        host.wait_signals = vec![Signal::Int, Signal::Tstp, Signal::Cont];
+        let (res, _, host, _) = drive_host(Journal::default(), host, captured).await;
+        assert_eq!(res.unwrap().code, 0);
+        assert_eq!((host.suspends, host.resumes), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn test_event_stream_error_still_restores_once_and_saves() {
+        // A broken terminal ends the loop with an error; the terminal is
+        // still restored once and the history is still saved.
+        let _lock = DIAG_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Journal::at(dir.path().join("h"), dir.path().join("e.jsonl"));
+        let mut events = script(&["ctx"]);
+        events.push(Err(io::Error::other("tty gone")));
+        let (res, _, host, _) = drive_with(journal, events, Vec::new()).await;
+        assert!(res.unwrap_err().to_string().contains("tty gone"));
+        assert_eq!(host.restores, 1);
+        let history = std::fs::read_to_string(dir.path().join("h")).unwrap();
+        assert!(history.contains("ctx"), "{history}");
     }
 
     #[tokio::test]
