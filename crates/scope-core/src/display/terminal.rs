@@ -7,7 +7,8 @@
 
 use owo_colors::OwoColorize;
 use std::io::IsTerminal;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use unicode_width::UnicodeWidthStr;
 
 // ============================================================================
 // Terminal detection
@@ -61,13 +62,45 @@ pub fn color_enabled_stderr() -> bool {
     color_enabled_for(std::io::stderr().is_terminal())
 }
 
+/// Width override in columns: 0 = none. The TUI sets it to the width of
+/// its output pane, so command output fits the pane.
+static WIDTH_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
+
+/// Sets the width that [`terminal_width`] returns for the whole process,
+/// or removes the override (`None`). `Some(0)` also removes it. The TUI
+/// removes it each time it gives the terminal back.
+pub fn set_width_override(width: Option<usize>) {
+    WIDTH_OVERRIDE.store(width.unwrap_or(0), Ordering::Relaxed);
+}
+
+/// The width override, if one is set.
+pub fn width_override() -> Option<usize> {
+    match WIDTH_OVERRIDE.load(Ordering::Relaxed) {
+        0 => None,
+        w => Some(w),
+    }
+}
+
 /// Returns the current terminal width in columns.
 ///
-/// Uses `crossterm::terminal::size()` when available, falls back to 80 columns.
+/// Uses the width override when one is set (the TUI pane). Otherwise uses
+/// `crossterm::terminal::size()` when available, and falls back to 80
+/// columns.
 pub fn terminal_width() -> usize {
-    crossterm::terminal::size()
-        .map(|(w, _)| w as usize)
-        .unwrap_or(80)
+    width_override().unwrap_or_else(|| {
+        crossterm::terminal::size()
+            .map(|(w, _)| w as usize)
+            .unwrap_or(80)
+    })
+}
+
+/// The widest rule, in columns, that the section helpers draw.
+const RULE_WIDTH: usize = 50;
+
+/// The `─` run for a rule that starts after `prefix_cols` columns: at
+/// most `RULE_WIDTH`, and never past the terminal (or pane) edge.
+fn rule(len: usize, prefix_cols: usize) -> String {
+    "─".repeat(len.min(terminal_width().saturating_sub(prefix_cols)))
 }
 
 // ============================================================================
@@ -92,7 +125,7 @@ pub fn wrap_lines(text: &str, content_width: usize) -> Vec<String> {
     let mut current_len = 0usize;
 
     for word in text.split_whitespace() {
-        let word_len = word.len();
+        let word_len = word.width();
 
         if current_len == 0 {
             // First word on the line — always accept it even if it exceeds width
@@ -145,17 +178,18 @@ pub fn section_header(title: &str) -> String {
 }
 
 fn section_header_styled(title: &str, tty: bool) -> String {
-    let width: usize = 50;
-    let pad = width.saturating_sub(title.len() + 4);
+    // "┌─ " + title + " " come before the rule.
+    let prefix = title.width() + 4;
+    let pad = rule(RULE_WIDTH.saturating_sub(prefix), prefix);
     if tty {
         format!(
             "\n{} {} {}",
             "┌─".cyan(),
             title.bold().bright_white(),
-            "─".repeat(pad).cyan()
+            pad.cyan()
         )
     } else {
-        format!("\n┌─ {} {}", title, "─".repeat(pad))
+        format!("\n┌─ {} {}", title, pad)
     }
 }
 
@@ -384,7 +418,7 @@ pub fn section_footer() -> String {
 }
 
 fn section_footer_styled(tty: bool) -> String {
-    let line = "─".repeat(50);
+    let line = rule(RULE_WIDTH, 1);
     if tty {
         format!("{}", format!("└{}", line).cyan())
     } else {
@@ -402,7 +436,7 @@ pub fn separator() -> String {
 }
 
 fn separator_styled(tty: bool) -> String {
-    let line = "─".repeat(50);
+    let line = rule(RULE_WIDTH, 1);
     if tty {
         format!("{}", format!("├{}", line).cyan())
     } else {
@@ -712,7 +746,7 @@ fn table_header_styled(cols: &[Col], tty: bool) -> String {
     }
     let header = header.trim_end().to_string();
     let rule_len = cols.iter().map(|c| c.width + 2).sum::<usize>();
-    let rule = "─".repeat(rule_len);
+    let line = rule(rule_len, 3);
 
     if tty {
         format!(
@@ -720,10 +754,10 @@ fn table_header_styled(cols: &[Col], tty: bool) -> String {
             "│".cyan(),
             header.dimmed(),
             "│".cyan(),
-            rule.cyan()
+            line.cyan()
         )
     } else {
-        format!("│    {}\n│  {}", header, rule)
+        format!("│    {}\n│  {}", header, line)
     }
 }
 
@@ -797,6 +831,14 @@ fn numbered_row_styled(index: usize, msg: &str, tty: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serialises the tests that set the process-global width override
+    /// or assert on `terminal_width()`.
+    static WIDTH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn width_lock() -> std::sync::MutexGuard<'static, ()> {
+        WIDTH_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
 
     #[test]
     fn test_color_enabled_rules() {
@@ -1342,12 +1384,14 @@ mod tests {
 
     #[test]
     fn test_terminal_width_returns_positive() {
+        let _lock = width_lock();
         let w = terminal_width();
         assert!(w > 0);
     }
 
     #[test]
     fn test_content_width_for_reasonable_prefix() {
+        let _lock = width_lock();
         let w = content_width_for(7);
         // Should be terminal_width - 7; at minimum > 0 even in CI
         assert!(w > 0 || terminal_width() <= 7);
@@ -1359,6 +1403,7 @@ mod tests {
 
     #[test]
     fn test_detail_row_wraps_long_text() {
+        let _lock = width_lock();
         // detail_row prefix is 7 cols ("│      "); with width=40 that gives 33 cols for content
         let long = "Contract source code is not verified and full vulnerability analysis requires verified source code for accurate results";
         let row = detail_row_styled(long, false);
@@ -1674,5 +1719,90 @@ mod tests {
         let words = |s: &str| s.matches("word").count();
         assert_eq!(words(&plain), 60);
         assert_eq!(words(&styled), 60);
+    }
+
+    // ============================================================
+    // Width override (R11): the TUI sets it to the pane width
+    // ============================================================
+
+    /// Holds `WIDTH_LOCK` with the override set to `width`, and removes
+    /// the override on drop, also when the test fails.
+    struct Narrow(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+    impl Narrow {
+        fn to(width: usize) -> Self {
+            let lock = width_lock();
+            set_width_override(Some(width));
+            Narrow(lock)
+        }
+    }
+
+    impl Drop for Narrow {
+        fn drop(&mut self) {
+            set_width_override(None);
+        }
+    }
+
+    fn widest(text: &str) -> usize {
+        text.lines().map(UnicodeWidthStr::width).max().unwrap_or(0)
+    }
+
+    #[test]
+    fn test_rules_fit_a_narrow_pane() {
+        // A rule wider than the pane wraps onto the next row in the TUI.
+        let _narrow = Narrow::to(40);
+        assert_eq!(terminal_width(), 40);
+        assert!(widest(&section_footer_styled(false)) <= 40);
+        assert!(widest(&separator_styled(false)) <= 40);
+        assert!(widest(&section_header_styled("Available Venues", false)) <= 40);
+        let cols = [
+            Col {
+                label: "Rank",
+                width: 30,
+                align: '<',
+            },
+            Col {
+                label: "Value",
+                width: 30,
+                align: '>',
+            },
+        ];
+        let header = table_header_styled(&cols, false);
+        let rule = header.lines().nth(1).unwrap_or_default();
+        assert!(rule.width() <= 40, "{header}");
+    }
+
+    #[test]
+    fn test_rules_keep_their_width_on_a_wide_terminal() {
+        // The override only narrows rules; a wide pane keeps the 50 rule.
+        let _wide = Narrow::to(200);
+        assert_eq!(section_footer_styled(false).width(), 51);
+        assert_eq!(separator_styled(false).width(), 51);
+        let header = section_header_styled("Available Venues", false);
+        assert_eq!(header.trim().width(), 50);
+    }
+
+    #[test]
+    fn test_removing_the_override_restores_the_real_width() {
+        // Review focus 5: a CLI run after the TUI must use the real width.
+        let _lock = width_lock();
+        set_width_override(Some(40));
+        set_width_override(None);
+        assert_eq!(width_override(), None);
+        let real = crossterm::terminal::size()
+            .map(|(w, _)| w as usize)
+            .unwrap_or(80);
+        assert_eq!(terminal_width(), real);
+    }
+
+    #[test]
+    fn test_wrap_lines_counts_display_width_of_cjk() {
+        // Each CJK char is two columns. Bytes (3 per char) wrap too early;
+        // chars (1 per char) would put all five words on one 12-column row.
+        let lines = wrap_lines("日本 語 です", 7);
+        assert_eq!(lines, vec!["日本 語", "です"]);
+        for l in &lines {
+            assert!(l.width() <= 7, "{l}");
+        }
     }
 }

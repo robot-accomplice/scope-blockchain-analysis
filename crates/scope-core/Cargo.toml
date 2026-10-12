@@ -72,6 +72,9 @@ owo-colors = "4.2.3"
 # Terminal size detection (used by display/terminal.rs)
 crossterm = { version = "0.29" }
 
+# Display width of text, for wrapping and rules (display/terminal.rs)
+unicode-width = "0.2"
+
 # CLI derive for config enums (ValueEnum)
 clap = { version = "4.0", features = ["derive"] }
 

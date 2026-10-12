@@ -7,6 +7,7 @@
 
 use super::clip::{self, SaveError};
 use super::exec::{self, Invocation, Plan, Route};
+use super::fit;
 use super::journal::{Event, Journal};
 use super::vocab::Vocab;
 use crate::cli::interactive::SessionContext;
@@ -18,7 +19,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph};
 use scope::config::Config;
 use scope::display::terminal::color_enabled;
 use std::cell::Cell;
@@ -175,6 +176,9 @@ pub struct TuiState {
     /// The first display column of the input line that is shown. It moves
     /// only when the cursor leaves the window (set while drawing).
     scroll_x: Cell<usize>,
+    /// The inner width of the output pane at the last draw; 0 before the
+    /// first. The event loop makes it the width override.
+    pane_width: Cell<u16>,
     /// Show the busy note in the hint row until the next key press.
     busy_hint: bool,
     /// The plain output of the last pane command that succeeded. Ctrl-Y
@@ -203,6 +207,7 @@ impl TuiState {
             ctx,
             running: None,
             scroll_x: Cell::new(0),
+            pane_width: Cell::new(0),
             busy_hint: false,
             last_output: None,
             journal,
@@ -892,6 +897,15 @@ impl TuiState {
 
     // -------------------------------------------------------------- render
 
+    /// The inner width of the output pane at the last draw, or `None`
+    /// before the first draw. Command output is fitted to it.
+    pub fn pane_width(&self) -> Option<usize> {
+        match self.pane_width.get() {
+            0 => None,
+            w => Some(w as usize),
+        }
+    }
+
     /// Draws the screen: output pane, input line, status line.
     pub fn render(&self, f: &mut Frame) {
         let [pane, input, hint_row, status] = Layout::vertical([
@@ -913,9 +927,11 @@ impl TuiState {
             .borders(Borders::TOP | Borders::BOTTOM)
             .title(format!(" scope v{} ", scope::VERSION));
         let inner = block.inner(pane);
-        let para = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
-        // Count wrapped rows at the inner width, without the borders, so the
-        // newest line sits on the last inner row.
+        self.pane_width.set(inner.width);
+        // Fit the lines to the inner width here, not with ratatui wrap: a
+        // wrapped row keeps its gutter and a rule is cut. Every line then
+        // is one row, so the newest line sits on the last inner row.
+        let para = Paragraph::new(Text::from(fit::fit(lines, inner.width as usize)));
         let total = para.line_count(inner.width);
         let max_top = total.saturating_sub(inner.height as usize);
         let top = max_top.saturating_sub(self.scroll.min(max_top));
@@ -2263,5 +2279,80 @@ mod tests {
             text.contains("Unbalanced quotes. Usage: save <file> [--force]"),
             "{text}"
         );
+    }
+
+    /// The pane rows of a `w`-column screen tall enough to show all output.
+    fn pane_rows(s: &TuiState, w: u16) -> Vec<String> {
+        let h = 200;
+        let rows: Vec<String> = screen(s, w, h).lines().map(str::to_string).collect();
+        // Pane border rows are the first and the one above the input box.
+        rows[1..(h as usize - 6)].to_vec()
+    }
+
+    #[tokio::test]
+    async fn test_venues_list_rules_never_wrap_in_a_narrow_pane() {
+        // R11: a rule wider than the pane must not continue on the next row,
+        // and a wrapped row inside a section keeps its `│` gutter. The
+        // output is written without a width override (a resize after the
+        // run does the same), so the pane itself must fit it.
+        let _lock = super::super::DIAG_LOCK.lock().await;
+        let mut s = state();
+        let inv = pane_invocation();
+        let out = s.start("venues list", &inv);
+        let factory = scope::chains::mocks::MockClientFactory::new();
+        let res = run_invocation(inv, &Config::default(), &factory, &out).await;
+        s.finish(Ending::Finished(res));
+        let rows = pane_rows(&s, 40);
+        for pair in rows.windows(2) {
+            let continued = pair[0].trim_end().ends_with('─') && pair[1].starts_with('─');
+            assert!(!continued, "a rule wrapped:\n{}", rows.join("\n"));
+        }
+        let first = rows
+            .iter()
+            .position(|r| r.starts_with("┌─ Available Venues"));
+        let last = rows.iter().position(|r| r.starts_with('└'));
+        let (Some(first), Some(last)) = (first, last) else {
+            panic!("no section:\n{}", rows.join("\n"));
+        };
+        for row in &rows[first + 1..last] {
+            assert!(
+                row.starts_with('│') || row.starts_with('├'),
+                "row lost its gutter: {row:?}\n{}",
+                rows.join("\n")
+            );
+        }
+        for row in &rows {
+            assert!(row.width() <= 40, "{row:?}");
+        }
+    }
+
+    #[test]
+    fn test_pane_wraps_never_reach_the_copy() {
+        // Ctrl-Y and `save` give the command's own text: no row breaks or
+        // gutters that the pane adds to fit its width.
+        let mut s = state();
+        let long = format!("│  {}", "word ".repeat(30).trim_end());
+        run_pane(&mut s, &format!("{long}\n"), Ending::Finished(Ok(())));
+        let rows = pane_rows(&s, 40);
+        let wrapped: Vec<_> = rows.iter().filter(|r| r.contains("word")).collect();
+        assert!(wrapped.len() > 1, "{rows:#?}");
+        assert!(
+            wrapped.iter().all(|r| r.starts_with("│  word")),
+            "{rows:#?}"
+        );
+        let Action::Copy(text) = s.handle_key(ctrl('y')) else {
+            panic!("expected a copy");
+        };
+        assert_eq!(text, format!("{long}\n"));
+    }
+
+    #[test]
+    fn test_render_records_the_pane_width() {
+        // The event loop sets the width override from it; with no side
+        // borders the pane is as wide as the screen.
+        let s = state();
+        assert_eq!(s.pane_width(), None, "nothing drawn yet");
+        screen(&s, 40, 20);
+        assert_eq!(s.pane_width(), Some(40));
     }
 }
