@@ -19,20 +19,28 @@ use std::sync::Arc;
 /// Routes one command to its handler.
 ///
 /// Creates the HTTP transport and client factory, then runs the handler
-/// with `out` as its output.
+/// with `out` as its output. Returns the process exit code: 0, or the
+/// TUI's code (128+N after signal N ended it).
 ///
 /// # Errors
 ///
 /// Returns the handler's error. `Commands::Web` is an error here: the web
 /// server lives in the `scope-bca` crate, and its binary starts it before
 /// dispatch.
-pub async fn dispatch(command: Commands, config: &Config, out: &Output) -> Result<()> {
+pub async fn dispatch(command: Commands, config: &Config, out: &Output) -> Result<i32> {
     let http: Arc<dyn HttpClient> = create_http_client(config, out)?;
     let factory = DefaultClientFactory {
         chains_config: config.chains.clone(),
         http,
     };
-    dispatch_with(command, config, &factory, out).await
+    // Only the TUI can end with a code other than 0, so it starts here.
+    if let Commands::Interactive(args) = command {
+        let exit = crate::cli::interactive::run(args, config, &factory).await?;
+        return Ok(exit.code);
+    }
+    dispatch_with(command, config, &factory, out)
+        .await
+        .map(|()| 0)
 }
 
 /// Routes one command to its handler, using the given client factory.
@@ -42,7 +50,9 @@ pub async fn dispatch(command: Commands, config: &Config, out: &Output) -> Resul
 ///
 /// # Errors
 ///
-/// Returns the handler's error. See [`dispatch`].
+/// Returns the handler's error. See [`dispatch`]. `Commands::Interactive`
+/// is an error here: the TUI starts only from [`dispatch`], which returns
+/// its exit code.
 pub async fn dispatch_with(
     command: Commands,
     config: &Config,
@@ -64,11 +74,11 @@ pub async fn dispatch_with(
             crate::cli::address_book::run(args, config, clients, out).await
         }
         Commands::Export(args) => crate::cli::export::run(args, config, clients, out).await,
-        // Boxed: the TUI calls dispatch_with, so this arm makes an async
-        // cycle. The TUI refuses a nested `interactive`, so it never recurses.
-        Commands::Interactive(args) => {
-            Box::pin(crate::cli::interactive::run(args, config, clients)).await
-        }
+        // The TUI calls dispatch_with and refuses a nested `interactive`
+        // before it gets here (exec::route).
+        Commands::Interactive(_) => Err(ScopeError::Other(
+            "the TUI cannot start from here; start it with `scope tui`".into(),
+        )),
         Commands::Monitor(args) => crate::cli::monitor::run_direct(args, config, clients).await,
         Commands::Setup(args) => crate::cli::setup::run(args, config, out).await,
         Commands::Compliance(compliance_cmd) => {

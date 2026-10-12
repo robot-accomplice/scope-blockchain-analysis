@@ -479,16 +479,15 @@ steps:
     #[ignore = "needs the scope binary: cargo build --bin scope && cargo test -p scope-tui-harness -- --ignored"]
     fn test_signal_step_ends_process() {
         let (c, _keep) = ctx();
-        // expect_exit 0 must fail with a real exit status: the signal ended the
-        // process. R1 later pins the exact code (143).
+        // The signal reaches the process, and scope exits with 128+15 (R1).
         let s = parse(
-            "name: sig\nargs: [tui, --no-banner]\nsteps:\n  - signal: TERM\n  - expect_exit: 0\n",
+            "name: sig\nargs: [tui, --no-banner]\nsteps:\n  - signal: TERM\n  - expect_exit: 143\n",
         )
         .unwrap();
         let start = std::time::Instant::now();
         let (out, _, _) = run_scenario(&s, Tier::Offline, &c).unwrap();
         let f = out.failure.unwrap_or_default();
-        assert!(!out.passed && f.contains("exit status"), "{f}");
+        assert!(out.passed, "{f}");
         assert!(start.elapsed() < std::time::Duration::from_secs(5), "{f}");
     }
 }

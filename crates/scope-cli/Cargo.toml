@@ -71,6 +71,10 @@ hex = "0.4"
 thiserror = "1.0"
 base64 = "0.22"
 
+# Signal numbers without a tokio SignalKind constructor (SIGTSTP, SIGCONT)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 scope = { path = "../scope-core", package = "scope-bca-core", version = "0.6.0", features = ["test-support"] }
 tempfile = "3.10"

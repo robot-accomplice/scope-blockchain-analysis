@@ -481,7 +481,7 @@ impl TuiState {
                 input: line,
                 argv: &[],
                 route: "session",
-                outcome: "session",
+                outcome: "session".into(),
                 error: None,
             });
         }
@@ -535,7 +535,7 @@ impl TuiState {
             input: &run.input,
             argv: &run.argv,
             route: "pane",
-            outcome,
+            outcome: outcome.into(),
             error,
         });
     }
@@ -565,8 +565,21 @@ impl TuiState {
             input,
             argv: inv_argv,
             route: "suspend",
-            outcome,
+            outcome: outcome.into(),
             error,
+        });
+    }
+
+    /// Records that signal `name` (for example `TERM`) ended the TUI.
+    pub fn record_signal(&mut self, name: &str) {
+        self.log(Event {
+            started: Utc::now().to_rfc3339(),
+            duration_ms: 0,
+            input: "",
+            argv: &[],
+            route: "session",
+            outcome: format!("signal:{}", name).into(),
+            error: None,
         });
     }
 

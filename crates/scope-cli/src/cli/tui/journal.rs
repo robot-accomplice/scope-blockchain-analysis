@@ -6,10 +6,12 @@
 //!   REPL wrote the same file, so old history carries over.
 //! - `tui-events.jsonl`: one JSON object per submitted line, with the
 //!   exact input, the argument vector clap parsed, where the command ran,
-//!   how long it took and how it ended. Use it to find out after the fact
-//!   what a TUI session did.
+//!   how long it took and how it ended. One more object records a signal
+//!   that ends the TUI. Use it to find out after the fact what a TUI
+//!   session did.
 
 use serde::Serialize;
+use std::borrow::Cow;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -41,8 +43,9 @@ pub struct Event<'a> {
     pub argv: &'a [String],
     /// `pane`, `suspend` or `session`.
     pub route: &'static str,
-    /// `ok`, `error`, `cancelled` or `session`.
-    pub outcome: &'static str,
+    /// `ok`, `error`, `cancelled`, `session`, or `signal:<NAME>` (for
+    /// example `signal:TERM`) when a signal ended the TUI.
+    pub outcome: Cow<'static, str>,
     /// The error text, for `error`.
     pub error: Option<String>,
 }
@@ -174,7 +177,7 @@ mod tests {
                 input: "venues list",
                 argv: &argv,
                 route: "pane",
-                outcome,
+                outcome: outcome.into(),
                 error: (outcome == "error").then(|| "boom".to_string()),
             })
             .unwrap();
