@@ -31,7 +31,7 @@ const REDACTED: &str = "<redacted>";
 fn redact(line: &str) -> String {
     let names = SECRET_PARAMS.join("|");
     let query = Regex::new(&format!(r#"(?i)\b({names})=[^&\s",]+"#)).expect("valid regex");
-    let flag = Regex::new(r#"(?i)(--(?:key|token|api-key))("\s*,\s*"|\s+|=)[^\s",&]+"#)
+    let flag = Regex::new(r#"(?i)(--(?:key|token|api-key|api_key|apikey|access-token|access_token))("\s*,\s*"|\s+|=)[^\s",&]+"#)
         .expect("valid regex");
     let line = query.replace_all(line, format!("$1={REDACTED}").as_str());
     flag.replace_all(&line, format!("$1$2{REDACTED}").as_str())
@@ -123,13 +123,13 @@ mod tests {
     fn test_crash_log_redacts_secrets_in_the_journal_tail() {
         let dir = tempfile::tempdir().unwrap();
         let tail = [
-            r#"{"input":"setup --key sk-123","argv":["scope","setup","--key","sk-456"]}"#
+            r#"{"input":"setup --key sk-123 --access-token tokZ7","argv":["scope","setup","--key","sk-456"]}"#
                 .to_string(),
-            r#"{"error":"failed: https://x.io/api?chain=eth&apikey=abc&Token=tok9"}"#.to_string(),
+            r#"{"error":"failed: https://x.io/api?chain=eth&apikey=sk3cr3tQ&Token=tok9"}"#.to_string(),
         ];
         let p = write_crash_log(dir.path(), "boom", &tail).unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
-        for secret in ["sk-123", "sk-456", "abc", "tok9"] {
+        for secret in ["sk-123", "sk-456", "sk3cr3tQ", "tok9", "tokZ7"] {
             assert!(!text.contains(secret), "{secret} leaked");
         }
         assert!(text.contains("chain=eth") && text.contains("<redacted>"));
