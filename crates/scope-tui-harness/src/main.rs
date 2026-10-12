@@ -7,6 +7,7 @@ use scope_tui_harness::{
     scenario::{self, Tier},
 };
 use std::path::PathBuf;
+use std::sync::PoisonError;
 use std::time::Instant;
 
 #[derive(Parser)]
@@ -56,10 +57,13 @@ fn main() -> Result<()> {
     };
     let binary = std::fs::canonicalize(&binary)
         .map_err(|e| anyhow::anyhow!("scope binary {}: {e}", binary.display()))?;
-    let run_id = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs()
-        .to_string();
+    let run_id = format!(
+        "{}-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_millis(),
+        std::process::id()
+    );
     let mut files: Vec<PathBuf> = std::fs::read_dir(&scenarios)?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|e| e == "yaml"))
@@ -71,13 +75,28 @@ fn main() -> Result<()> {
         })
         .collect();
     files.sort();
+    let unknown: Vec<&String> = names
+        .iter()
+        .filter(|n| {
+            !files
+                .iter()
+                .any(|p| p.file_stem().is_some_and(|s| s == n.as_str()))
+        })
+        .collect();
+    if !unknown.is_empty() {
+        anyhow::bail!("no scenario named {unknown:?} in {}", scenarios.display());
+    }
+    if files.is_empty() {
+        anyhow::bail!("no scenarios found in {}", scenarios.display());
+    }
     let lines = std::sync::Mutex::new(Vec::new());
     let queue = std::sync::Mutex::new(files);
     std::thread::scope(|scope| {
         for _ in 0..jobs.max(1) {
             scope.spawn(|| {
                 loop {
-                    let Some(path) = queue.lock().unwrap().pop() else {
+                    let Some(path) = queue.lock().unwrap_or_else(PoisonError::into_inner).pop()
+                    else {
                         break;
                     };
                     let id = path.file_stem().unwrap().to_string_lossy().to_string();
@@ -138,6 +157,13 @@ fn main() -> Result<()> {
                                 }
                                 Err(e) => {
                                     eprintln!("{id}: {e:#}");
+                                    let dir =
+                                        PathBuf::from("target/tui-harness").join(&run_id).join(&id);
+                                    if let Err(w) = std::fs::create_dir_all(&dir).and_then(|()| {
+                                        std::fs::write(dir.join("failure.txt"), format!("{e:#}"))
+                                    }) {
+                                        eprintln!("{id}: failure.txt not written: {w}");
+                                    }
                                     Line {
                                         name: id,
                                         tier,
@@ -148,12 +174,15 @@ fn main() -> Result<()> {
                             }
                         }
                     };
-                    lines.lock().unwrap().push(line);
+                    lines
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .push(line);
                 }
             });
         }
     });
-    let mut lines = lines.into_inner().unwrap();
+    let mut lines = lines.into_inner().unwrap_or_else(PoisonError::into_inner);
     lines.sort_by(|a, b| a.name.cmp(&b.name));
     std::process::exit(if report::print(&lines) { 0 } else { 1 });
 }

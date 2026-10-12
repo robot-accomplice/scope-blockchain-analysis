@@ -54,6 +54,31 @@ fn argv_of(rec: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Makes a path absolute against the current directory. The path need not exist.
+fn absolutize(p: &Path) -> Result<PathBuf> {
+    if p.is_absolute() {
+        Ok(p.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(p))
+    }
+}
+
+/// The env the child sees. The child's cwd is its temp HOME, so paths must be absolute.
+fn child_env(tier: Tier, ctx: &RunCtx) -> Result<Vec<(String, String)>> {
+    let mut env = vec![];
+    if tier == Tier::Offline {
+        env.push(("SCOPE_HTTP_MODE".to_string(), "replay".to_string()));
+        env.push((
+            "SCOPE_HTTP_FIXTURES".to_string(),
+            absolutize(&ctx.fixtures_root)?
+                .join(&ctx.scenario_id)
+                .display()
+                .to_string(),
+        ));
+    }
+    Ok(env)
+}
+
 pub fn run_scenario(
     s: &Scenario,
     tier: Tier,
@@ -66,17 +91,7 @@ pub fn run_scenario(
         cfg_dir.join("config.yaml"),
         s.config.clone().unwrap_or_else(|| "{}".into()),
     )?;
-    let mut env = vec![];
-    if tier == Tier::Offline {
-        env.push(("SCOPE_HTTP_MODE".to_string(), "replay".to_string()));
-        env.push((
-            "SCOPE_HTTP_FIXTURES".to_string(),
-            ctx.fixtures_root
-                .join(&ctx.scenario_id)
-                .display()
-                .to_string(),
-        ));
-    }
+    let env = child_env(tier, ctx)?;
     let mut sess = Session::start(&StartOpts {
         binary: ctx.binary.clone(),
         home: home.path().into(),
@@ -264,7 +279,11 @@ fn run_step(
             exited(sess)?;
             sess.pump(SETTLE)?;
             let masked = mask(&sess.screen(), &s.masks)?;
-            match compare_snapshot(&ctx.snapshots_root.join(&ctx.scenario_id), name, &masked)? {
+            match compare_snapshot(
+                &absolutize(&ctx.snapshots_root)?.join(&ctx.scenario_id),
+                name,
+                &masked,
+            )? {
                 SnapshotResult::Match => {}
                 SnapshotResult::Written(p) => {
                     anyhow::bail!(
@@ -305,6 +324,36 @@ mod tests {
     use super::*;
     use crate::scenario::parse;
     use std::path::PathBuf;
+
+    #[test]
+    fn test_absolutize_makes_relative_paths_absolute_without_requiring_them_to_exist() {
+        let p = absolutize(Path::new("tests/tui/fixtures-that-do-not-exist")).unwrap();
+        assert!(p.is_absolute());
+        assert!(p.starts_with(std::env::current_dir().unwrap()));
+        assert_eq!(
+            absolutize(Path::new("/x/y")).unwrap(),
+            PathBuf::from("/x/y")
+        );
+    }
+
+    #[test]
+    fn test_child_fixtures_env_is_absolute_for_a_relative_root() {
+        let c = RunCtx {
+            binary: "scope".into(),
+            fixtures_root: "tests/tui/fixtures".into(),
+            snapshots_root: "tests/tui/snapshots".into(),
+            scenario_id: "demo".into(),
+        };
+        let env = child_env(Tier::Offline, &c).unwrap();
+        let fx = &env
+            .iter()
+            .find(|(k, _)| k == "SCOPE_HTTP_FIXTURES")
+            .unwrap()
+            .1;
+        assert!(Path::new(fx).is_absolute(), "{fx}");
+        assert!(fx.ends_with("tests/tui/fixtures/demo"), "{fx}");
+        assert!(child_env(Tier::Live, &c).unwrap().is_empty());
+    }
 
     fn ctx() -> (RunCtx, tempfile::TempDir) {
         let bin = std::env::var("SCOPE_BIN")
