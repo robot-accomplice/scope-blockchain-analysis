@@ -23,6 +23,7 @@
 
 pub mod ghola;
 pub mod native;
+pub mod replay;
 pub mod shared;
 
 pub use ghola::GholaHttpClient;
