@@ -3,7 +3,9 @@
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
+/// Query parameter names (lowercase) whose values are removed from fixture keys.
 pub const SECRET_PARAMS: &[&str] = &["apikey", "api_key", "key", "token", "access_token"];
+/// Header names (lowercase) that are never written to fixtures.
 pub const SECRET_HEADERS: &[&str] = &["authorization", "x-api-key", "cookie", "set-cookie"];
 
 fn hex_sha256(data: &[u8]) -> String {
@@ -13,11 +15,16 @@ fn hex_sha256(data: &[u8]) -> String {
         .collect()
 }
 
-/// The URL with secret query parameters removed and the rest sorted.
+/// The URL with credentials, fragment and secret query parameters removed,
+/// and the rest of the query sorted. An unparseable URL becomes a hash of
+/// itself, so a secret inside it never reaches the key.
 pub fn clean_url(url: &str) -> String {
     let Ok(mut parsed) = reqwest::Url::parse(url) else {
-        return url.to_string();
+        return format!("invalid-url:{}", hex_sha256(url.as_bytes()));
     };
+    let _ = parsed.set_username("");
+    let _ = parsed.set_password(None);
+    parsed.set_fragment(None);
     let mut pairs: Vec<(String, String)> = parsed
         .query_pairs()
         .filter(|(k, _)| !SECRET_PARAMS.contains(&k.to_lowercase().as_str()))
@@ -73,6 +80,64 @@ mod tests {
         assert_eq!(
             u,
             "https://api.etherscan.io/v2/api?address=0x1&module=account"
+        );
+    }
+
+    #[test]
+    fn test_each_secret_param_is_removed() {
+        for name in SECRET_PARAMS {
+            let u = clean_url(&format!("https://h.io/p?{name}=SECRET&a=1"));
+            assert!(!u.contains("SECRET"), "{name}: {u}");
+            assert_eq!(u, "https://h.io/p?a=1", "{name}");
+        }
+    }
+
+    #[test]
+    fn test_encoded_secret_name_is_removed() {
+        let u = clean_url("https://h.io/p?%61pikey=S&a=1");
+        assert!(!u.contains("S&") && !u.contains("=S"), "{u}");
+        assert_eq!(u, "https://h.io/p?a=1");
+    }
+
+    #[test]
+    fn test_repeated_secret_param_is_removed() {
+        let u = clean_url("https://h.io/p?token=a&token=b&a=1");
+        assert!(!u.contains("=a") && !u.contains("=b"), "{u}");
+        assert_eq!(u, "https://h.io/p?a=1");
+    }
+
+    #[test]
+    fn test_only_secret_params_leave_no_trailing_query_mark() {
+        assert_eq!(clean_url("https://h.io/p?apikey=SECRET"), "https://h.io/p");
+    }
+
+    #[test]
+    fn test_userinfo_is_removed() {
+        let u = clean_url("https://user:pass@h.io/p");
+        assert!(!u.contains("user") && !u.contains("pass"), "{u}");
+        assert_eq!(u, "https://h.io/p");
+    }
+
+    #[test]
+    fn test_fragment_is_removed() {
+        let u = clean_url("https://h.io/p#access_token=X");
+        assert!(!u.contains('X'), "{u}");
+        assert_eq!(u, "https://h.io/p");
+    }
+
+    #[test]
+    fn test_unparseable_url_fails_closed() {
+        let u = clean_url("not a url?apikey=SECRET");
+        assert!(u.starts_with("invalid-url:"), "{u}");
+        assert!(!u.contains("SECRET"), "{u}");
+    }
+
+    #[test]
+    fn test_absent_body_hashes_like_empty_body() {
+        assert_eq!(body_sha256(None), body_sha256(Some("")));
+        assert_eq!(
+            body_sha256(None),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
     }
 
