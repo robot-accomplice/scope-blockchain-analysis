@@ -242,7 +242,7 @@ impl ColorSchemeExt for ColorScheme {
             },
             ColorScheme::Monochrome => ColorPalette {
                 up: Color::Reset,
-                down: Color::Magenta,
+                down: Color::Reset,
                 neutral: Color::Reset,
                 header_fg: Color::Reset,
                 border: Color::DarkGray,

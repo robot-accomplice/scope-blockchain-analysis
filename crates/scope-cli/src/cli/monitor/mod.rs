@@ -4106,14 +4106,9 @@ refresh_seconds: 5
 
     #[test]
     fn test_color_palette_fields_populated() {
-        // Verify each palette has distinct meaningful values
-        for scheme in &[
-            ColorScheme::GreenRed,
-            ColorScheme::BlueOrange,
-            ColorScheme::Monochrome,
-        ] {
+        // The colored schemes tell up from down by color.
+        for scheme in &[ColorScheme::GreenRed, ColorScheme::BlueOrange] {
             let pal = scheme.palette();
-            // up and down colors should differ (visually distinct)
             assert_ne!(
                 format!("{:?}", pal.up),
                 format!("{:?}", pal.down),
@@ -4121,6 +4116,27 @@ refresh_seconds: 5
                 scheme
             );
         }
+    }
+
+    #[test]
+    fn test_monochrome_adds_no_color_and_keeps_direction_in_glyphs() {
+        // Monochrome must not add color, so direction rides on the glyph.
+        let pal = ColorScheme::Monochrome.palette();
+        assert_eq!(pal.up, ratatui::style::Color::Reset);
+        assert_eq!(pal.down, ratatui::style::Color::Reset);
+        let header = |change: f64| {
+            let mut terminal = create_test_terminal();
+            let mut state = create_populated_state();
+            state.color_scheme = ColorScheme::Monochrome;
+            state.price_change_24h = change;
+            terminal
+                .draw(|f| render_header(f, f.area(), &state))
+                .unwrap();
+            format!("{}", terminal.backend())
+        };
+        let (up, down) = (header(50.0), header(-50.0));
+        assert!(up.contains('▲') && !up.contains('▼'));
+        assert!(down.contains('▼') && !down.contains('▲'));
     }
 
     #[test]
