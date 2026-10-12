@@ -707,6 +707,8 @@ mod tests {
         wait_signals: Vec<Signal>,
         /// `wait_to_return` never returns: a user who does not press Enter.
         wait_forever: bool,
+        /// `wait_to_return` fails, as a closed stdin would.
+        wait_fails: bool,
         suspended: Output,
         suspends: usize,
         resumes: usize,
@@ -762,6 +764,9 @@ mod tests {
         fn wait_to_return(&mut self) -> WaitFuture {
             for s in self.wait_signals.drain(..) {
                 self.signal_tx.unbounded_send(s).unwrap();
+            }
+            if self.wait_fails {
+                return Box::pin(async { Err(io::Error::other("stdin closed")) });
             }
             if self.wait_forever {
                 return Box::pin(futures::future::pending());
@@ -842,6 +847,7 @@ mod tests {
             signal_tx: sig_tx,
             wait_signals: Vec::new(),
             wait_forever: false,
+            wait_fails: false,
             suspended,
             suspends: 0,
             resumes: 0,
@@ -1284,5 +1290,24 @@ mod tests {
         // Installing handlers sends no signal. A failure to install one
         // must stop the TUI before it takes the terminal.
         assert!(signal_stream().is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_failed_wait_for_enter_is_reported_and_the_tui_resumes() {
+        // If stdin breaks while the TUI is suspended, the user must hear
+        // about it, and the TUI must still take the screen back.
+        let _lock = DIAG_LOCK.lock().await;
+        let (mut host, captured) = test_host(script(&["setup --key nosuchkey"]), Vec::new());
+        host.wait_fails = true;
+        let (res, state, host, _) = drive_host(Journal::default(), host, captured).await;
+        res.unwrap();
+        assert_eq!((host.suspends, host.resumes), (1, 1));
+        assert!(
+            state
+                .scrollback_text()
+                .contains("Terminal I/O error while outside the TUI: stdin closed"),
+            "{}",
+            state.scrollback_text()
+        );
     }
 }

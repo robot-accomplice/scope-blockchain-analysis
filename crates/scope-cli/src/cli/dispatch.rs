@@ -308,4 +308,64 @@ mod tests {
         let (res, _) = run_line(&["interactive"]).await;
         assert!(res.unwrap_err().to_string().contains("scope tui"));
     }
+
+    #[tokio::test]
+    async fn test_compliance_errors_are_labelled_as_compliance_errors() {
+        // Scripts match on the error kind, so a handler failure must come
+        // back as ScopeError::Compliance, not as the handler's own error.
+        let dir = tempfile::tempdir().unwrap();
+        let empty = dir.path().join("none.txt");
+        std::fs::write(&empty, "# no addresses\n").unwrap();
+        let out = dir.path().join("report.txt");
+        let (res, _) = run_line(&[
+            "compliance",
+            "compliance-report",
+            empty.to_str().unwrap(),
+            "--jurisdiction",
+            "us",
+            "--output",
+            out.to_str().unwrap(),
+        ])
+        .await;
+        let err = res.unwrap_err();
+        assert!(matches!(err, ScopeError::Compliance(_)), "{err:?}");
+        assert!(err.to_string().contains("No addresses to analyze"));
+
+        let (res, _) = run_line(&["compliance", "risk", "not-an-address"]).await;
+        assert!(matches!(res.unwrap_err(), ScopeError::Compliance(_)));
+    }
+
+    #[tokio::test]
+    async fn test_compliance_unknown_label_fails_before_any_lookup() {
+        // A typo in `@label` must stop at the address book (a NotFound
+        // error that lists the labels), never reach a handler.
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.address_book.data_dir = Some(dir.path().to_path_buf());
+        let factory = scope::chains::mocks::MockClientFactory::new();
+        for args in [
+            vec!["compliance", "risk", "@nobody"],
+            vec!["compliance", "analyze", "@nobody"],
+            vec![
+                "compliance",
+                "compliance-report",
+                "@nobody",
+                "--jurisdiction",
+                "eu",
+                "--output",
+                "unused.txt",
+            ],
+        ] {
+            let mut argv = vec!["scope"];
+            argv.extend_from_slice(&args);
+            let cli = Cli::try_parse_from(argv).unwrap();
+            let (o, cap) = Output::capture_merged();
+            let err = dispatch_with(cli.command, &config, &factory, &o)
+                .await
+                .unwrap_err();
+            assert!(matches!(err, ScopeError::NotFound(_)), "{args:?}: {err:?}");
+            assert!(err.to_string().contains("@nobody"), "{args:?}");
+            assert!(!cap.out().contains("Analyzing"), "handler must not run");
+        }
+    }
 }

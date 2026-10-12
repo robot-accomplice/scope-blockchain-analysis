@@ -1341,4 +1341,48 @@ mod tests {
         assert_eq!(row["input"], "setup");
         assert_eq!(row["argv"][1], "setup");
     }
+
+    #[test]
+    fn test_failed_suspended_command_is_journaled_as_error_with_its_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let events = dir.path().join("e.jsonl");
+        let mut s = TuiState::new(
+            SessionContext::default(),
+            Journal::at(dir.path().join("h"), events.clone()),
+            Vocab::default(),
+        );
+        let failed = Err(scope::error::ScopeError::Other("setup broke".into()));
+        s.record_suspended(
+            "setup",
+            &["scope".into(), "setup".into()],
+            std::time::Duration::from_millis(5),
+            "2026-01-01T00:00:00Z".into(),
+            &failed,
+        );
+        let row: serde_json::Value =
+            serde_json::from_str(std::fs::read_to_string(events).unwrap().trim()).unwrap();
+        assert_eq!(row["outcome"], "error");
+        assert_eq!(row["route"], "suspend");
+        assert!(row["error"].as_str().unwrap().contains("setup broke"));
+    }
+
+    #[test]
+    fn test_unwritable_event_log_is_reported_in_the_pane() {
+        // A journal that cannot be written must say so, not lose events
+        // silently (the journal is the RCA record).
+        let dir = tempfile::tempdir().unwrap();
+        // The events path is a directory, so appending to it fails.
+        let mut s = TuiState::new(
+            SessionContext::default(),
+            Journal::at(dir.path().join("h"), dir.path().to_path_buf()),
+            Vocab::default(),
+        );
+        s.record_signal("TERM", "session", "", &[]);
+        assert!(
+            s.scrollback_text()
+                .contains("Could not write the TUI event log"),
+            "{}",
+            s.scrollback_text()
+        );
+    }
 }
