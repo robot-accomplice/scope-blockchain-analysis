@@ -36,19 +36,39 @@ The 0.7.0 release waits for these three steps. The harness checks function. It d
 
 ## 2. One HTTP transport (prerequisite)
 
-Two paths bypass the configured transport (`NativeHttpClient` or `GholaHttpClient`):
+### 2.1 Problem
 
-- `scope-core/src/market/configurable_client.rs` holds a raw `reqwest::Client` (line 48). Every exchange venue call skips the transport, including Ghola.
-- `scope-core/src/chains/ethereum.rs` creates its own `NativeHttpClient` (lines 241, 271, 288).
+About 20 production call sites build their own HTTP client, so they skip the configured transport (native or Ghola). In replay mode they would reach the network.
 
-### Change
+| Where | What |
+|---|---|
+| `scope-core/src/market/configurable_client.rs:48` | `ConfigurableExchangeClient` holds a raw `reqwest::Client`. Every exchange venue call (`VenueRegistry::create_exchange_client`, `ExchangeClient::from_descriptor`) uses it: market, token-health, insights, crawl, monitor, and 5 web endpoints. |
+| `chains/dex.rs:365` | `DexClient::new()`. Called by `discover` (CLI and web) and inside `ethereum.rs:565` and `solana.rs:448`. |
+| `chains/ethereum.rs:241, 323, 1319`; `solana.rs:263`; `tron.rs:171` | `new(config)` and `for_chain(..)` constructors without a transport. |
+| `compliance/datasource.rs:80, 89` | The compliance data source. |
+| `scope-cli/src/cli/contract.rs:107`; `scope-web/src/api/contract.rs:64` | The contract command. |
+| `scope-cli/src/cli/dispatch.rs:144`; `scope-web/src/lib.rs:105` | Two copies of the Ghola/native selection. |
 
-1. `ConfigurableExchangeClient` takes an `Arc<dyn HttpClient>`. Status-code handling (`format_http_api_error`) uses `Response::status_code`.
-2. `ethereum.rs` uses the client from the factory.
-3. The client factory builds the transport one time from config and gives it to every client.
-4. A test checks that no file outside `scope-core/src/http/` uses `reqwest::Client` or `NativeHttpClient::new` outside `#[cfg(test)]` code. A new bypass then fails the build.
+### 2.2 Design: one shared transport (decided 2026-10-12, option A)
 
-This change also fixes a real defect: venue calls ignore the Ghola transport today.
+`scope-core/src/http/shared.rs`:
+
+- `pub fn build(config: &Config) -> Built`: the only place that selects the transport. Order: replay or record (section 3), else Ghola when `ghola.enabled` and the sidecar starts, else native. `Built { client: Arc<dyn HttpClient>, notices: Vec<String> }`; the caller prints the notices (for example "Ghola unavailable, using native").
+- `pub fn init(config: &Config) -> Built`: builds the transport and installs it for the process the first time. Later calls return the installed transport with no notices. `cli::dispatch` and `scope-web::start_server` call it.
+- `pub fn transport() -> Arc<dyn HttpClient>`: the installed transport. If nothing is installed, it installs native and logs `debug!("no transport installed; using native")`.
+
+Changes:
+
+1. Each constructor in 2.1 calls `crate::http::transport()` instead of building a client. Public signatures do not change.
+2. `ConfigurableExchangeClient` keeps an `Arc<dyn HttpClient>` and builds `http::Request`s. The descriptor timeout (`timeout_secs`) becomes `Request::timeout`, which `NativeHttpClient` applies to the request. Error text does not change.
+3. `cli::dispatch::create_http_client` and the copy in `scope-web/src/lib.rs` are replaced by `scope::http::init`.
+4. A test (`scope-core/tests/no_transport_bypass.rs`) reads every `.rs` file in the workspace and fails when `reqwest::Client` or `NativeHttpClient::new` appears outside `scope-core/src/http/` and outside test code.
+
+Explicit injection for every client (option B) is deferred to #59, with the reasons there.
+
+### 2.3 What this also fixes
+
+Ghola now covers every request. Today it misses all exchange venue calls, the DEX client in `discover` and in price enrichment, contract and compliance.
 
 ## 3. Replay transport
 
@@ -56,7 +76,7 @@ This change also fixes a real defect: venue calls ignore the Ghola transport tod
 
 `scope-core/src/http/replay.rs`: `ReplayHttpClient`, a third `HttpClient` implementation.
 
-The factory selects it from environment variables, not from `config.yaml`, so a normal user cannot turn it on by accident:
+`http::shared::build` (section 2.2) selects it from environment variables, not from `config.yaml`, so a normal user cannot turn it on by accident. In `record` mode it wraps the transport that `build` would otherwise select:
 
 | Variable | Values | Effect |
 |---|---|---|
@@ -64,7 +84,6 @@ The factory selects it from environment variables, not from `config.yaml`, so a 
 | | `record` | Send each request through the configured transport, then write the response as a fixture. |
 | | unset | Normal operation. |
 | `SCOPE_HTTP_FIXTURES` | a directory | Where fixtures are read or written. Required when `SCOPE_HTTP_MODE` is set. |
-| `SCOPE_FAKE_NOW` | RFC 3339 time | Only in `replay` mode: the time that scope shows and uses. Snapshots then do not drift. Ignored in other modes. |
 
 ### 3.2 Fixture key and file
 
@@ -114,7 +133,7 @@ Before writing a fixture, record mode:
 - A new temporary `HOME`. `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `XDG_CACHE_HOME` are removed from the environment, so the default paths resolve under that `HOME`.
 - The scenario `config` is written to `$HOME/.config/scope/config.yaml`. With no `config`, the file is `{}`.
 - `TZ=UTC`, `LANG=C.UTF-8`, `TERM=xterm-256color`.
-- Offline tier: `SCOPE_HTTP_MODE=replay`, `SCOPE_HTTP_FIXTURES=tests/tui/fixtures/<scenario>`, and `SCOPE_FAKE_NOW` when the scenario sets `now`.
+- Offline tier: `SCOPE_HTTP_MODE=replay` and `SCOPE_HTTP_FIXTURES=tests/tui/fixtures/<scenario>`.
 - Scenarios run in parallel (`--jobs N`, default: the CPU count). They share only the built binary.
 
 ## 5. Scenarios
@@ -127,7 +146,6 @@ Before writing a fixture, record mode:
 name: market summary repeat mode
 tiers: [offline, live]            # default: both
 terminal: { cols: 120, rows: 36 } # default: 120 x 36
-now: "2026-10-12T09:30:00Z"       # optional; offline tier only
 timeout: 120s                     # whole scenario; default 120s
 config: |
   market:
@@ -169,11 +187,12 @@ A scenario is rejected before it runs when:
 
 - it has no `expect_*` or `snapshot` step (a scenario that checks nothing cannot pass),
 - a key name or step field is unknown,
-- `now` is set and the scenario includes the live tier only.
 
 ### 5.4 Snapshot masks
 
-Before comparing, the harness replaces text that changes from run to run: RFC 3339 and `HH:MM:SS` times, durations (`123ms`, `1.2s`), and run times. A scenario can add masks (`masks: ["Block \\d+"]`). Trailing spaces are removed from each line.
+Before comparing, the harness replaces text that changes from run to run: RFC 3339 and `HH:MM:SS` times, dates, durations (`123ms`, `1.2s`), and run times. A scenario adds masks for other values that depend on the current time, such as an age computed from a recorded timestamp (`masks: ["age \\d+ days"]`). Trailing spaces are removed from each line.
+
+scope has no fake clock. **Why:** scope reads the wall clock in about 45 places in 17 files, and the masks cover the shown times. A fake clock is worth adding only if a scenario needs exact time arithmetic.
 
 ## 6. Coverage
 
@@ -225,7 +244,7 @@ When a scenario fails, the harness saves to `target/tui-harness/<run-id>/<scenar
 
 - `screen.txt`: the screen at the failure.
 - `pty.raw`: all PTY output, with escape codes.
-- `tui-events.jsonl` and the scope stderr log.
+- `tui-events.jsonl`. (scope writes stderr to the same PTY, so stderr is in `pty.raw` and on the screen.)
 - `steps.jsonl`: each step with its start time, duration and result.
 - `failure.txt`: the failed step, what it expected, and what it found.
 
@@ -252,8 +271,8 @@ Each step is one PR into `develop`. Each PR leaves the CLI and the TUI working.
 
 | Step | Work | Depends on |
 |---|---|---|
-| 1 | One HTTP transport (section 2), with the bypass test | none |
-| 2 | Replay transport, secret scan, `SCOPE_FAKE_NOW`, unit tests (section 3) | 1 |
+| 1 | One shared HTTP transport (section 2), with the bypass test | none |
+| 2 | Replay transport, secret scan, unit tests (section 3) | 1 |
 | 3 | Harness crate: PTY, screen, steps, evidence, report (sections 4, 5, 8.1, 8.2) | none (can run beside 1 and 2) |
 | 4 | Coverage check and the first scenarios (section 6) | 2, 3 |
 | 5 | Fixtures, `just` recipes, live tier with drift, `RELEASE.md` steps (sections 7, 8.3) | 4 |
@@ -264,5 +283,5 @@ Each step is one PR into `develop`. Each PR leaves the CLI and the TUI working.
 - **Fixture size.** Recorded bodies can be large. Trimming (7.1) is explicit per scenario, so no data is lost by accident.
 - **PTY behavior differs between macOS and Linux.** `portable-pty` supports both. The harness runs on both before step 5 merges.
 - **Replay hides API changes.** Replay proves the TUI with the responses we recorded. The live tier and the drift report cover the gap.
-- **Fake time misses time bugs.** `SCOPE_FAKE_NOW` only applies in replay mode. Live scenarios use the real clock.
+- **Shared transport hides its origin.** A constructor does not show which transport it uses. `transport()` logs when it falls back to native, and #59 holds the explicit-injection alternative.
 - **Secret leak through fixtures.** Section 3.4 removes known secret fields and blocks any file that contains a configured secret value.
