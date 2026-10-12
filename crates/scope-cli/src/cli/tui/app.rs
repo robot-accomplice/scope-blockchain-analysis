@@ -29,6 +29,14 @@ use unicode_width::UnicodeWidthStr;
 /// The most lines kept in the scrollback. Older lines are dropped.
 pub const SCROLLBACK_LIMIT: usize = 5000;
 
+/// The smallest terminal the TUI draws in, in columns and rows.
+pub const MIN_W: u16 = 40;
+/// See [`MIN_W`].
+pub const MIN_H: u16 = 10;
+
+/// Drawn alone when the terminal is smaller than [`MIN_W`] x [`MIN_H`].
+const TOO_SMALL_NOTE: &str = "Terminal too small: need at least 40×10";
+
 /// The most characters one paste adds to the input line.
 pub const PASTE_LIMIT: usize = 10_000;
 
@@ -166,6 +174,8 @@ pub struct TuiState {
     scrollback: Vec<Line<'static>>,
     /// How many lines the view is scrolled up from the bottom.
     scroll: usize,
+    /// The last draw was the too-small message. Enter does not run then.
+    too_small: Cell<bool>,
     /// The most the view can scroll up, at the last draw. PageUp stops here.
     last_max_top: Cell<usize>,
     /// The inner height of the output pane at the last draw. A page is one
@@ -206,6 +216,7 @@ impl TuiState {
             draft: String::new(),
             scrollback: Vec::new(),
             scroll: 0,
+            too_small: Cell::new(false),
             last_max_top: Cell::new(0),
             last_pane_height: Cell::new(0),
             ctx,
@@ -327,6 +338,10 @@ impl TuiState {
                 self.set_input(String::new());
             }
             KeyCode::Enter => {
+                // The screen shows no output now: the line stays.
+                if self.too_small.get() {
+                    return Action::None;
+                }
                 // One command at a time; the line stays for after it ends.
                 if self.running.is_some() {
                     if !self.input.trim().is_empty() {
@@ -935,6 +950,22 @@ impl TuiState {
 
     /// Draws the screen: output pane, input line, status line.
     pub fn render(&self, f: &mut Frame) {
+        let area = f.area();
+        let too_small = area.width < MIN_W || area.height < MIN_H;
+        self.too_small.set(too_small);
+        if too_small {
+            // Everything else stays in the state; only this line is drawn.
+            if area.width > 0 && area.height > 0 {
+                let line = Line::from(cut_with_ellipsis(TOO_SMALL_NOTE, area.width as usize));
+                let row = ratatui::layout::Rect {
+                    y: area.y + area.height / 2,
+                    height: 1,
+                    ..area
+                };
+                f.render_widget(Paragraph::new(line).centered(), row);
+            }
+            return;
+        }
         let [pane, input, hint_row, status] = Layout::vertical([
             Constraint::Min(3),
             Constraint::Length(3),
@@ -1750,9 +1781,12 @@ mod tests {
         assert!(text.contains("scrolled up 7 lines"), "{}", text);
     }
 
-    /// The status bar row (the last row) of a screen.
+    /// The status bar text at a width. It is fitted directly: a screen
+    /// below the minimum size draws no status bar.
     fn status_row(s: &TuiState, w: u16) -> String {
-        screen(s, w, 12).lines().last().unwrap().to_string()
+        let line = fit_status(&s.status_parts(), w as usize);
+        let text: String = line.spans.iter().map(|sp| sp.content.as_ref()).collect();
+        format!("{:<width$}", text, width = w as usize)
     }
 
     fn running_state(input: &str) -> (TuiState, Output) {
@@ -1916,6 +1950,55 @@ mod tests {
         // Narrow: the cancel hint is still kept.
         let row = status_row(&s, 40);
         assert!(row.contains("Esc cancels"), "{row:?}");
+    }
+
+    const TOO_SMALL: &str = "Terminal too small: need at least 40×10";
+
+    #[test]
+    fn test_below_the_minimum_size_only_the_too_small_line_is_drawn() {
+        let mut s = state();
+        s.push_ansi("some output\n");
+        type_str(&mut s, "draft");
+        // 39 columns hold the whole line.
+        let text = screen(&s, 39, 9);
+        assert!(text.contains(TOO_SMALL), "{text}");
+        let drawn: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(drawn.len(), 1, "only the message: {text}");
+        assert_eq!(s.input, "draft", "state is kept");
+        let text = screen(&s, 40, 10);
+        assert!(!text.contains(TOO_SMALL), "{text}");
+        assert!(text.contains("draft"), "{text}");
+        assert!(screen(&s, 40, 9).contains(TOO_SMALL));
+        assert!(screen(&s, 39, 10).contains(TOO_SMALL));
+    }
+
+    #[test]
+    fn test_the_too_small_line_is_cut_when_it_does_not_fit() {
+        let s = state();
+        let text = screen(&s, 30, 8);
+        assert!(text.contains("Terminal too small"), "{text}");
+        assert!(text.contains('…'), "{text}");
+        for w in 0..12 {
+            screen(&s, w, 3);
+        }
+    }
+
+    #[test]
+    fn test_enter_does_nothing_while_the_terminal_is_too_small() {
+        let mut s = state();
+        type_str(&mut s, "help");
+        screen(&s, 30, 8);
+        assert!(matches!(s.handle_key(key(KeyCode::Enter)), Action::None));
+        assert_eq!(s.input, "help", "the draft is not lost or run");
+        // Keys still edit the draft.
+        s.handle_key(key(KeyCode::Char('x')));
+        assert_eq!(s.input, "helpx");
+        // Once the terminal is big enough, Enter runs it again.
+        screen(&s, 80, 24);
+        assert!(matches!(
+            s.handle_key(key(KeyCode::Enter)),
+            Action::Submit(_)
+        ));
     }
 
     #[test]
