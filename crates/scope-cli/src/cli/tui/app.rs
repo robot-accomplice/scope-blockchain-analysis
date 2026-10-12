@@ -5,6 +5,7 @@
 //! terminal I/O, so tests drive it with key events and render it on a
 //! `TestBackend`.
 
+use super::clip::{self, SaveError};
 use super::exec::{self, Invocation, Plan, Route};
 use super::journal::{Event, Journal};
 use super::vocab::Vocab;
@@ -301,10 +302,7 @@ impl TuiState {
                     self.set_input(String::new());
                 }
             }
-            KeyCode::Char('y') if ctrl => match &self.last_output {
-                Some(text) => return Action::Copy(text.clone()),
-                None => self.push_note("nothing to copy yet"),
-            },
+            KeyCode::Char('y') if ctrl => return self.copy_key(),
             KeyCode::Char('d') if ctrl => {
                 if self.running.is_some() {
                     self.busy_hint = true;
@@ -642,12 +640,13 @@ impl TuiState {
     /// CLI command comes back for the event loop to run.
     pub fn submit(&mut self, line: &str, config: &Config) -> Plan {
         self.push_echo(line);
-        if let Some(words) = shlex::split(line)
-            && words
-                .first()
-                .is_some_and(|w| w.eq_ignore_ascii_case("save"))
+        if line
+            .split_whitespace()
+            .next()
+            .is_some_and(|w| w.eq_ignore_ascii_case("save"))
         {
-            self.save(line, &words[1..]);
+            let words = shlex::split(line);
+            self.save(line, words.as_ref().map(|w| &w[1..]));
             return Plan::Done;
         }
         let (out, captured) = Output::capture_merged();
@@ -676,25 +675,96 @@ impl TuiState {
         plan
     }
 
-    /// Runs the `save` session command over the last output.
-    fn save(&mut self, line: &str, args: &[String]) {
-        let started = Instant::now();
-        let started_at = Utc::now().to_rfc3339();
-        let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        let note = match std::env::current_dir() {
-            Ok(cwd) => super::clip::save(&args, self.last_output.as_deref(), &cwd),
-            Err(e) => format!("Could not read the current directory: {}", e),
-        };
-        self.push_note(&note);
+    /// Journals a save or copy: `session` when it worked, `refused` when
+    /// the request was turned down, `error` when the OS failed it.
+    fn log_action(
+        &mut self,
+        input: &str,
+        started: Instant,
+        outcome: &'static str,
+        error: Option<String>,
+    ) {
         self.log(Event {
-            started: started_at,
+            started: Utc::now().to_rfc3339(),
             duration_ms: started.elapsed().as_millis(),
-            input: line,
+            input,
             argv: &[],
             route: "session",
-            outcome: "session".into(),
-            error: None,
+            outcome: outcome.into(),
+            error,
         });
+    }
+
+    /// Runs the `save` session command over the last output. `words` is
+    /// the split line, or `None` when the quotes did not balance.
+    fn save(&mut self, line: &str, words: Option<&[String]>) {
+        let started = Instant::now();
+        let result = match words {
+            None => Err(SaveError::Refused(format!(
+                "Unbalanced quotes. {}",
+                clip::SAVE_USAGE
+            ))),
+            Some(args) => {
+                let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+                match std::env::current_dir() {
+                    Ok(cwd) => {
+                        clip::save(&args, self.last_output.as_deref(), &cwd, home.as_deref())
+                    }
+                    Err(e) => Err(SaveError::Failed(format!(
+                        "Could not read the current directory: {}",
+                        e
+                    ))),
+                }
+            }
+        };
+        match result {
+            Ok(note) => {
+                self.push_note(&note);
+                self.log_action(line, started, "session", None);
+            }
+            Err(e) => {
+                self.push_note(e.message());
+                let outcome = match e {
+                    SaveError::Refused(_) => "refused",
+                    SaveError::Failed(_) => "error",
+                };
+                self.log_action(line, started, outcome, Some(e.message().to_string()));
+            }
+        }
+    }
+
+    /// Ctrl-Y: returns the copy action, or notes and journals why there
+    /// is nothing to send.
+    fn copy_key(&mut self) -> Action {
+        let started = Instant::now();
+        let refusal = match self.last_output.clone() {
+            None => "nothing to copy yet".to_string(),
+            Some(text) if clip::fits_osc52(&text) => return Action::Copy(text),
+            Some(text) => format!(
+                "too large to copy ({} lines); use save <file>",
+                text.lines().count()
+            ),
+        };
+        self.push_note(&refusal);
+        self.log_action("Ctrl-Y", started, "refused", Some(refusal));
+        Action::None
+    }
+
+    /// Notes and journals the result of writing the copy sequence.
+    pub fn copied(&mut self, lines: usize, result: std::io::Result<()>) {
+        let started = Instant::now();
+        match result {
+            Ok(()) => {
+                self.push_note(&format!("copied {} lines", lines));
+                self.log_action("Ctrl-Y", started, "session", None);
+            }
+            Err(e) => {
+                let note = format!("Could not copy: {}", e);
+                self.push_note(&note);
+                self.log_action("Ctrl-Y", started, "error", Some(note));
+            }
+        }
     }
 
     /// Starts a pane command. Returns the output its handler must write to.
@@ -733,10 +803,12 @@ impl TuiState {
             }
         }
         let output = run.captured.out();
-        // The copy is the command's own output: no error text, no footer.
-        // A failed or cancelled run keeps the earlier copy.
-        if matches!(ending, Ending::Finished(Ok(()))) && !output.trim().is_empty() {
-            self.last_output = Some(super::clip::strip_ansi(&output));
+        // The copy is the command's own data: no warnings, error text or
+        // footer. A success with no data clears it; a failed or cancelled
+        // run keeps the earlier copy.
+        if matches!(ending, Ending::Finished(Ok(()))) {
+            let data = clip::strip_ansi(&run.captured.data());
+            self.last_output = (!data.trim().is_empty()).then_some(data);
         }
         self.push_ansi(&output);
         let secs = run.started.elapsed().as_secs_f64();
@@ -2137,5 +2209,59 @@ mod tests {
             ai: false,
             argv: vec![],
         }
+    }
+
+    fn warned_json_run(s: &mut TuiState) {
+        let inv = pane_invocation();
+        let out = s.start("address 0x1 --format json", &inv);
+        crate::errln!(out, "\u{26a0} Token balances unavailable").unwrap();
+        crate::outln!(out, "{{\"a\": 1}}").unwrap();
+        s.finish(Ending::Finished(Ok(())));
+    }
+
+    #[test]
+    fn test_last_output_excludes_warnings_the_pane_still_shows() {
+        let mut s = state();
+        warned_json_run(&mut s);
+        let Action::Copy(text) = s.handle_key(ctrl('y')) else {
+            panic!("expected a copy");
+        };
+        serde_json::from_str::<serde_json::Value>(&text).unwrap();
+        assert!(!text.contains("Token balances"));
+        assert!(s.scrollback_text().contains("Token balances unavailable"));
+    }
+
+    #[test]
+    fn test_a_success_with_no_output_clears_the_copy() {
+        let mut s = state();
+        run_pane(&mut s, "data\n", Ending::Finished(Ok(())));
+        run_pane(&mut s, "", Ending::Finished(Ok(())));
+        assert_eq!(s.handle_key(ctrl('y')), Action::None);
+        s.submit("save out.json", &Config::default());
+        assert!(s.scrollback_text().contains("nothing to save yet"));
+    }
+
+    #[test]
+    fn test_ctrl_y_refuses_output_over_the_osc52_cap() {
+        let mut s = state();
+        let big = "x".repeat(clip::OSC52_MAX_PAYLOAD);
+        run_pane(&mut s, &format!("{big}\n"), Ending::Finished(Ok(())));
+        assert_eq!(s.handle_key(ctrl('y')), Action::None);
+        assert!(
+            s.scrollback_text()
+                .contains("too large to copy (1 lines); use save <file>")
+        );
+    }
+
+    #[test]
+    fn test_save_with_unbalanced_quotes_gets_the_save_usage() {
+        let mut s = state();
+        run_pane(&mut s, "x\n", Ending::Finished(Ok(())));
+        s.submit("save \"unclosed", &Config::default());
+        let text = s.scrollback_text();
+        assert!(
+            text.contains("Unbalanced quotes. Usage: save <file> [--force]"),
+            "{text}"
+        );
     }
 }

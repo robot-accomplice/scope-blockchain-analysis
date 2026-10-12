@@ -424,10 +424,8 @@ async fn event_loop<H: Host>(
                     Action::Exit => return Ok(LEFT),
                     Action::Suspend => cont_expected = stop_and_return(host, state)?,
                     Action::Copy(text) => {
-                        match host.write_raw(&clip::osc52(&text)) {
-                            Ok(()) => state.push_note(&format!("copied {} lines", text.lines().count())),
-                            Err(e) => state.push_note(&format!("Could not copy: {}", e)),
-                        }
+                        let result = host.write_raw(&clip::osc52(&text));
+                        state.copied(text.lines().count(), result);
                     }
                     Action::Cancel => {
                         // Dropping the future cancels the handler at its
@@ -1499,35 +1497,94 @@ mod tests {
         assert!(screen.contains("scope:base>"));
     }
 
-    #[tokio::test]
-    async fn test_ctrl_y_writes_osc52_and_save_writes_the_json() {
-        let _lock = DIAG_LOCK.lock().await;
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("out.json");
-        let save = format!("save {}", file.display());
-        let mut events = script(&["venues list --format json", &save]);
-        events.push(Ok(Event::Key(KeyEvent::new(
+    fn ctrl_y_event() -> io::Result<Event> {
+        Ok(Event::Key(KeyEvent::new(
             KeyCode::Char('y'),
             KeyModifiers::CONTROL,
-        ))));
+        )))
+    }
+
+    #[tokio::test]
+    async fn test_ctrl_y_sends_the_json_and_save_writes_it() {
+        use base64::Engine as _;
+        let _lock = DIAG_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("one.json");
+        let mut events = script(&[
+            "venues list --format json",
+            &format!("save {}", file.display()),
+        ]);
+        events.push(ctrl_y_event());
         let (res, state, host, _) = drive(events).await;
         res.unwrap();
         let body = std::fs::read_to_string(&file).unwrap();
         serde_json::from_str::<serde_json::Value>(&body).unwrap();
         let text = state.scrollback_text();
         assert!(text.contains("copied "), "{text}");
-        assert!(host.raw.starts_with("\x1b]52;c;"), "{:?}", host.raw);
-        assert!(host.raw.ends_with('\x07'));
-        // A second save of the same file is refused without --force.
-        let (_, state, _, _) = drive(script(&[
-            "venues list --format json",
-            &save,
-            &save,
-            &format!("{save} --force"),
-        ]))
+        let payload = host
+            .raw
+            .strip_prefix("\x1b]52;c;")
+            .and_then(|r| r.strip_suffix('\x07'))
+            .unwrap_or_else(|| panic!("not an OSC 52 sequence: {:?}", host.raw));
+        let sent = base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .unwrap();
+        assert_eq!(String::from_utf8(sent).unwrap(), body);
+    }
+
+    #[tokio::test]
+    async fn test_save_refuses_to_overwrite_then_force_replaces_and_both_are_journaled() {
+        let _lock = DIAG_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("two.json");
+        std::fs::write(&file, "old").unwrap();
+        let save = format!("save {}", file.display());
+        let journal = Journal::at(dir.path().join("h"), dir.path().join("e.jsonl"));
+        let (res, state, _, _) = drive_with(
+            journal,
+            script(&[
+                "venues list --format json",
+                &save,
+                &format!("{save} --force"),
+            ]),
+            Vec::new(),
+        )
         .await;
+        res.unwrap();
         let text = state.scrollback_text();
         assert!(text.contains("exists; add --force"), "{text}");
+        assert!(text.contains("saved "), "{text}");
+        let body = std::fs::read_to_string(&file).unwrap();
+        assert_ne!(body, "old", "--force replaced the file");
+        serde_json::from_str::<serde_json::Value>(&body).unwrap();
+        let recs = records(&dir);
+        let refused = recs.iter().find(|r| r["outcome"] == "refused").unwrap();
+        assert_eq!(refused["input"], save);
+        assert!(refused["error"].as_str().unwrap().contains("exists"));
+        assert!(
+            recs.iter()
+                .any(|r| r["input"] == format!("{save} --force") && r["outcome"] == "session")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ctrl_y_results_are_journaled() {
+        let _lock = DIAG_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Journal::at(dir.path().join("h"), dir.path().join("e.jsonl"));
+        let mut events = vec![ctrl_y_event()];
+        events.extend(script(&["venues list"]));
+        events.push(ctrl_y_event());
+        let (mut host, captured) = test_host(events, Vec::new());
+        host.raw_fails = true;
+        let (_, _, _, _) = drive_host(journal, host, captured).await;
+        let recs = records(&dir);
+        let ctrl_y: Vec<_> = recs.iter().filter(|r| r["input"] == "Ctrl-Y").collect();
+        assert_eq!(ctrl_y.len(), 2, "{recs:?}");
+        assert_eq!(ctrl_y[0]["outcome"], "refused");
+        assert_eq!(ctrl_y[0]["error"], "nothing to copy yet");
+        assert_eq!(ctrl_y[1]["outcome"], "error");
+        assert!(ctrl_y[1]["error"].as_str().unwrap().contains("tty gone"));
     }
 
     #[tokio::test]

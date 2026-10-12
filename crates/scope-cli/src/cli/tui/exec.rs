@@ -622,6 +622,10 @@ fn write_help(out: &Output) -> io::Result<()> {
     outln!(
         out,
         "      Ctrl-Y copy last output · Shift-drag selects text"
+    )?;
+    outln!(
+        out,
+        "      Copy needs a terminal that allows OSC 52; save <file> works everywhere"
     )
 }
 

@@ -57,6 +57,7 @@ impl Output {
         let out = Arc::new(Mutex::new(Vec::new()));
         let err = Arc::new(Mutex::new(Vec::new()));
         let captured = Captured {
+            data: out.clone(),
             out: out.clone(),
             err: err.clone(),
         };
@@ -74,14 +75,20 @@ impl Output {
     /// The TUI uses it: its output pane shows data and diagnostics as one
     /// stream, as a terminal does. [`Captured::out`] returns the whole
     /// stream and [`Captured::err`] returns the same text.
+    /// [`Captured::data`] returns only what went to the data channel.
     pub fn capture_merged() -> (Self, Captured) {
         let buf = Arc::new(Mutex::new(Vec::new()));
+        let data = Arc::new(Mutex::new(Vec::new()));
         let captured = Captured {
             out: buf.clone(),
             err: buf.clone(),
+            data: data.clone(),
         };
         let output = Self {
-            out: buf.clone(),
+            out: Arc::new(Mutex::new(Tee {
+                merged: buf.clone(),
+                data,
+            })),
             err: buf,
             progress: false,
         };
@@ -129,6 +136,8 @@ impl Output {
 /// Reads back what an [`Output::capture`] output received.
 #[derive(Clone)]
 pub struct Captured {
+    /// Only the data channel. Same buffer as `out` unless merged.
+    data: Arc<Mutex<Vec<u8>>>,
     out: Arc<Mutex<Vec<u8>>>,
     err: Arc<Mutex<Vec<u8>>>,
 }
@@ -137,6 +146,12 @@ impl Captured {
     /// Everything written to the data channel so far.
     pub fn out(&self) -> String {
         String::from_utf8_lossy(&lock(&self.out)).into_owned()
+    }
+
+    /// Only what was written to the data channel, without the diagnostics
+    /// that a merged capture mixes in.
+    pub fn data(&self) -> String {
+        String::from_utf8_lossy(&lock(&self.data)).into_owned()
     }
 
     /// Everything written to the diagnostic channel so far.
@@ -148,6 +163,24 @@ impl Captured {
     /// [`scope::diag::redirect`] so library warnings join the same stream.
     pub fn out_sink(&self) -> scope::diag::Sink {
         self.out.clone()
+    }
+}
+
+/// The data channel of a merged capture: writes to the merged stream and
+/// to a data-only buffer.
+struct Tee {
+    merged: Arc<Mutex<Vec<u8>>>,
+    data: Arc<Mutex<Vec<u8>>>,
+}
+
+impl Write for Tee {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        lock(&self.merged).extend_from_slice(buf);
+        lock(&self.data).extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -242,6 +275,15 @@ pub(crate) mod tests {
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn test_merged_capture_keeps_data_apart_from_diagnostics() {
+        let (o, cap) = Output::capture_merged();
+        outln!(o, "data").unwrap();
+        errln!(o, "warn").unwrap();
+        assert_eq!(cap.data(), "data\n");
+        assert_eq!(cap.out(), "data\nwarn\n");
     }
 
     #[test]
