@@ -135,6 +135,13 @@ pub fn plan(
                 write_help(out)?;
                 return Ok(Plan::Done);
             }
+            // A session command has no clap help: show its own line.
+            let typed = words[1].to_lowercase();
+            let name = session_command_name(&typed);
+            if let Some((_, usage, what)) = SESSION_COMMANDS.iter().find(|(n, _, _)| *n == name) {
+                outln!(out, "  {:<34} {}", usage, what)?;
+                return Ok(Plan::Done);
+            }
             // `help market summary` is `market summary --help`: the same
             // text as `scope help market summary`.
             let mut words: Vec<String> = words[1..].to_vec();
@@ -603,6 +610,20 @@ pub(crate) const SESSION_COMMANDS: &[(&str, &str, &str)] = &[
     ("exit", "exit", "Leave the TUI (also Ctrl-D)"),
 ];
 
+/// The `SESSION_COMMANDS` name for a typed session command or its alias.
+fn session_command_name(word: &str) -> &str {
+    match word {
+        "quit" | "q" | ".exit" | ".quit" => "exit",
+        "context" | ".ctx" | ".context" => "ctx",
+        "reset" | ".clear" | ".reset" => "clear",
+        "?" | ".help" => "help",
+        "showtokens" => "+tokens",
+        "showtxs" | "txs" => "+txs",
+        "aliases" => "tokens",
+        other => other,
+    }
+}
+
 /// Writes the TUI help: the session commands, then every CLI command.
 fn write_help(out: &Output) -> io::Result<()> {
     outln!(out, "Session commands:")?;
@@ -859,6 +880,23 @@ mod tests {
         assert!(cap.out().contains("Usage:"), "{}", cap.out());
         assert!(cap.out().contains("--venue"), "{}", cap.out());
         assert!(!cap.out().contains("Session commands"), "{}", cap.out());
+    }
+
+    #[test]
+    fn test_help_with_a_session_command_shows_its_line() {
+        for (typed, usage) in [
+            ("help ctx", "ctx"),
+            ("help tokens", "tokens [list|recent|add|remove]"),
+            ("help clear", "clear"),
+            ("help save", "save <file> [--force]"),
+            ("help quit", "exit"),
+        ] {
+            let (p, cap) = plan_line(typed, &mut SessionContext::default());
+            assert!(matches!(p, Plan::Done));
+            assert!(cap.out().contains(usage), "{typed}: {}", cap.out());
+            assert!(cap.err().is_empty(), "{typed}: {}", cap.err());
+            assert!(!cap.out().contains("Usage:"), "{typed}");
+        }
     }
 
     #[test]

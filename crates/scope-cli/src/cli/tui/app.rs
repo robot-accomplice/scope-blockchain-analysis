@@ -34,8 +34,29 @@ pub const MIN_W: u16 = 40;
 /// See [`MIN_W`].
 pub const MIN_H: u16 = 10;
 
-/// Drawn alone when the terminal is smaller than [`MIN_W`] x [`MIN_H`].
-const TOO_SMALL_NOTE: &str = "Terminal too small: need at least 40×10";
+/// The message drawn alone when the terminal is smaller than [`MIN_W`] x
+/// [`MIN_H`].
+fn too_small_note() -> String {
+    format!("Terminal too small: need at least {MIN_W}×{MIN_H}")
+}
+
+/// Wraps `text` on word boundaries to `width` columns. A word wider than
+/// `width` is cut. At most `height` lines come back.
+fn wrap_words(text: &str, width: usize, height: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for word in text.split_whitespace() {
+        let word = cut_with_ellipsis(word, width);
+        match lines.last_mut() {
+            Some(last) if cols(last) + 1 + cols(&word) <= width => {
+                last.push(' ');
+                last.push_str(&word);
+            }
+            _ => lines.push(word),
+        }
+    }
+    lines.truncate(height);
+    lines
+}
 
 /// The most characters one paste adds to the input line.
 pub const PASTE_LIMIT: usize = 10_000;
@@ -256,6 +277,12 @@ impl TuiState {
             && matches!(self.overlay, Some(Overlay::Palette(_)))
         {
             self.overlay = None;
+        }
+        // The overlays are not drawn while the terminal is too small, so
+        // they must not act: Esc or any key closes one and does no more.
+        if self.too_small.get() && self.overlay.is_some() {
+            self.overlay = None;
+            return Action::None;
         }
         if let Some(Overlay::Palette(p)) = &mut self.overlay {
             let count = p.matches().len();
@@ -954,16 +981,21 @@ impl TuiState {
         let too_small = area.width < MIN_W || area.height < MIN_H;
         self.too_small.set(too_small);
         if too_small {
-            // Everything else stays in the state; only this line is drawn.
-            if area.width > 0 && area.height > 0 {
-                let line = Line::from(cut_with_ellipsis(TOO_SMALL_NOTE, area.width as usize));
-                let row = ratatui::layout::Rect {
-                    y: area.y + area.height / 2,
-                    height: 1,
-                    ..area
-                };
-                f.render_widget(Paragraph::new(line).centered(), row);
-            }
+            // Everything else stays in the state; only the message is drawn.
+            // No pane is drawn, so there is no pane width: the event loop
+            // then sets no width override.
+            self.pane_width.set(0);
+            self.last_pane_height.set(0);
+            let lines = wrap_words(&too_small_note(), area.width as usize, area.height as usize);
+            let top = area.y + (area.height as usize - lines.len()) as u16 / 2;
+            let rows = lines.len() as u16;
+            let text: Vec<Line> = lines.into_iter().map(Line::from).collect();
+            let rect = ratatui::layout::Rect {
+                y: top,
+                height: rows,
+                ..area
+            };
+            f.render_widget(Paragraph::new(text).centered(), rect);
             return;
         }
         let [pane, input, hint_row, status] = Layout::vertical([
@@ -1955,6 +1987,11 @@ mod tests {
     const TOO_SMALL: &str = "Terminal too small: need at least 40×10";
 
     #[test]
+    fn test_the_too_small_text_is_the_spec_text() {
+        assert_eq!(too_small_note(), TOO_SMALL);
+    }
+
+    #[test]
     fn test_below_the_minimum_size_only_the_too_small_line_is_drawn() {
         let mut s = state();
         s.push_ansi("some output\n");
@@ -1964,6 +2001,7 @@ mod tests {
         assert!(text.contains(TOO_SMALL), "{text}");
         let drawn: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
         assert_eq!(drawn.len(), 1, "only the message: {text}");
+        assert!(!text.contains("draft"), "{text}");
         assert_eq!(s.input, "draft", "state is kept");
         let text = screen(&s, 40, 10);
         assert!(!text.contains(TOO_SMALL), "{text}");
@@ -1973,14 +2011,66 @@ mod tests {
     }
 
     #[test]
-    fn test_the_too_small_line_is_cut_when_it_does_not_fit() {
+    fn test_the_too_small_message_wraps_on_words_and_is_centered() {
         let s = state();
         let text = screen(&s, 30, 8);
-        assert!(text.contains("Terminal too small"), "{text}");
-        assert!(text.contains('…'), "{text}");
+        let rows: Vec<&str> = text.lines().collect();
+        let at = rows
+            .iter()
+            .position(|r| r.contains("Terminal too small: need at"))
+            .expect(&text);
+        assert!(rows[at + 1].contains("least 40×10"), "{text}");
+        assert_eq!(at, 3, "centered vertically: {text}");
+        assert!(rows[at].starts_with(' '), "centered horizontally: {text}");
+        // Only a height that cannot hold the lines cuts the message.
+        assert!(screen(&s, 30, 1).contains("Terminal too small"));
         for w in 0..12 {
-            screen(&s, w, 3);
+            for h in 0..4 {
+                screen(&s, w, h);
+            }
         }
+    }
+
+    #[test]
+    fn test_too_small_clears_the_pane_width_so_no_override_is_set() {
+        let s = state();
+        screen(&s, 80, 24);
+        assert!(s.pane_width().is_some());
+        screen(&s, 30, 8);
+        assert_eq!(s.pane_width(), None);
+    }
+
+    #[test]
+    fn test_overlays_do_not_act_while_the_terminal_is_too_small() {
+        let mut s = state();
+        type_str(&mut s, "dra");
+        s.handle_key(ctrl('k'));
+        assert!(s.overlay.is_some());
+        screen(&s, 30, 8);
+        assert!(matches!(s.handle_key(key(KeyCode::Enter)), Action::None));
+        assert!(s.overlay.is_none(), "the overlay is closed");
+        assert_eq!(s.input, "dra", "the palette did not fill the input");
+        // Another key closes an open overlay and does not edit.
+        s.handle_key(ctrl('k'));
+        s.handle_key(key(KeyCode::Char('x')));
+        assert!(s.overlay.is_none());
+        assert_eq!(s.input, "dra");
+        // Esc closes it too.
+        s.handle_key(ctrl('k'));
+        s.handle_key(key(KeyCode::Esc));
+        assert!(s.overlay.is_none());
+        assert_eq!(s.input, "dra");
+    }
+
+    #[test]
+    fn test_enter_does_nothing_while_too_small_and_a_command_runs() {
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let (mut s, _out) = running_state("market summary USDC --every 2s");
+        type_str(&mut s, "ctx");
+        screen(&s, 30, 8);
+        assert!(matches!(s.handle_key(key(KeyCode::Enter)), Action::None));
+        assert_eq!(s.input, "ctx");
+        assert!(s.running.is_some());
     }
 
     #[test]

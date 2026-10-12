@@ -3,9 +3,10 @@ tiers: [offline]
 steps:
   - wait_for: { text: "scope:auto>" }
   - type: "draft"
-  # 39 columns hold the whole message.
-  - resize: { cols: 39, rows: 9 }
-  - wait_for: { text: "Terminal too small: need at least 40×10" }
+  # The message wraps on words at 30 columns.
+  - resize: { cols: 30, rows: 8 }
+  - wait_for: { text: "Terminal too small: need at" }
+  - wait_for: { text: "least 40×10" }
   # Enter does nothing while it is too small.
   - key: Enter
   - resize: { cols: 120, rows: 36 }
