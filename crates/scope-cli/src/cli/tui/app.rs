@@ -29,9 +29,6 @@ use unicode_width::UnicodeWidthStr;
 /// The most lines kept in the scrollback. Older lines are dropped.
 pub const SCROLLBACK_LIMIT: usize = 5000;
 
-/// Lines moved by one PageUp / PageDown.
-const PAGE: usize = 10;
-
 /// The most characters one paste adds to the input line.
 pub const PASTE_LIMIT: usize = 10_000;
 
@@ -169,6 +166,11 @@ pub struct TuiState {
     scrollback: Vec<Line<'static>>,
     /// How many lines the view is scrolled up from the bottom.
     scroll: usize,
+    /// The most the view can scroll up, at the last draw. PageUp stops here.
+    last_max_top: Cell<usize>,
+    /// The inner height of the output pane at the last draw. A page is one
+    /// row less.
+    last_pane_height: Cell<usize>,
     /// The session context.
     pub ctx: SessionContext,
     /// The command that runs in the pane now.
@@ -204,6 +206,8 @@ impl TuiState {
             draft: String::new(),
             scrollback: Vec::new(),
             scroll: 0,
+            last_max_top: Cell::new(0),
+            last_pane_height: Cell::new(0),
             ctx,
             running: None,
             scroll_x: Cell::new(0),
@@ -345,11 +349,24 @@ impl TuiState {
             KeyCode::Tab => self.tab_complete(),
             KeyCode::Up => self.history_prev(),
             KeyCode::Down => self.history_next(),
-            KeyCode::PageUp => self.scroll = self.scroll.saturating_add(PAGE),
-            KeyCode::PageDown => self.scroll = self.scroll.saturating_sub(PAGE),
+            KeyCode::PageUp => {
+                let max = self.last_max_top.get();
+                self.scroll = self.scroll.min(max).saturating_add(self.page()).min(max);
+            }
+            KeyCode::PageDown => {
+                self.scroll = self
+                    .scroll
+                    .min(self.last_max_top.get())
+                    .saturating_sub(self.page());
+            }
+            KeyCode::Home if ctrl => self.scroll = self.last_max_top.get(),
+            KeyCode::End if ctrl => self.scroll = 0,
             KeyCode::Left => self.cursor = self.cursor.saturating_sub(1),
             KeyCode::Right => self.cursor = (self.cursor + 1).min(self.char_len()),
             KeyCode::Home => self.cursor = 0,
+            // On an empty line there is no cursor to move: End goes to the
+            // newest output.
+            KeyCode::End if self.input.is_empty() => self.scroll = 0,
             KeyCode::End => self.cursor = self.char_len(),
             KeyCode::Char('k') if ctrl => {
                 self.overlay = Some(Overlay::Palette(super::palette::PaletteState::new(
@@ -365,17 +382,20 @@ impl TuiState {
             }
             KeyCode::Char('w') if ctrl => self.delete_word(),
             KeyCode::Backspace => {
+                self.scroll = 0;
                 if self.cursor > 0 {
                     self.cursor -= 1;
                     self.remove_char(self.cursor);
                 }
             }
             KeyCode::Delete => {
+                self.scroll = 0;
                 if self.cursor < self.char_len() {
                     self.remove_char(self.cursor);
                 }
             }
             KeyCode::Char(c) if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) => {
+                self.scroll = 0;
                 let at = self.byte_index(self.cursor);
                 self.input.insert(at, c);
                 self.cursor += 1;
@@ -402,6 +422,7 @@ impl TuiState {
         if clean.is_empty() {
             return;
         }
+        self.scroll = 0;
         let truncated = clean.chars().count() > PASTE_LIMIT;
         if truncated {
             clean = clean.chars().take(PASTE_LIMIT).collect();
@@ -422,6 +443,12 @@ impl TuiState {
         if truncated {
             self.push_note(&format!("paste truncated to {} characters", PASTE_LIMIT));
         }
+    }
+
+    /// Rows moved by PageUp and PageDown: the pane height less one, so the
+    /// top row of one page is the bottom row of the next.
+    fn page(&self) -> usize {
+        self.last_pane_height.get().saturating_sub(1).max(1)
     }
 
     /// Picks the first shown column of the input line for a window of
@@ -937,6 +964,8 @@ impl TuiState {
         let para = Paragraph::new(Text::from(fit::fit(lines, inner.width as usize)));
         let total = para.line_count(inner.width);
         let max_top = total.saturating_sub(inner.height as usize);
+        self.last_max_top.set(max_top);
+        self.last_pane_height.set(inner.height as usize);
         let top = max_top.saturating_sub(self.scroll.min(max_top));
         f.render_widget(para.block(block).scroll((top as u16, 0)), pane);
 
@@ -1103,20 +1132,29 @@ impl TuiState {
             format!("format {:?}", ctx.format),
             limit,
         ];
-        let (state, command) = match &self.running {
+        // The view is clamped to the content when it draws; say so here too.
+        let scrolled = self.scroll.min(self.last_max_top.get());
+        let scrolled = (scrolled > 0).then(|| format!("scrolled up {} lines · PgDn", scrolled));
+        let (state, scrolled, command) = match &self.running {
             Some(run) => (
                 format!(
                     "running {:.0}s · Esc cancels",
                     run.started.elapsed().as_secs_f64()
                 ),
+                scrolled,
                 Some(run.input.clone()),
             ),
-            None if self.scroll > 0 => (format!("scrolled up {} lines · PgDn", self.scroll), None),
-            None => ("help · exit".to_string(), None),
+            // Idle: the scroll text is the state.
+            None => (
+                scrolled.unwrap_or_else(|| "help · exit".to_string()),
+                None,
+                None,
+            ),
         };
         StatusParts {
             context,
             state,
+            scrolled,
             command,
         }
     }
@@ -1129,6 +1167,9 @@ struct StatusParts {
     /// `running Ns · Esc cancels`, `scrolled up N lines · PgDn` or
     /// `help · exit`. Kept at every width.
     state: String,
+    /// `scrolled up N lines · PgDn` while a command runs. Idle, it is the
+    /// state. Dropped after the context and before the command.
+    scrolled: Option<String>,
     /// The command that runs. The last part to go.
     command: Option<String>,
 }
@@ -1199,6 +1240,11 @@ fn fit_status(parts: &StatusParts, width: usize) -> Line<'static> {
         return Line::default();
     }
     let command = |c: &str| format!(" · `{}`", c);
+    let scroll_note = parts
+        .scrolled
+        .as_ref()
+        .map(|s| format!(" · {}", s))
+        .unwrap_or_default();
     let total = parts.context.len();
     for kept in (0..=total).rev() {
         let left = if kept == 0 {
@@ -1206,7 +1252,7 @@ fn fit_status(parts: &StatusParts, width: usize) -> Line<'static> {
         } else {
             format!(" {}  ", parts.context[..kept].join(" · "))
         };
-        let mut right = parts.state.clone();
+        let mut right = format!("{}{}", parts.state, scroll_note);
         if let Some(c) = &parts.command {
             right.push_str(&command(c));
         }
@@ -1218,12 +1264,17 @@ fn fit_status(parts: &StatusParts, width: usize) -> Line<'static> {
         }
     }
     // The whole context is gone. Cut the command text to what is left.
-    let used = 1 + cols(&parts.state) + COMMAND_FRAME_COLS;
-    if let Some(c) = &parts.command
-        && width >= used + MIN_CUT_COMMAND_COLS
-    {
-        let cut = cut_with_ellipsis(c, width - used);
-        return bar(" ".to_string(), format!("{}{}", parts.state, command(&cut)));
+    for note in [scroll_note.as_str(), ""] {
+        let used = 1 + cols(&parts.state) + cols(note) + COMMAND_FRAME_COLS;
+        if let Some(c) = &parts.command
+            && width >= used + MIN_CUT_COMMAND_COLS
+        {
+            let cut = cut_with_ellipsis(c, width - used);
+            return bar(
+                " ".to_string(),
+                format!("{}{}{}", parts.state, note, command(&cut)),
+            );
+        }
     }
     // The command is gone too. A `…` after the state shows it, if it fits.
     let text = format!(" {} {}", parts.state, ELLIPSIS);
@@ -1695,7 +1746,8 @@ mod tests {
         s.handle_key(key(KeyCode::PageUp));
         let text = screen(&s, 60, 15);
         assert!(!text.contains("line 39"), "{}", text);
-        assert!(text.contains("scrolled up 10 lines"));
+        // A page is the pane height less one row: inner height 8, page 7.
+        assert!(text.contains("scrolled up 7 lines"), "{}", text);
     }
 
     /// The status bar row (the last row) of a screen.
@@ -1759,9 +1811,111 @@ mod tests {
         for i in 0..40 {
             s.push_ansi(&format!("line {}\n", i));
         }
+        screen(&s, 40, 12);
         s.handle_key(key(KeyCode::PageUp));
         let row = status_row(&s, 40);
-        assert!(row.contains("scrolled up 10 lines"), "{row:?}");
+        assert!(row.contains("scrolled up 4 lines"), "{row:?}");
+    }
+
+    /// 30 lines in a 60x15 screen: the pane shows 8 rows, 22 can scroll.
+    fn scrollable() -> TuiState {
+        let mut s = state();
+        for i in 0..30 {
+            s.push_ansi(&format!("line {}\n", i));
+        }
+        screen(&s, 60, 15);
+        s
+    }
+
+    #[test]
+    fn test_page_up_stops_at_the_top_so_page_down_always_moves() {
+        let mut s = scrollable();
+        for _ in 0..50 {
+            s.handle_key(key(KeyCode::PageUp));
+        }
+        let top = screen(&s, 60, 15);
+        assert!(top.contains("scrolled up 22 lines"), "{top}");
+        s.handle_key(key(KeyCode::PageDown));
+        let after = screen(&s, 60, 15);
+        assert_ne!(top, after, "PageDown must change the view");
+        assert!(after.contains("scrolled up 15 lines"), "{after}");
+    }
+
+    #[test]
+    fn test_ctrl_home_and_ctrl_end_jump_to_the_top_and_the_bottom() {
+        let mut s = scrollable();
+        s.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::CONTROL));
+        assert!(screen(&s, 60, 15).contains("line 0"));
+        assert!(screen(&s, 60, 15).contains("scrolled up 22 lines"));
+        s.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL));
+        let text = screen(&s, 60, 15);
+        assert!(text.contains("line 29"), "{text}");
+        assert!(!text.contains("scrolled up"), "{text}");
+    }
+
+    #[test]
+    fn test_end_on_an_empty_input_jumps_to_the_bottom_else_moves_the_cursor() {
+        let mut s = scrollable();
+        s.handle_key(key(KeyCode::PageUp));
+        s.handle_key(key(KeyCode::End));
+        assert_eq!(s.scroll, 0);
+        type_str(&mut s, "abc");
+        s.handle_key(key(KeyCode::Home));
+        s.handle_key(key(KeyCode::PageUp));
+        s.handle_key(key(KeyCode::End));
+        assert_eq!(s.cursor, 3, "End moves the cursor on a non-empty input");
+        assert_eq!(s.scroll, 7, "and leaves the view alone");
+    }
+
+    #[test]
+    fn test_keys_that_edit_the_input_snap_the_view_to_the_bottom() {
+        for edit in ["char", "backspace", "delete", "paste"] {
+            let mut s = scrollable();
+            type_str(&mut s, "ab");
+            s.handle_key(key(KeyCode::Left));
+            s.handle_key(key(KeyCode::PageUp));
+            assert!(s.scroll > 0, "{edit}");
+            match edit {
+                "char" => drop(s.handle_key(key(KeyCode::Char('a')))),
+                "backspace" => drop(s.handle_key(key(KeyCode::Backspace))),
+                "delete" => drop(s.handle_key(key(KeyCode::Delete))),
+                _ => s.paste("x"),
+            }
+            assert_eq!(s.scroll, 0, "{edit}");
+        }
+    }
+
+    #[test]
+    fn test_navigation_keys_and_modifiers_alone_do_not_snap_the_view() {
+        let mut s = scrollable();
+        s.handle_key(key(KeyCode::PageUp));
+        for k in [
+            key(KeyCode::Left),
+            key(KeyCode::Right),
+            key(KeyCode::Home),
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+            key(KeyCode::Tab),
+        ] {
+            s.handle_key(k);
+            assert_eq!(s.scroll, 7, "{k:?}");
+        }
+    }
+
+    #[test]
+    fn test_status_shows_the_running_state_and_the_scroll_state_together() {
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let (mut s, _out) = running_state("market summary USDC --every 2s");
+        for i in 0..40 {
+            s.push_ansi(&format!("line {}\n", i));
+        }
+        screen(&s, 120, 12);
+        s.handle_key(key(KeyCode::PageUp));
+        let row = status_row(&s, 120);
+        assert!(row.contains("running "), "{row:?}");
+        assert!(row.contains("scrolled up 4 lines"), "{row:?}");
+        // Narrow: the cancel hint is still kept.
+        let row = status_row(&s, 40);
+        assert!(row.contains("Esc cancels"), "{row:?}");
     }
 
     #[test]
@@ -1775,6 +1929,7 @@ mod tests {
                 "limit 100".into(),
             ],
             state: "running 12s · Esc cancels".into(),
+            scrolled: Some("scrolled up 7 lines · PgDn".into()),
             command: Some("market summary ✓✓ --every 2s".into()),
         };
         for w in 0..=130 {
