@@ -16,12 +16,21 @@ use std::sync::OnceLock;
 /// How many journal lines the crash log keeps.
 const JOURNAL_TAIL_LINES: usize = 20;
 
+/// Bracketed paste on or off, as the escape bytes a terminal reads.
+pub(crate) fn paste_mode(w: &mut impl Write, on: bool) {
+    let _ = if on {
+        crossterm::execute!(w, crossterm::event::EnableBracketedPaste)
+    } else {
+        crossterm::execute!(w, crossterm::event::DisableBracketedPaste)
+    };
+}
+
 /// Takes the terminal: raw mode on, alternate screen on, bracketed paste
 /// on. Every init site calls this one function (startup, resume, a
 /// re-init after a stop), so paste mode is never missed.
 pub(crate) fn enter_terminal() -> ratatui::DefaultTerminal {
     let terminal = ratatui::init();
-    let _ = crossterm::execute!(io::stdout(), crossterm::event::EnableBracketedPaste);
+    paste_mode(&mut io::stdout(), true);
     terminal
 }
 
@@ -29,7 +38,7 @@ pub(crate) fn enter_terminal() -> ratatui::DefaultTerminal {
 /// screen off, cursor shown. Every restore site calls this one function.
 /// Calling it twice is harmless.
 pub(crate) fn restore_terminal() {
-    let _ = crossterm::execute!(io::stdout(), crossterm::event::DisableBracketedPaste);
+    paste_mode(&mut io::stdout(), false);
     ratatui::restore();
 }
 
@@ -113,6 +122,16 @@ pub(crate) fn install_panic_hook() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_paste_mode_writes_the_enable_and_disable_sequences() {
+        let mut on = Vec::new();
+        super::paste_mode(&mut on, true);
+        assert_eq!(on, b"\x1b[?2004h");
+        let mut off = Vec::new();
+        super::paste_mode(&mut off, false);
+        assert_eq!(off, b"\x1b[?2004l");
+    }
+
     use super::*;
 
     #[test]

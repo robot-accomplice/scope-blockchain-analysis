@@ -91,6 +91,8 @@ pub enum Step {
     /// Sends a signal to the scope process: TERM, HUP, INT, QUIT, TSTP, CONT or STOP.
     Signal(String),
     ExpectExit(i32),
+    /// Whether the terminal is in bracketed paste mode (`?2004h` seen, not reset).
+    ExpectPasteMode(bool),
 }
 
 impl Step {
@@ -102,6 +104,7 @@ impl Step {
                 | Step::ExpectFile { .. }
                 | Step::Snapshot(_)
                 | Step::ExpectExit(_)
+                | Step::ExpectPasteMode(_)
         )
     }
 }

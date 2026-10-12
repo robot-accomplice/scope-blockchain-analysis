@@ -5,16 +5,9 @@ steps:
   - key: Enter
   - wait_for: { text: "running" }
   - key: Ctrl-D
-  # The note joins the scrollback above the live output, so scroll up to it.
-  - key: PageUp
-  - key: PageUp
-  - key: PageUp
+  # The hint row under the input shows the note; no scrolling needed.
   - wait_for: { text: "A command is running; Esc or Ctrl-C cancels it first." }
   - key: Esc
-  - key: PageDown
-  - key: PageDown
-  - key: PageDown
-  - key: PageDown
   - wait_for: { text: "Cancelled" }
   - key: Ctrl-D
   - expect_exit: 0

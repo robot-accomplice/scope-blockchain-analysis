@@ -19,6 +19,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Paragraph, Wrap};
 use scope::config::Config;
+use std::cell::Cell;
 use std::time::Instant;
 use unicode_width::UnicodeWidthStr;
 
@@ -27,6 +28,13 @@ pub const SCROLLBACK_LIMIT: usize = 5000;
 
 /// Lines moved by one PageUp / PageDown.
 const PAGE: usize = 10;
+
+/// The most characters one paste adds to the input line.
+pub const PASTE_LIMIT: usize = 10_000;
+
+/// Bidirectional controls: they can disguise what the input line says.
+const BIDI_CONTROLS: [std::ops::RangeInclusive<char>; 2] =
+    ['\u{202A}'..='\u{202E}', '\u{2066}'..='\u{2069}'];
 
 /// Said when Ctrl-D or `exit` is pressed while a command runs.
 pub const BUSY_NOTE: &str = "A command is running; Esc or Ctrl-C cancels it first.";
@@ -143,6 +151,11 @@ pub struct TuiState {
     pub ctx: SessionContext,
     /// The command that runs in the pane now.
     pub running: Option<Running>,
+    /// The first display column of the input line that is shown. It moves
+    /// only when the cursor leaves the window (set while drawing).
+    scroll_x: Cell<usize>,
+    /// Show the busy note in the hint row until the next key press.
+    busy_hint: bool,
     /// The event log.
     journal: Journal,
     /// Completion values from the user's stores.
@@ -165,6 +178,8 @@ impl TuiState {
             scroll: 0,
             ctx,
             running: None,
+            scroll_x: Cell::new(0),
+            busy_hint: false,
             journal,
             vocab,
             overlay: None,
@@ -181,6 +196,7 @@ impl TuiState {
     /// Applies one key event.
     pub fn handle_key(&mut self, key: KeyEvent) -> Action {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        self.busy_hint = false;
         // Raw mode delivers Ctrl-Z as a key, not as SIGTSTP. It works in
         // every mode and keeps the draft and any overlay.
         if ctrl && key.code == KeyCode::Char('z') {
@@ -262,6 +278,7 @@ impl TuiState {
             }
             KeyCode::Char('d') if ctrl => {
                 if self.running.is_some() {
+                    self.busy_hint = true;
                     self.push_busy_note();
                 } else if self.input.is_empty() {
                     return Action::Exit;
@@ -276,8 +293,11 @@ impl TuiState {
             KeyCode::Enter => {
                 // One command at a time; the line stays for after it ends.
                 if self.running.is_some() {
-                    if self.input_is_exit() {
-                        self.push_busy_note();
+                    if !self.input.trim().is_empty() {
+                        self.busy_hint = true;
+                        if self.input_is_exit() {
+                            self.push_busy_note();
+                        }
                     }
                     return Action::None;
                 }
@@ -341,22 +361,71 @@ impl TuiState {
         let unified = text.replace("\r\n", "\n").replace('\r', "\n");
         let body = unified.strip_suffix('\n').unwrap_or(&unified);
         let lines = body.split('\n').count();
-        let clean: String = body
+        let mut clean: String = body
             .replace('\n', " ")
             .chars()
             .map(|c| if c == '\t' { ' ' } else { c })
-            .filter(|c| !c.is_control())
+            .filter(|c| !c.is_control() && !BIDI_CONTROLS.iter().any(|r| r.contains(c)))
             .collect();
         if clean.is_empty() {
             return;
         }
-        self.overlay = None;
-        let at = self.byte_index(self.cursor);
-        self.input.insert_str(at, &clean);
-        self.cursor += clean.chars().count();
+        let truncated = clean.chars().count() > PASTE_LIMIT;
+        if truncated {
+            clean = clean.chars().take(PASTE_LIMIT).collect();
+        }
+        if let Some(Overlay::Palette(p)) = &mut self.overlay {
+            // The palette has the focus: the paste goes into its query.
+            p.query.push_str(&clean);
+            p.selected = 0;
+        } else {
+            self.overlay = None;
+            let at = self.byte_index(self.cursor);
+            self.input.insert_str(at, &clean);
+            self.cursor += clean.chars().count();
+        }
         if lines > 1 {
             self.push_note(&format!("pasted {} lines as one line", lines));
         }
+        if truncated {
+            self.push_note(&format!("paste truncated to {} characters", PASTE_LIMIT));
+        }
+    }
+
+    /// Picks the first shown column of the input line for a window of
+    /// `width` columns. It moves only when the cursor would leave the
+    /// window, and it always sits on a character boundary, so a wide
+    /// character is never cut at the left edge or the cursor.
+    fn input_scroll(&self, width: usize) -> usize {
+        let mut bounds = vec![0usize];
+        let mut col = 0;
+        for c in self.input.chars() {
+            col += unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+            bounds.push(col);
+        }
+        let total = col;
+        let cursor_col = self.cursor_column();
+        let cursor_w = self
+            .input
+            .chars()
+            .nth(self.cursor)
+            .map_or(1, |c| {
+                unicode_width::UnicodeWidthChar::width(c)
+                    .unwrap_or(0)
+                    .max(1)
+            })
+            .min(width);
+        let down = |x: usize| bounds.iter().copied().rfind(|&b| b <= x).unwrap_or(0);
+        let up = |x: usize| bounds.iter().copied().find(|&b| b >= x).unwrap_or(total);
+        let mut scroll = down(self.scroll_x.get().min((total + 1).saturating_sub(width)));
+        if cursor_col < scroll {
+            scroll = cursor_col;
+        }
+        if cursor_col + cursor_w > scroll + width {
+            scroll = up(cursor_col + cursor_w - width);
+        }
+        self.scroll_x.set(scroll);
+        scroll
     }
 
     /// The display column of the cursor: wide characters count as two.
@@ -702,7 +771,7 @@ impl TuiState {
         // Scroll the line so the cursor stays on the last inner column.
         let inner_width = input.width.saturating_sub(2).max(1) as usize;
         let col = self.cursor_column();
-        let scroll_x = col.saturating_sub(inner_width - 1);
+        let scroll_x = self.input_scroll(inner_width);
         f.render_widget(
             Paragraph::new(self.input.as_str())
                 .block(block)
@@ -748,7 +817,15 @@ impl TuiState {
             f.render_widget(Paragraph::new(lines).block(Block::bordered()), area);
         }
 
-        if let Some(h) = super::hint::hint(&self.input) {
+        if self.busy_hint {
+            f.render_widget(
+                Paragraph::new(Line::styled(
+                    format!(" {}", BUSY_NOTE),
+                    Style::new().fg(Color::Yellow),
+                )),
+                hint_row,
+            );
+        } else if let Some(h) = super::hint::hint(&self.input) {
             let mut spans = vec![Span::styled(
                 format!(" {}", h.text),
                 Style::new().fg(Color::DarkGray),
@@ -1505,8 +1582,8 @@ mod tests {
     #[test]
     fn test_paste_cannot_inject_control_characters() {
         let mut s = state();
-        s.paste("a\x1b[2Jb\tc\x07\x7fd");
-        assert_eq!(s.input, "a[2Jb cd");
+        s.paste("a\x1b[2Jb\tc\x07\x7fd\u{9b}e");
+        assert_eq!(s.input, "a[2Jb cde");
     }
 
     #[test]
@@ -1593,7 +1670,8 @@ mod tests {
         // 40 CJK chars are 80 columns; the cursor stays on the last inner column.
         let mut s = state();
         s.paste(&"日".repeat(40));
-        assert_eq!(cursor_pos(&s, 60, 12).x, 58);
+        // 80 columns; the window starts on a boundary at or after 23.
+        assert_eq!(cursor_pos(&s, 60, 12).x, 57);
     }
 
     #[test]
@@ -1657,13 +1735,42 @@ mod tests {
     }
 
     #[test]
-    fn test_other_lines_typed_while_running_get_no_note() {
+    fn test_any_line_while_running_shows_the_hint_and_keeps_the_input() {
         let _lock = super::super::DIAG_LOCK.blocking_lock();
         let mut s = state();
         start_pane_command(&mut s);
         type_str(&mut s, "ctx");
         assert_eq!(s.handle_key(key(KeyCode::Enter)), Action::None);
-        assert!(!s.scrollback_text().contains(BUSY_NOTE));
+        assert_eq!(s.input, "ctx");
+        assert!(screen(&s, 100, 14).contains(BUSY_NOTE), "hint row");
+        assert!(
+            !s.scrollback_text().contains(BUSY_NOTE),
+            "no scrollback note"
+        );
+        s.finish(Ending::Cancelled);
+    }
+
+    #[test]
+    fn test_empty_enter_while_running_shows_no_hint() {
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let mut s = state();
+        start_pane_command(&mut s);
+        s.handle_key(key(KeyCode::Enter));
+        assert!(!screen(&s, 100, 14).contains(BUSY_NOTE));
+        s.finish(Ending::Cancelled);
+    }
+
+    #[test]
+    fn test_busy_hint_clears_on_the_next_key() {
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let mut s = state();
+        start_pane_command(&mut s);
+        s.handle_key(ctrl('d'));
+        let hint_row = screen(&s, 100, 14).lines().nth(12).unwrap().to_string();
+        assert!(hint_row.contains(BUSY_NOTE));
+        s.handle_key(key(KeyCode::Char('x')));
+        let hint_row = screen(&s, 100, 14).lines().nth(12).unwrap().to_string();
+        assert!(!hint_row.contains(BUSY_NOTE));
         s.finish(Ending::Cancelled);
     }
 
@@ -1694,5 +1801,105 @@ mod tests {
         type_str(&mut s, "ab");
         assert_eq!(s.handle_key(ctrl('d')), Action::None);
         assert!(!s.scrollback_text().contains(BUSY_NOTE));
+    }
+
+    #[test]
+    fn test_paste_drops_bidi_controls() {
+        let mut s = state();
+        s.paste("a\u{202E}b\u{2066}c\u{2069}d\u{202A}");
+        assert_eq!(s.input, "abcd");
+    }
+
+    #[test]
+    fn test_paste_is_capped_with_a_note() {
+        let mut s = state();
+        s.paste(&"x".repeat(PASTE_LIMIT + 50));
+        assert_eq!(s.input.chars().count(), PASTE_LIMIT);
+        assert!(
+            s.scrollback_text()
+                .contains("paste truncated to 10000 characters")
+        );
+        let mut t = state();
+        t.paste(&"x".repeat(PASTE_LIMIT));
+        assert!(
+            !t.scrollback_text().contains("truncated"),
+            "exact limit is not truncated"
+        );
+    }
+
+    #[test]
+    fn test_paste_goes_into_the_open_palette_query() {
+        let mut s = state();
+        s.handle_key(ctrl('k'));
+        s.paste("ven\nues");
+        match &s.overlay {
+            Some(Overlay::Palette(p)) => assert_eq!(p.query, "ven ues"),
+            _ => panic!("the palette stays open"),
+        }
+        assert_eq!(s.input, "", "the input line is untouched");
+    }
+
+    fn row_cells(s: &TuiState, w: u16, h: u16, needle: &str) -> (Vec<String>, u16) {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| s.render(f)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let y = (0..h)
+            .find(|&y| (0..w).any(|x| buf[(x, y)].symbol() == needle))
+            .unwrap();
+        (
+            (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect(),
+            y,
+        )
+    }
+
+    #[test]
+    fn test_left_mid_line_keeps_the_text_right_of_the_cursor_visible() {
+        let mut s = state();
+        s.paste(&format!("{}{}", "a".repeat(100), "b".repeat(5)));
+        let _ = cursor_pos(&s, 60, 12);
+        for _ in 0..3 {
+            s.handle_key(key(KeyCode::Left));
+        }
+        let (cells, _) = row_cells(&s, 60, 12, "b");
+        assert_eq!(cursor_pos(&s, 60, 12).x, 55, "the window did not move");
+        assert_eq!(cells[55], "b", "text under and right of the cursor stays");
+        assert_eq!(cells[57], "b", "the last char is still shown");
+    }
+
+    #[test]
+    fn test_window_moves_back_when_the_cursor_leaves_on_the_left() {
+        let mut s = state();
+        s.paste(&"x".repeat(100));
+        let _ = cursor_pos(&s, 60, 12);
+        for _ in 0..80 {
+            s.handle_key(key(KeyCode::Left));
+        }
+        assert_eq!(cursor_pos(&s, 60, 12).x, 1, "cursor at the left edge");
+    }
+
+    #[test]
+    fn test_wide_chars_are_never_cut_at_the_left_edge() {
+        // 40 wide chars are 80 columns. The raw offset would be 23 (odd,
+        // inside a char); the window starts at the next boundary, 24.
+        let mut s = state();
+        s.paste(&"日".repeat(40));
+        let (cells, _) = row_cells(&s, 60, 12, "日");
+        assert_eq!(cells[1], "日", "the first shown cell holds a whole char");
+        assert_eq!(cursor_pos(&s, 60, 12).x, 1 + 80 - 24);
+        assert_eq!(cells[59], "│", "border intact");
+    }
+
+    #[test]
+    fn test_cursor_on_a_wide_char_is_never_half_visible() {
+        let mut s = state();
+        s.paste(&"x".repeat(56));
+        s.paste("日日");
+        s.handle_key(key(KeyCode::Left));
+        // The cursor sits on the second 日 (columns 58..60): it must fit.
+        let p = cursor_pos(&s, 60, 12);
+        assert!(
+            p.x + 2 <= 59,
+            "wide char at the cursor fits inside the border"
+        );
     }
 }
