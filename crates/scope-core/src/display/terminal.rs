@@ -1697,7 +1697,8 @@ mod tests {
     #[test]
     fn test_check_pass_wraps_tty() {
         let _lock = width_lock();
-        let long = "No sells detected below the configured peg target during the monitoring window across all tracked pairs and venues in scope";
+        // Long enough to wrap on any real terminal (up to ~500 columns).
+        let long = &format!("{} ", "No sells detected below the configured peg target during the monitoring window across all tracked pairs and venues in scope").repeat(4);
         let row = check_pass_styled(long, true);
         assert!(row.contains("✓"));
         assert!(row.lines().count() > 1, "should wrap to multiple lines");
@@ -1706,7 +1707,8 @@ mod tests {
     #[test]
     fn test_check_fail_wraps_tty() {
         let _lock = width_lock();
-        let long = "Bid depth is significantly below the minimum threshold required for healthy market conditions on this particular trading pair";
+        // Long enough to wrap on any real terminal (up to ~500 columns).
+        let long = &format!("{} ", "Bid depth is significantly below the minimum threshold required for healthy market conditions on this particular trading pair").repeat(4);
         let row = check_fail_styled(long, true);
         assert!(row.contains("✗"));
         assert!(row.lines().count() > 1, "should wrap to multiple lines");
@@ -1715,8 +1717,9 @@ mod tests {
     #[test]
     fn test_check_na_plain_and_tty_wrap() {
         let _lock = width_lock();
+        // Long enough to wrap on any real terminal (up to ~500 columns).
         // n/a rows (#37) must read as neither pass nor fail.
-        let long = "Spread: n/a (synthetic AMM book; the real spread is the pool fee, which the data source does not report)";
+        let long = &format!("{} ", "Spread: n/a (synthetic AMM book; the real spread is the pool fee, which the data source does not report)").repeat(4);
         for tty in [false, true] {
             let row = check_na_styled(long, tty);
             assert!(row.contains("–"), "tty={}", tty);
@@ -1729,7 +1732,8 @@ mod tests {
     #[test]
     fn test_warning_row_wraps_tty() {
         let _lock = width_lock();
-        let long = "Source code is NOT verified — unable to perform full source-level analysis on this contract. Consider requesting verification from the deployer.";
+        // Long enough to wrap on any real terminal (up to ~500 columns).
+        let long = &format!("{} ", "Source code is NOT verified — unable to perform full source-level analysis on this contract. Consider requesting verification from the deployer.").repeat(4);
         let row = warning_row_styled(long, true);
         assert!(row.contains("⚠"));
         assert!(row.lines().count() > 1, "should wrap to multiple lines");
@@ -1738,7 +1742,8 @@ mod tests {
     #[test]
     fn test_info_row_wraps_tty() {
         let _lock = width_lock();
-        let long = "No audit reports found in any public database. Check block explorer and auditor databases manually for third-party audit information and verification.";
+        // Long enough to wrap on any real terminal (up to ~500 columns).
+        let long = &format!("{} ", "No audit reports found in any public database. Check block explorer and auditor databases manually for third-party audit information and verification.").repeat(4);
         let row = info_row_styled(long, true);
         assert!(row.contains("ℹ"));
         assert!(row.lines().count() > 1, "should wrap to multiple lines");
@@ -1747,7 +1752,8 @@ mod tests {
     #[test]
     fn test_numbered_row_wraps_tty() {
         let _lock = width_lock();
-        let long = "This is a very long description that should eventually wrap to the next line when the terminal width is narrow enough to force it";
+        // Long enough to wrap on any real terminal (up to ~500 columns).
+        let long = &format!("{} ", "This is a very long description that should eventually wrap to the next line when the terminal width is narrow enough to force it").repeat(4);
         let row = numbered_row_styled(1, long, true);
         assert!(row.contains("1."));
         assert!(row.lines().count() > 1, "should wrap to multiple lines");

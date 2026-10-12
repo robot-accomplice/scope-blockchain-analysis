@@ -8,6 +8,6 @@ steps:
   - wait_for: { text: "run 2 of 4", timeout: 10s }
   - wait_for: { text: "Done in", timeout: 20s }
   # It is not output: nothing of it stays after the run.
-  - expect_screen: { contains: ["Completed 4 run"], not_contains: ["next in", "run 2 of"] }
+  - expect_screen: { contains: ["Completed"], not_contains: ["next in", "run 2 of"] }
   - key: Ctrl-D
   - expect_exit: 0

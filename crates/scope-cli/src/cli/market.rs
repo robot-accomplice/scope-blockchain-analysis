@@ -562,7 +562,7 @@ async fn run_summary_once(
 /// `duration_secs`, and a last one at the end when the span is not a whole
 /// number of intervals (the final sleep is cut to the time left).
 fn repeat_total(duration_secs: u64, every_secs: u64) -> u64 {
-    duration_secs.div_ceil(every_secs) + 1
+    duration_secs.div_ceil(every_secs).saturating_add(1)
 }
 
 async fn run_summary(
