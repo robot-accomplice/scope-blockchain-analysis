@@ -39,9 +39,28 @@ pub struct Built {
     pub notices: Vec<String>,
 }
 
-static INSTALLED: OnceLock<(Arc<dyn HttpClient>, Kind)> = OnceLock::new();
-/// True when `transport()` installed native because nothing was installed.
-static FELL_BACK: AtomicBool = AtomicBool::new(false);
+/// The process-wide transport. `fell_back` is set in the same write as the
+/// install, so a concurrent `init` always sees it.
+struct Installed {
+    client: Arc<dyn HttpClient>,
+    kind: Kind,
+    /// True when `transport()` installed native because nothing was installed.
+    fell_back: bool,
+}
+
+static INSTALLED: OnceLock<Installed> = OnceLock::new();
+/// Set once the "not applied" notice has been returned, so it is shown once.
+static NOTICE_SENT: AtomicBool = AtomicBool::new(false);
+
+/// The kind the config selects, derived without building a client.
+/// Task 9 extends this for `SCOPE_HTTP_MODE` (replay and record).
+pub fn configured_kind(config: &Config) -> Kind {
+    if config.ghola.enabled {
+        Kind::Ghola
+    } else {
+        Kind::Native
+    }
+}
 
 /// Builds the transport the config and environment select.
 pub fn build(config: &Config) -> Result<Built, ScopeError> {
@@ -85,24 +104,33 @@ pub fn build_with(
 /// Builds and installs the transport the first time; later calls return
 /// the installed transport with no notices.
 pub fn init(config: &Config) -> Result<Built, ScopeError> {
-    if let Some((client, kind)) = INSTALLED.get() {
+    if let Some(installed) = INSTALLED.get() {
         let mut notices = Vec::new();
-        if FELL_BACK.swap(false, Ordering::SeqCst) {
+        let wanted = configured_kind(config);
+        if installed.fell_back
+            && wanted != installed.kind
+            && !NOTICE_SENT.swap(true, Ordering::SeqCst)
+        {
             let msg = format!(
                 "⚠ HTTP was used before startup; the {} transport from config was not applied",
-                build(config).map_or("configured", |b| b.kind.name())
+                wanted.name()
             );
             tracing::warn!("{msg}");
             notices.push(msg);
         }
         return Ok(Built {
-            client: client.clone(),
-            kind: *kind,
+            client: installed.client.clone(),
+            kind: installed.kind,
             notices,
         });
     }
     let built = build(config)?;
-    match INSTALLED.set((built.client.clone(), built.kind)) {
+    let installed = Installed {
+        client: built.client.clone(),
+        kind: built.kind,
+        fell_back: false,
+    };
+    match INSTALLED.set(installed) {
         Ok(()) => Ok(built),
         // Another thread installed first: use its transport.
         Err(_) => init(config),
@@ -111,21 +139,24 @@ pub fn init(config: &Config) -> Result<Built, ScopeError> {
 
 /// The installed transport. Installs native if nothing is installed.
 pub fn transport() -> Arc<dyn HttpClient> {
-    if let Some((client, _)) = INSTALLED.get() {
-        return client.clone();
+    if let Some(installed) = INSTALLED.get() {
+        return installed.client.clone();
     }
     tracing::debug!("no HTTP transport installed; using native");
     let native: Arc<dyn HttpClient> =
         Arc::new(NativeHttpClient::new().expect("failed to build HTTP client"));
-    if INSTALLED.set((native, Kind::Native)).is_ok() {
-        FELL_BACK.store(true, Ordering::SeqCst);
-    }
-    INSTALLED.get().expect("installed above").0.clone()
+    // If another thread won the race, `get` below returns its transport.
+    let _ = INSTALLED.set(Installed {
+        client: native,
+        kind: Kind::Native,
+        fell_back: true,
+    });
+    INSTALLED.get().expect("installed above").client.clone()
 }
 
 /// The installed transport kind, or `"none"`.
 pub fn describe() -> &'static str {
-    INSTALLED.get().map_or("none", |(_, k)| k.name())
+    INSTALLED.get().map_or("none", |i| i.kind.name())
 }
 
 #[cfg(test)]
@@ -134,6 +165,14 @@ mod tests {
 
     fn no_env(_: &str) -> Option<String> {
         None
+    }
+
+    #[test]
+    fn test_configured_kind_follows_ghola_enabled() {
+        assert_eq!(configured_kind(&Config::default()), Kind::Native);
+        let mut config = Config::default();
+        config.ghola.enabled = true;
+        assert_eq!(configured_kind(&config), Kind::Ghola);
     }
 
     #[test]
