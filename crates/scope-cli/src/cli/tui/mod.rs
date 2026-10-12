@@ -219,6 +219,12 @@ pub(crate) trait Host {
     fn resume(&mut self);
     /// Gives the terminal back for good when the TUI ends.
     fn restore(&mut self);
+    /// Stops the process until the shell continues it (`fg`). Call it
+    /// after `suspend`, so the shell gets a clean terminal. The kernel
+    /// sends SIGCONT when the process continues.
+    fn stop_self(&mut self) -> io::Result<()>;
+    /// Clears the screen, so the next draw repaints all of it.
+    fn clear(&mut self) -> io::Result<()>;
     /// The output a suspend-mode command writes to.
     fn suspended_output(&self) -> Output;
     /// Waits until the user is ready to return to the TUI. The future does
@@ -269,6 +275,25 @@ impl Host for RealHost {
             ratatui::restore();
         }
     }
+    /// SIGSTOP, not SIGTSTP: the TUI handles SIGTSTP itself, and SIGSTOP
+    /// cannot be caught. The call returns when the process continues.
+    #[cfg(unix)]
+    fn stop_self(&mut self) -> io::Result<()> {
+        // SAFETY: kill takes plain integers and has no memory effects.
+        let rc = unsafe { libc::kill(libc::getpid(), libc::SIGSTOP) };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+    #[cfg(not(unix))]
+    fn stop_self(&mut self) -> io::Result<()> {
+        Err(io::Error::other("job control needs a unix host"))
+    }
+    fn clear(&mut self) -> io::Result<()> {
+        self.terminal.clear()
+    }
     fn suspended_output(&self) -> Output {
         Output::stdio()
     }
@@ -298,6 +323,9 @@ async fn event_loop<H: Host>(
     let mut idle_diag = Some(scope::diag::redirect(idle_buf.clone()));
     let mut pending: Option<PaneFuture<'_>> = None;
     let mut tick = tokio::time::interval(LIVE_REDRAW);
+    // True after the TUI stopped itself: the SIGCONT that continues it
+    // needs no second set-up.
+    let mut cont_expected = false;
 
     loop {
         drain_into(&idle_buf, state);
@@ -317,13 +345,20 @@ async fn event_loop<H: Host>(
             }
             _ = tick.tick(), if state.running.is_some() => {}
             Some(sig) = signals.next() => {
-                // TSTP and CONT do not end the TUI.
                 if let Some(code) = sig.exit_code() {
                     // Drop the command future first: that cancels it.
                     drop(pending.take());
                     state.finish(Ending::Cancelled);
                     state.record_signal(sig.name(), "session", "", &[]);
                     return Ok(TuiExit { code });
+                }
+                if sig == Signal::Tstp {
+                    cont_expected = stop_and_return(host, state)?;
+                } else if !std::mem::take(&mut cont_expected) {
+                    // SIGCONT after an outside SIGSTOP: the shell reset the
+                    // terminal, so set it up again from scratch.
+                    host.suspend();
+                    retake(host)?;
                 }
             }
             ev = events.next() => {
@@ -336,6 +371,7 @@ async fn event_loop<H: Host>(
                 match state.handle_key(key) {
                     Action::None => {}
                     Action::Exit => return Ok(LEFT),
+                    Action::Suspend => cont_expected = stop_and_return(host, state)?,
                     Action::Cancel => {
                         // Dropping the future cancels the handler at its
                         // next await point.
@@ -379,6 +415,31 @@ async fn event_loop<H: Host>(
             }
         }
     }
+}
+
+/// Gives the terminal back and stops the process (Ctrl-Z, SIGTSTP). When
+/// the shell continues it, takes the screen again. A running pane command
+/// is kept; it is not polled while the process is stopped. Returns true
+/// when the process stopped, so a SIGCONT follows.
+fn stop_and_return<H: Host>(host: &mut H, state: &mut TuiState) -> Result<bool> {
+    host.suspend();
+    let stopped = match host.stop_self() {
+        Ok(()) => true,
+        Err(e) => {
+            state.push_note(&format!("Could not stop the process: {}", e));
+            false
+        }
+    };
+    retake(host)?;
+    Ok(stopped)
+}
+
+/// Takes the terminal again and clears it. The next draw then repaints
+/// all of the screen, also what the shell wrote over it.
+fn retake<H: Host>(host: &mut H) -> Result<()> {
+    host.resume();
+    host.clear()
+        .map_err(|e| ScopeError::Other(format!("terminal clear failed: {}", e)))
 }
 
 /// Runs one command outside the TUI, then waits for the user to return.
@@ -435,8 +496,8 @@ async fn run_suspended<H: Host>(
 }
 
 /// Waits for a signal that ends a suspend-mode command: TERM, HUP or
-/// QUIT. It drops the others: INT goes to the command (T5), and TSTP and
-/// CONT get their own handling (T2).
+/// QUIT. It drops the others: INT goes to the command (T5). TSTP and CONT
+/// do nothing, because the command owns the terminal.
 async fn ending_signal<S: futures::Stream<Item = Signal> + Unpin>(
     signals: &mut S,
 ) -> Option<Signal> {
@@ -600,6 +661,8 @@ mod tests {
         suspends: usize,
         resumes: usize,
         restores: usize,
+        stops: usize,
+        clears: usize,
     }
 
     impl Host for TestHost {
@@ -620,6 +683,17 @@ mod tests {
         }
         fn restore(&mut self) {
             self.restores += 1;
+        }
+        /// Does not stop the test process. It sends SIGCONT, as the kernel
+        /// does when the shell continues a stopped process.
+        fn stop_self(&mut self) -> io::Result<()> {
+            self.stops += 1;
+            self.signal_tx.unbounded_send(Signal::Cont).unwrap();
+            Ok(())
+        }
+        fn clear(&mut self) -> io::Result<()> {
+            self.clears += 1;
+            self.terminal.clear().map_err(|never| match never {})
         }
         fn suspended_output(&self) -> Output {
             self.suspended.clone()
@@ -711,6 +785,8 @@ mod tests {
             suspends: 0,
             resumes: 0,
             restores: 0,
+            stops: 0,
+            clears: 0,
         };
         (host, captured)
     }
@@ -784,14 +860,82 @@ mod tests {
 
     #[tokio::test]
     async fn test_stop_and_continue_signals_do_not_end_the_tui() {
-        // T2 acts on SIGTSTP and SIGCONT. Until then they must not end the
-        // session: the loop ends only when the keys end, with code 0.
+        // SIGTSTP and SIGCONT must not end the session: the loop ends only
+        // when the keys end, with code 0.
         let _lock = DIAG_LOCK.lock().await;
         for sig in [Signal::Tstp, Signal::Cont] {
             let (res, _, host, _) = drive_signal_after(&[], sig).await;
             assert_eq!(res.unwrap().code, 0, "{sig:?}");
             assert_eq!(host.restores, 1, "{sig:?}");
         }
+    }
+
+    fn ctrl_z() -> io::Result<Event> {
+        Ok(Event::Key(KeyEvent::new(
+            KeyCode::Char('z'),
+            KeyModifiers::CONTROL,
+        )))
+    }
+
+    /// The text on the test screen.
+    fn screen_text(host: &TestHost) -> String {
+        let buf = host.terminal.backend().buffer().clone();
+        buf.content().iter().map(|c| c.symbol()).collect()
+    }
+
+    #[tokio::test]
+    async fn test_ctrl_z_stops_then_redraws_with_the_draft() {
+        // Ctrl-Z must give the shell a clean terminal, stop the process,
+        // and on `fg` take the screen back, clear what the shell wrote,
+        // and redraw with the draft. The SIGCONT that `fg` sends must not
+        // take the screen a second time.
+        let _lock = DIAG_LOCK.lock().await;
+        let mut events: Vec<_> = "draf".chars().map(|c| press(KeyCode::Char(c))).collect();
+        events.push(ctrl_z());
+        let (res, state, host, _) = drive(events).await;
+        assert_eq!(res.unwrap().code, 0, "Ctrl-Z does not end the TUI");
+        assert_eq!(host.stops, 1);
+        assert_eq!((host.suspends, host.resumes, host.clears), (1, 1, 1));
+        assert_eq!(state.input, "draf");
+        assert!(screen_text(&host).contains("draf"));
+    }
+
+    #[tokio::test]
+    async fn test_tstp_signal_stops_like_ctrl_z() {
+        // `kill -TSTP` must stop the TUI the same way; its handler replaced
+        // the default stop, so without this the signal does nothing.
+        let _lock = DIAG_LOCK.lock().await;
+        let (res, _, host, _) = drive_signal_after(&[], Signal::Tstp).await;
+        assert_eq!(res.unwrap().code, 0);
+        assert_eq!(host.stops, 1);
+        assert_eq!((host.suspends, host.resumes, host.clears), (1, 1, 1));
+    }
+
+    #[tokio::test]
+    async fn test_cont_without_our_stop_retakes_and_clears_the_screen() {
+        // After an outside SIGSTOP, the shell reset the terminal and wrote
+        // on it. SIGCONT must set raw mode again and repaint everything.
+        let _lock = DIAG_LOCK.lock().await;
+        let (res, _, host, _) = drive_signal_after(&[], Signal::Cont).await;
+        assert_eq!(res.unwrap().code, 0);
+        assert_eq!(host.stops, 0, "SIGCONT does not stop the process");
+        assert_eq!((host.suspends, host.resumes, host.clears), (1, 1, 1));
+    }
+
+    #[tokio::test]
+    async fn test_ctrl_z_keeps_a_running_pane_command() {
+        // Review Focus 2: a command running in the pane survives Ctrl-Z,
+        // and after `fg` the screen shows its running footer again.
+        let _lock = DIAG_LOCK.lock().await;
+        let mut events = script(&["market summary USDC --venue eth --every 30s --duration 1h"]);
+        events.push(ctrl_z());
+        let (res, state, host, _) = drive(events).await;
+        assert_eq!(res.unwrap().code, 0);
+        assert_eq!(host.stops, 1);
+        assert!(state.running.is_some(), "the command still runs");
+        assert!(!state.scrollback_text().contains("Cancelled"));
+        let screen = screen_text(&host);
+        assert!(screen.contains("Esc cancels"), "{screen}");
     }
 
     /// Awaits `fut`, failing the test after 10 s: a swallowed signal must
@@ -861,7 +1005,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_suspended_command_ignores_int_tstp_and_cont() {
-        // INT belongs to the command (T5); TSTP and CONT to T2. None of
+        // INT belongs to the command (T5). The command owns the terminal,
+        // so TSTP and CONT do not stop the TUI or take the screen. None of
         // them may end the session from suspend mode.
         let _lock = DIAG_LOCK.lock().await;
         let (mut host, captured) = test_host(script(&["setup --key nosuchkey"]), Vec::new());
@@ -869,6 +1014,7 @@ mod tests {
         let (res, _, host, _) = drive_host(Journal::default(), host, captured).await;
         assert_eq!(res.unwrap().code, 0);
         assert_eq!((host.suspends, host.resumes), (1, 1));
+        assert_eq!((host.stops, host.clears), (0, 0));
     }
 
     #[tokio::test]

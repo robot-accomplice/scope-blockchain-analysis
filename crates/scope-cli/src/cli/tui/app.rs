@@ -77,6 +77,8 @@ pub enum Action {
     Cancel,
     /// Leave the TUI.
     Exit,
+    /// Stop the process (Ctrl-Z); it comes back on `fg`.
+    Suspend,
 }
 
 /// A command that runs in the output pane now.
@@ -163,6 +165,11 @@ impl TuiState {
     /// Applies one key event.
     pub fn handle_key(&mut self, key: KeyEvent) -> Action {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        // Raw mode delivers Ctrl-Z as a key, not as SIGTSTP. It works in
+        // every mode and keeps the draft and any overlay.
+        if ctrl && key.code == KeyCode::Char('z') {
+            return Action::Suspend;
+        }
         // Ctrl-C closes the palette and keeps its normal meaning (cancel a
         // running command, clear the line), so a command can always be
         // stopped with one key.
@@ -1078,6 +1085,19 @@ mod tests {
         assert_eq!(s.input, "two");
         s.handle_key(key(KeyCode::Down));
         assert_eq!(s.input, "draft");
+    }
+
+    #[test]
+    fn test_ctrl_z_suspends_and_keeps_the_draft_and_the_palette() {
+        // Raw mode turns Ctrl-Z into a key, so the TUI must act on it, in
+        // every mode. The draft and the open palette stay for after `fg`.
+        let mut s = state();
+        type_str(&mut s, "draf");
+        assert_eq!(s.handle_key(ctrl('z')), Action::Suspend);
+        assert_eq!(s.input, "draf");
+        s.handle_key(ctrl('k'));
+        assert_eq!(s.handle_key(ctrl('z')), Action::Suspend);
+        assert!(matches!(s.overlay, Some(Overlay::Palette(_))));
     }
 
     #[test]
