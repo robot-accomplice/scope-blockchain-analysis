@@ -123,7 +123,7 @@ pub async fn handle(
                         .fetch_ticker(&pair)
                         .await
                         .ok()
-                        .and_then(|t| t.quote_volume_24h.or(t.volume_24h))
+                        .and_then(|t| t.quote_volume(book.mid_price()))
                 } else {
                     None
                 };

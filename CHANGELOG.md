@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed (breaking)
 - **The REPL is replaced by a full-screen TUI.** `scope tui`, `scope interactive` and `scope shell` open it. Every CLI command runs inside it with the same flags and output; the REPL ran 7 of 17 commands. The REPL session commands (`chain`, `format`, `limit`, `+tokens`, `+txs`, `trace`, `decode`, `tokens`, `ctx`, `clear`) stay. Your history and saved context carry over. The `rustyline` dependency is removed. (#50)
+- **Health checks can be `warn`.** JSON checks can have `"status": "warn"`: the value is outside its target but is not a failure, and it does not count against `healthy`. Consumers must handle `warn` (the web UI does).
+- **New default rule: depth/volume.** Bid + ask depth within ±2% of mid should be 5–10% of 24h volume. Below 5% fails, so some books that were healthy are now unhealthy. Above 10% warns. Without 24h volume the rule is `n/a`. Overrides: `--depth-window-pct`, `--min-depth-volume-pct`, `--max-depth-volume-pct`, the same `market.health` keys, and web request fields.
+- **Every health check shows its value and limit**, pass or fail (for example `Bid depth: 3294 USDT (min 3000)`). Before, a passing level count or depth rule was not shown.
 - **Health checks can be `n/a`.** JSON checks are now `{"status": "pass" | "fail" | "n/a", "message": …}`. An `n/a` check does not apply to the book and does not count against `healthy`. Consumers that match only `pass` or `fail` must handle `n/a`. (#52)
 - **DEX venues (`eth`, `solana`) use a synthetic book from the AMM curve.** Results for DEX venues change: level count and spread are `n/a`; top-3 and top-10 depth now mean depth within ±0.3% and ±1%. Without pool reserves, scope keeps the old single-level estimate and labels it. (#52)
 - **`monitor --export FILE` writes to that file at launch.** Config `monitor.export.path` is the directory for the `E` key. Before, `--export` did nothing. (#51)
@@ -29,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`monitor --pair` accepts any common pair form** (`USDN_USDT`, `USDN/USDT`, `USDN-USDT`, `USDNUSDT`) and converts it to the venue's own format. (#56)
 
 ### Fixed
+- 24h volume used the ticker's base volume as if it were USDT when a venue reported no quote volume. It is now converted with the mid price.
 - The monitor used a hard-coded DEX client for refreshes, which ignored the configured HTTP transport and Ghola. (#51)
 - CSV export errors in the monitor were dropped. A failed write now stops the export and logs the reason. (#51)
 - `scope web` through the command router hit `unreachable!`. It now returns an error. (#48)
