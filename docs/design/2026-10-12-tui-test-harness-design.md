@@ -200,6 +200,7 @@ Each feature has at least one scenario:
 - History: a second session in the same `HOME` recalls the first session's lines with `Up`.
 - Resize from 120×36 to 80×24 and to 200×60, with no panic text and a correct snapshot.
 - The monitor: start, show data, quit back to the TUI.
+- The repeating view (#58), when it ships: a `--every` run updates one screen in place; check the snapshot panel and each key-value chart after N runs, at 120×36 and at 80×24.
 - Errors: an unknown venue, a replay miss (offline only), a network error chain (offline, from a recorded error).
 
 ## 7. Fixtures and the live tier
