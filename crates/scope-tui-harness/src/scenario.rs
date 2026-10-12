@@ -171,6 +171,26 @@ pub fn key_bytes(name: &str) -> Result<Vec<u8>> {
 /// Parses and validates a scenario.
 pub fn parse(yaml: &str) -> Result<Scenario> {
     let s: Scenario = serde_yaml::from_str(yaml)?;
+    if s.tiers.is_empty() {
+        bail!(
+            "scenario {:?} has an empty tiers list; it never runs",
+            s.name
+        );
+    }
+    for step in &s.steps {
+        if let Step::ExpectScreen {
+            contains,
+            not_contains,
+        } = step
+            && contains.is_empty()
+            && not_contains.is_empty()
+        {
+            bail!(
+                "scenario {:?} has an expect_screen with no contains or not_contains; it cannot fail",
+                s.name
+            );
+        }
+    }
     if !s.steps.iter().any(Step::is_expectation) {
         bail!(
             "scenario {:?} has no expect_* or snapshot step; it cannot fail",
@@ -224,6 +244,31 @@ steps:
             .unwrap_err()
             .to_string();
         assert!(err.contains("no expect_"), "{err}");
+    }
+
+    #[test]
+    fn test_empty_expect_screen_is_rejected() {
+        // An expect_screen with no lists checks nothing, so it must not
+        // count as the expectation that lets a scenario fail.
+        let err = parse("name: x\nsteps:\n  - expect_screen: {}\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("expect_screen"), "{err}");
+    }
+
+    #[test]
+    fn test_empty_tiers_is_rejected() {
+        // No tier means the scenario is skipped in every run: a silent pass.
+        let err = parse("name: x\ntiers: []\nsteps:\n  - expect_exit: 0\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("tiers"), "{err}");
+    }
+
+    #[test]
+    fn test_expect_file_without_contains_is_an_existence_check() {
+        let s = parse("name: x\nsteps:\n  - expect_file: { path: out.csv }\n").unwrap();
+        assert!(matches!(&s.steps[0], Step::ExpectFile { contains, .. } if contains.is_empty()));
     }
 
     #[test]

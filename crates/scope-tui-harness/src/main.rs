@@ -142,7 +142,7 @@ fn main() -> Result<()> {
                                         );
                                     }
                                     if keep {
-                                        let _ = home.keep();
+                                        eprintln!("{id}: kept HOME {}", home.keep().display());
                                     }
                                     Line {
                                         name: id,
@@ -184,5 +184,12 @@ fn main() -> Result<()> {
     });
     let mut lines = lines.into_inner().unwrap_or_else(PoisonError::into_inner);
     lines.sort_by(|a, b| a.name.cmp(&b.name));
-    std::process::exit(if report::print(&lines) { 0 } else { 1 });
+    let passed = report::print(&lines);
+    // The offline tier is the gate: a run where every scenario skipped
+    // checked nothing, so it must not pass.
+    if tier == Tier::Offline && lines.iter().all(|l| l.result == Result3::Skip) {
+        eprintln!("no offline scenario ran: every selected scenario skips the offline tier");
+        std::process::exit(1);
+    }
+    std::process::exit(if passed { 0 } else { 1 });
 }
