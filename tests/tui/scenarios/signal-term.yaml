@@ -1,0 +1,9 @@
+name: SIGTERM restores the terminal and records the signal
+tiers: [offline]
+steps:
+  - type: "ctx"
+  - key: Enter
+  - wait_for: { text: "Current Context" }
+  - signal: TERM
+  - expect_exit: 143
+  - expect_journal: { argv_prefix: [], outcome: "signal:TERM" }

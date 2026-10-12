@@ -6,19 +6,14 @@
 use crate::cli::output::Output;
 use crate::errln;
 use owo_colors::OwoColorize;
+use scope::display::terminal::color_enabled_stderr;
 use scope::error::ScopeError;
-use std::io::IsTerminal;
-
-/// Returns `true` when stderr is an interactive terminal.
-fn is_tty_stderr() -> bool {
-    std::io::stderr().is_terminal()
-}
 
 /// Displays an error with a remediation hint when available.
 ///
 /// Uses color when stderr is a TTY, plain text otherwise.
 pub fn display_error(e: &ScopeError, out: &Output) -> std::io::Result<()> {
-    display_error_styled(e, is_tty_stderr(), out)
+    display_error_styled(e, color_enabled_stderr(), out)
 }
 
 /// Internal styled implementation, testable with an explicit `tty` flag.
@@ -354,5 +349,16 @@ mod tests {
     fn test_error_suggestion_other_returns_none() {
         let err = ScopeError::Other("random".into());
         assert!(error_suggestion(&err).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_request_error_cause_chain_is_also_shown_on_a_color_terminal() {
+        // Color must not hide the real cause behind "error sending request".
+        let e = plaintext_reply_error().await;
+        let (o, cap) = crate::cli::output::Output::capture();
+        display_error_styled(&e, true, &o).unwrap();
+        let text = cap.err();
+        assert!(text.contains("caused by:"), "{}", text);
+        assert!(text.contains('\x1b'), "tty output is styled: {}", text);
     }
 }

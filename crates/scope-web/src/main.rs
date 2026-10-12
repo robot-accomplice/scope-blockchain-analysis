@@ -62,7 +62,7 @@ use scope_cli::cli::errors::display_error;
 use scope_cli::cli::output::Output;
 use scope_cli::cli::{Cli, Commands};
 use scope_cli::errln;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use tracing_subscriber::EnvFilter;
 
 /// ASCII art banner featuring a Portia jumping spider.
@@ -85,6 +85,24 @@ async fn main() -> Result<()> {
 
     // Initialize logging based on verbosity
     init_logging(cli.verbose);
+
+    if cli.no_color {
+        scope::display::terminal::set_color_override(Some(false));
+    }
+
+    // The TUI needs a terminal. Check before the config load and the setup
+    // prompt, which read stdin.
+    if matches!(cli.command, Commands::Interactive(_)) {
+        let term = std::env::var("TERM").ok();
+        if let Err(message) = scope_cli::cli::tui::tui_terminal_ok(
+            io::stdin().is_terminal(),
+            io::stdout().is_terminal(),
+            term.as_deref(),
+        ) {
+            eprintln!("{message}");
+            std::process::exit(2);
+        }
+    }
 
     // Show banner in verbose mode
     if cli.verbose > 0 {
@@ -195,7 +213,8 @@ fn prompt_for_setup() -> bool {
 /// Runs one command through the shared dispatcher with stdout/stderr output.
 ///
 /// Prints the version line for non-interactive commands, and on failure
-/// prints the error with remediation hints and exits with status 1.
+/// prints the error with remediation hints and exits with status 1. Exits
+/// with the TUI's code when a signal ended it.
 async fn dispatch(command: Commands, config: &Config) -> Result<()> {
     let out = Output::stdio();
     // Print version on stderr for non-interactive commands
@@ -203,15 +222,19 @@ async fn dispatch(command: Commands, config: &Config) -> Result<()> {
         errln!(out, "Scope v{}", scope::VERSION)?;
     }
 
-    if let Err(e) = scope_cli::cli::dispatch::dispatch(command, config, &out).await {
-        tracing::debug!("Command failed: {}", e);
-        // If stderr itself fails there is no channel left to report on;
-        // the non-zero exit status still tells the caller that it failed.
-        let _ = display_error(&e, &out);
-        std::process::exit(1);
+    match scope_cli::cli::dispatch::dispatch(command, config, &out).await {
+        Ok(0) => Ok(()),
+        // The TUI ended on a signal (128+N); it already restored the
+        // terminal and saved.
+        Ok(code) => std::process::exit(code),
+        Err(e) => {
+            tracing::debug!("Command failed: {}", e);
+            // If stderr itself fails there is no channel left to report on;
+            // the non-zero exit status still tells the caller that it failed.
+            let _ = display_error(&e, &out);
+            std::process::exit(1);
+        }
     }
-
-    Ok(())
 }
 
 /// Initializes the tracing subscriber for logging.

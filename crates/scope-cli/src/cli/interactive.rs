@@ -165,7 +165,7 @@ impl SessionContext {
     }
 }
 
-/// Opens the unified TUI.
+/// Opens the unified TUI. Returns how it ended.
 ///
 /// # Errors
 ///
@@ -174,7 +174,7 @@ pub async fn run(
     args: InteractiveArgs,
     config: &Config,
     clients: &dyn ChainClientFactory,
-) -> Result<()> {
+) -> Result<crate::cli::tui::TuiExit> {
     crate::cli::tui::run(args.no_banner, config, clients).await
 }
 

@@ -1,0 +1,8 @@
+name: TERM=dumb refuses the TUI with exit code 2
+tiers: [offline]
+env: { TERM: dumb }
+wait_for_paint: false
+# The process exits before any screen step can run. The message text is
+# covered by the tui_terminal_ok unit test and the manual checks.
+steps:
+  - expect_exit: 2

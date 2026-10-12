@@ -93,7 +93,10 @@ impl MonitorApp {
 
         loop {
             // Render UI
-            self.terminal.draw(|f| ui(f, &mut self.state))?;
+            self.terminal.draw(|f| {
+                ui(f, &mut self.state);
+                crate::cli::plain::finish_frame(f);
+            })?;
 
             // Calculate how long until next refresh
             let refresh_delay = if self.state.paused {

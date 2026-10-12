@@ -5201,6 +5201,71 @@ refresh_seconds: 5
         assert!(!app.should_exit);
     }
 
+    #[test]
+    fn test_standalone_key_handler_matches_the_app_handler_for_every_key() {
+        // `handle_key_event_on_state` is the state-only twin of
+        // `MonitorApp::handle_key_event`. Both must leave the same state
+        // after every binding, or tests on the twin say nothing about the
+        // app.
+        let shift_p = crossterm::event::KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT);
+        let keys = [
+            make_key_event(KeyCode::Char('r')),
+            shift_p,
+            make_key_event(KeyCode::Char('p')),
+            make_key_event(KeyCode::Char(' ')),
+            make_key_event(KeyCode::Char('=')),
+            make_key_event(KeyCode::Char(']')),
+            make_key_event(KeyCode::Char('_')),
+            make_key_event(KeyCode::Char('[')),
+            make_key_event(KeyCode::Char('3')),
+            make_key_event(KeyCode::Tab),
+            make_key_event(KeyCode::Char('c')),
+            make_key_event(KeyCode::Char('s')),
+            make_key_event(KeyCode::Char('/')),
+            make_key_event(KeyCode::Char('j')),
+            make_key_event(KeyCode::Down),
+            make_key_event(KeyCode::Char('k')),
+            make_key_event(KeyCode::Up),
+            make_key_event(KeyCode::Char('l')),
+            make_key_event(KeyCode::Char('l')),
+            make_key_event(KeyCode::Char('h')),
+            make_key_event(KeyCode::Char('a')),
+            make_key_event(KeyCode::Char('w')),
+            make_key_event(KeyCode::Char('2')),
+            make_key_event(KeyCode::Char('w')),
+            make_key_event(KeyCode::Char('x')),
+            make_key_event(KeyCode::F(12)),
+        ];
+        let data = create_test_token_data();
+        let mut app = create_test_app(Box::new(MockDexDataSource::new(data.clone())), None);
+        let mut twin = MonitorState::new(&data, "ethereum");
+        for key in keys {
+            app.handle_key_event(key);
+            assert!(!handle_key_event_on_state(key, &mut twin), "{key:?}");
+            let (a, b) = (&app.state, &twin);
+            assert_eq!(a.layout, b.layout, "{key:?}");
+            assert_eq!(a.auto_layout, b.auto_layout, "{key:?}");
+            assert_eq!(a.paused, b.paused, "{key:?}");
+            assert_eq!(a.auto_pause_on_input, b.auto_pause_on_input, "{key:?}");
+            assert_eq!(a.refresh_rate, b.refresh_rate, "{key:?}");
+            assert_eq!(a.time_period, b.time_period, "{key:?}");
+            assert_eq!(a.chart_mode, b.chart_mode, "{key:?}");
+            assert_eq!(a.scale_mode, b.scale_mode, "{key:?}");
+            assert_eq!(a.color_scheme, b.color_scheme, "{key:?}");
+            assert_eq!(a.widget_toggle_mode, b.widget_toggle_mode, "{key:?}");
+            assert_eq!(a.widgets.price_chart, b.widgets.price_chart, "{key:?}");
+            assert_eq!(
+                a.log_list_state.selected(),
+                b.log_list_state.selected(),
+                "{key:?}"
+            );
+        }
+        // Both stop on q.
+        let q = make_key_event(KeyCode::Char('q'));
+        app.handle_key_event(q);
+        assert!(app.should_exit && handle_key_event_on_state(q, &mut twin));
+    }
+
     // ========================================================================
     // Integration tests: MonitorApp::fetch_data
     // ========================================================================

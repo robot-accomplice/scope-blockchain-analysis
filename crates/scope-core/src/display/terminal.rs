@@ -7,14 +7,58 @@
 
 use owo_colors::OwoColorize;
 use std::io::IsTerminal;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 // ============================================================================
 // Terminal detection
 // ============================================================================
 
-/// Returns `true` when stdout is an interactive terminal (not piped).
-pub fn is_tty() -> bool {
-    std::io::stdout().is_terminal()
+/// Override set by `--no-color`: 0 = none, 1 = off, 2 = on.
+static COLOR_OVERRIDE: AtomicU8 = AtomicU8::new(0);
+
+/// Forces color off (`Some(false)`) or on (`Some(true)`) for the whole
+/// process, or removes the override (`None`). `--no-color` uses it.
+pub fn set_color_override(value: Option<bool>) {
+    let code = match value {
+        None => 0,
+        Some(false) => 1,
+        Some(true) => 2,
+    };
+    COLOR_OVERRIDE.store(code, Ordering::Relaxed);
+}
+
+/// Decides whether to emit color for one stream. Pure: the caller passes
+/// the environment and whether the stream is a terminal.
+///
+/// Color is off when `NO_COLOR` is set and not empty (see no-color.org),
+/// when `TERM` is `dumb`, or when the stream is not a terminal.
+pub fn color_enabled_with(env: &dyn Fn(&str) -> Option<String>, stream_is_tty: bool) -> bool {
+    if env("NO_COLOR").is_some_and(|v| !v.is_empty()) {
+        return false;
+    }
+    if env("TERM").as_deref() == Some("dumb") {
+        return false;
+    }
+    stream_is_tty
+}
+
+/// Applies the process override, then the environment rules.
+fn color_enabled_for(stream_is_tty: bool) -> bool {
+    match COLOR_OVERRIDE.load(Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => color_enabled_with(&|k| std::env::var(k).ok(), stream_is_tty),
+    }
+}
+
+/// Returns `true` when output to stdout may use color.
+pub fn color_enabled() -> bool {
+    color_enabled_for(std::io::stdout().is_terminal())
+}
+
+/// Returns `true` when output to stderr may use color.
+pub fn color_enabled_stderr() -> bool {
+    color_enabled_for(std::io::stderr().is_terminal())
 }
 
 /// Returns the current terminal width in columns.
@@ -97,7 +141,7 @@ fn content_width_for(prefix_width: usize) -> usize {
 /// ┌─ Token Health ─────────────────────────────
 /// ```
 pub fn section_header(title: &str) -> String {
-    section_header_styled(title, is_tty())
+    section_header_styled(title, color_enabled())
 }
 
 fn section_header_styled(title: &str, tty: bool) -> String {
@@ -122,7 +166,7 @@ fn section_header_styled(title: &str, tty: bool) -> String {
 /// ├── DEX Analytics
 /// ```
 pub fn subsection_header(title: &str) -> String {
-    subsection_header_styled(title, is_tty())
+    subsection_header_styled(title, color_enabled())
 }
 
 fn subsection_header_styled(title: &str, tty: bool) -> String {
@@ -139,7 +183,7 @@ fn subsection_header_styled(title: &str, tty: bool) -> String {
 /// │  Price            $0.9999
 /// ```
 pub fn kv_row(key: &str, value: &str) -> String {
-    kv_row_styled(key, value, is_tty())
+    kv_row_styled(key, value, color_enabled())
 }
 
 fn kv_row_styled(key: &str, value: &str, tty: bool) -> String {
@@ -168,7 +212,7 @@ fn kv_row_styled(key: &str, value: &str, tty: bool) -> String {
 
 /// A key-value row where the value is colored based on positive/negative.
 pub fn kv_row_delta(key: &str, value: f64, formatted: &str) -> String {
-    kv_row_delta_styled(key, value, formatted, is_tty())
+    kv_row_delta_styled(key, value, formatted, color_enabled())
 }
 
 fn kv_row_delta_styled(key: &str, value: f64, formatted: &str, tty: bool) -> String {
@@ -192,7 +236,7 @@ fn kv_row_delta_styled(key: &str, value: f64, formatted: &str, tty: bool) -> Str
 /// │  ✓ No sells below peg
 /// ```
 pub fn check_pass(msg: &str) -> String {
-    check_pass_styled(msg, is_tty())
+    check_pass_styled(msg, color_enabled())
 }
 
 fn check_pass_styled(msg: &str, tty: bool) -> String {
@@ -222,7 +266,7 @@ fn check_pass_styled(msg: &str, tty: bool) -> String {
 /// │  ✗ Bid depth: 0 USDT < 3000 USDT minimum
 /// ```
 pub fn check_fail(msg: &str) -> String {
-    check_fail_styled(msg, is_tty())
+    check_fail_styled(msg, color_enabled())
 }
 
 fn check_fail_styled(msg: &str, tty: bool) -> String {
@@ -252,7 +296,7 @@ fn check_fail_styled(msg: &str, tty: bool) -> String {
 /// │  – Spread: n/a (synthetic AMM book: the real spread is the pool fee)
 /// ```
 pub fn check_na(msg: &str) -> String {
-    check_na_styled(msg, is_tty())
+    check_na_styled(msg, color_enabled())
 }
 
 fn check_na_styled(msg: &str, tty: bool) -> String {
@@ -282,7 +326,7 @@ fn check_na_styled(msg: &str, tty: bool) -> String {
 /// │  ! Depth/volume: 27.8% (13344 / 47929 USDT within ±2%; target 5–10%)
 /// ```
 pub fn check_warn(msg: &str) -> String {
-    check_warn_styled(msg, is_tty())
+    check_warn_styled(msg, color_enabled())
 }
 
 fn check_warn_styled(msg: &str, tty: bool) -> String {
@@ -313,7 +357,7 @@ fn check_warn_styled(msg: &str, tty: bool) -> String {
 
 /// Overall status line (healthy / unhealthy).
 pub fn status_line(healthy: bool) -> String {
-    status_line_styled(healthy, is_tty())
+    status_line_styled(healthy, color_enabled())
 }
 
 fn status_line_styled(healthy: bool, tty: bool) -> String {
@@ -336,7 +380,7 @@ fn status_line_styled(healthy: bool, tty: bool) -> String {
 /// └──────────────────────────────────────────────
 /// ```
 pub fn section_footer() -> String {
-    section_footer_styled(is_tty())
+    section_footer_styled(color_enabled())
 }
 
 fn section_footer_styled(tty: bool) -> String {
@@ -354,7 +398,7 @@ fn section_footer_styled(tty: bool) -> String {
 /// ├──────────────────────────────────────────────
 /// ```
 pub fn separator() -> String {
-    separator_styled(is_tty())
+    separator_styled(color_enabled())
 }
 
 fn separator_styled(tty: bool) -> String {
@@ -369,7 +413,7 @@ fn separator_styled(tty: bool) -> String {
 /// Format a price with color for peg deviation.
 /// Green if within 0.1% of target, yellow if within 0.5%, red otherwise.
 pub fn format_price_peg(price: f64, target: f64) -> String {
-    format_price_peg_styled(price, target, is_tty())
+    format_price_peg_styled(price, target, color_enabled())
 }
 
 fn format_price_peg_styled(price: f64, target: f64, tty: bool) -> String {
@@ -389,7 +433,7 @@ fn format_price_peg_styled(price: f64, target: f64, tty: bool) -> String {
 
 /// Empty line with continuation bar.
 pub fn blank_row() -> String {
-    blank_row_styled(is_tty())
+    blank_row_styled(color_enabled())
 }
 
 fn blank_row_styled(tty: bool) -> String {
@@ -402,7 +446,7 @@ fn blank_row_styled(tty: bool) -> String {
 
 /// An order book level row with price coloring relative to peg.
 pub fn orderbook_level(price: f64, quantity: f64, base: &str, value: f64, peg: f64) -> String {
-    orderbook_level_styled(price, quantity, base, value, peg, is_tty())
+    orderbook_level_styled(price, quantity, base, value, peg, color_enabled())
 }
 
 fn orderbook_level_styled(
@@ -441,7 +485,7 @@ fn orderbook_level_styled(
 /// │  Security Score   [████████████────────] 60/100
 /// ```
 pub fn score_bar(label: &str, score: u32, max: u32) -> String {
-    score_bar_styled(label, score, max, is_tty())
+    score_bar_styled(label, score, max, color_enabled())
 }
 
 fn score_bar_styled(label: &str, score: u32, max: u32, tty: bool) -> String {
@@ -475,7 +519,7 @@ fn score_bar_styled(label: &str, score: u32, max: u32, tty: bool) -> String {
 /// Returns a colored severity string: Critical (red bold), High (red),
 /// Medium (yellow), Low (cyan), Informational (dimmed).
 pub fn severity_label(severity: &str) -> String {
-    severity_label_styled(severity, is_tty())
+    severity_label_styled(severity, color_enabled())
 }
 
 fn severity_label_styled(severity: &str, tty: bool) -> String {
@@ -497,7 +541,7 @@ fn severity_label_styled(severity: &str, tty: bool) -> String {
 /// │  ⚠ WARNING: Source code is NOT verified
 /// ```
 pub fn warning_row(msg: &str) -> String {
-    warning_row_styled(msg, is_tty())
+    warning_row_styled(msg, color_enabled())
 }
 
 fn warning_row_styled(msg: &str, tty: bool) -> String {
@@ -532,7 +576,7 @@ fn warning_row_styled(msg: &str, tty: bool) -> String {
 /// │  ℹ No heuristic findings triggered.
 /// ```
 pub fn info_row(msg: &str) -> String {
-    info_row_styled(msg, is_tty())
+    info_row_styled(msg, color_enabled())
 }
 
 fn info_row_styled(msg: &str, tty: bool) -> String {
@@ -562,7 +606,7 @@ fn info_row_styled(msg: &str, tty: bool) -> String {
 /// │  Explorer          https://etherscan.io/address/0x...
 /// ```
 pub fn link_row(label: &str, url: &str) -> String {
-    link_row_styled(label, url, is_tty())
+    link_row_styled(label, url, color_enabled())
 }
 
 fn link_row_styled(label: &str, url: &str, tty: bool) -> String {
@@ -579,7 +623,7 @@ fn link_row_styled(label: &str, url: &str, tty: bool) -> String {
 /// │      Contract source code is not verified.
 /// ```
 pub fn detail_row(msg: &str) -> String {
-    detail_row_styled(msg, is_tty())
+    detail_row_styled(msg, color_enabled())
 }
 
 fn detail_row_styled(msg: &str, tty: bool) -> String {
@@ -609,7 +653,7 @@ fn detail_row_styled(msg: &str, tty: bool) -> String {
 /// │    • mint (Critical): Can mint tokens
 /// ```
 pub fn bullet_row(msg: &str) -> String {
-    bullet_row_styled(msg, is_tty())
+    bullet_row_styled(msg, color_enabled())
 }
 
 fn bullet_row_styled(msg: &str, tty: bool) -> String {
@@ -654,7 +698,7 @@ pub struct Col<'a> {
 /// │  ─────────────────────────────────────────────────────
 /// ```
 pub fn table_header(cols: &[Col]) -> String {
-    table_header_styled(cols, is_tty())
+    table_header_styled(cols, color_enabled())
 }
 
 fn table_header_styled(cols: &[Col], tty: bool) -> String {
@@ -691,7 +735,7 @@ fn table_header_styled(cols: &[Col], tty: bool) -> String {
 /// │       1     12.50%         1,000,000  0xdAC1...1ec7
 /// ```
 pub fn table_row(cols: &[Col], values: &[&str]) -> String {
-    table_row_styled(cols, values, is_tty())
+    table_row_styled(cols, values, color_enabled())
 }
 
 fn table_row_styled(cols: &[Col], values: &[&str], tty: bool) -> String {
@@ -719,7 +763,7 @@ fn table_row_styled(cols: &[Col], values: &[&str], tty: bool) -> String {
 /// │  1. Uniswap ETH/USDC - $1.2M ($500K liq)
 /// ```
 pub fn numbered_row(index: usize, msg: &str) -> String {
-    numbered_row_styled(index, msg, is_tty())
+    numbered_row_styled(index, msg, color_enabled())
 }
 
 fn numbered_row_styled(index: usize, msg: &str, tty: bool) -> String {
@@ -753,6 +797,30 @@ fn numbered_row_styled(index: usize, msg: &str, tty: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_color_enabled_rules() {
+        let env = |m: &'static [(&'static str, &'static str)]| {
+            move |k: &str| m.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string())
+        };
+        assert!(color_enabled_with(&env(&[]), true));
+        assert!(!color_enabled_with(&env(&[("NO_COLOR", "1")]), true));
+        // no-color.org: only a non-empty NO_COLOR disables color.
+        assert!(color_enabled_with(&env(&[("NO_COLOR", "")]), true));
+        assert!(!color_enabled_with(&env(&[("TERM", "dumb")]), true));
+        assert!(!color_enabled_with(&env(&[]), false));
+    }
+
+    #[test]
+    fn test_color_override_beats_a_tty_and_none_restores() {
+        // The override is process-global. Never set Some(true): parallel
+        // tests run the plain wrappers, which expect uncolored output.
+        set_color_override(Some(false));
+        assert!(!color_enabled_for(true));
+        set_color_override(None);
+        let plain = color_enabled_with(&|k| std::env::var(k).ok(), true);
+        assert_eq!(color_enabled_for(true), plain);
+    }
 
     #[test]
     fn test_section_header_contains_title() {
@@ -1590,5 +1658,21 @@ mod tests {
         let row = numbered_row_styled(1, long, true);
         assert!(row.contains("1."));
         assert!(row.lines().count() > 1, "should wrap to multiple lines");
+    }
+
+    #[test]
+    fn test_check_warn_styled_keeps_text_and_continuation_bar() {
+        let msg = "word ".repeat(60);
+        let plain = check_warn_styled(&msg, false);
+        let styled = check_warn_styled(&msg, true);
+        assert!(plain.starts_with("│  ! "));
+        assert!(!plain.contains('\x1b'));
+        assert!(styled.contains('\x1b'), "color on a color-enabled stream");
+        // Wrapped lines keep the bar, and no text is lost in either mode.
+        assert!(plain.lines().count() > 1);
+        assert_eq!(styled.lines().count(), plain.lines().count());
+        let words = |s: &str| s.matches("word").count();
+        assert_eq!(words(&plain), 60);
+        assert_eq!(words(&styled), 60);
     }
 }

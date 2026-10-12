@@ -126,6 +126,10 @@ pub fn plan(
 
     match first.to_lowercase().as_str() {
         "exit" | "quit" | "q" | ".exit" | ".quit" => return Ok(Plan::Exit),
+        // Hidden debug command for the manual crash-log check. It is not in
+        // SESSION_COMMANDS, so help, completion and the palette skip it.
+        #[cfg(debug_assertions)]
+        "__panic" => panic!("__panic: manual crash-log check"),
         "help" | "?" | ".help" => {
             write_help(out)?;
             return Ok(Plan::Done);
@@ -903,6 +907,21 @@ mod tests {
         assert!(err.contains("disk full"));
     }
 
+    #[test]
+    fn test_tokens_recent_and_remove_report_empty_and_failed_saves() {
+        let mut a = TokenAliases::default();
+        let (out, _, saves) = tokens("recent", &mut a, false);
+        assert!(out.contains("No recently used tokens"), "{out}");
+        assert_eq!(saves, 0, "listing never writes the file");
+        let (out, _, _) = tokens("list", &mut a, false);
+        assert!(out.contains("Use 'crawl <token_name> --save'"), "{out}");
+        // A failed save after a remove must be loud, not "Removed".
+        tokens(&format!("add USDN ethereum {}", ADDR), &mut a, false);
+        let (out, err, _) = tokens("remove USDN", &mut a, true);
+        assert!(!out.contains("Removed"), "{out}");
+        assert!(err.contains("Failed to save the token aliases: "), "{err}");
+    }
+
     // ---- CLI parsing and context injection ----
 
     #[test]
@@ -1094,6 +1113,15 @@ mod tests {
             panic!("expected monitor")
         };
         assert_eq!(m.chain, "solana");
+    }
+
+    #[test]
+    fn test_hidden_panic_command_is_not_listed() {
+        assert!(
+            SESSION_COMMANDS
+                .iter()
+                .all(|(n, u, _)| *n != "__panic" && !u.contains("__panic"))
+        );
     }
 
     #[test]

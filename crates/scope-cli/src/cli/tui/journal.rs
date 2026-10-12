@@ -6,10 +6,12 @@
 //!   REPL wrote the same file, so old history carries over.
 //! - `tui-events.jsonl`: one JSON object per submitted line, with the
 //!   exact input, the argument vector clap parsed, where the command ran,
-//!   how long it took and how it ended. Use it to find out after the fact
-//!   what a TUI session did.
+//!   how long it took and how it ended. One more object records a signal
+//!   that ends the TUI. Use it to find out after the fact what a TUI
+//!   session did.
 
 use serde::Serialize;
+use std::borrow::Cow;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -41,8 +43,9 @@ pub struct Event<'a> {
     pub argv: &'a [String],
     /// `pane`, `suspend` or `session`.
     pub route: &'static str,
-    /// `ok`, `error`, `cancelled` or `session`.
-    pub outcome: &'static str,
+    /// `ok`, `error`, `cancelled`, `session`, or `signal:<NAME>` (for
+    /// example `signal:TERM`) when a signal ended the TUI.
+    pub outcome: Cow<'static, str>,
     /// The error text, for `error`.
     pub error: Option<String>,
 }
@@ -96,6 +99,20 @@ impl Journal {
         let mut text = history[start..].join("\n");
         text.push('\n');
         fs::write(path, text)
+    }
+
+    /// The last `n` lines of the event log, oldest first. A missing or
+    /// unreadable file gives no lines.
+    pub fn tail(&self, n: usize) -> Vec<String> {
+        let Some(path) = &self.events else {
+            return Vec::new();
+        };
+        let text = fs::read_to_string(path).unwrap_or_default();
+        let lines: Vec<&str> = text.lines().collect();
+        lines[lines.len().saturating_sub(n)..]
+            .iter()
+            .map(|l| (*l).to_string())
+            .collect()
     }
 
     /// Appends one event record.
@@ -174,7 +191,7 @@ mod tests {
                 input: "venues list",
                 argv: &argv,
                 route: "pane",
-                outcome,
+                outcome: outcome.into(),
                 error: (outcome == "error").then(|| "boom".to_string()),
             })
             .unwrap();
@@ -188,6 +205,16 @@ mod tests {
         assert_eq!(rows[0]["argv"][2], "list");
         assert_eq!(rows[1]["outcome"], "error");
         assert_eq!(rows[1]["error"], "boom");
+    }
+
+    #[test]
+    fn test_tail_returns_the_newest_lines_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let j = journal(&dir);
+        assert!(j.tail(2).is_empty());
+        std::fs::write(dir.path().join("e.jsonl"), "a\nb\nc\n").unwrap();
+        assert_eq!(j.tail(2), vec!["b", "c"]);
+        assert_eq!(j.tail(10), vec!["a", "b", "c"]);
     }
 
     #[test]
