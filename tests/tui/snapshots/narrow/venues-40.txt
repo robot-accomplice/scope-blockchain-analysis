@@ -17,4 +17,4 @@ scope:auto> venues list
 │                                      │
 └──────────────────────────────────────┘
 
- chain auto · format Table · limit 100
+ scrolled up 50 lines · PgDn …

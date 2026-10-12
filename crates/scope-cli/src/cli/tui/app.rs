@@ -1044,15 +1044,17 @@ impl TuiState {
                 rect,
             );
         }
-        f.render_widget(Paragraph::new(self.status_line()), status);
+        f.render_widget(
+            Paragraph::new(fit_status(&self.status_parts(), status.width as usize)),
+            status,
+        );
     }
 
-    fn status_line(&self) -> Line<'static> {
+    /// What the status bar says now, before it is fitted to a width.
+    fn status_parts(&self) -> StatusParts {
         let ctx = &self.ctx;
-        let left = format!(
-            " chain {} · format {:?} · limit {}{}{}",
-            ctx.chain,
-            ctx.format,
+        let limit = format!(
+            "limit {}{}{}",
             ctx.limit,
             if ctx.include_tokens {
                 " · +tokens"
@@ -1061,20 +1063,127 @@ impl TuiState {
             },
             if ctx.include_txs { " · +txs" } else { "" },
         );
-        let right = match &self.running {
-            Some(run) => format!(
-                "  running {:.0}s · Esc cancels · `{}`",
-                run.started.elapsed().as_secs_f64(),
-                run.input
+        // Highest priority first: the fit drops from the end.
+        let context = vec![
+            format!("chain {}", ctx.chain),
+            format!("format {:?}", ctx.format),
+            limit,
+        ];
+        let (state, command) = match &self.running {
+            Some(run) => (
+                format!(
+                    "running {:.0}s · Esc cancels",
+                    run.started.elapsed().as_secs_f64()
+                ),
+                Some(run.input.clone()),
             ),
-            None if self.scroll > 0 => format!("  scrolled up {} lines · PgDn", self.scroll),
-            None => "  help · exit".to_string(),
+            None if self.scroll > 0 => (format!("scrolled up {} lines · PgDn", self.scroll), None),
+            None => ("help · exit".to_string(), None),
         };
-        Line::from(vec![
-            Span::styled(left, Style::new().fg(Color::DarkGray)),
-            Span::styled(right, Style::new().fg(Color::Yellow)),
-        ])
+        StatusParts {
+            context,
+            state,
+            command,
+        }
     }
+}
+
+/// The parts of the status bar, in priority order.
+struct StatusParts {
+    /// Chain, format and limit. Dropped from the end when the bar is narrow.
+    context: Vec<String>,
+    /// `running Ns · Esc cancels`, `scrolled up N lines · PgDn` or
+    /// `help · exit`. Kept at every width.
+    state: String,
+    /// The command that runs. The last part to go.
+    command: Option<String>,
+}
+
+/// Marks text that was cut or dropped.
+const ELLIPSIS: &str = "…";
+
+/// Columns around a command in the bar: ` · ` before it, a backtick on
+/// each side.
+const COMMAND_FRAME_COLS: usize = 5;
+
+/// The shortest cut command worth showing: one column and the `…`.
+const MIN_CUT_COMMAND_COLS: usize = 2;
+
+fn cols(text: &str) -> usize {
+    UnicodeWidthStr::width(text)
+}
+
+/// Cuts `text` to at most `max` display columns, ending in `…` when it cuts.
+fn cut_with_ellipsis(text: &str, max: usize) -> String {
+    use unicode_segmentation::UnicodeSegmentation;
+    if cols(text) <= max {
+        return text.to_string();
+    }
+    let room = max.saturating_sub(cols(ELLIPSIS));
+    let mut out = String::new();
+    let mut used = 0;
+    for g in text.graphemes(true) {
+        let w = cols(g);
+        if used + w > room {
+            break;
+        }
+        out.push_str(g);
+        used += w;
+    }
+    if max >= cols(ELLIPSIS) {
+        out.push_str(ELLIPSIS);
+    }
+    out
+}
+
+/// Fits the status bar to `width` display columns. Drops limit, then
+/// format, then chain, then the command text. The state text stays at
+/// every width, and a `…` shows that something was cut or dropped.
+fn fit_status(parts: &StatusParts, width: usize) -> Line<'static> {
+    let dim = Style::new().fg(Color::DarkGray);
+    let hot = Style::new().fg(Color::Yellow);
+    let bar = |left: String, right: String| {
+        Line::from(vec![Span::styled(left, dim), Span::styled(right, hot)])
+    };
+    if width == 0 {
+        return Line::default();
+    }
+    let command = |c: &str| format!(" · `{}`", c);
+    let total = parts.context.len();
+    for kept in (0..=total).rev() {
+        let left = if kept == 0 {
+            " ".to_string()
+        } else {
+            format!(" {}  ", parts.context[..kept].join(" · "))
+        };
+        let mut right = parts.state.clone();
+        if let Some(c) = &parts.command {
+            right.push_str(&command(c));
+        }
+        if kept < total {
+            right.push_str(&format!(" {}", ELLIPSIS));
+        }
+        if cols(&left) + cols(&right) <= width {
+            return bar(left, right);
+        }
+    }
+    // The whole context is gone. Cut the command text to what is left.
+    let used = 1 + cols(&parts.state) + COMMAND_FRAME_COLS;
+    if let Some(c) = &parts.command
+        && width >= used + MIN_CUT_COMMAND_COLS
+    {
+        let cut = cut_with_ellipsis(c, width - used);
+        return bar(" ".to_string(), format!("{}{}", parts.state, command(&cut)));
+    }
+    // The command is gone too. A `…` after the state shows it, if it fits.
+    let text = format!(" {} {}", parts.state, ELLIPSIS);
+    if cols(&text) <= width {
+        return bar(String::new(), text);
+    }
+    bar(
+        String::new(),
+        cut_with_ellipsis(&format!(" {}", parts.state), width),
+    )
 }
 
 /// Runs a parsed command with the given output. `--ai` switches this one
@@ -1537,6 +1646,98 @@ mod tests {
         let text = screen(&s, 60, 15);
         assert!(!text.contains("line 39"), "{}", text);
         assert!(text.contains("scrolled up 10 lines"));
+    }
+
+    /// The status bar row (the last row) of a screen.
+    fn status_row(s: &TuiState, w: u16) -> String {
+        screen(s, w, 12).lines().last().unwrap().to_string()
+    }
+
+    fn running_state(input: &str) -> (TuiState, Output) {
+        let mut s = state();
+        let inv = Invocation {
+            command: venues_list(),
+            route: Route::Pane,
+            ai: false,
+            argv: vec![],
+        };
+        let out = s.start(input, &inv);
+        (s, out)
+    }
+
+    #[test]
+    fn test_status_bar_keeps_the_running_state_at_every_width() {
+        // The cancel hint is the only way out of a stuck command: no width
+        // may hide it.
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let (s, _out) = running_state("market summary USDC --venue binance --every 2s");
+        for w in [120, 60, 40, 30] {
+            let row = status_row(&s, w);
+            assert!(row.contains("running "), "{w}: {row:?}");
+            assert!(row.contains("Esc cancels"), "{w}: {row:?}");
+        }
+        let wide = status_row(&s, 120);
+        assert!(
+            wide.contains("limit") && wide.contains("format"),
+            "{wide:?}"
+        );
+        assert!(wide.contains("market summary USDC"), "{wide:?}");
+    }
+
+    #[test]
+    fn test_status_bar_drops_limit_and_format_before_the_cancel_hint() {
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let (s, _out) = running_state("market summary USDC --venue binance --every 2s");
+        let row = status_row(&s, 40);
+        assert!(!row.contains("limit"), "{row:?}");
+        assert!(!row.contains("format"), "{row:?}");
+        // Something was cut, and the bar says so.
+        assert!(row.contains('…'), "{row:?}");
+    }
+
+    #[test]
+    fn test_idle_status_bar_keeps_help_at_a_narrow_width() {
+        let s = state();
+        let row = status_row(&s, 30);
+        assert!(row.contains("help"), "{row:?}");
+        assert!(!row.contains("limit"), "{row:?}");
+    }
+
+    #[test]
+    fn test_scrolled_status_bar_keeps_the_scroll_hint_at_a_narrow_width() {
+        let mut s = state();
+        for i in 0..40 {
+            s.push_ansi(&format!("line {}\n", i));
+        }
+        s.handle_key(key(KeyCode::PageUp));
+        let row = status_row(&s, 40);
+        assert!(row.contains("scrolled up 10 lines"), "{row:?}");
+    }
+
+    #[test]
+    fn test_fit_status_never_panics_and_never_exceeds_the_width() {
+        // Width math runs on every redraw: width 0 and tiny widths must
+        // give a line, and no line may be wider than the bar.
+        let parts = StatusParts {
+            context: vec![
+                "chain auto".into(),
+                "format Table".into(),
+                "limit 100".into(),
+            ],
+            state: "running 12s · Esc cancels".into(),
+            command: Some("market summary ✓✓ --every 2s".into()),
+        };
+        for w in 0..=130 {
+            let line = fit_status(&parts, w);
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(cols(&text) <= w, "{w}: {text:?}");
+        }
+        let text: String = fit_status(&parts, 0)
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(text.is_empty());
     }
 
     #[test]
