@@ -25,6 +25,7 @@
 
 pub mod app;
 pub mod complete;
+pub mod crash;
 pub mod exec;
 pub mod hint;
 pub mod journal;
@@ -149,6 +150,7 @@ pub async fn run(
         signals,
         on_screen: true,
     };
+    crash::install_panic_hook();
     session(&mut host, &mut state, config, clients, SessionContext::save).await
 }
 
@@ -291,7 +293,7 @@ impl Host for RealHost {
     /// alternate screen twice can move the shell's cursor.
     fn restore(&mut self) {
         if std::mem::take(&mut self.on_screen) {
-            ratatui::restore();
+            crash::restore_terminal();
         }
     }
     /// SIGSTOP, not SIGTSTP: the TUI handles SIGTSTP itself, and SIGSTOP

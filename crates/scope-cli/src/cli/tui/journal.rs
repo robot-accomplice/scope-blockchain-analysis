@@ -101,6 +101,20 @@ impl Journal {
         fs::write(path, text)
     }
 
+    /// The last `n` lines of the event log, oldest first. A missing or
+    /// unreadable file gives no lines.
+    pub fn tail(&self, n: usize) -> Vec<String> {
+        let Some(path) = &self.events else {
+            return Vec::new();
+        };
+        let text = fs::read_to_string(path).unwrap_or_default();
+        let lines: Vec<&str> = text.lines().collect();
+        lines[lines.len().saturating_sub(n)..]
+            .iter()
+            .map(|l| (*l).to_string())
+            .collect()
+    }
+
     /// Appends one event record.
     ///
     /// # Errors
@@ -191,6 +205,16 @@ mod tests {
         assert_eq!(rows[0]["argv"][2], "list");
         assert_eq!(rows[1]["outcome"], "error");
         assert_eq!(rows[1]["error"], "boom");
+    }
+
+    #[test]
+    fn test_tail_returns_the_newest_lines_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let j = journal(&dir);
+        assert!(j.tail(2).is_empty());
+        std::fs::write(dir.path().join("e.jsonl"), "a\nb\nc\n").unwrap();
+        assert_eq!(j.tail(2), vec!["b", "c"]);
+        assert_eq!(j.tail(10), vec!["a", "b", "c"]);
     }
 
     #[test]

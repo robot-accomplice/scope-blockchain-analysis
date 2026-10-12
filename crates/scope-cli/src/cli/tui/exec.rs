@@ -126,6 +126,10 @@ pub fn plan(
 
     match first.to_lowercase().as_str() {
         "exit" | "quit" | "q" | ".exit" | ".quit" => return Ok(Plan::Exit),
+        // Hidden debug command for the manual crash-log check. It is not in
+        // SESSION_COMMANDS, so help, completion and the palette skip it.
+        #[cfg(debug_assertions)]
+        "__panic" => panic!("__panic: manual crash-log check"),
         "help" | "?" | ".help" => {
             write_help(out)?;
             return Ok(Plan::Done);
