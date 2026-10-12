@@ -220,6 +220,8 @@ fn run_step(
             let err_re = error.as_deref().map(Regex::new).transpose()?;
             let (until, clamped) = wait_end(DEFAULT_STEP_TIMEOUT, deadline);
             loop {
+                // Read the exit state first, so a record written before exit is still seen.
+                let exit = sess.exit_status();
                 let recs = journal(home);
                 let new = &recs[(*journal_seen).min(recs.len())..];
                 let hit = new.iter().any(|r| {
@@ -232,6 +234,12 @@ fn run_step(
                 if hit {
                     *journal_seen = recs.len();
                     break;
+                }
+                if let Some(code) = exit {
+                    *journal_seen = recs.len();
+                    anyhow::bail!(
+                        "no journal record matches (process exited with status {code}); new records: {new:?}"
+                    );
                 }
                 if Instant::now() >= until {
                     *journal_seen = recs.len();
@@ -373,6 +381,18 @@ steps:
         assert!(!out.passed);
         assert!(out.failure.unwrap().contains("scenario timeout"));
         assert!(out.argv_seen.is_empty());
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    #[ignore = "needs the scope binary: cargo build --bin scope && cargo test -p scope-tui-harness -- --ignored"]
+    fn test_expect_journal_after_exit_fails_at_once_without_spinning() {
+        let (c, _keep) = ctx();
+        let s = parse("name: exitj\nsteps:\n  - key: Ctrl-D\n  - expect_journal: { argv_prefix: [\"market\"], outcome: ok }\n  - expect_exit: 0\n").unwrap();
+        let start = std::time::Instant::now();
+        let (out, _, _) = run_scenario(&s, Tier::Offline, &c).unwrap();
+        assert!(!out.passed);
+        assert!(out.failure.unwrap().contains("process exited"));
         assert!(start.elapsed() < std::time::Duration::from_secs(5));
     }
 }

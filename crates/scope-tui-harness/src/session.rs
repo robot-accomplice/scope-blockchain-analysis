@@ -8,6 +8,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::time::{Duration, Instant};
 
 const READ_CHUNK: usize = 8192;
+const READY_TIMEOUT: Duration = Duration::from_secs(10);
 const RECV_SLICE: Duration = Duration::from_millis(50);
 
 pub struct StartOpts {
@@ -73,7 +74,7 @@ impl Session {
                 }
             }
         });
-        Ok(Self {
+        let mut session = Self {
             master: pair.master,
             writer,
             child,
@@ -81,7 +82,24 @@ impl Session {
             parser: vt100::Parser::new(o.rows, o.cols, 0),
             raw: Vec::new(),
             status: None,
-        })
+        };
+        session.wait_for_first_paint()?;
+        Ok(session)
+    }
+
+    /// Waits until the TUI has drawn. Input sent earlier is lost when the app
+    /// switches the terminal to raw mode, which is slow on a cold start.
+    fn wait_for_first_paint(&mut self) -> Result<()> {
+        let until = Instant::now() + READY_TIMEOUT;
+        while self.screen().trim().is_empty() {
+            anyhow::ensure!(
+                Instant::now() < until,
+                "scope drew nothing within {READY_TIMEOUT:?}"
+            );
+            self.pump(RECV_SLICE)?;
+            anyhow::ensure!(self.exit_status().is_none(), "scope exited before it drew");
+        }
+        Ok(())
     }
 
     pub fn send(&mut self, bytes: &[u8]) -> Result<()> {
