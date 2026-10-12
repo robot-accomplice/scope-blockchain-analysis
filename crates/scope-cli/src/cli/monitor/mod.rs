@@ -4132,6 +4132,12 @@ refresh_seconds: 5
             terminal
                 .draw(|f| render_header(f, f.area(), &state))
                 .unwrap();
+            let buf = terminal.backend().buffer();
+            for cell in &buf.content {
+                for c in [ratatui::style::Color::Green, ratatui::style::Color::Red] {
+                    assert_ne!(cell.fg, c, "Monochrome header drew {c:?}");
+                }
+            }
             format!("{}", terminal.backend())
         };
         let (up, down) = (header(50.0), header(-50.0));

@@ -353,10 +353,11 @@ pub(crate) fn ui(f: &mut Frame, state: &mut MonitorState) {
 
 /// Renders the header with token info and time period tabs.
 pub(crate) fn render_header(f: &mut Frame, area: Rect, state: &MonitorState) {
+    let pal = state.palette();
     let price_color = if state.price_change_24h >= 0.0 {
-        Color::Green
+        pal.up
     } else {
-        Color::Red
+        pal.down
     };
 
     // Use Unicode arrows for trend indication
