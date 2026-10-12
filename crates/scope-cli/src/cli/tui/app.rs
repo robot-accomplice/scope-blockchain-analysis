@@ -696,7 +696,7 @@ impl TuiState {
             let width = m
                 .candidates
                 .iter()
-                .map(|c| c.chars().count())
+                .map(|c| UnicodeWidthStr::width(c.as_str()))
                 .max()
                 .unwrap_or(0) as u16
                 + 4;
@@ -1540,5 +1540,59 @@ mod tests {
         );
         s.handle_key(key(KeyCode::End));
         assert_eq!(cursor_pos(&s, 60, 12).x, 58);
+    }
+
+    #[test]
+    fn test_cursor_follows_display_width_of_cjk() {
+        // 日本 is 4 columns, then a space and "ok": the cursor is at 1 + 7.
+        let mut s = state();
+        type_str(&mut s, "日本 ok");
+        s.handle_key(key(KeyCode::End));
+        assert_eq!(cursor_pos(&s, 60, 12).x, 1 + 7);
+        s.handle_key(key(KeyCode::Left));
+        s.handle_key(key(KeyCode::Left));
+        s.handle_key(key(KeyCode::Left));
+        assert_eq!(cursor_pos(&s, 60, 12).x, 1 + 4, "after 日本");
+    }
+
+    #[test]
+    fn test_cursor_follows_display_width_of_emoji() {
+        let mut s = state();
+        type_str(&mut s, "😀x");
+        assert_eq!(cursor_pos(&s, 60, 12).x, 1 + 3);
+    }
+
+    #[test]
+    fn test_wide_input_scrolls_by_columns_not_chars() {
+        // 40 CJK chars are 80 columns; the cursor stays on the last inner column.
+        let mut s = state();
+        s.paste(&"日".repeat(40));
+        assert_eq!(cursor_pos(&s, 60, 12).x, 58);
+    }
+
+    #[test]
+    fn test_menu_width_uses_display_width() {
+        let wide_a = "日本日本日本a";
+        let wide_b = "日本日本日本b";
+        let mut s = TuiState::new(
+            SessionContext::default(),
+            Journal::default(),
+            Vocab {
+                venues: vec![wide_a.into(), wide_b.into()],
+                ..Vocab::default()
+            },
+        );
+        type_str(&mut s, "market summary X --venue ");
+        s.handle_key(key(KeyCode::Tab));
+        assert!(matches!(s.overlay, Some(Overlay::Menu(_))));
+        let mut term = Terminal::new(TestBackend::new(60, 14)).unwrap();
+        term.draw(|f| s.render(f)).unwrap();
+        let buf = term.backend().buffer().clone();
+        // Each candidate is 13 columns wide: the box is 17 columns, so the
+        // right border is at x = 16.
+        let row = (0..14)
+            .find(|&y| (0..60).any(|x| buf[(x, y)].symbol() == "a"))
+            .unwrap();
+        assert_eq!(buf[(16, row)].symbol(), "│");
     }
 }
