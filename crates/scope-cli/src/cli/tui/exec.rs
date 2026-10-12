@@ -1101,6 +1101,15 @@ mod tests {
     }
 
     #[test]
+    fn test_hidden_panic_command_is_not_listed() {
+        assert!(
+            SESSION_COMMANDS
+                .iter()
+                .all(|(n, u, _)| *n != "__panic" && !u.contains("__panic"))
+        );
+    }
+
+    #[test]
     fn test_nested_tui_and_web_are_refused() {
         for line in ["interactive", "tui", "shell", "web"] {
             let (p, cap) = plan_line(line, &mut SessionContext::default());
