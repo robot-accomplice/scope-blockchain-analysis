@@ -37,3 +37,6 @@ scope-exports/
 
 # Local PR/release helpers (not for version control)
 PR_BODY.md
+
+# Claude workflow scratch (not project files)
+.superpowers/

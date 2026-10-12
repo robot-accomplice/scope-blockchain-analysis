@@ -361,9 +361,7 @@ struct DexScreenerSearchResponse {
 impl DexClient {
     /// Creates a new DEX client.
     pub fn new() -> Self {
-        let http: Arc<dyn HttpClient> =
-            Arc::new(crate::http::NativeHttpClient::new().expect("Failed to build HTTP client"));
-        Self::new_with_http(http)
+        Self::new_with_http(crate::http::transport())
     }
 
     /// Creates a new DEX client with a pre-built HTTP transport.
@@ -378,9 +376,7 @@ impl DexClient {
     #[cfg(any(test, feature = "test-support"))]
     pub fn with_base_url(base_url: &str) -> Self {
         Self {
-            http: Arc::new(
-                crate::http::NativeHttpClient::new().expect("failed to create HTTP client"),
-            ),
+            http: crate::http::transport(),
             base_url: base_url.to_string(),
         }
     }
@@ -1099,6 +1095,13 @@ fn build_test_pair_json(chain_id: &str, base_symbol: &str, base_addr: &str, pric
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_dex_client_new_uses_the_shared_transport() {
+        let shared = crate::http::transport();
+        let client = DexClient::new();
+        assert!(std::sync::Arc::ptr_eq(&client.http, &shared));
+    }
 
     #[test]
     fn test_chain_mapping() {

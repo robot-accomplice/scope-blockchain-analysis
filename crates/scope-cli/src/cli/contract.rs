@@ -104,11 +104,15 @@ pub async fn run(
     let spinner = crate::cli::progress::Spinner::new("Analyzing contract...", out)?;
 
     let client = clients.create_chain_client(&args.chain)?;
-    let http_client = scope::http::NativeHttpClient::new()?;
+    let http_client = scope::http::transport();
 
-    let analysis =
-        contract::analyze_contract(&args.address, &args.chain, client.as_ref(), &http_client)
-            .await?;
+    let analysis = contract::analyze_contract(
+        &args.address,
+        &args.chain,
+        client.as_ref(),
+        http_client.as_ref(),
+    )
+    .await?;
 
     spinner.finish("Contract analysis complete");
 
