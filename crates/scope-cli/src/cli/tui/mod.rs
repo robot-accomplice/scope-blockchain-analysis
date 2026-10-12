@@ -52,6 +52,10 @@ use crate::cli::interactive::SessionContext;
 use crate::cli::output::Output;
 use crate::cli::prompt;
 
+/// How long `run_suspended` waits for the signal behind a stopped
+/// prompt. The signal is normally already queued.
+const PROMPT_SIGNAL_WAIT: Duration = Duration::from_secs(1);
+
 /// How often the screen redraws while a command runs, so its output and
 /// elapsed time stay current.
 const LIVE_REDRAW: Duration = Duration::from_millis(100);
@@ -507,10 +511,14 @@ async fn run_suspended<H: Host>(
     // A prompt blocks this task, so the select can miss a signal that
     // came meanwhile. The prompt watcher saw it and set the flag; the
     // stream has it too, because each listener gets every signal. Take it
-    // from the stream, or the TUI would see it later.
+    // from the stream, or the TUI would see it later. The wait has a
+    // limit, so a broken invariant cannot hang the TUI on a cooked
+    // terminal; it then counts as a cancel.
     let ended = match ended {
         Ok(_) if prompt::CANCEL.load(Ordering::SeqCst) => {
-            Err(ending_signal(host.streams().1).await.unwrap_or(Signal::Int))
+            let queued =
+                tokio::time::timeout(PROMPT_SIGNAL_WAIT, ending_signal(host.streams().1)).await;
+            Err(queued.ok().flatten().unwrap_or(Signal::Int))
         }
         ended => ended,
     };
@@ -528,6 +536,25 @@ async fn run_suspended<H: Host>(
     state.record_suspended(line, argv, duration, started_at, &ending);
     for e in terminal_errors {
         state.push_note(&format!("Terminal I/O error while outside the TUI: {}", e));
+    }
+    if matches!(ending, Ending::Cancelled)
+        && let Some(sig) = drain_extra_ints(host.streams().1)
+    {
+        return Some(end_suspended(state, line, argv, sig));
+    }
+    None
+}
+
+/// Takes the signals already queued after a cancel, without waiting. A
+/// second Ctrl-C must not reach the TUI and end it. Drops INT, TSTP and
+/// CONT; returns the first TERM, HUP or QUIT, which still ends the
+/// session.
+fn drain_extra_ints<S: futures::Stream<Item = Signal> + Unpin>(signals: &mut S) -> Option<Signal> {
+    use futures::FutureExt;
+    while let Some(Some(sig)) = signals.next().now_or_never() {
+        if sig.ends_suspended() && sig != Signal::Int {
+            return Some(sig);
+        }
     }
     None
 }
@@ -1191,10 +1218,14 @@ mod tests {
     /// Runs a suspend-mode `setup` whose prompt a signal stops: the
     /// command sets the cancel flag and sends `sig`, as the prompt watcher
     /// and the signal stream see one signal, and returns `result` (a
-    /// prompt error, or Ok when the command swallowed it). Returns the exit,
-    /// the state, the host and the journal dir.
+    /// prompt error, or Ok when the command swallowed it). `None` sends no
+    /// signal. Returns the exit, the state, the host and the journal dir.
+    ///
+    /// `prompt::CANCEL` is process-global, so every test that touches it
+    /// or calls `run_suspended` must hold `DIAG_LOCK`. This helper resets
+    /// the flag before it returns.
     async fn prompt_stopped_by(
-        sig: Signal,
+        sig: Option<Signal>,
         result: Result<()>,
     ) -> (Option<TuiExit>, TuiState, TestHost, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
@@ -1207,11 +1238,14 @@ mod tests {
         // before the signal came.
         let prompt_stopped = async move {
             crate::cli::prompt::CANCEL.store(true, Ordering::SeqCst);
-            tx.unbounded_send(sig).unwrap();
+            if let Some(sig) = sig {
+                tx.unbounded_send(sig).unwrap();
+            }
             result
         };
         let run = run_suspended(&mut host, "setup", &argv, &out, prompt_stopped, &mut state);
         let exit = within_limit(run).await;
+        crate::cli::prompt::CANCEL.store(false, Ordering::SeqCst);
         (exit, state, host, dir)
     }
 
@@ -1222,7 +1256,7 @@ mod tests {
         // session with 130.
         let _lock = DIAG_LOCK.lock().await;
         for result in [Err(ScopeError::Io("cancelled".into())), Ok(())] {
-            let (exit, state, mut host, dir) = prompt_stopped_by(Signal::Int, result).await;
+            let (exit, state, mut host, dir) = prompt_stopped_by(Some(Signal::Int), result).await;
             assert_eq!(exit, None);
             assert_ran_note(&state, "setup", "cancelled");
             assert_eq!(records(&dir)[0]["outcome"], "cancelled");
@@ -1234,7 +1268,7 @@ mod tests {
     async fn test_term_at_a_prompt_ends_the_session_from_suspend_mode() {
         let _lock = DIAG_LOCK.lock().await;
         let failed = Err(ScopeError::Io("cancelled".into()));
-        let (exit, _, _, dir) = prompt_stopped_by(Signal::Term, failed).await;
+        let (exit, _, _, dir) = prompt_stopped_by(Some(Signal::Term), failed).await;
         assert_eq!(exit, Some(TuiExit { code: 143 }));
         let rec = records(&dir);
         assert_eq!(rec.len(), 1, "{rec:?}");
@@ -1259,6 +1293,57 @@ mod tests {
         let run = run_suspended(&mut host, "setup", &[], &out, saw_clear, &mut state);
         assert_eq!(within_limit(run).await, None);
         assert_ran_note(&state, "setup", "ok");
+        crate::cli::prompt::CANCEL.store(false, Ordering::SeqCst);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_a_set_flag_without_a_signal_does_not_hang_the_tui() {
+        // The flag means a signal is on the stream. If that ever breaks,
+        // the TUI must not wait forever on a cooked terminal.
+        let _lock = DIAG_LOCK.lock().await;
+        let started = tokio::time::Instant::now();
+        let failed = Err(ScopeError::Io("cancelled".into()));
+        let (exit, state, _, dir) = prompt_stopped_by(None, failed).await;
+        assert_eq!(exit, None);
+        assert!(started.elapsed() <= PROMPT_SIGNAL_WAIT + Duration::from_millis(100));
+        assert_ran_note(&state, "setup", "cancelled");
+        assert_eq!(records(&dir)[0]["outcome"], "cancelled");
+    }
+
+    #[tokio::test]
+    async fn test_a_second_ctrl_c_does_not_end_the_session() {
+        // A user often presses Ctrl-C twice. The second INT must not
+        // reach the TUI and end it with 130.
+        let _lock = DIAG_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Journal::at(dir.path().join("h"), dir.path().join("e.jsonl"));
+        let (mut host, captured) = test_host(script(&["setup --key nosuchkey", "ctx"]), Vec::new());
+        host.suspend_signals = vec![Signal::Int, Signal::Int];
+        let (res, state, host, _) = within_limit(drive_host(journal, host, captured)).await;
+        assert_eq!(res.unwrap().code, 0);
+        assert_eq!((host.suspends, host.resumes), (1, 1));
+        assert_ran_note(&state, "setup --key nosuchkey", "cancelled");
+        assert!(state.scrollback_text().contains("Current Context"));
+        let rec = records(&dir);
+        assert_eq!(rec.len(), 2, "{rec:?}");
+        assert_eq!(rec[1]["input"], "ctx", "{rec:?}");
+    }
+
+    #[tokio::test]
+    async fn test_a_term_queued_after_a_cancel_still_ends_the_session() {
+        // Draining extra INTs must not drop a TERM behind them.
+        let _lock = DIAG_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Journal::at(dir.path().join("h"), dir.path().join("e.jsonl"));
+        let (mut host, captured) = test_host(script(&["setup --key nosuchkey", "ctx"]), Vec::new());
+        host.suspend_signals = vec![Signal::Int, Signal::Int, Signal::Term];
+        let (res, _, host, _) = within_limit(drive_host(journal, host, captured)).await;
+        assert_eq!(res.unwrap().code, 143);
+        assert_eq!(host.resumes, 0);
+        let rec = records(&dir);
+        assert_eq!(rec[0]["outcome"], "cancelled", "{rec:?}");
+        assert_eq!(rec[1]["outcome"], "signal:TERM", "{rec:?}");
+        assert_eq!(rec[1]["route"], "suspend", "{rec:?}");
     }
 
     #[tokio::test]
