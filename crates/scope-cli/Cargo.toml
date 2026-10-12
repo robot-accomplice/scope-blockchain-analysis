@@ -45,6 +45,8 @@ serde_yaml = "0.9"
 ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 crossterm = { version = "0.29", features = ["event-stream"] }
 unicode-width = "0.2"
+# Grapheme clusters, as ratatui draws them (tui/fit.rs)
+unicode-segmentation = "1"
 futures = "0.3"
 ansi-to-tui = "8"
 shlex = "1"

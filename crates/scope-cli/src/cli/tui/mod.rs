@@ -42,7 +42,6 @@ use futures::stream::BoxStream;
 use journal::Journal;
 use scope::chains::ChainClientFactory;
 use scope::config::Config;
-use scope::display::terminal::set_width_override;
 use scope::error::{Result, ScopeError};
 use std::future::Future;
 use std::io::{self, Write};
@@ -190,6 +189,9 @@ async fn session<H: Host>(
     save_ctx: impl FnOnce(&SessionContext) -> Result<()>,
 ) -> Result<TuiExit> {
     let result = event_loop(host, state, config, clients).await;
+    // The CLI after the TUI, also after an error or a signal, uses the
+    // real width.
+    host.set_width(None);
     host.restore();
 
     // Save both even if one fails, then report the first failure.
@@ -276,6 +278,9 @@ pub(crate) trait Host {
     fn suspended_output(&self) -> Output;
     /// Writes `text` to the terminal as is (the OSC 52 copy sequence).
     fn write_raw(&mut self, text: &str) -> io::Result<()>;
+    /// Sets the width that command output fits (`None`: the real terminal
+    /// width). Production sets the process-wide width override.
+    fn set_width(&mut self, width: Option<usize>);
 }
 
 /// The real terminal.
@@ -345,6 +350,9 @@ impl Host for RealHost {
         out.write_all(text.as_bytes())?;
         out.flush()
     }
+    fn set_width(&mut self, width: Option<usize>) {
+        scope::display::terminal::set_width_override(width);
+    }
 }
 
 type PaneFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + 'a>>;
@@ -367,8 +375,6 @@ async fn event_loop<H: Host>(
     // True after the TUI stopped itself: the SIGCONT that continues it
     // needs no second set-up.
     let mut cont_expected = false;
-    // Removes the width override on every way out of the loop.
-    let _width = PaneWidth;
 
     loop {
         drain_into(&idle_buf, state);
@@ -380,7 +386,7 @@ async fn event_loop<H: Host>(
             .map_err(|e| ScopeError::Other(format!("terminal draw failed: {}", e)))?;
         // Command output fits the pane. Set after each draw, so it follows
         // a resize and comes back after the TUI leaves the terminal.
-        set_width_override(state.pane_width());
+        host.set_width(state.pane_width());
 
         // Biased: a finished command is handled before the next key, so
         // the key that follows it sees the command as done. A signal comes
@@ -499,18 +505,8 @@ fn stop_and_return<H: Host>(host: &mut H, state: &mut TuiState) -> Result<bool> 
 /// Gives the terminal back. Output written while the TUI is away (a
 /// suspend-mode command, the shell after Ctrl-Z) uses the real width.
 fn leave<H: Host>(host: &mut H) {
-    set_width_override(None);
+    host.set_width(None);
     host.suspend();
-}
-
-/// Removes the width override when dropped: the CLI after the TUI, also
-/// after an error or a signal, uses the real width.
-struct PaneWidth;
-
-impl Drop for PaneWidth {
-    fn drop(&mut self) {
-        set_width_override(None);
-    }
 }
 
 /// Takes the terminal again and clears it. The next draw then repaints
@@ -782,7 +778,6 @@ mod tests {
     use futures::stream::BoxStream;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use scope::display::terminal::width_override;
     use std::task::Poll;
 
     /// A host with a `TestBackend` screen, a scripted key stream and a
@@ -813,6 +808,8 @@ mod tests {
         raw_fails: bool,
         /// The width override at each draw, suspend and restore, in order.
         widths: Vec<(&'static str, Option<usize>)>,
+        /// The width the loop set last.
+        width: Option<usize>,
     }
 
     impl Host for TestHost {
@@ -821,7 +818,7 @@ mod tests {
         type Signals = mpsc::UnboundedReceiver<Signal>;
         fn terminal(&mut self) -> &mut Terminal<TestBackend> {
             self.draws += 1;
-            self.widths.push(("draw", width_override()));
+            self.widths.push(("draw", self.width));
             &mut self.terminal
         }
         fn streams(&mut self) -> (&mut Self::Events, &mut Self::Signals) {
@@ -829,7 +826,7 @@ mod tests {
         }
         fn suspend(&mut self) {
             self.suspends += 1;
-            self.widths.push(("suspend", width_override()));
+            self.widths.push(("suspend", self.width));
             for s in self.suspend_signals.drain(..) {
                 self.signal_tx.unbounded_send(s).unwrap();
             }
@@ -839,7 +836,7 @@ mod tests {
         }
         fn restore(&mut self) {
             self.restores += 1;
-            self.widths.push(("restore", width_override()));
+            self.widths.push(("restore", self.width));
         }
         /// Does not stop the test process. It sends SIGCONT, as the kernel
         /// does when the shell continues a stopped process.
@@ -865,6 +862,10 @@ mod tests {
                 return Err(io::Error::other("tty gone"));
             }
             Ok(())
+        }
+        /// Records the width; tests never set the process-wide override.
+        fn set_width(&mut self, width: Option<usize>) {
+            self.width = width;
         }
     }
 
@@ -951,6 +952,7 @@ mod tests {
             raw: String::new(),
             raw_fails: false,
             widths: Vec::new(),
+            width: None,
         };
         (host, captured)
     }
@@ -1083,7 +1085,6 @@ mod tests {
         // The pane of the 100-column test screen has no side borders.
         let draws = widths_at(&host, "draw");
         assert_eq!(draws.last(), Some(&Some(100)), "set again after Ctrl-Z");
-        assert_eq!(width_override(), None);
     }
 
     #[tokio::test]

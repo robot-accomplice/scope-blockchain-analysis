@@ -948,6 +948,8 @@ mod tests {
 
     #[test]
     fn test_text_report_names_the_book_source() {
+        // The report wraps at terminal_width().
+        let _lock = crate::display::terminal::width_lock();
         let s = amm_summary(10_000_000.0);
         let text = s.format_text(Some("eth"));
         assert!(text.contains("synthetic (AMM curve x·y=k)"), "{}", text);
