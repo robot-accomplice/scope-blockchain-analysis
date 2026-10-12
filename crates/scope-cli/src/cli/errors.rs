@@ -43,7 +43,7 @@ fn display_error_styled(e: &ScopeError, tty: bool, out: &Output) -> std::io::Res
     let hint = if causes.iter().any(|c| is_non_tls_reply(c)) {
         Some(INTERCEPTION_HINT)
     } else {
-        error_suggestion(e)
+        error_suggestion(e, out.is_tui())
     };
     if let Some(hint) = hint {
         if tty {
@@ -82,8 +82,13 @@ fn is_non_tls_reply(cause: &str) -> bool {
     cause.contains("InvalidContentType") || cause.contains("wrong version number")
 }
 
-/// Returns a user-facing suggestion for common error types.
-pub fn error_suggestion(e: &ScopeError) -> Option<&'static str> {
+/// Next steps for a network failure inside the TUI, where `-v` has no effect.
+const TUI_NETWORK_HINT: &str = "Check your network connection and try again.\n      \
+     run 'help <command>' for usage; set 'format json' for raw output";
+
+/// Returns a user-facing suggestion for common error types. In the TUI
+/// (`tui`) the suggestions name TUI commands, not CLI flags.
+pub fn error_suggestion(e: &ScopeError, tui: bool) -> Option<&'static str> {
     match e {
         ScopeError::InvalidAddress(_) => Some(
             "Ensure the address format matches the target chain.\n      \
@@ -97,6 +102,7 @@ pub fn error_suggestion(e: &ScopeError) -> Option<&'static str> {
              Solana: base58 encoded signature",
         ),
         ScopeError::Config(_) => Some("Run `scope setup` to create or repair your configuration."),
+        ScopeError::Request(_) | ScopeError::Network(_) if tui => Some(TUI_NETWORK_HINT),
         ScopeError::Request(_) | ScopeError::Network(_) => Some(
             "Check your network connection and try again.\n      \
              Use -v for more details on the failing request.",
@@ -260,6 +266,44 @@ mod tests {
     }
 
     #[test]
+    fn test_tui_network_error_gives_tui_next_steps_not_dash_v() {
+        let (o, cap) = Output::capture_merged();
+        display_error_styled(&ScopeError::Network("timeout".into()), false, &o).unwrap();
+        let text = cap.err();
+        assert!(!text.contains("-v"), "{text}");
+        assert!(
+            text.contains("run 'help <command>' for usage; set 'format json' for raw output"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn test_cli_network_error_keeps_dash_v_suggestion() {
+        let (o, cap) = Output::capture();
+        display_error_styled(&ScopeError::Network("timeout".into()), false, &o).unwrap();
+        assert!(
+            cap.err().contains("Use -v for more details"),
+            "{}",
+            cap.err()
+        );
+    }
+
+    #[test]
+    fn test_venue_error_displays_with_the_venue_name() {
+        let (o, cap) = Output::capture();
+        let e = ScopeError::Venue {
+            venue: "binance".into(),
+            message: "API error: HTTP 400".into(),
+        };
+        display_error_styled(&e, false, &o).unwrap();
+        assert!(
+            cap.err().contains("Venue error (binance):"),
+            "{}",
+            cap.err()
+        );
+    }
+
+    #[test]
     fn test_display_error_styled_tty_api_auth() {
         let err = ScopeError::Api("401 Unauthorized".into());
         display_error_styled(&err, true, &quiet()).unwrap();
@@ -284,7 +328,7 @@ mod tests {
     #[test]
     fn test_error_suggestion_invalid_address() {
         let err = ScopeError::InvalidAddress("bad".into());
-        let hint = error_suggestion(&err);
+        let hint = error_suggestion(&err, false);
         assert!(hint.is_some());
         assert!(hint.unwrap().contains("EVM"));
     }
@@ -292,7 +336,7 @@ mod tests {
     #[test]
     fn test_error_suggestion_invalid_hash() {
         let err = ScopeError::InvalidHash("bad".into());
-        let hint = error_suggestion(&err);
+        let hint = error_suggestion(&err, false);
         assert!(hint.is_some());
         assert!(hint.unwrap().contains("64 hex"));
     }
@@ -303,7 +347,7 @@ mod tests {
         let err = ScopeError::Config(ConfigError::NotFound {
             path: std::path::PathBuf::from("/missing"),
         });
-        let hint = error_suggestion(&err);
+        let hint = error_suggestion(&err, false);
         assert!(hint.is_some());
         assert!(hint.unwrap().contains("scope setup"));
     }
@@ -311,7 +355,7 @@ mod tests {
     #[test]
     fn test_error_suggestion_network() {
         let err = ScopeError::Network("timeout".into());
-        let hint = error_suggestion(&err);
+        let hint = error_suggestion(&err, false);
         assert!(hint.is_some());
         assert!(hint.unwrap().contains("network"));
     }
@@ -319,7 +363,7 @@ mod tests {
     #[test]
     fn test_error_suggestion_api_auth() {
         let err = ScopeError::Api("401 Unauthorized".into());
-        let hint = error_suggestion(&err);
+        let hint = error_suggestion(&err, false);
         assert!(hint.is_some());
         assert!(hint.unwrap().contains("API key"));
     }
@@ -327,20 +371,20 @@ mod tests {
     #[test]
     fn test_error_suggestion_api_key_keyword() {
         let err = ScopeError::Api("invalid api key".into());
-        let hint = error_suggestion(&err);
+        let hint = error_suggestion(&err, false);
         assert!(hint.is_some());
     }
 
     #[test]
     fn test_error_suggestion_api_no_auth() {
         let err = ScopeError::Api("500 Internal Server Error".into());
-        assert!(error_suggestion(&err).is_none());
+        assert!(error_suggestion(&err, false).is_none());
     }
 
     #[test]
     fn test_error_suggestion_not_found() {
         let err = ScopeError::NotFound("address".into());
-        let hint = error_suggestion(&err);
+        let hint = error_suggestion(&err, false);
         assert!(hint.is_some());
         assert!(hint.unwrap().contains("not found"));
     }
@@ -348,7 +392,7 @@ mod tests {
     #[test]
     fn test_error_suggestion_other_returns_none() {
         let err = ScopeError::Other("random".into());
-        assert!(error_suggestion(&err).is_none());
+        assert!(error_suggestion(&err, false).is_none());
     }
 
     #[tokio::test]

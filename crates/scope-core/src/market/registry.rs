@@ -5,6 +5,7 @@
 //! venues with the same `id`.
 
 use crate::error::{Result, ScopeError};
+use crate::market::configurable_client::venue_error;
 use crate::market::descriptor::VenueDescriptor;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -160,7 +161,7 @@ impl VenueRegistry {
                 .suggest(venue_id)
                 .map(|s| format!("\n\n  Did you mean \"{}\"?\n\n  Available venues: {}\n  Run `scope venues list` for details.", s, self.list().join(", ")))
                 .unwrap_or_else(|| format!("\n\n  Available venues: {}\n  Run `scope venues list` for details.", self.list().join(", ")));
-            ScopeError::Chain(format!("Unknown venue \"{}\"{}", venue_id, hint))
+            venue_error(venue_id, format!("Unknown venue \"{}\"{}", venue_id, hint))
         })?;
         Ok(crate::market::exchange::ExchangeClient::from_descriptor(
             desc,

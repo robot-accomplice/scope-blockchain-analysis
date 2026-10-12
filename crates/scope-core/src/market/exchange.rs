@@ -1,8 +1,8 @@
 //! ExchangeClient facade: composes OrderBook, Ticker, and TradeHistory
 //! capabilities behind a unified interface with capability discovery.
 
-use crate::error::{Result, ScopeError};
-use crate::market::configurable_client::ConfigurableExchangeClient;
+use crate::error::Result;
+use crate::market::configurable_client::{ConfigurableExchangeClient, venue_error};
 use crate::market::descriptor::VenueDescriptor;
 use crate::market::orderbook::{
     Candle, MarketSnapshot, OhlcClient, OrderBook, OrderBookClient, Ticker, TickerClient, Trade,
@@ -120,9 +120,7 @@ impl ExchangeClient {
     pub async fn fetch_order_book(&self, pair: &str) -> Result<OrderBook> {
         self.order_book
             .as_ref()
-            .ok_or_else(|| {
-                ScopeError::Chain(format!("{} does not support order book", self.venue_name))
-            })?
+            .ok_or_else(|| venue_error(&self.venue_id, "does not support order book"))?
             .fetch_order_book(pair)
             .await
     }
@@ -131,9 +129,7 @@ impl ExchangeClient {
     pub async fn fetch_ticker(&self, pair: &str) -> Result<Ticker> {
         self.ticker
             .as_ref()
-            .ok_or_else(|| {
-                ScopeError::Chain(format!("{} does not support ticker", self.venue_name))
-            })?
+            .ok_or_else(|| venue_error(&self.venue_id, "does not support ticker"))?
             .fetch_ticker(pair)
             .await
     }
@@ -142,9 +138,7 @@ impl ExchangeClient {
     pub async fn fetch_recent_trades(&self, pair: &str, limit: u32) -> Result<Vec<Trade>> {
         self.trade_history
             .as_ref()
-            .ok_or_else(|| {
-                ScopeError::Chain(format!("{} does not support trades", self.venue_name))
-            })?
+            .ok_or_else(|| venue_error(&self.venue_id, "does not support trades"))?
             .fetch_recent_trades(pair, limit)
             .await
     }
@@ -153,7 +147,7 @@ impl ExchangeClient {
     pub async fn fetch_ohlc(&self, pair: &str, interval: &str, limit: u32) -> Result<Vec<Candle>> {
         self.ohlc
             .as_ref()
-            .ok_or_else(|| ScopeError::Chain(format!("{} does not support OHLC", self.venue_name)))?
+            .ok_or_else(|| venue_error(&self.venue_id, "does not support OHLC"))?
             .fetch_ohlc(pair, interval, limit)
             .await
     }
@@ -303,7 +297,7 @@ mod tests {
 
         let err = client.fetch_order_book("BTCUSDT").await.unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("Empty"));
+        assert!(msg.contains("(empty)"));
         assert!(msg.contains("does not support order book"));
     }
 
@@ -314,7 +308,7 @@ mod tests {
 
         let err = client.fetch_ticker("BTCUSDT").await.unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("Empty"));
+        assert!(msg.contains("(empty)"));
         assert!(msg.contains("does not support ticker"));
     }
 
@@ -325,7 +319,7 @@ mod tests {
 
         let err = client.fetch_ohlc("BTCUSDT", "1h", 100).await.unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("Empty"));
+        assert!(msg.contains("(empty)"));
         assert!(msg.contains("does not support OHLC"));
     }
 
@@ -336,7 +330,7 @@ mod tests {
 
         let err = client.fetch_recent_trades("BTCUSDT", 50).await.unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("Empty"));
+        assert!(msg.contains("(empty)"));
         assert!(msg.contains("does not support trades"));
     }
 

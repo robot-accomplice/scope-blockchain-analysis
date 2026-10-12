@@ -3703,7 +3703,7 @@ capabilities:
 
     #[tokio::test]
     async fn test_ticker_failure_has_one_error_prefix() {
-        // "Chain client error: … Chain client error: …" read as noise.
+        // "Venue error (…): … Venue error (…): …" read as noise.
         let (_server, ex) = mock_venue(500).await;
         let mut notes = Vec::new();
         let err = fetch_initial_data(
@@ -3718,7 +3718,7 @@ capabilities:
         .await
         .unwrap_err()
         .to_string();
-        assert_eq!(err.matches("Chain client error").count(), 1, "{}", err);
+        assert_eq!(err.matches("Venue error (mockvenue)").count(), 1, "{}", err);
     }
 
     #[test]

@@ -11,7 +11,7 @@
 use crate::cli::interactive::SessionContext;
 use crate::cli::output::Output;
 use crate::cli::{Cli, Commands};
-use crate::{err, errln, out, outln};
+use crate::{errln, out, outln};
 use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser, ValueEnum};
 use scope::config::{Config, OutputFormat};
@@ -218,12 +218,12 @@ fn parse_cli(
                 argv.push(target);
                 match Cli::try_parse_from(&argv) {
                     Ok(cli) => cli,
-                    Err(e) => return write_clap_error(&e, out),
+                    Err(e) => return write_clap_error(&e, &argv, out),
                 }
             }
-            None => return write_clap_error(&e, out),
+            None => return write_clap_error(&e, &argv, out),
         },
-        Err(e) => return write_clap_error(&e, out),
+        Err(e) => return write_clap_error(&e, &argv, out),
     };
 
     if let Some(path) = &cli.config {
@@ -252,15 +252,48 @@ fn parse_cli(
 }
 
 /// Writes a clap error. `--help` and `--version` go to the data channel.
-fn write_clap_error(e: &clap::Error, out: &Output) -> io::Result<Plan> {
+///
+/// For a usage error, clap's `--help` hint is replaced by the TUI form,
+/// `run 'help <command>' for its options`.
+fn write_clap_error(e: &clap::Error, argv: &[String], out: &Output) -> io::Result<Plan> {
     let text = e.render().ansi().to_string();
     match e.kind() {
         ErrorKind::DisplayHelp
         | ErrorKind::DisplayVersion
         | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => out!(out, "{}", text)?,
-        _ => err!(out, "{}", text)?,
+        _ => {
+            for line in text.lines().filter(|l| !l.contains(CLAP_HELP_HINT)) {
+                errln!(out, "{}", line)?;
+            }
+            errln!(out, "{}", tui_help_hint(argv))?;
+        }
     }
     Ok(Plan::Done)
+}
+
+/// The start of clap's own hint line, which names the CLI `--help` flag.
+const CLAP_HELP_HINT: &str = "For more information";
+
+/// The TUI next step for a usage error: `help` for the command the user
+/// typed. The command is the longest run of subcommand words in `argv`.
+fn tui_help_hint(argv: &[String]) -> String {
+    let root = Cli::command();
+    let mut cmd = &root;
+    let mut words = Vec::new();
+    for w in argv.iter().skip(1).filter(|w| !w.starts_with('-')) {
+        match cmd.find_subcommand(w) {
+            Some(sub) => {
+                words.push(w.as_str());
+                cmd = sub;
+            }
+            None => break,
+        }
+    }
+    if words.is_empty() {
+        "run 'help <command>' for its options".to_string()
+    } else {
+        format!("run 'help {}' for its options", words.join(" "))
+    }
 }
 
 /// One session-context value that becomes a CLI flag.
@@ -750,6 +783,14 @@ mod tests {
             "completions" => "completions bash".into(),
             other => other.to_string(),
         }
+    }
+
+    #[test]
+    fn test_clap_error_gives_tui_next_steps_not_the_cli_hint() {
+        let (_, cap) = plan_line("market summary --bogus", &mut SessionContext::default());
+        let text = cap.err();
+        assert!(!text.contains("try '--help'"), "{text}");
+        assert!(text.contains("help market summary"), "{text}");
     }
 
     // ---- Session commands ----

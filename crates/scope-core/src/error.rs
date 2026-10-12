@@ -52,6 +52,17 @@ pub enum ScopeError {
     #[error("Chain client error: {0}")]
     Chain(String),
 
+    /// A market venue (exchange) request or capability failed.
+    ///
+    /// `venue` is the venue id that made the request, for example `bybit`.
+    #[error("Venue error ({venue}): {message}")]
+    Venue {
+        /// Venue id from the descriptor.
+        venue: String,
+        /// What went wrong.
+        message: String,
+    },
+
     /// HTTP request to an external API failed.
     ///
     /// Wraps reqwest errors for network failures, timeouts, or HTTP error responses.
@@ -189,6 +200,15 @@ mod tests {
     fn test_bca_error_display_invalid_hash() {
         let err = ScopeError::InvalidHash("bad-hash".into());
         assert_eq!(err.to_string(), "Invalid transaction hash: bad-hash");
+    }
+
+    #[test]
+    fn test_venue_error_display_names_the_venue() {
+        let err = ScopeError::Venue {
+            venue: "bybit".into(),
+            message: "API error: HTTP 400".into(),
+        };
+        assert_eq!(err.to_string(), "Venue error (bybit): API error: HTTP 400");
     }
 
     #[test]
