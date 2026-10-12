@@ -351,9 +351,13 @@ async fn resolve_token_input(
 
 /// Displays token search results and prompts user to select one.
 fn select_token(results: &[TokenSearchResult], auto_select: bool) -> Result<&TokenSearchResult> {
-    let stdin = io::stdin();
     let stdout = io::stdout();
-    select_token_impl(results, auto_select, &mut stdin.lock(), &mut stdout.lock())
+    select_token_impl(
+        results,
+        auto_select,
+        &mut crate::cli::prompt::stdin(),
+        &mut stdout.lock(),
+    )
 }
 
 /// Testable implementation of select_token with injected I/O.
@@ -444,9 +448,8 @@ fn select_token_impl<'a>(
 
 /// Prompts the user to save the token alias.
 fn prompt_save_alias() -> bool {
-    let stdin = io::stdin();
     let stdout = io::stdout();
-    prompt_save_alias_impl(&mut stdin.lock(), &mut stdout.lock())
+    prompt_save_alias_impl(&mut crate::cli::prompt::stdin(), &mut stdout.lock())
 }
 
 /// Testable implementation of prompt_save_alias with injected I/O.

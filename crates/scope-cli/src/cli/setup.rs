@@ -299,9 +299,12 @@ fn reset_config() -> Result<()> {
             path: PathBuf::from("~/.config/scope/config.yaml"),
         })
     })?;
-    let stdin = io::stdin();
     let stdout = io::stdout();
-    reset_config_impl(&mut stdin.lock(), &mut stdout.lock(), &config_path)
+    reset_config_impl(
+        &mut crate::cli::prompt::stdin(),
+        &mut stdout.lock(),
+        &config_path,
+    )
 }
 
 /// Testable implementation of reset_config with injected I/O and path.
@@ -349,10 +352,9 @@ async fn configure_single_key(key_name: &str, config: &Config) -> Result<()> {
             path: PathBuf::from("~/.config/scope/config.yaml"),
         })
     })?;
-    let stdin = io::stdin();
     let stdout = io::stdout();
     configure_single_key_impl(
-        &mut stdin.lock(),
+        &mut crate::cli::prompt::stdin(),
         &mut stdout.lock(),
         key_name,
         config,
@@ -500,9 +502,13 @@ async fn run_setup_wizard(config: &Config) -> Result<()> {
             path: PathBuf::from("~/.config/scope/config.yaml"),
         })
     })?;
-    let stdin = io::stdin();
     let stdout = io::stdout();
-    run_setup_wizard_impl(&mut stdin.lock(), &mut stdout.lock(), config, &config_path)
+    run_setup_wizard_impl(
+        &mut crate::cli::prompt::stdin(),
+        &mut stdout.lock(),
+        config,
+        &config_path,
+    )
 }
 
 /// Testable implementation of the setup wizard with injected I/O.

@@ -72,6 +72,7 @@ pub mod monitor;
 pub mod output;
 pub(crate) mod plain;
 pub mod progress;
+pub(crate) mod prompt;
 pub mod report;
 pub mod setup;
 pub mod token_health;

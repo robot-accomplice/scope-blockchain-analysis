@@ -42,13 +42,15 @@ use scope::chains::ChainClientFactory;
 use scope::config::Config;
 use scope::error::{Result, ScopeError};
 use std::future::Future;
-use std::io::{self, BufRead, Write};
+use std::io;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::cli::interactive::SessionContext;
 use crate::cli::output::Output;
+use crate::cli::prompt;
 
 /// How often the screen redraws while a command runs, so its output and
 /// elapsed time stay current.
@@ -90,6 +92,15 @@ impl Signal {
             Signal::Tstp => "TSTP",
             Signal::Cont => "CONT",
         }
+    }
+
+    /// True for a signal that ends a suspend-mode command: INT cancels
+    /// it, TERM, HUP and QUIT end the session.
+    fn ends_suspended(self) -> bool {
+        matches!(
+            self,
+            Signal::Int | Signal::Term | Signal::Hup | Signal::Quit
+        )
     }
 
     /// The exit code for a signal that ends the TUI. `None` for a signal
@@ -138,6 +149,10 @@ pub async fn run(
     clients: &dyn ChainClientFactory,
 ) -> Result<TuiExit> {
     let signals = signal_stream()?;
+    // A second stream gets the same signals (tokio gives each one to
+    // every listener). Only `scope tui` installs these handlers; a plain
+    // CLI run keeps the default Ctrl-C.
+    tokio::spawn(cancel_prompts_on(signal_stream()?, &prompt::CANCEL));
     let mut state = TuiState::new(
         SessionContext::load(),
         Journal::in_data_dir(),
@@ -248,13 +263,7 @@ pub(crate) trait Host {
     fn clear(&mut self) -> io::Result<()>;
     /// The output a suspend-mode command writes to.
     fn suspended_output(&self) -> Output;
-    /// Waits until the user is ready to return to the TUI. The future does
-    /// not borrow the host, so the caller can watch the signals meanwhile.
-    fn wait_to_return(&mut self) -> WaitFuture;
 }
-
-/// The wait for the user to return to the TUI.
-type WaitFuture = Pin<Box<dyn Future<Output = io::Result<()>> + Send>>;
 
 /// The real terminal.
 struct RealHost {
@@ -317,16 +326,6 @@ impl Host for RealHost {
     }
     fn suspended_output(&self) -> Output {
         Output::stdio()
-    }
-    fn wait_to_return(&mut self) -> WaitFuture {
-        Box::pin(async {
-            tokio::task::spawn_blocking(|| {
-                let mut s = String::new();
-                io::stdin().lock().read_line(&mut s).map(|_| ())
-            })
-            .await
-            .map_err(io::Error::other)?
-        })
     }
 }
 
@@ -474,9 +473,10 @@ fn retake<H: Host>(host: &mut H) -> Result<()> {
         .map_err(|e| ScopeError::Other(format!("terminal clear failed: {}", e)))
 }
 
-/// Runs one command outside the TUI, then waits for the user to return.
-/// `command` writes to `out`. Returns the exit when TERM, HUP or QUIT ends
-/// the session first; the command is dropped and the signal recorded.
+/// Runs one command outside the TUI. It returns to the TUI when the
+/// command ends, or when INT (Ctrl-C) cancels it. `command` writes to
+/// `out`. Returns the exit when TERM, HUP or QUIT ends the session first;
+/// the command is dropped and the signal recorded.
 async fn run_suspended<H: Host>(
     host: &mut H,
     line: &str,
@@ -487,54 +487,59 @@ async fn run_suspended<H: Host>(
 ) -> Option<TuiExit> {
     let started = Instant::now();
     let started_at = chrono::Utc::now().to_rfc3339();
+    // A cancel from an earlier command must not stop this one's prompts.
+    prompt::CANCEL.store(false, Ordering::SeqCst);
     let mut terminal_errors = Vec::new();
-    if let Err(e) = crate::errln!(out, "\n── scope {} ──", line) {
+    let header = crate::errln!(out, "\n── scope {} ──", line).and_then(|()| {
+        crate::errln!(
+            out,
+            "Running outside the TUI; it returns when the command ends (Ctrl-C cancels)."
+        )
+    });
+    if let Err(e) = header {
         terminal_errors.push(e.to_string());
     }
-    let result = tokio::select! {
+    let ended = tokio::select! {
         biased;
-        Some(sig) = ending_signal(host.streams().1) => {
-            return Some(end_suspended(state, line, argv, sig));
+        Some(sig) = ending_signal(host.streams().1) => Err(sig),
+        result = command => Ok(result),
+    };
+    // A prompt blocks this task, so the select can miss a signal that
+    // came meanwhile. The prompt watcher saw it and set the flag; the
+    // stream has it too, because each listener gets every signal. Take it
+    // from the stream, or the TUI would see it later.
+    let ended = match ended {
+        Ok(_) if prompt::CANCEL.load(Ordering::SeqCst) => {
+            Err(ending_signal(host.streams().1).await.unwrap_or(Signal::Int))
         }
-        result = command => result,
+        ended => ended,
+    };
+    let ending = match ended {
+        Ok(result) => Ending::Finished(result),
+        Err(Signal::Int) => Ending::Cancelled,
+        Err(sig) => return Some(end_suspended(state, line, argv, sig)),
     };
     let duration = started.elapsed();
-    if let Err(e) = &result
+    if let Ending::Finished(Err(e)) = &ending
         && let Err(write_err) = crate::cli::errors::display_error(e, out)
     {
         terminal_errors.push(write_err.to_string());
     }
-    let prompt = crate::err!(out, "\nPress Enter to return to the TUI. ")
-        .and_then(|()| io::stderr().flush());
-    if let Err(e) = prompt {
-        terminal_errors.push(e.to_string());
-    }
-    let wait = host.wait_to_return();
-    let waited = tokio::select! {
-        biased;
-        Some(sig) = ending_signal(host.streams().1) => {
-            return Some(end_suspended(state, line, argv, sig));
-        }
-        waited = wait => waited,
-    };
-    if let Err(e) = waited {
-        terminal_errors.push(e.to_string());
-    }
-    state.record_suspended(line, argv, duration, started_at, &result);
+    state.record_suspended(line, argv, duration, started_at, &ending);
     for e in terminal_errors {
         state.push_note(&format!("Terminal I/O error while outside the TUI: {}", e));
     }
     None
 }
 
-/// Waits for a signal that ends a suspend-mode command: TERM, HUP or
-/// QUIT. It drops the others: INT goes to the command (T5). TSTP and CONT
-/// do nothing, because the command owns the terminal.
+/// Waits for a signal that ends a suspend-mode command: INT cancels it;
+/// TERM, HUP and QUIT end the session. It drops TSTP and CONT, because
+/// the command owns the terminal.
 async fn ending_signal<S: futures::Stream<Item = Signal> + Unpin>(
     signals: &mut S,
 ) -> Option<Signal> {
     while let Some(sig) = signals.next().await {
-        if matches!(sig, Signal::Term | Signal::Hup | Signal::Quit) {
+        if sig.ends_suspended() {
             return Some(sig);
         }
     }
@@ -546,9 +551,21 @@ async fn ending_signal<S: futures::Stream<Item = Signal> + Unpin>(
 fn end_suspended(state: &mut TuiState, line: &str, argv: &[String], sig: Signal) -> TuiExit {
     state.record_signal(sig.name(), "suspend", line, argv);
     TuiExit {
-        code: sig
-            .exit_code()
-            .expect("ending_signal returns only fatal signals"),
+        code: sig.exit_code().expect("TERM, HUP and QUIT have exit codes"),
+    }
+}
+
+/// Sets `flag` on each signal that ends a suspend-mode command, so a
+/// prompt read stops (see [`prompt`]). It runs as its own task: while a
+/// prompt blocks, the event loop's task cannot see the signals.
+async fn cancel_prompts_on<S: futures::Stream<Item = Signal> + Unpin>(
+    mut signals: S,
+    flag: &AtomicBool,
+) {
+    while let Some(sig) = signals.next().await {
+        if sig.ends_suspended() {
+            flag.store(true, Ordering::SeqCst);
+        }
     }
 }
 
@@ -703,12 +720,9 @@ mod tests {
         keys: BoxStream<'static, io::Result<Event>>,
         signals: mpsc::UnboundedReceiver<Signal>,
         signal_tx: mpsc::UnboundedSender<Signal>,
-        /// `wait_to_return` sends these signals first.
-        wait_signals: Vec<Signal>,
-        /// `wait_to_return` never returns: a user who does not press Enter.
-        wait_forever: bool,
-        /// `wait_to_return` fails, as a closed stdin would.
-        wait_fails: bool,
+        /// `suspend` sends these signals: they arrive while a
+        /// suspend-mode command runs.
+        suspend_signals: Vec<Signal>,
         suspended: Output,
         suspends: usize,
         resumes: usize,
@@ -736,6 +750,9 @@ mod tests {
         }
         fn suspend(&mut self) {
             self.suspends += 1;
+            for s in self.suspend_signals.drain(..) {
+                self.signal_tx.unbounded_send(s).unwrap();
+            }
         }
         fn resume(&mut self) {
             self.resumes += 1;
@@ -760,18 +777,6 @@ mod tests {
         }
         fn suspended_output(&self) -> Output {
             self.suspended.clone()
-        }
-        fn wait_to_return(&mut self) -> WaitFuture {
-            for s in self.wait_signals.drain(..) {
-                self.signal_tx.unbounded_send(s).unwrap();
-            }
-            if self.wait_fails {
-                return Box::pin(async { Err(io::Error::other("stdin closed")) });
-            }
-            if self.wait_forever {
-                return Box::pin(futures::future::pending());
-            }
-            Box::pin(async { Ok(()) })
         }
     }
 
@@ -845,9 +850,7 @@ mod tests {
             keys: futures::stream::iter(events).chain(tail).boxed(),
             signals: sig_rx,
             signal_tx: sig_tx,
-            wait_signals: Vec::new(),
-            wait_forever: false,
-            wait_fails: false,
+            suspend_signals: Vec::new(),
             suspended,
             suspends: 0,
             resumes: 0,
@@ -1114,40 +1117,214 @@ mod tests {
         assert_eq!(rec[0]["input"], "monitor");
     }
 
-    #[tokio::test]
-    async fn test_term_signal_while_waiting_for_enter_ends_the_session() {
-        // After a suspend-mode command, the TUI waits for Enter. A signal
-        // there must end the session through the normal restore and save.
-        let _lock = DIAG_LOCK.lock().await;
-        let dir = tempfile::tempdir().unwrap();
-        let journal = Journal::at(dir.path().join("h"), dir.path().join("e.jsonl"));
-        let (mut host, captured) = test_host(script(&["setup --key nosuchkey"]), Vec::new());
-        host.wait_signals = vec![Signal::Term];
-        host.wait_forever = true;
-        let (res, _, host, _) = within_limit(drive_host(journal, host, captured)).await;
-        assert_eq!(res.unwrap().code, 143);
-        assert_eq!((host.suspends, host.resumes), (1, 0), "no resume after it");
-        assert_eq!(host.restores, 1);
-        let rec = records(&dir);
-        let last = rec.last().unwrap();
-        assert_eq!(last["outcome"], "signal:TERM", "{rec:?}");
-        assert_eq!(last["route"], "suspend");
-        let history = std::fs::read_to_string(dir.path().join("h")).unwrap();
-        assert!(history.contains("setup --key nosuchkey"), "{history}");
+    /// A state over a journal in `dir`.
+    fn journaled_state(dir: &tempfile::TempDir) -> TuiState {
+        TuiState::new(
+            SessionContext::default(),
+            Journal::at(dir.path().join("h"), dir.path().join("e.jsonl")),
+            vocab::Vocab::default(),
+        )
+    }
+
+    /// The scrollback note `run_suspended` leaves for `line`, checked
+    /// against the spec format with the outcome word `outcome`.
+    fn assert_ran_note(state: &TuiState, line: &str, outcome: &str) {
+        let text = state.scrollback_text();
+        let note = text
+            .lines()
+            .find(|l| l.starts_with("Ran outside the TUI:"))
+            .unwrap_or_else(|| panic!("no note in {text}"));
+        let pattern = format!(
+            r"^Ran outside the TUI: {} \({}, \d+\.\ds\)\.$",
+            regex::escape(line),
+            outcome
+        );
+        assert!(
+            regex::Regex::new(&pattern).unwrap().is_match(note),
+            "{note:?} does not match {pattern}"
+        );
     }
 
     #[tokio::test]
-    async fn test_suspended_command_ignores_int_tstp_and_cont() {
-        // INT belongs to the command (T5). The command owns the terminal,
-        // so TSTP and CONT do not stop the TUI or take the screen. None of
-        // them may end the session from suspend mode.
+    async fn test_suspended_command_is_cancelled_by_sigint() {
+        // Ctrl-C outside the TUI must stop a command that never ends (a
+        // hung crawl) and return to the TUI, not kill the process.
+        let _lock = DIAG_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = journaled_state(&dir);
+        let (mut host, captured) = test_host(Vec::new(), Vec::new());
+        host.signal_tx.unbounded_send(Signal::Int).unwrap();
+        let out = host.suspended_output();
+        let argv = vec!["crawl".to_string(), "USDC".to_string()];
+        let never = futures::future::pending::<Result<()>>();
+        let run = run_suspended(&mut host, "crawl USDC", &argv, &out, never, &mut state);
+        assert_eq!(within_limit(run).await, None, "the session goes on");
+        assert_ran_note(&state, "crawl USDC", "cancelled");
+        let rec = records(&dir);
+        assert_eq!(rec.len(), 1, "{rec:?}");
+        assert_eq!(rec[0]["outcome"], "cancelled");
+        assert_eq!(rec[0]["route"], "suspend");
+        assert!(captured.out().contains(
+            "Running outside the TUI; it returns when the command ends (Ctrl-C cancels)."
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_sigint_cancel_returns_to_a_working_loop() {
+        // After the cancel the TUI takes the screen back and runs the next
+        // line.
+        let _lock = DIAG_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Journal::at(dir.path().join("h"), dir.path().join("e.jsonl"));
+        let (mut host, captured) = test_host(script(&["setup --key nosuchkey", "ctx"]), Vec::new());
+        host.suspend_signals = vec![Signal::Int];
+        let (res, state, host, _) = within_limit(drive_host(journal, host, captured)).await;
+        assert_eq!(res.unwrap().code, 0);
+        assert_eq!((host.suspends, host.resumes), (1, 1));
+        assert_ran_note(&state, "setup --key nosuchkey", "cancelled");
+        assert!(state.scrollback_text().contains("Current Context"));
+        let rec = records(&dir);
+        assert_eq!(rec[0]["outcome"], "cancelled", "{rec:?}");
+        assert_eq!(rec[1]["input"], "ctx", "{rec:?}");
+    }
+
+    /// Runs a suspend-mode `setup` whose prompt a signal stops: the
+    /// command sets the cancel flag and sends `sig`, as the prompt watcher
+    /// and the signal stream see one signal, and returns `result` (a
+    /// prompt error, or Ok when the command swallowed it). Returns the exit,
+    /// the state, the host and the journal dir.
+    async fn prompt_stopped_by(
+        sig: Signal,
+        result: Result<()>,
+    ) -> (Option<TuiExit>, TuiState, TestHost, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = journaled_state(&dir);
+        let (mut host, _) = test_host(Vec::new(), Vec::new());
+        let out = host.suspended_output();
+        let tx = host.signal_tx.clone();
+        let argv = vec!["setup".to_string()];
+        // The prompt blocks the task, so the select polled the signals
+        // before the signal came.
+        let prompt_stopped = async move {
+            crate::cli::prompt::CANCEL.store(true, Ordering::SeqCst);
+            tx.unbounded_send(sig).unwrap();
+            result
+        };
+        let run = run_suspended(&mut host, "setup", &argv, &out, prompt_stopped, &mut state);
+        let exit = within_limit(run).await;
+        (exit, state, host, dir)
+    }
+
+    #[tokio::test]
+    async fn test_a_cancelled_prompt_is_recorded_as_cancelled_and_its_int_used_up() {
+        // Ctrl-C at a prompt: the cancel must read as a cancel, not a
+        // failure, and its INT must not reach the TUI later and end the
+        // session with 130.
+        let _lock = DIAG_LOCK.lock().await;
+        for result in [Err(ScopeError::Io("cancelled".into())), Ok(())] {
+            let (exit, state, mut host, dir) = prompt_stopped_by(Signal::Int, result).await;
+            assert_eq!(exit, None);
+            assert_ran_note(&state, "setup", "cancelled");
+            assert_eq!(records(&dir)[0]["outcome"], "cancelled");
+            assert!(host.signals.try_next().is_err(), "the INT is used up");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_term_at_a_prompt_ends_the_session_from_suspend_mode() {
+        let _lock = DIAG_LOCK.lock().await;
+        let failed = Err(ScopeError::Io("cancelled".into()));
+        let (exit, _, _, dir) = prompt_stopped_by(Signal::Term, failed).await;
+        assert_eq!(exit, Some(TuiExit { code: 143 }));
+        let rec = records(&dir);
+        assert_eq!(rec.len(), 1, "{rec:?}");
+        assert_eq!(rec[0]["outcome"], "signal:TERM");
+        assert_eq!(rec[0]["route"], "suspend");
+    }
+
+    #[tokio::test]
+    async fn test_a_suspended_command_starts_with_the_cancel_flag_clear() {
+        // A Ctrl-C from an earlier command must not cancel the next one's
+        // first prompt.
+        let _lock = DIAG_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = journaled_state(&dir);
+        let (mut host, _) = test_host(Vec::new(), Vec::new());
+        let out = host.suspended_output();
+        crate::cli::prompt::CANCEL.store(true, Ordering::SeqCst);
+        let saw_clear = async {
+            assert!(!crate::cli::prompt::CANCEL.load(Ordering::SeqCst));
+            Ok(())
+        };
+        let run = run_suspended(&mut host, "setup", &[], &out, saw_clear, &mut state);
+        assert_eq!(within_limit(run).await, None);
+        assert_ran_note(&state, "setup", "ok");
+    }
+
+    #[tokio::test]
+    async fn test_ending_signals_set_the_prompt_cancel_flag() {
+        // A prompt blocks the task that watches the signals, so a separate
+        // watcher must set the flag. TSTP and CONT do not cancel.
+        for (sigs, set) in [
+            (vec![Signal::Tstp, Signal::Cont], false),
+            (vec![Signal::Int], true),
+            (vec![Signal::Term], true),
+            (vec![Signal::Hup], true),
+            (vec![Signal::Quit], true),
+        ] {
+            let flag = AtomicBool::new(false);
+            cancel_prompts_on(futures::stream::iter(sigs.clone()), &flag).await;
+            assert_eq!(flag.load(Ordering::SeqCst), set, "{sigs:?}");
+        }
+    }
+
+    /// A writer whose terminal is gone.
+    struct BrokenTty;
+
+    impl io::Write for BrokenTty {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("tty gone"))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_terminal_errors_outside_the_tui_are_reported_after_it() {
+        // Nothing outside the TUI can show a broken terminal; the pane
+        // must say so when the TUI is back.
+        let _lock = DIAG_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = journaled_state(&dir);
+        let (mut host, _) = test_host(Vec::new(), Vec::new());
+        let out = Output::from_writers(BrokenTty, BrokenTty);
+        let failed = async { Err(ScopeError::Other("boom".into())) };
+        let run = run_suspended(&mut host, "setup", &[], &out, failed, &mut state);
+        assert_eq!(within_limit(run).await, None);
+        assert_ran_note(&state, "setup", "failed");
+        let text = state.scrollback_text();
+        assert_eq!(
+            text.matches("Terminal I/O error while outside the TUI: tty gone")
+                .count(),
+            2,
+            "the header and the error text: {text}"
+        );
+        assert_eq!(records(&dir)[0]["outcome"], "error");
+    }
+
+    #[tokio::test]
+    async fn test_suspended_command_ignores_tstp_and_cont() {
+        // The command owns the terminal, so TSTP and CONT do not stop the
+        // TUI or take the screen, and do not end the command.
         let _lock = DIAG_LOCK.lock().await;
         let (mut host, captured) = test_host(script(&["setup --key nosuchkey"]), Vec::new());
-        host.wait_signals = vec![Signal::Int, Signal::Tstp, Signal::Cont];
-        let (res, _, host, _) = drive_host(Journal::default(), host, captured).await;
+        host.suspend_signals = vec![Signal::Tstp, Signal::Cont];
+        let (res, state, host, _) = drive_host(Journal::default(), host, captured).await;
         assert_eq!(res.unwrap().code, 0);
         assert_eq!((host.suspends, host.resumes), (1, 1));
         assert_eq!((host.stops, host.clears), (0, 0));
+        assert_ran_note(&state, "setup --key nosuchkey", "ok");
     }
 
     #[tokio::test]
@@ -1221,16 +1398,12 @@ mod tests {
                 .out()
                 .contains("── scope setup --key nosuchkey ──")
         );
-        assert!(
-            suspended
-                .out()
-                .contains("Press Enter to return to the TUI.")
-        );
-        assert!(
-            state
-                .scrollback_text()
-                .contains("Ran outside the TUI: setup --key nosuchkey (ok).")
-        );
+        assert!(suspended.out().contains(
+            "Running outside the TUI; it returns when the command ends (Ctrl-C cancels)."
+        ));
+        // It returns by itself: there is no Enter to wait for.
+        assert!(!suspended.out().contains("Press Enter"));
+        assert_ran_note(&state, "setup --key nosuchkey", "ok");
     }
 
     #[tokio::test]
@@ -1290,24 +1463,5 @@ mod tests {
         // Installing handlers sends no signal. A failure to install one
         // must stop the TUI before it takes the terminal.
         assert!(signal_stream().is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_failed_wait_for_enter_is_reported_and_the_tui_resumes() {
-        // If stdin breaks while the TUI is suspended, the user must hear
-        // about it, and the TUI must still take the screen back.
-        let _lock = DIAG_LOCK.lock().await;
-        let (mut host, captured) = test_host(script(&["setup --key nosuchkey"]), Vec::new());
-        host.wait_fails = true;
-        let (res, state, host, _) = drive_host(Journal::default(), host, captured).await;
-        res.unwrap();
-        assert_eq!((host.suspends, host.resumes), (1, 1));
-        assert!(
-            state
-                .scrollback_text()
-                .contains("Terminal I/O error while outside the TUI: stdin closed"),
-            "{}",
-            state.scrollback_text()
-        );
     }
 }
