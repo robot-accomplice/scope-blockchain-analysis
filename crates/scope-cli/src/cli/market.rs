@@ -558,6 +558,13 @@ async fn run_summary_once(
     Ok(summary)
 }
 
+/// How many runs a repeating summary makes: one every `every_secs` over
+/// `duration_secs`, and a last one at the end when the span is not a whole
+/// number of intervals (the final sleep is cut to the time left).
+fn repeat_total(duration_secs: u64, every_secs: u64) -> u64 {
+    duration_secs.div_ceil(every_secs) + 1
+}
+
 async fn run_summary(
     args: SummaryArgs,
     config: &Config,
@@ -601,12 +608,17 @@ async fn run_summary(
     let start = std::time::Instant::now();
     let duration = Duration::from_secs(duration_secs);
 
-    errln!(
-        out,
-        "Running market summary every {}s for {}s (Ctrl+C to stop early)\n",
-        every_secs,
-        duration_secs
-    )?;
+    let banner = format!(
+        "Running market summary every {}s for {}s (Ctrl+C to stop early)",
+        every_secs, duration_secs
+    );
+    errln!(out, "{}\n", banner)?;
+    out.update_progress(|p| {
+        p.run = 0;
+        p.total = Some(repeat_total(duration_secs, every_secs));
+        p.next_at = None;
+        p.banner = Some(banner);
+    });
 
     let mut run_num: u64 = 1;
     #[allow(unused_assignments)]
@@ -620,6 +632,11 @@ async fn run_summary(
     }
 
     loop {
+        out.update_progress(|p| {
+            p.run = run_num;
+            p.next_at = None;
+        });
+        // An error ends the repeat: `?` returns it and no later run starts.
         let summary = run_summary_once(&args, factory, &thresholds, Some(run_num), out).await?;
         last_summary = Some(summary.clone());
 
@@ -673,6 +690,7 @@ async fn run_summary(
 
         let remaining = duration.saturating_sub(start.elapsed());
         let sleep_duration = if remaining < every { remaining } else { every };
+        out.update_progress(|p| p.next_at = Some(std::time::Instant::now() + sleep_duration));
         tokio::time::sleep(sleep_duration).await;
     }
 
@@ -2175,5 +2193,57 @@ capabilities:
         assert!(rows[0].split(',').nth(1) == Some("1"));
         assert!(rows[1].split(',').nth(1) == Some("2"));
         assert!(report.exists());
+    }
+
+    #[tokio::test]
+    async fn test_run_summary_repeat_publishes_run_progress() {
+        // The TUI draws `run N of M` from this hook, so the total must be
+        // known at the start and the run number must advance.
+        let (out, captured) = Output::capture_merged();
+        let hook = out.progress_hook().expect("a merged capture has a hook");
+        let factory = dex_factory(&[(50_000.0, 1_000.0)]);
+        let mut args = dex_args(SummaryFormat::Json);
+        args.every = Some("1s".to_string());
+        args.duration = Some("2s".to_string());
+        run_summary(args, &Config::default(), &factory, &out)
+            .await
+            .unwrap();
+        let p = hook.lock().unwrap().clone();
+        // Runs at 0s, 1s and 2s.
+        assert_eq!(p.total, Some(3), "{p:?}");
+        assert_eq!(p.run, 3, "{p:?}");
+        assert_eq!(p.next_at, None, "no next run after the last: {p:?}");
+        let banner = p.banner.expect("the start banner is published");
+        assert!(banner.contains("every 1s for 2s"), "{banner}");
+        assert!(captured.out().contains("Completed 3 run(s)"));
+    }
+
+    #[test]
+    fn test_repeat_total_counts_the_final_run_at_the_boundary() {
+        // 5s every 2s runs at 0, 2, 4 and then at 5 (the sleep is cut to
+        // the time left): four runs, not 5/2+1.
+        assert_eq!(repeat_total(5, 2), 4);
+        assert_eq!(repeat_total(2, 1), 3);
+        assert_eq!(repeat_total(1, 2), 2);
+    }
+
+    #[tokio::test]
+    async fn test_a_failed_run_ends_a_repeating_summary() {
+        // A run that errors stops the repeat and returns the error, so the
+        // pane footer is `✗ Failed in`. It does not skip to the next run.
+        let (out, _captured) = Output::capture_merged();
+        let hook = out.progress_hook().unwrap();
+        let factory = dex_factory(&[]);
+        let mut args = dex_args(SummaryFormat::Json);
+        args.every = Some("1s".to_string());
+        args.duration = Some("30s".to_string());
+        let started = std::time::Instant::now();
+        let result = run_summary(args, &Config::default(), &factory, &out).await;
+        assert!(result.is_err(), "no DEX pairs is a failed run");
+        assert_eq!(hook.lock().unwrap().run, 1, "no second run after the error");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "it did not sleep on"
+        );
     }
 }

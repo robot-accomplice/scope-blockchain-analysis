@@ -918,10 +918,13 @@ impl TuiState {
 
         // Output pane: scrollback plus the live output of a running command.
         let mut lines = self.scrollback.clone();
-        if let Some(run) = &self.running
-            && let Ok(t) = run.captured.out().into_text()
-        {
-            lines.extend(t.lines);
+        if let Some(run) = &self.running {
+            if let Ok(t) = run.captured.out().into_text() {
+                lines.extend(t.lines);
+            }
+            // Drawn only: these lines are not output, so they never reach
+            // the scrollback, the copy or the journal.
+            lines.extend(self.liveness_lines(run, color_enabled()));
         }
         let block = Block::new()
             .borders(Borders::TOP | Borders::BOTTOM)
@@ -1050,6 +1053,37 @@ impl TuiState {
         );
     }
 
+    /// The spinner line and, for a repeating command, its run status.
+    fn liveness_lines(&self, run: &Running, color: bool) -> Vec<Line<'static>> {
+        let dim = Style::new().fg(Color::DarkGray);
+        let elapsed = run.started.elapsed();
+        let mut lines = vec![Line::styled(
+            format!(
+                "{} running {}… {}s",
+                spinner_glyph(elapsed, color),
+                run.input,
+                elapsed.as_secs()
+            ),
+            dim,
+        )];
+        if let Some(hook) = run.out.progress_hook() {
+            // Copy the record out: the lock is not held while drawing.
+            let p = hook.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            if p.run > 0 {
+                let mut text = match p.total {
+                    Some(total) => format!("run {} of {}", p.run, total),
+                    None => format!("run {}", p.run),
+                };
+                if let Some(at) = p.next_at {
+                    let wait = at.saturating_duration_since(Instant::now());
+                    text.push_str(&format!(" · next in {}s", wait.as_secs_f64().ceil() as u64));
+                }
+                lines.push(Line::styled(text, dim));
+            }
+        }
+        lines
+    }
+
     /// What the status bar says now, before it is fitted to a width.
     fn status_parts(&self) -> StatusParts {
         let ctx = &self.ctx;
@@ -1097,6 +1131,22 @@ struct StatusParts {
     state: String,
     /// The command that runs. The last part to go.
     command: Option<String>,
+}
+
+/// The spinner frames with color on.
+const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// The spinner frames with color off, where a braille glyph may not draw.
+const SPINNER_ASCII: [&str; 4] = ["-", "\\", "|", "/"];
+
+/// The spinner moves one frame per redraw tick. It adds no timer of its own.
+fn spinner_glyph(elapsed: std::time::Duration, color: bool) -> &'static str {
+    let step = (elapsed.as_millis() / super::LIVE_REDRAW.as_millis()) as usize;
+    if color {
+        SPINNER_FRAMES[step % SPINNER_FRAMES.len()]
+    } else {
+        SPINNER_ASCII[step % SPINNER_ASCII.len()]
+    }
 }
 
 /// Marks text that was cut or dropped.
@@ -1738,6 +1788,98 @@ mod tests {
             .map(|s| s.content.as_ref())
             .collect();
         assert!(text.is_empty());
+    }
+
+    use crate::cli::output::RunProgress;
+    use std::time::Duration;
+
+    #[test]
+    fn test_running_pane_shows_a_spinner_and_the_repeat_status() {
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let (s, out) = running_state("market summary USDC --every 2s");
+        let hook = out.progress_hook().expect("the pane output has a hook");
+        *hook.lock().unwrap() = RunProgress {
+            run: 2,
+            total: Some(4),
+            next_at: Some(Instant::now() + Duration::from_secs(3)),
+            banner: None,
+        };
+        let text = screen(&s, 80, 12);
+        assert!(text.contains("run 2 of 4 · next in 3s"), "{text}");
+        assert!(
+            text.contains("running market summary USDC --every 2s…"),
+            "{text}"
+        );
+        // The glyph leads the line: braille with color, ASCII without.
+        let row = text.lines().find(|l| l.contains("running market")).unwrap();
+        let glyph = row.trim_start().chars().next().unwrap().to_string();
+        assert!(
+            SPINNER_FRAMES.contains(&glyph.as_str()) || SPINNER_ASCII.contains(&glyph.as_str()),
+            "{row:?}"
+        );
+    }
+
+    #[test]
+    fn test_spinner_uses_ascii_without_color_and_advances_with_time() {
+        assert_eq!(spinner_glyph(Duration::from_millis(0), false), "-");
+        assert_eq!(spinner_glyph(Duration::from_millis(100), false), "\\");
+        assert_eq!(spinner_glyph(Duration::from_millis(200), false), "|");
+        assert_eq!(spinner_glyph(Duration::from_millis(300), false), "/");
+        assert_eq!(spinner_glyph(Duration::from_millis(400), false), "-");
+        assert_ne!(
+            spinner_glyph(Duration::from_millis(0), true),
+            spinner_glyph(Duration::from_millis(100), true)
+        );
+    }
+
+    #[test]
+    fn test_spinner_and_run_status_never_enter_the_record() {
+        // They are drawn, not output: the copy, the scrollback and the
+        // journal must not hold them.
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Journal::at(dir.path().join("history"), dir.path().join("events"));
+        let mut s = TuiState::new(SessionContext::default(), journal, Vocab::default());
+        let inv = Invocation {
+            command: venues_list(),
+            route: Route::Pane,
+            ai: false,
+            argv: vec![],
+        };
+        let out = s.start("market summary USDC --every 2s", &inv);
+        crate::outln!(out, "data line").unwrap();
+        *out.progress_hook().unwrap().lock().unwrap() = RunProgress {
+            run: 2,
+            total: Some(4),
+            next_at: Some(Instant::now() + Duration::from_secs(3)),
+            banner: Some("Running market summary every 2s".into()),
+        };
+        let drawn = screen(&s, 80, 12);
+        assert!(drawn.contains("run 2 of 4"), "{drawn}");
+        s.finish(Ending::Finished(Ok(())));
+        let kept = format!(
+            "{}\n{}",
+            s.scrollback_text(),
+            s.last_output.clone().unwrap_or_default()
+        );
+        assert!(kept.contains("data line"));
+        for gone in [
+            "run 2 of",
+            "next in",
+            "running market",
+            "⠋",
+            "Running market",
+        ] {
+            assert!(!kept.contains(gone), "{gone:?} leaked into: {kept}");
+        }
+        let events = std::fs::read_to_string(dir.path().join("events")).unwrap();
+        assert!(
+            !events.contains("run 2 of") && !events.contains("next in"),
+            "{events}"
+        );
+        // And the finished screen shows none of it.
+        let after = screen(&s, 80, 12);
+        assert!(!after.contains("run 2 of"), "{after}");
     }
 
     #[test]

@@ -25,9 +25,29 @@
 use std::fmt;
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 /// A shared, thread-safe writer.
 type Sink = Arc<Mutex<dyn Write + Send>>;
+
+/// Where a repeating command is, for a screen that draws it.
+///
+/// It is not output. It never reaches the pane text, the copy or the
+/// journal. Only the command writes it; the TUI reads it.
+#[derive(Debug, Clone, Default)]
+pub struct RunProgress {
+    /// The run that is in progress or just ended. 0 before the first.
+    pub run: u64,
+    /// How many runs the command will make, when it is known.
+    pub total: Option<u64>,
+    /// When the next run starts. None while a run is in progress.
+    pub next_at: Option<Instant>,
+    /// The line the command printed when it started repeating.
+    pub banner: Option<String>,
+}
+
+/// A progress record shared between a command and the screen.
+pub type ProgressHook = Arc<Mutex<RunProgress>>;
 
 /// The output channels for one command run.
 ///
@@ -37,6 +57,7 @@ pub struct Output {
     out: Sink,
     err: Sink,
     progress: bool,
+    hook: Option<ProgressHook>,
 }
 
 impl Output {
@@ -47,6 +68,7 @@ impl Output {
             out: Arc::new(Mutex::new(io::stdout())),
             err: Arc::new(Mutex::new(io::stderr())),
             progress: true,
+            hook: None,
         }
     }
 
@@ -65,6 +87,7 @@ impl Output {
             out,
             err,
             progress: false,
+            hook: None,
         };
         (output, captured)
     }
@@ -91,6 +114,7 @@ impl Output {
             })),
             err: buf,
             progress: false,
+            hook: Some(ProgressHook::default()),
         };
         (output, captured)
     }
@@ -105,12 +129,26 @@ impl Output {
             out: Arc::new(Mutex::new(out)),
             err: Arc::new(Mutex::new(err)),
             progress: false,
+            hook: None,
         }
     }
 
     /// True when animated progress indicators may draw on the terminal.
     pub fn progress_enabled(&self) -> bool {
         self.progress
+    }
+
+    /// The progress record of this run, when the output has one. The TUI's
+    /// output has one; the plain CLI output does not.
+    pub fn progress_hook(&self) -> Option<ProgressHook> {
+        self.hook.clone()
+    }
+
+    /// Changes the progress record. Does nothing when there is no hook.
+    pub fn update_progress(&self, change: impl FnOnce(&mut RunProgress)) {
+        if let Some(hook) = &self.hook {
+            change(&mut lock(hook));
+        }
     }
 
     /// Writes formatted data to the data channel. Use [`outln!`](crate::outln) / [`out!`](crate::out).
