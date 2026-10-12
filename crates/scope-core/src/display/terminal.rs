@@ -1659,4 +1659,20 @@ mod tests {
         assert!(row.contains("1."));
         assert!(row.lines().count() > 1, "should wrap to multiple lines");
     }
+
+    #[test]
+    fn test_check_warn_styled_keeps_text_and_continuation_bar() {
+        let msg = "word ".repeat(60);
+        let plain = check_warn_styled(&msg, false);
+        let styled = check_warn_styled(&msg, true);
+        assert!(plain.starts_with("│  ! "));
+        assert!(!plain.contains('\x1b'));
+        assert!(styled.contains('\x1b'), "color on a color-enabled stream");
+        // Wrapped lines keep the bar, and no text is lost in either mode.
+        assert!(plain.lines().count() > 1);
+        assert_eq!(styled.lines().count(), plain.lines().count());
+        let words = |s: &str| s.matches("word").count();
+        assert_eq!(words(&plain), 60);
+        assert_eq!(words(&styled), 60);
+    }
 }

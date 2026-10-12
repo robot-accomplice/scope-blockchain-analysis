@@ -300,4 +300,12 @@ mod tests {
         res.unwrap();
         assert!(std::fs::read_to_string(&path).unwrap().contains(ADDR));
     }
+
+    #[tokio::test]
+    async fn test_dispatch_with_refuses_the_tui() {
+        // Only `dispatch` carries the TUI's exit code, so dispatch_with
+        // (which the TUI itself calls) must refuse `interactive`.
+        let (res, _) = run_line(&["interactive"]).await;
+        assert!(res.unwrap_err().to_string().contains("scope tui"));
+    }
 }

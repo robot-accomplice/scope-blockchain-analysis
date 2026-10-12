@@ -1257,4 +1257,88 @@ mod tests {
         assert_eq!(ev["route"], "pane");
         assert_eq!(ev["argv"][1], "venues");
     }
+
+    fn palette_selected(s: &TuiState) -> usize {
+        let Some(Overlay::Palette(p)) = &s.overlay else {
+            panic!("palette expected")
+        };
+        p.selected
+    }
+
+    #[test]
+    fn test_palette_selection_wraps_and_a_new_query_resets_it() {
+        // Down/Up must wrap, or the top and bottom rows are unreachable by
+        // keyboard. Editing the query must restart at the best match.
+        let mut s = state();
+        s.handle_key(ctrl_k());
+        let count = match &s.overlay {
+            Some(Overlay::Palette(p)) => p.matches().len(),
+            _ => panic!("palette expected"),
+        };
+        assert!(count > 2);
+        s.handle_key(key(KeyCode::Up));
+        assert_eq!(palette_selected(&s), count - 1);
+        s.handle_key(key(KeyCode::Down));
+        assert_eq!(palette_selected(&s), 0);
+        s.handle_key(key(KeyCode::Tab));
+        s.handle_key(key(KeyCode::BackTab));
+        assert_eq!(palette_selected(&s), 0);
+        s.handle_key(key(KeyCode::Down));
+        s.handle_key(key(KeyCode::Backspace));
+        assert_eq!(palette_selected(&s), 0);
+        s.handle_key(key(KeyCode::Down));
+        type_str(&mut s, "m");
+        assert_eq!(palette_selected(&s), 0);
+    }
+
+    #[test]
+    fn test_palette_esc_closes_and_enter_without_a_match_keeps_the_draft() {
+        let mut s = state();
+        type_str(&mut s, "draft");
+        s.handle_key(ctrl_k());
+        s.handle_key(key(KeyCode::Esc));
+        assert!(s.overlay.is_none());
+        s.handle_key(ctrl_k());
+        type_str(&mut s, "zzzzqqqq");
+        s.handle_key(key(KeyCode::Down));
+        s.handle_key(key(KeyCode::Enter));
+        assert!(s.overlay.is_none());
+        assert_eq!(s.input, "draft", "no match: nothing is filled in");
+    }
+
+    #[test]
+    fn test_menu_up_wraps_to_the_last_candidate() {
+        let mut s = vocab_state();
+        type_str(&mut s, "market summary USDC --venue b");
+        s.handle_key(key(KeyCode::Tab));
+        s.handle_key(key(KeyCode::Up));
+        s.handle_key(key(KeyCode::Enter));
+        assert_eq!(s.input, "market summary USDC --venue bitget ");
+        s.set_input("market summary USDC --venue b".to_string());
+        s.handle_key(key(KeyCode::Tab));
+        s.handle_key(key(KeyCode::Down));
+        s.handle_key(key(KeyCode::BackTab));
+        s.handle_key(key(KeyCode::Enter));
+        assert_eq!(s.input, "market summary USDC --venue binance ");
+    }
+
+    #[test]
+    fn test_record_signal_writes_the_signal_outcome_to_the_journal() {
+        // An RCA of a killed session reads this row: which signal, and
+        // which suspend-mode command it interrupted.
+        let dir = tempfile::tempdir().unwrap();
+        let events = dir.path().join("e.jsonl");
+        let mut s = TuiState::new(
+            SessionContext::default(),
+            Journal::at(dir.path().join("h"), events.clone()),
+            Vocab::default(),
+        );
+        s.record_signal("HUP", "suspend", "setup", &["scope".into(), "setup".into()]);
+        let row: serde_json::Value =
+            serde_json::from_str(std::fs::read_to_string(events).unwrap().trim()).unwrap();
+        assert_eq!(row["outcome"], "signal:HUP");
+        assert_eq!(row["route"], "suspend");
+        assert_eq!(row["input"], "setup");
+        assert_eq!(row["argv"][1], "setup");
+    }
 }

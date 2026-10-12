@@ -1277,4 +1277,12 @@ mod tests {
         s.finish(Ending::Finished(Ok(())));
         assert!(s.scrollback_text().contains("⚠ library warning"));
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_signal_stream_installs_all_handlers() {
+        // Installing handlers sends no signal. A failure to install one
+        // must stop the TUI before it takes the terminal.
+        assert!(signal_stream().is_ok());
+    }
 }

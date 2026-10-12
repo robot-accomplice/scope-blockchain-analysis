@@ -69,6 +69,19 @@ pub fn write_crash_log(
     Ok(path)
 }
 
+/// Writes the crash log and returns the line that tells the user where it
+/// is, or why it could not be written. `dir` is `None` when the platform
+/// has no data directory.
+fn crash_notice(dir: Option<&Path>, info_text: &str, journal_tail: &[String]) -> String {
+    match dir
+        .ok_or_else(|| io::Error::other("no data directory"))
+        .and_then(|dir| write_crash_log(dir, info_text, journal_tail))
+    {
+        Ok(path) => format!("scope crashed; details: {}", path.display()),
+        Err(e) => format!("scope crashed; the crash log failed: {e}"),
+    }
+}
+
 /// Installs the crash-log panic hook. Only the first call has an effect,
 /// so a resume that re-initializes the terminal does not stack hooks.
 pub(crate) fn install_panic_hook() {
@@ -78,17 +91,11 @@ pub(crate) fn install_panic_hook() {
         std::panic::set_hook(Box::new(move |info| {
             restore_terminal();
             let tail = Journal::in_data_dir().tail(JOURNAL_TAIL_LINES);
-            let logged = dirs::data_dir()
-                .map(|d| d.join("scope"))
-                .ok_or_else(|| io::Error::other("no data directory"))
-                .and_then(|dir| write_crash_log(&dir, &info.to_string(), &tail));
+            let dir = dirs::data_dir().map(|d| d.join("scope"));
+            let notice = crash_notice(dir.as_deref(), &info.to_string(), &tail);
             // `writeln!`, not `eprintln!`: a closed stderr must not panic
             // inside the hook, which would skip the previous hook.
-            let mut err = io::stderr();
-            let _ = match logged {
-                Ok(path) => writeln!(err, "scope crashed; details: {}", path.display()),
-                Err(e) => writeln!(err, "scope crashed; the crash log failed: {e}"),
-            };
+            let _ = writeln!(io::stderr(), "{notice}");
             previous(info);
         }));
     });
@@ -142,5 +149,33 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(2));
         let b = write_crash_log(dir.path(), "b", &[]).unwrap();
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn test_crash_notice_names_the_log_file_that_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let notice = crash_notice(Some(dir.path()), "boom", &[]);
+        let path = notice
+            .strip_prefix("scope crashed; details: ")
+            .expect(&notice);
+        assert!(std::fs::read_to_string(path).unwrap().contains("boom"));
+    }
+
+    #[test]
+    fn test_crash_notice_says_why_no_log_was_written() {
+        // The user must learn that no log exists, and why.
+        let none = crash_notice(None, "boom", &[]);
+        assert_eq!(
+            none,
+            "scope crashed; the crash log failed: no data directory"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("not-a-dir");
+        std::fs::write(&file, "x").unwrap();
+        let blocked = crash_notice(Some(&file), "boom", &[]);
+        assert!(
+            blocked.starts_with("scope crashed; the crash log failed: "),
+            "{blocked}"
+        );
     }
 }
