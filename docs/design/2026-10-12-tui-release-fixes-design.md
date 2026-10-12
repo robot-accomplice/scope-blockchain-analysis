@@ -154,3 +154,11 @@ Then:
 - **OSC 52 support differs between terminals.** `save` is the reliable path, and the Ctrl-Y note says when the terminal did not confirm the copy.
 - **Pane-width override (R11).** The display layer reads the terminal width in about 25 places. The override must be scoped to a TUI run, so the CLI is unaffected.
 - **Removing the side borders (R6) changes the look.** The color theme work restyles the pane anyway.
+
+## Amendments (2026-10-12)
+
+- **A1 (R16 titles):** the monitor never fetches a real venue order book or trades (code map G7). Titles: `(synthetic, from DEX pairs)` when built from DEX pairs; in `--pair` (venue-only) mode the panels read `Order Book (not available in venue-only mode)` / `Recent Trades (not available in venue-only mode)`. A real venue book in the monitor is out of scope (follow-up issue).
+- **A2 (R11 width):** a width override alone does not fix the fixed 50-column rules. `section_header`, `section_footer`, `separator` and table rules use `min(their width, terminal_width())`; `terminal_width()` honors a process-global override that the TUI sets to the pane's inner width.
+- **A3 (R4 acceptance):** the harness gains `env`, `args` and `wait_for_paint` scenario fields so `TERM=dumb` and the exit-2 path are harness-tested; stdin/stdout-not-a-tty stays a unit test plus manual check.
+- **A4 (R1 acceptance):** the harness gains a `signal` step (unix `kill`), so R1/R2 are harness-tested instead of manual.
+- **A5 (R7):** cause first. If the investigation (T8 step 1) shows the Enter is lost before raw mode, the fix is to enter raw mode first in `tui::run` (before `SessionContext::load`/`Vocab::load`) and accept `\n` as Enter; the harness `wait_for_paint: false` scenario is the acceptance.
