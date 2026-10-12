@@ -192,6 +192,16 @@ pub fn init_with(
         let mut notices = Vec::new();
         let wanted = configured_kind_with(config, env);
         let mismatch = installed.fell_back && wanted != installed.kind;
+        // A fallen-back recorder was built from the default config, so it
+        // scanned for no configured secrets. Refuse it even when record is
+        // also the wanted mode.
+        if installed.fell_back && wanted == Kind::Record && installed.kind == Kind::Record {
+            return Err(ScopeError::Network(
+                "record mode started before the config was loaded, so secrets from the \
+                 config could not be scanned for; the run stops"
+                    .into(),
+            ));
+        }
         if mismatch && matches!(wanted, Kind::Replay | Kind::Record) {
             return Err(ScopeError::Network(format!(
                 "HTTP was used before startup with the {} transport; SCOPE_HTTP_MODE={} \
