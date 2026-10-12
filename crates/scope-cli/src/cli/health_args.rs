@@ -44,6 +44,15 @@ pub struct HealthArgs {
 
     #[arg(long, value_name = "PCT", value_parser = positive_pct, help = with_default("Price step between levels of a synthetic AMM book (DEX venues), in percent.", health::DEFAULT_AMM_STEP_PCT))]
     pub amm_step_pct: Option<f64>,
+
+    #[arg(long, value_name = "PCT", value_parser = positive_pct, help = with_default("Half-width of the depth window for the depth/volume rule, in percent of the mid price.", health::DEFAULT_DEPTH_WINDOW_PCT))]
+    pub depth_window_pct: Option<f64>,
+
+    #[arg(long, value_name = "PCT", value_parser = positive_pct, help = with_default("Depth/volume floor: depth within the window below this percent of 24h volume fails.", health::DEFAULT_MIN_DEPTH_VOLUME_PCT))]
+    pub min_depth_volume_pct: Option<f64>,
+
+    #[arg(long, value_name = "PCT", value_parser = positive_pct, help = with_default("Depth/volume ceiling: depth within the window above this percent of 24h volume warns.", health::DEFAULT_MAX_DEPTH_VOLUME_PCT))]
+    pub max_depth_volume_pct: Option<f64>,
 }
 
 /// Parses a percentage that must be finite and greater than zero.
@@ -75,6 +84,9 @@ impl HealthArgs {
             min_top3_depth: self.min_top3_depth,
             min_top10_depth: self.min_top10_depth,
             amm_step_pct: self.amm_step_pct,
+            depth_window_pct: self.depth_window_pct,
+            min_depth_volume_pct: self.min_depth_volume_pct,
+            max_depth_volume_pct: self.max_depth_volume_pct,
         })
     }
 }
@@ -152,5 +164,18 @@ mod tests {
                 bad
             );
         }
+    }
+
+    #[test]
+    fn test_depth_volume_flags_override_config() {
+        let mut config = Config::default();
+        config.market.health.min_depth_volume_pct = 3.0;
+        let t = resolve(
+            &["--max-depth-volume-pct", "25", "--depth-window-pct", "1"],
+            &config,
+        );
+        assert_eq!(t.min_depth_volume_pct, 3.0);
+        assert_eq!(t.max_depth_volume_pct, 25.0);
+        assert_eq!(t.depth_window_pct, 1.0);
     }
 }

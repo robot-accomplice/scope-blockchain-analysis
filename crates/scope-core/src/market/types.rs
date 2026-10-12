@@ -202,8 +202,8 @@ pub struct ExecutionEstimate {
 
 /// Outcome of a single health check.
 ///
-/// Serializes as `{"status": "pass" | "fail" | "n/a", "message": "…"}`.
-/// JSON consumers must handle `n/a`.
+/// Serializes as `{"status": "pass" | "fail" | "warn" | "n/a", "message": "…"}`.
+/// JSON consumers must handle `warn` and `n/a`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum HealthCheck {
     Pass(String),
@@ -211,14 +211,18 @@ pub enum HealthCheck {
     /// The check does not apply to this book; the message says why.
     /// It does not count against `healthy`.
     NotApplicable(String),
+    /// The value is outside its target, but not a failure. Shown to the
+    /// user; it does not count against `healthy`.
+    Warn(String),
 }
 
 impl HealthCheck {
-    /// `pass`, `fail` or `n/a`.
+    /// `pass`, `fail`, `warn` or `n/a`.
     pub fn status(&self) -> &'static str {
         match self {
             HealthCheck::Pass(_) => "pass",
             HealthCheck::Fail(_) => "fail",
+            HealthCheck::Warn(_) => "warn",
             HealthCheck::NotApplicable(_) => "n/a",
         }
     }
@@ -226,27 +230,32 @@ impl HealthCheck {
     /// The check's message.
     pub fn message(&self) -> &str {
         match self {
-            HealthCheck::Pass(m) | HealthCheck::Fail(m) | HealthCheck::NotApplicable(m) => m,
+            HealthCheck::Pass(m)
+            | HealthCheck::Fail(m)
+            | HealthCheck::Warn(m)
+            | HealthCheck::NotApplicable(m) => m,
         }
     }
 }
 
 impl HealthCheck {
-    /// The plain icon for markdown and plain-text reports: ✓, ✗ or –.
+    /// The plain icon for markdown and plain-text reports: ✓, ✗, ! or –.
     pub fn icon(&self) -> &'static str {
         match self {
             HealthCheck::Pass(_) => "✓",
             HealthCheck::Fail(_) => "✗",
+            HealthCheck::Warn(_) => "!",
             HealthCheck::NotApplicable(_) => "–",
         }
     }
 
-    /// One text row for terminal reports (✓, ✗ or –).
+    /// One text row for terminal reports (✓, ✗, ! or –).
     pub fn render_text(&self) -> String {
         use crate::display::terminal as t;
         match self {
             HealthCheck::Pass(m) => t::check_pass(m),
             HealthCheck::Fail(m) => t::check_fail(m),
+            HealthCheck::Warn(m) => t::check_warn(m),
             HealthCheck::NotApplicable(m) => t::check_na(m),
         }
     }
@@ -311,6 +320,17 @@ pub struct Ticker {
     pub best_ask: Option<f64>,
 }
 
+impl Ticker {
+    /// 24h volume in quote terms (e.g. USDT).
+    ///
+    /// Uses the reported quote volume. When only base volume is reported,
+    /// converts it with `mid`. Base volume alone is not a quote amount.
+    pub fn quote_volume(&self, mid: Option<f64>) -> Option<f64> {
+        self.quote_volume_24h
+            .or_else(|| Some(self.volume_24h? * mid?))
+    }
+}
+
 /// Aggregated market snapshot combining all available data for a pair.
 #[derive(Debug, Clone)]
 pub struct MarketSnapshot {
@@ -348,6 +368,37 @@ pub struct Candle {
 
 #[cfg(test)]
 mod tests {
+
+    fn ticker(base: Option<f64>, quote: Option<f64>) -> Ticker {
+        Ticker {
+            pair: "ETH/USDT".into(),
+            last_price: Some(2_000.0),
+            high_24h: None,
+            low_24h: None,
+            volume_24h: base,
+            quote_volume_24h: quote,
+            best_bid: None,
+            best_ask: None,
+        }
+    }
+
+    #[test]
+    fn test_quote_volume_prefers_the_reported_quote_volume() {
+        assert_eq!(
+            ticker(Some(10.0), Some(25_000.0)).quote_volume(Some(2_000.0)),
+            Some(25_000.0)
+        );
+    }
+
+    #[test]
+    fn test_quote_volume_converts_base_volume_with_the_mid_price() {
+        // 10 ETH at 2,000 is 20,000 USDT, not 10.
+        assert_eq!(
+            ticker(Some(10.0), None).quote_volume(Some(2_000.0)),
+            Some(20_000.0)
+        );
+        assert_eq!(ticker(Some(10.0), None).quote_volume(None), None);
+    }
     use super::*;
 
     #[test]

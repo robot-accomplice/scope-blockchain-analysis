@@ -80,8 +80,11 @@ A DEX pool has no level-2 book. `order_book_from_analytics` builds one:
 | Min depth | Total in-band depth ≥ threshold (default 3000) |
 | Top-3 depth | Sum of top 3 valid levels ≥ threshold per side (default 300) |
 | Top-10 depth | Sum of top 10 valid levels ≥ threshold per side (default 2000) |
+| Depth/volume | Bid + ask depth within ±`depth_window_pct`% of mid (default 2%), as a percent of 24h quote volume. Below `min_depth_volume_pct` (5%) fails; above `max_depth_volume_pct` (10%) warns; `n/a` without volume. If the fetched book ends inside the window, the depth is a lower bound (`≥`): a low result is then `n/a`, a high one still warns. |
 
-Each check is `pass`, `fail` or `n/a`. On a `SyntheticAmm` book, *min levels* and *max spread* are `n/a`: the step sets the level count, and the real spread is the pool fee, which the data source does not report. `n/a` checks are always shown and are left out of `healthy`. JSON: `{"status": "pass" | "fail" | "n/a", "message": "…"}`.
+Each check shows its value and its limit, pass or fail. Each check is `pass`, `fail`, `warn` or `n/a`. A `warn` is outside its target but is not a failure; it is left out of `healthy`. On a `SyntheticAmm` book, *min levels* and *max spread* are `n/a`: the step sets the level count, and the real spread is the pool fee, which the data source does not report. `n/a` checks are always shown and are left out of `healthy`. JSON: `{"status": "pass" | "fail" | "warn" | "n/a", "message": "…"}`.
+
+**24h volume** comes from the venue ticker in quote terms. When a venue reports only base volume, scope converts it with the mid price (`Ticker::quote_volume`).
 
 ## Volume & Execution
 

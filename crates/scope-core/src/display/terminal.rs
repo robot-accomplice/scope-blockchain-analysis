@@ -276,6 +276,41 @@ fn check_na_styled(msg: &str, tty: bool) -> String {
     out
 }
 
+/// A check row for a warning: outside its target, but not a failure.
+///
+/// ```text
+/// │  ! Depth/volume: 27.8% (13344 / 47929 USDT within ±2%; target 5–10%)
+/// ```
+pub fn check_warn(msg: &str) -> String {
+    check_warn_styled(msg, is_tty())
+}
+
+fn check_warn_styled(msg: &str, tty: bool) -> String {
+    // Prefix: "│  ! " = 5 visible columns
+    let avail = content_width_for(5);
+    let wrapped = wrap_lines(msg, avail);
+
+    let mut out = if tty {
+        format!(
+            "{}  {} {}",
+            "│".cyan(),
+            "!".yellow().bold(),
+            wrapped[0].yellow()
+        )
+    } else {
+        format!("│  ! {}", wrapped[0])
+    };
+
+    for line in &wrapped[1..] {
+        if tty {
+            out.push_str(&format!("\n{}    {}", "│".cyan(), line.yellow()));
+        } else {
+            out.push_str(&format!("\n│    {}", line));
+        }
+    }
+    out
+}
+
 /// Overall status line (healthy / unhealthy).
 pub fn status_line(healthy: bool) -> String {
     status_line_styled(healthy, is_tty())

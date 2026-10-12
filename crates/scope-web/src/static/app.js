@@ -700,12 +700,15 @@ function crawlToMarkdown(data) {
 }
 
 // ===== Health checks =====
-// A check's status is 'pass', 'fail' or 'n/a' (#37). n/a checks do not
-// apply to the book (for example spread on a synthetic AMM book) and do
-// not count against "healthy".
+// A check's status is 'pass', 'fail', 'warn' or 'n/a'. n/a checks do not
+// apply to the book (for example spread on a synthetic AMM book) (#37).
+// warn checks are outside their target but are not failures (for example
+// depth far above the depth/volume ceiling). Neither counts against
+// "healthy".
 var CHECK_STYLE = {
   'pass': { cls: 'pass', icon: '\u2713', md: '[x]' },
   'fail': { cls: 'fail', icon: '\u2717', md: '[ ]' },
+  'warn': { cls: 'warn', icon: '!',      md: '[!]' },
   'n/a':  { cls: 'na',   icon: '\u2013', md: '(n/a)' }
 };
 

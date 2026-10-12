@@ -49,6 +49,9 @@
 //!     peg_range: 0.001
 //!     min_bid_ask_ratio: 0.2
 //!     max_bid_ask_ratio: 5.0
+//!     depth_window_pct: 2.0       # depth/volume rule: depth within ±2% of mid
+//!     min_depth_volume_pct: 5.0   # below 5% of 24h volume fails
+//!     max_depth_volume_pct: 10.0  # above 10% of 24h volume warns
 //! ```
 //!
 //! ## Error Handling

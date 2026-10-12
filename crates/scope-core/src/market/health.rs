@@ -25,6 +25,16 @@ pub const DEFAULT_MIN_TOP3_DEPTH: f64 = 300.0;
 /// Default minimum depth of the top 10 valid levels per side (quote).
 pub const DEFAULT_MIN_TOP10_DEPTH: f64 = 2000.0;
 
+/// Default half-width of the depth window for the depth-to-volume rule,
+/// in percent of the mid price.
+pub const DEFAULT_DEPTH_WINDOW_PCT: f64 = 2.0;
+/// Default floor: depth within the window, in percent of 24h volume.
+/// Below it the book is too thin for the volume traded (fail).
+pub const DEFAULT_MIN_DEPTH_VOLUME_PCT: f64 = 5.0;
+/// Default ceiling: above it the volume is low for the visible
+/// liquidity (warning).
+pub const DEFAULT_MAX_DEPTH_VOLUME_PCT: f64 = 10.0;
+
 /// Default price step between levels of a synthetic AMM book, in percent.
 pub const DEFAULT_AMM_STEP_PCT: f64 = 0.1;
 
@@ -62,6 +72,13 @@ pub struct HealthThresholds {
     /// Price step between levels of a synthetic AMM book, in percent.
     /// With 0.1%, top-3 and top-10 depth mean depth within ±0.3% and ±1%.
     pub amm_step_pct: f64,
+    /// Half-width of the depth window for the depth-to-volume rule, in
+    /// percent of the mid price.
+    pub depth_window_pct: f64,
+    /// Depth within the window, in percent of 24h volume: below this fails.
+    pub min_depth_volume_pct: f64,
+    /// Depth within the window, in percent of 24h volume: above this warns.
+    pub max_depth_volume_pct: f64,
 }
 
 impl Default for HealthThresholds {
@@ -77,6 +94,9 @@ impl Default for HealthThresholds {
             min_top3_depth: DEFAULT_MIN_TOP3_DEPTH,
             min_top10_depth: DEFAULT_MIN_TOP10_DEPTH,
             amm_step_pct: DEFAULT_AMM_STEP_PCT,
+            depth_window_pct: DEFAULT_DEPTH_WINDOW_PCT,
+            min_depth_volume_pct: DEFAULT_MIN_DEPTH_VOLUME_PCT,
+            max_depth_volume_pct: DEFAULT_MAX_DEPTH_VOLUME_PCT,
         }
     }
 }
@@ -97,6 +117,9 @@ pub struct HealthOverrides {
     pub min_top3_depth: Option<f64>,
     pub min_top10_depth: Option<f64>,
     pub amm_step_pct: Option<f64>,
+    pub depth_window_pct: Option<f64>,
+    pub min_depth_volume_pct: Option<f64>,
+    pub max_depth_volume_pct: Option<f64>,
 }
 
 impl HealthThresholds {
@@ -113,6 +136,9 @@ impl HealthThresholds {
             min_top3_depth: o.min_top3_depth.unwrap_or(self.min_top3_depth),
             min_top10_depth: o.min_top10_depth.unwrap_or(self.min_top10_depth),
             amm_step_pct: o.amm_step_pct.unwrap_or(self.amm_step_pct),
+            depth_window_pct: o.depth_window_pct.unwrap_or(self.depth_window_pct),
+            min_depth_volume_pct: o.min_depth_volume_pct.unwrap_or(self.min_depth_volume_pct),
+            max_depth_volume_pct: o.max_depth_volume_pct.unwrap_or(self.max_depth_volume_pct),
         }
     }
 }
@@ -130,6 +156,69 @@ fn top_n_depth(levels: &[OrderBookLevel], n: usize) -> f64 {
         .take(n)
         .map(OrderBookLevel::value)
         .sum()
+}
+
+/// Quote depth of valid levels within ±`window_pct`% of `mid`, both sides.
+///
+/// The second value is `true` when a side's last fetched level is still
+/// inside the window: the book may continue past what was fetched, so the
+/// depth is a lower bound.
+fn depth_within(book: &OrderBook, mid: f64, window_pct: f64) -> (f64, bool) {
+    let lo = mid * (1.0 - window_pct / 100.0);
+    let hi = mid * (1.0 + window_pct / 100.0);
+    let in_window = |l: &&OrderBookLevel| is_valid_level(l) && l.price >= lo && l.price <= hi;
+    let depth = book
+        .bids
+        .iter()
+        .chain(&book.asks)
+        .filter(in_window)
+        .map(OrderBookLevel::value)
+        .sum();
+    let ends_inside = |levels: &[OrderBookLevel]| {
+        levels
+            .iter()
+            .rev()
+            .find(|l| is_valid_level(l))
+            .is_some_and(|l| l.price >= lo && l.price <= hi)
+    };
+    (depth, ends_inside(&book.bids) || ends_inside(&book.asks))
+}
+
+/// The depth-to-volume rule: depth within the window should be
+/// `min..=max` percent of 24h volume. Below fails, above warns.
+fn depth_volume_check(
+    book: &OrderBook,
+    thresholds: &HealthThresholds,
+    volume_24h: Option<f64>,
+) -> HealthCheck {
+    let w = thresholds.depth_window_pct;
+    let (lo, hi) = (
+        thresholds.min_depth_volume_pct,
+        thresholds.max_depth_volume_pct,
+    );
+    let (Some(volume), Some(mid)) = (volume_24h.filter(|v| *v > 0.0), book.mid_price()) else {
+        return HealthCheck::NotApplicable(
+            "Depth/volume: n/a (no 24h volume or mid price from this source)".to_string(),
+        );
+    };
+    let (depth, truncated) = depth_within(book, mid, w);
+    let pct = depth / volume * 100.0;
+    let at_least = if truncated { "≥" } else { "" };
+    let msg = format!(
+        "Depth/volume: {at_least}{pct:.1}% ({at_least}{depth:.0} / {volume:.0} USDT within ±{w}%; target {lo}–{hi}%)"
+    );
+    if pct > hi {
+        // A lower bound above the ceiling is still above it.
+        HealthCheck::Warn(msg)
+    } else if pct < lo && truncated {
+        HealthCheck::NotApplicable(format!(
+            "{msg}; n/a: the book ends before ±{w}%, so the depth may be higher"
+        ))
+    } else if pct < lo {
+        HealthCheck::Fail(msg)
+    } else {
+        HealthCheck::Pass(msg)
+    }
 }
 
 /// Aggregated market summary with order book snapshot and health results.
@@ -272,12 +361,22 @@ impl MarketSummary {
                 "Bid levels: {} < {} minimum",
                 valid_bids, thresholds.min_levels
             )));
+        } else {
+            checks.push(HealthCheck::Pass(format!(
+                "Bid levels: {} (min {})",
+                valid_bids, thresholds.min_levels
+            )));
         }
 
         // Bid depth
         if bid_depth < thresholds.min_depth {
             checks.push(HealthCheck::Fail(format!(
                 "Bid depth: {:.0} USDT < {:.0} USDT minimum",
+                bid_depth, thresholds.min_depth
+            )));
+        } else {
+            checks.push(HealthCheck::Pass(format!(
+                "Bid depth: {:.0} USDT (min {:.0})",
                 bid_depth, thresholds.min_depth
             )));
         }
@@ -293,12 +392,22 @@ impl MarketSummary {
                 "Ask levels: {} < {} minimum",
                 valid_asks, thresholds.min_levels
             )));
+        } else {
+            checks.push(HealthCheck::Pass(format!(
+                "Ask levels: {} (min {})",
+                valid_asks, thresholds.min_levels
+            )));
         }
 
         // Ask depth
         if ask_depth < thresholds.min_depth {
             checks.push(HealthCheck::Fail(format!(
                 "Ask depth: {:.0} USDT < {:.0} USDT minimum",
+                ask_depth, thresholds.min_depth
+            )));
+        } else {
+            checks.push(HealthCheck::Pass(format!(
+                "Ask depth: {:.0} USDT (min {:.0})",
                 ask_depth, thresholds.min_depth
             )));
         }
@@ -314,11 +423,17 @@ impl MarketSummary {
                     checks.push(HealthCheck::Fail(format!(
                         "{side} top-{n} depth: {depth:.0} USDT < {min:.0} USDT minimum"
                     )));
+                } else {
+                    checks.push(HealthCheck::Pass(format!(
+                        "{side} top-{n} depth: {depth:.0} USDT (min {min:.0})"
+                    )));
                 }
             }
         }
 
-        // n/a checks do not count (#37 decision A).
+        checks.push(depth_volume_check(book, thresholds, volume_24h));
+
+        // n/a checks (#37 decision A) and warnings do not count.
         let healthy = !checks.iter().any(|c| matches!(c, HealthCheck::Fail(_)));
 
         let execution_10k_buy = book.estimate_buy_execution(10_000.0);
@@ -564,9 +679,144 @@ mod tests {
             .iter()
             .filter_map(|c| match c {
                 HealthCheck::Fail(m) => Some(m.clone()),
-                HealthCheck::Pass(_) | HealthCheck::NotApplicable(_) => None,
+                HealthCheck::Pass(_) | HealthCheck::NotApplicable(_) | HealthCheck::Warn(_) => None,
             })
             .collect()
+    }
+
+    // ---- Depth-to-volume rule ----
+
+    /// `healthy_book` plus one level per side beyond ±2%, so the book does
+    /// not end inside the depth window.
+    fn deep_book() -> OrderBook {
+        let mut b = healthy_book();
+        b.bids.push(OrderBookLevel {
+            price: 0.97,
+            quantity: 100.0,
+        });
+        b.asks.push(OrderBookLevel {
+            price: 1.03,
+            quantity: 100.0,
+        });
+        b
+    }
+
+    /// Depth within ±2% of mid for `deep_book` (the far levels are outside).
+    fn deep_window_depth() -> f64 {
+        let b = healthy_book();
+        b.bids
+            .iter()
+            .chain(&b.asks)
+            .map(OrderBookLevel::value)
+            .sum()
+    }
+
+    fn with_volume(book: &OrderBook, volume: Option<f64>) -> MarketSummary {
+        MarketSummary::from_order_book(book, &HealthThresholds::default(), volume)
+    }
+
+    fn depth_volume(s: &MarketSummary) -> &HealthCheck {
+        let found = status_of(s, "Depth/volume");
+        assert_eq!(found.len(), 1, "{:?}", s.checks);
+        found[0]
+    }
+
+    #[test]
+    fn test_depth_volume_below_floor_fails() {
+        // 4% of volume is visible: too thin for the volume traded.
+        let s = with_volume(&deep_book(), Some(deep_window_depth() / 0.04));
+        assert!(
+            matches!(depth_volume(&s), HealthCheck::Fail(_)),
+            "{:?}",
+            depth_volume(&s)
+        );
+        assert!(!s.healthy);
+    }
+
+    #[test]
+    fn test_depth_volume_at_floor_passes() {
+        let s = with_volume(&deep_book(), Some(deep_window_depth() / 0.05));
+        assert!(
+            matches!(depth_volume(&s), HealthCheck::Pass(_)),
+            "{:?}",
+            depth_volume(&s)
+        );
+        assert!(s.healthy, "{:?}", s.checks);
+    }
+
+    #[test]
+    fn test_depth_volume_above_ceiling_warns_but_stays_healthy() {
+        // 12%: visible liquidity is high for the volume. A warning only.
+        let s = with_volume(&deep_book(), Some(deep_window_depth() / 0.12));
+        let c = depth_volume(&s);
+        assert!(matches!(c, HealthCheck::Warn(_)), "{c:?}");
+        assert!(c.message().contains("12.0%"), "{c:?}");
+        assert!(s.healthy, "a warning must not make the book unhealthy");
+    }
+
+    #[test]
+    fn test_depth_volume_without_volume_is_not_applicable() {
+        let s = with_volume(&deep_book(), None);
+        assert!(matches!(depth_volume(&s), HealthCheck::NotApplicable(_)));
+        let s = with_volume(&deep_book(), Some(0.0));
+        assert!(matches!(depth_volume(&s), HealthCheck::NotApplicable(_)));
+    }
+
+    #[test]
+    fn test_truncated_book_below_floor_is_not_applicable() {
+        // healthy_book ends inside ±2%: the real depth may be higher, so a
+        // floor failure would not be conclusive.
+        let s = with_volume(&healthy_book(), Some(deep_window_depth() / 0.01));
+        let c = depth_volume(&s);
+        assert!(matches!(c, HealthCheck::NotApplicable(_)), "{c:?}");
+        assert!(c.message().contains('≥'), "{c:?}");
+    }
+
+    #[test]
+    fn test_truncated_book_above_ceiling_still_warns() {
+        let s = with_volume(&healthy_book(), Some(deep_window_depth() / 0.30));
+        let c = depth_volume(&s);
+        assert!(matches!(c, HealthCheck::Warn(_)), "{c:?}");
+        assert!(c.message().contains("≥30.0%"), "{c:?}");
+    }
+
+    #[test]
+    fn test_depth_volume_thresholds_are_overridable() {
+        let t = HealthThresholds {
+            min_depth_volume_pct: 1.0,
+            max_depth_volume_pct: 50.0,
+            ..HealthThresholds::default()
+        };
+        let s = MarketSummary::from_order_book(&deep_book(), &t, Some(deep_window_depth() / 0.12));
+        assert!(matches!(depth_volume(&s), HealthCheck::Pass(_)));
+    }
+
+    // ---- Display: every check shows its value and limit ----
+
+    #[test]
+    fn test_passing_level_and_depth_checks_are_shown_with_limits() {
+        let s = summarize(&healthy_book());
+        for prefix in [
+            "Bid levels",
+            "Ask levels",
+            "Bid depth",
+            "Ask depth",
+            "Bid top-3 depth",
+            "Ask top-10 depth",
+        ] {
+            let found = status_of(&s, prefix);
+            assert_eq!(found.len(), 1, "{prefix}: {:?}", s.checks);
+            assert!(
+                matches!(found[0], HealthCheck::Pass(_)),
+                "{prefix}: {:?}",
+                found[0]
+            );
+            assert!(
+                found[0].message().contains("(min "),
+                "{prefix}: {:?}",
+                found[0]
+            );
+        }
     }
 
     // ---- #37: synthetic AMM books ----
@@ -648,13 +898,17 @@ mod tests {
 
     #[test]
     fn test_exchange_book_rules_are_unchanged() {
-        // n/a applies to synthetic AMM books only.
+        // The AMM n/a rules (levels, spread) apply to synthetic AMM books
+        // only. Depth/volume is n/a here for another reason: no volume.
         let s = summarize(&healthy_book());
         assert_eq!(s.source, BookSource::Exchange);
         assert!(
             s.checks
                 .iter()
-                .all(|c| !matches!(c, HealthCheck::NotApplicable(_)))
+                .filter(|c| !c.message().starts_with("Depth/volume"))
+                .all(|c| !matches!(c, HealthCheck::NotApplicable(_))),
+            "{:?}",
+            s.checks
         );
     }
 
@@ -738,6 +992,10 @@ mod tests {
         assert_eq!(t.min_top3_depth, 300.0);
         assert_eq!(t.min_top10_depth, 2000.0);
         assert_eq!(t.min_depth, 3000.0);
+        // Depth within ±2% of mid should be 5–10% of 24h volume.
+        assert_eq!(t.depth_window_pct, 2.0);
+        assert_eq!(t.min_depth_volume_pct, 5.0);
+        assert_eq!(t.max_depth_volume_pct, 10.0);
     }
 
     #[test]
