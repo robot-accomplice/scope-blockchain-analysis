@@ -130,36 +130,19 @@ async fn dispatch_compliance(
     result.map_err(|e| ScopeError::Compliance(e.to_string()))
 }
 
-/// Creates the HTTP transport based on Ghola configuration.
-///
-/// When `config.ghola.enabled` is `true`, attempts to create a Ghola
-/// sidecar client. Falls back to native `reqwest` if Ghola fails to start
-/// or is not installed, and says so on the error channel.
+/// Installs the process transport on the first call (see `scope::http::shared`)
+/// and prints the notices. Later calls return the same transport.
 ///
 /// # Errors
 ///
-/// Returns the output's error when the fallback notice cannot be written.
+/// Returns an error when the transport cannot be built, or when the output's
+/// error channel cannot be written.
 pub fn create_http_client(config: &Config, out: &Output) -> std::io::Result<Arc<dyn HttpClient>> {
-    if config.ghola.enabled {
-        match scope::http::GholaHttpClient::new(config.ghola.stealth, config.ghola.buffer_size) {
-            Ok(client) => {
-                tracing::info!("Using Ghola sidecar for HTTP transport");
-                return Ok(Arc::new(client));
-            }
-            Err(e) => {
-                errln!(out, "  ⚠ Ghola sidecar enabled but unavailable: {}", e)?;
-                errln!(
-                    out,
-                    "    Install: go install github.com/robot-accomplice/ghola@latest"
-                )?;
-                errln!(out, "    Falling back to native HTTP transport")?;
-            }
-        }
+    let built = scope::http::init(config).map_err(|e| std::io::Error::other(e.to_string()))?;
+    for notice in &built.notices {
+        errln!(out, "  {notice}")?;
     }
-
-    Ok(Arc::new(
-        scope::http::NativeHttpClient::new().expect("Failed to create HTTP client"),
-    ))
+    Ok(built.client)
 }
 
 // ============================================================================
@@ -181,6 +164,15 @@ mod tests {
         let client = create_http_client(&config, &quiet()).unwrap();
         // Default config has ghola.enabled = false, so should get NativeHttpClient
         let _: &dyn HttpClient = &*client;
+    }
+
+    #[test]
+    fn test_create_http_client_returns_the_installed_transport() {
+        // Two calls must give the same transport: one process, one transport.
+        let config = Config::default();
+        let a = create_http_client(&config, &quiet()).unwrap();
+        let b = create_http_client(&config, &quiet()).unwrap();
+        assert!(Arc::ptr_eq(&a, &b));
     }
 
     #[test]

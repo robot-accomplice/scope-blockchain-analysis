@@ -101,18 +101,11 @@ async fn serve_ui(uri: axum::http::Uri) -> impl axum::response::IntoResponse {
 ///
 /// This is the main entry point called from the CLI `web` command handler.
 pub async fn start_server(addr: SocketAddr, config: Config) -> anyhow::Result<()> {
-    let http: std::sync::Arc<dyn scope::http::HttpClient> = if config.ghola.enabled {
-        match scope::http::GholaHttpClient::new(config.ghola.stealth, config.ghola.buffer_size) {
-            Ok(client) => std::sync::Arc::new(client),
-            Err(_) => std::sync::Arc::new(
-                scope::http::NativeHttpClient::new().expect("Failed to create HTTP client"),
-            ),
-        }
-    } else {
-        std::sync::Arc::new(
-            scope::http::NativeHttpClient::new().expect("Failed to create HTTP client"),
-        )
-    };
+    let built = scope::http::init(&config)?;
+    for notice in &built.notices {
+        tracing::warn!("{notice}");
+    }
+    let http = built.client;
     let factory = DefaultClientFactory {
         chains_config: config.chains.clone(),
         http,
