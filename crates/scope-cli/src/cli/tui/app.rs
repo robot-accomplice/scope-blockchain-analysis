@@ -20,6 +20,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Paragraph, Wrap};
 use scope::config::Config;
 use std::time::Instant;
+use unicode_width::UnicodeWidthStr;
 
 /// The most lines kept in the scrollback. Older lines are dropped.
 pub const SCROLLBACK_LIMIT: usize = 5000;
@@ -322,6 +323,37 @@ impl TuiState {
             _ => {}
         }
         Action::None
+    }
+
+    /// Inserts pasted text at the cursor as one line. A paste never runs
+    /// the line, also when it ends in a newline. Line breaks become
+    /// spaces, a tab becomes a space, and other control characters are
+    /// dropped, so a paste cannot put an escape sequence in the input.
+    pub fn paste(&mut self, text: &str) {
+        let unified = text.replace("\r\n", "\n").replace('\r', "\n");
+        let body = unified.strip_suffix('\n').unwrap_or(&unified);
+        let lines = body.split('\n').count();
+        let clean: String = body
+            .replace('\n', " ")
+            .chars()
+            .map(|c| if c == '\t' { ' ' } else { c })
+            .filter(|c| !c.is_control())
+            .collect();
+        if clean.is_empty() {
+            return;
+        }
+        self.overlay = None;
+        let at = self.byte_index(self.cursor);
+        self.input.insert_str(at, &clean);
+        self.cursor += clean.chars().count();
+        if lines > 1 {
+            self.push_note(&format!("pasted {} lines as one line", lines));
+        }
+    }
+
+    /// The display column of the cursor: wide characters count as two.
+    fn cursor_column(&self) -> usize {
+        UnicodeWidthStr::width(&self.input[..self.byte_index(self.cursor)])
     }
 
     fn tab_complete(&mut self) {
@@ -641,8 +673,17 @@ impl TuiState {
 
         // Input line with the prompt in the border title.
         let block = Block::bordered().title(self.prompt());
-        f.render_widget(Paragraph::new(self.input.as_str()).block(block), input);
-        let cursor_x = input.x + 1 + self.cursor as u16;
+        // Scroll the line so the cursor stays on the last inner column.
+        let inner_width = input.width.saturating_sub(2).max(1) as usize;
+        let col = self.cursor_column();
+        let scroll_x = col.saturating_sub(inner_width - 1);
+        f.render_widget(
+            Paragraph::new(self.input.as_str())
+                .block(block)
+                .scroll((0, scroll_x.min(u16::MAX as usize) as u16)),
+            input,
+        );
+        let cursor_x = input.x + 1 + (col - scroll_x).min(u16::MAX as usize) as u16;
         f.set_cursor_position(Position::new(
             cursor_x.min(input.right().saturating_sub(2)),
             input.y + 1,
@@ -831,6 +872,12 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn cursor_pos(s: &TuiState, w: u16, h: u16) -> Position {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| s.render(f)).unwrap();
+        term.get_cursor_position().unwrap()
     }
 
     fn vocab_state() -> TuiState {
@@ -1396,5 +1443,102 @@ mod tests {
             "{}",
             s.scrollback_text()
         );
+    }
+
+    #[test]
+    fn test_paste_joins_lines_and_never_runs() {
+        let mut s = state();
+        s.paste("venues list\nmarket summary USDC\n");
+        assert_eq!(s.input, "venues list market summary USDC");
+        assert!(s.scrollback_text().contains("pasted 2 lines as one line"));
+    }
+
+    #[test]
+    fn test_paste_one_line_adds_no_note_and_crlf_counts_once() {
+        let mut s = state();
+        s.paste("help\r\n");
+        assert_eq!(s.input, "help");
+        assert!(!s.scrollback_text().contains("pasted"));
+        s.set_input(String::new());
+        s.paste("a\r\nb\rc");
+        assert_eq!(s.input, "a b c");
+        assert!(s.scrollback_text().contains("pasted 3 lines as one line"));
+    }
+
+    #[test]
+    fn test_paste_inserts_at_the_cursor() {
+        let mut s = state();
+        type_str(&mut s, "ac");
+        s.handle_key(key(KeyCode::Left));
+        s.paste("b");
+        assert_eq!(s.input, "abc");
+        type_str(&mut s, "!");
+        assert_eq!(s.input, "ab!c", "the cursor sits after the paste");
+    }
+
+    #[test]
+    fn test_paste_cannot_inject_control_characters() {
+        let mut s = state();
+        s.paste("a\x1b[2Jb\tc\x07\x7fd");
+        assert_eq!(s.input, "a[2Jb cd");
+    }
+
+    #[test]
+    fn test_paste_closes_the_completion_menu() {
+        let mut s = vocab_state();
+        type_str(&mut s, "market summary X --venue b");
+        s.handle_key(key(KeyCode::Tab));
+        assert!(s.overlay.is_some());
+        s.paste("z");
+        assert!(s.overlay.is_none());
+    }
+
+    #[test]
+    fn test_paste_while_a_command_runs_goes_to_the_input() {
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let mut s = state();
+        let inv = Invocation {
+            command: venues_list(),
+            route: Route::Pane,
+            ai: false,
+            argv: vec![],
+        };
+        s.start("venues list", &inv);
+        s.paste("market summary USDC\n");
+        assert_eq!(s.input, "market summary USDC");
+        assert!(s.running.is_some(), "the paste does not run or cancel");
+        s.finish(Ending::Cancelled);
+    }
+
+    #[test]
+    fn test_long_input_keeps_cursor_visible() {
+        let mut s = state();
+        s.paste(&"x".repeat(300));
+        // 60 columns: the inner width is 58, and the cursor is the last cell.
+        assert_eq!(cursor_pos(&s, 60, 12).x, 58);
+        let sc = screen(&s, 60, 12);
+        let row = sc.lines().find(|l| l.contains("xxxx")).unwrap();
+        let cells: Vec<char> = row.chars().collect();
+        assert_eq!(cells[0], '│');
+        assert!(
+            cells[1..58].iter().all(|&c| c == 'x'),
+            "text ends at the cursor"
+        );
+        assert_eq!(cells[58], ' ', "the cursor cell is empty");
+        assert_eq!(cells[59], '│', "the border is not overwritten");
+    }
+
+    #[test]
+    fn test_cursor_scrolls_back_with_home() {
+        let mut s = state();
+        s.paste(&"x".repeat(100));
+        s.handle_key(key(KeyCode::Home));
+        assert_eq!(
+            cursor_pos(&s, 60, 12).x,
+            1,
+            "Home shows the start of the line"
+        );
+        s.handle_key(key(KeyCode::End));
+        assert_eq!(cursor_pos(&s, 60, 12).x, 58);
     }
 }

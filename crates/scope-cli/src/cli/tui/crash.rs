@@ -16,10 +16,20 @@ use std::sync::OnceLock;
 /// How many journal lines the crash log keeps.
 const JOURNAL_TAIL_LINES: usize = 20;
 
-/// Gives the terminal back: raw mode off, alternate screen off, cursor
-/// shown. Every restore site calls this one function, so a new terminal
-/// mode (bracketed paste) needs one change here.
+/// Takes the terminal: raw mode on, alternate screen on, bracketed paste
+/// on. Every init site calls this one function (startup, resume, a
+/// re-init after a stop), so paste mode is never missed.
+pub(crate) fn enter_terminal() -> ratatui::DefaultTerminal {
+    let terminal = ratatui::init();
+    let _ = crossterm::execute!(io::stdout(), crossterm::event::EnableBracketedPaste);
+    terminal
+}
+
+/// Gives the terminal back: bracketed paste off, raw mode off, alternate
+/// screen off, cursor shown. Every restore site calls this one function.
+/// Calling it twice is harmless.
 pub(crate) fn restore_terminal() {
+    let _ = crossterm::execute!(io::stdout(), crossterm::event::DisableBracketedPaste);
     ratatui::restore();
 }
 

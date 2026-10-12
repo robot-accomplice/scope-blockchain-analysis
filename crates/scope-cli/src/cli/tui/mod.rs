@@ -164,7 +164,7 @@ pub async fn run(
     );
     welcome(&mut state, no_banner);
     let mut host = RealHost {
-        terminal: ratatui::init(),
+        terminal: crash::enter_terminal(),
         events: None,
         signals,
         on_screen: true,
@@ -299,7 +299,7 @@ impl Host for RealHost {
         self.restore();
     }
     fn resume(&mut self) {
-        self.terminal = ratatui::init();
+        self.terminal = crash::enter_terminal();
         self.on_screen = true;
     }
     /// Does nothing when the screen is already given back: leaving the
@@ -399,6 +399,10 @@ async fn event_loop<H: Host>(
             ev = events.next() => {
                 let key = match ev {
                     Some(Ok(Event::Key(k))) if k.kind == KeyEventKind::Press => k,
+                    Some(Ok(Event::Paste(text))) => {
+                        state.paste(&text);
+                        continue;
+                    }
                     Some(Ok(_)) => continue,
                     Some(Err(e)) => return Err(ScopeError::IoError(e)),
                     None => return Ok(LEFT),
@@ -910,6 +914,16 @@ mod tests {
     /// Types `lines`, then delivers `signal`.
     async fn drive_signal_after(lines: &[&str], signal: Signal) -> Driven {
         drive_with(Journal::default(), script(lines), vec![signal]).await
+    }
+
+    #[tokio::test]
+    async fn test_paste_event_fills_the_input_and_does_not_run_it() {
+        // A paste that ends in a newline must not submit the line.
+        let _lock = DIAG_LOCK.lock().await;
+        let (res, state, _, _) = drive(vec![Ok(Event::Paste("ctx\nhelp\n".into()))]).await;
+        assert_eq!(res.unwrap().code, 0);
+        assert_eq!(state.input, "ctx help");
+        assert!(state.history.is_empty(), "nothing was submitted");
     }
 
     #[tokio::test]
