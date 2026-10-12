@@ -39,6 +39,10 @@ impl HttpClient for NativeHttpClient {
             builder = builder.header(k.as_str(), v.as_str());
         }
 
+        if let Some(t) = request.timeout {
+            builder = builder.timeout(t);
+        }
+
         if let Some(body) = request.body {
             builder = builder.body(body);
         }
@@ -200,6 +204,25 @@ mod tests {
             Some("value123")
         );
         mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_native_applies_request_timeout() {
+        // A server that answers after 2 s must fail a 200 ms request.
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/slow")
+            .with_chunked_body(|w| {
+                std::thread::sleep(Duration::from_secs(2));
+                w.write_all(b"late")
+            })
+            .create_async()
+            .await;
+
+        let client = NativeHttpClient::new().unwrap();
+        let req = Request::get(&format!("{}/slow", server.url()))
+            .with_timeout(Duration::from_millis(200));
+        assert!(client.send(req).await.is_err());
     }
 
     #[tokio::test]

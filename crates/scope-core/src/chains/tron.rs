@@ -168,8 +168,7 @@ impl TronClient {
     /// let client = TronClient::new(&config).unwrap();
     /// ```
     pub fn new(config: &ChainsConfig) -> Result<Self> {
-        let http: Arc<dyn HttpClient> = Arc::new(crate::http::NativeHttpClient::new()?);
-        Self::new_with_http(config, http)
+        Self::new_with_http(config, crate::http::transport())
     }
 
     /// Creates a new Tron client with a pre-built HTTP transport.
@@ -194,9 +193,7 @@ impl TronClient {
     /// * `api_url` - The TronGrid API endpoint URL
     pub fn with_api_url(api_url: &str) -> Self {
         Self {
-            http: Arc::new(
-                crate::http::NativeHttpClient::new().expect("failed to create HTTP client"),
-            ),
+            http: crate::http::transport(),
             api_url: api_url.to_string(),
             api_key: None,
         }
@@ -680,9 +677,7 @@ impl TronClient {
 impl Default for TronClient {
     fn default() -> Self {
         Self {
-            http: Arc::new(
-                crate::http::NativeHttpClient::new().expect("failed to create HTTP client"),
-            ),
+            http: crate::http::transport(),
             api_url: DEFAULT_TRON_API.to_string(),
             api_key: None,
         }

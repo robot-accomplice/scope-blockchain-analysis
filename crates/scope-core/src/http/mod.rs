@@ -23,9 +23,11 @@
 
 pub mod ghola;
 pub mod native;
+pub mod shared;
 
 pub use ghola::GholaHttpClient;
 pub use native::NativeHttpClient;
+pub use shared::{Built, init, transport};
 
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -39,6 +41,11 @@ pub struct Request {
     pub method: String,
     pub headers: HashMap<String, String>,
     pub body: Option<String>,
+    /// Overrides the transport's default timeout for this request.
+    ///
+    /// `NativeHttpClient` honours it. `GholaHttpClient` ignores it: the
+    /// request to the sidecar uses the Ghola client's own timeout.
+    pub timeout: Option<std::time::Duration>,
 }
 
 impl Request {
@@ -49,6 +56,7 @@ impl Request {
             method: "GET".to_string(),
             headers: HashMap::new(),
             body: None,
+            timeout: None,
         }
     }
 
@@ -61,12 +69,19 @@ impl Request {
             method: "POST".to_string(),
             headers,
             body: Some(body.into()),
+            timeout: None,
         }
     }
 
     /// Adds a header to the request.
     pub fn with_header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.headers.insert(key.into(), value.into());
+        self
+    }
+
+    /// Sets a timeout for this request only.
+    pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.timeout = Some(timeout);
         self
     }
 }
@@ -126,6 +141,23 @@ mod tests {
             req.headers.get("Content-Type").map(String::as_str),
             Some("application/json")
         );
+    }
+
+    #[test]
+    fn test_request_timeout_defaults_to_none() {
+        assert!(Request::get("https://example.com").timeout.is_none());
+        assert!(
+            Request::post_json("https://example.com", "{}")
+                .timeout
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_request_with_timeout_sets_it() {
+        let req =
+            Request::get("https://example.com").with_timeout(std::time::Duration::from_secs(7));
+        assert_eq!(req.timeout, Some(std::time::Duration::from_secs(7)));
     }
 
     #[test]

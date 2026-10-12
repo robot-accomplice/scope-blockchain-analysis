@@ -235,14 +235,7 @@ impl EthereumClient {
     /// let client = EthereumClient::new(&config).unwrap();
     /// ```
     pub fn new(config: &ChainsConfig) -> Result<Self> {
-        Self::new_with_http(
-            config,
-            Arc::new(
-                crate::http::NativeHttpClient::new().map_err(|e| {
-                    ScopeError::Chain(format!("Failed to create HTTP client: {}", e))
-                })?,
-            ),
-        )
+        Self::new_with_http(config, crate::http::transport())
     }
 
     /// Creates a new Ethereum client with an injected HTTP transport.
@@ -267,9 +260,7 @@ impl EthereumClient {
     /// * `base_url` - The base URL for the block explorer API
     pub fn with_base_url(base_url: &str) -> Self {
         Self {
-            http: Arc::new(
-                crate::http::NativeHttpClient::new().expect("failed to build reqwest client"),
-            ),
+            http: crate::http::transport(),
             base_url: base_url.to_string(),
             chain_id: None,
             api_key: None,
@@ -319,11 +310,7 @@ impl EthereumClient {
     /// Uses Etherscan V2 API format which requires an API key for most endpoints.
     /// Get a free API key at <https://etherscan.io/apis>
     pub fn for_chain(chain: &str, config: &ChainsConfig) -> Result<Self> {
-        let http: Arc<dyn HttpClient> = Arc::new(
-            crate::http::NativeHttpClient::new()
-                .map_err(|e| ScopeError::Chain(format!("Failed to create HTTP client: {}", e)))?,
-        );
-        Self::for_chain_with_http(chain, config, http)
+        Self::for_chain_with_http(chain, config, crate::http::transport())
     }
 
     /// Creates a chain-specific client with an injected HTTP transport.
@@ -1315,9 +1302,7 @@ impl EthereumClient {
 impl Default for EthereumClient {
     fn default() -> Self {
         Self {
-            http: Arc::new(
-                crate::http::NativeHttpClient::new().expect("failed to build default HTTP client"),
-            ),
+            http: crate::http::transport(),
             base_url: ETHERSCAN_V2_API.to_string(),
             chain_id: Some("1".to_string()),
             api_key: None,

@@ -260,8 +260,7 @@ impl SolanaClient {
     /// let client = SolanaClient::new(&config).unwrap();
     /// ```
     pub fn new(config: &ChainsConfig) -> Result<Self> {
-        let http: Arc<dyn HttpClient> = Arc::new(crate::http::NativeHttpClient::new()?);
-        Self::new_with_http(config, http)
+        Self::new_with_http(config, crate::http::transport())
     }
 
     /// Creates a new Solana client with a pre-built HTTP transport.
@@ -286,9 +285,7 @@ impl SolanaClient {
     /// * `rpc_url` - The Solana JSON-RPC endpoint URL
     pub fn with_rpc_url(rpc_url: &str) -> Self {
         Self {
-            http: Arc::new(
-                crate::http::NativeHttpClient::new().expect("failed to create HTTP client"),
-            ),
+            http: crate::http::transport(),
             rpc_url: rpc_url.to_string(),
             solscan_api_key: None,
         }
@@ -790,9 +787,7 @@ impl SolanaClient {
 impl Default for SolanaClient {
     fn default() -> Self {
         Self {
-            http: Arc::new(
-                crate::http::NativeHttpClient::new().expect("failed to create HTTP client"),
-            ),
+            http: crate::http::transport(),
             rpc_url: DEFAULT_SOLANA_RPC.to_string(),
             solscan_api_key: None,
         }

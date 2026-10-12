@@ -77,7 +77,7 @@ impl BlockchainDataClient {
     pub fn new(sources: DataSources) -> Self {
         Self {
             sources,
-            http_client: Arc::new(crate::http::NativeHttpClient::new().unwrap()),
+            http_client: crate::http::transport(),
             base_url: ETHERSCAN_API_BASE.to_string(),
         }
     }
@@ -86,7 +86,7 @@ impl BlockchainDataClient {
     pub fn with_base_url(sources: DataSources, base_url: &str) -> Self {
         Self {
             sources,
-            http_client: Arc::new(crate::http::NativeHttpClient::new().unwrap()),
+            http_client: crate::http::transport(),
             base_url: base_url.to_string(),
         }
     }

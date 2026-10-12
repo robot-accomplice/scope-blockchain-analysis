@@ -61,9 +61,10 @@ pub async fn handle(
             }
         };
 
-    let http_client = scope::http::NativeHttpClient::new().unwrap();
+    let http_client = scope::http::transport();
 
-    match contract::analyze_contract(&address, &chain, client.as_ref(), &http_client).await {
+    match contract::analyze_contract(&address, &chain, client.as_ref(), http_client.as_ref()).await
+    {
         Ok(analysis) => (StatusCode::OK, Json(serde_json::json!(analysis))).into_response(),
         Err(e) => {
             let err_msg = e.to_string();
