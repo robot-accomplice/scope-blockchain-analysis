@@ -173,14 +173,34 @@ pub fn secret_values(config: &Config) -> Vec<String> {
 
 /// Builds and installs the transport the first time; later calls return
 /// the installed transport with no notices.
+///
+/// # Errors
+///
+/// Returns an error when the transport cannot be built, or when
+/// `SCOPE_HTTP_MODE` selects replay or record but `transport()` already
+/// installed a different transport (the run must not use the network).
 pub fn init(config: &Config) -> Result<Built, ScopeError> {
+    init_with(config, &|k| std::env::var(k).ok())
+}
+
+/// Like `init`, reading environment variables through `env`.
+pub fn init_with(
+    config: &Config,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<Built, ScopeError> {
     if let Some(installed) = INSTALLED.get() {
         let mut notices = Vec::new();
-        let wanted = configured_kind(config);
-        if installed.fell_back
-            && wanted != installed.kind
-            && !NOTICE_SENT.swap(true, Ordering::SeqCst)
-        {
+        let wanted = configured_kind_with(config, env);
+        let mismatch = installed.fell_back && wanted != installed.kind;
+        if mismatch && matches!(wanted, Kind::Replay | Kind::Record) {
+            return Err(ScopeError::Network(format!(
+                "HTTP was used before startup with the {} transport; SCOPE_HTTP_MODE={} \
+                 was not applied, so the run stops",
+                installed.kind.name(),
+                wanted.name()
+            )));
+        }
+        if mismatch && !NOTICE_SENT.swap(true, Ordering::SeqCst) {
             let msg = format!(
                 "⚠ HTTP was used before startup; the {} transport from config was not applied",
                 wanted.name()
@@ -194,7 +214,7 @@ pub fn init(config: &Config) -> Result<Built, ScopeError> {
             notices,
         });
     }
-    let built = build(config)?;
+    let built = build_with(config, env)?;
     let installed = Installed {
         client: built.client.clone(),
         kind: built.kind,
@@ -203,22 +223,39 @@ pub fn init(config: &Config) -> Result<Built, ScopeError> {
     match INSTALLED.set(installed) {
         Ok(()) => Ok(built),
         // Another thread installed first: use its transport.
-        Err(_) => init(config),
+        Err(_) => init_with(config, env),
     }
 }
 
-/// The installed transport. Installs native if nothing is installed.
+/// The installed transport. If nothing is installed, installs the
+/// transport that the default config and the environment select, so
+/// `SCOPE_HTTP_MODE` applies even before `init`.
+///
+/// # Panics
+///
+/// Panics when that transport cannot be built, for example
+/// `SCOPE_HTTP_MODE=replay` with no `SCOPE_HTTP_FIXTURES`. A replay run must
+/// not go to the network in its place.
 pub fn transport() -> Arc<dyn HttpClient> {
+    transport_with(&|k| std::env::var(k).ok())
+}
+
+/// Like `transport`, reading environment variables through `env`.
+pub fn transport_with(env: &dyn Fn(&str) -> Option<String>) -> Arc<dyn HttpClient> {
     if let Some(installed) = INSTALLED.get() {
         return installed.client.clone();
     }
-    tracing::debug!("no HTTP transport installed; using native");
-    let native: Arc<dyn HttpClient> =
-        Arc::new(NativeHttpClient::new().expect("failed to build HTTP client"));
+    let built = build_with(&Config::default(), env).unwrap_or_else(|e| {
+        panic!("HTTP used before startup, and the transport could not be built: {e}")
+    });
+    tracing::debug!(
+        "no HTTP transport installed; using {} from the environment and default config",
+        built.kind.name()
+    );
     // If another thread won the race, `get` below returns its transport.
     let _ = INSTALLED.set(Installed {
-        client: native,
-        kind: Kind::Native,
+        client: built.client,
+        kind: built.kind,
         fell_back: true,
     });
     INSTALLED.get().expect("installed above").client.clone()
