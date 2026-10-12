@@ -566,6 +566,11 @@ fn drain_into(buf: &Mutex<Vec<u8>>, state: &mut TuiState) {
 mod tests {
     use super::*;
 
+    use crate::cli::Cli;
+    use ansi_to_tui::IntoText;
+    use clap::Parser;
+    use scope::chains::mocks::MockClientFactory;
+
     #[test]
     fn test_tui_requires_a_terminal() {
         assert!(tui_terminal_ok(true, true, Some("xterm-256color")).is_ok());
@@ -582,10 +587,6 @@ mod tests {
             );
         }
     }
-    use crate::cli::Cli;
-    use ansi_to_tui::IntoText;
-    use clap::Parser;
-    use scope::chains::mocks::MockClientFactory;
 
     const ADDR: &str = "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2";
     const TX: &str = "0xabc123def456789012345678901234567890123456789012345678901234abcd";

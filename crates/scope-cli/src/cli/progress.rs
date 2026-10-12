@@ -18,6 +18,7 @@
 use crate::cli::output::Output;
 use crate::errln;
 use indicatif::{ProgressBar, ProgressStyle};
+use scope::display::terminal::color_enabled_stderr;
 use std::time::Duration;
 
 /// A simple spinner for single-step or short sequential operations.
@@ -40,9 +41,13 @@ impl Spinner {
         let bar = if output.progress_enabled() && atty_stderr() {
             let pb = ProgressBar::new_spinner();
             pb.set_style(
-                ProgressStyle::with_template("{spinner:.cyan} {msg}")
-                    .unwrap()
-                    .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
+                ProgressStyle::with_template(if color_enabled_stderr() {
+                    "{spinner:.cyan} {msg}"
+                } else {
+                    "{spinner} {msg}"
+                })
+                .unwrap()
+                .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
             );
             pb.set_message(message.to_string());
             pb.enable_steady_tick(Duration::from_millis(80));
@@ -128,9 +133,13 @@ impl StepProgress {
         let bar = if output.progress_enabled() && atty_stderr() {
             let pb = ProgressBar::new(total);
             pb.set_style(
-                ProgressStyle::with_template("{prefix} [{bar:30.cyan/dim}] {pos}/{len} {msg}")
-                    .unwrap()
-                    .progress_chars("━━╸"),
+                ProgressStyle::with_template(if color_enabled_stderr() {
+                    "{prefix} [{bar:30.cyan/dim}] {pos}/{len} {msg}"
+                } else {
+                    "{prefix} [{bar:30}] {pos}/{len} {msg}"
+                })
+                .unwrap()
+                .progress_chars("━━╸"),
             );
             pb.set_prefix(prefix.to_string());
             pb
@@ -155,9 +164,19 @@ impl StepProgress {
     }
 }
 
-/// Checks if stderr is a TTY that may show a progress bar and color.
+/// Decides whether a progress bar may draw. Pure: the caller passes the
+/// environment and whether stderr is a terminal.
+///
+/// A bar needs a terminal that can redraw a line, so `TERM=dumb` turns it
+/// off. `NO_COLOR` does not: it governs color only.
+fn progress_bar_ok(env: &dyn Fn(&str) -> Option<String>, stderr_is_tty: bool) -> bool {
+    stderr_is_tty && env("TERM").as_deref() != Some("dumb")
+}
+
+/// Checks if stderr is a terminal that can show a progress bar.
 fn atty_stderr() -> bool {
-    scope::display::terminal::color_enabled_stderr()
+    use std::io::IsTerminal;
+    progress_bar_ok(&|k| std::env::var(k).ok(), std::io::stderr().is_terminal())
 }
 
 // ============================================================================
@@ -167,6 +186,18 @@ fn atty_stderr() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_progress_bar_rules() {
+        let env = |m: &'static [(&'static str, &'static str)]| {
+            move |k: &str| m.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string())
+        };
+        assert!(progress_bar_ok(&env(&[]), true));
+        // NO_COLOR governs color, not the bar.
+        assert!(progress_bar_ok(&env(&[("NO_COLOR", "1")]), true));
+        assert!(!progress_bar_ok(&env(&[("TERM", "dumb")]), true));
+        assert!(!progress_bar_ok(&env(&[]), false));
+    }
 
     fn quiet() -> Output {
         Output::capture().0

@@ -812,6 +812,17 @@ mod tests {
     }
 
     #[test]
+    fn test_color_override_beats_a_tty_and_none_restores() {
+        // The override is process-global. Never set Some(true): parallel
+        // tests run the plain wrappers, which expect uncolored output.
+        set_color_override(Some(false));
+        assert!(!color_enabled_for(true));
+        set_color_override(None);
+        let plain = color_enabled_with(&|k| std::env::var(k).ok(), true);
+        assert_eq!(color_enabled_for(true), plain);
+    }
+
+    #[test]
     fn test_section_header_contains_title() {
         let header = section_header("Token Health");
         assert!(header.contains("Token Health"));
