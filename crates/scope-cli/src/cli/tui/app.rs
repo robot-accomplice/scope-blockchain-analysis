@@ -12,6 +12,7 @@ use super::journal::{Event, Journal};
 use super::vocab::Vocab;
 use crate::cli::interactive::SessionContext;
 use crate::cli::output::{Captured, Output};
+use crate::cli::style::SECONDARY;
 use ansi_to_tui::IntoText;
 use chrono::Utc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -993,10 +994,7 @@ impl TuiState {
 
     /// Appends a dim note line.
     pub fn push_note(&mut self, note: &str) {
-        self.push_lines(vec![Line::styled(
-            note.to_string(),
-            Style::new().fg(Color::DarkGray),
-        )]);
+        self.push_lines(vec![Line::styled(note.to_string(), SECONDARY)]);
     }
 
     /// Appends a note line in `style`.
@@ -1464,10 +1462,7 @@ impl TuiState {
                 hint_row,
             );
         } else if let Some(h) = super::hint::hint(&self.input) {
-            let mut spans = vec![Span::styled(
-                format!(" {}", h.text),
-                Style::new().fg(Color::DarkGray),
-            )];
+            let mut spans = vec![Span::styled(format!(" {}", h.text), SECONDARY)];
             if let Some(next) = h.next {
                 spans.push(Span::styled(
                     format!("  next: {}", next),
@@ -1499,10 +1494,7 @@ impl TuiState {
                 };
                 lines.push(Line::from(vec![
                     Span::styled(format!("{:<28}", it.label), style),
-                    Span::styled(
-                        format!(" {}", it.description),
-                        Style::new().fg(Color::DarkGray),
-                    ),
+                    Span::styled(format!(" {}", it.description), SECONDARY),
                 ]));
             }
             f.render_widget(ratatui::widgets::Clear, rect);
@@ -1542,7 +1534,7 @@ impl TuiState {
 
     /// The spinner line and, for a repeating command, its run status.
     fn liveness_lines(&self, run: &Running, color: bool) -> Vec<Line<'static>> {
-        let dim = Style::new().fg(Color::DarkGray);
+        let dim = SECONDARY;
         let elapsed = run.started.elapsed();
         let mut lines = vec![Line::styled(
             format!(
@@ -1705,7 +1697,7 @@ fn cut_with_ellipsis(text: &str, max: usize) -> String {
 /// format, then chain, then the command text. The state text stays at
 /// every width, and a `…` shows that something was cut or dropped.
 fn fit_status(parts: &StatusParts, width: usize) -> Line<'static> {
-    let dim = Style::new().fg(Color::DarkGray);
+    let dim = SECONDARY;
     let hot = Style::new().fg(Color::Yellow);
     let bar = |left: String, right: String| {
         Line::from(vec![Span::styled(left, dim), Span::styled(right, hot)])
