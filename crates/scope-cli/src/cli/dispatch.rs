@@ -153,45 +153,60 @@ pub fn create_http_client(config: &Config, out: &Output) -> std::io::Result<Arc<
 mod tests {
     use super::*;
     use clap::Parser;
+    use scope::http::shared::Kind;
 
     fn quiet() -> Output {
         Output::capture().0
     }
 
     #[test]
-    fn test_create_http_client_default_config() {
-        let config = Config::default();
-        let client = create_http_client(&config, &quiet()).unwrap();
-        // Default config has ghola.enabled = false, so should get NativeHttpClient
-        let _: &dyn HttpClient = &*client;
-    }
-
-    #[test]
     fn test_create_http_client_returns_the_installed_transport() {
         // Two calls must give the same transport: one process, one transport.
+        // Default config only: `init` installs for the whole test binary, and
+        // a non-native transport would reach the mockito tests too.
         let config = Config::default();
-        let a = create_http_client(&config, &quiet()).unwrap();
-        let b = create_http_client(&config, &quiet()).unwrap();
+        let (out, captured) = Output::capture();
+        let a = create_http_client(&config, &out).unwrap();
+        let b = create_http_client(&config, &out).unwrap();
         assert!(Arc::ptr_eq(&a, &b));
+        // Default config selects native, which has nothing to report.
+        assert!(captured.err().is_empty(), "{}", captured.err());
+    }
+
+    /// Selection for a Ghola config, without installing it for the process.
+    /// The test machine may or may not run a Ghola sidecar: the result must
+    /// be Ghola with no notice, or native with notices that say so.
+    fn assert_ghola_selection(stealth: bool) {
+        let mut config = Config::default();
+        config.ghola.enabled = true;
+        config.ghola.stealth = stealth;
+        let built = scope::http::shared::build_with(&config, &|_| None).unwrap();
+        match built.kind {
+            Kind::Ghola => assert!(built.notices.is_empty(), "{:?}", built.notices),
+            Kind::Native => {
+                let all = built.notices.join("\n");
+                assert!(all.contains("Ghola"), "{all}");
+                assert!(all.contains("Falling back"), "{all}");
+            }
+            other => panic!("unexpected kind {other:?}"),
+        }
     }
 
     #[test]
-    fn test_create_http_client_ghola_enabled() {
-        let mut config = Config::default();
-        config.ghola.enabled = true;
-        config.ghola.stealth = true;
-        let client = create_http_client(&config, &quiet()).unwrap();
-        // Should still succeed (falls back to native if ghola not installed)
-        let _: &dyn HttpClient = &*client;
+    fn test_transport_selection_default_config_is_native() {
+        let built = scope::http::shared::build_with(&Config::default(), &|_| None).unwrap();
+        assert_eq!(built.kind, Kind::Native);
+        assert!(built.notices.is_empty(), "{:?}", built.notices);
     }
 
     #[test]
-    fn test_create_http_client_ghola_no_stealth() {
-        let mut config = Config::default();
-        config.ghola.enabled = true;
-        config.ghola.stealth = false;
-        let client = create_http_client(&config, &quiet()).unwrap();
-        let _: &dyn HttpClient = &*client;
+    fn test_transport_selection_ghola_enabled() {
+        assert_ghola_selection(true);
+    }
+
+    #[test]
+    fn test_transport_selection_ghola_no_stealth() {
+        assert_ghola_selection(false);
     }
 
     #[tokio::test]

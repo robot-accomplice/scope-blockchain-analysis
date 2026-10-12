@@ -42,6 +42,9 @@ pub struct Request {
     pub headers: HashMap<String, String>,
     pub body: Option<String>,
     /// Overrides the transport's default timeout for this request.
+    ///
+    /// `NativeHttpClient` honours it. `GholaHttpClient` ignores it: the
+    /// request to the sidecar uses the Ghola client's own timeout.
     pub timeout: Option<std::time::Duration>,
 }
 

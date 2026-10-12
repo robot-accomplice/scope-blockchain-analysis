@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Library API (`scope-bca-cli`, `scope-bca-core`).**
   - Command handlers take an `&Output`, and the print macros (`outln!`, `errln!`) return `io::Result`. The command router moved from the binary to `scope_cli::cli::dispatch`. `display_error`, `Spinner::new` and `StepProgress::new` return `io::Result`. (#48)
   - `HealthCheck` has a third variant, `NotApplicable`. `OrderBook` and `MarketSummary` have a `source: BookSource` field. `DexPair` has `liquidity_base`. `HealthThresholds` has `amm_step_pct`. `order_book_from_analytics` takes `&HealthThresholds`. (#52)
+  - `http::Request` has a new public field, `timeout: Option<Duration>`. Struct literals must set it. `Request::with_timeout` sets it for one request. `NativeHttpClient` uses it; `GholaHttpClient` ignores it. (#61)
 
 ### Added
 - **TUI learnability.** `Tab` completes commands, flags, enum values, `@labels`, token aliases, venues and chains. A row under the input shows the command's usage and the next argument. `Ctrl-K` opens a fuzzy command palette. `Esc` or `Ctrl-C` cancels a running command, including `--every` loops. (#50, #53)
@@ -27,9 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Errors show their cause chain** (`caused by: …`). When a TLS handshake gets a non-TLS reply, the hint names a router, firewall, proxy or VPN that may block the host. (#54)
 - **`monitor --venue` falls back to the venue** when DexScreener fails (unreachable, blocked, or the token is unknown there), and says why. (#54)
 - **`monitor --pair` accepts any common pair form** (`USDN_USDT`, `USDN/USDT`, `USDN-USDT`, `USDNUSDT`) and converts it to the venue's own format. (#56)
+- **Library API: new module `http::shared`.** It selects the HTTP transport in one place. `build` makes a transport from config, `init` installs it for the process, and `transport` returns the installed one. (#61)
 
 ### Fixed
 - The monitor used a hard-coded DEX client for refreshes, which ignored the configured HTTP transport and Ghola. (#51)
+- Some requests did not use the configured HTTP transport. Every request now uses it. Ghola now also covers the exchange venues, the DEX client, and the contract and compliance requests. (#61)
+- `scope web` now logs a warning when Ghola is enabled but not available and it uses the native transport. Before, it gave no warning. (#61)
 - CSV export errors in the monitor were dropped. A failed write now stops the export and logs the reason. (#51)
 - `scope web` through the command router hit `unreachable!`. It now returns an error. (#48)
 - Library warnings (for example the Etherscan Pro key notice) now go to stderr, or into the TUI pane while it runs. (#50)
