@@ -1,0 +1,12 @@
+name: a run ends with a Done or Failed footer
+tiers: [offline]
+steps:
+  - type: "venues list"
+  - key: Enter
+  - wait_for: { text: "Done in", timeout: 10s }
+  - type: "market summary USDC --venue nosuch"
+  - key: Enter
+  - wait_for: { text: "Failed in", timeout: 20s }
+  - expect_screen: { contains: ["✗ Failed in"] }
+  - key: Ctrl-D
+  - expect_exit: 0

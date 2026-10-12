@@ -19,6 +19,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use scope::config::Config;
+use scope::display::terminal::color_enabled;
 use std::cell::Cell;
 use std::time::Instant;
 use unicode_width::UnicodeWidthStr;
@@ -598,6 +599,11 @@ impl TuiState {
         )]);
     }
 
+    /// Appends a note line in `style`.
+    fn push_styled_note(&mut self, note: &str, style: Style) {
+        self.push_lines(vec![Line::styled(note.to_string(), style)]);
+    }
+
     fn push_lines(&mut self, lines: Vec<Line<'static>>) {
         self.scrollback.extend(lines);
         let excess = self.scrollback.len().saturating_sub(SCROLLBACK_LIMIT);
@@ -710,6 +716,12 @@ impl TuiState {
     /// Ends the pane command: moves its output into the scrollback, shows
     /// the error if it failed, and logs the event.
     pub fn finish(&mut self, ending: Ending) {
+        self.finish_with(ending, color_enabled());
+    }
+
+    /// `finish`, with the color choice given. The failure footer always
+    /// carries the `✗` glyph and its words; `color` only adds the red.
+    fn finish_with(&mut self, ending: Ending, color: bool) {
         let Some(run) = self.running.take() else {
             return;
         };
@@ -727,12 +739,18 @@ impl TuiState {
             self.last_output = Some(super::clip::strip_ansi(&output));
         }
         self.push_ansi(&output);
+        let secs = run.started.elapsed().as_secs_f64();
         match &ending {
-            Ending::Cancelled => self.push_note("Cancelled."),
-            Ending::Finished(_) => self.push_note(&format!(
-                "Done in {:.1}s.",
-                run.started.elapsed().as_secs_f64()
-            )),
+            Ending::Cancelled => self.push_note(&format!("Cancelled after {:.1}s.", secs)),
+            Ending::Finished(Err(_)) => {
+                let style = if color {
+                    Style::new().fg(Color::Red)
+                } else {
+                    Style::new().add_modifier(Modifier::BOLD)
+                };
+                self.push_styled_note(&format!("✗ Failed in {:.1}s.", secs), style);
+            }
+            Ending::Finished(Ok(())) => self.push_note(&format!("Done in {:.1}s.", secs)),
         }
         self.log(Event {
             started: run.started_at,
@@ -1379,7 +1397,7 @@ mod tests {
         assert_eq!(s.handle_key(key(KeyCode::Enter)), Action::None);
         assert_eq!(s.input, "x", "the next line waits for the command to end");
         s.finish(Ending::Cancelled);
-        assert!(s.scrollback_text().contains("Cancelled."));
+        assert!(s.scrollback_text().contains("Cancelled after"));
     }
 
     #[test]
@@ -2050,5 +2068,74 @@ mod tests {
         let text = screen(&s, 40, 12);
         let row = text.lines().find(|l| l.contains("hello")).unwrap();
         assert!(row.starts_with("hello"), "{row:?}");
+    }
+
+    fn last_line(s: &TuiState) -> &Line<'static> {
+        s.scrollback.last().unwrap()
+    }
+
+    #[test]
+    fn test_ok_run_ends_with_done_footer() {
+        let mut s = state();
+        run_pane(&mut s, "x\n", Ending::Finished(Ok(())));
+        let text = last_line(&s).to_string();
+        assert!(
+            regex::Regex::new(r"^Done in \d+\.\ds\.$")
+                .unwrap()
+                .is_match(&text),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn test_failed_run_ends_with_a_red_failed_footer() {
+        let mut s = state();
+        let err = Ending::Finished(Err(scope::error::ScopeError::Chain("boom".into())));
+        s.start("x", &pane_invocation());
+        s.finish_with(err, true);
+        let line = last_line(&s);
+        let text = line.to_string();
+        assert!(
+            regex::Regex::new(r"^✗ Failed in \d+\.\ds\.$")
+                .unwrap()
+                .is_match(&text),
+            "{text}"
+        );
+        assert_eq!(line.style.fg, Some(Color::Red));
+    }
+
+    #[test]
+    fn test_failed_footer_keeps_glyph_and_words_without_color() {
+        let mut s = state();
+        s.start("x", &pane_invocation());
+        s.finish_with(
+            Ending::Finished(Err(scope::error::ScopeError::Chain("boom".into()))),
+            false,
+        );
+        let line = last_line(&s);
+        assert!(line.to_string().starts_with("✗ Failed in "));
+        assert_eq!(line.style.fg, None, "no color when color is off");
+    }
+
+    #[test]
+    fn test_cancelled_run_ends_with_cancelled_after_footer() {
+        let mut s = state();
+        run_pane(&mut s, "x\n", Ending::Cancelled);
+        let text = last_line(&s).to_string();
+        assert!(
+            regex::Regex::new(r"^Cancelled after \d+\.\ds\.$")
+                .unwrap()
+                .is_match(&text),
+            "{text}"
+        );
+    }
+
+    fn pane_invocation() -> Invocation {
+        Invocation {
+            command: venues_list(),
+            route: Route::Pane,
+            ai: false,
+            argv: vec![],
+        }
     }
 }

@@ -8,6 +8,6 @@ steps:
   # The hint row under the input shows the note; no scrolling needed.
   - wait_for: { text: "A command is running; Esc or Ctrl-C cancels it first." }
   - key: Esc
-  - wait_for: { text: "Cancelled" }
+  - wait_for: { text: "Cancelled after" }
   - key: Ctrl-D
   - expect_exit: 0

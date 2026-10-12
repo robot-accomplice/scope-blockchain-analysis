@@ -1555,7 +1555,7 @@ mod tests {
         .await;
         res.unwrap();
         let text = state.scrollback_text();
-        assert!(text.contains("Cancelled."), "{}", text);
+        assert!(text.contains("Cancelled after"), "{}", text);
         assert!(state.running.is_none());
     }
 
