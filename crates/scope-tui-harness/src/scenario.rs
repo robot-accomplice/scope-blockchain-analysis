@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
@@ -87,6 +88,8 @@ pub enum Step {
         rows: u16,
     },
     Snapshot(String),
+    /// Sends a signal to the scope process: TERM, HUP, INT, QUIT, TSTP or CONT.
+    Signal(String),
     ExpectExit(i32),
 }
 
@@ -111,6 +114,14 @@ fn default_timeout() -> Duration {
     Duration::from_secs(120)
 }
 
+fn default_args() -> Vec<String> {
+    vec!["tui".into(), "--no-banner".into()]
+}
+
+fn yes() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Scenario {
@@ -124,6 +135,15 @@ pub struct Scenario {
     pub config: Option<String>,
     #[serde(default)]
     pub masks: Vec<String>,
+    /// Extra child env, applied after the defaults.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    /// Arguments passed to the scope binary.
+    #[serde(default = "default_args")]
+    pub args: Vec<String>,
+    /// Wait for the alternate screen before running steps.
+    #[serde(default = "yes")]
+    pub wait_for_paint: bool,
     #[serde(with = "serde_yaml::with::singleton_map_recursive")]
     pub steps: Vec<Step>,
 }
@@ -152,6 +172,11 @@ pub fn key_bytes(name: &str) -> Result<Vec<u8>> {
         "F9" => Some(b"\x1b[20~"),
         "F10" => Some(b"\x1b[21~"),
         "F11" => Some(b"\x1b[23~"),
+        "Home" => Some(b"\x1b[H"),
+        "End" => Some(b"\x1b[F"),
+        "Delete" => Some(b"\x1b[3~"),
+        "Ctrl-Home" => Some(b"\x1b[1;5H"),
+        "Ctrl-End" => Some(b"\x1b[1;5F"),
         "F12" => Some(b"\x1b[24~"),
         _ => None,
     };
@@ -166,6 +191,20 @@ pub fn key_bytes(name: &str) -> Result<Vec<u8>> {
         return Ok(vec![0x1b, rest.as_bytes()[0]]);
     }
     bail!("unknown key name {name:?}")
+}
+
+/// The signal number for a scenario signal name.
+#[cfg(unix)]
+pub fn signal_number(name: &str) -> Result<i32> {
+    Ok(match name {
+        "TERM" => libc::SIGTERM,
+        "HUP" => libc::SIGHUP,
+        "INT" => libc::SIGINT,
+        "QUIT" => libc::SIGQUIT,
+        "TSTP" => libc::SIGTSTP,
+        "CONT" => libc::SIGCONT,
+        _ => bail!("unknown signal name {name:?}; use TERM, HUP, INT, QUIT, TSTP or CONT"),
+    })
 }
 
 /// Parses and validates a scenario.
@@ -200,6 +239,10 @@ pub fn parse(yaml: &str) -> Result<Scenario> {
     for step in &s.steps {
         if let Step::Key(k) = step {
             key_bytes(k)?;
+        }
+        #[cfg(unix)]
+        if let Step::Signal(n) = step {
+            signal_number(n)?;
         }
     }
     Ok(s)
@@ -282,6 +325,24 @@ steps:
     #[test]
     fn test_unknown_step_field_is_rejected() {
         assert!(parse("name: x\nsteps:\n  - typo: 1\n  - expect_exit: 0\n").is_err());
+    }
+
+    #[test]
+    fn test_new_fields_parse_with_defaults() {
+        let s = parse("name: x\nsteps:\n  - expect_exit: 0\n").unwrap();
+        assert!(s.env.is_empty());
+        assert_eq!(s.args, vec!["tui".to_string(), "--no-banner".to_string()]);
+        assert!(s.wait_for_paint);
+    }
+
+    #[test]
+    fn test_signal_step_and_new_keys() {
+        let s = parse("name: x\nenv: {TERM: dumb}\nargs: [tui]\nwait_for_paint: false\nsteps:\n  - signal: TERM\n  - expect_exit: 143\n").unwrap();
+        assert_eq!(s.env.get("TERM").map(String::as_str), Some("dumb"));
+        assert!(matches!(&s.steps[0], Step::Signal(n) if n == "TERM"));
+        assert_eq!(key_bytes("Ctrl-End").unwrap(), b"\x1b[1;5F");
+        assert_eq!(key_bytes("Delete").unwrap(), b"\x1b[3~");
+        assert!(parse("name: x\nsteps:\n  - signal: BOGUS\n  - expect_exit: 0\n").is_err());
     }
 
     #[test]

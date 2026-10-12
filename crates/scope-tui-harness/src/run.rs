@@ -91,13 +91,16 @@ pub fn run_scenario(
         cfg_dir.join("config.yaml"),
         s.config.clone().unwrap_or_else(|| "{}".into()),
     )?;
-    let env = child_env(tier, ctx)?;
+    let mut env = child_env(tier, ctx)?;
+    env.extend(s.env.iter().map(|(k, v)| (k.clone(), v.clone())));
     let mut sess = Session::start(&StartOpts {
         binary: ctx.binary.clone(),
         home: home.path().into(),
         cols: s.terminal.cols,
         rows: s.terminal.rows,
         env,
+        args: s.args.clone(),
+        wait_for_paint: s.wait_for_paint,
     })?;
     let deadline = Instant::now() + s.timeout;
     let mut out = Outcome::default();
@@ -165,6 +168,28 @@ fn exited(sess: &mut Session) -> Result<()> {
     }
 }
 
+/// Sends a named signal to the scope process.
+#[cfg(unix)]
+fn send_signal(sess: &Session, name: &str) -> Result<()> {
+    let pid = sess
+        .pid()
+        .ok_or_else(|| anyhow::anyhow!("signal {name}: the process id is unknown"))?;
+    let sig = crate::scenario::signal_number(name)?;
+    // SAFETY: kill takes plain integers and has no memory effects.
+    let rc = unsafe { libc::kill(pid as i32, sig) };
+    anyhow::ensure!(
+        rc == 0,
+        "signal {name}: kill failed: {}",
+        std::io::Error::last_os_error()
+    );
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn send_signal(_sess: &Session, name: &str) -> Result<()> {
+    anyhow::bail!("signal {name}: signals need a unix host")
+}
+
 fn run_step(
     step: &Step,
     s: &Scenario,
@@ -186,6 +211,11 @@ fn run_step(
         Step::Key(k) => {
             exited(sess)?;
             sess.send(&key_bytes(k)?)?;
+            sess.pump(SETTLE)?;
+        }
+        Step::Signal(name) => {
+            exited(sess)?;
+            send_signal(sess, name)?;
             sess.pump(SETTLE)?;
         }
         Step::Resize { cols, rows } => {
@@ -443,5 +473,22 @@ steps:
         assert!(!out.passed);
         assert!(out.failure.unwrap().contains("process exited"));
         assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    #[ignore = "needs the scope binary: cargo build --bin scope && cargo test -p scope-tui-harness -- --ignored"]
+    fn test_signal_step_ends_process() {
+        let (c, _keep) = ctx();
+        // expect_exit 0 must fail with a real exit status: the signal ended the
+        // process. R1 later pins the exact code (143).
+        let s = parse(
+            "name: sig\nargs: [tui, --no-banner]\nsteps:\n  - signal: TERM\n  - expect_exit: 0\n",
+        )
+        .unwrap();
+        let start = std::time::Instant::now();
+        let (out, _, _) = run_scenario(&s, Tier::Offline, &c).unwrap();
+        let f = out.failure.unwrap_or_default();
+        assert!(!out.passed && f.contains("exit status"), "{f}");
+        assert!(start.elapsed() < std::time::Duration::from_secs(5), "{f}");
     }
 }

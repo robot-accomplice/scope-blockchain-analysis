@@ -17,6 +17,8 @@ pub struct StartOpts {
     pub cols: u16,
     pub rows: u16,
     pub env: Vec<(String, String)>,
+    pub args: Vec<String>,
+    pub wait_for_paint: bool,
 }
 
 pub struct Session {
@@ -51,7 +53,7 @@ impl Session {
     pub fn start(o: &StartOpts) -> Result<Self> {
         let pair = native_pty_system().openpty(size(o.cols, o.rows))?;
         let mut cmd = CommandBuilder::new(&o.binary);
-        cmd.args(["tui", "--no-banner"]);
+        cmd.args(&o.args);
         cmd.env_clear();
         cmd.env("PATH", std::env::var("PATH").unwrap_or_default());
         cmd.env("HOME", &o.home);
@@ -83,7 +85,9 @@ impl Session {
             raw: Vec::new(),
             status: None,
         };
-        session.wait_for_first_paint()?;
+        if o.wait_for_paint {
+            session.wait_for_first_paint()?;
+        }
         Ok(session)
     }
 
@@ -108,6 +112,11 @@ impl Session {
             );
         }
         Ok(())
+    }
+
+    /// The child process id, while known.
+    pub fn pid(&self) -> Option<u32> {
+        self.child.process_id()
     }
 
     pub fn send(&mut self, bytes: &[u8]) -> Result<()> {
@@ -203,6 +212,8 @@ mod tests {
             cols: 80,
             rows: 24,
             env: vec![],
+            args: vec!["tui".into(), "--no-banner".into()],
+            wait_for_paint: true,
         };
         let err = Session::start(&opts).err().expect("must not be ready");
         let msg = format!("{err:#}");
