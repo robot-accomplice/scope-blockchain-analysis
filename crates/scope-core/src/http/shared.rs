@@ -5,11 +5,15 @@
 //! transport passed in call `transport()`. See the TUI test harness
 //! design, section 2.2.
 
+use super::replay::ReplayHttpClient;
 use super::{GholaHttpClient, HttpClient, NativeHttpClient};
 use crate::config::Config;
 use crate::error::ScopeError;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
+
+/// An RPC URL path segment this long or longer is treated as a secret.
+const MIN_SECRET_SEGMENT_LEN: usize = 16;
 
 /// Which transport was built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,13 +56,18 @@ static INSTALLED: OnceLock<Installed> = OnceLock::new();
 /// Set once the "not applied" notice has been returned, so it is shown once.
 static NOTICE_SENT: AtomicBool = AtomicBool::new(false);
 
-/// The kind the config selects, derived without building a client.
-/// Task 9 extends this for `SCOPE_HTTP_MODE` (replay and record).
+/// The kind the config and environment select, derived without building a client.
 pub fn configured_kind(config: &Config) -> Kind {
-    if config.ghola.enabled {
-        Kind::Ghola
-    } else {
-        Kind::Native
+    configured_kind_with(config, &|k| std::env::var(k).ok())
+}
+
+/// Like `configured_kind`, reading environment variables through `env`.
+pub fn configured_kind_with(config: &Config, env: &dyn Fn(&str) -> Option<String>) -> Kind {
+    match env("SCOPE_HTTP_MODE").as_deref() {
+        Some("replay") => Kind::Replay,
+        Some("record") => Kind::Record,
+        _ if config.ghola.enabled => Kind::Ghola,
+        _ => Kind::Native,
     }
 }
 
@@ -69,12 +78,43 @@ pub fn build(config: &Config) -> Result<Built, ScopeError> {
 
 /// Builds the transport, reading environment variables through `env`.
 ///
-/// Order: Ghola when enabled and available, else native.
+/// Order: replay or record when `SCOPE_HTTP_MODE` is set (with
+/// `SCOPE_HTTP_FIXTURES`), else Ghola when enabled and available, else native.
 pub fn build_with(
     config: &Config,
     env: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Built, ScopeError> {
-    let _ = env; // replay and record selection are added in Task 9
+    if let Some(mode) = env("SCOPE_HTTP_MODE") {
+        let dir = env("SCOPE_HTTP_FIXTURES")
+            .map(std::path::PathBuf::from)
+            .ok_or_else(|| {
+                ScopeError::Network("SCOPE_HTTP_MODE is set but SCOPE_HTTP_FIXTURES is not".into())
+            })?;
+        return match mode.as_str() {
+            "replay" => Ok(Built {
+                client: Arc::new(ReplayHttpClient::replay(dir)),
+                kind: Kind::Replay,
+                notices: vec![],
+            }),
+            "record" => {
+                // The normal transport (Ghola or native) does the real requests.
+                // The empty env lookup stops it from selecting record again.
+                let inner = build_with(config, &|_| None)?;
+                Ok(Built {
+                    client: Arc::new(ReplayHttpClient::record(
+                        dir,
+                        inner.client,
+                        secret_values(config),
+                    )),
+                    kind: Kind::Record,
+                    notices: inner.notices,
+                })
+            }
+            other => Err(ScopeError::Network(format!(
+                "unknown SCOPE_HTTP_MODE \"{other}\" (use replay or record)"
+            ))),
+        };
+    }
     let mut notices = Vec::new();
     if config.ghola.enabled {
         match GholaHttpClient::new(config.ghola.stealth, config.ghola.buffer_size) {
@@ -99,6 +139,36 @@ pub fn build_with(
         kind: Kind::Native,
         notices,
     })
+}
+
+/// Values that must never be written to a fixture.
+pub fn secret_values(config: &Config) -> Vec<String> {
+    let mut out: Vec<String> = config.chains.api_keys.values().cloned().collect();
+    if let Some(t) = &config.web.auth_token {
+        out.push(t.clone());
+    }
+    let rpcs = [
+        &config.chains.ethereum_rpc,
+        &config.chains.bsc_rpc,
+        &config.chains.aegis_rpc,
+        &config.chains.solana_rpc,
+        &config.chains.tron_api,
+    ];
+    for url in rpcs.into_iter().flatten() {
+        if let Ok(u) = reqwest::Url::parse(url) {
+            if let Some(p) = u.password() {
+                out.push(p.to_string());
+            }
+            out.extend(
+                u.path_segments()
+                    .into_iter()
+                    .flatten()
+                    .filter(|s| s.len() >= MIN_SECRET_SEGMENT_LEN)
+                    .map(str::to_string),
+            );
+        }
+    }
+    out
 }
 
 /// Builds and installs the transport the first time; later calls return
@@ -173,6 +243,85 @@ mod tests {
         let mut config = Config::default();
         config.ghola.enabled = true;
         assert_eq!(configured_kind(&config), Kind::Ghola);
+    }
+
+    fn env_of(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+        move |k| {
+            pairs
+                .iter()
+                .find(|(n, _)| *n == k)
+                .map(|(_, v)| v.to_string())
+        }
+    }
+
+    #[test]
+    fn test_configured_kind_with_env_selects_replay_and_record() {
+        let c = Config::default();
+        let replay = env_of(&[("SCOPE_HTTP_MODE", "replay")]);
+        let record = env_of(&[("SCOPE_HTTP_MODE", "record")]);
+        assert_eq!(configured_kind_with(&c, &replay), Kind::Replay);
+        assert_eq!(configured_kind_with(&c, &record), Kind::Record);
+        // The mode wins over ghola.
+        let mut g = Config::default();
+        g.ghola.enabled = true;
+        assert_eq!(configured_kind_with(&g, &record), Kind::Record);
+        assert_eq!(configured_kind_with(&g, &no_env), Kind::Ghola);
+    }
+
+    #[test]
+    fn test_replay_mode_needs_a_fixture_dir() {
+        let err = build_with(
+            &Config::default(),
+            &env_of(&[("SCOPE_HTTP_MODE", "replay")]),
+        )
+        .err()
+        .unwrap();
+        assert!(err.to_string().contains("SCOPE_HTTP_FIXTURES"), "{err}");
+    }
+
+    #[test]
+    fn test_replay_mode_selects_replay() {
+        let env = env_of(&[
+            ("SCOPE_HTTP_MODE", "replay"),
+            ("SCOPE_HTTP_FIXTURES", "/tmp/x"),
+        ]);
+        let built = build_with(&Config::default(), &env).unwrap();
+        assert_eq!(built.kind, Kind::Replay);
+    }
+
+    #[test]
+    fn test_record_mode_selects_record() {
+        let env = env_of(&[
+            ("SCOPE_HTTP_MODE", "record"),
+            ("SCOPE_HTTP_FIXTURES", "/tmp/x"),
+        ]);
+        let built = build_with(&Config::default(), &env).unwrap();
+        assert_eq!(built.kind, Kind::Record);
+    }
+
+    #[test]
+    fn test_unknown_mode_is_an_error() {
+        let env = env_of(&[
+            ("SCOPE_HTTP_MODE", "playback"),
+            ("SCOPE_HTTP_FIXTURES", "/tmp/x"),
+        ]);
+        let err = build_with(&Config::default(), &env).err().unwrap();
+        assert!(err.to_string().contains("playback"), "{err}");
+    }
+
+    #[test]
+    fn test_secret_values_include_keys_token_and_rpc_path() {
+        let mut c = Config::default();
+        c.chains
+            .api_keys
+            .insert("etherscan".into(), "ABCDEF123456".into());
+        c.web.auth_token = Some("tok-secret".into());
+        c.chains.ethereum_rpc = Some("https://mainnet.infura.io/v3/0123456789abcdef0123".into());
+        let s = secret_values(&c);
+        assert!(s.contains(&"ABCDEF123456".to_string()));
+        assert!(s.contains(&"tok-secret".to_string()));
+        assert!(s.contains(&"0123456789abcdef0123".to_string()));
+        assert!(!s.contains(&"v3".to_string()));
     }
 
     #[test]
