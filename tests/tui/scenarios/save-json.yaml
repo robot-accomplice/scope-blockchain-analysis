@@ -1,0 +1,12 @@
+name: save writes the last output as a file
+tiers: [offline]
+steps:
+  - type: "venues list --format json"
+  - key: Enter
+  - wait_for: { text: "Done in", timeout: 10s }
+  - type: "save out.json"
+  - key: Enter
+  - wait_for: { text: "saved" }
+  - expect_file: { path: "out.json", contains: ["\"binance\""] }
+  - key: Ctrl-D
+  - expect_exit: 0

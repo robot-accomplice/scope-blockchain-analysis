@@ -24,6 +24,7 @@
 //! mode: the TUI gives the terminal back while it runs.
 
 pub mod app;
+pub mod clip;
 pub mod complete;
 pub mod crash;
 pub mod exec;
@@ -42,7 +43,7 @@ use scope::chains::ChainClientFactory;
 use scope::config::Config;
 use scope::error::{Result, ScopeError};
 use std::future::Future;
-use std::io;
+use std::io::{self, Write};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -271,6 +272,8 @@ pub(crate) trait Host {
     fn clear(&mut self) -> io::Result<()>;
     /// The output a suspend-mode command writes to.
     fn suspended_output(&self) -> Output;
+    /// Writes `text` to the terminal as is (the OSC 52 copy sequence).
+    fn write_raw(&mut self, text: &str) -> io::Result<()>;
 }
 
 /// The real terminal.
@@ -334,6 +337,11 @@ impl Host for RealHost {
     }
     fn suspended_output(&self) -> Output {
         Output::stdio()
+    }
+    fn write_raw(&mut self, text: &str) -> io::Result<()> {
+        let mut out = io::stdout();
+        out.write_all(text.as_bytes())?;
+        out.flush()
     }
 }
 
@@ -415,6 +423,12 @@ async fn event_loop<H: Host>(
                     Action::None => {}
                     Action::Exit => return Ok(LEFT),
                     Action::Suspend => cont_expected = stop_and_return(host, state)?,
+                    Action::Copy(text) => {
+                        match host.write_raw(&clip::osc52(&text)) {
+                            Ok(()) => state.push_note(&format!("copied {} lines", text.lines().count())),
+                            Err(e) => state.push_note(&format!("Could not copy: {}", e)),
+                        }
+                    }
                     Action::Cancel => {
                         // Dropping the future cancels the handler at its
                         // next await point.
@@ -770,6 +784,10 @@ mod tests {
         draws_at_stop: usize,
         /// `stop_self` fails, as `kill` could.
         stop_fails: bool,
+        /// Everything `write_raw` got.
+        raw: String,
+        /// `write_raw` fails.
+        raw_fails: bool,
     }
 
     impl Host for TestHost {
@@ -812,6 +830,13 @@ mod tests {
         }
         fn suspended_output(&self) -> Output {
             self.suspended.clone()
+        }
+        fn write_raw(&mut self, text: &str) -> io::Result<()> {
+            self.raw.push_str(text);
+            if self.raw_fails {
+                return Err(io::Error::other("tty gone"));
+            }
+            Ok(())
         }
     }
 
@@ -895,6 +920,8 @@ mod tests {
             draws: 0,
             draws_at_stop: 0,
             stop_fails: false,
+            raw: String::new(),
+            raw_fails: false,
         };
         (host, captured)
     }
@@ -1470,6 +1497,51 @@ mod tests {
         let buf = host.terminal.backend().buffer().clone();
         let screen: String = buf.content().iter().map(|c| c.symbol()).collect();
         assert!(screen.contains("scope:base>"));
+    }
+
+    #[tokio::test]
+    async fn test_ctrl_y_writes_osc52_and_save_writes_the_json() {
+        let _lock = DIAG_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("out.json");
+        let save = format!("save {}", file.display());
+        let mut events = script(&["venues list --format json", &save]);
+        events.push(Ok(Event::Key(KeyEvent::new(
+            KeyCode::Char('y'),
+            KeyModifiers::CONTROL,
+        ))));
+        let (res, state, host, _) = drive(events).await;
+        res.unwrap();
+        let body = std::fs::read_to_string(&file).unwrap();
+        serde_json::from_str::<serde_json::Value>(&body).unwrap();
+        let text = state.scrollback_text();
+        assert!(text.contains("copied "), "{text}");
+        assert!(host.raw.starts_with("\x1b]52;c;"), "{:?}", host.raw);
+        assert!(host.raw.ends_with('\x07'));
+        // A second save of the same file is refused without --force.
+        let (_, state, _, _) = drive(script(&[
+            "venues list --format json",
+            &save,
+            &save,
+            &format!("{save} --force"),
+        ]))
+        .await;
+        let text = state.scrollback_text();
+        assert!(text.contains("exists; add --force"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn test_a_failed_copy_is_noted() {
+        let _lock = DIAG_LOCK.lock().await;
+        let mut events = script(&["venues list"]);
+        events.push(Ok(Event::Key(KeyEvent::new(
+            KeyCode::Char('y'),
+            KeyModifiers::CONTROL,
+        ))));
+        let (mut host, captured) = test_host(events, Vec::new());
+        host.raw_fails = true;
+        let (_, state, _, _) = drive_host(Journal::default(), host, captured).await;
+        assert!(state.scrollback_text().contains("Could not copy: tty gone"));
     }
 
     #[tokio::test]

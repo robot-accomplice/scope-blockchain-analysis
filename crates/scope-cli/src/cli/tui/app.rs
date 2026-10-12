@@ -17,7 +17,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use scope::config::Config;
 use std::cell::Cell;
 use std::time::Instant;
@@ -107,6 +107,9 @@ pub enum Action {
     Exit,
     /// Stop the process (Ctrl-Z); it comes back on `fg`.
     Suspend,
+    /// Put this text on the clipboard (Ctrl-Y). The loop writes the OSC 52
+    /// sequence through the host and notes the result.
+    Copy(String),
 }
 
 /// A command that runs in the output pane now.
@@ -172,6 +175,9 @@ pub struct TuiState {
     scroll_x: Cell<usize>,
     /// Show the busy note in the hint row until the next key press.
     busy_hint: bool,
+    /// The plain output of the last pane command that succeeded. Ctrl-Y
+    /// copies it and `save` writes it.
+    last_output: Option<String>,
     /// The event log.
     journal: Journal,
     /// Completion values from the user's stores.
@@ -196,6 +202,7 @@ impl TuiState {
             running: None,
             scroll_x: Cell::new(0),
             busy_hint: false,
+            last_output: None,
             journal,
             vocab,
             overlay: None,
@@ -293,6 +300,10 @@ impl TuiState {
                     self.set_input(String::new());
                 }
             }
+            KeyCode::Char('y') if ctrl => match &self.last_output {
+                Some(text) => return Action::Copy(text.clone()),
+                None => self.push_note("nothing to copy yet"),
+            },
             KeyCode::Char('d') if ctrl => {
                 if self.running.is_some() {
                     self.busy_hint = true;
@@ -625,6 +636,14 @@ impl TuiState {
     /// CLI command comes back for the event loop to run.
     pub fn submit(&mut self, line: &str, config: &Config) -> Plan {
         self.push_echo(line);
+        if let Some(words) = shlex::split(line)
+            && words
+                .first()
+                .is_some_and(|w| w.eq_ignore_ascii_case("save"))
+        {
+            self.save(line, &words[1..]);
+            return Plan::Done;
+        }
         let (out, captured) = Output::capture_merged();
         let started = Instant::now();
         let started_at = Utc::now().to_rfc3339();
@@ -649,6 +668,27 @@ impl TuiState {
             });
         }
         plan
+    }
+
+    /// Runs the `save` session command over the last output.
+    fn save(&mut self, line: &str, args: &[String]) {
+        let started = Instant::now();
+        let started_at = Utc::now().to_rfc3339();
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let note = match std::env::current_dir() {
+            Ok(cwd) => super::clip::save(&args, self.last_output.as_deref(), &cwd),
+            Err(e) => format!("Could not read the current directory: {}", e),
+        };
+        self.push_note(&note);
+        self.log(Event {
+            started: started_at,
+            duration_ms: started.elapsed().as_millis(),
+            input: line,
+            argv: &[],
+            route: "session",
+            outcome: "session".into(),
+            error: None,
+        });
     }
 
     /// Starts a pane command. Returns the output its handler must write to.
@@ -680,7 +720,13 @@ impl TuiState {
                 self.push_note(&format!("Output error: {}", write_err));
             }
         }
-        self.push_ansi(&run.captured.out());
+        let output = run.captured.out();
+        // The copy is the command's own output: no error text, no footer.
+        // A failed or cancelled run keeps the earlier copy.
+        if matches!(ending, Ending::Finished(Ok(()))) && !output.trim().is_empty() {
+            self.last_output = Some(super::clip::strip_ansi(&output));
+        }
+        self.push_ansi(&output);
         match &ending {
             Ending::Cancelled => self.push_note("Cancelled."),
             Ending::Finished(_) => self.push_note(&format!(
@@ -773,7 +819,9 @@ impl TuiState {
         {
             lines.extend(t.lines);
         }
-        let block = Block::bordered().title(format!(" scope v{} ", scope::VERSION));
+        let block = Block::new()
+            .borders(Borders::TOP | Borders::BOTTOM)
+            .title(format!(" scope v{} ", scope::VERSION));
         let inner = block.inner(pane);
         let para = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
         // Count wrapped rows at the inner width, without the borders, so the
@@ -1416,7 +1464,7 @@ mod tests {
         let rows: Vec<String> = screen(&s, 40, 15).lines().map(str::to_string).collect();
         // Layout: pane rows 0..=9 (border at 0 and 9), input 10..=12, hint 13, status 14.
         assert!(rows[8].contains("line 39"), "{:#?}", rows);
-        assert!(rows[9].starts_with('└'), "{:#?}", rows);
+        assert!(rows[9].starts_with('─'), "{:#?}", rows);
     }
 
     #[test]
@@ -1943,5 +1991,64 @@ mod tests {
             p.x + 2 <= 59,
             "wide char at the cursor fits inside the border"
         );
+    }
+
+    /// Starts a pane command and ends it with `ending`, after it wrote `text`.
+    fn run_pane(s: &mut TuiState, text: &str, ending: Ending) {
+        let inv = Invocation {
+            command: venues_list(),
+            route: Route::Pane,
+            ai: false,
+            argv: vec![],
+        };
+        let out = s.start("venues list", &inv);
+        out.write_out(format_args!("{}", text)).unwrap();
+        s.finish(ending);
+    }
+
+    #[test]
+    fn test_ctrl_y_copies_the_plain_output_of_the_last_success() {
+        let mut s = state();
+        assert_eq!(s.handle_key(ctrl('y')), Action::None);
+        assert!(s.scrollback_text().contains("nothing to copy yet"));
+        run_pane(&mut s, "\x1b[1;36mA\x1b[0m\nb\n", Ending::Finished(Ok(())));
+        assert_eq!(s.handle_key(ctrl('y')), Action::Copy("A\nb\n".into()));
+    }
+
+    #[test]
+    fn test_failed_or_cancelled_run_keeps_the_earlier_copy() {
+        let mut s = state();
+        run_pane(&mut s, "good\n", Ending::Finished(Ok(())));
+        run_pane(
+            &mut s,
+            "partial\n",
+            Ending::Finished(Err(scope::error::ScopeError::Chain("boom".into()))),
+        );
+        run_pane(&mut s, "partial\n", Ending::Cancelled);
+        assert_eq!(s.handle_key(ctrl('y')), Action::Copy("good\n".into()));
+    }
+
+    #[test]
+    fn test_save_without_output_says_so_and_escape_is_refused() {
+        let mut s = state();
+        s.submit("save out.json", &Config::default());
+        assert!(s.scrollback_text().contains("nothing to save yet"));
+        run_pane(&mut s, "x\n", Ending::Finished(Ok(())));
+        s.submit("save ../escape.json", &Config::default());
+        assert!(
+            s.scrollback_text()
+                .contains("save writes inside the current directory or to an absolute path")
+        );
+        s.submit("save", &Config::default());
+        assert!(s.scrollback_text().contains("Usage: save <file> [--force]"));
+    }
+
+    #[test]
+    fn test_pane_has_no_side_borders() {
+        let mut s = state();
+        s.push_note("hello");
+        let text = screen(&s, 40, 12);
+        let row = text.lines().find(|l| l.contains("hello")).unwrap();
+        assert!(row.starts_with("hello"), "{row:?}");
     }
 }
