@@ -36,7 +36,7 @@ use scope::display::{charts, report};
 use scope::error::{Result, ScopeError};
 use scope::market::{ExchangeClient, VenueRegistry};
 use scope::tokens::TokenAliases;
-use std::io::{self, BufRead, Write};
+use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 /// Time period for analytics data.
@@ -315,15 +315,14 @@ async fn resolve_token_input(
             sel
         } else {
             // Interactive: suspend spinner for the prompt
-            let result = sp.suspend(|| select_token(&search_results, args.yes));
-            result?
+            select_token(&search_results, args.yes, out)?
         }
     } else {
-        select_token(&search_results, args.yes)?
+        select_token(&search_results, args.yes, out)?
     };
 
     // Offer to save the alias
-    if args.save || (!args.yes && prompt_save_alias()) {
+    if args.save || (!args.yes && prompt_save_alias(out)) {
         aliases.add(
             &selected.symbol,
             &selected.chain,
@@ -350,13 +349,16 @@ async fn resolve_token_input(
 }
 
 /// Displays token search results and prompts user to select one.
-fn select_token(results: &[TokenSearchResult], auto_select: bool) -> Result<&TokenSearchResult> {
-    let stdout = io::stdout();
+fn select_token<'a>(
+    results: &'a [TokenSearchResult],
+    auto_select: bool,
+    out: &Output,
+) -> Result<&'a TokenSearchResult> {
     select_token_impl(
         results,
         auto_select,
         &mut crate::cli::prompt::stdin(),
-        &mut stdout.lock(),
+        &mut out.data_writer(),
     )
 }
 
@@ -381,15 +383,13 @@ fn select_token_impl<'a>(
         return Ok(selected);
     }
 
-    writeln!(writer, "\nFound {} matching tokens:\n", results.len())
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(
-        writer,
-        "{:>3}  {:>8}  {:<22}  {:<16}  {:<12}  {:>12}  {:>12}",
+    // The list is part of the question: no progress bar may draw into it.
+    let mut question = format!("\nFound {} matching tokens:\n\n", results.len());
+    question.push_str(&format!(
+        "{:>3}  {:>8}  {:<22}  {:<16}  {:<12}  {:>12}  {:>12}\n",
         "#", "Symbol", "Name", "Address", "Chain", "Price", "Liquidity"
-    )
-    .map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(writer, "{}", "─".repeat(98)).map_err(|e| ScopeError::Io(e.to_string()))?;
+    ));
+    question.push_str(&format!("{}\n", "─".repeat(98)));
 
     for (i, token) in results.iter().enumerate() {
         let price = token
@@ -407,9 +407,8 @@ fn select_token_impl<'a>(
             token.name.clone()
         };
 
-        writeln!(
-            writer,
-            "{:>3}  {:>8}  {:<22}  {:<16}  {:<12}  {:>12}  {:>12}",
+        question.push_str(&format!(
+            "{:>3}  {:>8}  {:<22}  {:<16}  {:<12}  {:>12}  {:>12}\n",
             i + 1,
             token.symbol,
             name,
@@ -417,18 +416,11 @@ fn select_token_impl<'a>(
             token.chain,
             price,
             liquidity
-        )
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
+        ));
     }
+    question.push_str(&format!("\nSelect token (1-{}): ", results.len()));
 
-    writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
-    write!(writer, "Select token (1-{}): ", results.len())
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
-    writer.flush().map_err(|e| ScopeError::Io(e.to_string()))?;
-
-    let mut input = String::new();
-    reader
-        .read_line(&mut input)
+    let input = crate::cli::prompt::ask(reader, writer, &question)
         .map_err(|e| ScopeError::Io(e.to_string()))?;
 
     let selection: usize = input
@@ -447,26 +439,14 @@ fn select_token_impl<'a>(
 }
 
 /// Prompts the user to save the token alias.
-fn prompt_save_alias() -> bool {
-    let stdout = io::stdout();
-    prompt_save_alias_impl(&mut crate::cli::prompt::stdin(), &mut stdout.lock())
+fn prompt_save_alias(out: &Output) -> bool {
+    prompt_save_alias_impl(&mut crate::cli::prompt::stdin(), &mut out.data_writer())
 }
 
 /// Testable implementation of prompt_save_alias with injected I/O.
 fn prompt_save_alias_impl(reader: &mut impl BufRead, writer: &mut impl Write) -> bool {
-    if write!(writer, "Save this token for future use? [y/N]: ").is_err() {
-        return false;
-    }
-    if writer.flush().is_err() {
-        return false;
-    }
-
-    let mut input = String::new();
-    if reader.read_line(&mut input).is_err() {
-        return false;
-    }
-
-    matches!(input.trim().to_lowercase().as_str(), "y" | "yes")
+    crate::cli::prompt::ask(reader, writer, "Save this token for future use? [y/N]: ")
+        .is_ok_and(|input| matches!(input.trim().to_lowercase().as_str(), "y" | "yes"))
 }
 
 /// Fetches token analytics for composite commands (e.g., token-health).
@@ -2156,7 +2136,7 @@ mod tests {
             liquidity_usd: 500000.0,
             market_cap: Some(1000000.0),
         }];
-        let selected = select_token(&results, true).unwrap();
+        let selected = select_token(&results, true, &quiet()).unwrap();
         assert_eq!(selected.symbol, "TKN");
     }
 
@@ -2173,7 +2153,7 @@ mod tests {
             market_cap: None,
         }];
         // Single result auto-selects even without auto_select flag
-        let selected = select_token(&results, false).unwrap();
+        let selected = select_token(&results, false, &quiet()).unwrap();
         assert_eq!(selected.symbol, "SINGLE");
     }
 

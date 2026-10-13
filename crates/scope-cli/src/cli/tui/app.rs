@@ -1253,12 +1253,12 @@ impl TuiState {
 
     /// Keeps the data of a successful run for Ctrl-Y and `save`. The copy
     /// is the command's own data: no warnings, error text or footer. A
-    /// success with no data clears it; a failed or cancelled run keeps the
-    /// earlier copy.
+    /// success with no data, or with only the end of its data kept, clears
+    /// it; a failed or cancelled run keeps the earlier copy.
     fn keep_copy(&mut self, captured: &Captured, ending: &Ending) {
         if matches!(ending, Ending::Finished(Ok(()))) {
             let data = clip::strip_ansi(&captured.data());
-            self.last_output = (!data.trim().is_empty()).then_some(data);
+            self.last_output = (!captured.trimmed() && !data.trim().is_empty()).then_some(data);
         }
     }
 
@@ -1268,7 +1268,9 @@ impl TuiState {
     /// above the note.
     pub fn show_outside(&mut self, copy: &Captured, ending: &Ending) {
         if copy.trimmed() {
-            self.push_note("Its output was long; only the end is kept here.");
+            self.push_note(
+                "Its output was long: only the end is kept here, and Ctrl-Y and save do not have it.",
+            );
         }
         self.keep_copy(copy, ending);
         self.push_ansi(&copy.out());
@@ -1285,6 +1287,9 @@ impl TuiState {
         ending: &Ending,
     ) {
         let (outcome, error) = ending.outcome();
+        // As for a pane command: the rule shows the failure until the next
+        // line.
+        self.failed = matches!(ending, Ending::Finished(Err(_)));
         // The note says "failed"; the journal keeps "error".
         let word = if outcome == "error" {
             "failed"
@@ -1584,6 +1589,21 @@ impl TuiState {
         lines
     }
 
+    /// What Esc does now, in the words of the status bar. An open overlay
+    /// takes Esc first; then a running command; idle with no overlay, Esc
+    /// only clears the line and the bar says nothing. The key handling
+    /// checks the same order.
+    fn esc_hint(&self) -> Option<&'static str> {
+        match (&self.overlay, &self.running) {
+            (Some(Overlay::Palette(_)), _) => Some("Esc closes palette"),
+            (Some(Overlay::Menu(_)), _) => Some("Esc closes menu"),
+            (Some(Overlay::Search(_)), _) => Some("Esc closes search"),
+            (Some(Overlay::HistorySearch(_)), _) => Some("Esc closes history search"),
+            (None, Some(_)) => Some("Esc cancels"),
+            (None, None) => None,
+        }
+    }
+
     /// What the status bar says now, before it is fitted to a width. Tests
     /// use it; a draw calls `status_parts_with`.
     #[cfg(test)]
@@ -1621,33 +1641,22 @@ impl TuiState {
             }
             part
         });
-        // Esc closes an open search before it cancels the command.
-        let searching = matches!(
-            self.overlay,
-            Some(Overlay::Search(_) | Overlay::HistorySearch(_))
-        );
-        let (state, scrolled, command) = match &self.running {
-            Some(run) => (
-                vec![
-                    Span::styled(
-                        format!("running {:.0}s", run.started.elapsed().as_secs_f64()),
-                        WARN,
-                    ),
-                    sep(),
-                    Span::styled(
-                        if searching {
-                            "Esc closes search"
-                        } else {
-                            "Esc cancels"
-                        },
-                        Style::new().add_modifier(Modifier::BOLD),
-                    ),
-                ],
-                scrolled,
-                Some(run.input.clone()),
-            ),
+        let esc = self
+            .esc_hint()
+            .map(|hint| Span::styled(hint, Style::new().add_modifier(Modifier::BOLD)));
+        let (state, scrolled, command) = match (&self.running, esc) {
+            (Some(run), esc) => {
+                let mut state = vec![Span::styled(
+                    format!("running {:.0}s", run.started.elapsed().as_secs_f64()),
+                    WARN,
+                )];
+                state.extend(esc.into_iter().flat_map(|esc| [sep(), esc]));
+                (state, scrolled, Some(run.input.clone()))
+            }
+            // Idle with an overlay open: what Esc does is the state.
+            (None, Some(esc)) => (vec![esc], scrolled, None),
             // Idle: the scroll text is the state.
-            None => (
+            (None, None) => (
                 scrolled.unwrap_or_else(|| {
                     vec![
                         Span::styled("help", ACCENT),
@@ -1678,7 +1687,7 @@ struct StatusParts {
     /// Chain, format and limit: each a dim label and an accent value.
     /// Dropped from the end when the bar is narrow.
     context: Vec<Spans>,
-    /// `running Ns · Esc cancels` (or `Esc closes search`),
+    /// `running Ns · Esc cancels` (or what Esc does with an open overlay),
     /// `scrolled up N lines · PgDn` or `help · exit`. Kept at every width.
     state: Spans,
     /// `scrolled up N lines · PgDn` while a command runs. Idle, it is the
@@ -2376,6 +2385,120 @@ mod tests {
         };
         let out = s.start(input, &inv);
         (s, out)
+    }
+
+    /// The status bar text of `s` at a wide width.
+    fn status_text(s: &TuiState) -> String {
+        let line = fit_status(&s.status_parts(), 160);
+        line.spans.iter().map(|sp| sp.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn test_esc_hint_says_what_esc_does_with_each_overlay_open() {
+        // While a command runs, Esc first closes an open overlay. The bar
+        // must name that, not promise a cancel that Esc does not do.
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        type Open = fn(&mut TuiState);
+        let opens: [(&str, Open); 4] = [
+            ("Esc closes palette", |s| {
+                s.handle_key(ctrl('k'));
+            }),
+            ("Esc closes menu", |s| {
+                type_str(s, "ad");
+                s.handle_key(key(KeyCode::Tab));
+            }),
+            ("Esc closes search", |s| {
+                s.handle_key(ctrl('f'));
+            }),
+            ("Esc closes history search", |s| {
+                s.handle_key(ctrl('r'));
+            }),
+        ];
+        for (hint, open) in opens {
+            let mut s = vocab_state();
+            let inv = Invocation {
+                command: venues_list(),
+                route: Route::Pane,
+                ai: false,
+                argv: vec![],
+            };
+            let _out = s.start("venues list", &inv);
+            screen(&s, 80, 24);
+            open(&mut s);
+            assert!(s.overlay.is_some(), "{hint}: no overlay");
+            let bar = status_text(&s);
+            assert!(bar.contains(hint), "{hint}: {bar:?}");
+            assert!(!bar.contains("Esc cancels"), "{hint}: {bar:?}");
+            // The bar tells the truth: Esc closes the overlay and the
+            // command keeps running.
+            assert_eq!(s.handle_key(key(KeyCode::Esc)), Action::None, "{hint}");
+            assert!(s.overlay.is_none(), "{hint}");
+            assert!(status_text(&s).contains("Esc cancels"), "{hint}");
+        }
+    }
+
+    #[test]
+    fn test_idle_esc_hint_shows_only_while_an_overlay_is_open() {
+        let mut s = state();
+        assert!(!status_text(&s).contains("Esc"), "{}", status_text(&s));
+        screen(&s, 80, 24);
+        s.handle_key(ctrl('k'));
+        assert!(status_text(&s).contains("Esc closes palette"));
+        s.handle_key(key(KeyCode::Esc));
+        assert!(status_text(&s).contains("help"), "{}", status_text(&s));
+    }
+
+    #[test]
+    fn test_trimmed_outside_output_is_not_kept_for_copy_or_save() {
+        // Only the end of a long outside run is kept. Ctrl-Y or save must
+        // not hand out that part as if it were the whole output.
+        let mut s = state();
+        let (o, done) = Output::capture_merged();
+        crate::outln!(o, "earlier data").unwrap();
+        s.show_outside(&done, &Ending::Finished(Ok(())));
+        assert_eq!(s.last_output.as_deref(), Some("earlier data\n"));
+        let (terminal, _screen) = Output::capture();
+        let (o, long) = terminal.teed(64);
+        for i in 0..100 {
+            crate::outln!(o, "row {i}").unwrap();
+        }
+        assert!(long.trimmed());
+        s.show_outside(&long, &Ending::Finished(Ok(())));
+        assert_eq!(s.last_output, None, "neither the part nor the old copy");
+        assert!(
+            s.scrollback_text()
+                .contains("only the end is kept here, and Ctrl-Y and save do not have it."),
+            "{}",
+            s.scrollback_text()
+        );
+        assert!(matches!(s.handle_key(ctrl('y')), Action::None));
+        assert!(s.scrollback_text().contains("nothing to copy yet"));
+    }
+
+    #[test]
+    fn test_a_failed_outside_command_sets_the_failed_pane_state() {
+        // Same as a pane command: the rule says the last command failed.
+        let mut s = state();
+        let err = Ending::Finished(Err(scope::error::ScopeError::Chain("boom".into())));
+        s.record_suspended(
+            "crawl USDC",
+            &[],
+            std::time::Duration::from_secs(1),
+            String::new(),
+            &err,
+        );
+        assert_eq!(s.pane_state(), PaneState::Failed);
+        for ok in [Ending::Finished(Ok(())), Ending::Cancelled] {
+            s.submit("crawl USDC", &Config::default());
+            s.record_suspended(
+                "crawl USDC",
+                &[],
+                std::time::Duration::from_secs(1),
+                String::new(),
+                &ok,
+            );
+            assert_eq!(s.pane_state(), PaneState::Idle);
+        }
     }
 
     #[test]
@@ -4214,23 +4337,6 @@ mod tests {
                 .iter()
                 .any(|c| c.symbol() == "✗" && c.modifier.contains(Modifier::BOLD))
         );
-    }
-
-    #[test]
-    fn test_status_says_esc_closes_search_while_a_search_is_open_in_a_run() {
-        // Esc closes the search first; the bar must not promise a cancel.
-        let _lock = super::super::DIAG_LOCK.blocking_lock();
-        let (mut s, _out) = running_state("venues list");
-        screen(&s, 120, 20);
-        for open in [ctrl('f'), ctrl('r')] {
-            s.handle_key(open);
-            let row = status_row(&s, 120);
-            assert!(row.contains("Esc closes search"), "{row:?}");
-            assert!(!row.contains("Esc cancels"), "{row:?}");
-            s.handle_key(key(KeyCode::Esc));
-            assert!(s.running.is_some(), "Esc closed the search only");
-            assert!(status_row(&s, 120).contains("Esc cancels"));
-        }
     }
 
     #[test]

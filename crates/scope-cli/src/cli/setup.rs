@@ -18,11 +18,12 @@
 //! ```
 
 use crate::cli::output::Output;
+use crate::cli::prompt::ask;
 use crate::outln;
 use clap::Args;
 use scope::config::{Config, OutputFormat};
 use scope::error::{ConfigError, Result, ScopeError};
-use std::io::{self, BufRead, Write};
+use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
 /// Arguments for the setup command.
@@ -64,15 +65,15 @@ pub async fn run(args: SetupArgs, config: &Config, out: &Output) -> Result<()> {
     }
 
     if args.reset {
-        return reset_config();
+        return reset_config(out);
     }
 
     if let Some(ref key_name) = args.key {
-        return configure_single_key(key_name, config).await;
+        return configure_single_key(key_name, config, out).await;
     }
 
     // Run full setup wizard
-    run_setup_wizard(config).await
+    run_setup_wizard(config, out).await
 }
 
 /// Shows the current configuration status.
@@ -293,16 +294,15 @@ fn mask_key(key: &str) -> String {
 }
 
 /// Resets configuration to defaults.
-fn reset_config() -> Result<()> {
+fn reset_config(out: &Output) -> Result<()> {
     let config_path = Config::config_path().ok_or_else(|| {
         ScopeError::Config(ConfigError::NotFound {
             path: PathBuf::from("~/.config/scope/config.yaml"),
         })
     })?;
-    let stdout = io::stdout();
     reset_config_impl(
         &mut crate::cli::prompt::stdin(),
-        &mut stdout.lock(),
+        &mut out.data_writer(),
         &config_path,
     )
 }
@@ -314,17 +314,12 @@ fn reset_config_impl(
     config_path: &Path,
 ) -> Result<()> {
     if config_path.exists() {
-        write!(
+        let input = ask(
+            reader,
             writer,
-            "This will delete your current configuration. Continue? [y/N]: "
+            "This will delete your current configuration. Continue? [y/N]: ",
         )
         .map_err(|e| ScopeError::Io(e.to_string()))?;
-        writer.flush().map_err(|e| ScopeError::Io(e.to_string()))?;
-
-        let mut input = String::new();
-        reader
-            .read_line(&mut input)
-            .map_err(|e| ScopeError::Io(e.to_string()))?;
 
         if !matches!(input.trim().to_lowercase().as_str(), "y" | "yes") {
             writeln!(writer, "Cancelled.").map_err(|e| ScopeError::Io(e.to_string()))?;
@@ -346,16 +341,15 @@ fn reset_config_impl(
 }
 
 /// Configures a single API key.
-async fn configure_single_key(key_name: &str, config: &Config) -> Result<()> {
+async fn configure_single_key(key_name: &str, config: &Config, out: &Output) -> Result<()> {
     let config_path = Config::config_path().ok_or_else(|| {
         ScopeError::Config(ConfigError::NotFound {
             path: PathBuf::from("~/.config/scope/config.yaml"),
         })
     })?;
-    let stdout = io::stdout();
     configure_single_key_impl(
         &mut crate::cli::prompt::stdin(),
-        &mut stdout.lock(),
+        &mut out.data_writer(),
         key_name,
         config,
         &config_path,
@@ -496,16 +490,15 @@ fn get_api_key_url(key_name: &str) -> &'static str {
 }
 
 /// Runs the full setup wizard.
-async fn run_setup_wizard(config: &Config) -> Result<()> {
+async fn run_setup_wizard(config: &Config, out: &Output) -> Result<()> {
     let config_path = Config::config_path().ok_or_else(|| {
         ScopeError::Config(ConfigError::NotFound {
             path: PathBuf::from("~/.config/scope/config.yaml"),
         })
     })?;
-    let stdout = io::stdout();
     run_setup_wizard_impl(
         &mut crate::cli::prompt::stdin(),
-        &mut stdout.lock(),
+        &mut out.data_writer(),
         config,
         &config_path,
     )
@@ -615,17 +608,12 @@ fn run_setup_wizard_impl(
     }
 
     // Ask about other chains
-    write!(
+    let input = ask(
+        reader,
         writer,
-        "Configure API keys for other chains (BSC, Polygon, Arbitrum, etc.)? [y/N]: "
+        "Configure API keys for other chains (BSC, Polygon, Arbitrum, etc.)? [y/N]: ",
     )
     .map_err(|e| ScopeError::Io(e.to_string()))?;
-    writer.flush().map_err(|e| ScopeError::Io(e.to_string()))?;
-
-    let mut input = String::new();
-    reader
-        .read_line(&mut input)
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
 
     if matches!(input.trim().to_lowercase().as_str(), "y" | "yes") {
         writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
@@ -674,13 +662,7 @@ fn run_setup_wizard_impl(
     writeln!(writer, "  1. table (default)").map_err(|e| ScopeError::Io(e.to_string()))?;
     writeln!(writer, "  2. json").map_err(|e| ScopeError::Io(e.to_string()))?;
     writeln!(writer, "  3. csv").map_err(|e| ScopeError::Io(e.to_string()))?;
-    write!(writer, "Select [1-3, Enter for default]: ")
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
-    writer.flush().map_err(|e| ScopeError::Io(e.to_string()))?;
-
-    input.clear();
-    reader
-        .read_line(&mut input)
+    let input = ask(reader, writer, "Select [1-3, Enter for default]: ")
         .map_err(|e| ScopeError::Io(e.to_string()))?;
 
     match input.trim() {
@@ -757,14 +739,12 @@ fn prompt_optional_key_impl(
     writer: &mut impl Write,
     name: &str,
 ) -> Result<Option<String>> {
-    write!(writer, "  {} API key (or Enter to skip): ", name)
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
-    writer.flush().map_err(|e| ScopeError::Io(e.to_string()))?;
-
-    let mut input = String::new();
-    reader
-        .read_line(&mut input)
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
+    let input = ask(
+        reader,
+        writer,
+        &format!("  {} API key (or Enter to skip): ", name),
+    )
+    .map_err(|e| ScopeError::Io(e.to_string()))?;
 
     let key = input.trim().to_string();
     if key.is_empty() {
@@ -780,12 +760,7 @@ fn prompt_api_key_impl(
     writer: &mut impl Write,
     name: &str,
 ) -> Result<String> {
-    write!(writer, "Enter {} API key: ", name).map_err(|e| ScopeError::Io(e.to_string()))?;
-    writer.flush().map_err(|e| ScopeError::Io(e.to_string()))?;
-
-    let mut input = String::new();
-    reader
-        .read_line(&mut input)
+    let input = ask(reader, writer, &format!("Enter {} API key: ", name))
         .map_err(|e| ScopeError::Io(e.to_string()))?;
 
     Ok(input.trim().to_string())
@@ -1092,9 +1067,17 @@ mod tests {
             key: Some("nonexistent".to_string()),
             reset: false,
         };
-        // This should print "Unknown API key" but still return Ok
-        let result = run(args, &config, &quiet()).await;
+        // `setup --key` run from the TUI: its text must go through the
+        // Output, or the TUI scrollback never shows it.
+        let (out, cap) = crate::cli::output::Output::capture();
+        let result = run(args, &config, &out).await;
         assert!(result.is_ok());
+        assert!(
+            cap.out().starts_with("Unknown API key: nonexistent\n"),
+            "{:?}",
+            cap.out()
+        );
+        assert!(cap.out().contains("etherscan"), "{:?}", cap.out());
     }
 
     // ========================================================================

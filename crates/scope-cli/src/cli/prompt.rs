@@ -12,8 +12,11 @@
 //!
 //! Outside the TUI nothing sets [`CANCEL`], and the reader acts as
 //! `read_line` does.
+//!
+//! Every prompt goes through [`ask`]. It pauses the progress bars, so a
+//! spinner never draws over a question.
 
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Set when a signal cancels the suspend-mode command. A prompt read that
@@ -29,6 +32,28 @@ const POLL_INTERVAL_MS: libc::c_int = 100;
 /// The error a cancelled read returns.
 fn cancelled() -> io::Error {
     io::Error::new(io::ErrorKind::Interrupted, "cancelled")
+}
+
+/// Writes `question` to `writer` and reads one line of answer from
+/// `reader`. Every progress bar is paused from before the question is
+/// written until the answer is read, so no bar draws over the question.
+/// The question may span lines (a list to pick from, then the question).
+///
+/// # Errors
+///
+/// Returns the write, flush or read error.
+pub(crate) fn ask(
+    reader: &mut impl BufRead,
+    writer: &mut impl Write,
+    question: &str,
+) -> io::Result<String> {
+    crate::cli::progress::paused(|| {
+        write!(writer, "{question}")?;
+        writer.flush()?;
+        let mut answer = String::new();
+        reader.read_line(&mut answer)?;
+        Ok(answer)
+    })
 }
 
 /// The input for a prompt: stdin, cancellable with [`CANCEL`].
@@ -182,6 +207,94 @@ impl BufRead for PromptInput<'_> {
         })?;
         buf.push_str(&text);
         Ok(text.len())
+    }
+}
+
+#[cfg(test)]
+mod ask_tests {
+    use super::*;
+    use crate::cli::output::Output;
+    use crate::cli::progress::testing::{REGISTRY_LOCK, Screen, drawing_spinner};
+    use std::time::Duration;
+
+    /// An answer that takes a while to type. It notes how many draws the
+    /// screen had when the answer came.
+    struct SlowAnswer<'a> {
+        screen: &'a Screen,
+        draws_at_answer: Option<usize>,
+    }
+
+    impl io::Read for SlowAnswer<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.draws_at_answer.is_some() {
+                return Ok(0);
+            }
+            std::thread::sleep(Duration::from_millis(40));
+            self.draws_at_answer = Some(self.screen.ops().len());
+            buf[..2].copy_from_slice(b"y\n");
+            Ok(2)
+        }
+    }
+
+    /// A writer that notes how many draws the screen had when the
+    /// question was written.
+    struct Question<'a> {
+        screen: &'a Screen,
+        text: Vec<u8>,
+        draws_at_question: usize,
+    }
+
+    impl Write for Question<'_> {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.draws_at_question = self.screen.ops().len();
+            self.text.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_ask_keeps_a_ticking_spinner_off_the_question() {
+        // crawl by symbol: the "Searching..." spinner drew over "Save this
+        // token for future use? [y/N]" until the answer came.
+        let _lock = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let screen = Screen::default();
+        let sp = drawing_spinner("Searching...", &Output::capture().0, &screen);
+        std::thread::sleep(Duration::from_millis(30));
+        let mut answer = SlowAnswer {
+            screen: &screen,
+            draws_at_answer: None,
+        };
+        let mut reader = io::BufReader::new(&mut answer);
+        let mut q = Question {
+            screen: &screen,
+            text: Vec::new(),
+            draws_at_question: 0,
+        };
+        let got = ask(&mut reader, &mut q, "Save? [y/N]: ").unwrap();
+        drop(reader);
+        assert_eq!(got, "y\n");
+        assert_eq!(q.text, b"Save? [y/N]: ");
+        assert_eq!(
+            answer.draws_at_answer,
+            Some(q.draws_at_question),
+            "the spinner drew between the question and the answer"
+        );
+        sp.finish_and_clear();
+    }
+
+    #[test]
+    fn test_ask_returns_the_write_error() {
+        let mut reader = io::Cursor::new(b"y\n".to_vec());
+        let e = ask(
+            &mut reader,
+            &mut crate::cli::output::tests::ClosedPipe,
+            "q? ",
+        )
+        .unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::BrokenPipe);
     }
 }
 

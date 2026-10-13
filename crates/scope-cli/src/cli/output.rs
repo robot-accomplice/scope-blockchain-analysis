@@ -205,6 +205,13 @@ impl Output {
         }
     }
 
+    /// The data channel as a writer, for code that writes through
+    /// [`Write`] (the prompts, the setup wizard). What it writes takes the
+    /// same path as [`outln!`](crate::outln), so a TUI run keeps a copy.
+    pub fn data_writer(&self) -> DataWriter {
+        DataWriter(self.out.clone())
+    }
+
     /// Writes formatted data to the data channel. Use [`outln!`](crate::outln) / [`out!`](crate::out).
     ///
     /// # Errors
@@ -222,6 +229,18 @@ impl Output {
     /// Returns the writer's error.
     pub fn write_err(&self, args: fmt::Arguments<'_>) -> io::Result<()> {
         emit(&self.err, args)
+    }
+}
+
+/// The data channel of an [`Output`] as a writer. See [`Output::data_writer`].
+pub struct DataWriter(Sink);
+
+impl Write for DataWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        lock(&self.0).write(buf)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        lock(&self.0).flush()
     }
 }
 
@@ -314,9 +333,10 @@ impl Write for TeeSink {
     }
 }
 
-/// Drops whole lines from the start of `buf` when it is longer than
-/// `limit`, down to about half of it, so a long run trims rarely. Returns
-/// true when it dropped text.
+/// Drops text from the start of `buf` when it is longer than `limit`,
+/// down to about half of it, so a long run trims rarely. It cuts after a
+/// newline in the half it keeps; with no newline there, it keeps the end
+/// of the line. Returns true when it dropped text.
 fn keep_tail(buf: &mut Vec<u8>, limit: usize) -> bool {
     if buf.len() <= limit {
         return false;
@@ -325,7 +345,9 @@ fn keep_tail(buf: &mut Vec<u8>, limit: usize) -> bool {
     let start = buf[cut..]
         .iter()
         .position(|&b| b == b'\n')
-        .map_or(buf.len(), |i| cut + i + 1);
+        .map(|i| cut + i + 1)
+        .filter(|&start| start < buf.len())
+        .unwrap_or(cut);
     buf.drain(..start);
     true
 }
@@ -398,6 +420,23 @@ pub(crate) mod tests {
         errln!(o, "Warning: {}", "partial data").unwrap();
         assert_eq!(cap.out(), "{\"ok\":true}\n");
         assert_eq!(cap.err(), "Warning: partial data\n");
+    }
+
+    #[test]
+    fn test_data_writer_writes_to_the_data_channel() {
+        // The setup wizard writes through a writer; a TUI run must keep
+        // its text like any other data.
+        let (o, cap) = Output::capture();
+        let mut w = o.data_writer();
+        write!(w, "Step 1: API Keys").unwrap();
+        w.flush().unwrap();
+        assert_eq!(cap.out(), "Step 1: API Keys");
+        assert_eq!(cap.err(), "");
+        let mut closed = Output::from_writers(ClosedPipe, Vec::new()).data_writer();
+        assert_eq!(
+            closed.write(b"x").unwrap_err().kind(),
+            io::ErrorKind::BrokenPipe
+        );
     }
 
     #[test]
@@ -499,6 +538,22 @@ pub(crate) mod tests {
         assert!(kept.ends_with("line 0999\n"), "{kept:?}");
         assert!(copy.data().ends_with("line 0999\n"));
         assert_eq!(screen.out().lines().count(), 1000, "the terminal got all");
+    }
+
+    #[test]
+    fn test_teed_copy_keeps_the_tail_of_one_long_line() {
+        // A progress line or a JSON blob can be one write with no newline
+        // in its end half. The copy must keep its end, not drop it all.
+        let (terminal, _screen) = Output::capture();
+        let (o, copy) = terminal.teed(100);
+        let blob: String = (0..300)
+            .map(|i| char::from(b'a' + (i % 26) as u8))
+            .collect();
+        out!(o, "{blob}").unwrap();
+        assert!(copy.trimmed());
+        let kept = copy.out();
+        assert!(!kept.is_empty() && kept.len() <= 100, "{}", kept.len());
+        assert!(blob.ends_with(&kept), "the end of the line: {kept:?}");
     }
 
     #[test]

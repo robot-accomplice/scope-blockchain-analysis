@@ -1,12 +1,10 @@
 //! MonitorApp struct and event handling for the monitor TUI.
 
-use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
-    execute,
-};
+use crate::cli::screen;
+use crossterm::event::{Event, KeyCode, KeyModifiers};
 use scope::chains::ChainClient;
 use scope::chains::dex::DexDataSource;
-use scope::error::{Result, ScopeError};
+use scope::error::Result;
 use std::io;
 use std::time::{Duration, Instant};
 
@@ -59,11 +57,7 @@ impl MonitorApp {
         chain_client: Option<Box<dyn ChainClient>>,
         exchange_client: Option<scope::market::ExchangeClient>,
     ) -> Result<Self> {
-        // Setup terminal using ratatui's simplified init
-        let terminal = ratatui::init();
-        // Enable mouse capture (not handled by ratatui::init)
-        execute!(io::stdout(), EnableMouseCapture)
-            .map_err(|e| ScopeError::Chain(format!("Failed to enable mouse capture: {}", e)))?;
+        let terminal = screen::enter(screen::Mouse::Capture);
 
         let mut state = MonitorState::new(&initial_data, chain);
         state.apply_config(monitor_config);
@@ -142,8 +136,7 @@ impl MonitorApp {
 impl<B: ratatui::backend::Backend> Drop for MonitorApp<B> {
     fn drop(&mut self) {
         if self.owns_terminal {
-            let _ = execute!(io::stdout(), DisableMouseCapture);
-            ratatui::restore();
+            screen::restore();
         }
     }
 }
@@ -158,10 +151,7 @@ impl<B: ratatui::backend::Backend> MonitorApp<B> {
         self.state.save_cache();
 
         if self.owns_terminal {
-            // Disable mouse capture (not handled by ratatui::restore)
-            let _ = execute!(io::stdout(), DisableMouseCapture);
-            // Restore terminal using ratatui's simplified cleanup
-            ratatui::restore();
+            screen::restore();
         }
         Ok(())
     }

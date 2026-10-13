@@ -9,9 +9,8 @@ steps:
   # The answer ends in a line feed: the harness pty does not map the
   # Enter key's CR to LF (no ICRNL), as a real terminal does.
   - type: "1\n"
-  # The search spinner draws over the save prompt, so the screen cannot
-  # show it. Answer it now: the prompt reads one byte at a time, so this
-  # line waits in the terminal for it.
+  # No spinner draws over a prompt, so the save question is on screen.
+  - wait_for: { text: "Save this token for future use\\? \\[y/N\\]", timeout: 20s }
   - type: "n\n"
   - wait_for: { text: "Ran outside the TUI: crawl USDC \\(ok, \\d+\\.\\ds\\)", timeout: 20s }
   # Lines of the crawl report, in the TUI scrollback above the note.

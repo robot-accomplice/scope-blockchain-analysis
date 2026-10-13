@@ -74,6 +74,7 @@ pub(crate) mod plain;
 pub mod progress;
 pub(crate) mod prompt;
 pub mod report;
+pub(crate) mod screen;
 pub mod setup;
 pub(crate) mod textfit;
 pub mod theme;

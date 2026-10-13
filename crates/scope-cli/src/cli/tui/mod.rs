@@ -58,6 +58,7 @@ use std::time::{Duration, Instant};
 use crate::cli::interactive::SessionContext;
 use crate::cli::output::{Captured, Output};
 use crate::cli::prompt;
+use crate::cli::screen;
 
 /// How long `run_suspended` waits for the signal behind a stopped
 /// prompt. The signal is normally already queued.
@@ -169,14 +170,13 @@ pub async fn run(
     // every listener). Only `scope tui` installs these handlers; a plain
     // CLI run keeps the default Ctrl-C.
     tokio::spawn(cancel_prompts_on(signal_stream()?, &prompt::CANCEL));
-    // The crash hook first: it is the only hook that restores the
-    // terminal on a panic. Then raw mode before the loads, so keys typed
+    // The crash hook, then raw mode before the loads, so keys typed
     // during startup are not read in cooked mode (issue #63). Nothing
     // below can return an error before `session`, which restores the
     // terminal.
     crash::install_panic_hook();
     let mut host = RealHost {
-        terminal: crash::enter_terminal(),
+        terminal: screen::enter(screen::Mouse::Off),
         events: None,
         signals,
         on_screen: true,
@@ -324,14 +324,14 @@ impl Host for RealHost {
         self.restore();
     }
     fn resume(&mut self) {
-        self.terminal = crash::enter_terminal();
+        self.terminal = screen::enter(screen::Mouse::Off);
         self.on_screen = true;
     }
     /// Does nothing when the screen is already given back: leaving the
     /// alternate screen twice can move the shell's cursor.
     fn restore(&mut self) {
         if std::mem::take(&mut self.on_screen) {
-            crash::restore_terminal();
+            screen::restore();
         }
     }
     /// SIGSTOP, not SIGTSTP: the TUI handles SIGTSTP itself, and SIGSTOP

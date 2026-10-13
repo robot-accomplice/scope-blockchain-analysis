@@ -79,7 +79,9 @@ pub async fn dispatch_with(
         Commands::Interactive(_) => Err(ScopeError::Other(
             "the TUI cannot start from here; start it with `scope tui`".into(),
         )),
-        Commands::Monitor(args) => crate::cli::monitor::run_direct(args, config, clients).await,
+        Commands::Monitor(args) => {
+            crate::cli::monitor::run_direct(args, config, clients, out).await
+        }
         Commands::Setup(args) => crate::cli::setup::run(args, config, out).await,
         Commands::Compliance(compliance_cmd) => {
             dispatch_compliance(compliance_cmd, config, out).await

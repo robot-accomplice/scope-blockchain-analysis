@@ -83,6 +83,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use super::interactive::SessionContext;
+use crate::cli::output::Output;
+use crate::{errln, outln};
 
 // ============================================================================
 // CLI Arguments
@@ -185,6 +187,7 @@ pub async fn run_direct(
     mut args: MonitorArgs,
     config: &Config,
     clients: &dyn ChainClientFactory,
+    out: &Output,
 ) -> Result<()> {
     // Resolve address book label → address + chain
     if let Some((address, chain)) =
@@ -208,16 +211,13 @@ pub async fn run_direct(
     let mut effective_config = config.clone();
     effective_config.monitor = monitor_config;
 
-    run(
-        Some(args.token),
-        args.pair,
+    let start = MonitorStart {
+        token: Some(args.token),
+        explicit_pair: args.pair,
         export_file,
         layout_pinned,
-        &ctx,
-        &effective_config,
-        clients,
-    )
-    .await
+    };
+    run(start, &ctx, &effective_config, clients, out).await
 }
 
 /// Builds the monitor config from config-file defaults and CLI overrides.
@@ -248,22 +248,34 @@ pub(crate) fn monitor_config_from_args(
     (monitor_config, args.export.clone(), args.layout.is_some())
 }
 
-/// Entry point for the monitor command from interactive mode.
-///
-/// When `explicit_pair` is `Some`, token resolution is bypassed and the
-/// exchange ticker is used as the primary data source.  This enables
-/// monitoring tokens that are not indexed by DexScreener.
-///
-/// `layout_pinned` (from `--layout`) turns auto-layout off.
+/// What a monitor run watches and how it starts.
+pub struct MonitorStart {
+    /// The token address or symbol.
+    pub token: Option<String>,
+    /// When `Some`, token resolution is bypassed and the exchange ticker
+    /// is used as the primary data source. This enables monitoring tokens
+    /// that are not indexed by DexScreener.
+    pub explicit_pair: Option<String>,
+    /// The `--export` file to start writing at launch.
+    pub export_file: Option<PathBuf>,
+    /// True with `--layout`: auto-layout is off.
+    pub layout_pinned: bool,
+}
+
+/// Entry point for the monitor command.
 pub async fn run(
-    token: Option<String>,
-    explicit_pair: Option<String>,
-    export_file: Option<PathBuf>,
-    layout_pinned: bool,
+    start: MonitorStart,
     ctx: &SessionContext,
     config: &Config,
     clients: &dyn ChainClientFactory,
+    out: &Output,
 ) -> Result<()> {
+    let MonitorStart {
+        token,
+        explicit_pair,
+        export_file,
+        layout_pinned,
+    } = start;
     let token_input = match token {
         Some(t) => t,
         None => {
@@ -273,8 +285,8 @@ pub async fn run(
         }
     };
 
-    eprintln!("  Starting live monitor for {}...", token_input);
-    eprintln!("  Fetching initial data...");
+    errln!(out, "  Starting live monitor for {}...", token_input)?;
+    errln!(out, "  Fetching initial data...")?;
 
     // Create exchange client if a venue is configured (from MonitorConfig or CLI)
     let venue = config.monitor.venue.as_deref();
@@ -286,14 +298,14 @@ pub async fn run(
         &token_input,
         explicit_pair.as_deref(),
         &ctx.chain,
-        config,
         dex_client.as_ref(),
         venue.zip(exchange_client.as_ref()),
         &mut notes,
+        out,
     )
     .await;
     for note in &notes {
-        eprintln!("  {}", note);
+        errln!(out, "  {}", note)?;
     }
     let (initial_data, venue_quote) = result?;
 
@@ -303,11 +315,14 @@ pub async fn run(
         }
         _ => ctx.chain.clone(),
     };
-    println!(
+    outln!(
+        out,
         "Monitoring {} ({}) on {}",
-        initial_data.symbol, initial_data.name, source
-    );
-    println!("Press Q to quit, R to refresh, P to pause...\n");
+        initial_data.symbol,
+        initial_data.name,
+        source
+    )?;
+    outln!(out, "Press Q to quit, R to refresh, P to pause...\n")?;
 
     // Small delay to let user read the message
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -345,7 +360,7 @@ pub async fn run(
 
     // Cleanup is handled by Drop, but we do it explicitly for error handling
     if let Err(e) = app.cleanup() {
-        eprintln!("Warning: Failed to cleanup terminal: {}", e);
+        errln!(out, "Warning: Failed to cleanup terminal: {}", e)?;
     }
 
     result
@@ -383,10 +398,10 @@ pub(crate) async fn fetch_initial_data(
     token_input: &str,
     explicit_pair: Option<&str>,
     chain: &str,
-    config: &Config,
     dex_client: &dyn DexDataSource,
     venue: Option<(&str, &scope::market::ExchangeClient)>,
     notes: &mut Vec<String>,
+    out: &Output,
 ) -> Result<(DexTokenData, Option<(String, scope::market::Ticker)>)> {
     if let Some(pair) = explicit_pair {
         let (_, ex) = venue.ok_or_else(|| {
@@ -400,7 +415,7 @@ pub(crate) async fn fetch_initial_data(
     // With a venue set, the venue is the fallback; skip the Binance probe.
     let dex = async {
         let address =
-            resolve_token_address(token_input, chain, config, dex_client, venue.is_none()).await?;
+            resolve_token_address(token_input, chain, dex_client, venue.is_none(), out).await?;
         dex_client.get_token_data(chain, &address).await
     }
     .await;
@@ -518,9 +533,9 @@ fn build_exchange_token_data(
 async fn resolve_token_address(
     input: &str,
     chain: &str,
-    _config: &Config,
     dex_client: &dyn DexDataSource,
     allow_cex_fallback: bool,
+    out: &Output,
 ) -> Result<String> {
     // Check if it's already an address (EVM, Solana, Tron)
     if scope::tokens::TokenAliases::is_address(input) {
@@ -547,10 +562,12 @@ async fn resolve_token_address(
         && allow_cex_fallback
         && let Some(fallback) = try_cex_fallback(input, chain).await
     {
-        eprintln!(
+        errln!(
+            out,
             "  Not found on DexScreener; found {} on {} (CEX)",
-            fallback.symbol, fallback.chain
-        );
+            fallback.symbol,
+            fallback.chain
+        )?;
         results.push(fallback);
     }
 
@@ -564,17 +581,18 @@ async fn resolve_token_address(
     // If only one result, use it directly
     if results.len() == 1 {
         let token = &results[0];
-        println!(
+        outln!(
+            out,
             "Found: {} ({}) - ${:.6}",
             token.symbol,
             token.name,
             token.price_usd.unwrap_or(0.0)
-        );
+        )?;
         return Ok(token.address.clone());
     }
 
     // Multiple results — prompt user to select
-    let selected = select_token_interactive(&results)?;
+    let selected = select_token_interactive(&results, out)?;
     Ok(selected.address.clone())
 }
 
@@ -612,14 +630,14 @@ fn abbreviate_address(addr: &str) -> String {
 }
 
 /// Displays token search results and prompts the user to select one.
-fn select_token_interactive(
-    results: &[scope::chains::dex::TokenSearchResult],
-) -> Result<&scope::chains::dex::TokenSearchResult> {
-    let stdout = io::stdout();
+fn select_token_interactive<'a>(
+    results: &'a [scope::chains::dex::TokenSearchResult],
+    out: &Output,
+) -> Result<&'a scope::chains::dex::TokenSearchResult> {
     select_token_impl(
         results,
         &mut crate::cli::prompt::stdin(),
-        &mut stdout.lock(),
+        &mut out.data_writer(),
     )
 }
 
@@ -629,21 +647,13 @@ fn select_token_impl<'a>(
     reader: &mut impl io::BufRead,
     writer: &mut impl io::Write,
 ) -> Result<&'a scope::chains::dex::TokenSearchResult> {
-    writeln!(
-        writer,
-        "\nFound {} tokens matching your query:\n",
-        results.len()
-    )
-    .map_err(|e| ScopeError::Io(e.to_string()))?;
-
-    writeln!(
-        writer,
-        "{:>3}  {:>8}  {:<22}  {:<16}  {:>12}  {:>12}",
+    // The list is part of the question: no progress bar may draw into it.
+    let mut question = format!("\nFound {} tokens matching your query:\n\n", results.len());
+    question.push_str(&format!(
+        "{:>3}  {:>8}  {:<22}  {:<16}  {:>12}  {:>12}\n",
         "#", "Symbol", "Name", "Address", "Price", "Liquidity"
-    )
-    .map_err(|e| ScopeError::Io(e.to_string()))?;
-
-    writeln!(writer, "{}", "─".repeat(82)).map_err(|e| ScopeError::Io(e.to_string()))?;
+    ));
+    question.push_str(&format!("{}\n", "─".repeat(82)));
 
     for (i, token) in results.iter().enumerate() {
         let price = token
@@ -661,27 +671,19 @@ fn select_token_impl<'a>(
             token.name.clone()
         };
 
-        writeln!(
-            writer,
-            "{:>3}  {:>8}  {:<22}  {:<16}  {:>12}  {:>12}",
+        question.push_str(&format!(
+            "{:>3}  {:>8}  {:<22}  {:<16}  {:>12}  {:>12}\n",
             i + 1,
             token.symbol,
             name,
             addr,
             price,
             liquidity
-        )
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
+        ));
     }
+    question.push_str(&format!("\nSelect token (1-{}): ", results.len()));
 
-    writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
-    write!(writer, "Select token (1-{}): ", results.len())
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
-    writer.flush().map_err(|e| ScopeError::Io(e.to_string()))?;
-
-    let mut input = String::new();
-    reader
-        .read_line(&mut input)
+    let input = crate::cli::prompt::ask(reader, writer, &question)
         .map_err(|e| ScopeError::Io(e.to_string()))?;
 
     let selection: usize = input
@@ -3635,10 +3637,10 @@ capabilities:
             "USDN",
             None,
             "ethereum",
-            &Config::default(),
             &BlockedDex,
             Some(("mockvenue", &ex)),
             &mut notes,
+            &Output::capture().0,
         )
         .await
         .unwrap();
@@ -3662,10 +3664,10 @@ capabilities:
             "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
             None,
             "ethereum",
-            &Config::default(),
             &dex,
             Some(("mockvenue", &ex)),
             &mut notes,
+            &Output::capture().0,
         )
         .await
         .unwrap();
@@ -3681,10 +3683,10 @@ capabilities:
             "USDN",
             None,
             "ethereum",
-            &Config::default(),
             &BlockedDex,
             Some(("mockvenue", &ex)),
             &mut notes,
+            &Output::capture().0,
         )
         .await
         .unwrap_err()
@@ -3721,10 +3723,10 @@ capabilities:
                 "USDN",
                 Some(input),
                 "ethereum",
-                &Config::default(),
                 &BlockedDex,
                 Some(("weexlike", &ex)),
                 &mut notes,
+                &Output::capture().0,
             )
             .await
             .unwrap_or_else(|e| panic!("{input}: {e}"));
@@ -3746,10 +3748,10 @@ capabilities:
             "USDN",
             Some("USDN_USDT"),
             "ethereum",
-            &Config::default(),
             &BlockedDex,
             Some(("mockvenue", &ex)),
             &mut notes,
+            &Output::capture().0,
         )
         .await
         .unwrap_err()
@@ -6218,15 +6220,14 @@ refresh_seconds: 5
     #[tokio::test]
     async fn test_resolve_token_address_with_address_input() {
         use scope::chains::dex::DexClient;
-        let config = Config::default();
         let dex = DexClient::new();
         // EVM address should be returned directly, no DexScreener query
         let result = resolve_token_address(
             "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
             "ethereum",
-            &config,
             &dex,
             true,
+            &Output::capture().0,
         )
         .await
         .unwrap();
@@ -6234,13 +6235,35 @@ refresh_seconds: 5
     }
 
     #[tokio::test]
+    async fn test_resolve_token_address_reports_the_match_through_the_output() {
+        // A monitor run from the TUI: what it found must reach the
+        // scrollback, so it goes through the Output, not stdout.
+        let mut dex = scope::chains::mocks::MockDexSource::new();
+        dex.search_results = vec![scope::chains::dex::TokenSearchResult {
+            address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".into(),
+            symbol: "ZZQT".into(),
+            name: "Zz Quiet Token".into(),
+            chain: "ethereum".into(),
+            price_usd: Some(1.5),
+            volume_24h: 1.0,
+            liquidity_usd: 1.0,
+            market_cap: None,
+        }];
+        let (out, cap) = Output::capture();
+        let address = resolve_token_address("ZZQT", "ethereum", &dex, false, &out)
+            .await
+            .unwrap();
+        assert_eq!(address, "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
+        assert_eq!(cap.out(), "Found: ZZQT (Zz Quiet Token) - $1.500000\n");
+    }
+
+    #[tokio::test]
     async fn test_resolve_token_address_solana_address() {
         use scope::chains::dex::DexClient;
-        let config = Config::default();
         let dex = DexClient::new();
         // Solana address (base58, 32+ chars) should be returned directly
         let addr = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-        let result = resolve_token_address(addr, "solana", &config, &dex, true)
+        let result = resolve_token_address(addr, "solana", &dex, true, &Output::capture().0)
             .await
             .unwrap();
         assert_eq!(result, addr);
