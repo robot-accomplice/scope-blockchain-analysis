@@ -32,7 +32,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust
         with:
           targets: ${{ matrix.target }}
       
@@ -98,7 +98,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust
       - uses: Swatinem/rust-cache@v2
 
       # Publish order matches the dependency graph:

@@ -21,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust
       
       - uses: taiki-e/install-action@cargo-tarpaulin
       
