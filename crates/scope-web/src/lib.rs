@@ -299,6 +299,24 @@ mod tests {
         assert!(html.contains("Scope"));
     }
 
+    /// H6: the market panel must not send a peg the user did not set, or the
+    /// configured `market.health.peg_target` never applies on the web.
+    #[test]
+    fn test_ui_sends_peg_only_when_the_user_sets_it() {
+        let js = include_str!("static/app.js");
+        let html = include_str!("static/index.html");
+        assert!(!js.contains("|| 1.0"), "app.js falls back to a fixed peg");
+        assert!(
+            !html.contains(r#"id="mkt-peg" value="#),
+            "index.html fixes the peg field value"
+        );
+        assert!(
+            js.contains("market.peg_target"),
+            "peg field not filled from config"
+        );
+        assert!(js.contains("pegUserSet"), "peg not gated on a user edit");
+    }
+
     /// M5: DEX venues come from `/api/venues`, not from lists in the UI.
     #[test]
     fn test_ui_hard_codes_no_dex_venue() {

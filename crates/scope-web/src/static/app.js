@@ -1633,11 +1633,17 @@ function runTokenHealth() {
 function runMarket() {
   var pair = document.getElementById('mkt-pair').value.trim();
   if (!pair) return;
-  apiPost('/api/market/summary', {
+  var body = {
     pair: pair,
     market_venue: document.getElementById('mkt-venue').value,
-    peg: parseFloat(document.getElementById('mkt-peg').value) || 1.0,
-  }, document.getElementById('market-results'), renderMarketSummary);
+  };
+  // Send a peg only when the user set one; otherwise the server uses the
+  // configured market.health.peg_target, as the CLI and token health do.
+  var pegEl = document.getElementById('mkt-peg');
+  if (pegEl.dataset.pegUserSet && pegEl.value !== '') {
+    body.peg = parseFloat(pegEl.value);
+  }
+  apiPost('/api/market/summary', body, document.getElementById('market-results'), renderMarketSummary);
 }
 
 function runCompliance() {
@@ -2202,6 +2208,10 @@ async function loadConfigStatus() {
 
     document.getElementById('version').textContent = 'v' + (data.version || '?');
 
+    // The market panel shows the configured peg until the user edits it.
+    var pegEl = document.getElementById('mkt-peg');
+    if (data.market && !pegEl.dataset.pegUserSet) pegEl.value = data.market.peg_target;
+
     var statusEl = document.getElementById('setup-status');
     clearElement(statusEl);
 
@@ -2297,6 +2307,9 @@ document.querySelectorAll('input[type="text"]').forEach(function(input) {
 });
 
 // ===== Init =====
+document.getElementById('mkt-peg').addEventListener('input', function(e) {
+  e.target.dataset.pegUserSet = '1';
+});
 loadConfigStatus();
 loadAddressBook();
 loadVenues();
