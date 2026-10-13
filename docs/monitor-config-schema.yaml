@@ -6,8 +6,10 @@
 # ============================================================
 
 monitor:
-  # Layout preset: dashboard | chart-focus | feed | compact
-  # Responsive auto-selection picks the best preset for terminal size.
+  # Starting layout preset: dashboard | chart-focus | feed | compact | exchange
+  # Responsive auto-selection still picks the best preset for the terminal
+  # size, so this is only the first choice. To pin a layout, use the
+  # --layout flag: it turns auto-selection off.
   # Manual switching (L/H keys) overrides auto until A is pressed.
   layout: dashboard
 

@@ -29,6 +29,7 @@ capabilities:
       low_24h: lowPrice
       volume_24h: volume
       quote_volume_24h: quoteVolume
+      price_change_pct_24h: priceChangePercent
       best_bid: bidPrice
       best_ask: askPrice
 

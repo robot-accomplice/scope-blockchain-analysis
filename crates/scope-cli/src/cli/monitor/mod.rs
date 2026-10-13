@@ -134,6 +134,7 @@ pub struct MonitorArgs {
     ///
     /// Controls how widgets are arranged on screen.
     /// Options: dashboard, chart-focus, feed, compact, exchange.
+    /// Pins the layout: auto-selection by terminal size stays off.
     #[arg(short, long)]
     pub layout: Option<LayoutPreset>,
 
@@ -195,7 +196,7 @@ pub async fn run_direct(
         }
     }
 
-    let (monitor_config, export_file) = monitor_config_from_args(&args, config);
+    let (monitor_config, export_file, layout_pinned) = monitor_config_from_args(&args, config);
 
     // Build a SessionContext from the CLI args (no interactive session needed)
     let ctx = SessionContext {
@@ -211,6 +212,7 @@ pub async fn run_direct(
         Some(args.token),
         args.pair,
         export_file,
+        layout_pinned,
         &ctx,
         &effective_config,
         clients,
@@ -221,10 +223,12 @@ pub async fn run_direct(
 /// Builds the monitor config from config-file defaults and CLI overrides.
 /// Returns the `--export` file separately: config `export.path` is the
 /// export directory for the E key, `--export` is a file to start at launch.
+/// The flag is true when `--layout` was given: it pins the layout. A config
+/// `layout` is only the starting preset; auto-layout still applies to it.
 pub(crate) fn monitor_config_from_args(
     args: &MonitorArgs,
     config: &Config,
-) -> (scope::config::MonitorConfig, Option<PathBuf>) {
+) -> (scope::config::MonitorConfig, Option<PathBuf>, bool) {
     let mut monitor_config = config.monitor.clone();
     if let Some(layout) = args.layout {
         monitor_config.layout = layout;
@@ -241,7 +245,7 @@ pub(crate) fn monitor_config_from_args(
     if let Some(ref venue) = args.venue {
         monitor_config.venue = Some(venue.clone());
     }
-    (monitor_config, args.export.clone())
+    (monitor_config, args.export.clone(), args.layout.is_some())
 }
 
 /// Entry point for the monitor command from interactive mode.
@@ -249,10 +253,13 @@ pub(crate) fn monitor_config_from_args(
 /// When `explicit_pair` is `Some`, token resolution is bypassed and the
 /// exchange ticker is used as the primary data source.  This enables
 /// monitoring tokens that are not indexed by DexScreener.
+///
+/// `layout_pinned` (from `--layout`) turns auto-layout off.
 pub async fn run(
     token: Option<String>,
     explicit_pair: Option<String>,
     export_file: Option<PathBuf>,
+    layout_pinned: bool,
     ctx: &SessionContext,
     config: &Config,
     clients: &dyn ChainClientFactory,
@@ -288,11 +295,17 @@ pub async fn run(
     for note in &notes {
         eprintln!("  {}", note);
     }
-    let (initial_data, venue_pair) = result?;
+    let (initial_data, venue_quote) = result?;
 
+    let source = match (&venue_quote, venue) {
+        (Some((pair, _)), Some(venue_id)) => {
+            state::source_label(&ctx.chain, Some((venue_id, pair)))
+        }
+        _ => ctx.chain.clone(),
+    };
     println!(
         "Monitoring {} ({}) on {}",
-        initial_data.symbol, initial_data.name, ctx.chain
+        initial_data.symbol, initial_data.name, source
     );
     println!("Press Q to quit, R to refresh, P to pause...\n");
 
@@ -312,16 +325,20 @@ pub async fn run(
         exchange_client,
     )?;
 
+    app.state.auto_layout = !layout_pinned;
+
+    // In exchange-only mode, use the exact pair that priced the token, and
+    // refresh from the venue alone.
+    if let Some((pair_str, ticker)) = venue_quote {
+        app.state.venue_pair = Some(pair_str);
+        app.state.set_venue_ticker(&ticker);
+    }
+
     if let Some(path) = export_file {
         // Drop restores the terminal before the error reaches the user.
         app.state.start_export_to(&path).map_err(|e| {
             ScopeError::Export(format!("cannot write --export {}: {}", path.display(), e))
         })?;
-    }
-
-    // In exchange-only mode, use the exact pair that priced the token
-    if let Some(pair_str) = venue_pair {
-        app.state.venue_pair = Some(pair_str);
     }
 
     let result = app.run().await;
@@ -354,7 +371,7 @@ pub(crate) fn exchange_for_venue(
 }
 
 /// Gets the monitor's first data and, in exchange-only mode, the venue
-/// pair that priced it.
+/// pair and ticker that priced it.
 ///
 /// - With `explicit_pair`: the venue ticker only.
 /// - Otherwise DexScreener first. When it fails (unreachable, blocked, or
@@ -370,14 +387,14 @@ pub(crate) async fn fetch_initial_data(
     dex_client: &dyn DexDataSource,
     venue: Option<(&str, &scope::market::ExchangeClient)>,
     notes: &mut Vec<String>,
-) -> Result<(DexTokenData, Option<String>)> {
+) -> Result<(DexTokenData, Option<(String, scope::market::Ticker)>)> {
     if let Some(pair) = explicit_pair {
         let (_, ex) = venue.ok_or_else(|| {
             ScopeError::Chain("--pair requires --venue to be specified".to_string())
         })?;
         let pair = crate::cli::market::venue_pair(ex, pair);
-        let data = exchange_token_data(ex, &pair, token_input, notes).await?;
-        return Ok((data, Some(pair)));
+        let (data, ticker) = exchange_token_data(ex, &pair, token_input, notes).await?;
+        return Ok((data, Some((pair, ticker))));
     }
 
     // With a venue set, the venue is the fallback; skip the Binance probe.
@@ -397,7 +414,7 @@ pub(crate) async fn fetch_initial_data(
                 dex_err, venue_id, pair
             ));
             match exchange_token_data(ex, &pair, token_input, notes).await {
-                Ok(data) => Ok((data, Some(pair))),
+                Ok((data, ticker)) => Ok((data, Some((pair, ticker)))),
                 Err(ex_err) => Err(ScopeError::Other(format!(
                     "DexScreener lookup failed: {}; {} ticker {} failed: {}",
                     dex_err, venue_id, pair, ex_err
@@ -414,7 +431,7 @@ async fn exchange_token_data(
     pair: &str,
     token_input: &str,
     notes: &mut Vec<String>,
-) -> Result<DexTokenData> {
+) -> Result<(DexTokenData, scope::market::Ticker)> {
     let ticker = ex
         .fetch_ticker(pair)
         .await
@@ -432,13 +449,28 @@ async fn exchange_token_data(
         pair,
         ticker.last_price.unwrap_or(0.0)
     ));
-    Ok(build_exchange_token_data(&base_symbol, pair, &ticker))
+    let data = build_exchange_token_data(&base_symbol, pair, &ticker);
+    Ok((data, ticker))
+}
+
+/// The ticker's 24h volume in USD, or `None` when it is not known in USD.
+/// Quote volume (or base volume times the last price) is in the quote
+/// currency, so it counts as USD only when the quote is USD or a USD stable.
+pub(crate) fn ticker_usd_volume(ticker: &scope::market::Ticker) -> Option<f64> {
+    let (_, quote) = ticker.pair.split_once('/')?;
+    let usd = quote.eq_ignore_ascii_case("USD") || crate::cli::insights::is_stablecoin(quote);
+    if usd {
+        ticker.quote_volume(ticker.last_price)
+    } else {
+        None
+    }
 }
 
 /// Builds a minimal [`DexTokenData`] from an exchange ticker.
 ///
 /// Used in exchange-only mode (--pair) when DexScreener is not available
-/// for the token.
+/// for the token. What the ticker does not give is 0 here; the state marks
+/// it unknown (see `MonitorState::set_venue_ticker`).
 fn build_exchange_token_data(
     symbol: &str,
     pair_label: &str,
@@ -450,11 +482,11 @@ fn build_exchange_token_data(
         symbol: symbol.to_string(),
         name: symbol.to_string(),
         price_usd: price,
-        price_change_24h: 0.0,
+        price_change_24h: ticker.price_change_pct_24h.unwrap_or(0.0),
         price_change_6h: 0.0,
         price_change_1h: 0.0,
         price_change_5m: 0.0,
-        volume_24h: ticker.volume_24h.unwrap_or(0.0),
+        volume_24h: ticker_usd_volume(ticker).unwrap_or(0.0),
         volume_6h: 0.0,
         volume_1h: 0.0,
         liquidity_usd: 0.0,
@@ -3525,7 +3557,7 @@ widgets:
             panic!("expected monitor")
         };
         let config = Config::default();
-        let (monitor_config, export_file) = monitor_config_from_args(&args, &config);
+        let (monitor_config, export_file, _) = monitor_config_from_args(&args, &config);
         assert_eq!(monitor_config.export.path, config.monitor.export.path);
         assert_eq!(export_file, Some(PathBuf::from("out.csv")));
     }
@@ -3610,7 +3642,7 @@ capabilities:
         )
         .await
         .unwrap();
-        assert_eq!(pair.as_deref(), Some("USDN_USDT"));
+        assert_eq!(pair.as_ref().map(|(p, _)| p.as_str()), Some("USDN_USDT"));
         assert!((data.price_usd - 1.0002).abs() < 1e-9);
         assert!(
             notes
@@ -3638,7 +3670,7 @@ capabilities:
         .await
         .unwrap();
         assert_eq!(data.symbol, "MOCK");
-        assert_eq!(pair, None);
+        assert!(pair.is_none());
     }
 
     #[tokio::test]
@@ -3696,7 +3728,11 @@ capabilities:
             )
             .await
             .unwrap_or_else(|e| panic!("{input}: {e}"));
-            assert_eq!(pair.as_deref(), Some("USDNUSDT"), "{input}");
+            assert_eq!(
+                pair.as_ref().map(|(p, _)| p.as_str()),
+                Some("USDNUSDT"),
+                "{input}"
+            );
             assert!((data.price_usd - 0.9999).abs() < 1e-9);
         }
     }
@@ -4897,18 +4933,22 @@ refresh_seconds: 5
     struct MockDexDataSource {
         /// Data returned by `get_token_data`. If `Err`, simulates an API failure.
         token_data_result: std::sync::Mutex<Result<DexTokenData>>,
+        /// How many times `get_token_data` was called.
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl MockDexDataSource {
         fn new(data: DexTokenData) -> Self {
             Self {
                 token_data_result: std::sync::Mutex::new(Ok(data)),
+                calls: Default::default(),
             }
         }
 
         fn failing(msg: &str) -> Self {
             Self {
                 token_data_result: std::sync::Mutex::new(Err(ScopeError::Api(msg.to_string()))),
+                calls: Default::default(),
             }
         }
     }
@@ -4929,6 +4969,7 @@ refresh_seconds: 5
         }
 
         async fn get_token_data(&self, _chain: &str, _address: &str) -> Result<DexTokenData> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let guard = self.token_data_result.lock().unwrap();
             match &*guard {
                 Ok(data) => Ok(data.clone()),
@@ -5963,6 +6004,7 @@ refresh_seconds: 5
             low_24h: Some(0.998),
             volume_24h: Some(500_000.0),
             quote_volume_24h: Some(500_500.0),
+            price_change_pct_24h: None,
             best_bid: Some(1.0005),
             best_ask: Some(1.0015),
         };
@@ -5972,7 +6014,8 @@ refresh_seconds: 5
         assert_eq!(data.symbol, "DAI");
         assert_eq!(data.name, "DAI");
         assert_eq!(data.price_usd, 1.001);
-        assert_eq!(data.volume_24h, 500_000.0);
+        // USD volume is the quote volume (USDT), not the base volume.
+        assert_eq!(data.volume_24h, 500_500.0);
         assert!(data.address.contains("exchange:"));
         assert!(data.pairs.is_empty());
         assert!(data.price_history.is_empty());
@@ -5988,6 +6031,7 @@ refresh_seconds: 5
             low_24h: None,
             volume_24h: None,
             quote_volume_24h: None,
+            price_change_pct_24h: None,
             best_bid: None,
             best_ask: None,
         };
@@ -6039,6 +6083,7 @@ refresh_seconds: 5
             low_24h: Some(0.12),
             volume_24h: Some(1_000_000.0),
             quote_volume_24h: Some(123_000.0),
+            price_change_pct_24h: None,
             best_bid: Some(0.1225),
             best_ask: Some(0.1235),
         };
@@ -6047,7 +6092,8 @@ refresh_seconds: 5
         assert_eq!(data.symbol, "DOGE");
         assert_eq!(data.name, "DOGE");
         assert_eq!(data.price_usd, 0.123);
-        assert_eq!(data.volume_24h, 1_000_000.0);
+        // 1M DOGE is not $1M: USD volume is the USDT quote volume.
+        assert_eq!(data.volume_24h, 123_000.0);
         // Verify all DEX-specific fields are zeroed/empty
         assert_eq!(data.price_change_24h, 0.0);
         assert_eq!(data.price_change_6h, 0.0);
@@ -6075,6 +6121,7 @@ refresh_seconds: 5
             low_24h: None,
             volume_24h: None,
             quote_volume_24h: None,
+            price_change_pct_24h: None,
             best_bid: None,
             best_ask: None,
         };
@@ -6776,6 +6823,441 @@ refresh_seconds: 5
         // Should still produce a trade with quantity 1.0
         if let Some(trade) = state.recent_trades.back() {
             assert_eq!(trade.quantity, 1.0);
+        }
+    }
+
+    // ========================================================================
+    // R16: footer, header error, venue-only mode, layout, size guard
+    // ========================================================================
+
+    fn spans_text(spans: &[ratatui::text::Span]) -> String {
+        spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    fn ui_text(state: &mut MonitorState, w: u16, h: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal.draw(|f| ui(f, state)).unwrap();
+        format!("{}", terminal.backend())
+    }
+
+    /// A state priced from a venue ticker alone, as `--pair` builds it.
+    fn venue_only_state() -> MonitorState {
+        venue_state(&venue_ticker("USDC/USDT", 1.0001, Some(1000.0), None, None))
+    }
+
+    #[test]
+    fn test_footer_puts_quit_first_and_keeps_pause_while_an_error_is_set() {
+        // A failed refresh used to replace the hints with a cut error, and
+        // hid PAUSED. Quit must stay reachable whatever the state.
+        let mut state = create_populated_state();
+        state.error_message = Some("API Error: boom".into());
+        state.paused = true;
+        let text = spans_text(&footer_spans(&state));
+        assert!(text.starts_with("Quit"), "{text}");
+        assert!(text.contains("PAUSED"), "{text}");
+        assert!(
+            !text.contains("API Error"),
+            "the error is in the header: {text}"
+        );
+        // At 80 columns the footer row still shows Quit and PAUSED.
+        let mut terminal = Terminal::new(TestBackend::new(80, 3)).unwrap();
+        terminal
+            .draw(|f| render_footer(f, f.area(), &state))
+            .unwrap();
+        let row = format!("{}", terminal.backend());
+        assert!(row.contains("Quit") && row.contains("PAUSED"), "{row}");
+    }
+
+    #[test]
+    fn test_header_title_carries_the_error_cut_to_fit() {
+        let mut state = create_populated_state();
+        state.error_message = Some(format!("API Error: {}", "x".repeat(300)));
+        let mut terminal = Terminal::new(TestBackend::new(80, 4)).unwrap();
+        terminal
+            .draw(|f| render_header(f, f.area(), &state))
+            .unwrap();
+        let text = format!("{}", terminal.backend());
+        let top = text.lines().next().unwrap();
+        assert!(top.contains("⚠ API Error: xx"), "{top}");
+        assert!(top.contains('…'), "a long error is cut with …: {top}");
+        assert!(top.trim_end_matches('"').ends_with('┐'), "{top}");
+    }
+
+    #[tokio::test]
+    async fn test_venue_only_refresh_never_calls_dexscreener() {
+        // `--pair` prices the token from the venue. A DexScreener call for
+        // `exchange:<pair>` can only fail, and it used to fail every refresh.
+        let (_server, ex) = mock_venue(200).await;
+        let dex = MockDexDataSource::new(create_test_token_data());
+        let calls = dex.calls.clone();
+        let mut state = venue_only_state();
+        state.venue_pair = Some("USDN_USDT".into());
+        let mut app = create_test_app_with_state(state, Box::new(dex), None);
+        app.exchange_client = Some(ex);
+        for _ in 0..3 {
+            app.fetch_data().await;
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(
+            app.state.error_message.is_none(),
+            "{:?}",
+            app.state.error_message
+        );
+        assert!(
+            (app.state.current_price - 1.0002).abs() < 1e-9,
+            "priced by the venue"
+        );
+
+        // The counter sees calls: DEX mode makes one per refresh.
+        let dex = MockDexDataSource::new(create_test_token_data());
+        let calls = dex.calls.clone();
+        let mut app = create_test_app(Box::new(dex), None);
+        for _ in 0..3 {
+            app.fetch_data().await;
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn test_panel_titles_name_their_source() {
+        let data = create_test_token_data_with_pairs();
+        let mut state = MonitorState::new(&data, "ethereum");
+        state.update(&data);
+        assert!(order_book_title(&state).contains("(synthetic, from DEX pairs)"));
+        assert!(trades_title(&state).contains("(synthetic, from DEX pairs)"));
+
+        let state = venue_only_state();
+        assert!(order_book_title(&state).contains("Order Book (not available in venue-only mode)"));
+        assert!(trades_title(&state).contains("Recent Trades (not available in venue-only mode)"));
+    }
+
+    #[test]
+    fn test_venue_only_screen_names_the_venue_and_hides_dex_only_stats() {
+        let mut state = venue_only_state();
+        state.layout = LayoutPreset::Exchange;
+        state.auto_layout = false;
+        let text = ui_text(&mut state, 220, 50);
+        assert!(text.contains("BINANCE USDCUSDT"), "{text}");
+        assert!(!text.contains("ETHEREUM"), "{text}");
+        assert!(
+            text.contains("Order Book (not available in venue-only mode)"),
+            "{text}"
+        );
+        assert!(!text.contains("$0.00"), "{text}");
+        assert!(!text.contains("0 (50%)"), "{text}");
+        assert!(!text.contains("Buys: 0"), "{text}");
+        assert!(text.contains("n/a"), "{text}");
+
+        state.layout = LayoutPreset::Dashboard;
+        let text = ui_text(&mut state, 220, 50);
+        assert!(!text.contains("$0.00"), "{text}");
+        assert!(!text.contains("Buys: 0"), "{text}");
+    }
+
+    #[test]
+    fn test_only_the_layout_flag_pins_the_layout() {
+        use clap::Parser;
+        // The state as run() builds it, and its layout before and after
+        // the first frame.
+        let launch = |argv: &[&str], config: &Config| {
+            let cli = crate::cli::Cli::try_parse_from(argv).unwrap();
+            let crate::cli::Commands::Monitor(args) = cli.command else {
+                panic!("expected monitor")
+            };
+            let (cfg, _, pinned) = monitor_config_from_args(&args, config);
+            let mut state = create_populated_state();
+            state.apply_config(&cfg);
+            state.auto_layout = !pinned;
+            let start = state.layout;
+            ui_text(&mut state, 120, 40);
+            (start, state.layout)
+        };
+        let auto = auto_select_layout(Rect::new(0, 0, 120, 40));
+        assert_ne!(
+            auto,
+            LayoutPreset::Exchange,
+            "the test needs auto to differ"
+        );
+        let bare = ["scope", "monitor", "USDC"];
+
+        // `--layout` pins the layout on the first frame and after.
+        let flag = ["scope", "monitor", "USDC", "--layout", "exchange"];
+        let (_, first) = launch(&flag, &Config::default());
+        assert_eq!(first, LayoutPreset::Exchange);
+
+        // A config `layout` is the starting preset only. Many saved configs
+        // hold `layout: dashboard` that the user never chose, so
+        // auto-layout still applies.
+        let config = Config {
+            monitor: serde_yaml::from_str("layout: exchange\n").unwrap(),
+            ..Default::default()
+        };
+        assert_eq!(launch(&bare, &config), (LayoutPreset::Exchange, auto));
+
+        // Neither: auto-layout.
+        assert_eq!(launch(&bare, &Config::default()).1, auto);
+    }
+
+    const MONITOR_TOO_SMALL: &str = "Terminal too small: need at least 60×16";
+
+    #[test]
+    fn test_below_60x16_only_the_too_small_message_is_drawn() {
+        let mut state = create_populated_state();
+        state.layout = LayoutPreset::Exchange;
+        let text = ui_text(&mut state, 50, 12);
+        assert!(text.contains(MONITOR_TOO_SMALL), "{text}");
+        assert!(!text.contains("Quit"), "{text}");
+        // 30x8 wraps on words and keeps the state.
+        let text = ui_text(&mut state, 30, 8);
+        assert!(text.contains("Terminal too small: need at"), "{text}");
+        assert!(text.contains("least 60×16"), "{text}");
+        assert_eq!(state.layout, LayoutPreset::Exchange, "state is kept");
+        // At the minimum the monitor draws, with its Quit hint.
+        let text = ui_text(&mut state, 60, 16);
+        assert!(!text.contains("Terminal too small"), "{text}");
+        assert!(text.contains("Quit"), "{text}");
+        assert!(ui_text(&mut state, 59, 16).contains("Terminal too small"));
+        assert!(ui_text(&mut state, 60, 15).contains("Terminal too small"));
+    }
+
+    // ========================================================================
+    // R16 fix round 1: venue-only values that the venue does not give
+    // ========================================================================
+
+    fn venue_ticker(
+        pair: &str,
+        last: f64,
+        base_vol: Option<f64>,
+        quote_vol: Option<f64>,
+        change: Option<f64>,
+    ) -> scope::market::Ticker {
+        scope::market::Ticker {
+            pair: pair.into(),
+            last_price: Some(last),
+            high_24h: None,
+            low_24h: None,
+            volume_24h: base_vol,
+            quote_volume_24h: quote_vol,
+            price_change_pct_24h: change,
+            best_bid: None,
+            best_ask: None,
+        }
+    }
+
+    /// A venue-only state priced by `ticker`, as `run()` builds it.
+    fn venue_state(ticker: &scope::market::Ticker) -> MonitorState {
+        let data = build_exchange_token_data("USDC", "USDCUSDT", ticker);
+        let mut state = MonitorState::new(&data, "ethereum");
+        state.venue = Some("binance".into());
+        state.venue_pair = Some("USDCUSDT".into());
+        state.set_venue_ticker(ticker);
+        state
+    }
+
+    fn header_text(state: &MonitorState) -> (String, Vec<ratatui::style::Color>) {
+        let mut terminal = Terminal::new(TestBackend::new(120, 4)).unwrap();
+        terminal
+            .draw(|f| render_header(f, f.area(), state))
+            .unwrap();
+        let colors = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.fg)
+            .collect();
+        (format!("{}", terminal.backend()), colors)
+    }
+
+    /// The Key Metrics panel alone, tall enough for every row.
+    fn metrics_text(state: &MonitorState) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(60, 30)).unwrap();
+        terminal
+            .draw(|f| render_metrics_panel(f, f.area(), state))
+            .unwrap();
+        format!("{}", terminal.backend())
+    }
+
+    #[test]
+    fn test_venue_only_export_leaves_unknown_fields_empty() {
+        // A venue ticker has no liquidity or buy/sell counts. A CSV row of
+        // zeros would read as data, so the fields stay empty, as market
+        // cap already does.
+        let last_row = |t: &scope::market::Ticker| {
+            let mut state = venue_state(t);
+            let path = start_export_in_temp(&mut state);
+            state.update(&build_exchange_token_data("USDC", "USDCUSDT", t));
+            let contents = std::fs::read_to_string(&path).unwrap();
+            contents.lines().last().unwrap().to_string()
+        };
+        // USDT quote: the USD volume is known; the DEX-only fields are not.
+        let row = last_row(&venue_ticker(
+            "USDC/USDT",
+            1.0,
+            Some(10.0),
+            Some(10.5),
+            None,
+        ));
+        let fields: Vec<&str> = row.split(',').collect();
+        assert_eq!(fields[2], "10.50", "{row}");
+        assert_eq!(&fields[3..], ["", "", "", ""], "{row}");
+        // BTC quote: the volume is not in USD, so it is empty too.
+        let row = last_row(&venue_ticker(
+            "USDC/BTC",
+            0.00001,
+            Some(10.0),
+            Some(0.0001),
+            None,
+        ));
+        let fields: Vec<&str> = row.split(',').collect();
+        assert_eq!(&fields[2..], ["", "", "", "", ""], "{row}");
+
+        // DEX mode keeps writing its values.
+        let data = create_test_token_data();
+        let mut state = MonitorState::new(&data, "ethereum");
+        let path = start_export_in_temp(&mut state);
+        state.update(&data);
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let row = contents.lines().last().unwrap();
+        assert!(!row.contains(",,"), "{row}");
+    }
+
+    #[test]
+    fn test_venue_24h_change_is_carried_and_an_unknown_change_is_na() {
+        let t = venue_ticker("USDC/USDT", 1.0, Some(10.0), Some(10.0), Some(-0.25));
+        let data = build_exchange_token_data("USDC", "USDCUSDT", &t);
+        assert_eq!(data.price_change_24h, -0.25);
+        let mut state = venue_state(&t);
+        state.update(&data);
+        assert_eq!(state.change_24h(), Some(-0.25));
+        let (text, _) = header_text(&state);
+        assert!(text.contains("-0.25%"), "{text}");
+
+        // The venue gives no change: n/a, no arrow, no up/down color.
+        let t = venue_ticker("USDC/USDT", 1.0, Some(10.0), Some(10.0), None);
+        let mut state = venue_state(&t);
+        state.update(&build_exchange_token_data("USDC", "USDCUSDT", &t));
+        assert_eq!(state.change_24h(), None);
+        let (text, colors) = header_text(&state);
+        assert!(text.contains("24h n/a"), "{text}");
+        assert!(!text.contains(['▲', '△', '▼', '▽']), "{text}");
+        let pal = state.palette();
+        assert!(
+            !colors.contains(&pal.up) && !colors.contains(&pal.down),
+            "an unknown change has no direction color"
+        );
+
+        // 5m/1h/6h are never in a venue ticker.
+        state.layout = LayoutPreset::Exchange;
+        state.auto_layout = false;
+        let text = ui_text(&mut state, 220, 50);
+        for label in ["5m", "1h", "6h", "24h"] {
+            assert!(text.contains(&format!(" {label}: n/a")), "{label}: {text}");
+        }
+        let text = metrics_text(&state);
+        for label in ["5m Chg", "24h Chg"] {
+            let row = text.lines().find(|l| l.contains(label)).expect(label);
+            assert!(row.contains("n/a"), "{row}");
+        }
+    }
+
+    #[test]
+    fn test_venue_volume_is_usd_only_for_a_usd_quote() {
+        let usd = |pair: &str, base: Option<f64>, quote: Option<f64>| {
+            ticker_usd_volume(&venue_ticker(pair, 2.0, base, quote, None))
+        };
+        // The quote volume is in the quote currency.
+        assert_eq!(usd("ETH/USDT", Some(5.0), Some(10.5)), Some(10.5));
+        // Base volume alone converts with the last price.
+        assert_eq!(usd("ETH/USDC", Some(5.0), None), Some(10.0));
+        assert_eq!(usd("ETH/USD", None, Some(7.0)), Some(7.0));
+        // Not USD: unknown, never the raw figure.
+        assert_eq!(usd("ETH/BTC", Some(5.0), Some(0.2)), None);
+        assert_eq!(usd("ETHUSDT", Some(5.0), Some(10.5)), None);
+        assert_eq!(usd("ETH/USDT", None, None), None);
+
+        // A non-USD figure never feeds the spike average or alerts.
+        let t = venue_ticker("USDC/BTC", 0.00001, Some(10.0), Some(5.0), None);
+        let mut state = venue_state(&t);
+        assert!(state.volume_usd().is_none());
+        assert!(state.volume_history.is_empty(), "no synthetic volume");
+        state.volume_avg = 100.0;
+        state.alerts.volume_spike_threshold_pct = Some(1.0);
+        state.update(&build_exchange_token_data("USDC", "USDCBTC", &t));
+        assert_eq!(state.volume_avg, 100.0);
+        assert!(state.volume_history.is_empty());
+        assert!(
+            state.active_alerts.is_empty(),
+            "{:?}",
+            state.active_alerts.len()
+        );
+        let text = metrics_text(&state);
+        let row = text.lines().find(|l| l.contains("Vol 24h")).expect(&text);
+        assert!(row.contains("n/a"), "{row}");
+    }
+
+    #[test]
+    fn test_startup_line_names_the_venue_and_pair_in_venue_only_mode() {
+        assert_eq!(
+            state::source_label("ethereum", Some(("binance", "USDCUSDT"))),
+            "BINANCE USDCUSDT"
+        );
+        assert_eq!(state::source_label("ethereum", None), "ETHEREUM");
+        assert_eq!(venue_only_state().source_label(), "BINANCE USDCUSDT");
+    }
+
+    #[tokio::test]
+    async fn test_a_failed_venue_ticker_keeps_the_price_and_names_the_venue() {
+        let (_server, ex) = mock_venue(500).await;
+        let dex = MockDexDataSource::new(create_test_token_data());
+        let calls = dex.calls.clone();
+        let mut state = venue_only_state();
+        state.venue_pair = Some("USDN_USDT".into());
+        let before = state.current_price;
+        let mut app = create_test_app_with_state(state, Box::new(dex), None);
+        app.exchange_client = Some(ex);
+        app.fetch_data().await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(app.state.current_price, before, "the old price stays");
+        let (text, _) = header_text(&app.state);
+        assert!(text.contains("Venue error ("), "{text}");
+    }
+
+    #[tokio::test]
+    async fn test_venue_only_without_a_venue_says_so() {
+        // Not reachable from run(), but a silent freeze would hide it.
+        let dex = MockDexDataSource::new(create_test_token_data());
+        let calls = dex.calls.clone();
+        let mut app = create_test_app_with_state(venue_only_state(), Box::new(dex), None);
+        app.fetch_data().await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(app.state.error_message.is_some());
+    }
+
+    #[test]
+    fn test_every_layout_draws_at_60x16_with_quit_and_pause() {
+        let mut state = create_populated_state();
+        state.error_message = Some("API Error: boom".into());
+        state.paused = true;
+        let mut terminal = Terminal::new(TestBackend::new(60, 3)).unwrap();
+        terminal
+            .draw(|f| render_footer(f, f.area(), &state))
+            .unwrap();
+        let row = format!("{}", terminal.backend());
+        assert!(row.contains("Quit") && row.contains("PAUSED"), "{row}");
+
+        state.auto_layout = false;
+        for layout in [
+            LayoutPreset::Dashboard,
+            LayoutPreset::ChartFocus,
+            LayoutPreset::Feed,
+            LayoutPreset::Compact,
+            LayoutPreset::Exchange,
+        ] {
+            state.layout = layout;
+            let text = ui_text(&mut state, 60, 16);
+            assert!(text.contains("Quit"), "{layout:?}: {text}");
+            assert_eq!(state.layout, layout);
         }
     }
 }

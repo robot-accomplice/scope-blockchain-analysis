@@ -76,6 +76,7 @@ pub(crate) mod prompt;
 pub mod report;
 pub mod setup;
 pub mod style;
+pub(crate) mod textfit;
 pub mod token_health;
 pub mod tui;
 pub mod tx;

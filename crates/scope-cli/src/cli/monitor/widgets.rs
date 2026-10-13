@@ -8,7 +8,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{
         Axis, Bar, BarChart, BarGroup, Block, Borders, Chart, Dataset, GraphType, List, ListItem,
-        Paragraph, Row, Sparkline, Table, Tabs,
+        Paragraph, Row, Sparkline, Table, Tabs, Wrap,
         canvas::{Canvas, Line as CanvasLine, Rectangle},
     },
 };
@@ -19,6 +19,27 @@ use scope::market::TradeSide;
 use super::config::{ChartMode, LayoutPreset, ScaleMode, WidgetVisibility};
 use super::state::MonitorState;
 use crate::cli::style::SECONDARY;
+use crate::cli::textfit::{cols, cut_with_ellipsis, draw_note_alone};
+
+/// The smallest terminal the monitor draws in, in columns and rows.
+pub(crate) const MIN_W: u16 = 60;
+/// See [`MIN_W`].
+pub(crate) const MIN_H: u16 = 16;
+
+/// The message drawn alone when the terminal is smaller than [`MIN_W`] x
+/// [`MIN_H`].
+fn too_small_note() -> String {
+    format!("Terminal too small: need at least {MIN_W}×{MIN_H}")
+}
+
+/// Panel title note: the data is built from DEX pairs, not a venue book.
+const SYNTHETIC_NOTE: &str = "(synthetic, from DEX pairs)";
+
+/// Panel title note: venue-only mode has no data for the panel.
+const VENUE_ONLY_NOTE: &str = "(not available in venue-only mode)";
+
+/// Shown in place of a stat that only DEX data has.
+const NOT_AVAILABLE: &str = "n/a";
 
 /// Renders the UI.
 /// Computed layout areas for each widget. `None` means the widget is hidden.
@@ -263,6 +284,13 @@ pub(crate) fn auto_select_layout(size: Rect) -> LayoutPreset {
 
 /// Renders the UI, dispatching to the active layout preset.
 pub(crate) fn ui(f: &mut Frame, state: &mut MonitorState) {
+    // Too small: draw only the message. The state is kept and keys work.
+    let area = f.area();
+    if area.width < MIN_W || area.height < MIN_H {
+        draw_note_alone(f, &too_small_note());
+        return;
+    }
+
     // Responsive breakpoint: auto-select layout for terminal size
     if state.auto_layout {
         let suggested = auto_select_layout(f.area());
@@ -276,7 +304,7 @@ pub(crate) fn ui(f: &mut Frame, state: &mut MonitorState) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(4), // Header (token info + time period tabs)
-            Constraint::Min(10),   // Content
+            Constraint::Min(0),    // Content: shrinks first, the footer stays
             Constraint::Length(3), // Footer
         ])
         .split(f.area());
@@ -354,39 +382,27 @@ pub(crate) fn ui(f: &mut Frame, state: &mut MonitorState) {
 /// Renders the header with token info and time period tabs.
 pub(crate) fn render_header(f: &mut Frame, area: Rect, state: &MonitorState) {
     let pal = state.palette();
-    let price_color = if state.price_change_24h >= 0.0 {
-        pal.up
-    } else {
-        pal.down
+    let (price_color, trend_arrow, change_str) = match state.change_24h() {
+        Some(change) => {
+            let color = if change >= 0.0 { pal.up } else { pal.down };
+            // Use Unicode arrows for trend indication
+            let arrow = if change > 0.5 {
+                "▲"
+            } else if change < -0.5 {
+                "▼"
+            } else if change >= 0.0 {
+                "△"
+            } else {
+                "▽"
+            };
+            let sign = if change >= 0.0 { "+" } else { "" };
+            (color, arrow, format!("{}{:.2}%", sign, change))
+        }
+        // No direction is known: no arrow, no up/down color.
+        None => (pal.neutral, "", format!("24h {NOT_AVAILABLE}")),
     };
 
-    // Use Unicode arrows for trend indication
-    let trend_arrow = if state.price_change_24h > 0.5 {
-        "▲"
-    } else if state.price_change_24h < -0.5 {
-        "▼"
-    } else if state.price_change_24h >= 0.0 {
-        "△"
-    } else {
-        "▽"
-    };
-
-    let change_str = format!(
-        "{}{:.2}%",
-        if state.price_change_24h >= 0.0 {
-            "+"
-        } else {
-            ""
-        },
-        state.price_change_24h
-    );
-
-    let title = format!(
-        " ◈ {} ({}) │ {} ",
-        state.symbol,
-        state.name,
-        state.chain.to_uppercase(),
-    );
+    let title = header_title(state, area.width);
 
     let price_str = format_price_usd(state.current_price);
 
@@ -432,6 +448,25 @@ pub(crate) fn render_header(f: &mut Frame, area: Rect, state: &MonitorState) {
         )),
         tabs_line[1],
     );
+}
+
+/// The header title: token, its source (chain, or venue and pair in
+/// venue-only mode), and the last error cut with `…` to fit `width`.
+fn header_title(state: &MonitorState, width: u16) -> Line<'static> {
+    let base = format!(
+        " ◈ {} ({}) │ {} ",
+        state.symbol,
+        state.name,
+        state.source_label()
+    );
+    let mut spans = vec![Span::raw(base.clone())];
+    if let Some(err) = &state.error_message {
+        // Inside the borders, after the base and "│ " ... " ".
+        let room = (width as usize).saturating_sub(2 + cols(&base) + 3);
+        let err = cut_with_ellipsis(&format!("⚠ {}", err), room);
+        spans.push(Span::styled(format!("│ {} ", err), Style::new().red()));
+    }
+    Line::from(spans)
 }
 
 /// Renders the price chart with visual differentiation between real and synthetic data.
@@ -1010,6 +1045,15 @@ pub(crate) fn render_buy_sell_gauge(f: &mut Frame, area: Rect, state: &mut Monit
         .borders(Borders::ALL)
         .border_style(Style::new().fg(border_color));
 
+    if state.venue_only {
+        let note = format!("Buys/Sells: {NOT_AVAILABLE} (venue-only mode)");
+        let body = Paragraph::new(Span::styled(note, SECONDARY))
+            .wrap(Wrap { trim: true })
+            .block(block);
+        f.render_widget(body, area);
+        return;
+    }
+
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -1192,7 +1236,9 @@ pub(crate) fn render_metrics_panel(f: &mut Frame, area: Rect, state: &MonitorSta
         }
     };
 
-    let trend_color = if state.price_change_5m >= 0.0 {
+    let trend_color = if !state.short_changes_known() {
+        pal.neutral
+    } else if state.price_change_5m >= 0.0 {
         pal.up
     } else {
         pal.down
@@ -1211,12 +1257,16 @@ pub(crate) fn render_metrics_panel(f: &mut Frame, area: Rect, state: &MonitorSta
     f.render_widget(sparkline, chunks[0]);
 
     // --- Table: key metrics ---
-    let change_5m_str = if state.price_change_5m.abs() < 0.0001 {
+    let change_5m_str = if !state.short_changes_known() {
+        NOT_AVAILABLE.to_string()
+    } else if state.price_change_5m.abs() < 0.0001 {
         "0.00%".to_string()
     } else {
         format!("{:+.4}%", state.price_change_5m)
     };
-    let change_5m_color = if state.price_change_5m > 0.0 {
+    let change_5m_color = if !state.short_changes_known() {
+        pal.neutral
+    } else if state.price_change_5m > 0.0 {
         pal.up
     } else if state.price_change_5m < 0.0 {
         pal.down
@@ -1239,20 +1289,24 @@ pub(crate) fn render_metrics_panel(f: &mut Frame, area: Rect, state: &MonitorSta
         pal.highlight
     };
 
-    let change_24h_str = format!(
-        "{}{:.2}%",
-        if state.price_change_24h >= 0.0 {
-            "+"
-        } else {
-            ""
-        },
-        state.price_change_24h
-    );
+    let change_24h_str = state
+        .change_24h()
+        .map(|c| format!("{}{:.2}%", if c >= 0.0 { "+" } else { "" }, c))
+        .unwrap_or_else(|| NOT_AVAILABLE.to_string());
 
     let market_cap_str = state
         .market_cap
         .map(scope::display::format_usd)
         .unwrap_or_else(|| "N/A".to_string());
+
+    // Liquidity and buy/sell counts exist only for DEX data.
+    let dex_stat = |value: String| {
+        if state.venue_only {
+            NOT_AVAILABLE.to_string()
+        } else {
+            value
+        }
+    };
 
     let mut rows = vec![
         Row::new(vec![
@@ -1273,11 +1327,16 @@ pub(crate) fn render_metrics_panel(f: &mut Frame, area: Rect, state: &MonitorSta
         ]),
         Row::new(vec![
             Span::styled("Liq", SECONDARY),
-            Span::raw(scope::display::format_usd(state.liquidity_usd)),
+            Span::raw(dex_stat(scope::display::format_usd(state.liquidity_usd))),
         ]),
         Row::new(vec![
             Span::styled("Vol 24h", SECONDARY),
-            Span::raw(scope::display::format_usd(state.volume_24h)),
+            Span::raw(
+                state
+                    .volume_usd()
+                    .map(scope::display::format_usd)
+                    .unwrap_or_else(|| NOT_AVAILABLE.to_string()),
+            ),
         ]),
         Row::new(vec![
             Span::styled("Mkt Cap", SECONDARY),
@@ -1285,11 +1344,17 @@ pub(crate) fn render_metrics_panel(f: &mut Frame, area: Rect, state: &MonitorSta
         ]),
         Row::new(vec![
             Span::styled("Buys", SECONDARY),
-            Span::styled(format!("{}", state.buys_24h), Style::new().fg(pal.up)),
+            Span::styled(
+                dex_stat(state.buys_24h.to_string()),
+                Style::new().fg(pal.up),
+            ),
         ]),
         Row::new(vec![
             Span::styled("Sells", SECONDARY),
-            Span::styled(format!("{}", state.sells_24h), Style::new().fg(pal.down)),
+            Span::styled(
+                dex_stat(state.sells_24h.to_string()),
+                Style::new().fg(pal.down),
+            ),
         ]),
     ];
 
@@ -1320,13 +1385,9 @@ pub(crate) fn render_order_book_panel(f: &mut Frame, area: Rect, state: &Monitor
     let pal = state.palette();
 
     let book = match &state.order_book {
-        Some(b) => b,
-        None => {
-            let block = Block::default()
-                .title(" ◈ Order Book (no data) ")
-                .borders(Borders::ALL)
-                .border_style(Style::new().fg(Color::DarkGray));
-            f.render_widget(block, area);
+        Some(b) if !state.venue_only => b,
+        _ => {
+            render_empty_panel(f, area, order_book_title(state), state.venue_only);
             return;
         }
     };
@@ -1423,22 +1484,65 @@ pub(crate) fn render_order_book_panel(f: &mut Frame, area: Rect, state: &Monitor
         ]));
     }
 
-    let ask_depth: f64 = book.asks.iter().map(|l| l.value()).sum();
-    let bid_depth: f64 = book.bids.iter().map(|l| l.value()).sum();
-    let title = format!(
-        " ◈ {} │ Ask {} │ Bid {} ",
-        book.pair,
-        format_number(ask_depth),
-        format_number(bid_depth),
-    );
-
     let block = Block::default()
-        .title(title)
+        .title(order_book_title(state))
         .borders(Borders::ALL)
         .border_style(Style::new().fg(pal.border));
 
     let paragraph = Paragraph::new(lines).block(block);
     f.render_widget(paragraph, area);
+}
+
+/// The order book title names where the book comes from. The monitor
+/// never fetches a venue book: it is built from DEX pairs, or absent in
+/// venue-only mode.
+pub(crate) fn order_book_title(state: &MonitorState) -> String {
+    if state.venue_only {
+        return format!(" ◈ Order Book {VENUE_ONLY_NOTE} ");
+    }
+    match &state.order_book {
+        Some(book) => {
+            let ask_depth: f64 = book.asks.iter().map(|l| l.value()).sum();
+            let bid_depth: f64 = book.bids.iter().map(|l| l.value()).sum();
+            format!(
+                " ◈ Order Book {SYNTHETIC_NOTE} │ {} │ Ask {} │ Bid {} ",
+                book.pair,
+                format_number(ask_depth),
+                format_number(bid_depth),
+            )
+        }
+        None => format!(" ◈ Order Book {SYNTHETIC_NOTE} │ no data "),
+    }
+}
+
+/// The recent trades title names where the trades come from, as
+/// [`order_book_title`] does.
+pub(crate) fn trades_title(state: &MonitorState) -> String {
+    if state.venue_only {
+        return format!(" ◈ Recent Trades {VENUE_ONLY_NOTE} ");
+    }
+    match state.recent_trades.len() {
+        0 => format!(" ◈ Recent Trades {SYNTHETIC_NOTE} │ no data "),
+        n => format!(" ◈ Recent Trades {SYNTHETIC_NOTE} │ {n} "),
+    }
+}
+
+/// Draws a panel that has no data. In venue-only mode the body says why,
+/// so a title cut by a narrow panel still leaves the reason on screen.
+fn render_empty_panel(f: &mut Frame, area: Rect, title: String, venue_only: bool) {
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(Color::DarkGray));
+    let body = if venue_only {
+        "Not available in venue-only mode."
+    } else {
+        ""
+    };
+    let body = Paragraph::new(Span::styled(body, SECONDARY))
+        .wrap(Wrap { trim: true })
+        .block(block);
+    f.render_widget(body, area);
 }
 
 /// Renders the recent trades panel for the Exchange layout.
@@ -1448,12 +1552,8 @@ pub(crate) fn render_order_book_panel(f: &mut Frame, area: Rect, state: &Monitor
 pub(crate) fn render_recent_trades_panel(f: &mut Frame, area: Rect, state: &MonitorState) {
     let pal = state.palette();
 
-    if state.recent_trades.is_empty() {
-        let block = Block::default()
-            .title(" ◈ Recent Trades (no data) ")
-            .borders(Borders::ALL)
-            .border_style(Style::new().fg(Color::DarkGray));
-        f.render_widget(block, area);
+    if state.venue_only || state.recent_trades.is_empty() {
+        render_empty_panel(f, area, trades_title(state), state.venue_only);
         return;
     }
 
@@ -1532,9 +1632,8 @@ pub(crate) fn render_recent_trades_panel(f: &mut Frame, area: Rect, state: &Moni
         ]));
     }
 
-    let title = format!(" ◈ Recent Trades ({}) ", state.recent_trades.len());
     let block = Block::default()
-        .title(title)
+        .title(trades_title(state))
         .borders(Borders::ALL)
         .border_style(Style::new().fg(pal.border));
 
@@ -1607,10 +1706,10 @@ pub(crate) fn render_market_info_panel(f: &mut Frame, area: Rect, state: &Monito
         let mut info_lines: Vec<Line> = Vec::new();
 
         // Price summary
-        let price_color = if state.price_change_24h >= 0.0 {
-            pal.up
-        } else {
-            pal.down
+        let price_color = match state.change_24h() {
+            Some(c) if c >= 0.0 => pal.up,
+            Some(_) => pal.down,
+            None => pal.neutral,
         };
         info_lines.push(Line::from(vec![
             Span::styled(" Price  ", SECONDARY),
@@ -1618,19 +1717,24 @@ pub(crate) fn render_market_info_panel(f: &mut Frame, area: Rect, state: &Monito
         ]));
 
         // Multi-timeframe changes
+        let short = |v: f64| state.short_changes_known().then_some(v);
         let changes = [
-            ("5m", state.price_change_5m),
-            ("1h", state.price_change_1h),
-            ("6h", state.price_change_6h),
-            ("24h", state.price_change_24h),
+            ("5m", short(state.price_change_5m)),
+            ("1h", short(state.price_change_1h)),
+            ("6h", short(state.price_change_6h)),
+            ("24h", state.change_24h()),
         ];
         let change_spans: Vec<Span> = changes
             .iter()
             .flat_map(|(label, val)| {
-                let color = if *val >= 0.0 { pal.up } else { pal.down };
+                let (text, color) = match val {
+                    Some(v) if *v >= 0.0 => (format!("{:+.2}%", v), pal.up),
+                    Some(v) => (format!("{:+.2}%", v), pal.down),
+                    None => (NOT_AVAILABLE.to_string(), pal.neutral),
+                };
                 vec![
                     Span::styled(format!(" {}: ", label), SECONDARY),
-                    Span::styled(format!("{:+.2}%", val), Style::new().fg(color)),
+                    Span::styled(text, Style::new().fg(color)),
                 ]
             })
             .collect();
@@ -1642,16 +1746,21 @@ pub(crate) fn render_market_info_panel(f: &mut Frame, area: Rect, state: &Monito
         info_lines.push(Line::from(vec![
             Span::styled(" Vol 24h ", SECONDARY),
             Span::styled(
-                format!("${}", format_number(state.volume_24h)),
+                state
+                    .volume_usd()
+                    .map(|v| format!("${}", format_number(v)))
+                    .unwrap_or_else(|| NOT_AVAILABLE.to_string()),
                 Style::new().fg(pal.neutral),
             ),
         ]));
+        let liq = if state.venue_only {
+            NOT_AVAILABLE.to_string()
+        } else {
+            format!("${}", format_number(state.liquidity_usd))
+        };
         info_lines.push(Line::from(vec![
             Span::styled(" Liq     ", SECONDARY),
-            Span::styled(
-                format!("${}", format_number(state.liquidity_usd)),
-                Style::new().fg(pal.volume_bar),
-            ),
+            Span::styled(liq, Style::new().fg(pal.volume_bar)),
         ]));
 
         // Market cap / FDV
@@ -1682,19 +1791,21 @@ pub(crate) fn render_market_info_panel(f: &mut Frame, area: Rect, state: &Monito
         } else {
             50.0
         };
+        let (buys, sells) = if state.venue_only {
+            (NOT_AVAILABLE.to_string(), NOT_AVAILABLE.to_string())
+        } else {
+            (
+                format!("{} ({:.0}%)", state.buys_24h, buy_pct),
+                format!("{} ({:.0}%)", state.sells_24h, 100.0 - buy_pct),
+            )
+        };
         info_lines.push(Line::from(vec![
             Span::styled(" Buys    ", SECONDARY),
-            Span::styled(
-                format!("{} ({:.0}%)", state.buys_24h, buy_pct),
-                Style::new().fg(pal.up),
-            ),
+            Span::styled(buys, Style::new().fg(pal.up)),
         ]));
         info_lines.push(Line::from(vec![
             Span::styled(" Sells   ", SECONDARY),
-            Span::styled(
-                format!("{} ({:.0}%)", state.sells_24h, 100.0 - buy_pct),
-                Style::new().fg(pal.down),
-            ),
+            Span::styled(sells, Style::new().fg(pal.down)),
         ]));
 
         // Holder count
@@ -1755,6 +1866,14 @@ pub(crate) fn render_market_info_panel(f: &mut Frame, area: Rect, state: &Monito
 
 /// Renders the footer with status and controls.
 pub(crate) fn render_footer(f: &mut Frame, area: Rect, state: &MonitorState) {
+    let footer = Paragraph::new(Line::from(footer_spans(state)))
+        .block(Block::default().borders(Borders::ALL));
+    f.render_widget(footer, area);
+}
+
+/// The footer line. Quit comes first and PAUSED next, so a narrow
+/// terminal still shows them; errors go to the header, not here.
+pub(crate) fn footer_spans(state: &MonitorState) -> Vec<Span<'static>> {
     let elapsed = state.last_update.elapsed().as_secs();
 
     // Calculate time since last price change
@@ -1779,24 +1898,16 @@ pub(crate) fn render_footer(f: &mut Frame, area: Rect, state: &MonitorState) {
         format!("{}B", memory_bytes)
     };
 
-    let status = if let Some(ref err) = state.error_message {
-        Span::styled(format!("⚠ {}", err), Style::new().red())
-    } else if state.paused {
-        Span::styled("⏸ PAUSED", Style::new().fg(Color::Yellow).bold())
-    } else if state.is_auto_paused() {
-        Span::styled("⏸ AUTO-PAUSED", Style::new().fg(Color::Cyan).bold())
-    } else {
-        Span::styled(
-            format!(
-                "↻ {}s │ Δ {} │ {} pts │ {}",
-                elapsed,
-                price_change_str,
-                synthetic_count + real_count,
-                memory_str
-            ),
-            SECONDARY,
-        )
-    };
+    let stats = Span::styled(
+        format!(
+            "↻ {}s │ Δ {} │ {} pts │ {}",
+            elapsed,
+            price_change_str,
+            synthetic_count + real_count,
+            memory_str
+        ),
+        SECONDARY,
+    );
 
     let widget_hint = if state.widget_toggle_mode {
         Span::styled("W:1-5?", Style::new().fg(Color::Yellow).bold())
@@ -1804,7 +1915,21 @@ pub(crate) fn render_footer(f: &mut Frame, area: Rect, state: &MonitorState) {
         Span::styled("W", Style::new().fg(Color::Cyan).bold())
     };
 
-    let mut spans = vec![status, Span::raw(" ║ ")];
+    let mut spans = vec![
+        Span::styled("Q", Style::new().red().bold()),
+        Span::raw("uit "),
+    ];
+    if state.paused {
+        spans.push(Span::styled(
+            "⏸ PAUSED ",
+            Style::new().fg(Color::Yellow).bold(),
+        ));
+    } else if state.is_auto_paused() {
+        spans.push(Span::styled(
+            "⏸ AUTO-PAUSED ",
+            Style::new().fg(Color::Cyan).bold(),
+        ));
+    }
 
     // REC indicator when CSV export is active
     if state.export_active {
@@ -1812,8 +1937,6 @@ pub(crate) fn render_footer(f: &mut Frame, area: Rect, state: &MonitorState) {
     }
 
     spans.extend([
-        Span::styled("Q", Style::new().red().bold()),
-        Span::raw("uit "),
         Span::styled("R", Style::new().fg(Color::Green).bold()),
         Span::raw("efresh "),
         Span::styled("P", Style::new().fg(Color::Yellow).bold()),
@@ -1832,11 +1955,10 @@ pub(crate) fn render_footer(f: &mut Frame, area: Rect, state: &MonitorState) {
         Span::raw(format!(":{} ", state.color_scheme.label())),
         Span::styled("T", Style::new().fg(Color::Magenta).bold()),
         Span::raw("ime "),
+        Span::raw("║ "),
+        stats,
     ]);
-
-    let footer = Paragraph::new(Line::from(spans)).block(Block::default().borders(Borders::ALL));
-
-    f.render_widget(footer, area);
+    spans
 }
 
 /// Formats a number with K/M/B suffixes.

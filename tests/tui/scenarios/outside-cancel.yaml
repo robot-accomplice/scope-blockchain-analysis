@@ -6,6 +6,10 @@ steps:
   - type: "monitor USDC --venue binance --pair USDC_USDT"
   - key: Enter
   - wait_for: { text: "Key Metrics" }
+  # A refresh in --pair mode asks the venue, not DexScreener. A DexScreener
+  # request is a replay miss, and its error text is "no fixture for".
+  - wait_for: { text: "Updated: \\$", timeout: 20s }
+  - expect_screen: { not_contains: ["no fixture"] }
   - key: Ctrl-C
   - wait_for: { text: "Ran outside the TUI: monitor" }
   - expect_journal: { argv_prefix: ["scope", "monitor"], outcome: ok }

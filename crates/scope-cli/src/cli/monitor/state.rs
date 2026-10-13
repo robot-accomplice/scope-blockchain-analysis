@@ -201,6 +201,30 @@ pub struct MonitorState {
 
     /// Venue-formatted pair symbol for OHLC queries (e.g., "BTCUSDT").
     pub venue_pair: Option<String>,
+
+    /// Venue id from `--venue` (e.g., "binance"), when a venue is set.
+    pub venue: Option<String>,
+
+    /// The token is priced from the venue ticker alone (`--pair`, or the
+    /// venue fallback). DexScreener is never called in this mode.
+    pub venue_only: bool,
+
+    /// False when the venue ticker gives no 24h change: `price_change_24h`
+    /// is then a placeholder, shown as n/a.
+    pub change_24h_known: bool,
+
+    /// False when the 24h volume is not known in USD: `volume_24h` is then
+    /// a placeholder. It is not charted, exported or fed to alerts.
+    pub volume_known: bool,
+}
+
+/// Where the data comes from: the chain, or `<VENUE> <pair>` in venue-only
+/// mode.
+pub(crate) fn source_label(chain: &str, venue: Option<(&str, &str)>) -> String {
+    match venue {
+        Some((id, pair)) => format!("{} {}", id.to_uppercase(), pair),
+        None => chain.to_uppercase(),
+    }
 }
 
 impl MonitorState {
@@ -311,6 +335,10 @@ impl MonitorState {
             // Exchange OHLC
             exchange_ohlc: Vec::new(),
             venue_pair: None,
+            venue: None,
+            venue_only: false,
+            change_24h_known: true,
+            volume_known: true,
         }
     }
 
@@ -328,6 +356,44 @@ impl MonitorState {
             .path
             .as_deref()
             .map_or_else(|| PathBuf::from(DEFAULT_EXPORT_DIR), PathBuf::from);
+    }
+
+    /// Switches to venue-only mode and records which stats `ticker` gives.
+    /// Call it before `update` with data built from the same ticker.
+    pub fn set_venue_ticker(&mut self, ticker: &scope::market::Ticker) {
+        self.venue_only = true;
+        self.change_24h_known = ticker.price_change_pct_24h.is_some();
+        self.volume_known = super::ticker_usd_volume(ticker).is_some();
+        if !self.volume_known {
+            // Synthetic volume built from a placeholder is not data.
+            self.volume_history.clear();
+        }
+    }
+
+    /// The source of the data, for the header and the startup line.
+    pub fn source_label(&self) -> String {
+        let venue = self.venue_only.then(|| {
+            (
+                self.venue.as_deref().unwrap_or("venue"),
+                self.venue_pair.as_deref().unwrap_or(&self.symbol),
+            )
+        });
+        source_label(&self.chain, venue)
+    }
+
+    /// The 24h change, or `None` when the source does not give it.
+    pub fn change_24h(&self) -> Option<f64> {
+        self.change_24h_known.then_some(self.price_change_24h)
+    }
+
+    /// True when the 5m/1h/6h changes are data. A venue ticker has none.
+    pub fn short_changes_known(&self) -> bool {
+        !self.venue_only
+    }
+
+    /// The 24h volume in USD, or `None` when it is not known in USD.
+    pub fn volume_usd(&self) -> Option<f64> {
+        self.volume_known.then_some(self.volume_24h)
     }
 
     /// Toggles between line and candlestick chart modes.
@@ -579,11 +645,13 @@ impl MonitorState {
             value: token_data.price_usd,
             is_real: true,
         });
-        self.volume_history.push_back(DataPoint {
-            timestamp: now_ts,
-            value: token_data.volume_24h,
-            is_real: true,
-        });
+        if self.volume_known {
+            self.volume_history.push_back(DataPoint {
+                timestamp: now_ts,
+                value: token_data.volume_24h,
+                is_real: true,
+            });
+        }
         self.real_data_count += 1;
 
         // Trim data points older than 24 hours
@@ -704,7 +772,9 @@ impl MonitorState {
 
         // ── Volume average for spike detection ──
         // Exponential moving average: 10% weight on new value
-        self.volume_avg = self.volume_avg * 0.9 + token_data.volume_24h * 0.1;
+        if self.volume_known {
+            self.volume_avg = self.volume_avg * 0.9 + token_data.volume_24h * 0.1;
+        }
 
         self.log(format!("Updated: ${:.6}", token_data.price_usd));
 
@@ -740,6 +810,7 @@ impl MonitorState {
 
         // Volume spike alert
         if let Some(threshold_pct) = self.alerts.volume_spike_threshold_pct
+            && self.volume_known
             && self.volume_avg > 0.0
         {
             let spike_pct = ((token_data.volume_24h - self.volume_avg) / self.volume_avg) * 100.0;
@@ -797,14 +868,28 @@ impl MonitorState {
             .market_cap
             .map(|mc| format!("{:.2}", mc))
             .unwrap_or_default();
+        // Unknown values are empty fields, not zeros.
+        let volume_str = self
+            .volume_usd()
+            .map(|v| format!("{:.2}", v))
+            .unwrap_or_default();
+        let (liquidity_str, buys_str, sells_str) = if self.venue_only {
+            Default::default()
+        } else {
+            (
+                format!("{:.2}", self.liquidity_usd),
+                self.buys_24h.to_string(),
+                self.sells_24h.to_string(),
+            )
+        };
         let row = format!(
-            "{},{:.8},{:.2},{:.2},{},{},{}\n",
+            "{},{:.8},{},{},{},{},{}\n",
             timestamp,
             self.current_price,
-            self.volume_24h,
-            self.liquidity_usd,
-            self.buys_24h,
-            self.sells_24h,
+            volume_str,
+            liquidity_str,
+            buys_str,
+            sells_str,
             market_cap_str,
         );
         writer.write_all(row.as_bytes())?;
