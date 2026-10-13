@@ -70,10 +70,10 @@ pub enum Overlay {
 /// What the status bar says when a search finds nothing.
 const NO_MATCH: &str = "no match";
 
-/// The gutter of a matched row: it marks the match without color.
 /// The glyph that starts a note line.
 const NOTE_GLYPH: &str = "ℹ";
 
+/// The gutter of a matched row: it marks the match without color.
 const MATCH_MARK: &str = "▶ ";
 
 /// The gutter of a row that is not a match, so rows do not shift.
@@ -1055,6 +1055,12 @@ impl TuiState {
     /// CLI command comes back for the event loop to run.
     pub fn submit(&mut self, line: &str, config: &Config) -> Plan {
         self.push_echo(line);
+        // The failed rule is about the last thing the user did. Any line
+        // they enter (a pane command, a builtin, a command run outside the
+        // TUI) is that now.
+        if !line.trim().is_empty() {
+            self.failed = false;
+        }
         if line
             .split_whitespace()
             .next()
@@ -4281,5 +4287,45 @@ mod tests {
         );
         assert_eq!(style_of(STATUS_SEP), SECONDARY);
         assert_eq!(style_of("`venues list`"), ACCENT);
+    }
+
+    #[test]
+    fn test_help_shows_key_names_in_the_key_style() {
+        let mut s = state();
+        assert!(matches!(s.submit("help", &Config::default()), Plan::Done));
+        let span = s
+            .scrollback
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .find(|sp| sp.content == "Ctrl-K")
+            .expect("help names Ctrl-K");
+        assert_eq!(span.style.fg, Some(Color::Magenta));
+        assert!(span.style.add_modifier.contains(Modifier::BOLD));
+        // Each help span follows an ANSI reset, so it is the theme style
+        // over a reset style.
+        assert_eq!(span.style, Style::reset().patch(KEY));
+        let what = s
+            .scrollback
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .find(|sp| sp.content == "palette")
+            .expect("help says what Ctrl-K does");
+        assert_eq!(what.style, Style::reset().patch(SECONDARY));
+    }
+
+    #[test]
+    fn test_any_accepted_line_clears_the_failed_state() {
+        // The red rule says the last thing the user did failed. A builtin
+        // or an outside command after the failure is the last thing now.
+        for line in ["ctx", "format json", "setup"] {
+            let mut s = failed_state();
+            assert_eq!(s.pane_state(), PaneState::Failed);
+            s.submit(line, &Config::default());
+            assert_eq!(s.pane_state(), PaneState::Idle, "{line}");
+        }
+        // An empty line is not a new action.
+        let mut s = failed_state();
+        s.submit("  ", &Config::default());
+        assert_eq!(s.pane_state(), PaneState::Failed);
     }
 }

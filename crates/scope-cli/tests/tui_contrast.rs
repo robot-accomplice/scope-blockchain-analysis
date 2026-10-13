@@ -107,15 +107,54 @@ const COLOR_TOKENS: &[&str] = &[
     ".magenta()",
 ];
 
-/// `file:line: text` for each line of the non-test code that names a color.
-/// The scan stops at the first `#[cfg(test)]`.
+/// True when the `use` statement `stmt` imports ratatui's `Color`, alone
+/// (`style::Color`) or in a group (`style::{Color, …}`).
+fn imports_color(stmt: &str) -> bool {
+    let Some((_, path)) = stmt.split_once("style::") else {
+        return false;
+    };
+    let names = path.trim_start_matches('{');
+    names
+        .split([',', '}', ';'])
+        .map(str::trim)
+        .any(|name| name == "Color" || name.starts_with("Color as "))
+}
+
+/// `file:line: text` for each line of the non-test code that names a color,
+/// and for each `use` that imports `Color`. The scan stops at the test
+/// module: a `#[cfg(test)]` followed by `mod tests`. Another `#[cfg(test)]`
+/// item does not stop it.
 fn color_uses(file: &str, src: &str) -> Vec<String> {
-    src.lines()
-        .enumerate()
-        .take_while(|(_, l)| l.trim() != "#[cfg(test)]")
-        .filter(|(_, l)| COLOR_TOKENS.iter().any(|t| l.contains(t)))
-        .map(|(i, l)| format!("{file}:{}: {}", i + 1, l.trim()))
-        .collect()
+    let lines: Vec<&str> = src.lines().collect();
+    let end = lines
+        .windows(2)
+        .position(|w| w[0].trim() == "#[cfg(test)]" && w[1].trim_start().starts_with("mod tests"))
+        .unwrap_or(lines.len());
+    let mut found = Vec::new();
+    let mut i = 0;
+    while i < end {
+        let line = lines[i];
+        let flag = |found: &mut Vec<String>| {
+            found.push(format!("{file}:{}: {}", i + 1, line.trim()));
+        };
+        if line.trim_start().starts_with("use ") {
+            // A use statement can span lines; it ends at the `;`.
+            let last = (i..end)
+                .find(|&j| lines[j].contains(';'))
+                .unwrap_or(end - 1);
+            let stmt = lines[i..=last].join(" ");
+            if imports_color(&stmt) || COLOR_TOKENS.iter().any(|t| stmt.contains(t)) {
+                flag(&mut found);
+            }
+            i = last + 1;
+            continue;
+        }
+        if COLOR_TOKENS.iter().any(|t| line.contains(t)) {
+            flag(&mut found);
+        }
+        i += 1;
+    }
+    found
 }
 
 #[test]
@@ -141,22 +180,34 @@ fn tui_files_name_no_color_outside_theme_rs() {
 #[test]
 fn color_scanner_flags_named_colors_and_shorthands_in_non_test_code() {
     let src = [
-        "a.fg(Color::Red)", // 1 flag
-        "b.red()",          // 2 flag
-        "c.cyan().bold()",  // 3 flag
-        "d.yellow()",       // 4 flag
-        "e.green()",        // 5 flag
-        "f.blue()",         // 6 flag
-        "g.magenta()",      // 7 flag
-        "h.bold()",         // 8 spare
-        "i.fg(ACCENT.fg)",  // 9 spare
-        "#[cfg(test)]",     // 10 stop
-        "j.fg(Color::Red)", // 11 spare: test code
+        "a.fg(Color::Red)",                       // 1 flag
+        "b.red()",                                // 2 flag
+        "c.cyan().bold()",                        // 3 flag
+        "d.yellow()",                             // 4 flag
+        "e.green()",                              // 5 flag
+        "f.blue()",                               // 6 flag
+        "g.magenta()",                            // 7 flag
+        "h.bold()",                               // 8 spare
+        "i.fg(ACCENT.fg)",                        // 9 spare
+        "#[cfg(test)]",                           // 10 not a test module: the scan goes on
+        "static LOCK: () = ();",                  // 11 spare
+        "k.fg(Color::Red)",                       // 12 flag
+        "use ratatui::style::Color;",             // 13 flag
+        "use ratatui::style::{Color, Modifier};", // 14 flag
+        "use ratatui::style::{Modifier, Style};", // 15 spare
+        "use ratatui::style::{",                  // 16 flag (the use)
+        "    Color as C,",                        // 17
+        "};",                                     // 18
+        "use crate::cli::theme::{ACCENT, KEY};",  // 19 spare
+        "#[cfg(test)]",                           // 20 stop
+        "mod tests {",                            // 21
+        "j.fg(Color::Red)",                       // 22 spare: test code
+        "use ratatui::style::Color;",             // 23 spare: test code
     ]
     .join("\n");
     let lines: Vec<usize> = color_uses("x.rs", &src)
         .iter()
         .map(|v| v.split(':').nth(1).unwrap().parse().unwrap())
         .collect();
-    assert_eq!(lines, vec![1, 2, 3, 4, 5, 6, 7]);
+    assert_eq!(lines, vec![1, 2, 3, 4, 5, 6, 7, 12, 13, 14, 16]);
 }

@@ -127,6 +127,22 @@ mod tests {
         assert!(MATCH.add_modifier.contains(Modifier::REVERSED));
     }
 
+    /// The style of `text` after the pane parses its ANSI, as
+    /// `TuiState::push_ansi` does.
+    fn parsed(start: &str) -> Style {
+        use ansi_to_tui::IntoText;
+        let text = format!("{start}x{RESET_ANSI}").into_text().unwrap();
+        text.lines[0].spans[0].style
+    }
+
+    #[test]
+    fn test_the_ansi_starts_parse_back_to_their_styles() {
+        // Help text reaches the pane as ANSI. A constant that drifts from
+        // its style would show keys in another color than the hint line.
+        assert_eq!(parsed(KEY_ANSI), KEY);
+        assert_eq!(parsed(SECONDARY_ANSI), SECONDARY);
+    }
+
     #[test]
     fn test_key_is_bold_magenta() {
         assert_eq!(KEY.fg, Some(Color::Magenta));
