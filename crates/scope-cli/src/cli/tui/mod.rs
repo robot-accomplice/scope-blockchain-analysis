@@ -5,15 +5,19 @@
 //! flags and the same handlers as on the command line (issue #47).
 //!
 //! ```text
-//! ┌ scope v0.6.0 ──────────────────────────────────────────┐
-//! │ scope:auto> address 0x742d…                             │
-//! │ ┌─ Address Analysis ─…                                  │
-//! └─────────────────────────────────────────────────────────┘
-//! ┌scope:auto> ─────────────────────────────────────────────┐
-//! │ market summary USDC --venue binance                     │
-//! └─────────────────────────────────────────────────────────┘
+//!  scope vX.Y.Z ──────────────────────────────────────── idle
+//! scope:auto> address 0x742d…
+//! ┌─ Address Analysis ─…
+//! ──────────────────────────────────────────────────────────
+//! ┌scope:auto> ────────────────────────────────────────────┐
+//! │ market summary USDC --venue binance                    │
+//! └────────────────────────────────────────────────────────┘
+//!  <next argument hint>
 //!  chain auto · format Table · limit 100      help · exit
 //! ```
+//!
+//! The output pane has a top and a bottom rule and no side borders. The
+//! top rule names the version and the pane state (idle, running, failed).
 //!
 //! - [`exec`] parses a line: session commands, or the CLI's clap definition.
 //! - [`app`] holds the state and draws the screen.
@@ -21,7 +25,8 @@
 //!
 //! A command that reads stdin or draws its own screen (the setup wizard, a
 //! token search with a selection prompt, the live monitor) runs in suspend
-//! mode: the TUI gives the terminal back while it runs.
+//! mode: the TUI gives the terminal back while it runs. What it writes
+//! through its output also joins the scrollback when the TUI returns.
 
 pub mod app;
 pub mod clip;
@@ -164,17 +169,18 @@ pub async fn run(
     // every listener). Only `scope tui` installs these handlers; a plain
     // CLI run keeps the default Ctrl-C.
     tokio::spawn(cancel_prompts_on(signal_stream()?, &prompt::CANCEL));
-    // Raw mode before the loads, so keys typed during startup are not
-    // read in cooked mode (issue #63). Nothing below can return an error
-    // before `session`, which restores the terminal; a panic restores it
-    // through the hook.
+    // The crash hook first: it is the only hook that restores the
+    // terminal on a panic. Then raw mode before the loads, so keys typed
+    // during startup are not read in cooked mode (issue #63). Nothing
+    // below can return an error before `session`, which restores the
+    // terminal.
+    crash::install_panic_hook();
     let mut host = RealHost {
         terminal: crash::enter_terminal(),
         events: None,
         signals,
         on_screen: true,
     };
-    crash::install_panic_hook();
     let mut state = TuiState::new(
         SessionContext::load(),
         Journal::in_data_dir(),

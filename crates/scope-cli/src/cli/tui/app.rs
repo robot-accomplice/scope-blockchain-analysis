@@ -443,7 +443,9 @@ impl TuiState {
                 }
                 return Action::Submit(line);
             }
-            KeyCode::Tab => self.tab_complete(),
+            // Tab and Ctrl-K open overlays, which are not drawn while the
+            // terminal is too small.
+            KeyCode::Tab if !self.too_small.get() => self.tab_complete(),
             KeyCode::Up => self.history_prev(),
             KeyCode::Down => self.history_next(),
             KeyCode::PageUp => {
@@ -483,7 +485,7 @@ impl TuiState {
                 self.open_search()
             }
             KeyCode::Char('r') if ctrl && !self.too_small.get() => self.open_history_search(),
-            KeyCode::Char('k') if ctrl => {
+            KeyCode::Char('k') if ctrl && !self.too_small.get() => {
                 self.overlay = Some(Overlay::Palette(super::palette::PaletteState::new(
                     super::palette::items(&self.history),
                 )));
@@ -1587,40 +1589,66 @@ impl TuiState {
     /// As [`Self::status_parts`], with the search text a draw already built.
     fn status_parts_with(&self, search: Option<String>) -> StatusParts {
         let ctx = &self.ctx;
-        let limit = format!(
-            "limit {}{}{}",
-            ctx.limit,
-            if ctx.include_tokens {
-                " · +tokens"
-            } else {
-                ""
-            },
-            if ctx.include_txs { " · +txs" } else { "" },
-        );
+        let mut limit = labeled("limit", ctx.limit.to_string());
+        for (on, flag) in [(ctx.include_tokens, "+tokens"), (ctx.include_txs, "+txs")] {
+            if on {
+                limit.extend([sep(), Span::styled(flag, ACCENT)]);
+            }
+        }
         // Highest priority first: the fit drops from the end.
         let context = vec![
-            format!("chain {}", ctx.chain),
-            format!("format {:?}", ctx.format),
+            labeled("chain", ctx.chain.clone()),
+            labeled("format", format!("{:?}", ctx.format)),
             limit,
         ];
         // The view is clamped to the content when it draws; say so here too.
         let scrolled = self.scroll.get().min(self.last_max_top.get());
-        // PgDn does nothing while a search is open, so the bar does not say it.
-        let page_down = if search.is_some() { "" } else { " · PgDn" };
-        let scrolled =
-            (scrolled > 0).then(|| format!("scrolled up {} lines{}", scrolled, page_down));
+        let scrolled = (scrolled > 0).then(|| {
+            let mut part = vec![Span::styled(
+                format!("scrolled up {} lines", scrolled),
+                ACCENT,
+            )];
+            // PgDn does nothing while a search is open, so the bar does
+            // not say it.
+            if search.is_none() {
+                part.extend([sep(), Span::styled("PgDn", ACCENT)]);
+            }
+            part
+        });
+        // Esc closes an open search before it cancels the command.
+        let searching = matches!(
+            self.overlay,
+            Some(Overlay::Search(_) | Overlay::HistorySearch(_))
+        );
         let (state, scrolled, command) = match &self.running {
             Some(run) => (
-                format!(
-                    "running {:.0}s · Esc cancels",
-                    run.started.elapsed().as_secs_f64()
-                ),
+                vec![
+                    Span::styled(
+                        format!("running {:.0}s", run.started.elapsed().as_secs_f64()),
+                        WARN,
+                    ),
+                    sep(),
+                    Span::styled(
+                        if searching {
+                            "Esc closes search"
+                        } else {
+                            "Esc cancels"
+                        },
+                        Style::new().add_modifier(Modifier::BOLD),
+                    ),
+                ],
                 scrolled,
                 Some(run.input.clone()),
             ),
             // Idle: the scroll text is the state.
             None => (
-                scrolled.unwrap_or_else(|| "help · exit".to_string()),
+                scrolled.unwrap_or_else(|| {
+                    vec![
+                        Span::styled("help", ACCENT),
+                        sep(),
+                        Span::styled("exit", ACCENT),
+                    ]
+                }),
                 None,
                 None,
             ),
@@ -1629,25 +1657,30 @@ impl TuiState {
             context,
             state,
             scrolled,
-            search,
+            search: search.map(|text| vec![Span::styled(text, ACCENT)]),
             command,
         }
     }
 }
 
-/// The parts of the status bar, in priority order.
+/// Styled text: each span carries the theme style of its part.
+type Spans = Vec<Span<'static>>;
+
+/// The parts of the status bar, in priority order. Each part is built
+/// with its styles, so a change of wording cannot change them.
 struct StatusParts {
-    /// Chain, format and limit. Dropped from the end when the bar is narrow.
-    context: Vec<String>,
-    /// `running Ns · Esc cancels`, `scrolled up N lines · PgDn` or
-    /// `help · exit`. Kept at every width.
-    state: String,
+    /// Chain, format and limit: each a dim label and an accent value.
+    /// Dropped from the end when the bar is narrow.
+    context: Vec<Spans>,
+    /// `running Ns · Esc cancels` (or `Esc closes search`),
+    /// `scrolled up N lines · PgDn` or `help · exit`. Kept at every width.
+    state: Spans,
     /// `scrolled up N lines · PgDn` while a command runs. Idle, it is the
     /// state. Dropped after the context and before the command.
-    scrolled: Option<String>,
+    scrolled: Option<Spans>,
     /// `search: alpha 1/2` or `search: alpha no match` while a search is
     /// open. Kept before the command text; dropped only after it.
-    search: Option<String>,
+    search: Option<Spans>,
     /// The command that runs. The first of these parts to go once the
     /// context is gone.
     command: Option<String>,
@@ -1676,124 +1709,129 @@ const COMMAND_FRAME_COLS: usize = 5;
 /// The shortest cut command worth showing: one column and the `…`.
 const MIN_CUT_COMMAND_COLS: usize = 2;
 
+/// The status bar separator between parts.
+const STATUS_SEP: &str = " · ";
+
+/// The separator span: dim.
+fn sep() -> Span<'static> {
+    Span::styled(STATUS_SEP, SECONDARY)
+}
+
+/// A context part: the label dim, the value in the accent.
+fn labeled(label: &str, value: String) -> Spans {
+    vec![
+        Span::styled(format!("{label} "), SECONDARY),
+        Span::styled(value, ACCENT),
+    ]
+}
+
+/// The width of `spans` in display columns.
+fn spans_cols(spans: &[Span<'static>]) -> usize {
+    spans.iter().map(|sp| cols(&sp.content)).sum()
+}
+
+/// The parts joined in order, each run of `parts` after the first led by
+/// the separator.
+fn joined<'a>(parts: impl IntoIterator<Item = &'a Spans>) -> Spans {
+    let mut out = Spans::new();
+    for (i, part) in parts.into_iter().enumerate() {
+        if i > 0 {
+            out.push(sep());
+        }
+        out.extend(part.iter().cloned());
+    }
+    out
+}
+
+/// Cuts `spans` to `max` columns with a `…`, keeping each span's style.
+fn cut_spans(spans: Spans, max: usize) -> Spans {
+    let full: String = spans.iter().map(|sp| sp.content.as_ref()).collect();
+    let cut = cut_with_ellipsis(&full, max);
+    if cut == full {
+        return spans;
+    }
+    let ellipsis = cut.ends_with(ELLIPSIS);
+    // The cut is a prefix of the text, then the `…`.
+    let mut keep = cut.len() - if ellipsis { ELLIPSIS.len() } else { 0 };
+    let mut out = Spans::new();
+    for sp in spans {
+        if keep == 0 {
+            break;
+        }
+        let n = keep.min(sp.content.len());
+        out.push(Span::styled(sp.content[..n].to_string(), sp.style));
+        keep -= n;
+    }
+    if ellipsis {
+        out.push(Span::styled(ELLIPSIS, SECONDARY));
+    }
+    out
+}
+
 /// Fits the status bar to `width` display columns. Drops limit, then
 /// format, then chain, then the command text. The state text stays at
 /// every width, and a `…` shows that something was cut or dropped.
 fn fit_status(parts: &StatusParts, width: usize) -> Line<'static> {
-    let bar = |left: String, right: String| {
-        let mut spans = context_spans(&left);
-        spans.extend(state_spans(&right));
-        Line::from(spans)
-    };
     if width == 0 {
         return Line::default();
     }
-    let command = |c: &str| format!(" · `{}`", c);
-    let note = |text: &Option<String>| {
-        text.as_ref()
-            .map(|s| format!(" · {}", s))
+    let lead = || Span::raw(" ");
+    let more = || Span::styled(format!(" {ELLIPSIS}"), SECONDARY);
+    let command = |c: &str| vec![sep(), Span::styled(format!("`{c}`"), ACCENT)];
+    let note = |part: &Option<Spans>| {
+        part.as_ref()
+            .map(|p| joined([&Spans::new(), p]))
             .unwrap_or_default()
     };
     let scroll_note = note(&parts.scrolled);
     let search_note = note(&parts.search);
+    let fits = |line: &Spans| spans_cols(line) <= width;
     let total = parts.context.len();
     for kept in (0..=total).rev() {
-        let left = if kept == 0 {
-            " ".to_string()
-        } else {
-            format!(" {}  ", parts.context[..kept].join(" · "))
-        };
-        let mut right = format!("{}{}{}", parts.state, scroll_note, search_note);
+        let mut line = vec![lead()];
+        if kept > 0 {
+            line.extend(joined(&parts.context[..kept]));
+            line.push(Span::raw("  "));
+        }
+        line.extend(parts.state.iter().cloned());
+        line.extend(scroll_note.iter().cloned());
+        line.extend(search_note.iter().cloned());
         if let Some(c) = &parts.command {
-            right.push_str(&command(c));
+            line.extend(command(c));
         }
         if kept < total {
-            right.push_str(&format!(" {}", ELLIPSIS));
+            line.push(more());
         }
-        if cols(&left) + cols(&right) <= width {
-            return bar(left, right);
+        if fits(&line) {
+            return Line::from(line);
         }
     }
     // The whole context is gone. Cut the command text to what is left. The
     // search note stays until the command is gone.
-    for note in [format!("{scroll_note}{search_note}"), search_note.clone()] {
-        let used = 1 + cols(&parts.state) + cols(&note) + COMMAND_FRAME_COLS;
+    let both = [scroll_note.clone(), search_note.clone()].concat();
+    for note in [both, search_note.clone()] {
+        let used = 1 + spans_cols(&parts.state) + spans_cols(&note) + COMMAND_FRAME_COLS;
         if let Some(c) = &parts.command
             && width >= used + MIN_CUT_COMMAND_COLS
         {
             let cut = cut_with_ellipsis(c, width - used);
-            return bar(
-                " ".to_string(),
-                format!("{}{}{}", parts.state, note, command(&cut)),
-            );
+            let line = [vec![lead()], parts.state.clone(), note, command(&cut)].concat();
+            return Line::from(line);
         }
     }
     // The command is gone too. A `…` after the state shows it, if it fits.
+    let head = [vec![lead()], parts.state.clone()].concat();
     if parts.search.is_some() {
-        let text = format!(" {}{} {}", parts.state, search_note, ELLIPSIS);
-        if cols(&text) <= width {
-            return bar(String::new(), text);
+        let line = [head.clone(), search_note, vec![more()]].concat();
+        if fits(&line) {
+            return Line::from(line);
         }
     }
-    let text = format!(" {} {}", parts.state, ELLIPSIS);
-    if cols(&text) <= width {
-        return bar(String::new(), text);
+    let line = [head.clone(), vec![more()]].concat();
+    if fits(&line) {
+        return Line::from(line);
     }
-    bar(
-        String::new(),
-        cut_with_ellipsis(&format!(" {}", parts.state), width),
-    )
-}
-
-/// The status bar separator between parts.
-const STATUS_SEP: &str = " · ";
-
-/// Styles the context part of the bar, such as ` chain eth  format Table `.
-/// Each part is a label then a value: the label dim, the value in the
-/// accent. A `…` or other text with no label stays dim.
-fn context_spans(text: &str) -> Vec<Span<'static>> {
-    let mut spans = Vec::new();
-    for (i, part) in text.split(STATUS_SEP).enumerate() {
-        if i > 0 {
-            spans.push(Span::styled(STATUS_SEP, SECONDARY));
-        }
-        let body = part.trim_start();
-        let lead = &part[..part.len() - body.len()];
-        let Some((label, value)) = body.split_once(' ') else {
-            // A flag such as `+tokens` is a value.
-            let style = if body.starts_with('+') {
-                ACCENT
-            } else {
-                SECONDARY
-            };
-            spans.push(Span::styled(part.to_string(), style));
-            continue;
-        };
-        spans.push(Span::styled(format!("{lead}{label} "), SECONDARY));
-        spans.push(Span::styled(value.to_string(), ACCENT));
-    }
-    spans
-}
-
-/// Styles the state part of the bar: `running Ns` in the warning color,
-/// `Esc cancels` bold, the rest in the accent.
-fn state_spans(text: &str) -> Vec<Span<'static>> {
-    let mut spans = Vec::new();
-    for (i, part) in text.split(STATUS_SEP).enumerate() {
-        if i > 0 {
-            spans.push(Span::styled(STATUS_SEP, SECONDARY));
-        }
-        let word = part.trim_start();
-        let style = if word.starts_with("running") {
-            WARN
-        } else if word.starts_with("Esc") {
-            Style::new().add_modifier(Modifier::BOLD)
-        } else {
-            ACCENT
-        };
-        spans.push(Span::styled(part.to_string(), style));
-    }
-    spans
+    Line::from(cut_spans(head, width))
 }
 
 /// The first fitted row of each entry at `width`, and the row after the
@@ -2551,13 +2589,18 @@ mod tests {
         assert!(matches!(s.handle_key(key(KeyCode::Enter)), Action::None));
         assert!(s.overlay.is_none(), "the overlay is closed");
         assert_eq!(s.input, "dra", "the palette did not fill the input");
-        // Another key closes an open overlay and does not edit.
+        // Another key closes an overlay opened before the shrink, and
+        // does not edit.
+        screen(&s, 80, 24);
         s.handle_key(ctrl('k'));
+        screen(&s, 30, 8);
         s.handle_key(key(KeyCode::Char('x')));
         assert!(s.overlay.is_none());
         assert_eq!(s.input, "dra");
         // Esc closes it too.
+        screen(&s, 80, 24);
         s.handle_key(ctrl('k'));
+        screen(&s, 30, 8);
         s.handle_key(key(KeyCode::Esc));
         assert!(s.overlay.is_none());
         assert_eq!(s.input, "dra");
@@ -2596,18 +2639,19 @@ mod tests {
     fn test_fit_status_never_panics_and_never_exceeds_the_width() {
         // Width math runs on every redraw: width 0 and tiny widths must
         // give a line, and no line may be wider than the bar.
+        let text = |t: &str| vec![Span::styled(t.to_string(), ACCENT)];
         let mut parts = StatusParts {
             context: vec![
-                "chain auto".into(),
-                "format Table".into(),
-                "limit 100".into(),
+                labeled("chain", "auto".into()),
+                labeled("format", "Table".into()),
+                labeled("limit", "100".into()),
             ],
-            state: "running 12s · Esc cancels".into(),
-            scrolled: Some("scrolled up 7 lines · PgDn".into()),
+            state: text("running 12s · Esc cancels"),
+            scrolled: Some(text("scrolled up 7 lines · PgDn")),
             search: None,
             command: Some("market summary ✓✓ --every 2s".into()),
         };
-        for search in [None, Some("search: alpha ✓ 1/2".to_string())] {
+        for search in [None, Some(text("search: alpha ✓ 1/2"))] {
             parts.search = search;
             for w in 0..=130 {
                 let line = fit_status(&parts, w);
@@ -2636,7 +2680,6 @@ mod tests {
             run: 2,
             total: Some(4),
             next_at: Some(Instant::now() + Duration::from_secs(3)),
-            banner: None,
         };
         let text = screen(&s, 80, 12);
         assert!(text.contains("run 2 of 4 · next in 3s"), "{text}");
@@ -2686,7 +2729,6 @@ mod tests {
             run: 2,
             total: Some(4),
             next_at: Some(Instant::now() + Duration::from_secs(3)),
-            banner: Some("Running market summary every 2s".into()),
         };
         let drawn = screen(&s, 80, 12);
         assert!(drawn.contains("run 2 of 4"), "{drawn}");
@@ -3709,9 +3751,10 @@ mod tests {
             wide.contains("search: alpha 1/5") && wide.contains("market summary"),
             "{wide}"
         );
-        for w in 26..140 {
+        // Below 32 columns the state itself is cut.
+        for w in 32..140 {
             let row = status_row(&s, w);
-            assert!(row.contains("Esc cancels"), "{w}: {row:?}");
+            assert!(row.contains("Esc closes search"), "{w}: {row:?}");
             if row.contains("market") {
                 assert!(
                     row.contains("search:"),
@@ -4165,5 +4208,78 @@ mod tests {
                 .iter()
                 .any(|c| c.symbol() == "✗" && c.modifier.contains(Modifier::BOLD))
         );
+    }
+
+    #[test]
+    fn test_status_says_esc_closes_search_while_a_search_is_open_in_a_run() {
+        // Esc closes the search first; the bar must not promise a cancel.
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let (mut s, _out) = running_state("venues list");
+        screen(&s, 120, 20);
+        for open in [ctrl('f'), ctrl('r')] {
+            s.handle_key(open);
+            let row = status_row(&s, 120);
+            assert!(row.contains("Esc closes search"), "{row:?}");
+            assert!(!row.contains("Esc cancels"), "{row:?}");
+            s.handle_key(key(KeyCode::Esc));
+            assert!(s.running.is_some(), "Esc closed the search only");
+            assert!(status_row(&s, 120).contains("Esc cancels"));
+        }
+    }
+
+    #[test]
+    fn test_ctrl_k_and_tab_open_no_overlay_while_the_terminal_is_too_small() {
+        // A hidden overlay would take the next keys unseen.
+        let mut s = state();
+        type_str(&mut s, "m");
+        screen(&s, 80, 24);
+        s.handle_key(key(KeyCode::Tab));
+        assert!(
+            matches!(s.overlay, Some(Overlay::Menu(_))),
+            "Tab offers a menu at a normal size"
+        );
+        s.handle_key(key(KeyCode::Esc));
+        screen(&s, 30, 8);
+        s.handle_key(key(KeyCode::Tab));
+        assert!(s.overlay.is_none());
+        assert_eq!(s.input, "m", "Tab did not complete unseen");
+        s.handle_key(ctrl('k'));
+        assert!(s.overlay.is_none());
+    }
+
+    #[test]
+    fn test_status_styles_come_from_the_parts_not_from_their_text() {
+        // A search for text that looks like a state word keeps the style
+        // of the search note: styles must not depend on the wording.
+        let mut s = alpha_state();
+        s.push_ansi("x · running\n");
+        open_search(&mut s, "x · running");
+        let line = fit_status(&s.status_parts(), 120);
+        let at = |text: &str| {
+            line.spans
+                .iter()
+                .position(|sp| sp.content.contains(text))
+                .unwrap_or_else(|| panic!("no {text:?} in {line:?}"))
+        };
+        for sp in &line.spans[at("search:")..=at("1/1")] {
+            assert_eq!(sp.style, ACCENT, "{sp:?} in {line:?}");
+        }
+        // Each part keeps its role: label dim, value accent, the
+        // separator dim.
+        let (run, _out) = running_state("venues list");
+        let line = fit_status(&run.status_parts(), 120);
+        let style_of = |text: &str| {
+            line.spans
+                .iter()
+                .find(|sp| sp.content == text)
+                .unwrap_or_else(|| panic!("no span {text:?} in {line:?}"))
+                .style
+        };
+        assert_eq!(
+            style_of("Esc cancels"),
+            Style::new().add_modifier(Modifier::BOLD)
+        );
+        assert_eq!(style_of(STATUS_SEP), SECONDARY);
+        assert_eq!(style_of("`venues list`"), ACCENT);
     }
 }

@@ -324,7 +324,11 @@ pub async fn handle_analyze_with_client(
                 outln!(out, "Unusual hour transactions: {}", analysis.unusual_hours)?;
             }
             Err(e) => {
-                errln!(out, "  ⚠ Could not fetch transactions (use -v for details)")?;
+                errln!(
+                    out,
+                    "  ⚠ Could not fetch transactions ({})",
+                    crate::cli::errors::details_hint(out.is_tui())
+                )?;
                 tracing::debug!("Error fetching transactions: {}", e);
             }
         }

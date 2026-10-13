@@ -12,6 +12,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// How many journal lines the crash log keeps.
 const JOURNAL_TAIL_LINES: usize = 20;
@@ -25,13 +26,36 @@ pub(crate) fn paste_mode(w: &mut impl Write, on: bool) {
     };
 }
 
+/// How many panic hooks this module installed. A test seam: taking the
+/// terminal again must not add one.
+pub(crate) static HOOK_INSTALLS: AtomicUsize = AtomicUsize::new(0);
+
 /// Takes the terminal: raw mode on, alternate screen on, bracketed paste
 /// on. Every init site calls this one function (startup, resume, a
 /// re-init after a stop), so paste mode is never missed.
+///
+/// It installs no panic hook: `ratatui::init` would add one per call, so
+/// each suspend would stack another. The crash hook
+/// ([`install_panic_hook`], installed once) restores the terminal.
+///
+/// # Panics
+///
+/// Panics when the terminal cannot be set up, as `ratatui::init` does.
 pub(crate) fn enter_terminal() -> ratatui::DefaultTerminal {
-    let terminal = ratatui::init();
-    paste_mode(&mut io::stdout(), true);
-    terminal
+    take_screen(&mut io::stdout(), crossterm::terminal::enable_raw_mode)
+        .and_then(|()| {
+            ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(io::stdout()))
+        })
+        .expect("failed to initialize terminal")
+}
+
+/// Turns raw mode on with `raw_mode`, then writes the sequences that enter
+/// the alternate screen and turn bracketed paste on to `w`.
+fn take_screen(w: &mut impl Write, raw_mode: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
+    raw_mode()?;
+    crossterm::execute!(w, crossterm::terminal::EnterAlternateScreen)?;
+    paste_mode(w, true);
+    Ok(())
 }
 
 /// Gives the terminal back: bracketed paste off, raw mode off, alternate
@@ -106,6 +130,7 @@ fn crash_notice(dir: Option<&Path>, info_text: &str, journal_tail: &[String]) ->
 pub(crate) fn install_panic_hook() {
     static INSTALLED: OnceLock<()> = OnceLock::new();
     INSTALLED.get_or_init(|| {
+        HOOK_INSTALLS.fetch_add(1, Ordering::SeqCst);
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             restore_terminal();
@@ -205,6 +230,43 @@ mod tests {
         assert!(
             blocked.starts_with("scope crashed; the crash log failed: "),
             "{blocked}"
+        );
+    }
+
+    /// The non-test source of `file`: everything before its test module.
+    fn code_of(file: &str) -> &str {
+        file.split("#[cfg(test)]\nmod tests").next().unwrap()
+    }
+
+    #[test]
+    fn test_no_path_takes_the_terminal_through_ratatui_init() {
+        // ratatui's init installs a panic hook on every call; a resume per
+        // suspend would stack one more each time, and a panic would then
+        // restore the terminal once per suspend. The crash hook restores it.
+        for file in [include_str!("crash.rs"), include_str!("mod.rs")] {
+            for call in [
+                "init(",
+                "try_init(",
+                "init_with_options(",
+                "try_init_with_options(",
+            ] {
+                let needle = format!("ratatui::{call}");
+                assert!(!code_of(file).contains(&needle), "{needle} is called");
+            }
+        }
+    }
+
+    #[test]
+    fn test_taking_the_terminal_again_installs_no_panic_hook() {
+        let before = HOOK_INSTALLS.load(std::sync::atomic::Ordering::SeqCst);
+        for _ in 0..3 {
+            let mut screen = Vec::new();
+            take_screen(&mut screen, || Ok(())).unwrap();
+            assert_eq!(screen, b"\x1b[?1049h\x1b[?2004h", "alternate screen, paste");
+        }
+        assert_eq!(
+            HOOK_INSTALLS.load(std::sync::atomic::Ordering::SeqCst),
+            before
         );
     }
 }

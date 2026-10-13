@@ -360,7 +360,8 @@ pub async fn analyze_address(
             Err(e) => {
                 errln!(
                     out,
-                    "  ⚠ Transaction history unavailable (use -v for details)"
+                    "  ⚠ Transaction history unavailable ({})",
+                    crate::cli::errors::details_hint(out.is_tui())
                 )?;
                 tracing::debug!("Failed to fetch transactions: {}", e);
                 Some(vec![])
@@ -390,7 +391,11 @@ pub async fn analyze_address(
                     .collect(),
             ),
             Err(e) => {
-                errln!(out, "  ⚠ Token balances unavailable (use -v for details)")?;
+                errln!(
+                    out,
+                    "  ⚠ Token balances unavailable ({})",
+                    crate::cli::errors::details_hint(out.is_tui())
+                )?;
                 tracing::debug!("Failed to fetch token balances: {}", e);
                 Some(vec![])
             }
@@ -1205,6 +1210,43 @@ mod tests {
                 .map(|v| v.is_empty())
                 .unwrap_or(false)
         );
+    }
+
+    #[tokio::test]
+    async fn test_unavailable_notes_name_tui_steps_in_the_tui() {
+        // `-v` does nothing in the TUI; the note must not send users there.
+        let mut args = AddressArgs {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: "ethereum".to_string(),
+            format: None,
+            include_txs: true,
+            include_tokens: false,
+            limit: 10,
+            report: None,
+            dossier: false,
+        };
+        let (tui, tui_text) = crate::cli::output::Output::capture_merged();
+        let (cli, cli_text) = crate::cli::output::Output::capture();
+        for out in [&tui, &cli] {
+            analyze_address(&args, &FailTxMockClient, out)
+                .await
+                .unwrap();
+        }
+        args.include_txs = false;
+        args.include_tokens = true;
+        for out in [&tui, &cli] {
+            analyze_address(&args, &FailTokenBalancesMockClient, out)
+                .await
+                .unwrap();
+        }
+        let tui_text = tui_text.out();
+        assert!(!tui_text.contains("-v"), "{tui_text}");
+        assert_eq!(
+            tui_text.matches("(run 'help <command>' for usage)").count(),
+            2,
+            "{tui_text}"
+        );
+        assert_eq!(cli_text.err().matches("(use -v for details)").count(), 2);
     }
 
     #[tokio::test]

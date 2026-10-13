@@ -82,6 +82,17 @@ fn is_non_tls_reply(cause: &str) -> bool {
     cause.contains("InvalidContentType") || cause.contains("wrong version number")
 }
 
+/// Where to learn more about a partial failure, such as a section that
+/// could not be fetched. In the TUI (`tui`), where `-v` has no effect, it
+/// names the TUI's help.
+pub fn details_hint(tui: bool) -> &'static str {
+    if tui {
+        "run 'help <command>' for usage"
+    } else {
+        "use -v for details"
+    }
+}
+
 /// Next steps for a network failure inside the TUI, where `-v` has no effect.
 const TUI_NETWORK_HINT: &str = "Check your network connection and try again.\n      \
      run 'help <command>' for usage; set 'format json' for raw output";
@@ -188,6 +199,13 @@ mod tests {
     // ================================================================
     // display_error (delegates to non-TTY in CI)
     // ================================================================
+
+    #[test]
+    fn test_details_hint_names_no_cli_flag_in_the_tui() {
+        assert_eq!(details_hint(false), "use -v for details");
+        assert_eq!(details_hint(true), "run 'help <command>' for usage");
+        assert!(!details_hint(true).contains("-v"));
+    }
 
     #[test]
     fn test_display_error_goes_to_err_channel_with_hint() {

@@ -608,16 +608,16 @@ async fn run_summary(
     let start = std::time::Instant::now();
     let duration = Duration::from_secs(duration_secs);
 
-    let banner = format!(
-        "Running market summary every {}s for {}s (Ctrl+C to stop early)",
-        every_secs, duration_secs
-    );
-    errln!(out, "{}\n", banner)?;
+    errln!(
+        out,
+        "Running market summary every {}s for {}s (Ctrl+C to stop early)\n",
+        every_secs,
+        duration_secs
+    )?;
     out.update_progress(|p| {
         p.run = 0;
         p.total = Some(repeat_total(duration_secs, every_secs));
         p.next_at = None;
-        p.banner = Some(banner);
     });
 
     let mut run_num: u64 = 1;
@@ -2213,8 +2213,7 @@ capabilities:
         assert_eq!(p.total, Some(3), "{p:?}");
         assert_eq!(p.run, 3, "{p:?}");
         assert_eq!(p.next_at, None, "no next run after the last: {p:?}");
-        let banner = p.banner.expect("the start banner is published");
-        assert!(banner.contains("every 1s for 2s"), "{banner}");
+        assert!(captured.out().contains("every 1s for 2s"));
         assert!(captured.out().contains("Completed 3 run(s)"));
     }
 

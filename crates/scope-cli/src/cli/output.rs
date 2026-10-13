@@ -43,8 +43,6 @@ pub struct RunProgress {
     pub total: Option<u64>,
     /// When the next run starts. None while a run is in progress.
     pub next_at: Option<Instant>,
-    /// The line the command printed when it started repeating.
-    pub banner: Option<String>,
 }
 
 /// A progress record shared between a command and the screen.
