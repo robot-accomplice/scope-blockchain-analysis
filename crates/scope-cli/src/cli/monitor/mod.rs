@@ -583,9 +583,12 @@ fn abbreviate_address(addr: &str) -> String {
 fn select_token_interactive(
     results: &[scope::chains::dex::TokenSearchResult],
 ) -> Result<&scope::chains::dex::TokenSearchResult> {
-    let stdin = io::stdin();
     let stdout = io::stdout();
-    select_token_impl(results, &mut stdin.lock(), &mut stdout.lock())
+    select_token_impl(
+        results,
+        &mut crate::cli::prompt::stdin(),
+        &mut stdout.lock(),
+    )
 }
 
 /// Testable implementation of token selection with injected I/O.

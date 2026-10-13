@@ -99,12 +99,24 @@ pub struct Running {
     _diag: scope::diag::RedirectGuard,
 }
 
-/// How a pane command ended.
+/// How a command ended, in the pane or outside the TUI.
 pub enum Ending {
     /// The handler returned.
     Finished(scope::error::Result<()>),
     /// The user cancelled it.
     Cancelled,
+}
+
+impl Ending {
+    /// The journal outcome (`ok`, `error` or `cancelled`) and the error
+    /// text.
+    fn outcome(&self) -> (&'static str, Option<String>) {
+        match self {
+            Ending::Finished(Ok(())) => ("ok", None),
+            Ending::Finished(Err(e)) => ("error", Some(e.to_string())),
+            Ending::Cancelled => ("cancelled", None),
+        }
+    }
 }
 
 /// The complete TUI state.
@@ -517,11 +529,7 @@ impl TuiState {
         let Some(run) = self.running.take() else {
             return;
         };
-        let (outcome, error) = match &ending {
-            Ending::Finished(Ok(())) => ("ok", None),
-            Ending::Finished(Err(e)) => ("error", Some(e.to_string())),
-            Ending::Cancelled => ("cancelled", None),
-        };
+        let (outcome, error) = ending.outcome();
         if let Ending::Finished(Err(e)) = &ending {
             // Same text and hints as the CLI prints on failure.
             if let Err(write_err) = crate::cli::errors::display_error(e, &run.out) {
@@ -547,24 +555,28 @@ impl TuiState {
         });
     }
 
-    /// Records a command that ran outside the TUI (suspend mode).
-    /// `duration` is the command's own run time, without the wait for Enter.
+    /// Records a command that ran outside the TUI (suspend mode), with a
+    /// note such as `Ran outside the TUI: crawl USDC (cancelled, 3.2s).`
     pub fn record_suspended(
         &mut self,
         input: &str,
         inv_argv: &[String],
         duration: std::time::Duration,
         started_at: String,
-        result: &scope::error::Result<()>,
+        ending: &Ending,
     ) {
-        let (outcome, error) = match result {
-            Ok(()) => ("ok", None),
-            Err(e) => ("error", Some(e.to_string())),
+        let (outcome, error) = ending.outcome();
+        // The note says "failed"; the journal keeps "error".
+        let word = if outcome == "error" {
+            "failed"
+        } else {
+            outcome
         };
         self.push_note(&format!(
-            "Ran outside the TUI: {} ({}).",
+            "Ran outside the TUI: {} ({}, {:.1}s).",
             input,
-            if result.is_ok() { "ok" } else { "failed" }
+            word,
+            duration.as_secs_f64()
         ));
         self.log(Event {
             started: started_at,
@@ -1357,7 +1369,7 @@ mod tests {
             &["scope".into(), "setup".into()],
             std::time::Duration::from_millis(5),
             "2026-01-01T00:00:00Z".into(),
-            &failed,
+            &Ending::Finished(failed),
         );
         let row: serde_json::Value =
             serde_json::from_str(std::fs::read_to_string(events).unwrap().trim()).unwrap();
