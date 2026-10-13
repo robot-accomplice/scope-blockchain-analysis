@@ -89,7 +89,7 @@ fn dex_book_and_volume(
 ) -> Result<(OrderBook, Option<f64>)> {
     venue.require_chain(&analytics.chain)?;
     let best = most_liquid(&analytics.dex_pairs).ok_or_else(|| {
-        ScopeError::Chain(format!(
+        ScopeError::NotFound(format!(
             "No DEX pairs found for {} on {}",
             analytics.token.symbol,
             venue.chain()
@@ -234,6 +234,8 @@ mod tests {
                 .contains("No DEX pairs found for USDC on solana"),
             "{err}"
         );
+        // Not found, so the web answers 404 (see scope-web `status_for`).
+        assert!(matches!(err, ScopeError::NotFound(_)), "{err:?}");
     }
 
     /// One chain rule for every caller: analytics from another chain never

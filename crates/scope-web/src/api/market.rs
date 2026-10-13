@@ -1,5 +1,6 @@
 //! Market summary API handler.
 
+use super::{error_response, status_for};
 use crate::AppState;
 use axum::Json;
 use axum::extract::State;
@@ -94,21 +95,18 @@ pub async fn handle(
     let thresholds = state.config.market.health.with_overrides(&req.health);
     let registry = match VenueRegistry::load() {
         Ok(r) => r,
-        Err(e) => {
-            return error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Registry error: {e}"),
-            );
-        }
+        Err(e) => return error_response(status_for(&e), format!("Registry error: {e}")),
     };
+    // An unknown venue or a chain that is not the DEX venue's chain is a
+    // fault in the request itself.
     let venue = match MarketVenue::resolve(&req.market_venue, &registry) {
         Ok(v) => v,
-        Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
+        Err(e) => return error_response(StatusCode::BAD_REQUEST, e.to_string()),
     };
     if let Some(chain) = &req.chain
         && let Err(e) = venue.require_chain(chain)
     {
-        return error(StatusCode::BAD_REQUEST, e.to_string());
+        return error_response(StatusCode::BAD_REQUEST, e.to_string());
     }
     let out = Output::stdio();
     let dex = CrawlDexSource {
@@ -117,12 +115,8 @@ pub async fn handle(
     };
     match fetch_summary(&venue, &Pair::parse(&req.pair), &thresholds, &dex).await {
         Ok(summary) => Json(summary_to_json(&summary)).into_response(),
-        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Err(e) => error_response(status_for(&e), e.to_string()),
     }
-}
-
-fn error(status: StatusCode, message: String) -> axum::response::Response {
-    (status, Json(serde_json::json!({ "error": message }))).into_response()
 }
 
 #[cfg(test)]

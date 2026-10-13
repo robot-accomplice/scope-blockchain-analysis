@@ -73,13 +73,7 @@ pub async fn handle(
     .await
     {
         Ok(a) => a,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response();
-        }
+        Err(e) => return super::error_response(super::status_for(&e), e.to_string()),
     };
 
     // Optionally fetch market data; a market error leaves `market` null.
@@ -322,8 +316,14 @@ mod tests {
         };
         let response = handle(State(state), axum::Json(req)).await.into_response();
         let status = response.status();
-        // May succeed (empty analytics) or 500 (fetch error)
-        assert!(status.is_success() || status.is_server_error());
+        // Empty analytics (200), not found (404, via `status_for`), or a
+        // network failure offline (500).
+        assert!(
+            status.is_success()
+                || status == axum::http::StatusCode::NOT_FOUND
+                || status.is_server_error(),
+            "{status}"
+        );
     }
 
     #[test]
