@@ -22,9 +22,10 @@ const WATCHED: &[&str] = &[
     "panic::set_hook",
 ];
 
-const fn screen(call: &'static str, reason: &'static str) -> Allowed {
+const fn screen(func: &'static str, call: &'static str, reason: &'static str) -> Allowed {
     Allowed {
         file: "screen.rs",
+        func,
         call,
         count: 1,
         reason,
@@ -32,17 +33,23 @@ const fn screen(call: &'static str, reason: &'static str) -> Allowed {
 }
 
 const ALLOWED: &[Allowed] = &[
-    screen("enable_raw_mode", "enter"),
-    screen("EnterAlternateScreen", "enter"),
-    screen("EnableMouseCapture", "enter, for the monitor"),
-    screen("DisableMouseCapture", "restore"),
+    screen("enter", "enable_raw_mode", "raw mode on"),
+    screen("take", "EnterAlternateScreen", "the alternate screen"),
+    screen("take", "EnableMouseCapture", "mouse, for the monitor"),
+    screen("give_back", "DisableMouseCapture", "mouse off"),
     screen(
+        "restore",
         "ratatui::restore",
-        "restore: raw mode and alternate screen off",
+        "raw mode and alternate screen off",
     ),
-    screen("panic::set_hook", "the restore hook, run once"),
+    screen(
+        "install_restore_hook",
+        "panic::set_hook",
+        "the restore hook, run once",
+    ),
     Allowed {
         file: "tui/crash.rs",
+        func: "install_panic_hook",
         call: "panic::set_hook",
         count: 1,
         reason: "the crash-log hook, installed once",
@@ -62,22 +69,21 @@ fn only_the_screen_module_takes_the_screen() {
 #[test]
 fn a_second_hook_or_a_ratatui_init_is_flagged() {
     let src = [
-        "std::panic::set_hook(a);",
-        "std::panic::set_hook(b);",
-        "let t = ratatui::init();",
+        "fn install_restore_hook() {",
+        "    std::panic::set_hook(a);",
+        "}",
+        "fn take() {",
+        "    std::panic::set_hook(b);",
+        "    let t = ratatui::init();",
+        "}",
     ]
     .join("\n");
     let found = audit(&[("screen.rs".into(), src)], WATCHED, ALLOWED);
-    assert!(
-        found.contains(&"screen.rs: ratatui::init 1 times, allowed 0 [screen.rs:3]".to_string()),
-        "{found:?}"
-    );
-    assert!(
-        found.contains(
-            &"screen.rs: panic::set_hook 2 times, allowed 1 (the restore hook, run once) \
-              [screen.rs:1, screen.rs:2]"
-                .to_string()
-        ),
-        "{found:?}"
-    );
+    for want in [
+        "screen.rs fn take: ratatui::init 1 times, allowed 0 [screen.rs:6]",
+        "screen.rs fn take: panic::set_hook 1 times, allowed 0 [screen.rs:5]",
+        "stale entry: screen.rs has no fn enter",
+    ] {
+        assert!(found.iter().any(|f| f == want), "{want} not in {found:?}");
+    }
 }

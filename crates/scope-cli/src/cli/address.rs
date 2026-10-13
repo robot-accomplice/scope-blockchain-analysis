@@ -257,10 +257,8 @@ pub async fn run(
         analysis_args.include_tokens = true;
     }
 
-    let sp = crate::cli::progress::Spinner::new(
-        &format!("Analyzing address on {}...", args.chain),
-        out,
-    )?;
+    let sp =
+        crate::cli::progress::Spinner::new(&format!("Analyzing address on {}...", args.chain), out);
 
     let client = clients.create_chain_client(&args.chain)?;
     let report = analyze_address(&analysis_args, client.as_ref(), out).await?;

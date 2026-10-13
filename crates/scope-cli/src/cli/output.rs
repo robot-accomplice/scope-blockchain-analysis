@@ -21,6 +21,12 @@
 //!
 //! Data goes to `out`. Warnings, progress and status lines go to `err`, so
 //! piped JSON and CSV stay clean.
+//!
+//! A status line ("Fetching…", "Selected: …", "Saved …") is a note. Write
+//! it with [`note!`](crate::note). Notes are best effort: a failed note
+//! write is dropped, so it never takes the place of the command's own
+//! result. Data and errors use `outln!` and `errln!`, which return the
+//! write error.
 
 use std::fmt;
 use std::io::{self, Write};
@@ -223,6 +229,13 @@ impl Output {
     pub fn write_err(&self, args: fmt::Arguments<'_>) -> io::Result<()> {
         emit(&self.err, args)
     }
+
+    /// Writes a status line to the diagnostic channel. Use
+    /// [`note!`](crate::note). A failed write is dropped: see the module
+    /// documentation.
+    pub fn note(&self, args: fmt::Arguments<'_>) {
+        let _ = emit(&self.err, args);
+    }
 }
 
 /// Reads back what an [`Output::capture`] output received.
@@ -334,34 +347,19 @@ fn keep_tail(buf: &mut Vec<u8>, limit: usize) -> bool {
     true
 }
 
-const ESC: u8 = 0x1b;
-
-/// The first index at or after `cut` that starts neither inside a CSI
-/// escape sequence (`ESC [ … final`) nor inside a UTF-8 character.
+/// The first index at or after `cut` that is inside neither an escape
+/// sequence ([`crate::cli::ansi`]) nor a UTF-8 character. It walks from
+/// the start, so it knows where each sequence begins.
 fn whole_cut(buf: &[u8], cut: usize) -> usize {
-    let after_escape = buf[..cut]
-        .iter()
-        .rposition(|&b| b == ESC)
-        .and_then(|esc| csi_end(buf, esc))
-        .filter(|&end| end > cut)
-        .unwrap_or(cut);
+    let mut i = 0;
+    while i < cut {
+        i = crate::cli::ansi::escape_end(buf, i).unwrap_or(i + 1);
+    }
     let continuation = |b: u8| b & 0b1100_0000 == 0b1000_0000;
-    buf[after_escape..]
+    buf[i.min(buf.len())..]
         .iter()
         .position(|&b| !continuation(b))
-        .map_or(buf.len(), |i| after_escape + i)
-}
-
-/// The index after the final byte of the CSI sequence that starts at
-/// `esc`, or `None` when it is not a complete CSI sequence.
-fn csi_end(buf: &[u8], esc: usize) -> Option<usize> {
-    if buf.get(esc + 1) != Some(&b'[') {
-        return None;
-    }
-    buf[esc + 2..]
-        .iter()
-        .position(|b| (0x40..=0x7e).contains(b))
-        .map(|i| esc + 2 + i + 1)
+        .map_or(buf.len(), |n| i + n)
 }
 
 /// Locks a mutex, recovering the data if a panicking writer poisoned it.
@@ -408,6 +406,18 @@ macro_rules! errln {
     };
 }
 
+/// Writes a status line (a note) to the diagnostic channel of an
+/// [`Output`], with a newline. Best effort: it returns nothing.
+#[macro_export]
+macro_rules! note {
+    ($o:expr) => {
+        $o.note(format_args!("\n"))
+    };
+    ($o:expr, $($arg:tt)*) => {
+        $o.note(format_args!("{}\n", format_args!($($arg)*)))
+    };
+}
+
 /// Prints to the diagnostic channel of an [`Output`], without a newline.
 #[macro_export]
 macro_rules! err {
@@ -432,6 +442,18 @@ pub(crate) mod tests {
         errln!(o, "Warning: {}", "partial data").unwrap();
         assert_eq!(cap.out(), "{\"ok\":true}\n");
         assert_eq!(cap.err(), "Warning: partial data\n");
+    }
+
+    #[test]
+    fn test_a_note_goes_to_the_diagnostic_channel_and_never_fails() {
+        // A status line must not end a command whose real work went well,
+        // and must stay out of data.
+        let (o, cap) = Output::capture();
+        note!(o, "Fetching {}...", "USDC");
+        assert_eq!(cap.err(), "Fetching USDC...\n");
+        assert_eq!(cap.out(), "");
+        let closed = Output::from_writers(Vec::new(), ClosedPipe);
+        note!(closed, "dropped");
     }
 
     #[test]
@@ -564,6 +586,13 @@ pub(crate) mod tests {
         // 74 bytes; limit 20 cuts at 64, inside the sequence at 60..71.
         assert!(keep_tail(&mut colored, 20));
         assert_eq!(colored, b"red");
+        let mut link = b"y".repeat(60);
+        link.extend_from_slice(b"\x1b]8;;https://example.com/a/long/path\x1b\\text");
+        // The OSC string runs from 60 to 98; a cut at 80 is inside it.
+        let cut_at = link.len() - 40 / 2;
+        assert!(cut_at > 60 && cut_at < 98, "{cut_at}");
+        assert!(keep_tail(&mut link, 40));
+        assert_eq!(link, b"text");
     }
 
     #[test]

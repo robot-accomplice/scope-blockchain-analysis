@@ -25,7 +25,7 @@
 //! not copied.
 
 use crate::cli::output::Output;
-use crate::errln;
+use crate::note;
 use indicatif::{ProgressBar, ProgressStyle, WeakProgressBar};
 use scope::display::terminal::color_enabled_stderr;
 use std::sync::Mutex;
@@ -74,12 +74,9 @@ pub struct Spinner {
 }
 
 impl Spinner {
-    /// Creates and starts a spinner with the given message.
-    ///
-    /// # Errors
-    ///
-    /// Returns the output's error when the status line cannot be written.
-    pub fn new(message: &str, output: &Output) -> std::io::Result<Self> {
+    /// Creates and starts a spinner with the given message. A hidden
+    /// spinner writes the message as a note.
+    pub fn new(message: &str, output: &Output) -> Self {
         let bar = if output.progress_enabled() && atty_stderr() {
             let pb = ProgressBar::new_spinner();
             pb.set_style(
@@ -97,13 +94,13 @@ impl Spinner {
             pb
         } else {
             // No animation: write a simple status line instead
-            errln!(output, "{}", message)?;
+            note!(output, "{}", message);
             ProgressBar::hidden()
         };
-        Ok(Self {
+        Self {
             bar,
             output: output.clone(),
-        })
+        }
     }
 
     /// Updates the spinner message in-place.
@@ -130,16 +127,11 @@ impl Spinner {
         self.bar.finish_and_clear();
     }
 
-    /// Prints a line to the output's error channel, above the spinner.
-    /// The spinner's line is cleared while the line is written and drawn
-    /// again below it. The line goes through the [`Output`], so a TUI run
-    /// keeps a copy.
-    ///
-    /// # Errors
-    ///
-    /// Returns the output's error when the line cannot be written.
-    pub fn println(&self, message: &str) -> std::io::Result<()> {
-        self.bar.suspend(|| errln!(self.output, "{}", message))
+    /// Writes a note above the spinner. The spinner's line is cleared
+    /// while the note is written and drawn again below it. The note goes
+    /// through the [`Output`], so a TUI run keeps a copy.
+    pub fn println(&self, message: &str) {
+        self.bar.suspend(|| note!(self.output, "{}", message));
     }
 }
 
@@ -149,12 +141,9 @@ pub struct StepProgress {
 }
 
 impl StepProgress {
-    /// Creates a progress bar for `total` steps with the given prefix.
-    ///
-    /// # Errors
-    ///
-    /// Returns the output's error when the status line cannot be written.
-    pub fn new(total: u64, prefix: &str, output: &Output) -> std::io::Result<Self> {
+    /// Creates a progress bar for `total` steps with the given prefix. A
+    /// hidden bar writes the prefix as a note.
+    pub fn new(total: u64, prefix: &str, output: &Output) -> Self {
         let bar = if output.progress_enabled() && atty_stderr() {
             let pb = ProgressBar::new(total);
             pb.set_style(
@@ -170,10 +159,10 @@ impl StepProgress {
             register(&pb);
             pb
         } else {
-            errln!(output, "{} (0/{})", prefix, total)?;
+            note!(output, "{} (0/{})", prefix, total);
             ProgressBar::hidden()
         };
-        Ok(Self { bar })
+        Self { bar }
     }
 
     /// Increments progress by one and updates the message.
@@ -305,8 +294,8 @@ mod tests {
         // Inside the TUI the spinner must not draw; its message must still
         // reach the user through the error channel, never through data.
         let (o, cap) = Output::capture();
-        let sp = Spinner::new("Fetching...", &o).unwrap();
-        sp.println("note").unwrap();
+        let sp = Spinner::new("Fetching...", &o);
+        sp.println("note");
         sp.finish("done");
         assert_eq!(cap.err(), "Fetching...\nnote\n");
         assert_eq!(cap.out(), "");
@@ -315,26 +304,26 @@ mod tests {
     #[test]
     fn test_spinner_create_and_finish() {
         // In test context, stderr is not a TTY, so spinner is hidden
-        let sp = Spinner::new("Testing...", &quiet()).unwrap();
+        let sp = Spinner::new("Testing...", &quiet());
         sp.set_message("Updated");
         sp.finish("Done");
     }
 
     #[test]
     fn test_spinner_finish_and_clear() {
-        let sp = Spinner::new("Testing...", &quiet()).unwrap();
+        let sp = Spinner::new("Testing...", &quiet());
         sp.finish_and_clear();
     }
 
     #[test]
     fn test_spinner_finish_warn() {
-        let sp = Spinner::new("Testing...", &quiet()).unwrap();
+        let sp = Spinner::new("Testing...", &quiet());
         sp.finish_warn("Warning");
     }
 
     #[test]
     fn test_step_progress_create_and_finish() {
-        let prog = StepProgress::new(3, "Processing", &quiet()).unwrap();
+        let prog = StepProgress::new(3, "Processing", &quiet());
         prog.inc("Step 1");
         prog.inc("Step 2");
         prog.inc("Step 3");
@@ -343,7 +332,7 @@ mod tests {
 
     #[test]
     fn test_spinner_multiple_set_message() {
-        let sp = Spinner::new("Initial", &quiet()).unwrap();
+        let sp = Spinner::new("Initial", &quiet());
         sp.set_message("First update");
         sp.set_message("Second update");
         sp.set_message("Third update");
@@ -352,7 +341,7 @@ mod tests {
 
     #[test]
     fn test_step_progress_multiple_inc() {
-        let prog = StepProgress::new(5, "Processing", &quiet()).unwrap();
+        let prog = StepProgress::new(5, "Processing", &quiet());
         prog.inc("Step 1");
         prog.inc("Step 2");
         prog.inc("Step 3");
@@ -363,14 +352,14 @@ mod tests {
 
     #[test]
     fn test_step_progress_single_step() {
-        let prog = StepProgress::new(1, "Single", &quiet()).unwrap();
+        let prog = StepProgress::new(1, "Single", &quiet());
         prog.inc("Only step");
         prog.finish("Complete");
     }
 
     #[test]
     fn test_step_progress_large_total() {
-        let prog = StepProgress::new(100, "Large", &quiet()).unwrap();
+        let prog = StepProgress::new(100, "Large", &quiet());
         for i in 1..=100 {
             prog.inc(&format!("Step {}", i));
         }
@@ -379,19 +368,19 @@ mod tests {
 
     #[test]
     fn test_step_progress_zero_total() {
-        let prog = StepProgress::new(0, "Empty", &quiet()).unwrap();
+        let prog = StepProgress::new(0, "Empty", &quiet());
         prog.finish("Complete");
     }
 
     #[test]
     fn test_spinner_finish_warn_with_message() {
-        let sp = Spinner::new("Warning test", &quiet()).unwrap();
+        let sp = Spinner::new("Warning test", &quiet());
         sp.finish_warn("Something went wrong");
     }
 
     #[test]
     fn test_spinner_finish_warn_multiple_calls() {
-        let sp = Spinner::new("Test", &quiet()).unwrap();
+        let sp = Spinner::new("Test", &quiet());
         sp.finish_warn("First warning");
         // finish_warn can be called multiple times (though unusual)
         sp.finish_warn("Second warning");
@@ -399,8 +388,8 @@ mod tests {
 
     #[test]
     fn test_spinner_println() {
-        let sp = Spinner::new("Working...", &quiet()).unwrap();
-        sp.println("A message above the spinner").unwrap();
+        let sp = Spinner::new("Working...", &quiet());
+        sp.println("A message above the spinner");
         sp.finish("Done");
     }
 
@@ -452,8 +441,7 @@ mod tests {
         let screen = Screen::default();
         let (o, cap) = Output::capture();
         let sp = drawing_spinner("Searching...", &o, &screen);
-        sp.println("Not found on DexScreener; found X on Y (CEX)")
-            .unwrap();
+        sp.println("Not found on DexScreener; found X on Y (CEX)");
         assert_eq!(cap.err(), "Not found on DexScreener; found X on Y (CEX)\n");
         assert!(
             !screen.ops().iter().any(|op| op.contains("DexScreener")),

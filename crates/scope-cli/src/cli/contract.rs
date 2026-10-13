@@ -101,7 +101,7 @@ pub async fn run(
     clients: &dyn ChainClientFactory,
     out: &Output,
 ) -> Result<()> {
-    let spinner = crate::cli::progress::Spinner::new("Analyzing contract...", out)?;
+    let spinner = crate::cli::progress::Spinner::new("Analyzing contract...", out);
 
     let client = clients.create_chain_client(&args.chain)?;
     let http_client = scope::http::transport();

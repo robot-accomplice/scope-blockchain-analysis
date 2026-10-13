@@ -19,7 +19,7 @@
 
 use crate::cli::output::Output;
 use crate::cli::prompt::ask;
-use crate::{errln, outln};
+use crate::{note, outln};
 use clap::Args;
 use scope::config::{Config, OutputFormat};
 use scope::error::{ConfigError, Result, ScopeError};
@@ -310,20 +310,17 @@ fn reset_config_impl(reader: &mut impl BufRead, out: &Output, config_path: &Path
             reader,
             out,
             "This will delete your current configuration. Continue? [y/N]: ",
-        )
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
+        )?;
 
         if !matches!(input.trim().to_lowercase().as_str(), "y" | "yes") {
-            errln!(out, "Cancelled.").map_err(|e| ScopeError::Io(e.to_string()))?;
+            note!(out, "Cancelled.");
             return Ok(());
         }
 
-        std::fs::remove_file(config_path).map_err(|e| ScopeError::Io(e.to_string()))?;
-        errln!(out, "Configuration reset to defaults.")
-            .map_err(|e| ScopeError::Io(e.to_string()))?;
+        std::fs::remove_file(config_path)?;
+        note!(out, "Configuration reset to defaults.");
     } else {
-        errln!(out, "No configuration file found. Already using defaults.")
-            .map_err(|e| ScopeError::Io(e.to_string()))?;
+        note!(out, "No configuration file found. Already using defaults.");
     }
 
     Ok(())
@@ -363,45 +360,41 @@ fn configure_single_key_impl(
     ];
 
     if !valid_keys.contains(&key_name) {
-        errln!(out, "Unknown API key: {}", key_name).map_err(|e| ScopeError::Io(e.to_string()))?;
-        errln!(out).map_err(|e| ScopeError::Io(e.to_string()))?;
-        errln!(out, "Valid options:").map_err(|e| ScopeError::Io(e.to_string()))?;
+        note!(out, "Unknown API key: {}", key_name);
+        note!(out);
+        note!(out, "Valid options:");
         for key in valid_keys {
             let info = get_api_key_info(key);
-            errln!(out, "  {:<15} - {}", key, info.chain)
-                .map_err(|e| ScopeError::Io(e.to_string()))?;
+            note!(out, "  {:<15} - {}", key, info.chain);
         }
         return Ok(());
     }
 
     let info = get_api_key_info(key_name);
-    errln!(out).map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(
+    note!(out);
+    note!(
         out,
         "╔══════════════════════════════════════════════════════════════╗"
-    )
-    .map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(out, "║  Configure {} API Key", key_name.to_uppercase())
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(
+    );
+    note!(out, "║  Configure {} API Key", key_name.to_uppercase());
+    note!(
         out,
         "╚══════════════════════════════════════════════════════════════╝"
-    )
-    .map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(out).map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(out, "Chain: {}", info.chain).map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(out, "Enables: {}", info.features).map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(out).map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(out, "How to get your free API key:").map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(out, "  {}", info.signup_steps).map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(out).map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(out, "URL: {}", info.url).map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(out).map_err(|e| ScopeError::Io(e.to_string()))?;
+    );
+    note!(out);
+    note!(out, "Chain: {}", info.chain);
+    note!(out, "Enables: {}", info.features);
+    note!(out);
+    note!(out, "How to get your free API key:");
+    note!(out, "  {}", info.signup_steps);
+    note!(out);
+    note!(out, "URL: {}", info.url);
+    note!(out);
 
     let key = prompt_api_key_impl(reader, out, key_name)?;
 
     if key.is_empty() {
-        errln!(out, "Skipped.").map_err(|e| ScopeError::Io(e.to_string()))?;
+        note!(out, "Skipped.");
         return Ok(());
     }
 
@@ -410,7 +403,7 @@ fn configure_single_key_impl(
     new_config.chains.api_keys.insert(key_name.to_string(), key);
 
     save_config_to_path(&new_config, config_path)?;
-    errln!(out, "✓ {} API key saved.", key_name).map_err(|e| ScopeError::Io(e.to_string()))?;
+    note!(out, "✓ {} API key saved.", key_name);
 
     Ok(())
 }
@@ -494,85 +487,72 @@ fn run_setup_wizard_impl(
     config: &Config,
     config_path: &Path,
 ) -> Result<()> {
-    errln!(out).map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(
+    note!(out);
+    note!(
         out,
         "╔══════════════════════════════════════════════════════════════╗"
-    )
-    .map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(
+    );
+    note!(
         out,
         "║                    Scope Setup Wizard                        ║"
-    )
-    .map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(
+    );
+    note!(
         out,
         "╚══════════════════════════════════════════════════════════════╝"
-    )
-    .map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(out).map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(
+    );
+    note!(out);
+    note!(
         out,
         "This wizard will help you configure Scope (Blockchain Crawler CLI)."
-    )
-    .map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(out, "Press Enter to skip any optional setting.")
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(out).map_err(|e| ScopeError::Io(e.to_string()))?;
+    );
+    note!(out, "Press Enter to skip any optional setting.");
+    note!(out);
 
     let mut new_config = config.clone();
     let mut changes_made = false;
 
     // Step 1: API Keys
-    errln!(out, "Step 1: API Keys").map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(out, "{}", "=".repeat(60)).map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(out).map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(
+    note!(out, "Step 1: API Keys");
+    note!(out, "{}", "=".repeat(60));
+    note!(out);
+    note!(
         out,
         "API keys enable access to block explorer data including:"
-    )
-    .map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(out, "  • Token balances and holder information")
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(out, "  • Transaction history and details")
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(out, "  • Contract verification status").map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(out, "  • Token analytics and metrics").map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(out).map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(
+    );
+    note!(out, "  • Token balances and holder information");
+    note!(out, "  • Transaction history and details");
+    note!(out, "  • Contract verification status");
+    note!(out, "  • Token analytics and metrics");
+    note!(out);
+    note!(
         out,
         "All API keys are FREE and take just a minute to obtain."
-    )
-    .map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(out).map_err(|e| ScopeError::Io(e.to_string()))?;
+    );
+    note!(out);
 
     // Etherscan (primary)
     if !config.chains.api_keys.contains_key("etherscan") {
         let info = get_api_key_info("etherscan");
-        errln!(
+        note!(
             out,
             "┌────────────────────────────────────────────────────────────┐"
-        )
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
-        errln!(
+        );
+        note!(
             out,
             "│  ETHERSCAN API KEY (Recommended)                           │"
-        )
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
-        errln!(
+        );
+        note!(
             out,
             "└────────────────────────────────────────────────────────────┘"
-        )
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
-        errln!(out, "  Chain: {}", info.chain).map_err(|e| ScopeError::Io(e.to_string()))?;
-        errln!(out, "  Enables: {}", info.features).map_err(|e| ScopeError::Io(e.to_string()))?;
-        errln!(out).map_err(|e| ScopeError::Io(e.to_string()))?;
-        errln!(out, "  How to get your free API key:")
-            .map_err(|e| ScopeError::Io(e.to_string()))?;
-        errln!(out, "  {}", info.signup_steps).map_err(|e| ScopeError::Io(e.to_string()))?;
-        errln!(out).map_err(|e| ScopeError::Io(e.to_string()))?;
-        errln!(out, "  URL: {}", info.url).map_err(|e| ScopeError::Io(e.to_string()))?;
-        errln!(out).map_err(|e| ScopeError::Io(e.to_string()))?;
+        );
+        note!(out, "  Chain: {}", info.chain);
+        note!(out, "  Enables: {}", info.features);
+        note!(out);
+        note!(out, "  How to get your free API key:");
+        note!(out, "  {}", info.signup_steps);
+        note!(out);
+        note!(out, "  URL: {}", info.url);
+        note!(out);
         if let Some(key) = prompt_optional_key_impl(reader, out, "etherscan")? {
             new_config
                 .chains
@@ -580,11 +560,10 @@ fn run_setup_wizard_impl(
                 .insert("etherscan".to_string(), key);
             changes_made = true;
         }
-        errln!(out).map_err(|e| ScopeError::Io(e.to_string()))?;
+        note!(out);
     } else {
-        errln!(out, "✓ Etherscan API key already configured")
-            .map_err(|e| ScopeError::Io(e.to_string()))?;
-        errln!(out).map_err(|e| ScopeError::Io(e.to_string()))?;
+        note!(out, "✓ Etherscan API key already configured");
+        note!(out);
     }
 
     // Ask about other chains
@@ -592,57 +571,50 @@ fn run_setup_wizard_impl(
         reader,
         out,
         "Configure API keys for other chains (BSC, Polygon, Arbitrum, etc.)? [y/N]: ",
-    )
-    .map_err(|e| ScopeError::Io(e.to_string()))?;
+    )?;
 
     if matches!(input.trim().to_lowercase().as_str(), "y" | "yes") {
-        errln!(out).map_err(|e| ScopeError::Io(e.to_string()))?;
+        note!(out);
 
         let other_chains = ["bscscan", "polygonscan", "arbiscan", "basescan", "optimism"];
 
         for key_name in other_chains {
             if !config.chains.api_keys.contains_key(key_name) {
                 let info = get_api_key_info(key_name);
-                errln!(
+                note!(
                     out,
                     "┌────────────────────────────────────────────────────────────┐"
-                )
-                .map_err(|e| ScopeError::Io(e.to_string()))?;
-                errln!(out, "│  {} API KEY", key_name.to_uppercase())
-                    .map_err(|e| ScopeError::Io(e.to_string()))?;
-                errln!(
+                );
+                note!(out, "│  {} API KEY", key_name.to_uppercase());
+                note!(
                     out,
                     "└────────────────────────────────────────────────────────────┘"
-                )
-                .map_err(|e| ScopeError::Io(e.to_string()))?;
-                errln!(out, "  Chain: {}", info.chain)
-                    .map_err(|e| ScopeError::Io(e.to_string()))?;
-                errln!(out, "  Enables: {}", info.features)
-                    .map_err(|e| ScopeError::Io(e.to_string()))?;
-                errln!(out, "  URL: {}", info.url).map_err(|e| ScopeError::Io(e.to_string()))?;
-                errln!(out).map_err(|e| ScopeError::Io(e.to_string()))?;
+                );
+                note!(out, "  Chain: {}", info.chain);
+                note!(out, "  Enables: {}", info.features);
+                note!(out, "  URL: {}", info.url);
+                note!(out);
                 if let Some(key) = prompt_optional_key_impl(reader, out, key_name)? {
                     new_config.chains.api_keys.insert(key_name.to_string(), key);
                     changes_made = true;
                 }
-                errln!(out).map_err(|e| ScopeError::Io(e.to_string()))?;
+                note!(out);
             }
         }
     }
 
     // Step 2: Preferences
-    errln!(out).map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(out, "Step 2: Preferences").map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(out, "{}", "=".repeat(60)).map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(out).map_err(|e| ScopeError::Io(e.to_string()))?;
+    note!(out);
+    note!(out, "Step 2: Preferences");
+    note!(out, "{}", "=".repeat(60));
+    note!(out);
 
     // Default output format
-    errln!(out, "Default output format:").map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(out, "  1. table (default)").map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(out, "  2. json").map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(out, "  3. csv").map_err(|e| ScopeError::Io(e.to_string()))?;
-    let input = ask(reader, out, "Select [1-3, Enter for default]: ")
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
+    note!(out, "Default output format:");
+    note!(out, "  1. table (default)");
+    note!(out, "  2. json");
+    note!(out, "  3. csv");
+    let input = ask(reader, out, "Select [1-3, Enter for default]: ")?;
 
     match input.trim() {
         "2" => {
@@ -658,47 +630,38 @@ fn run_setup_wizard_impl(
 
     // Save configuration
     if changes_made {
-        errln!(out).map_err(|e| ScopeError::Io(e.to_string()))?;
-        errln!(out, "Saving configuration...").map_err(|e| ScopeError::Io(e.to_string()))?;
+        note!(out);
+        note!(out, "Saving configuration...");
         save_config_to_path(&new_config, config_path)?;
-        errln!(out).map_err(|e| ScopeError::Io(e.to_string()))?;
-        errln!(out, "✓ Configuration saved to ~/.config/scope/config.yaml")
-            .map_err(|e| ScopeError::Io(e.to_string()))?;
+        note!(out);
+        note!(out, "✓ Configuration saved to ~/.config/scope/config.yaml");
     } else {
-        errln!(out).map_err(|e| ScopeError::Io(e.to_string()))?;
-        errln!(out, "No changes made.").map_err(|e| ScopeError::Io(e.to_string()))?;
+        note!(out);
+        note!(out, "No changes made.");
     }
 
-    errln!(out).map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(out, "Setup complete! You can now use Scope.")
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(out).map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(out, "Quick start:").map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(out, "  scope crawl USDC              # Analyze a token")
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(out, "  scope address 0x...           # Analyze an address")
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(
+    note!(out);
+    note!(out, "Setup complete! You can now use Scope.");
+    note!(out);
+    note!(out, "Quick start:");
+    note!(out, "  scope crawl USDC              # Analyze a token");
+    note!(out, "  scope address 0x...           # Analyze an address");
+    note!(
         out,
         "  scope insights <target>       # Auto-detect and analyze"
-    )
-    .map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(out, "  scope monitor USDC            # Live TUI dashboard")
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(out, "  scope interactive             # Interactive mode")
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(out).map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(
+    );
+    note!(out, "  scope monitor USDC            # Live TUI dashboard");
+    note!(out, "  scope interactive             # Interactive mode");
+    note!(out);
+    note!(
         out,
         "Run 'scope setup --status' to view your configuration."
-    )
-    .map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(
+    );
+    note!(
         out,
         "Run 'scope completions zsh > _scope' for shell tab-completion."
-    )
-    .map_err(|e| ScopeError::Io(e.to_string()))?;
-    errln!(out).map_err(|e| ScopeError::Io(e.to_string()))?;
+    );
+    note!(out);
 
     Ok(())
 }
@@ -713,8 +676,7 @@ fn prompt_optional_key_impl(
         reader,
         out,
         &format!("  {} API key (or Enter to skip): ", name),
-    )
-    .map_err(|e| ScopeError::Io(e.to_string()))?;
+    )?;
 
     let key = input.trim().to_string();
     if key.is_empty() {
@@ -726,8 +688,7 @@ fn prompt_optional_key_impl(
 
 /// Testable implementation of prompt_api_key with injected I/O.
 fn prompt_api_key_impl(reader: &mut impl BufRead, out: &Output, name: &str) -> Result<String> {
-    let input = ask(reader, out, &format!("Enter {} API key: ", name))
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
+    let input = ask(reader, out, &format!("Enter {} API key: ", name))?;
 
     Ok(input.trim().to_string())
 }
@@ -736,7 +697,7 @@ fn prompt_api_key_impl(reader: &mut impl BufRead, out: &Output, name: &str) -> R
 fn save_config_to_path(config: &Config, config_path: &Path) -> Result<()> {
     // Ensure directory exists
     if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| ScopeError::Io(e.to_string()))?;
+        std::fs::create_dir_all(parent)?;
     }
 
     // Build YAML manually for cleaner output
@@ -771,7 +732,7 @@ fn save_config_to_path(config: &Config, config_path: &Path) -> Result<()> {
     yaml.push_str(&format!("  stealth: {}\n", config.ghola.stealth));
     yaml.push_str(&format!("  buffer_size: {}\n", config.ghola.buffer_size));
 
-    std::fs::write(config_path, yaml).map_err(|e| ScopeError::Io(e.to_string()))?;
+    std::fs::write(config_path, yaml)?;
 
     Ok(())
 }

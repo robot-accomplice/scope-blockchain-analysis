@@ -57,6 +57,7 @@
 pub mod address;
 pub mod address_book;
 pub mod address_report;
+pub(crate) mod ansi;
 pub mod compliance;
 pub mod contract;
 pub mod crawl;

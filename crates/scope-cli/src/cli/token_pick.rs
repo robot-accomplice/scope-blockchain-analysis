@@ -24,7 +24,32 @@ pub(crate) fn pick_token<'a>(
     results: &'a [TokenSearchResult],
 ) -> Result<&'a TokenSearchResult> {
     let index = crate::cli::prompt::pick(reader, out, &table(results), "token", results.len())?;
-    Ok(&results[index])
+    let picked = &results[index];
+    announce(out, picked);
+    Ok(picked)
+}
+
+/// Tells the user, as a note, which token the command uses.
+pub(crate) fn announce(out: &Output, token: &TokenSearchResult) {
+    crate::note!(out, "{}", selected_line(token));
+}
+
+/// The one line that names the token a command uses: symbol, name, chain,
+/// price and, when there is one, the address.
+pub(crate) fn selected_line(token: &TokenSearchResult) -> String {
+    let at = if token.address.is_empty() {
+        String::new()
+    } else {
+        format!(" at {}", token.address)
+    };
+    format!(
+        "Selected: {} ({}) on {} - ${:.6}{}",
+        token.symbol,
+        token.name,
+        token.chain,
+        token.price_usd.unwrap_or(0.0),
+        at
+    )
 }
 
 /// The header, a rule and one row per result, each line ending in a
@@ -126,8 +151,25 @@ mod tests {
             "{shown}"
         );
         assert!(shown.contains("0xA0b869...06eB48") && shown.contains("A Very Long Token..."));
-        assert!(shown.ends_with("\nSelect token (1-2): "), "{shown}");
+        assert!(
+            shown.ends_with("\nSelect token (1-2): Selected: XYZ (A Very Long Token Name Indeed) on ethereum - $1.000000 at 0x1234abcd\n"),
+            "{shown}"
+        );
         assert_eq!(cap.out(), "", "the list is not data");
+    }
+
+    #[test]
+    fn test_selected_line_names_the_address_only_when_there_is_one() {
+        let mut t = result("USDC", "USD Coin", "0xabc");
+        assert_eq!(
+            selected_line(&t),
+            "Selected: USDC (USD Coin) on ethereum - $1.000000 at 0xabc"
+        );
+        t.address.clear();
+        assert_eq!(
+            selected_line(&t),
+            "Selected: USDC (USD Coin) on ethereum - $1.000000"
+        );
     }
 
     #[test]

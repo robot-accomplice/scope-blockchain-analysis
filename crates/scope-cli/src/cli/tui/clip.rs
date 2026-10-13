@@ -46,60 +46,6 @@ pub fn fits_osc52(text: &str) -> bool {
     text.len().div_ceil(3) * 4 <= OSC52_MAX_PAYLOAD
 }
 
-/// Consumes a string-type escape body: up to BEL or ST (`ESC \`), or to the
-/// end of the text when it is not terminated.
-fn skip_string(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
-    while let Some(n) = chars.next() {
-        if n == '\x07' || n == '\u{9c}' {
-            break;
-        }
-        if n == '\x1b' {
-            if chars.peek() == Some(&'\\') {
-                chars.next();
-            }
-            break;
-        }
-    }
-}
-
-/// Consumes CSI parameters up to the final byte, or to the end of the text.
-fn skip_csi(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
-    for n in chars.by_ref() {
-        if ('\x40'..='\x7e').contains(&n) {
-            break;
-        }
-    }
-}
-
-/// `text` without ANSI escape sequences: CSI (7-bit and U+009B), OSC, DCS,
-/// SOS, PM, APC, and other escapes. An unterminated sequence drops only
-/// itself.
-pub fn strip_ansi(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\u{9b}' => skip_csi(&mut chars),
-            '\x1b' => match chars.next() {
-                Some('[') => skip_csi(&mut chars),
-                Some(']' | 'P' | 'X' | '^' | '_') => skip_string(&mut chars),
-                // Intermediate bytes (ESC ( B): consume through the final byte.
-                Some('\x20'..='\x2f') => {
-                    for n in chars.by_ref() {
-                        if !('\x20'..='\x2f').contains(&n) {
-                            break;
-                        }
-                    }
-                }
-                // Any other two-byte escape, or the end of the text.
-                _ => {}
-            },
-            _ => out.push(c),
-        }
-    }
-    out
-}
-
 /// Where `save` writes `arg`: the checked canonical parent joined with the
 /// file name, so the path that was checked is the path that is written. A
 /// `~` or a leading `~/` means `home`. A relative path with `..`, or one whose
@@ -239,49 +185,6 @@ mod tests {
         let at_cap = "a".repeat(OSC52_MAX_PAYLOAD / 4 * 3);
         assert!(fits_osc52(&at_cap));
         assert!(!fits_osc52(&format!("{at_cap}a")));
-    }
-
-    #[test]
-    fn test_strip_ansi_removes_sgr() {
-        assert_eq!(strip_ansi("\x1b[1;36mA\x1b[0m b"), "A b");
-    }
-
-    #[test]
-    fn test_strip_ansi_removes_osc_with_either_terminator() {
-        assert_eq!(
-            strip_ansi("\x1b]8;;http://x\x1b\\link\x1b]8;;\x07!"),
-            "link!"
-        );
-    }
-
-    #[test]
-    fn test_strip_ansi_removes_dcs_sos_pm_apc_strings() {
-        for intro in ['P', 'X', '^', '_'] {
-            let text = format!("a\x1b{intro}payload\x1b\\b");
-            assert_eq!(strip_ansi(&text), "ab", "ESC {intro}");
-            let bel = format!("a\x1b{intro}payload\x07b");
-            assert_eq!(strip_ansi(&bel), "ab", "ESC {intro} with BEL");
-        }
-    }
-
-    #[test]
-    fn test_strip_ansi_consumes_intermediates_through_the_final_byte() {
-        assert_eq!(strip_ansi("a\x1b(Bb\x1b)0c"), "abc");
-        assert_eq!(strip_ansi("a\x1bXb"), "a", "ESC X opens a string");
-        assert_eq!(strip_ansi("a\x1b=b"), "ab", "plain two-byte escape");
-    }
-
-    #[test]
-    fn test_strip_ansi_removes_the_8_bit_csi() {
-        assert_eq!(strip_ansi("a\u{9b}1;31mb\u{9b}0mc"), "abc");
-    }
-
-    #[test]
-    fn test_strip_ansi_unterminated_sequence_drops_only_itself() {
-        assert_eq!(strip_ansi("keep\x1b[1;3"), "keep");
-        assert_eq!(strip_ansi("keep\x1b]0;title"), "keep");
-        assert_eq!(strip_ansi("keep\x1b"), "keep");
-        assert_eq!(strip_ansi("keep\x1b("), "keep");
     }
 
     #[test]

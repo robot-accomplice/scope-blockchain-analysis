@@ -239,7 +239,7 @@ pub async fn run(
     let sp = crate::cli::progress::Spinner::new(
         &format!("Analyzing transaction on {}...", args.chain),
         out,
-    )?;
+    );
 
     let report =
         fetch_transaction_report(&args.hash, &args.chain, args.decode, args.trace, clients).await?;

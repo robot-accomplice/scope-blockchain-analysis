@@ -114,7 +114,7 @@ pub async fn run(
         args.format
     };
     // 1. Fetch DEX analytics (crawl)
-    let sp = crate::cli::progress::Spinner::new("Fetching token health data...", out)?;
+    let sp = crate::cli::progress::Spinner::new("Fetching token health data...", out);
     let analytics = crawl::fetch_analytics_for_input(
         &args.token,
         &args.chain,
@@ -161,12 +161,12 @@ pub async fn run(
                     sp.println(&format!(
                         "  Warning: DEX venue '{}' requires --chain {} (got {})",
                         args.venue, venue_chain, analytics.chain
-                    ))?;
+                    ));
                 } else if analytics.dex_pairs.is_empty() {
                     sp.println(&format!(
                         "  Warning: No DEX pairs found for {} on {}",
                         analytics.token.symbol, analytics.chain
-                    ))?;
+                    ));
                 }
                 None
             }
@@ -196,14 +196,14 @@ pub async fn run(
                             sp.println(&format!(
                                 "  Warning: Market data unavailable for {} on {}",
                                 analytics.token.symbol, args.venue
-                            ))?;
+                            ));
                             tracing::debug!("Market data error: {}", e);
                             None
                         }
                     }
                 }
                 Err(e) => {
-                    sp.println(&format!("  Warning: {}", e))?;
+                    sp.println(&format!("  Warning: {}", e));
                     None
                 }
             }

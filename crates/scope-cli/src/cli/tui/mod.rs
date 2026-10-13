@@ -176,8 +176,7 @@ pub async fn run(
     // return an error before `session`, which restores the terminal.
     crash::install_panic_hook();
     let mut host = RealHost {
-        terminal: screen::enter(screen::Mouse::Off)
-            .map_err(|e| ScopeError::Other(format!("cannot take the terminal: {}", e)))?,
+        terminal: screen::enter(screen::Mouse::Off)?,
         events: None,
         signals,
         on_screen: true,
@@ -277,7 +276,11 @@ pub(crate) trait Host {
     /// Gives the terminal back for a suspend-mode command.
     fn suspend(&mut self);
     /// Takes the terminal again after a suspend-mode command.
-    fn resume(&mut self);
+    ///
+    /// # Errors
+    ///
+    /// The terminal cannot be taken ([`screen::not_taken`]).
+    fn resume(&mut self) -> Result<()>;
     /// Gives the terminal back for good when the TUI ends.
     fn restore(&mut self);
     /// Stops the process until the shell continues it (`fg`). Call it
@@ -324,11 +327,10 @@ impl Host for RealHost {
         self.events = None;
         self.restore();
     }
-    fn resume(&mut self) {
-        // `Host::resume` has no error path. A terminal that cannot be
-        // taken back panics; the crash hook writes the log.
-        self.terminal = screen::enter(screen::Mouse::Off).expect("failed to initialize terminal");
+    fn resume(&mut self) -> Result<()> {
+        self.terminal = screen::enter(screen::Mouse::Off)?;
         self.on_screen = true;
+        Ok(())
     }
     /// Does nothing when the screen is already given back: leaving the
     /// alternate screen twice can move the shell's cursor.
@@ -507,7 +509,7 @@ async fn event_loop<H: Host>(
                                     // restores and saves.
                                     return Ok(exit);
                                 }
-                                host.resume();
+                                host.resume()?;
                                 idle_diag.replace(scope::diag::redirect(idle_buf.clone()));
                             }
                             Route::Refuse(reason) => {
@@ -550,7 +552,7 @@ fn leave<H: Host>(host: &mut H) {
 /// Takes the terminal again and clears it. The next draw then repaints
 /// all of the screen, also what the shell wrote over it.
 fn retake<H: Host>(host: &mut H) -> Result<()> {
-    host.resume();
+    host.resume()?;
     host.clear()
         .map_err(|e| ScopeError::Other(format!("terminal clear failed: {}", e)))
 }
@@ -849,6 +851,8 @@ mod tests {
         raw: String,
         /// `write_raw` fails.
         raw_fails: bool,
+        /// `resume` fails, as for a terminal that went away.
+        resume_fails: bool,
         /// The width override at each draw, suspend and restore, in order.
         widths: Vec<(&'static str, Option<usize>)>,
         /// The width the loop set last.
@@ -874,8 +878,12 @@ mod tests {
                 self.signal_tx.unbounded_send(s).unwrap();
             }
         }
-        fn resume(&mut self) {
+        fn resume(&mut self) -> Result<()> {
             self.resumes += 1;
+            if self.resume_fails {
+                return Err(crate::cli::screen::not_taken(io::Error::other("no tty")));
+            }
+            Ok(())
         }
         fn restore(&mut self) {
             self.restores += 1;
@@ -994,6 +1002,7 @@ mod tests {
             stop_fails: false,
             raw: String::new(),
             raw_fails: false,
+            resume_fails: false,
             widths: Vec::new(),
             width: None,
         };
@@ -1246,6 +1255,26 @@ mod tests {
         assert_eq!(host.stops, 1);
         // One set for the failed stop, one for the outside SIGCONT.
         assert_eq!((host.suspends, host.resumes, host.clears), (2, 2, 2));
+    }
+
+    #[tokio::test]
+    async fn test_a_terminal_that_cannot_be_taken_back_ends_the_session_with_the_terminal_error() {
+        // After Ctrl-Z and `fg`, the terminal may be gone. The TUI must
+        // end with the same error the monitor shows, not panic, and still
+        // restore and save.
+        let _lock = DIAG_LOCK.lock().await;
+        let (mut host, captured) = test_host(vec![ctrl_z()], vec![]);
+        host.resume_fails = true;
+        let (res, _, host, _) = drive_host(Journal::default(), host, captured).await;
+        assert_eq!(
+            res.unwrap_err().to_string(),
+            "cannot take the terminal: no tty"
+        );
+        assert_eq!(host.resumes, 1);
+        assert_eq!(
+            host.restores, 1,
+            "the session still gives the terminal back"
+        );
     }
 
     /// Awaits `fut`, failing the test after 10 s: a swallowed signal must

@@ -9,6 +9,7 @@
 //! No other module takes the screen or sets a restore hook. A guard test
 //! (`tests/one_screen_owner.rs`) keeps it so.
 
+use scope::error::{Result, ScopeError};
 use std::io::{self, Write};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -77,20 +78,38 @@ impl Lifecycle {
 ///
 /// # Errors
 ///
-/// Returns the terminal error (no tty, mouse capture refused). The screen
-/// is given back first, so the caller does not have to.
-pub(crate) fn enter(mouse: Mouse) -> io::Result<ratatui::DefaultTerminal> {
-    SCREEN
-        .take(
-            &mut io::stdout(),
-            crossterm::terminal::enable_raw_mode,
-            mouse,
-            install_restore_hook,
-        )
-        .and_then(|()| {
-            ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(io::stdout()))
-        })
-        .inspect_err(|_| restore())
+/// [`not_taken`] with the terminal error (no tty, mouse capture refused).
+/// The screen is given back first, so the caller does not have to.
+pub(crate) fn enter(mouse: Mouse) -> Result<ratatui::DefaultTerminal> {
+    take_screen(
+        &SCREEN,
+        &mut io::stdout(),
+        crossterm::terminal::enable_raw_mode,
+        mouse,
+    )
+    .and_then(|()| {
+        ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(io::stdout()))
+            .map_err(not_taken)
+    })
+    .inspect_err(|_| restore())
+}
+
+/// The one error for a terminal the screen cannot take, for the TUI and
+/// the monitor alike.
+pub(crate) fn not_taken(e: io::Error) -> ScopeError {
+    ScopeError::Other(format!("cannot take the terminal: {}", e))
+}
+
+/// [`Lifecycle::take`] with the restore hook, as a command error.
+fn take_screen(
+    lifecycle: &Lifecycle,
+    w: &mut impl Write,
+    raw_mode: impl FnOnce() -> io::Result<()>,
+    mouse: Mouse,
+) -> Result<()> {
+    lifecycle
+        .take(w, raw_mode, mouse, install_restore_hook)
+        .map_err(not_taken)
 }
 
 /// Gives the terminal back: mouse capture and bracketed paste off, raw
@@ -183,6 +202,22 @@ mod tests {
         screen.give_back(&mut second, || leaves.set(leaves.get() + 1));
         assert!(second.is_empty(), "a second restore moves the cursor");
         assert_eq!(leaves.get(), 1);
+    }
+
+    #[test]
+    fn test_a_failed_take_is_the_one_terminal_error() {
+        // The TUI and the monitor show the same words for a terminal
+        // they cannot take.
+        let screen = Lifecycle::new();
+        let e = take_screen(
+            &screen,
+            &mut Vec::new(),
+            || Err(io::Error::other("no tty")),
+            Mouse::Capture,
+        )
+        .unwrap_err();
+        assert!(matches!(e, ScopeError::Other(_)));
+        assert_eq!(e.to_string(), "cannot take the terminal: no tty");
     }
 
     #[test]

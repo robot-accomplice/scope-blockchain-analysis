@@ -1,7 +1,7 @@
 //! CLI commands for compliance and risk analysis
 
 use crate::cli::output::Output;
-use crate::{errln, outln};
+use crate::{errln, note, outln};
 use clap::{Args, Subcommand};
 use scope::compliance::datasource::{BlockchainDataClient, DataSources, analyze_patterns};
 use scope::compliance::risk::RiskEngine;
@@ -168,7 +168,7 @@ pub async fn handle_risk_with_client(
     let sp = crate::cli::progress::Spinner::new(
         &format!("Assessing risk for {} on {}...", args.address, chain),
         out,
-    )?;
+    );
 
     let engine = if let Some(c) = client {
         sp.set_message("Using Etherscan API for enhanced analysis...");
@@ -283,9 +283,9 @@ pub async fn handle_analyze_with_client(
     client: Option<BlockchainDataClient>,
     out: &Output,
 ) -> anyhow::Result<()> {
-    outln!(out, "Analyzing patterns for {}...", args.address)?;
-    outln!(out, "Patterns: {:?}", args.patterns)?;
-    outln!(out, "Time range: {}", args.range)?;
+    note!(out, "Analyzing patterns for {}...", args.address);
+    note!(out, "Patterns: {:?}", args.patterns);
+    note!(out, "Time range: {}", args.range);
 
     let resolved_client = if let Some(c) = client {
         Some(c)
@@ -364,11 +364,11 @@ pub async fn handle_compliance_report(
 
     let engine = match &client {
         Some(c) => {
-            outln!(out, "Using Etherscan API for enhanced analysis")?;
+            note!(out, "Using Etherscan API for enhanced analysis");
             RiskEngine::with_data_client(c.clone())
         }
         None => {
-            outln!(out, "Note: Set ETHERSCAN_API_KEY for enhanced analysis")?;
+            note!(out, "Note: Set ETHERSCAN_API_KEY for enhanced analysis");
             RiskEngine::new()
         }
     };

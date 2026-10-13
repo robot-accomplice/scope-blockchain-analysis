@@ -131,7 +131,7 @@ pub async fn run(
         "Starting export"
     );
 
-    let sp = crate::cli::progress::Spinner::new("Exporting data...", out)?;
+    let sp = crate::cli::progress::Spinner::new("Exporting data...", out);
     let result = if args.address_book {
         export_address_book(&args, format, config, out).await
     } else if let Some(ref address) = args.address {

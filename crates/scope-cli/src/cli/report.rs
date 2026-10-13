@@ -80,7 +80,7 @@ async fn run_batch(
             if args.with_risk { " (with risk)" } else { "" }
         ),
         out,
-    )?;
+    );
     let mut reports = Vec::new();
     let mut risk_assessments: Vec<Option<scope::compliance::risk::RiskAssessment>> = Vec::new();
 

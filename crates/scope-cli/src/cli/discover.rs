@@ -78,7 +78,7 @@ pub async fn run_with_client(
             }
         ),
         out,
-    )?;
+    );
 
     let tokens = match args.source {
         DiscoverSource::Profiles => client.get_token_profiles().await?,

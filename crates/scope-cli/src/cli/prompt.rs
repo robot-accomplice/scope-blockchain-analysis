@@ -62,7 +62,7 @@ pub(crate) fn ask(reader: &mut impl BufRead, out: &Output, question: &str) -> io
 ///
 /// # Errors
 ///
-/// `Io` for a write or read error; `Api` when the answer is not a number
+/// The write or read error; `Api` when the answer is not a number
 /// from 1 to `count`.
 pub(crate) fn pick(
     reader: &mut impl BufRead,
@@ -72,7 +72,7 @@ pub(crate) fn pick(
     count: usize,
 ) -> scope::error::Result<usize> {
     let question = format!("{list}\nSelect {what} (1-{count}): ");
-    let answer = ask(reader, out, &question).map_err(|e| ScopeError::Io(e.to_string()))?;
+    let answer = ask(reader, out, &question)?;
     let n: usize = answer
         .trim()
         .parse()

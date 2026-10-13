@@ -84,7 +84,7 @@ use std::time::Duration;
 
 use super::interactive::SessionContext;
 use crate::cli::output::Output;
-use crate::errln;
+use crate::note;
 
 // ============================================================================
 // CLI Arguments
@@ -285,11 +285,8 @@ pub async fn run(
         }
     };
 
-    tell(
-        out,
-        &format!("  Starting live monitor for {}...", token_input),
-    );
-    tell(out, "  Fetching initial data...");
+    note!(out, "  Starting live monitor for {}...", token_input);
+    note!(out, "  Fetching initial data...");
 
     // Create exchange client if a venue is configured (from MonitorConfig or CLI)
     let venue = config.monitor.venue.as_deref();
@@ -312,14 +309,14 @@ pub async fn run(
         }
         _ => ctx.chain.clone(),
     };
-    tell(
+    note!(
         out,
-        &format!(
-            "Monitoring {} ({}) on {}",
-            initial_data.symbol, initial_data.name, source
-        ),
+        "Monitoring {} ({}) on {}",
+        initial_data.symbol,
+        initial_data.name,
+        source
     );
-    tell(out, "Press Q to quit, R to refresh, P to pause...\n");
+    note!(out, "Press Q to quit, R to refresh, P to pause...\n");
 
     // Small delay to let user read the message
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -357,17 +354,10 @@ pub async fn run(
 
     // Cleanup is handled by Drop, but we do it explicitly for error handling
     if let Err(e) = app.cleanup() {
-        tell(out, &format!("Warning: Failed to cleanup terminal: {}", e));
+        note!(out, "Warning: Failed to cleanup terminal: {}", e);
     }
 
     result
-}
-
-/// Writes a line for the user to the diagnostic channel: status, notes,
-/// what a search found. These lines are not data. A failed write is
-/// dropped: it must not take the place of the monitor's own result.
-fn tell(out: &Output, line: &str) {
-    let _ = errln!(out, "{}", line);
 }
 
 /// Looks up the venue's exchange client. An unknown venue is an error
@@ -427,12 +417,12 @@ pub(crate) async fn fetch_initial_data(
         (Ok(data), _) => Ok((data, None)),
         (Err(dex_err), Some((venue_id, ex))) => {
             let pair = ex.format_pair(token_input);
-            tell(
+            note!(
                 out,
-                &format!(
-                    "  DexScreener lookup failed ({}); using the {} ticker {} instead",
-                    dex_err, venue_id, pair
-                ),
+                "  DexScreener lookup failed ({}); using the {} ticker {} instead",
+                dex_err,
+                venue_id,
+                pair
             );
             match exchange_token_data(ex, &pair, token_input, out).await {
                 Ok((data, ticker)) => Ok((data, Some((pair, ticker)))),
@@ -465,13 +455,11 @@ async fn exchange_token_data(
         .filter(|s| !s.is_empty())
         .unwrap_or(token_input)
         .to_string();
-    tell(
+    note!(
         out,
-        &format!(
-            "  Exchange-only mode: {} @ ${:.6}",
-            pair,
-            ticker.last_price.unwrap_or(0.0)
-        ),
+        "  Exchange-only mode: {} @ ${:.6}",
+        pair,
+        ticker.last_price.unwrap_or(0.0)
     );
     let data = build_exchange_token_data(&base_symbol, pair, &ticker);
     Ok((data, ticker))
@@ -571,12 +559,11 @@ async fn resolve_token_address(
         && allow_cex_fallback
         && let Some(fallback) = try_cex_fallback(input, chain).await
     {
-        tell(
+        note!(
             out,
-            &format!(
-                "  Not found on DexScreener; found {} on {} (CEX)",
-                fallback.symbol, fallback.chain
-            ),
+            "  Not found on DexScreener; found {} on {} (CEX)",
+            fallback.symbol,
+            fallback.chain
         );
         results.push(fallback);
     }
@@ -591,15 +578,7 @@ async fn resolve_token_address(
     // If only one result, use it directly
     if results.len() == 1 {
         let token = &results[0];
-        tell(
-            out,
-            &format!(
-                "Found: {} ({}) - ${:.6}",
-                token.symbol,
-                token.name,
-                token.price_usd.unwrap_or(0.0)
-            ),
-        );
+        crate::cli::token_pick::announce(out, token);
         return Ok(token.address.clone());
     }
 
@@ -632,7 +611,7 @@ async fn try_cex_fallback(symbol: &str, chain: &str) -> Option<scope::chains::To
     })
 }
 
-/// Lets the user pick one of `results`, and says which.
+/// Lets the user pick one of `results`.
 fn select_token_interactive<'a>(
     results: &'a [scope::chains::dex::TokenSearchResult],
     out: &Output,
@@ -646,15 +625,7 @@ fn select_token_impl<'a>(
     reader: &mut impl io::BufRead,
     out: &Output,
 ) -> Result<&'a scope::chains::dex::TokenSearchResult> {
-    let selected = crate::cli::token_pick::pick_token(reader, out, results)?;
-    tell(
-        out,
-        &format!(
-            "Selected: {} ({}) at {}",
-            selected.symbol, selected.name, selected.address
-        ),
-    );
-    Ok(selected)
+    crate::cli::token_pick::pick_token(reader, out, results)
 }
 
 // ============================================================================
@@ -2600,6 +2571,10 @@ mod tests {
         let result = select_token_impl(&results, &mut reader, &out);
         assert!(result.is_err());
     }
+
+    // ============================
+    // Phase 4: Layout system tests
+    // ============================
 
     #[test]
     fn test_monitor_config_defaults() {
@@ -6109,7 +6084,10 @@ refresh_seconds: 5
             .await
             .unwrap();
         assert_eq!(address, "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
-        assert_eq!(cap.err(), "Found: ZZQT (Zz Quiet Token) - $1.500000\n");
+        assert_eq!(
+            cap.err(),
+            "Selected: ZZQT (Zz Quiet Token) on ethereum - $1.500000 at 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48\n"
+        );
         assert_eq!(cap.out(), "", "what a search found is not data");
     }
 

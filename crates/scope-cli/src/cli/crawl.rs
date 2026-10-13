@@ -25,7 +25,7 @@
 //! ```
 
 use crate::cli::output::Output;
-use crate::{errln, outln};
+use crate::{note, outln};
 use clap::Args;
 use scope::chains::{
     ChainClientFactory, DexClient, DexDataSource, DexPair, Token, TokenAnalytics, TokenHolder,
@@ -256,7 +256,7 @@ async fn resolve_token_input(
         if let Some(sp) = spinner {
             sp.set_message(msg);
         } else {
-            errln!(out, "  {}", msg)?;
+            note!(out, "  {}", msg);
         }
         return Ok(ResolvedToken {
             address: token_info.address.clone(),
@@ -270,7 +270,7 @@ async fn resolve_token_input(
     if let Some(sp) = spinner {
         sp.set_message(search_msg);
     } else {
-        errln!(out, "  {}", search_msg)?;
+        note!(out, "  {}", search_msg);
     }
 
     let mut search_results = dex_client.search_tokens(input, chain_filter).await?;
@@ -284,9 +284,9 @@ async fn resolve_token_input(
             fallback.symbol, fallback.chain
         );
         if let Some(sp) = spinner {
-            sp.println(&msg)?;
+            sp.println(&msg);
         } else {
-            errln!(out, "  {}", msg)?;
+            note!(out, "  {}", msg);
         }
         search_results.push(fallback);
     }
@@ -305,13 +305,7 @@ async fn resolve_token_input(
         if search_results.len() == 1 || args.yes {
             // Auto-select: route "Selected:" through the spinner
             let sel = &search_results[0];
-            sp.set_message(format!(
-                "Selected: {} ({}) on {} - ${:.6}",
-                sel.symbol,
-                sel.name,
-                sel.chain,
-                sel.price_usd.unwrap_or(0.0)
-            ));
+            sp.set_message(crate::cli::token_pick::selected_line(sel));
             sel
         } else {
             // Interactive: suspend spinner for the prompt
@@ -335,9 +329,9 @@ async fn resolve_token_input(
             sp.println(&format!(
                 "Saved {} as alias for future use.",
                 selected.symbol
-            ))?;
+            ));
         } else {
-            errln!(out, "Saved {} as alias for future use.", selected.symbol)?;
+            note!(out, "Saved {} as alias for future use.", selected.symbol);
         }
     }
 
@@ -367,14 +361,7 @@ fn select_token_impl<'a>(
 ) -> Result<&'a TokenSearchResult> {
     if results.len() == 1 || auto_select {
         let selected = &results[0];
-        errln!(
-            out,
-            "Selected: {} ({}) on {} - ${:.6}",
-            selected.symbol,
-            selected.name,
-            selected.chain,
-            selected.price_usd.unwrap_or(0.0)
-        )?;
+        crate::cli::token_pick::announce(out, selected);
         return Ok(selected);
     }
     crate::cli::token_pick::pick_token(reader, out, results)
@@ -464,7 +451,7 @@ pub async fn run(
     let sp = crate::cli::progress::Spinner::new(
         &format!("Crawling token {} on {}...", args.token, args.chain),
         out,
-    )?;
+    );
 
     // Resolve the token input to an address (uses factory's dex client for search)
     let dex_client = clients.create_dex_client();

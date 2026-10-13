@@ -944,7 +944,7 @@ mod tests {
     #[test]
     fn test_help_lists_the_search_keys() {
         let (_, cap) = plan_line("help", &mut SessionContext::default());
-        let help = super::super::clip::strip_ansi(&cap.out());
+        let help = crate::cli::ansi::strip(&cap.out());
         for keys in ["Ctrl-F or / search", "Ctrl-R history search"] {
             assert!(help.contains(keys), "help is missing {}", keys);
         }

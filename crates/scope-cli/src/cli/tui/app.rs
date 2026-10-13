@@ -1269,7 +1269,7 @@ impl TuiState {
     /// it; a failed or cancelled run keeps the earlier copy.
     fn keep_copy(&mut self, captured: &Captured, ending: &Ending) {
         if matches!(ending, Ending::Finished(Ok(()))) {
-            let data = clip::strip_ansi(&captured.data());
+            let data = crate::cli::ansi::strip(&captured.data());
             self.last_output = (!captured.trimmed() && !data.trim().is_empty()).then_some(data);
         }
     }

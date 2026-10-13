@@ -134,7 +134,7 @@ pub async fn run(
             chain_label(&target)
         ),
         out,
-    )?;
+    );
 
     let mut output = String::new();
     output.push_str("# Scope Insights\n\n");
