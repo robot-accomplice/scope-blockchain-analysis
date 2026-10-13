@@ -94,7 +94,7 @@ $stale"
     cargo test --workspace --quiet
 
     echo "Step 4/5: coverage"
-    "$REPO_ROOT/scripts/check-coverage.sh"
+    "$REPO_ROOT/scripts/check-coverage.sh" --record
 
     echo "Step 5/5: commit"
     git add Cargo.toml Cargo.lock "${MANIFESTS[@]}" "$CHANGELOG" .coverage-last
