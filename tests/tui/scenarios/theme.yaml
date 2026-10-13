@@ -1,0 +1,20 @@
+name: "the top rule names the state: idle, running, then failed"
+tiers: [offline]
+steps:
+  # The harness checks text, not color. The state word is the text half of
+  # the rule color (cyan idle, yellow running, red failed); with color off
+  # the word is all that is left.
+  - expect_screen: { contains: ["─ idle"] }
+  - type: "market summary USDC --venue binance --every 5s --duration 1m"
+  - key: Enter
+  - wait_for: { text: "─ running", timeout: 10s }
+  - expect_screen: { not_contains: ["─ idle", "─ failed"] }
+  - key: Esc
+  - wait_for: { text: "Cancelled after", timeout: 10s }
+  - expect_screen: { contains: ["─ idle"], not_contains: ["─ running"] }
+  - type: "market summary USDC --venue nosuch"
+  - key: Enter
+  - wait_for: { text: "─ failed", timeout: 20s }
+  - expect_screen: { contains: ["✗ Failed in"], not_contains: ["─ idle", "─ running"] }
+  - key: Ctrl-D
+  - expect_exit: 0

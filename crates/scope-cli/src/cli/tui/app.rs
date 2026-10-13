@@ -12,14 +12,14 @@ use super::journal::{Event, Journal};
 use super::vocab::Vocab;
 use crate::cli::interactive::SessionContext;
 use crate::cli::output::{Captured, Output};
-use crate::cli::style::SECONDARY;
 use crate::cli::textfit::{ELLIPSIS, cols, cut_with_ellipsis, draw_note_alone};
+use crate::cli::theme::{ACCENT, ERR, INFO, KEY, MATCH, OK, PaneState, SECONDARY, SELECTED, WARN};
 use ansi_to_tui::IntoText;
 use chrono::Utc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use scope::config::Config;
@@ -71,6 +71,9 @@ pub enum Overlay {
 const NO_MATCH: &str = "no match";
 
 /// The gutter of a matched row: it marks the match without color.
+/// The glyph that starts a note line.
+const NOTE_GLYPH: &str = "ℹ";
+
 const MATCH_MARK: &str = "▶ ";
 
 /// The gutter of a row that is not a match, so rows do not shift.
@@ -232,6 +235,9 @@ pub struct TuiState {
     pub ctx: SessionContext,
     /// The command that runs in the pane now.
     pub running: Option<Running>,
+    /// The last pane command failed and no command has started since. It
+    /// turns the pane rule red.
+    failed: bool,
     /// The first display column of the input line that is shown. It moves
     /// only when the cursor leaves the window (set while drawing).
     scroll_x: Cell<usize>,
@@ -274,6 +280,7 @@ impl TuiState {
             last_pane_height: Cell::new(0),
             ctx,
             running: None,
+            failed: false,
             scroll_x: Cell::new(0),
             pane_width: Cell::new(0),
             busy_hint: false,
@@ -859,7 +866,7 @@ impl TuiState {
     /// Says why exit waits. Does not repeat when the last line is the note.
     fn push_busy_note(&mut self) {
         let last = self.scrollback.last().map(|l| l.to_string());
-        if last.as_deref() != Some(BUSY_NOTE) {
+        if last.as_deref() != Some(format!("{NOTE_GLYPH} {BUSY_NOTE}").as_str()) {
             self.push_note(BUSY_NOTE);
         }
     }
@@ -975,9 +982,12 @@ impl TuiState {
         self.push_lines(lines);
     }
 
-    /// Appends a dim note line.
+    /// Appends a note line: the `ℹ` glyph, then the dim text.
     pub fn push_note(&mut self, note: &str) {
-        self.push_lines(vec![Line::styled(note.to_string(), SECONDARY)]);
+        self.push_lines(vec![Line::from(vec![
+            Span::styled(NOTE_GLYPH, INFO),
+            Span::styled(format!(" {note}"), SECONDARY),
+        ])]);
     }
 
     /// Appends a note line in `style`.
@@ -998,16 +1008,31 @@ impl TuiState {
 
     fn push_echo(&mut self, line: &str) {
         self.push_lines(vec![Line::from(vec![
-            Span::styled(
-                self.prompt(),
-                Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-            ),
+            Span::styled("scope", ACCENT),
+            Span::styled(format!(":{}", self.ctx.chain), KEY),
+            Span::raw("> "),
             Span::raw(line.to_string()),
         ])]);
     }
 
-    fn prompt(&self) -> String {
-        format!("scope:{}> ", self.ctx.chain)
+    /// The prompt: `scope` in the accent, the chain in the key color.
+    fn prompt(&self) -> Line<'static> {
+        Line::from(vec![
+            Span::styled("scope", ACCENT),
+            Span::styled(format!(":{}", self.ctx.chain), KEY),
+            Span::raw("> "),
+        ])
+    }
+
+    /// What the output pane shows: running, failed or idle.
+    fn pane_state(&self) -> PaneState {
+        if self.running.is_some() {
+            PaneState::Running
+        } else if self.failed {
+            PaneState::Failed
+        } else {
+            PaneState::Idle
+        }
     }
 
     /// The scrollback as plain text, one line per row. For tests and logs.
@@ -1159,6 +1184,7 @@ impl TuiState {
     pub fn start(&mut self, input: &str, inv: &Invocation) -> Output {
         let (out, captured) = Output::capture_merged();
         let diag = scope::diag::redirect(captured.out_sink());
+        self.failed = false;
         self.running = Some(Running {
             input: input.to_string(),
             argv: inv.argv.clone(),
@@ -1174,12 +1200,12 @@ impl TuiState {
     /// Ends the pane command: moves its output into the scrollback, shows
     /// the error if it failed, and logs the event.
     pub fn finish(&mut self, ending: Ending) {
-        self.finish_with(ending, color_enabled());
+        self.finish_with(ending);
     }
 
-    /// `finish`, with the color choice given. The failure footer always
-    /// carries the `✗` glyph and its words; `color` only adds the red.
-    fn finish_with(&mut self, ending: Ending, color: bool) {
+    /// `finish`. Every footer carries its glyph or words, and its style
+    /// holds the color; a frame with color off strips it.
+    fn finish_with(&mut self, ending: Ending) {
         let Some(run) = self.running.take() else {
             return;
         };
@@ -1201,16 +1227,17 @@ impl TuiState {
         self.push_ansi(&output);
         let secs = run.started.elapsed().as_secs_f64();
         match &ending {
-            Ending::Cancelled => self.push_note(&format!("Cancelled after {:.1}s.", secs)),
+            Ending::Cancelled => {
+                self.push_styled_note(&format!("Cancelled after {:.1}s.", secs), WARN)
+            }
             Ending::Finished(Err(_)) => {
-                let style = if color {
-                    Style::new().fg(Color::Red)
-                } else {
-                    Style::new().add_modifier(Modifier::BOLD)
-                };
+                self.failed = true;
+                let style = ERR.add_modifier(Modifier::BOLD);
                 self.push_styled_note(&format!("✗ Failed in {:.1}s.", secs), style);
             }
-            Ending::Finished(Ok(())) => self.push_note(&format!("Done in {:.1}s.", secs)),
+            Ending::Finished(Ok(())) => {
+                self.push_styled_note(&format!("✓ Done in {:.1}s.", secs), OK)
+            }
         }
         self.log(Event {
             started: run.started_at,
@@ -1319,9 +1346,16 @@ impl TuiState {
             Some(run) => self.liveness_lines(run, color_enabled()),
             None => Vec::new(),
         };
+        // The rule and title show the state by color; the word says it too.
+        let state = self.pane_state();
         let block = Block::new()
             .borders(Borders::TOP | Borders::BOTTOM)
-            .title(format!(" scope v{} ", scope::VERSION));
+            .border_style(state.style())
+            .title(Line::styled(
+                format!(" scope v{} ", scope::VERSION),
+                state.style().add_modifier(Modifier::BOLD),
+            ))
+            .title(Line::styled(format!(" {} ", state.word()), state.style()).right_aligned());
         let inner = block.inner(pane);
         self.pane_width.set(inner.width);
         // Fit the lines to the inner width here, not with ratatui wrap: a
@@ -1416,7 +1450,7 @@ impl TuiState {
                 .enumerate()
                 .map(|(i, c)| {
                     let style = if first + i == m.selected {
-                        Style::new().add_modifier(Modifier::REVERSED)
+                        SELECTED
                     } else {
                         Style::new()
                     };
@@ -1429,19 +1463,14 @@ impl TuiState {
 
         if self.busy_hint {
             f.render_widget(
-                Paragraph::new(Line::styled(
-                    format!(" {}", BUSY_NOTE),
-                    Style::new().fg(Color::Yellow),
-                )),
+                Paragraph::new(Line::styled(format!(" {}", BUSY_NOTE), WARN)),
                 hint_row,
             );
         } else if let Some(h) = super::hint::hint(&self.input) {
             let mut spans = vec![Span::styled(format!(" {}", h.text), SECONDARY)];
             if let Some(next) = h.next {
-                spans.push(Span::styled(
-                    format!("  next: {}", next),
-                    Style::new().fg(Color::Yellow),
-                ));
+                spans.push(Span::styled("  next: ", SECONDARY));
+                spans.push(Span::styled(next, KEY));
             }
             f.render_widget(Paragraph::new(Line::from(spans)), hint_row);
         }
@@ -1461,11 +1490,7 @@ impl TuiState {
             let mut lines = vec![Line::from(format!("> {}", p.query))];
             for (n, &i) in matches.iter().enumerate().skip(first).take(rows) {
                 let it = &p.items[i];
-                let style = if n == p.selected {
-                    Style::new().add_modifier(Modifier::REVERSED)
-                } else {
-                    Style::new()
-                };
+                let style = if n == p.selected { SELECTED } else { ACCENT };
                 lines.push(Line::from(vec![
                     Span::styled(format!("{:<28}", it.label), style),
                     Span::styled(format!(" {}", it.description), SECONDARY),
@@ -1510,15 +1535,13 @@ impl TuiState {
     fn liveness_lines(&self, run: &Running, color: bool) -> Vec<Line<'static>> {
         let dim = SECONDARY;
         let elapsed = run.started.elapsed();
-        let mut lines = vec![Line::styled(
-            format!(
-                "{} running {}… {}s",
-                spinner_glyph(elapsed, color),
-                run.input,
-                elapsed.as_secs()
+        let mut lines = vec![Line::from(vec![
+            Span::styled(spinner_glyph(elapsed, color), WARN),
+            Span::styled(
+                format!(" running {}… {}s", run.input, elapsed.as_secs()),
+                dim,
             ),
-            dim,
-        )];
+        ])];
         if let Some(hook) = run.out.progress_hook() {
             // Copy the record out: the lock is not held while drawing.
             let p = hook.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -1641,10 +1664,10 @@ const MIN_CUT_COMMAND_COLS: usize = 2;
 /// format, then chain, then the command text. The state text stays at
 /// every width, and a `…` shows that something was cut or dropped.
 fn fit_status(parts: &StatusParts, width: usize) -> Line<'static> {
-    let dim = SECONDARY;
-    let hot = Style::new().fg(Color::Yellow);
     let bar = |left: String, right: String| {
-        Line::from(vec![Span::styled(left, dim), Span::styled(right, hot)])
+        let mut spans = context_spans(&left);
+        spans.extend(state_spans(&right));
+        Line::from(spans)
     };
     if width == 0 {
         return Line::default();
@@ -1706,6 +1729,57 @@ fn fit_status(parts: &StatusParts, width: usize) -> Line<'static> {
     )
 }
 
+/// The status bar separator between parts.
+const STATUS_SEP: &str = " · ";
+
+/// Styles the context part of the bar, such as ` chain eth  format Table `.
+/// Each part is a label then a value: the label dim, the value in the
+/// accent. A `…` or other text with no label stays dim.
+fn context_spans(text: &str) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    for (i, part) in text.split(STATUS_SEP).enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(STATUS_SEP, SECONDARY));
+        }
+        let body = part.trim_start();
+        let lead = &part[..part.len() - body.len()];
+        let Some((label, value)) = body.split_once(' ') else {
+            // A flag such as `+tokens` is a value.
+            let style = if body.starts_with('+') {
+                ACCENT
+            } else {
+                SECONDARY
+            };
+            spans.push(Span::styled(part.to_string(), style));
+            continue;
+        };
+        spans.push(Span::styled(format!("{lead}{label} "), SECONDARY));
+        spans.push(Span::styled(value.to_string(), ACCENT));
+    }
+    spans
+}
+
+/// Styles the state part of the bar: `running Ns` in the warning color,
+/// `Esc cancels` bold, the rest in the accent.
+fn state_spans(text: &str) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    for (i, part) in text.split(STATUS_SEP).enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(STATUS_SEP, SECONDARY));
+        }
+        let word = part.trim_start();
+        let style = if word.starts_with("running") {
+            WARN
+        } else if word.starts_with("Esc") {
+            Style::new().add_modifier(Modifier::BOLD)
+        } else {
+            ACCENT
+        };
+        spans.push(Span::styled(part.to_string(), style));
+    }
+    spans
+}
+
 /// The first fitted row of each entry at `width`, and the row after the
 /// last entry.
 fn entry_starts(lines: &[Line<'static>], width: usize) -> Vec<usize> {
@@ -1736,7 +1810,7 @@ fn marked_rows(
         let mark = if hit { MATCH_MARK } else { MATCH_BLANK };
         row.spans.insert(0, Span::raw(mark));
         if hit {
-            let mut style = Style::new().add_modifier(Modifier::REVERSED);
+            let mut style = MATCH;
             if now {
                 style = style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
             }
@@ -1787,6 +1861,7 @@ mod tests {
     use super::*;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -3241,7 +3316,7 @@ mod tests {
         s.push_note("hello");
         let text = screen(&s, 40, 12);
         let row = text.lines().find(|l| l.contains("hello")).unwrap();
-        assert!(row.starts_with("hello"), "{row:?}");
+        assert!(row.starts_with("ℹ hello"), "{row:?}");
     }
 
     fn last_line(s: &TuiState) -> &Line<'static> {
@@ -3254,11 +3329,12 @@ mod tests {
         run_pane(&mut s, "x\n", Ending::Finished(Ok(())));
         let text = last_line(&s).to_string();
         assert!(
-            regex::Regex::new(r"^Done in \d+\.\ds\.$")
+            regex::Regex::new(r"^✓ Done in \d+\.\ds\.$")
                 .unwrap()
                 .is_match(&text),
             "{text}"
         );
+        assert_eq!(last_line(&s).style, OK);
     }
 
     #[test]
@@ -3266,7 +3342,7 @@ mod tests {
         let mut s = state();
         let err = Ending::Finished(Err(scope::error::ScopeError::Chain("boom".into())));
         s.start("x", &pane_invocation());
-        s.finish_with(err, true);
+        s.finish_with(err);
         let line = last_line(&s);
         let text = line.to_string();
         assert!(
@@ -3275,20 +3351,7 @@ mod tests {
                 .is_match(&text),
             "{text}"
         );
-        assert_eq!(line.style.fg, Some(Color::Red));
-    }
-
-    #[test]
-    fn test_failed_footer_keeps_glyph_and_words_without_color() {
-        let mut s = state();
-        s.start("x", &pane_invocation());
-        s.finish_with(
-            Ending::Finished(Err(scope::error::ScopeError::Chain("boom".into()))),
-            false,
-        );
-        let line = last_line(&s);
-        assert!(line.to_string().starts_with("✗ Failed in "));
-        assert_eq!(line.style.fg, None, "no color when color is off");
+        assert_eq!(line.style, ERR.add_modifier(Modifier::BOLD));
     }
 
     #[test]
@@ -3302,6 +3365,7 @@ mod tests {
                 .is_match(&text),
             "{text}"
         );
+        assert_eq!(last_line(&s).style, WARN);
     }
 
     fn pane_invocation() -> Invocation {
@@ -3868,5 +3932,222 @@ mod tests {
         s.handle_key(key(KeyCode::Esc));
         open_search(&mut s, "31m");
         assert!(status_row(&s, 80).contains("no match"));
+    }
+
+    // ---- Color theme: the mapping from state to style ----
+
+    fn buffer(s: &TuiState, w: u16, h: u16) -> ratatui::buffer::Buffer {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| s.render(f)).unwrap();
+        term.backend().buffer().clone()
+    }
+
+    fn row_text(buf: &ratatui::buffer::Buffer, y: u16) -> String {
+        (0..buf.area.width)
+            .map(|x| buf[(x, y)].symbol().to_string())
+            .collect()
+    }
+
+    /// The foreground of a rule cell in the top row of the pane.
+    fn rule_fg(buf: &ratatui::buffer::Buffer) -> Color {
+        let x = (0..buf.area.width)
+            .find(|&x| buf[(x, 0)].symbol() == "─")
+            .expect("a rule cell");
+        buf[(x, 0)].fg
+    }
+
+    fn failed_state() -> TuiState {
+        let mut s = state();
+        s.start("x", &pane_invocation());
+        s.finish(Ending::Finished(Err(scope::error::ScopeError::Chain(
+            "boom".into(),
+        ))));
+        s
+    }
+
+    #[test]
+    fn test_pane_rule_is_accent_idle_warn_running_and_err_after_a_failure() {
+        // The rule color is the one signal of state a glance can read.
+        let idle = state();
+        assert_eq!(rule_fg(&buffer(&idle, 60, 14)), Color::Cyan);
+        let (running, _out) = running_state("venues list");
+        assert_eq!(rule_fg(&buffer(&running, 60, 14)), Color::Yellow);
+        let failed = failed_state();
+        assert_eq!(rule_fg(&buffer(&failed, 60, 14)), Color::Red);
+    }
+
+    #[test]
+    fn test_failed_rule_lasts_until_the_next_command_starts() {
+        let mut s = failed_state();
+        assert_eq!(s.pane_state(), PaneState::Failed);
+        s.start("venues list", &pane_invocation());
+        assert_eq!(s.pane_state(), PaneState::Running);
+        s.finish(Ending::Finished(Ok(())));
+        assert_eq!(s.pane_state(), PaneState::Idle);
+    }
+
+    #[test]
+    fn test_cancelled_run_leaves_the_rule_idle() {
+        let mut s = state();
+        run_pane(&mut s, "x\n", Ending::Cancelled);
+        assert_eq!(s.pane_state(), PaneState::Idle);
+    }
+
+    #[test]
+    fn test_state_word_is_at_the_right_end_of_the_top_rule_and_title_stays_left() {
+        let buf = buffer(&state(), 60, 14);
+        let top = row_text(&buf, 0);
+        let title = format!(" scope v{} ", scope::VERSION);
+        assert!(top.starts_with(&title), "{top:?}");
+        assert!(top.trim_end().ends_with(" idle"), "{top:?}");
+        assert!(buf[(1, 0)].modifier.contains(Modifier::BOLD), "title bold");
+        assert_eq!(buf[(1, 0)].fg, Color::Cyan);
+    }
+
+    #[test]
+    fn test_prompt_spans_scope_accent_chain_key_rest_default() {
+        let mut s = state();
+        s.ctx.chain = "base".into();
+        let prompt = s.prompt();
+        assert_eq!(prompt.to_string(), "scope:base> ");
+        assert_eq!(prompt.spans[0].style, ACCENT);
+        assert_eq!(prompt.spans[1].style, KEY);
+        assert_eq!(prompt.spans[2].style, Style::new());
+        s.push_echo("venues list");
+        let echo = last_line(&s);
+        assert_eq!(echo.spans[0].style, ACCENT);
+        assert_eq!(echo.spans[1].style, KEY);
+        assert_eq!(echo.spans[3].content, "venues list");
+        assert_eq!(echo.spans[3].style, Style::new());
+    }
+
+    #[test]
+    fn test_notes_carry_an_info_glyph_and_dim_text() {
+        let mut s = state();
+        s.push_note("hello");
+        let note = last_line(&s);
+        assert_eq!(note.to_string(), "ℹ hello");
+        assert_eq!(note.spans[0].style, INFO);
+        assert_eq!(note.spans[1].style, SECONDARY);
+    }
+
+    #[test]
+    fn test_selected_palette_row_is_reversed_cyan() {
+        let mut s = state();
+        s.handle_key(ctrl_k());
+        let buf = buffer(&s, 100, 24);
+        let selected = buf.content.iter().any(|c| {
+            c.fg == Color::Cyan && c.modifier.contains(Modifier::REVERSED) && c.symbol() != " "
+        });
+        assert!(selected, "a reversed cyan palette row");
+        // The rows that are not selected show their names in the accent.
+        let names = buf
+            .content
+            .iter()
+            .any(|c| c.fg == Color::Cyan && !c.modifier.contains(Modifier::REVERSED));
+        assert!(names);
+    }
+
+    #[test]
+    fn test_search_match_is_reversed_yellow() {
+        let mut s = alpha_state();
+        open_search(&mut s, "alpha");
+        let buf = buffer(&s, 80, 20);
+        let hits = buf
+            .content
+            .iter()
+            .filter(|c| c.fg == Color::Yellow && c.modifier.contains(Modifier::REVERSED))
+            .count();
+        assert!(hits >= 2 * "alpha".len(), "{hits} matched cells");
+    }
+
+    #[test]
+    fn test_status_values_are_accent_and_labels_secondary() {
+        let line = fit_status(&state().status_parts(), 100);
+        let find = |text: &str| {
+            line.spans
+                .iter()
+                .find(|sp| sp.content.contains(text))
+                .unwrap_or_else(|| panic!("no span with {text:?}"))
+        };
+        assert_eq!(find("chain").style, SECONDARY);
+        assert_eq!(find("auto").style, ACCENT);
+        assert_eq!(find("format").style, SECONDARY);
+        assert_eq!(find("help").style, ACCENT);
+    }
+
+    #[test]
+    fn test_running_status_is_warn_and_esc_cancels_is_bold() {
+        let (s, _out) = running_state("venues list");
+        let line = fit_status(&s.status_parts(), 120);
+        let find = |text: &str| {
+            line.spans
+                .iter()
+                .find(|sp| sp.content.contains(text))
+                .unwrap_or_else(|| panic!("no span with {text:?}"))
+        };
+        assert_eq!(find("running").style, WARN);
+        assert_eq!(
+            find("Esc cancels").style,
+            Style::new().add_modifier(Modifier::BOLD)
+        );
+        assert_eq!(find("`venues list`").style, ACCENT);
+    }
+
+    #[test]
+    fn test_hint_next_argument_is_a_key_and_busy_note_is_warn() {
+        let mut s = state();
+        type_str(&mut s, "address");
+        let buf = buffer(&s, 100, 14);
+        let hint_row = 14 - 2;
+        let next = (0..100u16)
+            .rfind(|&x| buf[(x, hint_row)].symbol() == "<")
+            .unwrap();
+        assert_eq!(buf[(next, hint_row)].fg, Color::Magenta);
+        assert!(buf[(next, hint_row)].modifier.contains(Modifier::BOLD));
+        let (mut busy, _out) = running_state("venues list");
+        busy.busy_hint = true;
+        let buf = buffer(&busy, 100, 14);
+        let x = (0..100u16)
+            .find(|&x| buf[(x, hint_row)].symbol() == "A")
+            .unwrap();
+        assert_eq!(buf[(x, hint_row)].fg, Color::Yellow);
+    }
+
+    #[test]
+    fn test_with_color_off_every_state_still_differs_by_text() {
+        // `finish_frame` strips color in the real loop; strip it the same way.
+        let strip = |s: &TuiState| {
+            let mut buf = buffer(s, 60, 14);
+            crate::cli::plain::strip_color(&mut buf);
+            assert!(buf.content.iter().all(|c| c.fg == Color::Reset));
+            buf
+        };
+        let idle = row_text(&strip(&state()), 0);
+        let (running, _out) = running_state("venues list");
+        let running = row_text(&strip(&running), 0);
+        let failed = row_text(&strip(&failed_state()), 0);
+        assert!(idle.trim_end().ends_with(" idle"), "{idle:?}");
+        assert!(running.trim_end().ends_with(" running"), "{running:?}");
+        assert!(failed.trim_end().ends_with(" failed"), "{failed:?}");
+        // The footers keep their glyphs and words.
+        let mut s = state();
+        run_pane(&mut s, "x\n", Ending::Finished(Ok(())));
+        assert!(last_line(&s).to_string().starts_with("✓ Done in "));
+        let failed = failed_state();
+        assert!(last_line(&failed).to_string().starts_with("✗ Failed in "));
+        // Bold is a modifier, so the failed footer stays bold without color.
+        assert!(
+            last_line(&failed)
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
+        let buf = strip(&failed);
+        assert!(
+            buf.content
+                .iter()
+                .any(|c| c.symbol() == "✗" && c.modifier.contains(Modifier::BOLD))
+        );
     }
 }

@@ -2,6 +2,9 @@
 //! black and bright black vanish on some themes, so text uses the default
 //! foreground plus the DIM modifier, or a named ANSI color. Borders may keep
 //! DarkGray.
+//!
+//! The TUI names no color outside `cli/theme.rs`. Its test modules are exempt:
+//! they read colors back from a rendered buffer.
 
 use std::path::{Path, PathBuf};
 
@@ -91,4 +94,69 @@ fn scanner_flags_text_and_spares_only_border_styles() {
         .map(|v| v.split(':').nth(1).unwrap().parse().unwrap())
         .collect();
     assert_eq!(lines, vec![1, 3, 4, 5, 7, 8, 9, 10, 11, 12, 14, 16]);
+}
+
+/// Any named color or ratatui color shorthand.
+const COLOR_TOKENS: &[&str] = &[
+    "Color::",
+    ".red()",
+    ".cyan()",
+    ".yellow()",
+    ".green()",
+    ".blue()",
+    ".magenta()",
+];
+
+/// `file:line: text` for each line of the non-test code that names a color.
+/// The scan stops at the first `#[cfg(test)]`.
+fn color_uses(file: &str, src: &str) -> Vec<String> {
+    src.lines()
+        .enumerate()
+        .take_while(|(_, l)| l.trim() != "#[cfg(test)]")
+        .filter(|(_, l)| COLOR_TOKENS.iter().any(|t| l.contains(t)))
+        .map(|(i, l)| format!("{file}:{}: {}", i + 1, l.trim()))
+        .collect()
+}
+
+#[test]
+fn tui_files_name_no_color_outside_theme_rs() {
+    let mut files = Vec::new();
+    rs_files(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cli/tui"),
+        &mut files,
+    );
+    files.sort();
+    let mut found = Vec::new();
+    for path in files {
+        let src = std::fs::read_to_string(&path).unwrap();
+        found.extend(color_uses(&path.to_string_lossy(), &src));
+    }
+    assert!(
+        found.is_empty(),
+        "name colors only in cli/theme.rs (ACCENT, KEY, OK, WARN, ERR, INFO, SECONDARY, SELECTED, MATCH):\n{}",
+        found.join("\n")
+    );
+}
+
+#[test]
+fn color_scanner_flags_named_colors_and_shorthands_in_non_test_code() {
+    let src = [
+        "a.fg(Color::Red)", // 1 flag
+        "b.red()",          // 2 flag
+        "c.cyan().bold()",  // 3 flag
+        "d.yellow()",       // 4 flag
+        "e.green()",        // 5 flag
+        "f.blue()",         // 6 flag
+        "g.magenta()",      // 7 flag
+        "h.bold()",         // 8 spare
+        "i.fg(ACCENT.fg)",  // 9 spare
+        "#[cfg(test)]",     // 10 stop
+        "j.fg(Color::Red)", // 11 spare: test code
+    ]
+    .join("\n");
+    let lines: Vec<usize> = color_uses("x.rs", &src)
+        .iter()
+        .map(|v| v.split(':').nth(1).unwrap().parse().unwrap())
+        .collect();
+    assert_eq!(lines, vec![1, 2, 3, 4, 5, 6, 7]);
 }

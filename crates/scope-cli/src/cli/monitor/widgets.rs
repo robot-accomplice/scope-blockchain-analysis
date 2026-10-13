@@ -18,8 +18,8 @@ use scope::market::TradeSide;
 
 use super::config::{ChartMode, LayoutPreset, ScaleMode, WidgetVisibility};
 use super::state::MonitorState;
-use crate::cli::style::SECONDARY;
 use crate::cli::textfit::{cols, cut_with_ellipsis, draw_note_alone};
+use crate::cli::theme::SECONDARY;
 
 /// The smallest terminal the monitor draws in, in columns and rows.
 pub(crate) const MIN_W: u16 = 60;

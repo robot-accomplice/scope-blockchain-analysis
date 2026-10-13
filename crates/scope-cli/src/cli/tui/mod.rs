@@ -1263,7 +1263,10 @@ mod tests {
         let text = state.scrollback_text();
         let note = text
             .lines()
-            .find(|l| l.starts_with("Ran outside the TUI:"))
+            .find_map(|l| {
+                l.strip_prefix("ℹ ")
+                    .filter(|n| n.starts_with("Ran outside the TUI:"))
+            })
             .unwrap_or_else(|| panic!("no note in {text}"));
         let pattern = format!(
             r"^Ran outside the TUI: {} \({}, \d+\.\ds\)\.$",

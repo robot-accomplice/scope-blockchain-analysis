@@ -1,5 +1,5 @@
- <MASK> ──────────────────────────
-Type `help` for commands. `exit` or
+ <MASK> ──────────────────── idle
+ℹ Type `help` for commands. `exit` or
 Ctrl-D leaves.
 scope:auto> venues list
 

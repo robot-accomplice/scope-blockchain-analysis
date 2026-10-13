@@ -10,6 +10,7 @@
 
 use crate::cli::interactive::SessionContext;
 use crate::cli::output::Output;
+use crate::cli::theme::{KEY_ANSI, RESET_ANSI, SECONDARY_ANSI};
 use crate::cli::{Cli, Commands};
 use crate::{errln, out, outln};
 use clap::error::ErrorKind;
@@ -676,17 +677,43 @@ fn write_help(out: &Output) -> io::Result<()> {
         outln!(out, "  {:<34} {}", sub.get_name(), about)?;
     }
     outln!(out)?;
+    // Key names in the key color, what they do dim. The ANSI becomes styles
+    // in the pane; the copy and the log strip it.
+    let key = |k: &str| format!("{KEY_ANSI}{k}{RESET_ANSI}");
+    let what = |w: &str| format!("{SECONDARY_ANSI}{w}{RESET_ANSI}");
     outln!(
         out,
-        "Keys: Enter run · Tab complete · Ctrl-K palette · ↑/↓ history · PgUp/PgDn scroll · Esc or Ctrl-C cancel"
+        "Keys: {} {} · {} {} · {} {} · {} {} · {} {} · {} {}",
+        key("Enter"),
+        what("run"),
+        key("Tab"),
+        what("complete"),
+        key("Ctrl-K"),
+        what("palette"),
+        key("↑/↓"),
+        what("history"),
+        key("PgUp/PgDn"),
+        what("scroll"),
+        format_args!("{} or {}", key("Esc"), key("Ctrl-C")),
+        what("cancel"),
     )?;
     outln!(
         out,
-        "      Ctrl-Y copy last output · Ctrl-F or / search · Ctrl-R history search · Shift-drag selects text"
+        "      {} {} · {} or {} {} · {} {} · {} {}",
+        key("Ctrl-Y"),
+        what("copy last output"),
+        key("Ctrl-F"),
+        key("/"),
+        what("search"),
+        key("Ctrl-R"),
+        what("history search"),
+        key("Shift-drag"),
+        what("selects text"),
     )?;
     outln!(
         out,
-        "      Copy needs a terminal that allows OSC 52; save <file> works everywhere"
+        "      {}",
+        what("Copy needs a terminal that allows OSC 52; save <file> works everywhere")
     )
 }
 
@@ -917,8 +944,9 @@ mod tests {
     #[test]
     fn test_help_lists_the_search_keys() {
         let (_, cap) = plan_line("help", &mut SessionContext::default());
+        let help = super::super::clip::strip_ansi(&cap.out());
         for keys in ["Ctrl-F or / search", "Ctrl-R history search"] {
-            assert!(cap.out().contains(keys), "help is missing {}", keys);
+            assert!(help.contains(keys), "help is missing {}", keys);
         }
     }
 

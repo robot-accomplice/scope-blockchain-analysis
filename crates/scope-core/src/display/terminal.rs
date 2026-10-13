@@ -791,7 +791,7 @@ fn table_header_at(cols: &[Col], tty: bool, cap: Option<usize>) -> String {
         format!(
             "{}    {}\n{}  {}",
             "│".cyan(),
-            header.dimmed(),
+            header.bold().cyan(),
             "│".cyan(),
             line.cyan()
         )
@@ -1642,6 +1642,10 @@ mod tests {
         let header = table_header_styled(cols, true);
         assert!(header.contains("Price"));
         assert!(header.contains("│"));
+        // The header text is bold cyan: cyan, then bold, then the label.
+        assert!(header.contains("\x1b[36m\x1b[1m"), "{header:?}");
+        let plain = table_header_styled(cols, false);
+        assert!(!plain.contains('\x1b'), "plain output has no escapes");
     }
 
     #[test]
