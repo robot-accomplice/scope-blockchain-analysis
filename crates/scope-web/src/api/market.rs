@@ -16,7 +16,7 @@ use std::sync::Arc;
 /// Request body for market summary.
 #[derive(Debug, Deserialize)]
 pub struct MarketRequest {
-    /// Pair ("DAI_USDC", "BTCGBP") or base symbol ("USDC"). Default: "USDC".
+    /// Pair or base symbol, read by `Pair::parse` ("DAI_USDC", "OPUSDT", "USDC"). Default: "USDC".
     #[serde(default = "default_pair")]
     pub pair: String,
     /// Market venue: a CEX id ("binance") or a DEX ("ethereum", "solana").

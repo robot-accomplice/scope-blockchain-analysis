@@ -1,16 +1,22 @@
 //! Trading pairs: one parser and one display format for every surface.
 //!
-//! Users write a pair as `BASE_QUOTE`, `BASE/QUOTE`, `BASE-QUOTE`,
-//! `BASEQUOTE` (for a quote in [`QUOTE_CURRENCIES`]) or a bare `BASE`. Venue
-//! responses use the same forms. [`Pair::parse`] reads all of them, and
-//! `Display` writes `BASE/QUOTE`.
+//! Users write a pair as `BASE_QUOTE`, `BASE/QUOTE`, `BASE-QUOTE`, a bare
+//! `BASE`, or `BASEQUOTE` when the quote is a stable or fiat currency in
+//! [`QUOTE_CURRENCIES`]. Venue responses use the same forms. [`Pair::parse`]
+//! reads all of them, and `Display` writes `BASE/QUOTE`.
 
 use std::fmt;
 
-/// Quote currencies recognized at the end of a concatenated symbol such as
-/// `BTCUSDT`. A longer code comes before a code it starts with (`USDT` and
-/// `USDC` before `USD`), so the longest match wins.
-pub const QUOTE_CURRENCIES: [&str; 8] = ["USDT", "USDC", "USD", "BTC", "ETH", "EUR", "GBP", "TRY"];
+/// Stable and fiat quote currencies that may end a concatenated symbol such
+/// as `OPUSDT`. A crypto quote (BTC, ETH, BNB) needs a separator, so `WETH`
+/// and `STETH` stay whole.
+pub const QUOTE_CURRENCIES: [&str; 9] = [
+    "USDT", "USDC", "USD", "BUSD", "FDUSD", "DAI", "EUR", "GBP", "TRY",
+];
+
+/// The fewest base characters left after a quote suffix is split off, so
+/// `TUSD` and `XUSDT` stay whole.
+const MIN_BASE_LEN: usize = 2;
 
 /// Separators accepted between base and quote.
 const SEPARATORS: [char; 3] = ['_', '/', '-'];
@@ -81,12 +87,17 @@ fn split_on_separator(p: &str) -> Option<(&str, &str)> {
     })
 }
 
+/// The longest quote currency that ends `p` decides (`FDUSD`, not `USD`). It
+/// splits only when at least [`MIN_BASE_LEN`] characters remain, so a quote
+/// on its own (`BUSD`, `FDUSD`) stays a base.
 fn split_on_quote_suffix(p: &str) -> Option<(&str, &str)> {
     let upper = p.to_ascii_uppercase();
-    QUOTE_CURRENCIES
+    let quote = QUOTE_CURRENCIES
         .iter()
-        .find(|quote| p.len() > quote.len() && upper.ends_with(*quote))
-        .map(|quote| p.split_at(p.len() - quote.len()))
+        .filter(|quote| upper.ends_with(*quote))
+        .max_by_key(|quote| quote.len())?;
+    let base_len = p.len() - quote.len();
+    (base_len >= MIN_BASE_LEN).then(|| p.split_at(base_len))
 }
 
 #[cfg(test)]
@@ -172,6 +183,30 @@ mod tests {
                 quote: None
             }
         );
-        assert_eq!(Pair::parse("WETH").quote.as_deref(), Some("ETH"));
+    }
+
+    /// Concatenated input splits only on a stable or fiat quote, and only when
+    /// at least two base characters remain. Crypto quotes need a separator.
+    #[test]
+    fn concatenated_input_splits_only_on_a_stable_or_fiat_quote() {
+        assert_eq!(parts("OPUSDT"), pair("OP", Some("USDT")));
+        assert_eq!(parts("WBTCUSDT"), pair("WBTC", Some("USDT")));
+        assert_eq!(parts("ETHFDUSD"), pair("ETH", Some("FDUSD")));
+        assert_eq!(parts("BTCBUSD"), pair("BTC", Some("BUSD")));
+        assert_eq!(parts("ETHDAI"), pair("ETH", Some("DAI")));
+        assert_eq!(parts("WETH"), pair("WETH", None));
+        assert_eq!(parts("STETH"), pair("STETH", None));
+        assert_eq!(parts("BTCETH"), pair("BTCETH", None));
+        assert_eq!(parts("BUSD"), pair("BUSD", None));
+        assert_eq!(parts("FDUSD"), pair("FDUSD", None));
+        assert_eq!(parts("TUSD"), pair("TUSD", None));
+        assert_eq!(parts("XUSDT"), pair("XUSDT", None));
+    }
+
+    #[test]
+    fn a_separator_always_splits() {
+        assert_eq!(parts("BTC_ETH"), pair("BTC", Some("ETH")));
+        assert_eq!(parts("WETH/BTC"), pair("WETH", Some("BTC")));
+        assert_eq!(parts("X-USDT"), pair("X", Some("USDT")));
     }
 }

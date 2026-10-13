@@ -803,7 +803,7 @@ Use `--venue binance` (or any CEX venue) to fetch real exchange OHLC data instea
 
 - **`--venue`** must name a known venue (`scope venues list`). An unknown venue is an error.
 - **When DexScreener fails** (unreachable, blocked, or the token is unknown there) and `--venue` is set, the monitor uses that venue's ticker for the token and tells you why.
-- **`--pair`** prices the token from the venue alone (exchange-only mode). Write the pair in any common form, `USDN_USDT`, `USDN/USDT`, `USDN-USDT` or `USDNUSDT`; scope converts it to the venue's own format.
+- **`--pair`** prices the token from the venue alone (exchange-only mode). Write the pair in any common form, `USDN_USDT`, `USDN/USDT`, `USDN-USDT` or `USDNUSDT` (the joined form only for a stable or fiat quote such as USDT, USDC, DAI, EUR); scope converts it to the venue's own format.
 - **`--export FILE`** starts CSV export to that file at launch. The `E` key starts an export in the directory set by `monitor.export.path` in `config.yaml` (default `./scope-exports/`). A file that cannot be written is an error, not a silent no-op.
 
 The monitor supports five layout presets that can be switched at runtime or configured in `config.yaml`:

@@ -21,6 +21,11 @@ use scope::market::{
 };
 use std::time::Duration;
 
+/// Help for every market pair argument; the rule is `scope::market::Pair::parse`.
+const PAIR_HELP: &str = "Pair or base symbol. BASE_QUOTE, BASE/QUOTE and BASE-QUOTE work for any quote \
+    (BTC_ETH). BASEQUOTE works only for a stable or fiat quote (OPUSDT, BTCEUR); WETH stays \
+    WETH. A bare base (USDC) uses the venue's default quote.";
+
 /// Default interval between summary runs when in repeat mode (60 seconds).
 pub const DEFAULT_EVERY_SECS: u64 = 60;
 
@@ -89,9 +94,7 @@ pub enum MarketCommands {
   ..."
 )]
 pub struct SummaryArgs {
-    /// Pair (DAI_USDC, BTC/GBP, BTCUSDT) or base symbol (USDC). A bare base
-    /// uses the venue's default quote.
-    #[arg(default_value = "USDC", value_name = "SYMBOL")]
+    #[arg(default_value = "USDC", value_name = "SYMBOL", help = PAIR_HELP)]
     pub pair: String,
 
     /// Market venue: a CEX (e.g., binance, mexc, okx) or a DEX (ethereum/eth,
@@ -179,8 +182,7 @@ pub enum SummaryFormat {
   ]"
 )]
 pub struct OhlcArgs {
-    /// Trading pair symbol (e.g., USDC, BTC). Quote is USDT by default.
-    #[arg(default_value = "USDC", value_name = "SYMBOL")]
+    #[arg(default_value = "USDC", value_name = "SYMBOL", help = PAIR_HELP)]
     pub pair: String,
 
     /// Exchange venue (e.g., binance, mexc, bybit).
@@ -207,8 +209,7 @@ pub struct OhlcArgs {
   scope market trades DAI --venue binance --limit 20
   scope market trades ETH --venue okx --format json")]
 pub struct TradesArgs {
-    /// Trading pair symbol (e.g., USDC, BTC). Quote is USDT by default.
-    #[arg(default_value = "USDC", value_name = "SYMBOL")]
+    #[arg(default_value = "USDC", value_name = "SYMBOL", help = PAIR_HELP)]
     pub pair: String,
 
     /// Exchange venue (e.g., binance, mexc, bybit).

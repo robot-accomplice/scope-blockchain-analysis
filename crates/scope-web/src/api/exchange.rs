@@ -14,7 +14,7 @@ use serde::Deserialize;
 pub struct SnapshotRequest {
     /// Venue ID (e.g., "binance", "mexc").
     pub venue: String,
-    /// Base token symbol (e.g., "BTC", "USDC").
+    /// Pair or base symbol, read by `Pair::parse` (e.g., "BTC", "ETH_BTC", "OPUSDT").
     #[serde(default = "default_pair")]
     pub pair: String,
     /// Maximum number of recent trades to fetch.
@@ -111,7 +111,7 @@ pub async fn handle(Json(req): Json<SnapshotRequest>) -> impl IntoResponse {
 pub struct TradesRequest {
     /// Venue ID (e.g., "binance", "mexc").
     pub venue: String,
-    /// Base token symbol (e.g., "BTC", "USDC").
+    /// Pair or base symbol, read by `Pair::parse` (e.g., "BTC", "ETH_BTC", "OPUSDT").
     #[serde(default = "default_pair")]
     pub pair: String,
     /// Maximum number of trades to return.
@@ -186,7 +186,7 @@ pub async fn handle_trades(Json(req): Json<TradesRequest>) -> impl IntoResponse 
 pub struct OhlcRequest {
     /// Venue ID (e.g., "binance", "mexc").
     pub venue: String,
-    /// Base token symbol (e.g., "BTC", "USDC").
+    /// Pair or base symbol, read by `Pair::parse` (e.g., "BTC", "ETH_BTC", "OPUSDT").
     #[serde(default = "default_pair")]
     pub pair: String,
     /// Candle interval (e.g., "1m", "1h", "1d").
