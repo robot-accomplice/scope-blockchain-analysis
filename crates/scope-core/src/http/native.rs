@@ -25,9 +25,44 @@ impl NativeHttpClient {
     }
 }
 
+/// Set to let a test build reach live hosts. Test builds otherwise send
+/// only to loopback (#39).
+pub const TEST_NETWORK_ENV: &str = "SCOPE_TEST_NETWORK";
+
+/// In a test build, a request to any host but loopback fails at once, so a
+/// test gives the same result, and the same coverage, with the network on
+/// or off (#39). Local mock servers (mockito) still answer.
+/// [`TEST_NETWORK_ENV`] allows live hosts for a manual run.
+#[cfg(any(test, feature = "test-support"))]
+fn refuse_live_host_in_tests(url: &str) -> Result<(), ScopeError> {
+    live_host_check(url, std::env::var_os(TEST_NETWORK_ENV).is_some())
+}
+
+/// The guard's decision: `url` may be sent when it names loopback or when
+/// the network is `allowed`.
+#[cfg(any(test, feature = "test-support"))]
+fn live_host_check(url: &str, allowed: bool) -> Result<(), ScopeError> {
+    let host = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_owned));
+    let loopback = matches!(host.as_deref(), Some("localhost" | "127.0.0.1" | "[::1]"));
+    if loopback || allowed {
+        return Ok(());
+    }
+    Err(ScopeError::Network(format!(
+        "live network is off in tests: {url} (set {TEST_NETWORK_ENV}=1 to allow it)"
+    )))
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+fn refuse_live_host_in_tests(_url: &str) -> Result<(), ScopeError> {
+    Ok(())
+}
+
 #[async_trait]
 impl HttpClient for NativeHttpClient {
     async fn send(&self, request: Request) -> Result<Response, ScopeError> {
+        refuse_live_host_in_tests(&request.url)?;
         let method: reqwest::Method = request
             .method
             .parse()
@@ -232,5 +267,64 @@ mod tests {
         req.method = String::new();
         let result = client.send(req).await;
         assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod live_guard_tests {
+    use super::*;
+
+    // #39: a unit test must not reach a live API, or its result and the
+    // coverage change with the network.
+    #[test]
+    fn test_a_test_build_refuses_live_hosts() {
+        let err = live_host_check("https://api.dexscreener.com/latest", false).unwrap_err();
+        assert!(
+            err.to_string().contains("live network is off in tests"),
+            "{err}"
+        );
+        // The opt-in for a manual run lets it through.
+        assert!(live_host_check("https://api.dexscreener.com/latest", true).is_ok());
+        for local in [
+            "http://127.0.0.1:1234/x",
+            "http://localhost/x",
+            "http://[::1]:80/x",
+        ] {
+            assert!(live_host_check(local, false).is_ok(), "{local}");
+        }
+    }
+
+    // send() applies the check before anything goes out.
+    #[tokio::test]
+    async fn test_send_applies_the_live_host_check() {
+        if std::env::var_os(TEST_NETWORK_ENV).is_some() {
+            return; // a manual run with the network allowed
+        }
+        let client = NativeHttpClient::new().unwrap();
+        let err = client
+            .send(Request::get("https://api.dexscreener.com/latest"))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("live network is off in tests"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_a_test_build_still_reaches_a_local_mock() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/ok")
+            .with_body("yes")
+            .create_async()
+            .await;
+        let client = NativeHttpClient::new().unwrap();
+        let resp = client
+            .send(Request::get(&format!("{}/ok", server.url())))
+            .await
+            .unwrap();
+        assert_eq!(resp.body, "yes");
+        mock.assert_async().await;
     }
 }

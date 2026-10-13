@@ -322,15 +322,17 @@ impl serde::Serialize for HealthCheck {
 // Trade & Ticker Types
 // =============================================================================
 
-/// Side of a trade.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Side of a trade. JSON writes `buy` or `sell`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum TradeSide {
     Buy,
     Sell,
 }
 
-/// A single trade from the recent trades endpoint.
-#[derive(Debug, Clone)]
+/// A single trade from the recent trades endpoint. Its JSON form is the one
+/// the CLI and the web send.
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Trade {
     /// Trade price in quote currency.
     pub price: f64,
@@ -392,8 +394,9 @@ pub struct MarketSnapshot {
 // OHLC / Candlestick
 // =============================================================================
 
-/// A single OHLC candlestick bar.
-#[derive(Debug, Clone, PartialEq)]
+/// A single OHLC candlestick bar. Its JSON form is the one the CLI and the
+/// web send.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Candle {
     /// Candle open time in milliseconds since epoch.
     pub open_time: u64,

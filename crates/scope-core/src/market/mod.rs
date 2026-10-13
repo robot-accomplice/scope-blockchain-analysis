@@ -46,6 +46,24 @@ pub mod exchange;
 pub mod registry;
 pub mod venue;
 
+/// Test helpers: a built-in venue pointed at a local mock server.
+#[cfg(any(test, feature = "test-support"))]
+pub mod testing {
+    use super::{ExchangeClient, VenueRegistry};
+
+    /// The built-in venue `id`, with its real mapping, sending to
+    /// `base_url` (a mockito server) instead of the live API.
+    pub fn venue_at(id: &str, base_url: &str) -> ExchangeClient {
+        let mut desc = VenueRegistry::load()
+            .expect("built-in venues load")
+            .get(id)
+            .unwrap_or_else(|| panic!("no built-in venue {id}"))
+            .clone();
+        desc.base_url = base_url.to_string();
+        ExchangeClient::from_descriptor(&desc)
+    }
+}
+
 // Backward-compatible re-export shim (allows `use crate::market::OrderBook` etc.)
 mod orderbook;
 

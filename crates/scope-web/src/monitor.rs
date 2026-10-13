@@ -103,7 +103,10 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, params: Moni
 
         // Optionally fetch exchange snapshot in parallel
         let exchange_snapshot = if let (Some(ec), Some(pair)) = (&exchange_client, &exchange_pair) {
-            Some(ec.fetch_market_snapshot(pair).await)
+            Some(
+                ec.fetch_market_snapshot(pair, scope::market::exchange::DEFAULT_SNAPSHOT_TRADES)
+                    .await,
+            )
         } else {
             None
         };

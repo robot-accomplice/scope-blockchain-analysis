@@ -9,6 +9,9 @@ use crate::market::orderbook::{
     TradeHistoryClient,
 };
 
+/// Recent trades in a market snapshot when the caller names no limit.
+pub const DEFAULT_SNAPSHOT_TRADES: u32 = 50;
+
 /// Unified exchange client that wraps per-capability trait objects.
 ///
 /// Created by [`super::VenueRegistry::create_exchange_client`]. Provides
@@ -153,11 +156,12 @@ impl ExchangeClient {
     // Combined fetch
     // =========================================================================
 
-    /// Fetch all available market data for a pair in one call.
+    /// Fetch all available market data for a pair in one call, with up to
+    /// `trades_limit` recent trades.
     ///
     /// Each capability is fetched independently; failures in one capability
     /// do not prevent others from succeeding (they just produce `None`).
-    pub async fn fetch_market_snapshot(&self, pair: &str) -> MarketSnapshot {
+    pub async fn fetch_market_snapshot(&self, pair: &str, trades_limit: u32) -> MarketSnapshot {
         let order_book = if self.has_order_book() {
             self.fetch_order_book(pair).await.ok()
         } else {
@@ -171,7 +175,7 @@ impl ExchangeClient {
         };
 
         let recent_trades = if self.has_trade_history() {
-            self.fetch_recent_trades(pair, 50).await.ok()
+            self.fetch_recent_trades(pair, trades_limit).await.ok()
         } else {
             None
         };
@@ -347,7 +351,9 @@ mod tests {
         let desc = make_empty_descriptor();
         let client = ExchangeClient::from_descriptor(&desc);
 
-        let snapshot = client.fetch_market_snapshot("BTCUSDT").await;
+        let snapshot = client
+            .fetch_market_snapshot("BTCUSDT", DEFAULT_SNAPSHOT_TRADES)
+            .await;
 
         assert!(snapshot.order_book.is_none());
         assert!(snapshot.ticker.is_none());

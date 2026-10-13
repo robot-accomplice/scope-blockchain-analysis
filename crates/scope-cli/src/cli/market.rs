@@ -16,8 +16,8 @@ use super::health_args::HealthArgs;
 use scope::display::terminal as t;
 use scope::error::{Result, ScopeError};
 use scope::market::{
-    DexAnalyticsSource, HealthThresholds, MarketSummary, MarketVenue, OrderBook, Pair, VENUE_HELP,
-    VenueRegistry,
+    DexAnalyticsSource, ExchangeClient, HealthThresholds, MarketSummary, MarketVenue, OrderBook,
+    Pair, VENUE_HELP, VenueRegistry,
 };
 use std::time::Duration;
 
@@ -537,27 +537,18 @@ async fn run_summary(
 /// Execute the `scope market ohlc` command.
 async fn run_ohlc(args: OhlcArgs, out: &Output) -> Result<()> {
     let client = VenueRegistry::load()?.create_exchange_client(&args.venue)?;
+    run_ohlc_with(&client, args, out).await
+}
+
+/// `scope market ohlc` on `client`, the venue that `args.venue` names.
+async fn run_ohlc_with(client: &ExchangeClient, args: OhlcArgs, out: &Output) -> Result<()> {
     let pair = client.venue_symbol(&Pair::parse(&args.pair));
 
     let candles = client.fetch_ohlc(&pair, &args.interval, args.limit).await?;
 
     match args.format {
         OhlcFormat::Json => {
-            let json_candles: Vec<serde_json::Value> = candles
-                .iter()
-                .map(|c| {
-                    serde_json::json!({
-                        "open_time": c.open_time,
-                        "open": c.open,
-                        "high": c.high,
-                        "low": c.low,
-                        "close": c.close,
-                        "volume": c.volume,
-                        "close_time": c.close_time,
-                    })
-                })
-                .collect();
-            let json_str = serde_json::to_string_pretty(&json_candles)
+            let json_str = serde_json::to_string_pretty(&candles)
                 .map_err(|e| ScopeError::Chain(format!("JSON serialization failed: {e}")))?;
             outln!(out, "{json_str}")?;
         }
@@ -642,25 +633,18 @@ async fn run_ohlc(args: OhlcArgs, out: &Output) -> Result<()> {
 /// Execute the `scope market trades` command.
 async fn run_trades(args: TradesArgs, out: &Output) -> Result<()> {
     let client = VenueRegistry::load()?.create_exchange_client(&args.venue)?;
+    run_trades_with(&client, args, out).await
+}
+
+/// `scope market trades` on `client`, the venue that `args.venue` names.
+async fn run_trades_with(client: &ExchangeClient, args: TradesArgs, out: &Output) -> Result<()> {
     let pair = client.venue_symbol(&Pair::parse(&args.pair));
 
     let trades = client.fetch_recent_trades(&pair, args.limit).await?;
 
     match args.format {
         OhlcFormat::Json => {
-            let json_trades: Vec<serde_json::Value> = trades
-                .iter()
-                .map(|t| {
-                    serde_json::json!({
-                        "price": t.price,
-                        "quantity": t.quantity,
-                        "quote_quantity": t.quote_quantity,
-                        "timestamp_ms": t.timestamp_ms,
-                        "side": format!("{:?}", t.side),
-                    })
-                })
-                .collect();
-            let json_str = serde_json::to_string_pretty(&json_trades)
+            let json_str = serde_json::to_string_pretty(&trades)
                 .map_err(|e| ScopeError::Chain(format!("JSON serialization failed: {e}")))?;
             outln!(out, "{json_str}")?;
         }
@@ -1467,81 +1451,105 @@ capabilities:
         assert!(result.is_err());
     }
 
-    #[tokio::test]
-    async fn test_run_ohlc_text_format_with_real_venue() {
-        // Uses a real venue with a real API call. May succeed or fail depending
-        // on network availability. Exercises venue resolution and client creation.
-        let args = OhlcArgs {
+    /// The binance mapping with a local reply, so the test needs no network (#39).
+    fn binance_at(server: &mockito::ServerGuard) -> ExchangeClient {
+        scope::market::testing::venue_at("binance", &server.url())
+    }
+
+    const KLINES: &str = r#"[[1700000000000,"1.0","1.5","0.5","1.25","1000.5",1700003599999],
+        [1700003600000,"1.25","2.0","1.0","1.75","20.25",1700007199999]]"#;
+    const TRADES: &str = r#"[{"id":1,"price":"1.5","qty":"2.5","quoteQty":"3.75","time":1700000000000,"isBuyerMaker":true},
+        {"id":2,"price":"1.6","qty":"1.0","quoteQty":"1.6","time":1700000001000,"isBuyerMaker":false}]"#;
+
+    fn ohlc_args(format: OhlcFormat) -> OhlcArgs {
+        OhlcArgs {
             pair: "BTC".to_string(),
             venue: "binance".to_string(),
             interval: "1h".to_string(),
-            limit: 3,
-            format: OhlcFormat::Text,
-        };
-        let _result = run_ohlc(args, &quiet()).await;
-        // Don't assert success — depends on network
-    }
-
-    #[tokio::test]
-    async fn test_run_ohlc_json_format_with_real_venue() {
-        let args = OhlcArgs {
-            pair: "ETH".to_string(),
-            venue: "binance".to_string(),
-            interval: "15m".to_string(),
             limit: 2,
-            format: OhlcFormat::Json,
-        };
-        let _result = run_ohlc(args, &quiet()).await;
+            format,
+        }
     }
 
-    #[tokio::test]
-    async fn test_run_trades_text_format_with_real_venue() {
-        let args = TradesArgs {
+    fn trades_args(format: OhlcFormat) -> TradesArgs {
+        TradesArgs {
             pair: "BTC".to_string(),
             venue: "binance".to_string(),
-            limit: 5,
-            format: OhlcFormat::Text,
-        };
-        let _result = run_trades(args, &quiet()).await;
-    }
-
-    #[tokio::test]
-    async fn test_run_trades_json_format_with_real_venue() {
-        let args = TradesArgs {
-            pair: "ETH".to_string(),
-            venue: "binance".to_string(),
-            limit: 3,
-            format: OhlcFormat::Json,
-        };
-        let _result = run_trades(args, &quiet()).await;
-    }
-
-    #[tokio::test]
-    async fn test_run_ohlc_multiple_venues() {
-        // Exercise venue resolution for several built-in venues
-        for venue in &["mexc", "okx", "bybit"] {
-            let args = OhlcArgs {
-                pair: "BTC".to_string(),
-                venue: venue.to_string(),
-                interval: "1h".to_string(),
-                limit: 2,
-                format: OhlcFormat::Json,
-            };
-            let _result = run_ohlc(args, &quiet()).await;
+            limit: 2,
+            format,
         }
     }
 
+    async fn serve(path: &str, body: &str) -> mockito::ServerGuard {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", path)
+            .match_query(mockito::Matcher::UrlEncoded(
+                "symbol".into(),
+                "BTCUSDT".into(),
+            ))
+            .with_body(body)
+            .create_async()
+            .await;
+        server
+    }
+
     #[tokio::test]
-    async fn test_run_trades_multiple_venues() {
-        for venue in &["mexc", "okx", "bybit"] {
-            let args = TradesArgs {
-                pair: "BTC".to_string(),
-                venue: venue.to_string(),
-                limit: 3,
-                format: OhlcFormat::Text,
-            };
-            let _result = run_trades(args, &quiet()).await;
-        }
+    async fn test_ohlc_text_shows_every_candle() {
+        let server = serve("/api/v3/klines", KLINES).await;
+        let (out, cap) = Output::capture();
+        run_ohlc_with(&binance_at(&server), ohlc_args(OhlcFormat::Text), &out)
+            .await
+            .unwrap();
+        let text = crate::cli::ansi::strip(&cap.out());
+        assert!(text.contains("OHLC — BTCUSDT (binance)"), "{text}");
+        assert!(text.contains("1.250000"), "{text}");
+        assert!(text.contains("1000.50"), "{text}");
+        assert!(text.contains("2 candles returned"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn test_ohlc_json_keeps_every_field() {
+        let server = serve("/api/v3/klines", KLINES).await;
+        let (out, cap) = Output::capture();
+        run_ohlc_with(&binance_at(&server), ohlc_args(OhlcFormat::Json), &out)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&cap.out()).unwrap();
+        assert_eq!(v.as_array().unwrap().len(), 2);
+        assert_eq!(v[0]["open_time"], 1_700_000_000_000u64);
+        assert_eq!(v[1]["close"], 1.75);
+        assert_eq!(v[1]["volume"], 20.25);
+    }
+
+    #[tokio::test]
+    async fn test_trades_text_shows_side_price_and_quantity() {
+        let server = serve("/api/v3/trades", TRADES).await;
+        let (out, cap) = Output::capture();
+        run_trades_with(&binance_at(&server), trades_args(OhlcFormat::Text), &out)
+            .await
+            .unwrap();
+        let text = crate::cli::ansi::strip(&cap.out());
+        assert!(text.contains("Recent Trades — BTCUSDT (binance)"), "{text}");
+        // isBuyerMaker true is a sell; false is a buy.
+        assert!(text.contains("SELL") && text.contains("BUY"), "{text}");
+        assert!(text.contains("1.500000") && text.contains("2.50"), "{text}");
+        assert!(text.contains("2 trades returned"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn test_trades_json_keeps_every_field() {
+        let server = serve("/api/v3/trades", TRADES).await;
+        let (out, cap) = Output::capture();
+        run_trades_with(&binance_at(&server), trades_args(OhlcFormat::Json), &out)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&cap.out()).unwrap();
+        assert_eq!(v[0]["side"], "sell");
+        assert_eq!(v[1]["side"], "buy");
+        assert_eq!(v[0]["id"], "1");
+        assert_eq!(v[0]["quote_quantity"], 3.75);
+        assert_eq!(v[1]["timestamp_ms"], 1_700_000_001_000u64);
     }
 
     // ====================================================================

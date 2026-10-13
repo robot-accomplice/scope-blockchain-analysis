@@ -5,8 +5,8 @@
 
 use super::{error_response, status_for};
 use axum::Json;
-use axum::response::IntoResponse;
-use scope::market::{Pair, VenueRegistry};
+use axum::response::{IntoResponse, Response};
+use scope::market::{ExchangeClient, Pair, VenueRegistry};
 use serde::Deserialize;
 
 /// Request body for exchange snapshot.
@@ -22,24 +22,34 @@ pub struct SnapshotRequest {
     pub trades_limit: u32,
 }
 
+/// The client for `venue`. An unknown venue is InvalidInput, which the one
+/// status map makes a 400.
+fn venue_client(venue: &str) -> scope::Result<ExchangeClient> {
+    VenueRegistry::load().and_then(|r| r.create_exchange_client(venue))
+}
+
 fn default_pair() -> String {
     "BTC".to_string()
 }
 
 fn default_trades_limit() -> u32 {
-    50
+    scope::market::exchange::DEFAULT_SNAPSHOT_TRADES
 }
 
 /// POST /api/exchange/snapshot — Full market snapshot.
 pub async fn handle(Json(req): Json<SnapshotRequest>) -> impl IntoResponse {
-    // An unknown venue is 400 (InvalidInput), via the one status map.
-    let exchange = match VenueRegistry::load().and_then(|r| r.create_exchange_client(&req.venue)) {
-        Ok(c) => c,
-        Err(e) => return error_response(status_for(&e), e.to_string()),
-    };
+    match venue_client(&req.venue) {
+        Ok(exchange) => snapshot_response(&exchange, req).await,
+        Err(e) => error_response(status_for(&e), e.to_string()),
+    }
+}
 
+/// The `snapshot` reply from `exchange`.
+async fn snapshot_response(exchange: &ExchangeClient, req: SnapshotRequest) -> Response {
     let pair = exchange.venue_symbol(&Pair::parse(&req.pair));
-    let snapshot = exchange.fetch_market_snapshot(&pair).await;
+    let snapshot = exchange
+        .fetch_market_snapshot(&pair, req.trades_limit)
+        .await;
 
     let order_book_json = snapshot.order_book.as_ref().map(order_book_json);
 
@@ -56,24 +66,7 @@ pub async fn handle(Json(req): Json<SnapshotRequest>) -> impl IntoResponse {
         })
     });
 
-    let trades_json = snapshot.recent_trades.as_ref().map(|trades| {
-        trades
-            .iter()
-            .map(|t| {
-                serde_json::json!({
-                    "price": t.price,
-                    "quantity": t.quantity,
-                    "quote_quantity": t.quote_quantity,
-                    "timestamp_ms": t.timestamp_ms,
-                    "side": match t.side {
-                        scope::market::TradeSide::Buy => "buy",
-                        scope::market::TradeSide::Sell => "sell",
-                    },
-                    "id": t.id,
-                })
-            })
-            .collect::<Vec<_>>()
-    });
+    let trades_json = snapshot.recent_trades.as_ref();
 
     let output = serde_json::json!({
         "venue": req.venue,
@@ -105,38 +98,22 @@ pub struct TradesRequest {
 
 /// POST /api/exchange/trades — Recent trades for a venue/pair.
 pub async fn handle_trades(Json(req): Json<TradesRequest>) -> impl IntoResponse {
-    // An unknown venue is 400 (InvalidInput), via the one status map.
-    let exchange = match VenueRegistry::load().and_then(|r| r.create_exchange_client(&req.venue)) {
-        Ok(c) => c,
-        Err(e) => return error_response(status_for(&e), e.to_string()),
-    };
+    match venue_client(&req.venue) {
+        Ok(exchange) => trades_response(&exchange, req).await,
+        Err(e) => error_response(status_for(&e), e.to_string()),
+    }
+}
 
+/// The `trades` reply from `exchange`.
+async fn trades_response(exchange: &ExchangeClient, req: TradesRequest) -> Response {
     let pair = exchange.venue_symbol(&Pair::parse(&req.pair));
     match exchange.fetch_recent_trades(&pair, req.limit).await {
-        Ok(trades) => {
-            let json_trades: Vec<serde_json::Value> = trades
-                .iter()
-                .map(|t| {
-                    serde_json::json!({
-                        "price": t.price,
-                        "quantity": t.quantity,
-                        "quote_quantity": t.quote_quantity,
-                        "timestamp_ms": t.timestamp_ms,
-                        "side": match t.side {
-                            scope::market::TradeSide::Buy => "buy",
-                            scope::market::TradeSide::Sell => "sell",
-                        },
-                        "id": t.id,
-                    })
-                })
-                .collect();
-            Json(serde_json::json!({
-                "venue": req.venue,
-                "pair": pair,
-                "trades": json_trades,
-            }))
-            .into_response()
-        }
+        Ok(trades) => Json(serde_json::json!({
+            "venue": req.venue,
+            "pair": pair,
+            "trades": trades,
+        }))
+        .into_response(),
         Err(e) => error_response(status_for(&e), e.to_string()),
     }
 }
@@ -171,37 +148,23 @@ fn default_ohlc_limit() -> u32 {
 
 /// POST /api/exchange/ohlc — OHLC candlestick data for a venue/pair.
 pub async fn handle_ohlc(Json(req): Json<OhlcRequest>) -> impl IntoResponse {
-    // An unknown venue is 400 (InvalidInput), via the one status map.
-    let exchange = match VenueRegistry::load().and_then(|r| r.create_exchange_client(&req.venue)) {
-        Ok(c) => c,
-        Err(e) => return error_response(status_for(&e), e.to_string()),
-    };
+    match venue_client(&req.venue) {
+        Ok(exchange) => ohlc_response(&exchange, req).await,
+        Err(e) => error_response(status_for(&e), e.to_string()),
+    }
+}
 
+/// The `ohlc` reply from `exchange`.
+async fn ohlc_response(exchange: &ExchangeClient, req: OhlcRequest) -> Response {
     let pair = exchange.venue_symbol(&Pair::parse(&req.pair));
     match exchange.fetch_ohlc(&pair, &req.interval, req.limit).await {
-        Ok(candles) => {
-            let json_candles: Vec<serde_json::Value> = candles
-                .iter()
-                .map(|c| {
-                    serde_json::json!({
-                        "open_time": c.open_time,
-                        "open": c.open,
-                        "high": c.high,
-                        "low": c.low,
-                        "close": c.close,
-                        "volume": c.volume,
-                        "close_time": c.close_time,
-                    })
-                })
-                .collect();
-            Json(serde_json::json!({
-                "venue": req.venue,
-                "pair": pair,
-                "interval": req.interval,
-                "candles": json_candles,
-            }))
-            .into_response()
-        }
+        Ok(candles) => Json(serde_json::json!({
+            "venue": req.venue,
+            "pair": pair,
+            "interval": req.interval,
+            "candles": candles,
+        }))
+        .into_response(),
         Err(e) => error_response(status_for(&e), e.to_string()),
     }
 }
@@ -374,60 +337,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_valid_venue_graceful_failure() {
-        // Uses a real venue (binance) — VenueRegistry loads built-in descriptors.
-        // The actual API call will likely fail in CI (no network / timeouts),
-        // but the handler catches errors gracefully and still returns 200 with null fields.
-        let req = SnapshotRequest {
-            venue: "binance".to_string(),
-            pair: "BTC".to_string(),
-            trades_limit: 5,
-        };
-        let response = handle(Json(req)).await.into_response();
-        // Should succeed even if exchange API is unreachable
-        let status = response.status();
-        assert!(
-            status == StatusCode::OK || status == StatusCode::INTERNAL_SERVER_ERROR,
-            "Expected 200 or 500, got {}",
-            status
-        );
-
-        if status == StatusCode::OK {
-            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-                .await
-                .unwrap();
-            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-            assert_eq!(json["venue"], "binance");
-            assert!(json["pair"].is_string());
-            // order_book/ticker/trades may be null (API failed) or populated (API succeeded)
-        }
-    }
-
-    #[tokio::test]
-    async fn test_handle_multiple_venues() {
-        // Test with several built-in venues to exercise the handler broadly
-        for venue in &["mexc", "okx", "bybit", "coinbase"] {
-            let req = SnapshotRequest {
-                venue: venue.to_string(),
-                pair: "ETH".to_string(),
-                trades_limit: 5,
-            };
-            let response = handle(Json(req)).await.into_response();
-            let status = response.status();
-            assert!(
-                status == StatusCode::OK || status == StatusCode::INTERNAL_SERVER_ERROR,
-                "Venue {} returned unexpected status {}",
-                venue,
-                status
-            );
-        }
-    }
-
-    // =================================================================
-    // Trades endpoint tests
-    // =================================================================
-
-    #[tokio::test]
     async fn test_handle_trades_unknown_venue() {
         let req = TradesRequest {
             venue: "nonexistent_venue_xyz".to_string(),
@@ -444,27 +353,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_trades_valid_venue() {
-        let req = TradesRequest {
-            venue: "binance".to_string(),
-            pair: "BTC".to_string(),
-            limit: 5,
-        };
-        let response = handle_trades(Json(req)).await.into_response();
-        let status = response.status();
-        // May succeed (200 with trades) or fail gracefully (500 due to network)
-        assert!(
-            status == StatusCode::OK || status == StatusCode::INTERNAL_SERVER_ERROR,
-            "Expected 200 or 500, got {}",
-            status
-        );
-    }
-
-    // =================================================================
-    // OHLC endpoint tests
-    // =================================================================
-
-    #[tokio::test]
     async fn test_handle_ohlc_unknown_venue() {
         let req = OhlcRequest {
             venue: "nonexistent_venue_xyz".to_string(),
@@ -479,23 +367,6 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(json["error"].as_str().unwrap().contains("Unknown venue"));
-    }
-
-    #[tokio::test]
-    async fn test_handle_ohlc_valid_venue() {
-        let req = OhlcRequest {
-            venue: "binance".to_string(),
-            pair: "BTC".to_string(),
-            interval: "1h".to_string(),
-            limit: 5,
-        };
-        let response = handle_ohlc(Json(req)).await.into_response();
-        let status = response.status();
-        assert!(
-            status == StatusCode::OK || status == StatusCode::INTERNAL_SERVER_ERROR,
-            "Expected 200 or 500, got {}",
-            status
-        );
     }
 
     #[test]
@@ -591,5 +462,132 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(json.get("error").is_some());
+    }
+
+    // =================================================================
+    // Replies from a mock venue (#39: no live API in tests)
+    // =================================================================
+
+    async fn body_json(response: Response) -> serde_json::Value {
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    fn symbol_btcusdt() -> mockito::Matcher {
+        mockito::Matcher::UrlEncoded("symbol".into(), "BTCUSDT".into())
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_reply_has_book_ticker_and_the_asked_trades() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/api/v3/depth")
+            .match_query(symbol_btcusdt())
+            .with_body(r#"{"bids":[["0.999","100"]],"asks":[["1.001","200"]]}"#)
+            .create_async()
+            .await;
+        server
+            .mock("GET", "/api/v3/ticker/24hr")
+            .match_query(symbol_btcusdt())
+            .with_body(r#"{"lastPrice":"1.0","highPrice":"1.1","lowPrice":"0.9","volume":"10","quoteVolume":"10","priceChangePercent":"0.5","bidPrice":"0.999","askPrice":"1.001"}"#)
+            .create_async()
+            .await;
+        // The request's trades_limit reaches the venue (it was ignored).
+        let trades = server
+            .mock("GET", "/api/v3/trades")
+            .match_query(mockito::Matcher::AllOf(vec![
+                symbol_btcusdt(),
+                mockito::Matcher::UrlEncoded("limit".into(), "7".into()),
+            ]))
+            .with_body(r#"[{"id":9,"price":"1.0","qty":"3","quoteQty":"3","time":1700000000000,"isBuyerMaker":false}]"#)
+            .create_async()
+            .await;
+        let exchange = scope::market::testing::venue_at("binance", &server.url());
+        let req = SnapshotRequest {
+            venue: "binance".to_string(),
+            pair: "BTC".to_string(),
+            trades_limit: 7,
+        };
+        let json = body_json(snapshot_response(&exchange, req).await).await;
+        trades.assert_async().await;
+        assert_eq!(json["venue"], "binance");
+        assert_eq!(json["pair"], "BTCUSDT");
+        assert!(json["order_book"].is_object(), "{json}");
+        assert_eq!(json["ticker"]["last_price"], 1.0);
+        assert_eq!(json["recent_trades"][0]["side"], "buy");
+        assert_eq!(json["recent_trades"][0]["id"], "9");
+    }
+
+    #[tokio::test]
+    async fn test_trades_reply_lists_the_trades() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/api/v3/trades")
+            .match_query(mockito::Matcher::Any)
+            .with_body(r#"[{"id":1,"price":"1.5","qty":"2","quoteQty":"3","time":1700000000000,"isBuyerMaker":true}]"#)
+            .create_async()
+            .await;
+        let exchange = scope::market::testing::venue_at("binance", &server.url());
+        let req = TradesRequest {
+            venue: "binance".to_string(),
+            pair: "BTC".to_string(),
+            limit: 5,
+        };
+        let response = trades_response(&exchange, req).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert_eq!(json["trades"][0]["side"], "sell");
+        assert_eq!(json["trades"][0]["price"], 1.5);
+        assert_eq!(json["trades"][0]["quote_quantity"], 3.0);
+    }
+
+    #[tokio::test]
+    async fn test_ohlc_reply_lists_the_candles() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/api/v3/klines")
+            .match_query(mockito::Matcher::Any)
+            .with_body(r#"[[1700000000000,"1.0","1.5","0.5","1.25","1000.5",1700003599999]]"#)
+            .create_async()
+            .await;
+        let exchange = scope::market::testing::venue_at("binance", &server.url());
+        let req = OhlcRequest {
+            venue: "binance".to_string(),
+            pair: "BTC".to_string(),
+            interval: "1h".to_string(),
+            limit: 1,
+        };
+        let json = body_json(ohlc_response(&exchange, req).await).await;
+        assert_eq!(json["interval"], "1h");
+        assert_eq!(json["candles"][0]["close"], 1.25);
+        assert_eq!(json["candles"][0]["close_time"], 1_700_003_599_999u64);
+    }
+
+    // A venue failure is the venue's error status, not a 200 with nulls.
+    #[tokio::test]
+    async fn test_trades_reply_reports_a_venue_failure() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/api/v3/trades")
+            .match_query(mockito::Matcher::Any)
+            .with_status(500)
+            .create_async()
+            .await;
+        let exchange = scope::market::testing::venue_at("binance", &server.url());
+        let req = TradesRequest {
+            venue: "binance".to_string(),
+            pair: "BTC".to_string(),
+            limit: 5,
+        };
+        let response = trades_response(&exchange, req).await;
+        assert_ne!(response.status(), StatusCode::OK);
+        assert!(
+            body_json(response).await["error"]
+                .as_str()
+                .unwrap()
+                .contains("binance")
+        );
     }
 }

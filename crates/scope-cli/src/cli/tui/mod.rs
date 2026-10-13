@@ -1008,17 +1008,80 @@ mod tests {
     /// Runs a whole session on `host` with `journal`.
     async fn drive_host(
         journal: Journal,
+        host: TestHost,
+        captured: crate::cli::output::Captured,
+    ) -> Driven {
+        drive_host_on(journal, host, captured, &MockClientFactory::new()).await
+    }
+
+    /// [`drive_host`] with the client factory `clients`.
+    async fn drive_host_on(
+        journal: Journal,
         mut host: TestHost,
         captured: crate::cli::output::Captured,
+        clients: &dyn ChainClientFactory,
     ) -> Driven {
         let mut state = TuiState::new(SessionContext::default(), journal, vocab::Vocab::default());
         welcome(&mut state, true);
-        let factory = MockClientFactory::new();
-        let res = session(&mut host, &mut state, &Config::default(), &factory, |_| {
+        let res = session(&mut host, &mut state, &Config::default(), clients, |_| {
             Ok(())
         })
         .await;
         (res, state, host, captured)
+    }
+
+    /// A DEX source whose every lookup waits forever: a command that uses
+    /// it stays running until it is cancelled, with no network (#39).
+    struct PendingDex;
+
+    #[async_trait::async_trait]
+    impl scope::chains::DexDataSource for PendingDex {
+        async fn get_token_price(&self, _: &str, _: &str) -> Option<f64> {
+            std::future::pending().await
+        }
+        async fn get_native_token_price(&self, _: &str) -> Option<f64> {
+            std::future::pending().await
+        }
+        async fn get_token_data(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> scope::Result<scope::chains::dex::DexTokenData> {
+            std::future::pending().await
+        }
+        async fn search_tokens(
+            &self,
+            _: &str,
+            _: Option<&str>,
+        ) -> scope::Result<Vec<scope::chains::dex::TokenSearchResult>> {
+            std::future::pending().await
+        }
+    }
+
+    /// The mock factory with a [`PendingDex`].
+    struct PendingFactory(MockClientFactory);
+
+    impl ChainClientFactory for PendingFactory {
+        fn create_chain_client(
+            &self,
+            chain: &str,
+        ) -> scope::Result<Box<dyn scope::chains::ChainClient>> {
+            self.0.create_chain_client(chain)
+        }
+        fn create_dex_client(&self) -> Box<dyn scope::chains::DexDataSource> {
+            Box::new(PendingDex)
+        }
+    }
+
+    /// The command the cancel tests start: a repeat run whose first
+    /// lookup never finishes ([`PendingDex`]).
+    const PENDING_REPEAT: &str = "market summary USDC --venue eth --every 30s --duration 1h";
+
+    /// Types `lines`, then delivers `signals`, with the DEX lookups pending.
+    async fn drive_pending(events: Vec<io::Result<Event>>, signals: Vec<Signal>) -> Driven {
+        let (host, captured) = test_host(events, signals);
+        let clients = PendingFactory(MockClientFactory::new());
+        drive_host_on(Journal::default(), host, captured, &clients).await
     }
 
     /// Types `lines`, then delivers `signal`.
@@ -1056,11 +1119,7 @@ mod tests {
         // A repeat command sleeps between runs; SIGTERM must end it at
         // once and say so, not wait for the command.
         let _lock = DIAG_LOCK.lock().await;
-        let (res, state, _, _) = drive_signal_after(
-            &["market summary USDC --venue eth --every 30s --duration 1h"],
-            Signal::Term,
-        )
-        .await;
+        let (res, state, _, _) = drive_pending(script(&[PENDING_REPEAT]), vec![Signal::Term]).await;
         assert_eq!(res.unwrap().code, 143);
         assert!(state.scrollback_text().contains("Cancelled"));
         assert!(state.running.is_none());
@@ -1179,9 +1238,9 @@ mod tests {
         // Review Focus 2: a command running in the pane survives Ctrl-Z,
         // and after `fg` the screen shows its running footer again.
         let _lock = DIAG_LOCK.lock().await;
-        let mut events = script(&["market summary USDC --venue eth --every 30s --duration 1h"]);
+        let mut events = script(&[PENDING_REPEAT]);
         events.push(ctrl_z());
-        let (res, state, host, _) = drive(events).await;
+        let (res, state, host, _) = drive_pending(events, Vec::new()).await;
         assert_eq!(res.unwrap().code, 0);
         assert_eq!(host.stops, 1);
         assert!(state.running.is_some(), "the command still runs");
@@ -1822,11 +1881,8 @@ mod tests {
     async fn test_loop_esc_cancels_a_running_repeat_command() {
         // `--every` sleeps between runs; Esc must stop it, not wait 1 minute.
         let _lock = DIAG_LOCK.lock().await;
-        let (res, state, _, _) = drive(script(&[
-            "market summary USDC --venue eth --every 30s --duration 1h",
-            "<esc>",
-        ]))
-        .await;
+        let (res, state, _, _) =
+            drive_pending(script(&[PENDING_REPEAT, "<esc>"]), Vec::new()).await;
         res.unwrap();
         let text = state.scrollback_text();
         assert!(text.contains("Cancelled after"), "{}", text);

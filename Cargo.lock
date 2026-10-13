@@ -2427,6 +2427,7 @@ dependencies = [
  "clap_complete",
  "futures",
  "libc",
+ "mockito",
  "predicates",
  "scope-bca-cli",
  "scope-bca-core",
