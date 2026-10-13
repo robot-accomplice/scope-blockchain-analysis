@@ -149,13 +149,49 @@ fn is_valid_level(level: &OrderBookLevel) -> bool {
 }
 
 /// Sum of quote value over the first `n` valid levels (book order = best first).
-pub(super) fn top_n_depth(levels: &[OrderBookLevel], n: usize) -> f64 {
+fn top_n_depth(levels: &[OrderBookLevel], n: usize) -> f64 {
     levels
         .iter()
         .filter(|l| is_valid_level(l))
         .take(n)
         .map(OrderBookLevel::value)
         .sum()
+}
+
+/// Quote depth of the top valid levels per side, summed once per book.
+///
+/// The health checks and the repeating-view series both read these values.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct TopDepth {
+    pub bid_top3: f64,
+    pub bid_top10: f64,
+    pub ask_top3: f64,
+    pub ask_top10: f64,
+}
+
+impl TopDepth {
+    fn from_book(book: &OrderBook) -> Self {
+        Self {
+            bid_top3: top_n_depth(&book.bids, TOP3_LEVELS),
+            bid_top10: top_n_depth(&book.bids, TOP10_LEVELS),
+            ask_top3: top_n_depth(&book.asks, TOP3_LEVELS),
+            ask_top10: top_n_depth(&book.asks, TOP10_LEVELS),
+        }
+    }
+}
+
+/// Spread between the best valid bid and the best valid ask, as
+/// `(absolute, percent of that pair's mid)`. `None` for a synthetic AMM book
+/// (its real spread is the pool fee, which is not reported) and when a side
+/// has no valid level.
+fn best_valid_spread(book: &OrderBook) -> Option<(f64, f64)> {
+    if book.source == BookSource::SyntheticAmm {
+        return None;
+    }
+    let bid = book.bids.iter().find(|l| is_valid_level(l))?.price;
+    let ask = book.asks.iter().find(|l| is_valid_level(l))?.price;
+    let mid = (ask + bid) / 2.0;
+    Some((ask - bid, (ask - bid) / mid * 100.0))
 }
 
 /// Quote depth of valid levels within ±`window_pct`% of `mid`, both sides.
@@ -236,8 +272,13 @@ pub struct MarketSummary {
     pub best_ask: Option<f64>,
     /// Mid price.
     pub mid_price: Option<f64>,
-    /// Spread.
+    /// Absolute spread between the best valid bid and ask. `None` for a
+    /// synthetic AMM book or when a side has no valid level.
     pub spread: Option<f64>,
+    /// The same spread in percent of the mid of those two levels.
+    pub spread_pct: Option<f64>,
+    /// Top-3 and top-10 depth per side, as the checks judge them.
+    pub top_depth: TopDepth,
     /// 24h volume in quote (e.g. USDT) if available.
     pub volume_24h: Option<f64>,
     /// Execution estimate for 10k USDT buy (slippage).
@@ -324,19 +365,17 @@ impl MarketSummary {
         let valid_asks = book.asks.iter().filter(|l| is_valid_level(l)).count();
         // A synthetic AMM book has no real level count or spread (#37).
         let amm = book.source == BookSource::SyntheticAmm;
+        let spread = best_valid_spread(book);
+        let top_depth = TopDepth::from_book(book);
 
         // Spread between best valid bid and best valid ask
-        let best_valid_bid = book.bids.iter().find(|l| is_valid_level(l));
-        let best_valid_ask = book.asks.iter().find(|l| is_valid_level(l));
-        match (best_valid_bid, best_valid_ask) {
-            _ if amm => checks.push(HealthCheck::NotApplicable(
+        match (amm, spread) {
+            (true, _) => checks.push(HealthCheck::NotApplicable(
                 "Spread: n/a (synthetic AMM book; the real spread is the pool fee, \
                  which the data source does not report)"
                     .to_string(),
             )),
-            (Some(b), Some(a)) => {
-                let mid = (a.price + b.price) / 2.0;
-                let spread_pct = (a.price - b.price) / mid * 100.0;
+            (false, Some((_, spread_pct))) => {
                 let msg = format!(
                     "Spread: {:.3}% (max {:.1}%)",
                     spread_pct, thresholds.max_spread_pct
@@ -347,7 +386,9 @@ impl MarketSummary {
                     checks.push(HealthCheck::Pass(msg));
                 }
             }
-            _ => checks.push(HealthCheck::Fail("Spread: no valid bid or ask".to_string())),
+            (false, None) => {
+                checks.push(HealthCheck::Fail("Spread: no valid bid or ask".to_string()))
+            }
         }
 
         // Bid levels
@@ -413,12 +454,14 @@ impl MarketSummary {
         }
 
         // Top-N depth per side (valid levels, best first)
-        for (side, levels) in [("Bid", &book.bids), ("Ask", &book.asks)] {
-            for (n, min) in [
-                (TOP3_LEVELS, thresholds.min_top3_depth),
-                (TOP10_LEVELS, thresholds.min_top10_depth),
+        for (side, top3, top10) in [
+            ("Bid", top_depth.bid_top3, top_depth.bid_top10),
+            ("Ask", top_depth.ask_top3, top_depth.ask_top10),
+        ] {
+            for (n, depth, min) in [
+                (TOP3_LEVELS, top3, thresholds.min_top3_depth),
+                (TOP10_LEVELS, top10, thresholds.min_top10_depth),
             ] {
-                let depth = top_n_depth(levels, n);
                 if depth < min {
                     checks.push(HealthCheck::Fail(format!(
                         "{side} top-{n} depth: {depth:.0} USDT < {min:.0} USDT minimum"
@@ -446,7 +489,9 @@ impl MarketSummary {
             best_bid: book.best_bid(),
             best_ask: book.best_ask(),
             mid_price: book.mid_price(),
-            spread: book.spread(),
+            spread: spread.map(|(abs, _)| abs),
+            spread_pct: spread.map(|(_, pct)| pct),
+            top_depth,
             volume_24h,
             execution_10k_buy,
             execution_10k_sell,
@@ -523,12 +568,10 @@ impl MarketSummary {
             ));
             out.push('\n');
         }
-        if let (Some(spread), Some(mid)) = (self.spread, self.mid_price)
-            && mid > 0.0
-        {
+        if let (Some(spread), Some(pct)) = (self.spread, self.spread_pct) {
             out.push_str(&t::kv_row(
                 "Spread",
-                &format!("{:.4}  ({:.3}%)", spread, spread / mid * 100.0),
+                &format!("{:.4}  ({:.3}%)", spread, pct),
             ));
             out.push('\n');
         }

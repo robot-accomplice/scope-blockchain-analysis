@@ -5,10 +5,15 @@
 //! into values in the same order as the table, and [`csv_columns`] gives the
 //! CSV order of the same table.
 //!
+//! Every value is a field the summary computed once for its health checks
+//! (spread, top-N depth, health). This module only reads them, so a charted
+//! value and the check that judged it cannot differ.
+//!
 //! The table has no `timestamp` or `run` entry: the CSV writer adds those
 //! two columns in front. This module has no presentation types.
 
-use super::health::{HealthThresholds, MarketSummary, TOP3_LEVELS, TOP10_LEVELS, top_n_depth};
+use super::health::HealthThresholds;
+use super::health::MarketSummary;
 use super::types::HealthCheck;
 
 /// Identifies one key value of a market summary.
@@ -19,9 +24,9 @@ pub enum MetricId {
     Mid,
     /// `(mid - peg_target) / peg_target * 100`.
     PegDeviationPct,
-    /// Absolute spread (ask - bid), as in the CSV `spread` column.
+    /// Absolute spread of the best valid bid and ask.
     Spread,
-    /// Spread in percent of mid: `spread / mid * 100`, converted once here.
+    /// The same spread in percent of its mid.
     SpreadPct,
     BidDepth,
     AskDepth,
@@ -29,12 +34,14 @@ pub enum MetricId {
     AskTop3,
     BidTop10,
     AskTop10,
-    /// `1.0` when the summary is healthy, else `0.0`.
+    /// `1.0` when [`Sample::healthy`] is true, else `0.0`.
     Healthy,
 }
 
 impl MetricId {
-    /// Every id, in table order.
+    /// Every id, in table order. `describe` matches over each variant, so a
+    /// new variant fails to compile until it has a table entry; the tests
+    /// check that this list holds every variant.
     pub const ALL: [MetricId; 13] = [
         MetricId::BestBid,
         MetricId::BestAsk,
@@ -90,10 +97,16 @@ pub struct Metric {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Sample {
     pub values: Vec<Option<f64>>,
+    /// The one source of health: the `Healthy` metric value is derived from it.
     pub healthy: bool,
     /// Messages of the checks that failed, in check order.
     pub failed_checks: Vec<String>,
 }
+
+/// A CSV column the caller needs is missing from the table it passed.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[error("the metric table has no entry for {0:?}")]
+pub struct MissingMetric(pub MetricId);
 
 /// CSV columns that exist today, in their fixed order. Other columns follow.
 const LEGACY_CSV_ORDER: [MetricId; 7] = [
@@ -108,101 +121,106 @@ const LEGACY_CSV_ORDER: [MetricId; 7] = [
 
 /// The metric table, built from the thresholds in force.
 pub fn summary_metrics(thresholds: &HealthThresholds) -> Vec<Metric> {
+    MetricId::ALL
+        .iter()
+        .map(|id| describe(*id, thresholds))
+        .collect()
+}
+
+fn describe(id: MetricId, t: &HealthThresholds) -> Metric {
     use MetricId::*;
     use Threshold::{Max, Min, Target};
-    let entry = |id, label, unit, threshold, csv_column| Metric {
+    let (label, unit, threshold, csv_column) = match id {
+        BestBid => ("Best bid", Unit::Price, None, "best_bid"),
+        BestAsk => ("Best ask", Unit::Price, None, "best_ask"),
+        Mid => (
+            "Mid price",
+            Unit::Price,
+            Some(Target(t.peg_target)),
+            "mid_price",
+        ),
+        PegDeviationPct => ("Peg deviation %", Unit::Percent, None, "peg_deviation_pct"),
+        Spread => ("Spread", Unit::Price, None, "spread"),
+        SpreadPct => (
+            "Spread %",
+            Unit::Percent,
+            Some(Max(t.max_spread_pct)),
+            "spread_pct",
+        ),
+        BidDepth => (
+            "Bid depth",
+            Unit::Quote,
+            Some(Min(t.min_depth)),
+            "bid_depth",
+        ),
+        AskDepth => (
+            "Ask depth",
+            Unit::Quote,
+            Some(Min(t.min_depth)),
+            "ask_depth",
+        ),
+        BidTop3 => (
+            "Bid top-3 depth",
+            Unit::Quote,
+            Some(Min(t.min_top3_depth)),
+            "bid_top3_depth",
+        ),
+        AskTop3 => (
+            "Ask top-3 depth",
+            Unit::Quote,
+            Some(Min(t.min_top3_depth)),
+            "ask_top3_depth",
+        ),
+        BidTop10 => (
+            "Bid top-10 depth",
+            Unit::Quote,
+            Some(Min(t.min_top10_depth)),
+            "bid_top10_depth",
+        ),
+        AskTop10 => (
+            "Ask top-10 depth",
+            Unit::Quote,
+            Some(Min(t.min_top10_depth)),
+            "ask_top10_depth",
+        ),
+        Healthy => ("Health", Unit::Flag, None, "healthy"),
+    };
+    Metric {
         id,
         label,
         unit,
         threshold,
         csv_column,
-    };
-    vec![
-        entry(BestBid, "Best bid", Unit::Price, None, "best_bid"),
-        entry(BestAsk, "Best ask", Unit::Price, None, "best_ask"),
-        entry(
-            Mid,
-            "Mid price",
-            Unit::Price,
-            Some(Target(thresholds.peg_target)),
-            "mid_price",
-        ),
-        entry(
-            PegDeviationPct,
-            "Peg deviation %",
-            Unit::Percent,
-            None,
-            "peg_deviation_pct",
-        ),
-        entry(Spread, "Spread", Unit::Price, None, "spread"),
-        entry(
-            SpreadPct,
-            "Spread %",
-            Unit::Percent,
-            Some(Max(thresholds.max_spread_pct)),
-            "spread_pct",
-        ),
-        entry(
-            BidDepth,
-            "Bid depth",
-            Unit::Quote,
-            Some(Min(thresholds.min_depth)),
-            "bid_depth",
-        ),
-        entry(
-            AskDepth,
-            "Ask depth",
-            Unit::Quote,
-            Some(Min(thresholds.min_depth)),
-            "ask_depth",
-        ),
-        entry(
-            BidTop3,
-            "Bid top-3 depth",
-            Unit::Quote,
-            Some(Min(thresholds.min_top3_depth)),
-            "bid_top3_depth",
-        ),
-        entry(
-            AskTop3,
-            "Ask top-3 depth",
-            Unit::Quote,
-            Some(Min(thresholds.min_top3_depth)),
-            "ask_top3_depth",
-        ),
-        entry(
-            BidTop10,
-            "Bid top-10 depth",
-            Unit::Quote,
-            Some(Min(thresholds.min_top10_depth)),
-            "bid_top10_depth",
-        ),
-        entry(
-            AskTop10,
-            "Ask top-10 depth",
-            Unit::Quote,
-            Some(Min(thresholds.min_top10_depth)),
-            "ask_top10_depth",
-        ),
-        entry(Healthy, "Health", Unit::Flag, None, "healthy"),
-    ]
+    }
 }
 
 /// The table in CSV column order: today's columns first, then the rest in
 /// table order. The writer adds `timestamp` and `run` before these.
-pub fn csv_columns(metrics: &[Metric]) -> Vec<&Metric> {
-    let legacy = LEGACY_CSV_ORDER
-        .iter()
-        .filter_map(|id| metrics.iter().find(|m| m.id == *id));
-    let rest = metrics.iter().filter(|m| !LEGACY_CSV_ORDER.contains(&m.id));
-    legacy.chain(rest).collect()
+///
+/// Fails when the table lacks one of today's columns, so a writer never
+/// emits a header that silently drops it.
+pub fn csv_columns(metrics: &[Metric]) -> Result<Vec<&Metric>, MissingMetric> {
+    let mut columns = Vec::with_capacity(metrics.len());
+    for id in LEGACY_CSV_ORDER {
+        let metric = metrics
+            .iter()
+            .find(|m| m.id == id)
+            .ok_or(MissingMetric(id))?;
+        columns.push(metric);
+    }
+    columns.extend(metrics.iter().filter(|m| !LEGACY_CSV_ORDER.contains(&m.id)));
+    Ok(columns)
 }
 
 /// Reads one summary into values, in the order of `metrics`.
 pub fn sample(summary: &MarketSummary, metrics: &[Metric]) -> Sample {
+    let healthy = summary.healthy;
     Sample {
-        values: metrics.iter().map(|m| value_of(m.id, summary)).collect(),
-        healthy: summary.healthy,
+        values: metrics
+            .iter()
+            .map(|m| value_of(m.id, summary, healthy))
+            .collect(),
+        healthy,
         failed_checks: summary
             .checks
             .iter()
@@ -214,7 +232,7 @@ pub fn sample(summary: &MarketSummary, metrics: &[Metric]) -> Sample {
     }
 }
 
-fn value_of(id: MetricId, s: &MarketSummary) -> Option<f64> {
+fn value_of(id: MetricId, s: &MarketSummary, healthy: bool) -> Option<f64> {
     match id {
         MetricId::BestBid => s.best_bid,
         MetricId::BestAsk => s.best_ask,
@@ -224,19 +242,14 @@ fn value_of(id: MetricId, s: &MarketSummary) -> Option<f64> {
             .filter(|_| s.peg_target > 0.0)
             .map(|mid| (mid - s.peg_target) / s.peg_target * 100.0),
         MetricId::Spread => s.spread,
-        MetricId::SpreadPct => s
-            .spread
-            .zip(s.mid_price.filter(|mid| *mid > 0.0))
-            .map(|(spread, mid)| spread / mid * 100.0),
+        MetricId::SpreadPct => s.spread_pct,
         MetricId::BidDepth => Some(s.bid_depth),
         MetricId::AskDepth => Some(s.ask_depth),
-        // The summary's levels are the book's levels cut at the peg range,
-        // best first, so the top-N sum equals the one the checks use.
-        MetricId::BidTop3 => Some(top_n_depth(&s.bids, TOP3_LEVELS)),
-        MetricId::AskTop3 => Some(top_n_depth(&s.asks, TOP3_LEVELS)),
-        MetricId::BidTop10 => Some(top_n_depth(&s.bids, TOP10_LEVELS)),
-        MetricId::AskTop10 => Some(top_n_depth(&s.asks, TOP10_LEVELS)),
-        MetricId::Healthy => Some(if s.healthy { 1.0 } else { 0.0 }),
+        MetricId::BidTop3 => Some(s.top_depth.bid_top3),
+        MetricId::AskTop3 => Some(s.top_depth.ask_top3),
+        MetricId::BidTop10 => Some(s.top_depth.bid_top10),
+        MetricId::AskTop10 => Some(s.top_depth.ask_top10),
+        MetricId::Healthy => Some(f64::from(u8::from(healthy))),
     }
 }
 
@@ -265,12 +278,31 @@ mod tests {
         }
     }
 
-    fn healthy_summary() -> MarketSummary {
-        let b = book(
+    fn healthy_book() -> OrderBook {
+        book(
             side(0.9999, -0.0001, &[400.0; 10]),
             side(1.0001, 0.0001, &[400.0; 10]),
-        );
-        MarketSummary::from_order_book(&b, &HealthThresholds::default(), None)
+        )
+    }
+
+    fn summarize(book: &OrderBook) -> MarketSummary {
+        MarketSummary::from_order_book(book, &HealthThresholds::default(), None)
+    }
+
+    fn healthy_summary() -> MarketSummary {
+        summarize(&healthy_book())
+    }
+
+    fn thin_summary() -> MarketSummary {
+        summarize(&book(
+            side(0.9999, -0.0001, &[1.0; 2]),
+            side(1.0001, 0.0001, &[1.0; 2]),
+        ))
+    }
+
+    /// Sum of the first `n` levels, the same way the health module sums them.
+    fn top_sum(levels: &[OrderBookLevel], n: usize) -> f64 {
+        levels.iter().take(n).map(OrderBookLevel::value).sum()
     }
 
     fn metric(metrics: &[Metric], id: MetricId) -> &Metric {
@@ -282,13 +314,34 @@ mod tests {
         sample.values[at]
     }
 
+    /// Exhaustive on purpose: a new `MetricId` fails to compile here until it
+    /// is given the next ordinal, which then fails the test below unless the
+    /// variant is also added to `MetricId::ALL`.
+    fn ordinal(id: MetricId) -> usize {
+        match id {
+            MetricId::BestBid => 0,
+            MetricId::BestAsk => 1,
+            MetricId::Mid => 2,
+            MetricId::PegDeviationPct => 3,
+            MetricId::Spread => 4,
+            MetricId::SpreadPct => 5,
+            MetricId::BidDepth => 6,
+            MetricId::AskDepth => 7,
+            MetricId::BidTop3 => 8,
+            MetricId::AskTop3 => 9,
+            MetricId::BidTop10 => 10,
+            MetricId::AskTop10 => 11,
+            MetricId::Healthy => 12,
+        }
+    }
+
     #[test]
     fn every_metric_id_is_in_the_table_once() {
         let metrics = summary_metrics(&HealthThresholds::default());
-        for id in MetricId::ALL {
-            assert_eq!(metrics.iter().filter(|m| m.id == id).count(), 1, "{id:?}");
-        }
-        assert_eq!(metrics.len(), MetricId::ALL.len());
+        let ordinals: Vec<usize> = metrics.iter().map(|m| ordinal(m.id)).collect();
+        assert_eq!(ordinals, (0..ordinals.len()).collect::<Vec<_>>());
+        let highest = MetricId::ALL.iter().map(|id| ordinal(*id)).max().unwrap();
+        assert_eq!(metrics.len(), highest + 1, "ALL lacks a variant");
     }
 
     #[test]
@@ -341,18 +394,30 @@ mod tests {
             MetricId::PegDeviationPct,
         );
         assert!((dev.unwrap() - 0.2).abs() < 1e-9);
-        // Spread % converts the absolute spread once: spread / mid * 100.
-        let mut wide = s.clone();
-        wide.mid_price = Some(2.0);
-        wide.spread = Some(0.04);
-        let pct = value(&sample(&wide, &metrics), &metrics, MetricId::SpreadPct);
-        assert!((pct.unwrap() - 2.0).abs() < 1e-9);
-        // Top-3 and top-10 depth reuse the health module sums: 3 and 10 levels of ~400.
-        let top3 = value(&one, &metrics, MetricId::BidTop3).unwrap();
-        let top10 = value(&one, &metrics, MetricId::AskTop10).unwrap();
-        assert!((1199.0..1201.0).contains(&top3), "{top3}");
-        assert!((3999.0..4005.0).contains(&top10), "{top10}");
+        // Spread and spread % are the summary's fields: 0.0002 on a mid of 1.0.
+        let spread_pct = value(&one, &metrics, MetricId::SpreadPct).unwrap();
+        assert!((spread_pct - 0.02).abs() < 1e-9, "{spread_pct}");
+        let spread = value(&one, &metrics, MetricId::Spread).unwrap();
+        assert!((spread - 0.0002).abs() < 1e-12, "{spread}");
+        // Top-N depth: the exact sums of the first 3 and 10 levels.
+        let b = healthy_book();
+        assert_eq!(
+            value(&one, &metrics, MetricId::BidTop3),
+            Some(top_sum(&b.bids, 3))
+        );
+        assert_eq!(
+            value(&one, &metrics, MetricId::AskTop10),
+            Some(top_sum(&b.asks, 10))
+        );
         assert_eq!(value(&one, &metrics, MetricId::Healthy), Some(1.0));
+        assert_eq!(
+            value(
+                &sample(&thin_summary(), &metrics),
+                &metrics,
+                MetricId::Healthy
+            ),
+            Some(0.0)
+        );
     }
 
     #[test]
@@ -401,7 +466,11 @@ mod tests {
     #[test]
     fn csv_columns_start_with_todays_header_and_append_the_rest() {
         let metrics = summary_metrics(&HealthThresholds::default());
-        let columns: Vec<&str> = csv_columns(&metrics).iter().map(|m| m.csv_column).collect();
+        let columns: Vec<&str> = csv_columns(&metrics)
+            .unwrap()
+            .iter()
+            .map(|m| m.csv_column)
+            .collect();
         assert_eq!(
             columns[..7],
             [
@@ -419,5 +488,91 @@ mod tests {
         unique.sort_unstable();
         unique.dedup();
         assert_eq!(unique.len(), columns.len(), "csv column names are unique");
+    }
+
+    #[test]
+    fn csv_columns_fail_when_a_legacy_column_is_missing() {
+        let mut metrics = summary_metrics(&HealthThresholds::default());
+        metrics.retain(|m| m.id != MetricId::Spread);
+        assert_eq!(csv_columns(&metrics), Err(MissingMetric(MetricId::Spread)));
+    }
+
+    #[test]
+    fn synthetic_amm_book_has_no_spread_like_its_check() {
+        let mut b = healthy_book();
+        b.source = BookSource::SyntheticAmm;
+        let s = summarize(&b);
+        assert!(matches!(
+            s.checks.iter().find(|c| c.message().starts_with("Spread")),
+            Some(HealthCheck::NotApplicable(_))
+        ));
+        let metrics = summary_metrics(&HealthThresholds::default());
+        let one = sample(&s, &metrics);
+        assert_eq!(value(&one, &metrics, MetricId::Spread), None);
+        assert_eq!(value(&one, &metrics, MetricId::SpreadPct), None);
+        assert!(value(&one, &metrics, MetricId::Mid).is_some());
+    }
+
+    #[test]
+    fn spread_uses_the_best_valid_level_like_its_check() {
+        let mut bids = side(1.0, -0.0001, &[400.0; 10]);
+        bids[0].quantity = 0.0; // invalid top level: the best valid bid is 0.9999
+        let s = summarize(&book(bids, side(1.0001, 0.0001, &[400.0; 10])));
+        let metrics = summary_metrics(&HealthThresholds::default());
+        let one = sample(&s, &metrics);
+        let spread = value(&one, &metrics, MetricId::Spread).unwrap();
+        assert!((spread - 0.0002).abs() < 1e-12, "{spread}");
+        let pct = value(&one, &metrics, MetricId::SpreadPct).unwrap();
+        assert!(
+            s.checks
+                .iter()
+                .any(|c| c.message() == format!("Spread: {pct:.3}% (max 3.0%)"))
+        );
+    }
+
+    #[test]
+    fn top_depth_equals_what_the_check_judged_on_a_book_with_outliers() {
+        // 4 levels near the peg, then 6 outliers far below it.
+        let mut bids = side(0.9999, -0.0001, &[100.0; 4]);
+        bids.extend(side(0.9, -0.01, &[100.0; 6]));
+        let b = book(bids, side(1.0001, 0.0001, &[400.0; 10]));
+        let s = summarize(&b);
+        let metrics = summary_metrics(&HealthThresholds::default());
+        let one = sample(&s, &metrics);
+        let top10 = value(&one, &metrics, MetricId::BidTop10).unwrap();
+        assert_eq!(top10, top_sum(&b.bids, 10));
+        assert_ne!(
+            top10,
+            top_sum(&s.bids, 10),
+            "the peg cut drops the outliers"
+        );
+        let judged = format!("Bid top-10 depth: {top10:.0} USDT");
+        assert!(s.checks.iter().any(|c| c.message().starts_with(&judged)));
+        assert_eq!(
+            value(&one, &metrics, MetricId::BidTop3),
+            Some(top_sum(&b.bids, 3))
+        );
+    }
+
+    #[test]
+    fn zero_mid_and_zero_peg_do_not_divide_by_zero() {
+        let metrics = summary_metrics(&HealthThresholds::default());
+        let mut zero_mid = healthy_summary();
+        zero_mid.mid_price = Some(0.0);
+        let one = sample(&zero_mid, &metrics);
+        assert_eq!(
+            value(&one, &metrics, MetricId::PegDeviationPct),
+            Some(-100.0)
+        );
+        assert!(
+            value(&one, &metrics, MetricId::SpreadPct)
+                .unwrap()
+                .is_finite()
+        );
+
+        let mut zero_peg = healthy_summary();
+        zero_peg.peg_target = 0.0;
+        let one = sample(&zero_peg, &metrics);
+        assert_eq!(value(&one, &metrics, MetricId::PegDeviationPct), None);
     }
 }

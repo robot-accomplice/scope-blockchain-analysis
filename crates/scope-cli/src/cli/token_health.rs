@@ -557,6 +557,8 @@ mod tests {
             best_ask: Some(1.0001),
             mid_price: Some(1.0),
             spread: Some(0.0002),
+            spread_pct: None,
+            top_depth: Default::default(),
             volume_24h: Some(1_000_000.0),
             execution_10k_buy: Some(ExecutionEstimate {
                 notional_usdt: 10_000.0,
