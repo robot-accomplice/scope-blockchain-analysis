@@ -1,0 +1,6 @@
+# The one Rust version for local builds, the pre-push hook and CI (#41).
+# Bump it in a commit on purpose. CI reads the channel through
+# .github/actions/rust.
+[toolchain]
+channel = "1.99.0"
+components = ["clippy", "rustfmt"]

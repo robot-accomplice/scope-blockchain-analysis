@@ -226,8 +226,18 @@ impl ConfigurableExchangeClient {
                 &resp.body,
             ));
         }
-        serde_json::from_str::<Value>(&resp.body)
-            .map_err(|e| venue_error(&self.descriptor.id, format!("JSON parse error: {e}")))
+        let reply = serde_json::from_str::<Value>(&resp.body)
+            .map_err(|e| venue_error(&self.descriptor.id, format!("JSON parse error: {e}")))?;
+        // Some venues report errors with HTTP 200 and an error envelope (#69).
+        if let Some(message) = self
+            .descriptor
+            .error_envelope
+            .as_ref()
+            .and_then(|env| env.error_message(&reply))
+        {
+            return Err(venue_error(&self.descriptor.id, message));
+        }
+        Ok(reply)
     }
 
     // =========================================================================
@@ -955,6 +965,7 @@ mod tests {
                 case: SymbolCase::Upper,
             },
             headers: std::collections::HashMap::new(),
+            error_envelope: None,
             capabilities: CapabilitySet::default(),
         }
     }
@@ -1342,6 +1353,7 @@ mod tests {
                 case: SymbolCase::Upper,
             },
             headers: std::collections::HashMap::new(),
+            error_envelope: None,
             capabilities: CapabilitySet {
                 order_book: Some(EndpointDescriptor {
                     path: "/api/v1/depth".to_string(),
@@ -1556,6 +1568,39 @@ mod tests {
             "expected error message to contain 'API error: HTTP 500', got: {}",
             err_msg
         );
+        mock.assert_async().await;
+    }
+
+    // #69: Bybit answers an unknown symbol with HTTP 200 and an error
+    // envelope. The client must report the venue's message, not a missing key.
+    #[tokio::test]
+    async fn test_fetch_order_book_http_200_error_envelope() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/v1/depth")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_body(r#"{"retCode":10001,"retMsg":"Not supported symbols","result":{}}"#)
+            .create_async()
+            .await;
+
+        let mut desc = make_http_test_descriptor(&server.url());
+        desc.error_envelope = Some(crate::market::descriptor::ErrorEnvelope {
+            code_key: Some("retCode".into()),
+            ok_codes: vec!["0".into()],
+            message_key: "retMsg".into(),
+        });
+        let err = ConfigurableExchangeClient::new(desc)
+            .fetch_order_book("ZZQXUSDT")
+            .await
+            .unwrap_err();
+        match err {
+            ScopeError::Venue { venue, message } => {
+                assert_eq!(venue, "mock_test");
+                assert_eq!(message, "Not supported symbols (code 10001)");
+            }
+            other => panic!("expected a venue error, got {other:?}"),
+        }
         mock.assert_async().await;
     }
 
@@ -1957,6 +2002,7 @@ mod tests {
                 case: SymbolCase::Upper,
             },
             headers: std::collections::HashMap::new(),
+            error_envelope: None,
             capabilities: CapabilitySet {
                 order_book: None,
                 ticker: None,
@@ -2104,6 +2150,7 @@ mod tests {
                 case: SymbolCase::Upper,
             },
             headers: std::collections::HashMap::new(),
+            error_envelope: None,
             capabilities: CapabilitySet {
                 order_book: None,
                 ticker: None,
@@ -2214,6 +2261,7 @@ mod tests {
                 case: SymbolCase::Upper,
             },
             headers: std::collections::HashMap::new(),
+            error_envelope: None,
             capabilities: CapabilitySet {
                 order_book: None,
                 ticker: None,
@@ -2302,6 +2350,7 @@ mod tests {
                 case: SymbolCase::Upper,
             },
             headers: std::collections::HashMap::new(),
+            error_envelope: None,
             capabilities: CapabilitySet {
                 order_book: None,
                 ticker: None,
@@ -2522,6 +2571,7 @@ mod tests {
                 case: SymbolCase::Upper,
             },
             headers: std::collections::HashMap::new(),
+            error_envelope: None,
             capabilities: CapabilitySet {
                 order_book: None,
                 ticker: None,
@@ -2584,6 +2634,7 @@ mod tests {
                 case: SymbolCase::Upper,
             },
             headers: std::collections::HashMap::new(),
+            error_envelope: None,
             capabilities: CapabilitySet {
                 order_book: None,
                 ticker: None,
@@ -2667,6 +2718,7 @@ mod tests {
                 case: SymbolCase::Upper,
             },
             headers: std::collections::HashMap::new(),
+            error_envelope: None,
             capabilities: CapabilitySet {
                 order_book: None,
                 ticker: None,

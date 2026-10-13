@@ -1,6 +1,7 @@
-# cargo-audit configuration
+# cargo-audit configuration, read by the CI Security Audit job and the local
+# pre-push hook, so the two use one ignore list (#40).
 # See: https://github.com/rustsec/rustsec/tree/main/cargo-audit
 
 [advisories]
-# No advisories to ignore at this time
-ignore = []
+# RUSTSEC-2025-0119: number_prefix is unmaintained (a warning). indicatif 0.17 pulls it in; 0.18 does not.
+ignore = ["RUSTSEC-2025-0119"]

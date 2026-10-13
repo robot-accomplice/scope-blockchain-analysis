@@ -223,6 +223,7 @@ mod tests {
                 case: SymbolCase::Upper,
             },
             headers: HashMap::new(),
+            error_envelope: None,
             capabilities: CapabilitySet::default(),
         }
     }

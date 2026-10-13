@@ -181,15 +181,23 @@ pub(crate) fn unknown_venue<S: AsRef<str>>(input: &str, ids: &[S]) -> ScopeError
     ScopeError::InvalidInput(format!("Unknown venue \"{input}\"{hint}"))
 }
 
-/// The id nearest to `input` within a small edit distance, ignoring case.
+/// The id nearest to `input`, ignoring case, within one edit for each
+/// [`SUGGEST_LENGTH_PER_EDIT`] characters of the longer name.
 fn closest<'a>(input: &str, ids: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
     let input_lower = input.to_lowercase();
     ids.into_iter()
         .map(|k| (k, strsim_distance(&input_lower, &k.to_lowercase())))
-        .filter(|(_, dist)| *dist <= 3)
+        // A fixed limit suggested `okx` for `weex` (#69). Scale it to the name.
+        .filter(|(k, dist)| {
+            *dist * SUGGEST_LENGTH_PER_EDIT <= input_lower.chars().count().max(k.len())
+        })
         .min_by_key(|(_, dist)| *dist)
         .map(|(k, _)| k)
 }
+
+/// A suggestion may differ by one edit for each this many characters of the
+/// longer name.
+const SUGGEST_LENGTH_PER_EDIT: usize = 3;
 
 /// Simple Levenshtein distance for typo suggestions.
 fn strsim_distance(a: &str, b: &str) -> usize {
@@ -266,6 +274,9 @@ mod tests {
     fn test_registry_suggest_typo() {
         let registry = VenueRegistry::default();
         assert_eq!(registry.suggest("binace"), Some("binance"));
+        assert_eq!(registry.suggest("gate"), Some("gateio"));
+        // #69: "weex" is 3 edits from "okx", too far for a 4-letter name.
+        assert_eq!(registry.suggest("weex"), None);
         assert_eq!(registry.suggest("krakn"), Some("kraken"));
         assert_eq!(registry.suggest("bybi"), Some("bybit"));
     }

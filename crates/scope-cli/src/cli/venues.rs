@@ -263,6 +263,11 @@ Each file defines one venue with the following structure:
     default_quote: USDT          # Quote currency when user omits it
     case: upper                  # "upper" or "lower" (default: upper)
 
+  error_envelope:                # Optional: errors sent with HTTP 200
+    code_key: retCode            # Status field; omit to test message_key only
+    ok_codes: ["0"]              # Status values that mean success
+    message_key: retMsg          # Error text (a string, or an array like Kraken's)
+
   capabilities:
     order_book:                  # Omit if the venue has no depth API
       method: GET                # GET (default) or POST
@@ -404,6 +409,16 @@ fn print_json_schema(out: &Output) -> std::io::Result<()> {
                     "template": str_prop("Pair template with {base} and {quote} placeholders"),
                     "default_quote": str_prop("Default quote currency (e.g., 'USDT')"),
                     "case": {"type": "string", "enum": ["upper", "lower"], "default": "upper"}
+                }
+            },
+            "error_envelope": {
+                "type": "object",
+                "description": "How the venue reports an error inside an HTTP 200 reply",
+                "required": ["message_key"],
+                "properties": {
+                    "code_key": str_prop("Status field; a missing field means success"),
+                    "ok_codes": {"type": "array", "items": {"type": "string"}, "description": "Status values that mean success, compared as strings"},
+                    "message_key": str_prop("Field with the error message (string or array)")
                 }
             },
             "capabilities": {
