@@ -669,10 +669,7 @@ pub(crate) fn render_price_chart(f: &mut Frame, area: Rect, state: &MonitorState
     f.render_widget(chart, area);
 }
 
-/// Checks if a price indicates a stablecoin (pegged around $1.00).
-pub(crate) fn is_stablecoin_price(price: f64) -> bool {
-    (0.95..=1.05).contains(&price)
-}
+pub(crate) use scope::tokens::is_stablecoin_price;
 
 /// Formats a price in USD with appropriate precision.
 /// Stablecoins get extra precision (6 decimals) to show micro-fluctuations.

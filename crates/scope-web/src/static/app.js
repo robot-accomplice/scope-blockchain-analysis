@@ -763,13 +763,13 @@ function renderMarketSummary(resultEl, data) {
     if (data.execution_10k_buy) {
       var b = data.execution_10k_buy;
       execGrid.appendChild(metricCard('Buy VWAP', formatPrice(b.vwap),
-        { text: b.slippage_bps.toFixed(1) + ' bps slippage', cls: b.slippage_bps > 10 ? 'negative' : 'positive' }
+        { text: b.slippage_bps.toFixed(1) + ' bps slippage', cls: b.slippage_bps > data.slippage_warn_bps ? 'negative' : 'positive' }
       ));
     }
     if (data.execution_10k_sell) {
       var s = data.execution_10k_sell;
       execGrid.appendChild(metricCard('Sell VWAP', formatPrice(s.vwap),
-        { text: s.slippage_bps.toFixed(1) + ' bps slippage', cls: s.slippage_bps > 10 ? 'negative' : 'positive' }
+        { text: s.slippage_bps.toFixed(1) + ' bps slippage', cls: s.slippage_bps > data.slippage_warn_bps ? 'negative' : 'positive' }
       ));
     }
     view.appendChild(execGrid);

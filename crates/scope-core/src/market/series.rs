@@ -381,7 +381,7 @@ mod tests {
         let b = healthy_book();
         assert_eq!(
             value(&one, &metrics, MetricId::BidTop3),
-            Some(top_sum(&b.bids, 3))
+            Some(top_sum(&s.bids, 3))
         );
         assert_eq!(
             value(&one, &metrics, MetricId::AskTop10),
@@ -518,17 +518,15 @@ mod tests {
         let metrics = summary_metrics(&HealthThresholds::default());
         let one = sample(&s, &metrics);
         let top10 = value(&one, &metrics, MetricId::BidTop10).unwrap();
-        assert_eq!(top10, top_sum(&b.bids, 10));
-        assert_ne!(
-            top10,
-            top_sum(&s.bids, 10),
-            "the peg cut drops the outliers"
-        );
+        // Eligible levels only: the outliers are not in top-N depth.
+        assert_eq!(top10, top_sum(&s.bids, 10));
+        assert_ne!(top10, top_sum(&b.bids, 10));
+        assert_eq!(top10, s.bid_depth);
         let judged = format!("Bid top-10 depth: {top10:.0} USDT");
         assert!(s.checks.iter().any(|c| c.message().starts_with(&judged)));
         assert_eq!(
             value(&one, &metrics, MetricId::BidTop3),
-            Some(top_sum(&b.bids, 3))
+            Some(top_sum(&s.bids, 3))
         );
     }
 

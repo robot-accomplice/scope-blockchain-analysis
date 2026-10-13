@@ -48,6 +48,12 @@ pub const TOP10_LEVELS: usize = 10;
 /// Basis points in one percent.
 pub const BPS_PER_PERCENT: f64 = 100.0;
 
+/// The outlier band is `peg_range` times this, around the peg target.
+pub const PEG_OUTLIER_FACTOR: f64 = 5.0;
+
+/// Execution slippage above this many basis points is flagged as high.
+pub const SLIPPAGE_WARN_BPS: f64 = 10.0;
+
 /// Health check thresholds for order book validation.
 ///
 /// Built-in defaults are the `DEFAULT_*` constants in this module. The
@@ -128,6 +134,14 @@ pub struct HealthOverrides {
 }
 
 impl HealthThresholds {
+    /// The peg target and its bands.
+    pub fn peg_bands(&self) -> PegBands {
+        PegBands {
+            target: self.peg_target,
+            range: self.peg_range,
+        }
+    }
+
     /// Returns a copy of `self` with each `Some` field in `o` applied.
     pub fn with_overrides(&self, o: &HealthOverrides) -> Self {
         Self {
@@ -160,14 +174,76 @@ pub struct TopDepth {
 }
 
 impl TopDepth {
-    fn from_book(book: &OrderBook) -> Self {
+    /// Top-N depth over the eligible levels: valid and inside the outlier
+    /// band `[lo, hi]`.
+    fn from_book(book: &OrderBook, lo: f64, hi: f64) -> Self {
+        let bid = |n| book.top_depth(BookSide::Bid, lo.., n);
+        let ask = |n| book.top_depth(BookSide::Ask, ..=hi, n);
         Self {
-            bid_top3: book.top_depth(BookSide::Bid, TOP3_LEVELS),
-            bid_top10: book.top_depth(BookSide::Bid, TOP10_LEVELS),
-            ask_top3: book.top_depth(BookSide::Ask, TOP3_LEVELS),
-            ask_top10: book.top_depth(BookSide::Ask, TOP10_LEVELS),
+            bid_top3: bid(TOP3_LEVELS),
+            bid_top10: bid(TOP10_LEVELS),
+            ask_top3: ask(TOP3_LEVELS),
+            ask_top10: ask(TOP10_LEVELS),
         }
     }
+}
+
+/// Where a price sits relative to the peg.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PegBand {
+    /// Within `peg_range` of the target.
+    OnPeg,
+    /// Within the outlier band (`peg_range` × [`PEG_OUTLIER_FACTOR`]).
+    Slight,
+    /// Outside the outlier band.
+    Off,
+}
+
+/// The peg target and the bands around it, from [`HealthThresholds`]. The
+/// price colors, the peg verdict and the outlier filter all use these.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PegBands {
+    pub target: f64,
+    pub range: f64,
+}
+
+impl PegBands {
+    /// Half-width of the outlier band.
+    pub fn outlier_width(&self) -> f64 {
+        self.range * PEG_OUTLIER_FACTOR
+    }
+
+    /// Lowest and highest price inside the outlier band.
+    pub fn outlier_band(&self) -> (f64, f64) {
+        (
+            self.target - self.outlier_width(),
+            self.target + self.outlier_width(),
+        )
+    }
+
+    pub fn classify(&self, price: f64) -> PegBand {
+        let distance = (price - self.target).abs();
+        if distance < self.range {
+            PegBand::OnPeg
+        } else if distance < self.outlier_width() {
+            PegBand::Slight
+        } else {
+            PegBand::Off
+        }
+    }
+}
+
+/// The verdict on the peg, from the mid price and the market's health.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PegStatus {
+    /// Mid on the peg and every health check passes.
+    OnPeg,
+    /// Mid on the peg, but a health check fails.
+    BookUnhealthy,
+    SlightDeviation,
+    Deviation,
+    /// There is no mid price: a side has no valid level.
+    NoPrice,
 }
 
 /// Quote depth of valid levels within ±`window_pct`% of `mid`, both sides.
@@ -236,6 +312,8 @@ pub struct MarketSummary {
     pub source: BookSource,
     /// Peg target.
     pub peg_target: f64,
+    /// Peg range the summary was built with (see [`PegBands`]).
+    pub peg_range: f64,
     /// Best valid bid (no outlier filtering).
     pub best_bid: Option<f64>,
     /// Best valid ask.
@@ -287,6 +365,39 @@ impl MarketSummary {
             .map(|pct| pct * BPS_PER_PERCENT)
     }
 
+    /// The peg target and bands this summary was built with.
+    pub fn peg_bands(&self) -> PegBands {
+        PegBands {
+            target: self.peg_target,
+            range: self.peg_range,
+        }
+    }
+
+    /// The one peg verdict: market summary and insights both read it. A mid
+    /// on the peg counts as healthy only when every health check passes.
+    pub fn peg_status(&self) -> PegStatus {
+        let Some(mid) = self.mid_price else {
+            return PegStatus::NoPrice;
+        };
+        match self.peg_bands().classify(mid) {
+            PegBand::Off => PegStatus::Deviation,
+            PegBand::Slight => PegStatus::SlightDeviation,
+            PegBand::OnPeg if self.healthy => PegStatus::OnPeg,
+            PegBand::OnPeg => PegStatus::BookUnhealthy,
+        }
+    }
+
+    /// Eligible ask levels: valid and inside the outlier band. The checks,
+    /// the text report and the JSON all show this count.
+    pub fn ask_levels(&self) -> usize {
+        self.asks.len()
+    }
+
+    /// Eligible bid levels. See [`Self::ask_levels`].
+    pub fn bid_levels(&self) -> usize {
+        self.bids.len()
+    }
+
     /// Build summary from order book; the peg is `thresholds.peg_target`.
     /// Optionally includes 24h volume (from venue ticker) and execution estimates for 10k USDT.
     pub fn from_order_book(
@@ -295,26 +406,29 @@ impl MarketSummary {
         volume_24h: Option<f64>,
     ) -> Self {
         let peg_target = thresholds.peg_target;
-        let price_lo = peg_target - thresholds.peg_range * 5.0;
-        let price_hi = peg_target + thresholds.peg_range * 5.0;
+        let (price_lo, price_hi) = thresholds.peg_bands().outlier_band();
 
-        // The peg band cuts outliers on the far side of each book.
+        // The eligible levels: valid, and inside the outlier band. The band
+        // cuts the far side of each book, so a depeg stays visible.
         let ask_band = ..=price_hi;
-        let bid_band = price_lo..;
+
         let asks: Vec<OrderBookLevel> = book
-            .levels_in_band(BookSide::Ask, ask_band)
+            .valid_levels_in_band(BookSide::Ask, ask_band)
             .cloned()
             .collect();
         let bids: Vec<OrderBookLevel> = book
-            .levels_in_band(BookSide::Bid, bid_band.clone())
+            .valid_levels_in_band(BookSide::Bid, price_lo..)
             .cloned()
             .collect();
 
-        let ask_outliers = book.asks.len().saturating_sub(asks.len());
-        let bid_outliers = book.bids.len().saturating_sub(bids.len());
+        let outliers =
+            |side, eligible: usize| book.valid_levels_in_band(side, ..).count() - eligible;
+        let ask_outliers = outliers(BookSide::Ask, asks.len());
+        let bid_outliers = outliers(BookSide::Bid, bids.len());
 
         let ask_depth = book.depth_in_band(BookSide::Ask, ask_band);
-        let bid_depth = book.depth_in_band(BookSide::Bid, bid_band);
+        let bid_depth = book.depth_in_band(BookSide::Bid, price_lo..);
+        let top_depth = TopDepth::from_book(book, price_lo, price_hi);
 
         let mut checks = Vec::new();
 
@@ -343,11 +457,8 @@ impl MarketSummary {
             checks.push(HealthCheck::Pass(format!("Bid/Ask ratio: {:.2}x", ratio)));
         }
 
-        let valid_bids = book.bids.iter().filter(|l| l.is_valid()).count();
-        let valid_asks = book.asks.iter().filter(|l| l.is_valid()).count();
         // A synthetic AMM book has no real level count or spread (#37).
         let amm = book.source == BookSource::SyntheticAmm;
-        let top_depth = TopDepth::from_book(book);
 
         // Spread between best valid bid and best valid ask
         match (amm, book.spread_pct()) {
@@ -378,15 +489,17 @@ impl MarketSummary {
                 "Bid levels: n/a (synthetic AMM book; the step size sets the level count)"
                     .to_string(),
             ));
-        } else if valid_bids < thresholds.min_levels {
+        } else if bids.len() < thresholds.min_levels {
             checks.push(HealthCheck::Fail(format!(
                 "Bid levels: {} < {} minimum",
-                valid_bids, thresholds.min_levels
+                bids.len(),
+                thresholds.min_levels
             )));
         } else {
             checks.push(HealthCheck::Pass(format!(
                 "Bid levels: {} (min {})",
-                valid_bids, thresholds.min_levels
+                bids.len(),
+                thresholds.min_levels
             )));
         }
 
@@ -409,15 +522,17 @@ impl MarketSummary {
                 "Ask levels: n/a (synthetic AMM book; the step size sets the level count)"
                     .to_string(),
             ));
-        } else if valid_asks < thresholds.min_levels {
+        } else if asks.len() < thresholds.min_levels {
             checks.push(HealthCheck::Fail(format!(
                 "Ask levels: {} < {} minimum",
-                valid_asks, thresholds.min_levels
+                asks.len(),
+                thresholds.min_levels
             )));
         } else {
             checks.push(HealthCheck::Pass(format!(
                 "Ask levels: {} (min {})",
-                valid_asks, thresholds.min_levels
+                asks.len(),
+                thresholds.min_levels
             )));
         }
 
@@ -467,6 +582,7 @@ impl MarketSummary {
             pair: book.pair.clone(),
             source: book.source,
             peg_target,
+            peg_range: thresholds.peg_range,
             best_bid: book.best_bid(),
             best_ask: book.best_ask(),
             mid_price: book.mid_price(),
@@ -490,7 +606,7 @@ impl MarketSummary {
     /// A price as text, with its deviation from the peg when there is one.
     fn price_with_peg_deviation(&self, price: f64) -> String {
         use crate::display::terminal as t;
-        let shown = t::format_price_peg(price, self.peg_target);
+        let shown = t::format_price_peg(price, &self.peg_bands());
         match self.peg_deviation_pct(price) {
             Some(pct) => format!("{shown}  ({pct:+.3}%)"),
             None => shown,
@@ -572,14 +688,14 @@ impl MarketSummary {
         let ask_label = if self.ask_outliers > 0 {
             format!(
                 "Ask Side — {} levels, {:.0} USDT (+{} outliers excl.)",
-                self.asks.len(),
+                self.ask_levels(),
                 self.ask_depth,
                 self.ask_outliers
             )
         } else {
             format!(
                 "Ask Side — {} levels, {:.0} USDT",
-                self.asks.len(),
+                self.ask_levels(),
                 self.ask_depth
             )
         };
@@ -591,7 +707,7 @@ impl MarketSummary {
                 level.quantity,
                 base_symbol,
                 level.value(),
-                self.peg_target,
+                &self.peg_bands(),
             ));
             out.push('\n');
         }
@@ -604,14 +720,14 @@ impl MarketSummary {
         let bid_label = if self.bid_outliers > 0 {
             format!(
                 "Bid Side — {} levels, {:.0} USDT (+{} outliers excl.)",
-                self.bids.len(),
+                self.bid_levels(),
                 self.bid_depth,
                 self.bid_outliers
             )
         } else {
             format!(
                 "Bid Side — {} levels, {:.0} USDT",
-                self.bids.len(),
+                self.bid_levels(),
                 self.bid_depth
             )
         };
@@ -623,7 +739,7 @@ impl MarketSummary {
                 level.quantity,
                 base_symbol,
                 level.value(),
-                self.peg_target,
+                &self.peg_bands(),
             ));
             out.push('\n');
         }
@@ -1301,5 +1417,91 @@ mod tests {
         assert!(summary.bid_outliers > 0);
         assert!(out.contains("outliers excl."));
         assert!(out.contains("... +"));
+    }
+
+    // ---- One eligible-levels set ----
+
+    #[test]
+    fn test_top_depth_never_exceeds_in_band_depth_with_far_outliers() {
+        // One level at the peg, then a huge level far below it.
+        let mut bids = side(0.9999, 0.0, &[100.0]);
+        bids.extend(side(0.5, 0.0, &[100_000.0]));
+        let b = OrderBook {
+            bids,
+            ..healthy_book()
+        };
+        let s = summarize(&b);
+        assert_eq!(s.top_depth.bid_top3, s.bid_depth);
+        assert!(s.top_depth.bid_top10 <= s.bid_depth);
+        assert!((s.bid_depth - 99.99).abs() < 1e-9);
+        // The whole-book depth keeps its own name and its own value.
+        assert!((b.total_depth(BookSide::Bid) - 50_099.99).abs() < 1e-9);
+        assert_eq!(s.bid_outliers, 1);
+    }
+
+    #[test]
+    fn test_shown_level_count_equals_the_checked_one() {
+        // 8 valid asks in the band, 3 outliers at 1.01, one invalid ask.
+        let mut asks = side(1.0001, 0.0001, &[400.0; 8]);
+        asks.extend(side(1.01, 0.001, &[400.0; 3]));
+        asks.push(OrderBookLevel {
+            price: 1.0002,
+            quantity: 0.0,
+        });
+        let s = summarize(&OrderBook {
+            asks,
+            ..healthy_book()
+        });
+        assert_eq!(s.ask_levels(), 8);
+        assert_eq!(s.ask_outliers, 3);
+        assert!(failed(&s).contains(&"Ask levels: 8 < 10 minimum".to_string()));
+        assert!(s.format_text(None).contains("Ask Side — 8 levels"));
+    }
+
+    #[test]
+    fn test_a_zero_quantity_level_is_not_a_sell_below_peg() {
+        let mut asks = healthy_book().asks;
+        asks.insert(
+            0,
+            OrderBookLevel {
+                price: 0.9999,
+                quantity: 0.0,
+            },
+        );
+        let s = summarize(&OrderBook {
+            asks,
+            ..healthy_book()
+        });
+        assert!(!failed(&s).iter().any(|m| m.contains("below peg")));
+    }
+
+    // ---- Peg verdict ----
+
+    #[test]
+    fn test_peg_status_follows_the_mid_and_the_health_checks() {
+        let s = summarize(&healthy_book());
+        assert_eq!(s.peg_status(), PegStatus::OnPeg);
+        let mut unhealthy = s.clone();
+        unhealthy.healthy = false;
+        assert_eq!(unhealthy.peg_status(), PegStatus::BookUnhealthy);
+        let mut off = s.clone();
+        off.mid_price = Some(0.9);
+        assert_eq!(off.peg_status(), PegStatus::Deviation);
+        off.mid_price = None;
+        assert_eq!(off.peg_status(), PegStatus::NoPrice);
+    }
+
+    #[test]
+    fn test_peg_bands_come_from_the_thresholds() {
+        let bands = HealthThresholds {
+            peg_target: 0.5,
+            peg_range: 0.002,
+            ..HealthThresholds::default()
+        }
+        .peg_bands();
+        assert_eq!(bands.classify(0.5015), PegBand::OnPeg);
+        assert_eq!(bands.classify(0.505), PegBand::Slight);
+        assert_eq!(bands.classify(0.52), PegBand::Off);
+        assert_eq!(bands.outlier_band(), (0.49, 0.51));
     }
 }

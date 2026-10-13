@@ -42,7 +42,7 @@ pub fn order_book_from_analytics(
 /// levels the top-10 depth check reads.
 fn amm_levels_per_side(step: f64, t: &HealthThresholds) -> usize {
     let band = if t.peg_target > 0.0 {
-        t.peg_range * 5.0 / t.peg_target
+        t.peg_bands().outlier_width() / t.peg_target
     } else {
         0.0
     };

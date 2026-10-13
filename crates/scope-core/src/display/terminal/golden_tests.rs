@@ -50,12 +50,21 @@ fn render_all(tty: bool) -> Vec<(&'static str, String)> {
         ("section_footer", section_footer_styled(tty)),
         ("separator", separator_styled(tty)),
         ("blank_row", blank_row_styled(tty)),
-        ("price_peg_near", format_price_peg_styled(1.0001, 1.0, tty)),
-        ("price_peg_mid", format_price_peg_styled(1.003, 1.0, tty)),
-        ("price_peg_far", format_price_peg_styled(0.95, 1.0, tty)),
+        (
+            "price_peg_near",
+            format_price_peg_styled(1.0001, &usd_peg(), tty),
+        ),
+        (
+            "price_peg_mid",
+            format_price_peg_styled(1.003, &usd_peg(), tty),
+        ),
+        (
+            "price_peg_far",
+            format_price_peg_styled(0.95, &usd_peg(), tty),
+        ),
         (
             "orderbook_level",
-            orderbook_level_styled(1.0001, 500.0, "DAI", 500.05, 1.0, tty),
+            orderbook_level_styled(1.0001, 500.0, "DAI", 500.05, &usd_peg(), tty),
         ),
         ("score_bar_high", score_bar_styled("Score", 85, 100, tty)),
         ("score_bar_mid", score_bar_styled("Score", 55, 100, tty)),

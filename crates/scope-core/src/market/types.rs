@@ -126,24 +126,24 @@ impl OrderBook {
         }
     }
 
-    /// The levels of one side whose price is in `band`, best first. Valid or
-    /// not: the caller decides what to do with an invalid level.
-    pub fn levels_in_band(
+    /// The valid levels of one side whose price is in `band`, best first.
+    /// This is the one eligible-levels set: depth, level counts and the
+    /// peg checks all read it.
+    pub fn valid_levels_in_band(
         &self,
         side: BookSide,
         band: impl RangeBounds<f64>,
     ) -> impl Iterator<Item = &OrderBookLevel> {
         self.levels(side)
             .iter()
-            .filter(move |l| band.contains(&l.price))
+            .filter(move |l| l.is_valid() && band.contains(&l.price))
     }
 
-    /// Quote depth (sum of price × quantity) of the valid levels of one side
-    /// whose price is in `band`. This is the one depth sum; every other
-    /// depth is a call to it with a band.
+    /// Quote depth (sum of price × quantity) of the eligible levels of one
+    /// side in `band`. This is the one depth sum; every other depth is a call
+    /// to it with a band.
     pub fn depth_in_band(&self, side: BookSide, band: impl RangeBounds<f64>) -> f64 {
-        self.levels_in_band(side, band)
-            .filter(|l| l.is_valid())
+        self.valid_levels_in_band(side, band)
             .map(OrderBookLevel::value)
             .sum()
     }
@@ -153,11 +153,9 @@ impl OrderBook {
         self.depth_in_band(side, ..)
     }
 
-    /// Quote depth of the first `n` valid levels of one side.
-    pub fn top_depth(&self, side: BookSide, n: usize) -> f64 {
-        self.levels(side)
-            .iter()
-            .filter(|l| l.is_valid())
+    /// Quote depth of the first `n` eligible levels of one side in `band`.
+    pub fn top_depth(&self, side: BookSide, band: impl RangeBounds<f64>, n: usize) -> f64 {
+        self.valid_levels_in_band(side, band)
             .take(n)
             .map(OrderBookLevel::value)
             .sum()
@@ -830,7 +828,7 @@ mod tests {
         let whole = book.total_depth(BookSide::Bid);
         assert!((whole - 14.9).abs() < 1e-12);
         assert!((book.total_depth(BookSide::Ask) - 30.1).abs() < 1e-12);
-        assert!((book.top_depth(BookSide::Bid, 1) - 9.9).abs() < 1e-12);
+        assert!((book.top_depth(BookSide::Bid, .., 1) - 9.9).abs() < 1e-12);
     }
 
     #[test]

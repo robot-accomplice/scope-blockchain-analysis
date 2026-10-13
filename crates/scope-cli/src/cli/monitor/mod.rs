@@ -458,7 +458,7 @@ async fn exchange_token_data(
 /// currency, so it counts as USD only when the quote is USD or a USD stable.
 pub(crate) fn ticker_usd_volume(ticker: &scope::market::Ticker) -> Option<f64> {
     let (_, quote) = ticker.pair.split_once('/')?;
-    let usd = quote.eq_ignore_ascii_case("USD") || crate::cli::insights::is_stablecoin(quote);
+    let usd = quote.eq_ignore_ascii_case("USD") || scope::tokens::is_stablecoin_symbol(quote);
     if usd {
         ticker.quote_volume(ticker.last_price)
     } else {

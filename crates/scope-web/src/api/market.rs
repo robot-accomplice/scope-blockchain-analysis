@@ -71,6 +71,7 @@ fn summary_to_json(summary: &MarketSummary) -> serde_json::Value {
         "bid_outliers": summary.bid_outliers,
         "ask_outliers": summary.ask_outliers,
         "healthy": summary.healthy,
+        "slippage_warn_bps": scope::market::health::SLIPPAGE_WARN_BPS,
         "execution_10k_buy": exec_buy,
         "execution_10k_sell": exec_sell,
         "bids": summary.bids.iter().take(20).map(|l| {

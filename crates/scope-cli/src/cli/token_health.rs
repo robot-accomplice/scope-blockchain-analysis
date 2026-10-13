@@ -417,21 +417,21 @@ fn output_token_health_table(
             outln!(
                 out,
                 "{}",
-                t::kv_row("Best Bid", &t::format_price_peg(b, summary.peg_target))
+                t::kv_row("Best Bid", &t::format_price_peg(b, &summary.peg_bands()))
             )?;
         }
         if let Some(a) = summary.best_ask {
             outln!(
                 out,
                 "{}",
-                t::kv_row("Best Ask", &t::format_price_peg(a, summary.peg_target))
+                t::kv_row("Best Ask", &t::format_price_peg(a, &summary.peg_bands()))
             )?;
         }
         if let Some(m) = summary.mid_price {
             outln!(
                 out,
                 "{}",
-                t::kv_row("Mid Price", &t::format_price_peg(m, summary.peg_target))
+                t::kv_row("Mid Price", &t::format_price_peg(m, &summary.peg_bands()))
             )?;
         }
         outln!(
@@ -553,6 +553,7 @@ mod tests {
             pair: "USDC/USDT".to_string(),
             source: scope::market::BookSource::Exchange,
             peg_target: 1.0,
+            peg_range: scope::market::health::DEFAULT_PEG_RANGE,
             best_bid: Some(0.9999),
             best_ask: Some(1.0001),
             mid_price: Some(1.0),

@@ -7,6 +7,7 @@
 //! Long text is automatically word-wrapped to the detected terminal width.
 
 use super::theme::{Painter, Role};
+use crate::market::health::{PegBand, PegBands};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use unicode_width::UnicodeWidthStr;
 
@@ -369,22 +370,29 @@ fn separator_at(tty: bool, cap: Option<usize>) -> String {
     Painter::new(tty).paint(Role::Accent, &format!("├{}", line))
 }
 
-/// Format a price with color for peg deviation.
-/// Green if within 0.1% of target, yellow if within 0.5%, red otherwise.
-pub fn format_price_peg(price: f64, target: f64) -> String {
-    format_price_peg_styled(price, target, color_enabled())
+/// Format a price with color for peg deviation. The bands come from the
+/// health thresholds: green on the peg, yellow inside the outlier band, red
+/// outside it.
+pub fn format_price_peg(price: f64, peg: &PegBands) -> String {
+    format_price_peg_styled(price, peg, color_enabled())
 }
 
-fn format_price_peg_styled(price: f64, target: f64, tty: bool) -> String {
-    let deviation = ((price - target) / target).abs();
-    let role = if deviation < 0.001 {
-        Role::Ok
-    } else if deviation < 0.005 {
-        Role::Warn
-    } else {
-        Role::Err
+fn format_price_peg_styled(price: f64, peg: &PegBands, tty: bool) -> String {
+    let role = match peg.classify(price) {
+        PegBand::OnPeg => Role::Ok,
+        PegBand::Slight => Role::Warn,
+        PegBand::Off => Role::Err,
     };
     Painter::new(tty).paint(role, &format!("{:.4}", price))
+}
+
+/// The USD peg with the default range, for the tests.
+#[cfg(test)]
+fn usd_peg() -> PegBands {
+    PegBands {
+        target: 1.0,
+        range: crate::market::health::DEFAULT_PEG_RANGE,
+    }
 }
 
 /// Empty line with continuation bar.
@@ -397,7 +405,13 @@ fn blank_row_styled(tty: bool) -> String {
 }
 
 /// An order book level row with price coloring relative to peg.
-pub fn orderbook_level(price: f64, quantity: f64, base: &str, value: f64, peg: f64) -> String {
+pub fn orderbook_level(
+    price: f64,
+    quantity: f64,
+    base: &str,
+    value: f64,
+    peg: &PegBands,
+) -> String {
     orderbook_level_styled(price, quantity, base, value, peg, color_enabled())
 }
 
@@ -406,7 +420,7 @@ fn orderbook_level_styled(
     quantity: f64,
     base: &str,
     value: f64,
-    peg: f64,
+    peg: &PegBands,
     tty: bool,
 ) -> String {
     let p = Painter::new(tty);
@@ -775,13 +789,13 @@ mod tests {
 
     #[test]
     fn test_format_price_peg_near() {
-        let s = format_price_peg(1.0001, 1.0);
+        let s = format_price_peg(1.0001, &usd_peg());
         assert!(s.contains("1.0001"));
     }
 
     #[test]
     fn test_format_price_peg_far() {
-        let s = format_price_peg(0.95, 1.0);
+        let s = format_price_peg(0.95, &usd_peg());
         assert!(s.contains("0.9500"));
     }
 
@@ -793,7 +807,7 @@ mod tests {
 
     #[test]
     fn test_orderbook_level() {
-        let row = orderbook_level(1.0001, 500.0, "DAI", 500.05, 1.0);
+        let row = orderbook_level(1.0001, 500.0, "DAI", 500.05, &usd_peg());
         assert!(row.contains("DAI"));
         assert!(row.contains("USDT"));
     }
@@ -810,15 +824,15 @@ mod tests {
     #[test]
     fn test_format_price_peg_moderate_deviation() {
         // 0.2% deviation: price 1.002, target 1.0 -> in non-TTY returns plain price string
-        let s = format_price_peg(1.002, 1.0);
+        let s = format_price_peg(1.002, &usd_peg());
         assert!(s.contains("1.0020"));
     }
 
     #[test]
     fn test_orderbook_level_various_prices() {
-        let row_low = orderbook_level(0.9990, 100.0, "DAI", 99.90, 1.0);
-        let row_mid = orderbook_level(1.0000, 100.0, "DAI", 100.0, 1.0);
-        let row_high = orderbook_level(1.0015, 100.0, "DAI", 100.15, 1.0);
+        let row_low = orderbook_level(0.9990, 100.0, "DAI", 99.90, &usd_peg());
+        let row_mid = orderbook_level(1.0000, 100.0, "DAI", 100.0, &usd_peg());
+        let row_high = orderbook_level(1.0015, 100.0, "DAI", 100.15, &usd_peg());
         assert!(row_low.contains("0.9990"));
         assert!(row_mid.contains("1.0000"));
         assert!(row_high.contains("1.0015"));
@@ -938,19 +952,19 @@ mod tests {
 
     #[test]
     fn test_format_price_peg_tty_near() {
-        let s = format_price_peg_styled(1.0001, 1.0, true);
+        let s = format_price_peg_styled(1.0001, &usd_peg(), true);
         assert!(s.contains("1.0001"));
     }
 
     #[test]
     fn test_format_price_peg_tty_moderate() {
-        let s = format_price_peg_styled(1.003, 1.0, true);
+        let s = format_price_peg_styled(1.003, &usd_peg(), true);
         assert!(s.contains("1.0030"));
     }
 
     #[test]
     fn test_format_price_peg_tty_far() {
-        let s = format_price_peg_styled(0.95, 1.0, true);
+        let s = format_price_peg_styled(0.95, &usd_peg(), true);
         assert!(s.contains("0.9500"));
     }
 
@@ -962,7 +976,7 @@ mod tests {
 
     #[test]
     fn test_orderbook_level_tty() {
-        let row = orderbook_level_styled(1.0001, 500.0, "DAI", 500.05, 1.0, true);
+        let row = orderbook_level_styled(1.0001, 500.0, "DAI", 500.05, &usd_peg(), true);
         assert!(row.contains("DAI"));
         assert!(row.contains("USDT"));
     }
