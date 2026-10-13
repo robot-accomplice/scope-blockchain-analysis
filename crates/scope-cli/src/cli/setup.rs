@@ -634,7 +634,7 @@ fn run_setup_wizard_impl(
         note!(out, "Saving configuration...");
         save_config_to_path(&new_config, config_path)?;
         note!(out);
-        note!(out, "✓ Configuration saved to ~/.config/scope/config.yaml");
+        out.note_saved("Configuration", config_path.display());
     } else {
         note!(out);
         note!(out, "No changes made.");

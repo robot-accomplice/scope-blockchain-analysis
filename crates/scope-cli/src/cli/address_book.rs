@@ -20,7 +20,7 @@
 //! ```
 
 use crate::cli::output::Output;
-use crate::{errln, outln};
+use crate::{note, outln};
 use clap::{Args, Subcommand};
 use scope::chains::{ChainClientFactory, native_symbol};
 use scope::config::{Config, OutputFormat};
@@ -398,7 +398,7 @@ async fn run_summary(
     if let Some(ref report_path) = args.report {
         let md = address_book_summary_to_markdown(&summary);
         std::fs::write(report_path, md)?;
-        outln!(out, "\nReport saved to: {}", report_path.display())?;
+        out.note_saved("Report", report_path.display());
     }
 
     Ok(())
@@ -484,7 +484,7 @@ async fn fetch_address_balance(
     let client = match clients.create_chain_client(chain) {
         Ok(c) => c,
         Err(e) => {
-            errln!(out, "  ⚠ Unsupported chain: {}", chain)?;
+            note!(out, "  ⚠ Unsupported chain: {}", chain);
             tracing::debug!(error = %e, chain = %chain, "Failed to create chain client");
             return Ok(("Error".to_string(), vec![]));
         }
@@ -494,7 +494,7 @@ async fn fetch_address_balance(
     let native_balance = match client.get_balance(address).await {
         Ok(bal) => bal.formatted,
         Err(e) => {
-            errln!(out, "  ⚠ Could not fetch balance for {}", address)?;
+            note!(out, "  ⚠ Could not fetch balance for {}", address);
             tracing::debug!(error = %e, address = %address, "Failed to fetch balance");
             "Error".to_string()
         }
@@ -512,7 +512,7 @@ async fn fetch_address_balance(
             })
             .collect(),
         Err(e) => {
-            errln!(out, "  ⚠ Token balances unavailable")?;
+            note!(out, "  ⚠ Token balances unavailable");
             tracing::debug!(error = %e, "Could not fetch token balances");
             vec![]
         }

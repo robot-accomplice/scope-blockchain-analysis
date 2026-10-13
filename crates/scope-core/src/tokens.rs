@@ -85,16 +85,13 @@ impl TokenAliases {
         if let Some(path) = Self::aliases_path() {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| {
-                    let context = format!("Failed to create token aliases directory: {}", e);
-                    ScopeError::IoError(std::io::Error::new(e.kind(), context))
+                    ScopeError::io_context(e, "Failed to create token aliases directory")
                 })?;
             }
             let contents = serde_yaml::to_string(self)
                 .map_err(|e| ScopeError::Export(format!("Failed to serialize aliases: {}", e)))?;
-            std::fs::write(&path, contents).map_err(|e| {
-                let context = format!("Failed to write token aliases: {}", e);
-                ScopeError::IoError(std::io::Error::new(e.kind(), context))
-            })?;
+            std::fs::write(&path, contents)
+                .map_err(|e| ScopeError::io_context(e, "Failed to write token aliases"))?;
         }
         Ok(())
     }

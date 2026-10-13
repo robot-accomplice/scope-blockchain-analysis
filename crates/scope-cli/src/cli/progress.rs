@@ -135,6 +135,24 @@ impl Spinner {
     }
 }
 
+/// A status that passes: the spinner's message when a spinner draws,
+/// otherwise a note.
+pub(crate) fn status(spinner: Option<&Spinner>, out: &Output, message: &str) {
+    match spinner {
+        Some(sp) => sp.set_message(message.to_string()),
+        None => note!(out, "{}", message),
+    }
+}
+
+/// A status line that stays: above the spinner when one draws, otherwise
+/// a note.
+pub(crate) fn notice(spinner: Option<&Spinner>, out: &Output, message: &str) {
+    match spinner {
+        Some(sp) => sp.println(message),
+        None => note!(out, "{}", message),
+    }
+}
+
 /// A counted progress bar for multi-step operations (X of Y).
 pub struct StepProgress {
     bar: ProgressBar,

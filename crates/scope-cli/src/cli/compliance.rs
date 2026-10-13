@@ -1,7 +1,7 @@
 //! CLI commands for compliance and risk analysis
 
 use crate::cli::output::Output;
-use crate::{errln, note, outln};
+use crate::{note, outln};
 use clap::{Args, Subcommand};
 use scope::compliance::datasource::{BlockchainDataClient, DataSources, analyze_patterns};
 use scope::compliance::risk::RiskEngine;
@@ -153,6 +153,39 @@ pub async fn handle_risk(args: RiskArgs, out: &Output) -> anyhow::Result<()> {
     handle_risk_with_client(args, None, out).await
 }
 
+/// The environment variable that holds the Etherscan API key.
+const ETHERSCAN_KEY_ENV: &str = "ETHERSCAN_API_KEY";
+
+/// `given`, or a client for the key in [`ETHERSCAN_KEY_ENV`] when there is
+/// one.
+fn etherscan_client(given: Option<BlockchainDataClient>) -> Option<BlockchainDataClient> {
+    given.or_else(|| {
+        std::env::var(ETHERSCAN_KEY_ENV)
+            .ok()
+            .map(|key| BlockchainDataClient::new(DataSources::new(key)))
+    })
+}
+
+/// The risk engine, with Etherscan data when there is a client. Tells the
+/// user which (above the spinner when one draws).
+fn risk_engine(
+    client: Option<&BlockchainDataClient>,
+    spinner: Option<&crate::cli::progress::Spinner>,
+    out: &Output,
+) -> RiskEngine {
+    match client {
+        Some(c) => {
+            crate::cli::progress::notice(spinner, out, "Using Etherscan API for enhanced analysis");
+            RiskEngine::with_data_client(c.clone())
+        }
+        None => {
+            let hint = format!("Note: Set {ETHERSCAN_KEY_ENV} for enhanced analysis");
+            crate::cli::progress::notice(spinner, out, &hint);
+            RiskEngine::new()
+        }
+    }
+}
+
 /// Handle risk assessment with an optional pre-built client (for testability).
 pub async fn handle_risk_with_client(
     args: RiskArgs,
@@ -170,23 +203,7 @@ pub async fn handle_risk_with_client(
         out,
     );
 
-    let engine = if let Some(c) = client {
-        sp.set_message("Using Etherscan API for enhanced analysis...");
-        RiskEngine::with_data_client(c)
-    } else {
-        // Try to load API key from environment
-        let etherscan_key = std::env::var("ETHERSCAN_API_KEY").ok();
-
-        if let Some(key) = etherscan_key {
-            let sources = DataSources::new(key);
-            let client = BlockchainDataClient::new(sources);
-            sp.set_message("Using Etherscan API for enhanced analysis...");
-            RiskEngine::with_data_client(client)
-        } else {
-            errln!(out, "Note: Set ETHERSCAN_API_KEY for enhanced analysis")?;
-            RiskEngine::new()
-        }
-    };
+    let engine = risk_engine(etherscan_client(client).as_ref(), Some(&sp), out);
 
     let assessment = engine.assess_address(&args.address, &chain).await?;
     sp.finish("Risk assessment complete.");
@@ -210,7 +227,7 @@ pub async fn handle_risk_with_client(
             _ => format_risk_report(&assessment, OutputFormat::Json, args.detailed),
         };
         std::fs::write(&path, content)?;
-        outln!(out, "\nReport exported to: {}", path)?;
+        out.note_saved("Report", &path);
     }
 
     Ok(())
@@ -227,21 +244,14 @@ pub async fn handle_trace_with_client(
     client: Option<BlockchainDataClient>,
     out: &Output,
 ) -> anyhow::Result<()> {
-    outln!(out, "Tracing transaction {}...", args.tx_hash)?;
-    outln!(out, "Depth: {} hops", args.depth)?;
+    note!(out, "Tracing transaction {}...", args.tx_hash);
+    note!(out, "Depth: {} hops", args.depth);
 
     if args.flag_suspicious {
-        outln!(out, "Flagging suspicious addresses enabled")?;
+        note!(out, "Flagging suspicious addresses enabled");
     }
 
-    let resolved_client = if let Some(c) = client {
-        Some(c)
-    } else {
-        std::env::var("ETHERSCAN_API_KEY").ok().map(|key| {
-            let sources = DataSources::new(key);
-            BlockchainDataClient::new(sources)
-        })
-    };
+    let resolved_client = etherscan_client(client);
 
     if let Some(client) = resolved_client {
         match client.trace_transaction(&args.tx_hash, args.depth).await {
@@ -262,11 +272,11 @@ pub async fn handle_trace_with_client(
                 }
             }
             Err(e) => {
-                errln!(out, "Error tracing transaction: {}", e)?;
+                note!(out, "Error tracing transaction: {}", e);
             }
         }
     } else {
-        outln!(out, "Set ETHERSCAN_API_KEY to enable transaction tracing")?;
+        note!(out, "Set {ETHERSCAN_KEY_ENV} to enable transaction tracing");
     }
 
     Ok(())
@@ -287,14 +297,7 @@ pub async fn handle_analyze_with_client(
     note!(out, "Patterns: {:?}", args.patterns);
     note!(out, "Time range: {}", args.range);
 
-    let resolved_client = if let Some(c) = client {
-        Some(c)
-    } else {
-        std::env::var("ETHERSCAN_API_KEY").ok().map(|key| {
-            let sources = DataSources::new(key);
-            BlockchainDataClient::new(sources)
-        })
-    };
+    let resolved_client = etherscan_client(client);
 
     if let Some(client) = resolved_client {
         // Auto-detect chain
@@ -324,16 +327,16 @@ pub async fn handle_analyze_with_client(
                 outln!(out, "Unusual hour transactions: {}", analysis.unusual_hours)?;
             }
             Err(e) => {
-                errln!(
+                note!(
                     out,
                     "  ⚠ Could not fetch transactions ({})",
                     crate::cli::errors::details_hint(out.is_tui())
-                )?;
+                );
                 tracing::debug!("Error fetching transactions: {}", e);
             }
         }
     } else {
-        outln!(out, "Set ETHERSCAN_API_KEY to enable pattern analysis")?;
+        note!(out, "Set {ETHERSCAN_KEY_ENV} to enable pattern analysis");
     }
 
     Ok(())
@@ -349,29 +352,16 @@ pub async fn handle_compliance_report(
         anyhow::bail!("No addresses to analyze");
     }
 
-    outln!(
+    note!(
         out,
         "Generating {:?} compliance report for {} address(es) ({:?} jurisdiction)...",
         args.report_type,
         addresses.len(),
         args.jurisdiction
-    )?;
+    );
 
-    let client = std::env::var("ETHERSCAN_API_KEY").ok().map(|key| {
-        let sources = DataSources::new(key);
-        BlockchainDataClient::new(sources)
-    });
-
-    let engine = match &client {
-        Some(c) => {
-            note!(out, "Using Etherscan API for enhanced analysis");
-            RiskEngine::with_data_client(c.clone())
-        }
-        None => {
-            note!(out, "Note: Set ETHERSCAN_API_KEY for enhanced analysis");
-            RiskEngine::new()
-        }
-    };
+    let client = etherscan_client(None);
+    let engine = risk_engine(client.as_ref(), None, out);
 
     let mut risk_assessments = Vec::new();
     let mut pattern_results: Vec<(
@@ -403,7 +393,7 @@ pub async fn handle_compliance_report(
     );
 
     std::fs::write(&args.output, &content)?;
-    outln!(out, "\nCompliance report saved to: {}", args.output)?;
+    out.note_saved("Compliance report", &args.output);
 
     Ok(())
 }

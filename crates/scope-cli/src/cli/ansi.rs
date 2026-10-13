@@ -6,8 +6,10 @@
 //!
 //! Recognized, as bytes of UTF-8 text:
 //! - CSI: `ESC [` or U+009B, parameters, one final byte (0x40..=0x7E).
-//! - Strings: OSC (`ESC ]`), DCS (`ESC P`), SOS (`ESC X`), PM (`ESC ^`),
-//!   APC (`ESC _`), up to BEL, ST (`ESC \` or U+009C), or a lone ESC.
+//! - Strings: OSC (`ESC ]`, U+009D), DCS (`ESC P`, U+0090), SOS (`ESC X`,
+//!   U+0098), PM (`ESC ^`, U+009E), APC (`ESC _`, U+009F), up to BEL or
+//!   ST (`ESC \` or U+009C). A lone ESC ends the string and starts the
+//!   next sequence.
 //! - `ESC`, intermediate bytes (0x20..=0x2F), one final character.
 //! - Any other two-character escape: `ESC` and the next character.
 //!
@@ -20,6 +22,9 @@ const C1_LEAD: u8 = 0xc2;
 /// U+009B (CSI) and U+009C (ST), second UTF-8 byte.
 const C1_CSI: u8 = 0x9b;
 const C1_ST: u8 = 0x9c;
+/// The 8-bit string openers, second UTF-8 byte: DCS U+0090, SOS U+0098,
+/// OSC U+009D, PM U+009E, APC U+009F.
+const C1_STRINGS: [u8; 5] = [0x90, 0x98, 0x9d, 0x9e, 0x9f];
 
 /// When an escape sequence starts at `at` in `bytes`, the index just after
 /// it; otherwise `None`. The result is always a UTF-8 character boundary
@@ -27,6 +32,7 @@ const C1_ST: u8 = 0x9c;
 pub(crate) fn escape_end(bytes: &[u8], at: usize) -> Option<usize> {
     match (bytes.get(at)?, bytes.get(at + 1)) {
         (&C1_LEAD, Some(&C1_CSI)) => Some(csi_end(bytes, at + 2)),
+        (&C1_LEAD, Some(b)) if C1_STRINGS.contains(b) => Some(string_end(bytes, at + 2)),
         (&ESC, None) => Some(at + 1),
         (&ESC, Some(b'[')) => Some(csi_end(bytes, at + 2)),
         (&ESC, Some(b']' | b'P' | b'X' | b'^' | b'_')) => Some(string_end(bytes, at + 2)),
@@ -63,8 +69,8 @@ fn csi_end(bytes: &[u8], from: usize) -> usize {
         .map_or(bytes.len(), |i| from + i + 1)
 }
 
-/// After a string body that starts at `from`: past BEL, ST or a lone ESC,
-/// or the end.
+/// After a string body that starts at `from`: past BEL or ST, at a lone
+/// ESC (it starts the next sequence), or the end.
 fn string_end(bytes: &[u8], from: usize) -> usize {
     let mut i = from;
     while i < bytes.len() {
@@ -72,7 +78,7 @@ fn string_end(bytes: &[u8], from: usize) -> usize {
             (BEL, _) => return i + 1,
             (C1_LEAD, Some(&C1_ST)) => return i + 2,
             (ESC, Some(b'\\')) => return i + 2,
-            (ESC, _) => return i + 1,
+            (ESC, _) => return i,
             _ => i += 1,
         }
     }
@@ -160,6 +166,23 @@ mod tests {
         // boundary, so the rest stays valid text.
         assert_eq!(strip("a\x1béb"), "ab");
         assert_eq!(strip("a\x1bMb"), "ab");
+    }
+
+    #[test]
+    fn test_a_lone_esc_ends_a_string_and_starts_the_next_sequence() {
+        // ESC [1m after an unterminated OSC is a color, not text.
+        assert_eq!(strip("\x1b]0;title\x1b[1mA"), "A");
+        assert_eq!(strip("\x1bPdcs\x1b[0mB"), "B");
+    }
+
+    #[test]
+    fn test_strip_removes_8_bit_string_openers() {
+        for opener in ['\u{90}', '\u{98}', '\u{9d}', '\u{9e}', '\u{9f}'] {
+            let text = format!("a{opener}body\u{9c}b");
+            assert_eq!(strip(&text), "ab", "{:?}", opener);
+            let bel = format!("a{opener}body\x07b");
+            assert_eq!(strip(&bel), "ab", "{:?} with BEL", opener);
+        }
     }
 
     #[test]

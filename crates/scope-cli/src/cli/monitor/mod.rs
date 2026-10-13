@@ -346,7 +346,7 @@ pub async fn run(
     if let Some(path) = export_file {
         // Drop restores the terminal before the error reaches the user.
         app.state.start_export_to(&path).map_err(|e| {
-            ScopeError::Export(format!("cannot write --export {}: {}", path.display(), e))
+            ScopeError::io_context(e, format!("cannot write --export {}", path.display()))
         })?;
     }
 
@@ -557,14 +557,8 @@ async fn resolve_token_address(
     // CEX fallback: if DexScreener has no results, try exchange ticker
     if results.is_empty()
         && allow_cex_fallback
-        && let Some(fallback) = try_cex_fallback(input, chain).await
+        && let Some(fallback) = crate::cli::token_pick::cex_fallback(input, chain, None, out).await
     {
-        note!(
-            out,
-            "  Not found on DexScreener; found {} on {} (CEX)",
-            fallback.symbol,
-            fallback.chain
-        );
         results.push(fallback);
     }
 
@@ -578,37 +572,13 @@ async fn resolve_token_address(
     // If only one result, use it directly
     if results.len() == 1 {
         let token = &results[0];
-        crate::cli::token_pick::announce(out, token);
+        crate::cli::token_pick::announce(None, out, token);
         return Ok(token.address.clone());
     }
 
     // Multiple results — prompt user to select
     let selected = select_token_interactive(&results, out)?;
     Ok(selected.address.clone())
-}
-
-/// CEX venue ticker fallback for token resolution.
-///
-/// When DexScreener returns no results, tries to find the token on a
-/// centralized exchange (Binance) as a fallback. Returns a synthetic
-/// `TokenSearchResult` from the ticker data.
-async fn try_cex_fallback(symbol: &str, chain: &str) -> Option<scope::chains::TokenSearchResult> {
-    let registry = scope::market::VenueRegistry::load().ok()?;
-    let descriptor = registry.get("binance")?;
-    let client = scope::market::ExchangeClient::from_descriptor(&descriptor.clone());
-    let pair = client.format_pair(&format!("{}USDT", symbol.to_uppercase()));
-    let ticker = client.fetch_ticker(&pair).await.ok()?;
-    let price = ticker.last_price.unwrap_or(0.0);
-    Some(scope::chains::TokenSearchResult {
-        address: String::new(),
-        symbol: symbol.to_uppercase(),
-        name: symbol.to_uppercase(),
-        chain: chain.to_string(),
-        price_usd: Some(price),
-        volume_24h: ticker.volume_24h.unwrap_or(0.0),
-        liquidity_usd: 0.0,
-        market_cap: None,
-    })
 }
 
 /// Lets the user pick one of `results`.
@@ -625,7 +595,7 @@ fn select_token_impl<'a>(
     reader: &mut impl io::BufRead,
     out: &Output,
 ) -> Result<&'a scope::chains::dex::TokenSearchResult> {
-    crate::cli::token_pick::pick_token(reader, out, results)
+    crate::cli::token_pick::pick_token(reader, None, out, results)
 }
 
 // ============================================================================
@@ -2524,7 +2494,7 @@ mod tests {
         );
 
         let output = cap.err();
-        assert!(output.contains("A Very Long Token..."));
+        assert!(output.contains("A Very Long Token N…"));
     }
 
     #[test]
@@ -5467,7 +5437,7 @@ refresh_seconds: 5
         assert_eq!(selected.symbol, "LONG");
         let output = cap.err();
         // Should have truncated name
-        assert!(output.contains("A Very Long Token..."));
+        assert!(output.contains("A Very Long Token N…"));
         // Should show N/A for price
         assert!(output.contains("N/A"));
     }

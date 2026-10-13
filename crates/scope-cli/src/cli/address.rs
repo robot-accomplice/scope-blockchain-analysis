@@ -18,7 +18,7 @@
 //! ```
 
 use crate::cli::output::Output;
-use crate::{errln, outln};
+use crate::{note, outln};
 use clap::Args;
 use scope::chains::{
     ChainClient, ChainClientFactory, validate_solana_address, validate_tron_address,
@@ -316,7 +316,7 @@ pub async fn run(
             crate::cli::address_report::generate_address_report(&report)
         };
         crate::cli::address_report::save_address_report(&markdown_report, report_path)?;
-        outln!(out, "\nReport saved to: {}", report_path.display())?;
+        out.note_saved("Report", report_path.display());
     }
 
     Ok(())
@@ -356,11 +356,11 @@ pub async fn analyze_address(
                     .collect(),
             ),
             Err(e) => {
-                errln!(
+                note!(
                     out,
                     "  ⚠ Transaction history unavailable ({})",
                     crate::cli::errors::details_hint(out.is_tui())
-                )?;
+                );
                 tracing::debug!("Failed to fetch transactions: {}", e);
                 Some(vec![])
             }
@@ -389,11 +389,11 @@ pub async fn analyze_address(
                     .collect(),
             ),
             Err(e) => {
-                errln!(
+                note!(
                     out,
                     "  ⚠ Token balances unavailable ({})",
                     crate::cli::errors::details_hint(out.is_tui())
-                )?;
+                );
                 tracing::debug!("Failed to fetch token balances: {}", e);
                 Some(vec![])
             }

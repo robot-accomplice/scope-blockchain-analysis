@@ -678,7 +678,7 @@ fn run_validate(args: ValidateArgs, out: &Output) -> Result<()> {
     }
 
     let content = std::fs::read_to_string(path).map_err(|e| {
-        scope::error::ScopeError::Chain(format!("Failed to read {}: {}", path.display(), e))
+        scope::error::ScopeError::io_context(e, format!("Failed to read {}", path.display()))
     })?;
 
     outln!(out, "{}", section_header("Venue Validation"))?;

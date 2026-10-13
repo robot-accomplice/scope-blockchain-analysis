@@ -5,7 +5,7 @@
 use crate::cli::address::{self, AddressArgs, AddressReport};
 use crate::cli::address_report;
 use crate::cli::output::Output;
-use crate::{errln, outln};
+use crate::note;
 use clap::{Args, Subcommand};
 use scope::chains::{ChainClientFactory, infer_chain_from_address};
 use scope::config::Config;
@@ -120,7 +120,7 @@ async fn run_batch(
                 risk_assessments.push(risk);
             }
             Err(e) => {
-                errln!(out, "Warning: Failed to analyze {}: {}", address, e)?;
+                note!(out, "Warning: Failed to analyze {}: {}", address, e);
             }
         }
     }
@@ -128,7 +128,7 @@ async fn run_batch(
     prog.finish("All addresses analyzed.");
     let md = batch_report_to_markdown(&reports, &risk_assessments, args.with_risk);
     std::fs::write(&args.output, &md)?;
-    outln!(out, "Batch report saved to: {}", args.output.display())?;
+    out.note_saved("Batch report", args.output.display());
     Ok(())
 }
 

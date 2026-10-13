@@ -25,7 +25,9 @@
 //! ```
 
 use crate::cli::output::Output;
-use crate::{note, outln};
+use crate::cli::progress::{self, Spinner};
+use crate::cli::token_pick;
+use crate::outln;
 use clap::Args;
 use scope::chains::{
     ChainClientFactory, DexClient, DexDataSource, DexPair, Token, TokenAnalytics, TokenHolder,
@@ -34,7 +36,6 @@ use scope::chains::{
 use scope::config::{Config, OutputFormat};
 use scope::display::{charts, report};
 use scope::error::{Result, ScopeError};
-use scope::market::{ExchangeClient, VenueRegistry};
 use scope::tokens::TokenAliases;
 use std::io::BufRead;
 use std::path::PathBuf;
@@ -187,30 +188,6 @@ struct ResolvedToken {
 /// 2. Saved aliases - looked up from storage
 /// 3. Token names/symbols - searched via DEX API with interactive selection
 ///
-/// Attempts to find a token on a CEX venue when DexScreener has no results.
-///
-/// Tries the default venue (binance) first, checking `{SYMBOL}USDT`.
-/// Returns a synthetic [`TokenSearchResult`] with price/volume from the ticker.
-async fn try_cex_fallback(symbol: &str, chain: &str) -> Option<TokenSearchResult> {
-    let registry = VenueRegistry::load().ok()?;
-    let venue_id = "binance";
-    let descriptor = registry.get(venue_id)?;
-    let client = ExchangeClient::from_descriptor(&descriptor.clone());
-    let pair = client.format_pair(&format!("{}USDT", symbol.to_uppercase()));
-    let ticker = client.fetch_ticker(&pair).await.ok()?;
-    let price = ticker.last_price.unwrap_or(0.0);
-    Some(TokenSearchResult {
-        address: String::new(), // no on-chain address from CEX
-        symbol: symbol.to_uppercase(),
-        name: symbol.to_uppercase(),
-        chain: chain.to_string(),
-        price_usd: Some(price),
-        volume_24h: ticker.volume_24h.unwrap_or(0.0),
-        liquidity_usd: 0.0,
-        market_cap: None,
-    })
-}
-
 /// Uses `dex_client` for search to enable dependency injection and testing.
 ///
 /// When an optional `spinner` is provided, progress messages are routed through
@@ -220,7 +197,7 @@ async fn resolve_token_input(
     args: &CrawlArgs,
     aliases: &mut TokenAliases,
     dex_client: &dyn DexDataSource,
-    spinner: Option<&crate::cli::progress::Spinner>,
+    spinner: Option<&Spinner>,
     out: &Output,
 ) -> Result<ResolvedToken> {
     let input = args.token.trim();
@@ -253,11 +230,7 @@ async fn resolve_token_input(
             "Using saved token: {} ({}) on {}",
             token_info.symbol, token_info.name, token_info.chain
         );
-        if let Some(sp) = spinner {
-            sp.set_message(msg);
-        } else {
-            note!(out, "  {}", msg);
-        }
+        progress::status(spinner, out, &msg);
         return Ok(ResolvedToken {
             address: token_info.address.clone(),
             chain: token_info.chain.clone(),
@@ -266,28 +239,14 @@ async fn resolve_token_input(
     }
 
     // Search for tokens by name/symbol
-    let search_msg = format!("Searching for '{}'...", input);
-    if let Some(sp) = spinner {
-        sp.set_message(search_msg);
-    } else {
-        note!(out, "  {}", search_msg);
-    }
+    progress::status(spinner, out, &format!("Searching for '{}'...", input));
 
     let mut search_results = dex_client.search_tokens(input, chain_filter).await?;
 
     // Fallback: if DexScreener has no results, try CEX venue ticker
     if search_results.is_empty()
-        && let Some(fallback) = try_cex_fallback(input, &args.chain).await
+        && let Some(fallback) = token_pick::cex_fallback(input, &args.chain, spinner, out).await
     {
-        let msg = format!(
-            "Not found on DexScreener; found {} on {} (CEX)",
-            fallback.symbol, fallback.chain
-        );
-        if let Some(sp) = spinner {
-            sp.println(&msg);
-        } else {
-            note!(out, "  {}", msg);
-        }
         search_results.push(fallback);
     }
 
@@ -298,22 +257,7 @@ async fn resolve_token_input(
         )));
     }
 
-    // Display results and let user select
-    // When a spinner is active, suspend it for interactive selection (multi-result)
-    // or route auto-select messages through it (single-result / --yes).
-    let selected = if let Some(sp) = spinner {
-        if search_results.len() == 1 || args.yes {
-            // Auto-select: route "Selected:" through the spinner
-            let sel = &search_results[0];
-            sp.set_message(crate::cli::token_pick::selected_line(sel));
-            sel
-        } else {
-            // Interactive: suspend spinner for the prompt
-            select_token(&search_results, args.yes, out)?
-        }
-    } else {
-        select_token(&search_results, args.yes, out)?
-    };
+    let selected = select_token(&search_results, args.yes, spinner, out)?;
 
     // Offer to save the alias
     if args.save || (!args.yes && prompt_save_alias(out)) {
@@ -325,13 +269,9 @@ async fn resolve_token_input(
         );
         if let Err(e) = aliases.save() {
             tracing::debug!("Failed to save token alias: {}", e);
-        } else if let Some(sp) = spinner {
-            sp.println(&format!(
-                "Saved {} as alias for future use.",
-                selected.symbol
-            ));
         } else {
-            note!(out, "Saved {} as alias for future use.", selected.symbol);
+            let saved = format!("Saved {} as alias for future use.", selected.symbol);
+            progress::notice(spinner, out, &saved);
         }
     }
 
@@ -347,9 +287,16 @@ async fn resolve_token_input(
 fn select_token<'a>(
     results: &'a [TokenSearchResult],
     auto_select: bool,
+    spinner: Option<&Spinner>,
     out: &Output,
 ) -> Result<&'a TokenSearchResult> {
-    select_token_impl(results, auto_select, &mut crate::cli::prompt::stdin(), out)
+    select_token_impl(
+        results,
+        auto_select,
+        &mut crate::cli::prompt::stdin(),
+        spinner,
+        out,
+    )
 }
 
 /// Testable implementation of select_token with injected input.
@@ -357,14 +304,15 @@ fn select_token_impl<'a>(
     results: &'a [TokenSearchResult],
     auto_select: bool,
     reader: &mut impl BufRead,
+    spinner: Option<&Spinner>,
     out: &Output,
 ) -> Result<&'a TokenSearchResult> {
     if results.len() == 1 || auto_select {
         let selected = &results[0];
-        crate::cli::token_pick::announce(out, selected);
+        token_pick::announce(spinner, out, selected);
         return Ok(selected);
     }
-    crate::cli::token_pick::pick_token(reader, out, results)
+    token_pick::pick_token(reader, spinner, out, results)
 }
 
 /// Prompts the user to save the token alias.
@@ -506,7 +454,7 @@ pub async fn run(
     if let Some(ref report_path) = args.report {
         let markdown_report = report::generate_report(&analytics);
         report::save_report(&markdown_report, report_path)?;
-        outln!(out, "\nReport saved to: {}", report_path.display())?;
+        out.note_saved("Report", report_path.display());
     }
 
     Ok(())
@@ -1671,6 +1619,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_json_with_a_report_file_keeps_stdout_pure_json() {
+        // `scope crawl X --format json --report r.md | jq`: the "saved to"
+        // line must not land in the JSON.
+        let dir = tempfile::tempdir().unwrap();
+        let report_path = dir.path().join("r.md");
+        let factory = MockClientFactory::new();
+        let args = CrawlArgs {
+            token: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+            chain: "ethereum".to_string(),
+            period: Period::Hour24,
+            holders_limit: 5,
+            format: OutputFormat::Json,
+            no_charts: true,
+            report: Some(report_path.clone()),
+            yes: true,
+            save: false,
+        };
+        let (out, cap) = crate::cli::output::Output::capture();
+        super::run(args, &Config::default(), &factory, &out)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&cap.out())
+            .unwrap_or_else(|e| panic!("stdout is not JSON ({e}): {}", cap.out()));
+        assert!(json.is_object());
+        assert!(report_path.exists());
+        assert!(cap.err().contains("Report saved to: "), "{}", cap.err());
+    }
+
+    #[tokio::test]
     async fn test_run_crawl_symbol_resolution_via_factory_dex() {
         // Verifies resolve_token_input uses DexDataSource from factory (not DexClient::new)
         let mut factory = MockClientFactory::new();
@@ -2056,7 +2033,7 @@ mod tests {
             liquidity_usd: 500000.0,
             market_cap: Some(1000000.0),
         }];
-        let selected = select_token(&results, true, &quiet()).unwrap();
+        let selected = select_token(&results, true, None, &quiet()).unwrap();
         assert_eq!(selected.symbol, "TKN");
     }
 
@@ -2073,7 +2050,7 @@ mod tests {
             market_cap: None,
         }];
         // Single result auto-selects even without auto_select flag
-        let selected = select_token(&results, false, &quiet()).unwrap();
+        let selected = select_token(&results, false, None, &quiet()).unwrap();
         assert_eq!(selected.symbol, "SINGLE");
     }
 
@@ -2153,7 +2130,7 @@ mod tests {
         let (out, cap) = crate::cli::output::Output::capture();
         let mut reader = std::io::Cursor::new(b"" as &[u8]);
 
-        let selected = select_token_impl(&results, true, &mut reader, &out).unwrap();
+        let selected = select_token_impl(&results, true, &mut reader, None, &out).unwrap();
         assert_eq!(selected.symbol, "USDC");
         assert_eq!(selected.chain, "ethereum");
         let output = cap.err();
@@ -2166,7 +2143,7 @@ mod tests {
         let out = crate::cli::output::Output::capture().0;
         let mut reader = std::io::Cursor::new(b"" as &[u8]);
 
-        let selected = select_token_impl(&results, false, &mut reader, &out).unwrap();
+        let selected = select_token_impl(&results, false, &mut reader, None, &out).unwrap();
         assert_eq!(selected.symbol, "USDC");
     }
 
@@ -2177,7 +2154,7 @@ mod tests {
         let mut reader = std::io::Cursor::new(&input[..]);
         let (out, cap) = crate::cli::output::Output::capture();
 
-        let selected = select_token_impl(&results, false, &mut reader, &out).unwrap();
+        let selected = select_token_impl(&results, false, &mut reader, None, &out).unwrap();
         assert_eq!(selected.chain, "polygon");
         let output = cap.err();
         assert!(output.contains("Found 3 matching tokens"));
@@ -2191,7 +2168,7 @@ mod tests {
         let mut reader = std::io::Cursor::new(&input[..]);
         let (out, cap) = crate::cli::output::Output::capture();
 
-        select_token_impl(&results, false, &mut reader, &out).unwrap();
+        select_token_impl(&results, false, &mut reader, None, &out).unwrap();
         let output = cap.err();
 
         // Table header should include Address column
@@ -2208,7 +2185,7 @@ mod tests {
         let mut reader = std::io::Cursor::new(&input[..]);
         let (out, cap) = crate::cli::output::Output::capture();
 
-        let selected = select_token_impl(&results, false, &mut reader, &out).unwrap();
+        let selected = select_token_impl(&results, false, &mut reader, None, &out).unwrap();
         assert_eq!(selected.chain, "arbitrum");
         // Long name should be truncated in output
         let output = cap.err();
@@ -2222,7 +2199,7 @@ mod tests {
         let mut reader = std::io::Cursor::new(&input[..]);
         let out = crate::cli::output::Output::capture().0;
 
-        let result = select_token_impl(&results, false, &mut reader, &out);
+        let result = select_token_impl(&results, false, &mut reader, None, &out);
         assert!(result.is_err());
         assert!(
             result
@@ -2239,7 +2216,7 @@ mod tests {
         let mut reader = std::io::Cursor::new(&input[..]);
         let out = crate::cli::output::Output::capture().0;
 
-        let result = select_token_impl(&results, false, &mut reader, &out);
+        let result = select_token_impl(&results, false, &mut reader, None, &out);
         assert!(result.is_err());
         assert!(
             result
@@ -2256,7 +2233,7 @@ mod tests {
         let mut reader = std::io::Cursor::new(&input[..]);
         let out = crate::cli::output::Output::capture().0;
 
-        let result = select_token_impl(&results, false, &mut reader, &out);
+        let result = select_token_impl(&results, false, &mut reader, None, &out);
         assert!(result.is_err());
     }
 

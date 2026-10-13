@@ -7,7 +7,7 @@
 
 use crate::cli::crawl::{self, Period};
 use crate::cli::output::Output;
-use crate::{errln, out, outln};
+use crate::{note, out, outln};
 use clap::{Args, Subcommand};
 use scope::chains::ChainClientFactory;
 use scope::config::Config;
@@ -512,7 +512,7 @@ async fn run_summary_once(
 ) -> Result<MarketSummary> {
     if let Some(n) = run_num {
         let ts = chrono::Utc::now().format("%H:%M:%S");
-        errln!(out, "  --- Run #{} at {} ---\n", n, ts)?;
+        note!(out, "  --- Run #{} at {} ---\n", n, ts);
     }
 
     let (book, volume_24h) = fetch_book_and_volume(args, thresholds, factory, out).await?;
@@ -581,7 +581,7 @@ async fn run_summary(
             let venue_label = args.venue.clone();
             let md = market_summary_to_markdown(&summary, &venue_label, &args.pair);
             std::fs::write(report_path, md)?;
-            errln!(out, "\nReport saved to: {}", report_path.display())?;
+            out.note_saved("Report", report_path.display());
         }
         return Ok(());
     }
@@ -608,12 +608,12 @@ async fn run_summary(
     let start = std::time::Instant::now();
     let duration = Duration::from_secs(duration_secs);
 
-    errln!(
+    note!(
         out,
         "Running market summary every {}s for {}s (Ctrl+C to stop early)\n",
         every_secs,
         duration_secs
-    )?;
+    );
     out.update_progress(|p| {
         p.run = 0;
         p.total = Some(repeat_total(duration_secs, every_secs));
@@ -677,12 +677,12 @@ async fn run_summary(
         }
 
         if start.elapsed() >= duration {
-            errln!(
+            note!(
                 out,
                 "\nCompleted {} run(s) over {}s.",
                 run_num,
                 duration_secs
-            )?;
+            );
             break;
         }
 
@@ -699,10 +699,10 @@ async fn run_summary(
         let venue_label = args.venue.clone();
         let md = market_summary_to_markdown(summary, &venue_label, &args.pair);
         std::fs::write(report_path, md)?;
-        errln!(out, "Report saved to: {}", report_path.display())?;
+        out.note_saved("Report", report_path.display());
     }
     if let Some(ref csv_path) = args.csv {
-        errln!(out, "Time-series CSV saved to: {}", csv_path.display())?;
+        out.note_saved("Time-series CSV", csv_path.display());
     }
 
     Ok(())

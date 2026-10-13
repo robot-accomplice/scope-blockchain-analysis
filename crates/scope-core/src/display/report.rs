@@ -1125,12 +1125,8 @@ pub fn report_footer() -> String {
 /// Returns `Ok(())` on success, or an error if the file cannot be written.
 pub fn save_report(report: &str, path: impl AsRef<Path>) -> Result<()> {
     std::fs::write(path.as_ref(), report).map_err(|e| {
-        let context = format!(
-            "Failed to write report to {}: {}",
-            path.as_ref().display(),
-            e
-        );
-        crate::error::ScopeError::IoError(std::io::Error::new(e.kind(), context))
+        let context = format!("Failed to write report to {}", path.as_ref().display());
+        crate::error::ScopeError::io_context(e, context)
     })
 }
 

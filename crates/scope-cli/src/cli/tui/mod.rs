@@ -422,7 +422,11 @@ async fn event_loop<H: Host>(
                 state.render(f);
                 crate::cli::plain::finish_frame(f);
             })
-            .map_err(|e| ScopeError::Other(format!("terminal draw failed: {}", e)))?;
+            // The backend's error type is generic and need not be Send, so
+            // only its text can travel.
+            .map_err(|e| {
+                ScopeError::io_context(io::Error::other(e.to_string()), "terminal draw failed")
+            })?;
         // Command output fits the pane. Set after each draw, so it follows
         // a resize and comes back after the TUI leaves the terminal.
         host.set_width(state.pane_width());
@@ -554,7 +558,7 @@ fn leave<H: Host>(host: &mut H) {
 fn retake<H: Host>(host: &mut H) -> Result<()> {
     host.resume()?;
     host.clear()
-        .map_err(|e| ScopeError::Other(format!("terminal clear failed: {}", e)))
+        .map_err(|e| ScopeError::io_context(e, "terminal clear failed"))
 }
 
 /// Runs one command outside the TUI. It returns to the TUI when the
@@ -576,15 +580,11 @@ async fn run_suspended<H: Host>(
     // A cancel from an earlier command must not stop this one's prompts.
     prompt::CANCEL.store(false, Ordering::SeqCst);
     let mut terminal_errors = Vec::new();
-    let header = crate::errln!(outside.terminal, "\n── scope {} ──", line).and_then(|()| {
-        crate::errln!(
-            outside.terminal,
-            "Running outside the TUI; it returns when the command ends (Ctrl-C cancels)."
-        )
-    });
-    if let Err(e) = header {
-        terminal_errors.push(e.to_string());
-    }
+    crate::note!(outside.terminal, "\n── scope {} ──", line);
+    crate::note!(
+        outside.terminal,
+        "Running outside the TUI; it returns when the command ends (Ctrl-C cancels)."
+    );
     let ended = tokio::select! {
         biased;
         Some(sig) = ending_signal(host.streams().1) => Err(sig),
@@ -1268,7 +1268,7 @@ mod tests {
         let (res, _, host, _) = drive_host(Journal::default(), host, captured).await;
         assert_eq!(
             res.unwrap_err().to_string(),
-            "cannot take the terminal: no tty"
+            "I/O error: cannot take the terminal: no tty"
         );
         assert_eq!(host.resumes, 1);
         assert_eq!(
@@ -1656,8 +1656,8 @@ mod tests {
         assert_eq!(
             text.matches("Terminal I/O error while outside the TUI: tty gone")
                 .count(),
-            2,
-            "the header and the error text: {text}"
+            1,
+            "the error text; the header is a note, and a failed note is dropped: {text}"
         );
         assert_eq!(records(&dir)[0]["outcome"], "error");
     }

@@ -5,28 +5,32 @@
 //! so the same handler can run in both places without printing over the
 //! terminal UI.
 //!
-//! ## Usage
+//! ## The one policy
+//!
+//! | What | Macro | Channel | A failed write |
+//! |---|---|---|---|
+//! | Data (the command's result) | `outln!`, `out!` | out | is the command's error |
+//! | Error reports ([`crate::cli::errors`], a TUI session command's error) | `errln!` | err | is the command's error |
+//! | A prompt's question ([`crate::cli::prompt`]) | `err!` | err | is the prompt's error |
+//! | Everything else: status, notices, warnings, "saved to" | [`note!`](crate::note) | err | is dropped |
+//!
+//! Data goes to `out`, so piped JSON and CSV stay clean. A note ("Fetching
+//! …", "Selected: …", "⚠ … unavailable") is best effort: when it cannot be
+//! written, it must not take the place of the command's own result, and
+//! it does not change the exit code. Library code in `scope` (core) has the
+//! same kind of best-effort line: `scope::diag::notice`.
+//!
+//! A guard test (`tests/one_output_path.rs`) keeps `errln!` and `err!` in
+//! the files above and status words off `outln!`.
 //!
 //! ```rust,ignore
 //! use scope_cli::cli::output::Output;
-//! use scope_cli::{errln, outln};
+//! use scope_cli::{note, outln};
 //!
 //! let out = Output::stdio();
-//! outln!(out, "Balance: {}", 42)?;   // data → stdout
-//! errln!(out, "Warning: partial")?; // diagnostics → stderr
+//! outln!(out, "Balance: {}", 42)?;    // data → stdout
+//! note!(out, "Fetching balances..."); // status → stderr
 //! ```
-//!
-//! Every macro returns `std::io::Result<()>`. Propagate it with `?`, so a
-//! command whose output failed (closed pipe, full disk) does not succeed.
-//!
-//! Data goes to `out`. Warnings, progress and status lines go to `err`, so
-//! piped JSON and CSV stay clean.
-//!
-//! A status line ("Fetching…", "Selected: …", "Saved …") is a note. Write
-//! it with [`note!`](crate::note). Notes are best effort: a failed note
-//! write is dropped, so it never takes the place of the command's own
-//! result. Data and errors use `outln!` and `errln!`, which return the
-//! write error.
 
 use std::fmt;
 use std::io::{self, Write};
@@ -232,9 +236,14 @@ impl Output {
 
     /// Writes a status line to the diagnostic channel. Use
     /// [`note!`](crate::note). A failed write is dropped: see the module
-    /// documentation.
+    /// policy.
     pub fn note(&self, args: fmt::Arguments<'_>) {
         let _ = emit(&self.err, args);
+    }
+
+    /// The one "saved to" line: `<what> saved to: <where>`, as a note.
+    pub fn note_saved(&self, what: &str, path: impl fmt::Display) {
+        crate::note!(self, "\n{what} saved to: {path}");
     }
 }
 
@@ -368,10 +377,10 @@ fn lock<T: ?Sized>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Writes one formatted message to a sink.
-///
-/// A failed write is returned to the caller, never dropped: a command whose
-/// output did not arrive (closed pipe, full disk) must not report success.
+/// Writes one formatted message to a sink and returns the write error.
+/// Data and error reports pass it on, so a command whose output did not
+/// arrive (closed pipe, full disk) does not report success; a note drops
+/// it (see the module policy).
 fn emit(sink: &Mutex<dyn Write + Send>, args: fmt::Arguments<'_>) -> io::Result<()> {
     lock(sink).write_fmt(args)
 }
@@ -454,6 +463,14 @@ pub(crate) mod tests {
         assert_eq!(cap.out(), "");
         let closed = Output::from_writers(Vec::new(), ClosedPipe);
         note!(closed, "dropped");
+    }
+
+    #[test]
+    fn test_note_saved_is_one_line_on_the_diagnostic_channel() {
+        let (o, cap) = Output::capture();
+        o.note_saved("Report", "r.md");
+        assert_eq!(cap.err(), "\nReport saved to: r.md\n");
+        assert_eq!(cap.out(), "");
     }
 
     #[test]

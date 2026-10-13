@@ -53,32 +53,53 @@ enum Lex {
     Line,
 }
 
-/// The code lines of `src`, as `(1-based line number, code)`, up to the
-/// test module (a `#[cfg(test)]` line followed by a `mod` line). Comments
-/// (`//` and `/* */`) are removed. String and character literals stay: a
-/// `//` inside one is not a comment.
-pub fn code_lines(src: &str) -> Vec<(usize, String)> {
+/// True when `line` opens a test module: `mod`, `pub mod` or
+/// `pub(crate) mod` after a `#[cfg(test)]` line.
+fn opens_module(line: &str) -> bool {
+    let line = line.trim_start();
+    ["mod ", "pub mod ", "pub(crate) mod "]
+        .iter()
+        .any(|p| line.starts_with(p))
+}
+
+/// One line of code, twice: `code` keeps string and character literals;
+/// `masked` has their contents blanked (one space per character, the
+/// quotes kept), so a name inside a literal is not code.
+pub struct Line {
+    pub n: usize,
+    pub code: String,
+    pub masked: String,
+}
+
+/// The code lines of `src`, up to the test module (a `#[cfg(test)]` line
+/// followed by a `mod` line). Comments (`//` and `/* */`) are removed. A
+/// `//` inside a string literal is not a comment.
+pub fn lex(src: &str) -> Vec<Line> {
     let lines: Vec<&str> = src.lines().collect();
     let end = lines
         .windows(2)
-        .position(|w| w[0].trim() == "#[cfg(test)]" && w[1].trim_start().starts_with("mod "))
+        .position(|w| w[0].trim() == "#[cfg(test)]" && opens_module(w[1]))
         .unwrap_or(lines.len());
     let chars: Vec<char> = lines[..end].join("\n").chars().collect();
-    let mut out = vec![String::new()];
+    let mut out = vec![(String::new(), String::new())];
     let mut state = Lex::Code;
     let mut i = 0;
     let at = |j: usize| chars.get(j).copied();
     while i < chars.len() {
         let c = chars[i];
         if c == '\n' {
-            out.push(String::new());
+            out.push((String::new(), String::new()));
             if state == Lex::Line {
                 state = Lex::Code;
             }
             i += 1;
             continue;
         }
-        let line = out.last_mut().unwrap();
+        let (code, masked) = out.last_mut().unwrap();
+        let mut both = |text: &[char], hide: bool| {
+            code.extend(text);
+            masked.extend(text.iter().map(|&t| if hide { ' ' } else { t }));
+        };
         let mut take = 1;
         match state {
             Lex::Line => {}
@@ -88,53 +109,70 @@ pub fn code_lines(src: &str) -> Vec<(usize, String)> {
                 ('*', Some('/')) => (state, take) = (Lex::Block(depth - 1), 2),
                 _ => {}
             },
-            Lex::Str => {
-                line.push(c);
-                match c {
-                    '\\' => {
-                        if let Some(n) = at(i + 1).filter(|&n| n != '\n') {
-                            line.push(n);
-                            take = 2;
-                        }
-                    }
-                    '"' => state = Lex::Code,
-                    _ => {}
+            Lex::Str => match (c, at(i + 1)) {
+                ('\\', Some(n)) if n != '\n' => {
+                    both(&[c, n], true);
+                    take = 2;
                 }
-            }
+                ('"', _) => {
+                    both(&[c], false);
+                    state = Lex::Code;
+                }
+                _ => both(&[c], true),
+            },
             Lex::RawStr(hashes) => {
-                line.push(c);
                 if c == '"' && (1..=hashes).all(|k| at(i + k) == Some('#')) {
-                    line.extend(std::iter::repeat_n('#', hashes));
+                    both(&chars[i..=i + hashes], false);
                     (state, take) = (Lex::Code, 1 + hashes);
+                } else {
+                    both(&[c], true);
                 }
             }
             Lex::Code => match (c, at(i + 1)) {
                 ('/', Some('/')) => state = Lex::Line,
                 ('/', Some('*')) => (state, take) = (Lex::Block(1), 2),
                 ('"', _) => {
-                    line.push(c);
+                    both(&[c], false);
                     state = Lex::Str;
                 }
                 ('r', _) if raw_start(&chars, i).is_some() => {
                     let hashes = raw_start(&chars, i).unwrap();
-                    line.push('r');
-                    line.extend(std::iter::repeat_n('#', hashes));
-                    line.push('"');
-                    (state, take) = (Lex::RawStr(hashes), hashes + 2);
+                    take = hashes + 2;
+                    both(&chars[i..i + take], false);
+                    state = Lex::RawStr(hashes);
                 }
                 ('\'', _) => {
                     take = char_literal_len(&chars, i);
-                    line.extend(&chars[i..i + take]);
+                    both(&chars[i..=i], false);
+                    if take > 1 {
+                        both(&chars[i + 1..i + take - 1], true);
+                        both(&chars[i + take - 1..i + take], false);
+                    }
                 }
-                _ => line.push(c),
+                _ => both(&[c], false),
             },
         }
         i += take;
     }
     out.into_iter()
         .enumerate()
-        .map(|(n, l)| (n + 1, l))
+        .map(|(n, (code, masked))| Line {
+            n: n + 1,
+            code,
+            masked,
+        })
         .collect()
+}
+
+/// The code lines of `src` as `(line number, code)`, literals kept.
+pub fn code_lines(src: &str) -> Vec<(usize, String)> {
+    lex(src).into_iter().map(|l| (l.n, l.code)).collect()
+}
+
+/// The code lines of `src` as `(line number, code)`, literal contents
+/// blanked.
+pub fn masked_lines(src: &str) -> Vec<(usize, String)> {
+    lex(src).into_iter().map(|l| (l.n, l.masked)).collect()
 }
 
 /// The number of `#` when a raw string (`r"`, `r#"`, `br"` …) starts at
@@ -154,14 +192,16 @@ fn raw_start(chars: &[char], i: usize) -> Option<usize> {
     (chars.get(i + 1 + hashes) == Some(&'"')).then_some(hashes)
 }
 
-/// The length of the character literal at `i` (`'x'`, `'\n'`,
+/// The length of the character literal at `i` (`'x'`, `'\n'`, `'\''`,
 /// `'\u{1b}'`), or 1 for a lifetime's quote.
 fn char_literal_len(chars: &[char], i: usize) -> usize {
     match chars.get(i + 1) {
-        Some('\\') => chars[i + 2..]
-            .iter()
-            .position(|&c| c == '\'')
-            .map_or(1, |p| p + 3),
+        // An escape: the character after the backslash is part of it, so
+        // the closing quote comes after that.
+        Some('\\') => chars
+            .get(i + 3..)
+            .and_then(|rest| rest.iter().position(|&c| c == '\''))
+            .map_or(1, |p| p + 4),
         Some(_) if chars.get(i + 2) == Some(&'\'') => 3,
         _ => 1,
     }
@@ -243,7 +283,7 @@ pub struct Allowed {
 pub fn audit(sources: &[(String, String)], watched: &[&str], allowed: &[Allowed]) -> Vec<String> {
     let mut found = Vec::new();
     for (file, src) in sources {
-        let code = code_lines(src);
+        let code = masked_lines(src);
         let fns = enclosing_fns(&code);
         for call in watched {
             let mut by_fn: Vec<(Option<String>, Vec<usize>)> = Vec::new();
@@ -284,7 +324,7 @@ pub fn audit(sources: &[(String, String)], watched: &[&str], allowed: &[Allowed]
             found.push(format!("stale entry: {} does not exist", a.file));
             continue;
         };
-        let code = code_lines(src);
+        let code = masked_lines(src);
         if !code
             .iter()
             .any(|(_, l)| fn_name(l).as_deref() == Some(a.func))
@@ -350,6 +390,33 @@ mod tests {
                 r#"line // kept"; s();"#,
             ]
         );
+    }
+
+    #[test]
+    fn masked_lines_blank_literal_contents() {
+        let src = [
+            r#"let s = "fn fake() { println!() }"; real();"#,
+            r"let q = '\''; let b = '\\'; let e = '\u{1b}'; x();",
+            "let lt: &'a str = y();",
+        ]
+        .join("\n");
+        let masked: Vec<String> = masked_lines(&src).into_iter().map(|(_, l)| l).collect();
+        assert_eq!(calls(&masked[0], "println!"), 0, "{:?}", masked[0]);
+        assert!(masked[0].ends_with("\"; real();"), "{:?}", masked[0]);
+        assert_eq!(
+            fn_name(&masked[0]),
+            None,
+            "a fn inside a string is no header"
+        );
+        assert!(masked[1].ends_with("'; x();"), "{:?}", masked[1]);
+        assert_eq!(masked[1].matches('\'').count(), 6, "{:?}", masked[1]);
+        assert_eq!(masked[2], "let lt: &'a str = y();");
+    }
+
+    #[test]
+    fn a_pub_crate_test_module_ends_the_code() {
+        let src = "a();\n#[cfg(test)]\npub(crate) mod tests {\nb();";
+        assert_eq!(code_lines(src).len(), 1);
     }
 
     #[test]

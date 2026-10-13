@@ -7,7 +7,7 @@
 
 use crate::cli::output::Output;
 use crate::cli::{Cli, Commands};
-use crate::{errln, out};
+use crate::{note, out};
 use clap::CommandFactory;
 use clap_complete::generate;
 use scope::Config;
@@ -147,12 +147,11 @@ async fn dispatch_compliance(
 ///
 /// # Errors
 ///
-/// Returns an error when the transport cannot be built, or when the output's
-/// error channel cannot be written.
-pub fn create_http_client(config: &Config, out: &Output) -> std::io::Result<Arc<dyn HttpClient>> {
-    let built = scope::http::init(config).map_err(|e| std::io::Error::other(e.to_string()))?;
+/// Returns the error when the transport cannot be built.
+pub fn create_http_client(config: &Config, out: &Output) -> Result<Arc<dyn HttpClient>> {
+    let built = scope::http::init(config)?;
     for notice in &built.notices {
-        errln!(out, "  {notice}")?;
+        note!(out, "  {notice}");
     }
     Ok(built.client)
 }

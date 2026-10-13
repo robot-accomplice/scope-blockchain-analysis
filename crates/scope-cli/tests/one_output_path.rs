@@ -8,7 +8,7 @@
 
 mod common;
 
-use common::{Allowed, audit, cli_dir, code_lines, rs_sources};
+use common::{Allowed, audit, cli_dir, rs_sources};
 
 /// Calls that write to the process streams past `Output`.
 const DIRECT: &[&str] = &[
@@ -122,14 +122,14 @@ fn scanner_flags_direct_writes_and_spares_comments_and_tests() {
     assert_eq!(
         found,
         vec![
-            "x.rs fn f: println! 2 times, allowed 0 [x.rs:2, x.rs:9]",
+            "x.rs fn f: println! 1 times, allowed 0 [x.rs:2]",
             "x.rs fn f: print! 1 times, allowed 0 [x.rs:3]",
             "x.rs fn f: eprintln! 1 times, allowed 0 [x.rs:4]",
             "x.rs fn f: eprint! 1 times, allowed 0 [x.rs:5]",
             "x.rs fn f: stdout() 1 times, allowed 0 [x.rs:6]",
             "x.rs fn f: stderr() 1 times, allowed 0 [x.rs:7]",
         ],
-        "a call named inside a string literal counts too: {found:?}"
+        "a call named inside a string literal is not a call: {found:?}"
     );
 }
 
@@ -137,38 +137,93 @@ fn scanner_flags_direct_writes_and_spares_comments_and_tests() {
 /// the diagnostic channel with `note!`, so data stays clean.
 const STATUS_WORDS: &[&str] = &[
     "Analyzing",
-    "Using",
-    "Note",
+    "Assessing",
+    "Checking",
+    "Completed",
+    "Exporting",
     "Fetching",
-    "Searching",
+    "Flagging",
     "Found",
-    "Selected",
-    "Saved",
-    "Running",
+    "Generating",
+    "Loading",
     "Monitoring",
+    "Note",
     "Press",
+    "Running",
+    "Saved",
+    "Saving",
+    "Searching",
+    "Selected",
+    "Starting",
+    "Tracing",
+    "Using",
+    "Warning",
+    "⚠",
 ];
 
-/// `file:line` for each `outln!` whose text starts with a status word.
-/// The literal may follow the output on the next lines, and may start
-/// with blanks or `\n`.
+/// Phrases that mark a status line wherever they are in the text.
+const STATUS_ANYWHERE: &[&str] = &["saved to", "exported to"];
+
+/// The first argument after the output in the `outln!(` call whose `(` is
+/// just before `from` (char index into `masked`): its start, when it is a
+/// string literal. The scan follows brackets on the masked text, so a
+/// comma inside the output expression or inside a literal is not the one.
+fn literal_argument(masked: &[char], from: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (i, &c) in masked.iter().enumerate().skip(from) {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' if depth == 0 => return None,
+            ')' | ']' | '}' => depth -= 1,
+            ',' if depth == 0 => {
+                let start = i
+                    + 1
+                    + masked[i + 1..]
+                        .iter()
+                        .take_while(|c| c.is_whitespace())
+                        .count();
+                return (masked.get(start) == Some(&'"')).then_some(start + 1);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// `file:line` for each `outln!` whose text is a status line: it starts
+/// with a status word (after blanks and `\n` escapes) or says "saved to".
 fn status_on_data(file: &str, src: &str) -> Vec<String> {
-    let code = code_lines(src);
-    let text: Vec<&str> = code.iter().map(|(_, l)| l.as_str()).collect();
-    let joined = text.join("\n");
+    let lines = common::lex(src);
+    let join = |f: fn(&common::Line) -> &str| -> Vec<char> {
+        lines
+            .iter()
+            .map(f)
+            .collect::<Vec<_>>()
+            .join("\n")
+            .chars()
+            .collect()
+    };
+    let code = join(|l| &l.code);
+    let masked = join(|l| &l.masked);
+    let masked_text: String = masked.iter().collect();
     let mut found = Vec::new();
-    for (at, _) in joined.match_indices("outln!(") {
-        let args = &joined[at + "outln!(".len()..];
-        let Some(comma) = args.find(',') else {
+    for (byte_at, _) in masked_text.match_indices("outln!(") {
+        let call = masked_text[..byte_at].chars().count();
+        if call > 0 && (masked[call - 1].is_alphanumeric() || masked[call - 1] == '_') {
+            continue;
+        }
+        let Some(start) = literal_argument(&masked, call + "outln!(".len()) else {
             continue;
         };
-        let rest = args[comma + 1..].trim_start();
-        let Some(literal) = rest.strip_prefix('"') else {
-            continue;
-        };
-        let words = skip_blanks(literal);
-        if STATUS_WORDS.iter().any(|w| words.starts_with(w)) {
-            let line = joined[..at].matches('\n').count() + 1;
+        let end = start + masked[start..].iter().position(|&c| c == '"').unwrap_or(0);
+        let literal: String = code[start..end].iter().collect();
+        let words = skip_blanks(&literal);
+        if STATUS_WORDS.iter().any(|w| words.starts_with(w))
+            || STATUS_ANYWHERE
+                .iter()
+                .any(|p| literal.to_lowercase().contains(p))
+        {
+            let line = masked[..call].iter().filter(|&&c| c == '\n').count() + 1;
             found.push(format!("{file}:{line}"));
         }
     }
@@ -194,13 +249,13 @@ fn status_lines_are_notes_not_data() {
     }
     assert!(
         found.is_empty(),
-        "a status line is a note: use note!(out, …), not outln!:\n{}",
+        "a status line is a note: use note!(out, …) or out.note_saved, not outln!:\n{}",
         found.join("\n")
     );
 }
 
 #[test]
-fn status_scanner_flags_status_words_on_the_data_channel() {
+fn status_scanner_flags_status_lines_on_the_data_channel() {
     let src = [
         r#"outln!(out, "Analyzing {}", x)?;"#, // 1 flag
         r#"outln!(out, "\n  Note: {}", x)?;"#, // 2 flag
@@ -208,14 +263,79 @@ fn status_scanner_flags_status_words_on_the_data_channel() {
         "    out,",
         r#"    "Monitoring {} on {}","#,
         "    a, b)?;",
-        r#"outln!(out, "{}", json)?;"#,               // 7 spare
-        r#"outln!(out, "Report saved to: {}", p)?;"#, // 8 spare
-        r#"note!(out, "Fetching {}", x);"#,           // 9 spare
-        r#"outln!(out, "Nothing found")?;"#,          // 10 spare
+        r#"outln!(out, "{}", json)?;"#,                 // 7 spare
+        r#"outln!(out, "\nReport saved to: {}", p)?;"#, // 8 flag: saved to
+        r#"note!(out, "Fetching {}", x);"#,             // 9 spare
+        r#"outln!(out, "Nothing found")?;"#,            // 10 spare
+        r#"outln!(out)?; let s = "a, \"Using\"";"#,     // 11 spare: no literal argument
+        r#"outln!(pick(a, b), "Starting {}", x)?;"#,    // 12 flag: comma in the output
+        r#"outln!(out, "{}", "Using")?;"#,              // 13 spare: the text is "{}"
+        r#"let s = "outln!(out, \"Saved\")";"#,         // 14 spare: inside a string
+        r#"youtln!(out, "Saved")?;"#,                   // 15 spare: another name
     ]
     .join("\n");
     assert_eq!(
         status_on_data("x.rs", &src),
-        vec!["x.rs:1", "x.rs:2", "x.rs:3"]
+        vec!["x.rs:1", "x.rs:2", "x.rs:3", "x.rs:8", "x.rs:12"]
     );
+}
+
+/// The files that may write to the diagnostic channel past `note!`, and
+/// why. Everything else there is a note.
+const REPORTERS: &[(&str, &str, &str)] = &[
+    (
+        "errors.rs",
+        "errln!(",
+        "the error report of a failed command",
+    ),
+    (
+        "tui/exec.rs",
+        "errln!(",
+        "the TUI's answer to a mistyped session command",
+    ),
+    ("prompt.rs", "err!(", "a prompt's question"),
+];
+
+/// `file:line: call` for each `errln!(`/`err!(` outside [`REPORTERS`].
+fn unreported(file: &str, src: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for (n, line) in common::masked_lines(src) {
+        for call in ["errln!(", "err!("] {
+            let allowed = REPORTERS.iter().any(|(f, c, _)| *f == file && *c == call);
+            if !allowed && common::calls(&line, call) > 0 {
+                found.push(format!("{file}:{n}: {call}"));
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn only_error_reports_and_prompts_bypass_note() {
+    let mut found = Vec::new();
+    for (file, src) in rs_sources(&cli_dir()) {
+        found.extend(unreported(&file, &src));
+    }
+    assert!(
+        found.is_empty(),
+        "status, notices and warnings use note! (see cli/output.rs):\n{}",
+        found.join("\n")
+    );
+    for (file, call, why) in REPORTERS {
+        let src = std::fs::read_to_string(cli_dir().join(file)).unwrap();
+        let used = common::masked_lines(&src)
+            .iter()
+            .any(|(_, l)| common::calls(l, call) > 0);
+        assert!(used, "stale entry: {file} has no {call} ({why})");
+    }
+}
+
+#[test]
+fn reporter_scan_flags_other_files_only() {
+    let src = r#"errln!(out, "x")?; crate::err!(out, "q")?; note!(out, "ok");"#;
+    assert_eq!(
+        unreported("market.rs", src),
+        vec!["market.rs:1: errln!(", "market.rs:1: err!("]
+    );
+    assert!(unreported("errors.rs", r#"errln!(out, "x")?;"#).is_empty());
 }

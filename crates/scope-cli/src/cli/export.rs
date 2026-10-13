@@ -17,7 +17,7 @@
 //! ```
 
 use crate::cli::output::Output;
-use crate::{errln, outln};
+use crate::{note, outln};
 use clap::Args;
 use scope::chains::{ChainClientFactory, infer_chain_from_address};
 use scope::config::{Config, OutputFormat};
@@ -250,12 +250,12 @@ async fn export_address(
         "Exporting address data"
     );
 
-    errln!(
+    note!(
         out,
         "  Fetching transactions for {} on {}...",
         address,
         chain
-    )?;
+    );
 
     // Fetch real transaction history
     let client = clients.create_chain_client(&chain)?;

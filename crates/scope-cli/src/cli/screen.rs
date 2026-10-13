@@ -97,7 +97,7 @@ pub(crate) fn enter(mouse: Mouse) -> Result<ratatui::DefaultTerminal> {
 /// The one error for a terminal the screen cannot take, for the TUI and
 /// the monitor alike.
 pub(crate) fn not_taken(e: io::Error) -> ScopeError {
-    ScopeError::Other(format!("cannot take the terminal: {}", e))
+    ScopeError::io_context(e, "cannot take the terminal")
 }
 
 /// [`Lifecycle::take`] with the restore hook, as a command error.
@@ -216,8 +216,8 @@ mod tests {
             Mouse::Capture,
         )
         .unwrap_err();
-        assert!(matches!(e, ScopeError::Other(_)));
-        assert_eq!(e.to_string(), "cannot take the terminal: no tty");
+        assert!(matches!(&e, ScopeError::IoError(io) if io.kind() == io::ErrorKind::Other));
+        assert_eq!(e.to_string(), "I/O error: cannot take the terminal: no tty");
     }
 
     #[test]

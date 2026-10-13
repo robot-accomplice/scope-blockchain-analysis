@@ -6,9 +6,18 @@
 //! progress bar draws into it.
 
 use crate::cli::output::Output;
+use crate::cli::progress::{self, Spinner};
+use crate::cli::textfit::{cols, cut_with_ellipsis};
 use scope::chains::dex::TokenSearchResult;
 use scope::error::Result;
+use scope::market::{ExchangeClient, VenueRegistry};
 use std::io::BufRead;
+
+/// The venue a symbol is looked up on when DexScreener does not know it.
+const CEX_FALLBACK_VENUE: &str = "binance";
+
+/// The quote a fallback pair uses.
+const CEX_FALLBACK_QUOTE: &str = "USDT";
 
 /// The longest token name the list shows whole.
 const NAME_COLS: usize = 20;
@@ -20,18 +29,52 @@ const NAME_COLS: usize = 20;
 /// The write or read error, or an answer that is not a number in range.
 pub(crate) fn pick_token<'a>(
     reader: &mut impl BufRead,
+    spinner: Option<&Spinner>,
     out: &Output,
     results: &'a [TokenSearchResult],
 ) -> Result<&'a TokenSearchResult> {
     let index = crate::cli::prompt::pick(reader, out, &table(results), "token", results.len())?;
     let picked = &results[index];
-    announce(out, picked);
+    announce(spinner, out, picked);
     Ok(picked)
 }
 
-/// Tells the user, as a note, which token the command uses.
-pub(crate) fn announce(out: &Output, token: &TokenSearchResult) {
-    crate::note!(out, "{}", selected_line(token));
+/// Tells the user which token the command uses (above the spinner when
+/// one draws).
+pub(crate) fn announce(spinner: Option<&Spinner>, out: &Output, token: &TokenSearchResult) {
+    progress::notice(spinner, out, &selected_line(token));
+}
+
+/// Looks `symbol` up on a centralized exchange when DexScreener does not
+/// know it, and tells the user when it finds it. The result has no
+/// on-chain address; price and volume come from the venue ticker.
+pub(crate) async fn cex_fallback(
+    symbol: &str,
+    chain: &str,
+    spinner: Option<&Spinner>,
+    out: &Output,
+) -> Option<TokenSearchResult> {
+    let registry = VenueRegistry::load().ok()?;
+    let client = ExchangeClient::from_descriptor(registry.get(CEX_FALLBACK_VENUE)?);
+    let symbol = symbol.to_uppercase();
+    let pair = client.format_pair(&format!("{symbol}{CEX_FALLBACK_QUOTE}"));
+    let ticker = client.fetch_ticker(&pair).await.ok()?;
+    let found = TokenSearchResult {
+        address: String::new(),
+        symbol: symbol.clone(),
+        name: symbol,
+        chain: chain.to_string(),
+        price_usd: Some(ticker.last_price.unwrap_or(0.0)),
+        volume_24h: ticker.volume_24h.unwrap_or(0.0),
+        liquidity_usd: 0.0,
+        market_cap: None,
+    };
+    let line = format!(
+        "Not found on DexScreener; found {} on {} (CEX)",
+        found.symbol, found.chain
+    );
+    progress::notice(spinner, out, &line);
+    Some(found)
 }
 
 /// The one line that names the token a command uses: symbol, name, chain,
@@ -59,7 +102,7 @@ fn table(results: &[TokenSearchResult]) -> String {
     list.push_str(&row(
         "#",
         "Symbol",
-        "Name",
+        &pad_end("Name"),
         "Address",
         "Chain",
         "Price",
@@ -74,7 +117,7 @@ fn table(results: &[TokenSearchResult]) -> String {
         list.push_str(&row(
             &(i + 1).to_string(),
             &token.symbol,
-            &short_name(&token.name),
+            &pad_end(&cut_with_ellipsis(&token.name, NAME_COLS)),
             &abbreviate_address(&token.address),
             &token.chain,
             &price,
@@ -84,6 +127,7 @@ fn table(results: &[TokenSearchResult]) -> String {
     list
 }
 
+/// One table row. `name` comes padded ([`pad_end`]).
 fn row(
     n: &str,
     symbol: &str,
@@ -93,16 +137,17 @@ fn row(
     price: &str,
     liq: &str,
 ) -> String {
-    format!("{n:>3}  {symbol:>8}  {name:<22}  {addr:<16}  {chain:<12}  {price:>12}  {liq:>12}\n")
+    format!("{n:>3}  {symbol:>8}  {name}  {addr:<16}  {chain:<12}  {price:>12}  {liq:>12}\n")
 }
 
-/// `name`, or its start and `...` when it is longer than [`NAME_COLS`].
-fn short_name(name: &str) -> String {
-    if name.len() > NAME_COLS {
-        format!("{}...", &name[..NAME_COLS - 3])
-    } else {
-        name.to_string()
-    }
+/// The width of the name column, in display columns.
+const NAME_FIELD_COLS: usize = 22;
+
+/// `name` followed by spaces up to [`NAME_FIELD_COLS`] display columns.
+/// `format!` pads by characters, which is wrong for wide characters.
+fn pad_end(name: &str) -> String {
+    let fill = NAME_FIELD_COLS.saturating_sub(cols(name));
+    format!("{name}{}", " ".repeat(fill))
 }
 
 /// Abbreviates a blockchain address for display (e.g. "0x1234...abcd").
@@ -142,20 +187,46 @@ mod tests {
             result("XYZ", "A Very Long Token Name Indeed", "0x1234abcd"),
         ];
         let (out, cap) = Output::capture();
-        let picked =
-            pick_token(&mut std::io::Cursor::new(b"2\n".to_vec()), &out, &results).unwrap();
+        let picked = pick_token(
+            &mut std::io::Cursor::new(b"2\n".to_vec()),
+            None,
+            &out,
+            &results,
+        )
+        .unwrap();
         assert_eq!(picked.symbol, "XYZ");
         let shown = cap.err();
         assert!(
             shown.starts_with("\nFound 2 matching tokens:\n\n"),
             "{shown}"
         );
-        assert!(shown.contains("0xA0b869...06eB48") && shown.contains("A Very Long Token..."));
+        assert!(shown.contains("0xA0b869...06eB48") && shown.contains("A Very Long Token N…"));
         assert!(
             shown.ends_with("\nSelect token (1-2): Selected: XYZ (A Very Long Token Name Indeed) on ethereum - $1.000000 at 0x1234abcd\n"),
             "{shown}"
         );
         assert_eq!(cap.out(), "", "the list is not data");
+    }
+
+    #[test]
+    fn test_long_wide_names_cut_by_display_width_and_line_up() {
+        // Byte slicing panicked inside a multi-byte character, and byte
+        // padding pushed the columns after a wide name out of line.
+        let names = [
+            "USD Coin",
+            "日本円ステーブルコイン・テスト用の長い名前",
+            "🚀🚀🚀 Rocket Moon Token Supreme Edition",
+        ];
+        let results: Vec<_> = names.iter().map(|n| result("X", n, "0xabc")).collect();
+        let list = table(&results);
+        let rows: Vec<&str> = list.lines().skip(5).collect();
+        assert_eq!(rows.len(), 3, "{list}");
+        let address_col = |row: &str| cols(&row[..row.find("0xabc").unwrap()]);
+        let first = address_col(rows[0]);
+        for row in &rows {
+            assert_eq!(address_col(row), first, "{list}");
+            assert!(row.contains('…') || row.contains("USD Coin"), "{row}");
+        }
     }
 
     #[test]

@@ -67,6 +67,22 @@ fn only_the_screen_module_takes_the_screen() {
 }
 
 #[test]
+fn a_second_call_in_the_allowed_function_is_flagged() {
+    // The allowance is a count, not a pass for the function.
+    let src = [
+        "fn install_restore_hook() {",
+        "    std::panic::set_hook(a);",
+        "    std::panic::set_hook(b);",
+        "}",
+    ]
+    .join("\n");
+    let found = audit(&[("screen.rs".into(), src)], WATCHED, ALLOWED);
+    let want = "screen.rs fn install_restore_hook: panic::set_hook 2 times, allowed 1 \
+                (the restore hook, run once) [screen.rs:2, screen.rs:3]";
+    assert!(found.iter().any(|f| f == want), "{want} not in {found:?}");
+}
+
+#[test]
 fn a_second_hook_or_a_ratatui_init_is_flagged() {
     let src = [
         "fn install_restore_hook() {",
