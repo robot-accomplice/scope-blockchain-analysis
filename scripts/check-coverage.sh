@@ -60,7 +60,7 @@ if ! ge "$COVERAGE_PCT" "$MANDATORY_THRESHOLD"; then
     echo "   Add more tests to reach the required coverage."
     echo ""
     echo "Top uncovered modules:"
-    echo "$COVERAGE_OUTPUT" | grep -E '^\|\| src/' 2>/dev/null | head -10 || true
+    echo "$COVERAGE_OUTPUT" | grep -E '^\|\| crates/' 2>/dev/null | head -10 || true
     exit 1
 fi
 
