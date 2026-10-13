@@ -7,9 +7,9 @@ use crate::AppState;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::response::IntoResponse;
+use scope::chains::DexDataSource;
 use scope::chains::dex::DexTokenData;
-use scope::chains::{ChainClientFactory, DexDataSource};
-use scope::market::{ExchangeClient, TradeSide, VenueRegistry};
+use scope::market::{ExchangeClient, Pair, TradeSide, VenueRegistry};
 use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,7 +29,8 @@ pub struct MonitorQuery {
     /// (order book, ticker, recent trades) is included in each update frame.
     #[serde(default)]
     pub venue: Option<String>,
-    /// Base pair for exchange data (default: same as token).
+    /// Pair for exchange data, read like the CLI pair (default: the token
+    /// symbol with the venue's default quote).
     #[serde(default)]
     pub pair: Option<String>,
 }
@@ -71,8 +72,11 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, params: Moni
     });
 
     let exchange_pair: Option<String> = exchange_client.as_ref().map(|ec| {
-        let base = params.pair.as_deref().unwrap_or(&token_input);
-        ec.format_pair(base)
+        let pair = match params.pair.as_deref() {
+            Some(pair) => Pair::parse(pair),
+            None => Pair::base_only(&token_input),
+        };
+        ec.venue_symbol(&pair)
     });
 
     // Send initial connection message
@@ -195,8 +199,8 @@ fn attach_exchange_data(frame: &mut serde_json::Value, snap: &scope::market::Mar
             "best_ask": book.best_ask(),
             "mid_price": book.mid_price(),
             "spread": book.spread(),
-            "bid_depth": book.bid_depth(),
-            "ask_depth": book.ask_depth(),
+            "total_bid_depth": book.total_depth(scope::market::BookSide::Bid),
+            "total_ask_depth": book.total_depth(scope::market::BookSide::Ask),
             "bids": book.bids.iter().take(20).map(|l| {
                 serde_json::json!({"price": l.price, "quantity": l.quantity})
             }).collect::<Vec<_>>(),
@@ -358,6 +362,37 @@ mod tests {
         assert!(frame.get("exchange_order_book").is_none());
         assert!(frame.get("exchange_ticker").is_none());
         assert!(frame.get("exchange_trades").is_none());
+    }
+
+    #[test]
+    fn test_attach_exchange_data_spread_matches_the_market_summary() {
+        use scope::market::{
+            BookSource, HealthThresholds, MarketSummary, OrderBook, OrderBookLevel,
+        };
+        let level = |price, quantity| OrderBookLevel { price, quantity };
+        // Zero-quantity top levels are not real orders.
+        let book = OrderBook {
+            pair: "X/USDT".to_string(),
+            source: BookSource::Exchange,
+            bids: vec![level(1.0, 0.0), level(0.999, 500.0)],
+            asks: vec![level(1.0001, 0.0), level(1.001, 500.0)],
+        };
+        let summary = MarketSummary::from_order_book(&book, &HealthThresholds::default(), None);
+        let snapshot = scope::market::MarketSnapshot {
+            order_book: Some(book),
+            ticker: None,
+            recent_trades: None,
+        };
+        let mut frame = serde_json::json!({"type": "update"});
+        attach_exchange_data(&mut frame, &snapshot);
+        assert_eq!(
+            frame["exchange_order_book"]["spread"].as_f64(),
+            summary.spread
+        );
+        assert_eq!(
+            frame["exchange_order_book"]["mid_price"].as_f64(),
+            summary.mid_price
+        );
     }
 
     #[test]

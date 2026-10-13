@@ -14,7 +14,7 @@ use ratatui::{
 };
 use std::time::Instant;
 
-use scope::market::TradeSide;
+use scope::market::{BookSide, TradeSide};
 
 use super::config::{ChartMode, LayoutPreset, ScaleMode, WidgetVisibility};
 use super::state::MonitorState;
@@ -669,17 +669,12 @@ pub(crate) fn render_price_chart(f: &mut Frame, area: Rect, state: &MonitorState
     f.render_widget(chart, area);
 }
 
-/// Checks if a price indicates a stablecoin (pegged around $1.00).
-pub(crate) fn is_stablecoin_price(price: f64) -> bool {
-    (0.95..=1.05).contains(&price)
-}
-
 /// Formats a price in USD with appropriate precision.
 /// Stablecoins get extra precision (6 decimals) to show micro-fluctuations.
 pub(crate) fn format_price_usd(price: f64) -> String {
     if price >= 1000.0 {
         format!("${:.2}", price)
-    } else if is_stablecoin_price(price) {
+    } else if scope::tokens::is_stablecoin_price(price) {
         // Stablecoins get 6 decimals to show micro-fluctuations
         format!("${:.6}", price)
     } else if price >= 1.0 {
@@ -1381,6 +1376,15 @@ pub(crate) fn render_metrics_panel(f: &mut Frame, area: Rect, state: &MonitorSta
 /// Renders the order book panel for the Exchange layout.
 ///
 /// Shows asks (descending), spread, bids (descending) with depth bars.
+/// The panel's spread row. Spread and percent come from `OrderBook`, the same
+/// source as `market summary` and the web API.
+pub(crate) fn spread_line(book: &scope::market::OrderBook) -> String {
+    book.spread()
+        .zip(book.spread_pct())
+        .map(|(s, pct)| format!("  Spread: {:.6} ({:.3}%)", s, pct))
+        .unwrap_or_else(|| "  Spread: --".to_string())
+}
+
 pub(crate) fn render_order_book_panel(f: &mut Frame, area: Rect, state: &MonitorState) {
     let pal = state.palette();
 
@@ -1446,15 +1450,7 @@ pub(crate) fn render_order_book_panel(f: &mut Frame, area: Rect, state: &Monitor
     }
 
     // --- Spread line ---
-    let spread = book
-        .best_ask()
-        .zip(book.best_bid())
-        .map(|(ask, bid)| {
-            let s = ask - bid;
-            let pct = if bid > 0.0 { (s / bid) * 100.0 } else { 0.0 };
-            format!("  Spread: {:.6} ({:.3}%)", s, pct)
-        })
-        .unwrap_or_else(|| "  Spread: --".to_string());
+    let spread = spread_line(book);
     lines.push(Line::from(Span::styled(
         spread,
         Style::new().fg(Color::Yellow).bold(),
@@ -1502,8 +1498,8 @@ pub(crate) fn order_book_title(state: &MonitorState) -> String {
     }
     match &state.order_book {
         Some(book) => {
-            let ask_depth: f64 = book.asks.iter().map(|l| l.value()).sum();
-            let bid_depth: f64 = book.bids.iter().map(|l| l.value()).sum();
+            let ask_depth = book.total_depth(BookSide::Ask);
+            let bid_depth = book.total_depth(BookSide::Bid);
             format!(
                 " ◈ Order Book {SYNTHETIC_NOTE} │ {} │ Ask {} │ Bid {} ",
                 book.pair,

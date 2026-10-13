@@ -198,7 +198,9 @@ scope market summary USDC --format json
 scope market summary USDC --report peg-report.md
 ```
 
-**Venues:** `binance`, `biconomy`, `eth` (Ethereum DEX), `solana` (Solana DEX).
+**Venues:** `binance`, `biconomy`, `ethereum`/`eth` (Ethereum DEX), `solana`/`sol` (Solana DEX).
+
+**Pairs:** `DAI_USDC`, `BTC/ETH` and `BTC-USDT` work for any quote. The joined form (`OPUSDT`, `BTCEUR`) works only for a stable or fiat quote; `WETH` stays one symbol. A bare symbol (`USDC`) uses the venue's default quote.
 
 ---
 

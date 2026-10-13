@@ -3,10 +3,10 @@
 //! POST /api/exchange/snapshot — Fetches full market snapshot (order book, ticker,
 //! recent trades) for a given venue and pair.
 
+use super::{error_response, status_for};
 use axum::Json;
-use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use scope::market::VenueRegistry;
+use scope::market::{Pair, VenueRegistry};
 use serde::Deserialize;
 
 /// Request body for exchange snapshot.
@@ -14,7 +14,7 @@ use serde::Deserialize;
 pub struct SnapshotRequest {
     /// Venue ID (e.g., "binance", "mexc").
     pub venue: String,
-    /// Base token symbol (e.g., "BTC", "USDC").
+    /// Pair or base symbol, read by `Pair::parse` (e.g., "BTC", "ETH_BTC", "OPUSDT").
     #[serde(default = "default_pair")]
     pub pair: String,
     /// Maximum number of recent trades to fetch.
@@ -32,48 +32,16 @@ fn default_trades_limit() -> u32 {
 
 /// POST /api/exchange/snapshot — Full market snapshot.
 pub async fn handle(Json(req): Json<SnapshotRequest>) -> impl IntoResponse {
-    let registry = match VenueRegistry::load() {
-        Ok(r) => r,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": format!("Registry error: {e}") })),
-            )
-                .into_response();
-        }
-    };
-
-    let exchange = match registry.create_exchange_client(&req.venue) {
+    // An unknown venue is 400 (InvalidInput), via the one status map.
+    let exchange = match VenueRegistry::load().and_then(|r| r.create_exchange_client(&req.venue)) {
         Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response();
-        }
+        Err(e) => return error_response(status_for(&e), e.to_string()),
     };
 
-    let pair = exchange.format_pair(&req.pair);
+    let pair = exchange.venue_symbol(&Pair::parse(&req.pair));
     let snapshot = exchange.fetch_market_snapshot(&pair).await;
 
-    let order_book_json = snapshot.order_book.as_ref().map(|book| {
-        serde_json::json!({
-            "pair": book.pair,
-            "best_bid": book.best_bid(),
-            "best_ask": book.best_ask(),
-            "mid_price": book.mid_price(),
-            "spread": book.spread(),
-            "bid_depth": book.bid_depth(),
-            "ask_depth": book.ask_depth(),
-            "bids": book.bids.iter().map(|l| {
-                serde_json::json!({"price": l.price, "quantity": l.quantity, "value": l.value()})
-            }).collect::<Vec<_>>(),
-            "asks": book.asks.iter().map(|l| {
-                serde_json::json!({"price": l.price, "quantity": l.quantity, "value": l.value()})
-            }).collect::<Vec<_>>(),
-        })
-    });
+    let order_book_json = snapshot.order_book.as_ref().map(order_book_json);
 
     let ticker_json = snapshot.ticker.as_ref().map(|t| {
         serde_json::json!({
@@ -127,7 +95,7 @@ pub async fn handle(Json(req): Json<SnapshotRequest>) -> impl IntoResponse {
 pub struct TradesRequest {
     /// Venue ID (e.g., "binance", "mexc").
     pub venue: String,
-    /// Base token symbol (e.g., "BTC", "USDC").
+    /// Pair or base symbol, read by `Pair::parse` (e.g., "BTC", "ETH_BTC", "OPUSDT").
     #[serde(default = "default_pair")]
     pub pair: String,
     /// Maximum number of trades to return.
@@ -137,29 +105,13 @@ pub struct TradesRequest {
 
 /// POST /api/exchange/trades — Recent trades for a venue/pair.
 pub async fn handle_trades(Json(req): Json<TradesRequest>) -> impl IntoResponse {
-    let registry = match VenueRegistry::load() {
-        Ok(r) => r,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": format!("Registry error: {e}") })),
-            )
-                .into_response();
-        }
-    };
-
-    let exchange = match registry.create_exchange_client(&req.venue) {
+    // An unknown venue is 400 (InvalidInput), via the one status map.
+    let exchange = match VenueRegistry::load().and_then(|r| r.create_exchange_client(&req.venue)) {
         Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response();
-        }
+        Err(e) => return error_response(status_for(&e), e.to_string()),
     };
 
-    let pair = exchange.format_pair(&req.pair);
+    let pair = exchange.venue_symbol(&Pair::parse(&req.pair));
     match exchange.fetch_recent_trades(&pair, req.limit).await {
         Ok(trades) => {
             let json_trades: Vec<serde_json::Value> = trades
@@ -185,11 +137,7 @@ pub async fn handle_trades(Json(req): Json<TradesRequest>) -> impl IntoResponse 
             }))
             .into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => error_response(status_for(&e), e.to_string()),
     }
 }
 
@@ -202,7 +150,7 @@ pub async fn handle_trades(Json(req): Json<TradesRequest>) -> impl IntoResponse 
 pub struct OhlcRequest {
     /// Venue ID (e.g., "binance", "mexc").
     pub venue: String,
-    /// Base token symbol (e.g., "BTC", "USDC").
+    /// Pair or base symbol, read by `Pair::parse` (e.g., "BTC", "ETH_BTC", "OPUSDT").
     #[serde(default = "default_pair")]
     pub pair: String,
     /// Candle interval (e.g., "1m", "1h", "1d").
@@ -223,29 +171,13 @@ fn default_ohlc_limit() -> u32 {
 
 /// POST /api/exchange/ohlc — OHLC candlestick data for a venue/pair.
 pub async fn handle_ohlc(Json(req): Json<OhlcRequest>) -> impl IntoResponse {
-    let registry = match VenueRegistry::load() {
-        Ok(r) => r,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": format!("Registry error: {e}") })),
-            )
-                .into_response();
-        }
-    };
-
-    let exchange = match registry.create_exchange_client(&req.venue) {
+    // An unknown venue is 400 (InvalidInput), via the one status map.
+    let exchange = match VenueRegistry::load().and_then(|r| r.create_exchange_client(&req.venue)) {
         Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response();
-        }
+        Err(e) => return error_response(status_for(&e), e.to_string()),
     };
 
-    let pair = exchange.format_pair(&req.pair);
+    let pair = exchange.venue_symbol(&Pair::parse(&req.pair));
     match exchange.fetch_ohlc(&pair, &req.interval, req.limit).await {
         Ok(candles) => {
             let json_candles: Vec<serde_json::Value> = candles
@@ -270,18 +202,53 @@ pub async fn handle_ohlc(Json(req): Json<OhlcRequest>) -> impl IntoResponse {
             }))
             .into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => error_response(status_for(&e), e.to_string()),
     }
+}
+
+/// JSON view of an order book. Prices and spread come from `OrderBook`, the
+/// same source as `/api/market`.
+fn order_book_json(book: &scope::market::OrderBook) -> serde_json::Value {
+    serde_json::json!({
+        "pair": book.pair,
+        "best_bid": book.best_bid(),
+        "best_ask": book.best_ask(),
+        "mid_price": book.mid_price(),
+        "spread": book.spread(),
+        "total_bid_depth": book.total_depth(scope::market::BookSide::Bid),
+        "total_ask_depth": book.total_depth(scope::market::BookSide::Ask),
+        "bids": book.bids.iter().map(|l| {
+            serde_json::json!({"price": l.price, "quantity": l.quantity, "value": l.value()})
+        }).collect::<Vec<_>>(),
+        "asks": book.asks.iter().map(|l| {
+            serde_json::json!({"price": l.price, "quantity": l.quantity, "value": l.value()})
+        }).collect::<Vec<_>>(),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::http::StatusCode;
+    use scope::market::{BookSource, HealthThresholds, MarketSummary, OrderBook, OrderBookLevel};
+
+    #[test]
+    fn test_order_book_json_spread_matches_the_market_summary() {
+        // The top level of each side has zero quantity: not a real order.
+        let level = |price, quantity| OrderBookLevel { price, quantity };
+        let book = OrderBook {
+            pair: "X/USDT".to_string(),
+            source: BookSource::Exchange,
+            bids: vec![level(1.0, 0.0), level(0.999, 500.0)],
+            asks: vec![level(1.0001, 0.0), level(1.001, 500.0)],
+        };
+        let summary = MarketSummary::from_order_book(&book, &HealthThresholds::default(), None);
+        let json = order_book_json(&book);
+        assert_eq!(json["spread"].as_f64(), summary.spread);
+        assert_eq!(json["best_bid"].as_f64(), summary.best_bid);
+        assert_eq!(json["mid_price"].as_f64(), summary.mid_price);
+        assert!(json["spread"].as_f64().unwrap() > 0.0019);
+    }
 
     #[test]
     fn test_snapshot_request_empty_pair() {

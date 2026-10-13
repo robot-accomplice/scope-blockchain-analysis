@@ -22,6 +22,31 @@ use crate::AppState;
 use axum::Router;
 use std::sync::Arc;
 
+/// The one map from a core error kind to an HTTP status: a missing resource
+/// is 404, a request fault (unknown venue, chain mismatch, bad address) is
+/// 400, and anything else is 500.
+pub(crate) fn status_for(err: &scope::error::ScopeError) -> axum::http::StatusCode {
+    use axum::http::StatusCode;
+    use scope::error::ScopeError;
+    match err {
+        ScopeError::NotFound(_) => StatusCode::NOT_FOUND,
+        ScopeError::InvalidInput(_)
+        | ScopeError::InvalidAddress(_)
+        | ScopeError::InvalidHash(_) => StatusCode::BAD_REQUEST,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+/// A JSON error body, `{ "error": message }`, with `status`.
+pub(crate) fn error_response(
+    status: axum::http::StatusCode,
+    message: impl Into<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let body = serde_json::json!({ "error": message.into() });
+    (status, axum::Json(body)).into_response()
+}
+
 /// Result of resolving a user input through the address book.
 ///
 /// When the input matches an address book entry (either via `@label`
@@ -118,7 +143,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = Arc::new(AppState { config, factory });
+        let state = Arc::new(AppState::new(config, factory));
         let _router = routes(state);
         // If this doesn't panic, routes are properly constructed
     }
@@ -223,5 +248,29 @@ mod tests {
         let r = result.unwrap();
         assert_eq!(r.value, "USDC");
         assert_eq!(r.chain, None);
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+    use axum::http::StatusCode;
+    use scope::error::ScopeError;
+
+    /// One map from core error kinds to HTTP status: a missing resource
+    /// (e.g. no DEX pairs for the token) is 404, bad input is 400, and
+    /// anything else is 500.
+    #[test]
+    fn core_error_kinds_map_to_one_status_each() {
+        let no_pairs = ScopeError::NotFound("No DEX pairs found for USDC on solana".into());
+        assert_eq!(status_for(&no_pairs), StatusCode::NOT_FOUND);
+        assert_eq!(
+            status_for(&ScopeError::InvalidAddress("0x1".into())),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            status_for(&ScopeError::Network("timeout".into())),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 }

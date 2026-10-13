@@ -5,7 +5,6 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use scope::chains::ChainClientFactory;
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -175,7 +174,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = ExportRequest {
             address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
             chain: "ethereum".to_string(),
@@ -204,7 +203,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = ExportRequest {
             address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
             chain: "ethereum".to_string(),
@@ -271,7 +270,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = ExportRequest {
             address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
             chain: "bitcoin".to_string(), // Unsupported chain
@@ -315,7 +314,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = ExportRequest {
             address: "@ghost-wallet".to_string(),
             chain: "ethereum".to_string(),

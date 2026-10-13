@@ -8,6 +8,11 @@ symbol:
   template: "{base}-{quote}"
   default_quote: USDT
 
+error_envelope:
+  code_key: code
+  ok_codes: ["0"]
+  message_key: msg
+
 capabilities:
   order_book:
     path: /api/v5/market/books

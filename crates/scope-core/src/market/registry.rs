@@ -5,7 +5,6 @@
 //! venues with the same `id`.
 
 use crate::error::{Result, ScopeError};
-use crate::market::configurable_client::venue_error;
 use crate::market::descriptor::VenueDescriptor;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -132,13 +131,7 @@ impl VenueRegistry {
 
     /// Find the closest venue name to a given input (for typo suggestions).
     pub fn suggest(&self, input: &str) -> Option<&str> {
-        let input_lower = input.to_lowercase();
-        self.venues
-            .keys()
-            .map(|k| (k.as_str(), strsim_distance(&input_lower, &k.to_lowercase())))
-            .filter(|(_, dist)| *dist <= 3)
-            .min_by_key(|(_, dist)| *dist)
-            .map(|(k, _)| k)
+        closest(input, self.list())
     }
 
     /// Path to the user venues directory (`~/.config/scope/venues/`).
@@ -150,19 +143,16 @@ impl VenueRegistry {
 
     /// Create an ExchangeClient for the given venue ID.
     ///
-    /// Returns an error if the venue is not found, with a suggestion if
-    /// a close match exists.
+    /// An unknown ID is [`ScopeError::InvalidInput`] that lists the registry
+    /// venues and names the closest one. DEX venues are not listed: this
+    /// lookup cannot serve them (see `MarketVenue::resolve`).
     pub fn create_exchange_client(
         &self,
         venue_id: &str,
     ) -> Result<crate::market::exchange::ExchangeClient> {
-        let desc = self.get(venue_id).ok_or_else(|| {
-            let hint = self
-                .suggest(venue_id)
-                .map(|s| format!("\n\n  Did you mean \"{}\"?\n\n  Available venues: {}\n  Run `scope venues list` for details.", s, self.list().join(", ")))
-                .unwrap_or_else(|| format!("\n\n  Available venues: {}\n  Run `scope venues list` for details.", self.list().join(", ")));
-            venue_error(venue_id, format!("Unknown venue \"{}\"{}", venue_id, hint))
-        })?;
+        let desc = self
+            .get(venue_id)
+            .ok_or_else(|| unknown_venue(venue_id, &self.list()))?;
         Ok(crate::market::exchange::ExchangeClient::from_descriptor(
             desc,
         ))
@@ -174,6 +164,40 @@ impl VenueRegistry {
             .map_err(|e| ScopeError::Config(crate::error::ConfigError::Parse { source: e }))
     }
 }
+
+/// The unknown-venue error: names the closest of `ids` and lists them all.
+/// Each lookup passes the ids it can serve, so it never suggests a venue it
+/// would reject.
+pub(crate) fn unknown_venue<S: AsRef<str>>(input: &str, ids: &[S]) -> ScopeError {
+    let ids: Vec<&str> = ids.iter().map(AsRef::as_ref).collect();
+    let available = format!(
+        "\n\n  Available venues: {}\n  Run `scope venues list` for details.",
+        ids.join(", ")
+    );
+    let hint = match closest(input, ids) {
+        Some(s) => format!("\n\n  Did you mean \"{s}\"?{available}"),
+        None => available,
+    };
+    ScopeError::InvalidInput(format!("Unknown venue \"{input}\"{hint}"))
+}
+
+/// The id nearest to `input`, ignoring case, within one edit for each
+/// [`SUGGEST_LENGTH_PER_EDIT`] characters of the longer name.
+fn closest<'a>(input: &str, ids: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
+    let input_lower = input.to_lowercase();
+    ids.into_iter()
+        .map(|k| (k, strsim_distance(&input_lower, &k.to_lowercase())))
+        // A fixed limit suggested `okx` for `weex` (#69). Scale it to the name.
+        .filter(|(k, dist)| {
+            *dist * SUGGEST_LENGTH_PER_EDIT <= input_lower.chars().count().max(k.len())
+        })
+        .min_by_key(|(_, dist)| *dist)
+        .map(|(k, _)| k)
+}
+
+/// A suggestion may differ by one edit for each this many characters of the
+/// longer name.
+const SUGGEST_LENGTH_PER_EDIT: usize = 3;
 
 /// Simple Levenshtein distance for typo suggestions.
 fn strsim_distance(a: &str, b: &str) -> usize {
@@ -250,6 +274,9 @@ mod tests {
     fn test_registry_suggest_typo() {
         let registry = VenueRegistry::default();
         assert_eq!(registry.suggest("binace"), Some("binance"));
+        assert_eq!(registry.suggest("gate"), Some("gateio"));
+        // #69: "weex" is 3 edits from "okx", too far for a 4-letter name.
+        assert_eq!(registry.suggest("weex"), None);
         assert_eq!(registry.suggest("krakn"), Some("kraken"));
         assert_eq!(registry.suggest("bybi"), Some("bybit"));
     }

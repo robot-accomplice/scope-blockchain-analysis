@@ -6,7 +6,7 @@
 //! design, section 2.2.
 
 use super::replay::ReplayHttpClient;
-use super::{GholaHttpClient, HttpClient, NativeHttpClient};
+use super::{GholaHttpClient, HttpClient, NativeHttpClient, ghola};
 use crate::config::Config;
 use crate::error::ScopeError;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -84,6 +84,17 @@ pub fn build_with(
     config: &Config,
     env: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Built, ScopeError> {
+    build_probed(config, env, &ghola::is_bridge_running)
+}
+
+/// [`build_with`] with the Ghola sidecar check injected, so tests do not
+/// depend on a sidecar on the test machine. Ghola is chosen only when
+/// `sidecar_up` says the sidecar answers (#64).
+fn build_probed(
+    config: &Config,
+    env: &dyn Fn(&str) -> Option<String>,
+    sidecar_up: &dyn Fn() -> bool,
+) -> Result<Built, ScopeError> {
     if let Some(mode) = env("SCOPE_HTTP_MODE") {
         let dir = env("SCOPE_HTTP_FIXTURES")
             .map(std::path::PathBuf::from)
@@ -99,7 +110,7 @@ pub fn build_with(
             "record" => {
                 // The normal transport (Ghola or native) does the real requests.
                 // The empty env lookup stops it from selecting record again.
-                let inner = build_with(config, &|_| None)?;
+                let inner = build_probed(config, &|_| None, sidecar_up)?;
                 Ok(Built {
                     client: Arc::new(ReplayHttpClient::record(
                         dir,
@@ -117,7 +128,15 @@ pub fn build_with(
     }
     let mut notices = Vec::new();
     if config.ghola.enabled {
-        match GholaHttpClient::new(config.ghola.stealth, config.ghola.buffer_size) {
+        let client = if sidecar_up() {
+            GholaHttpClient::new(config.ghola.stealth, config.ghola.buffer_size)
+        } else {
+            Err(ScopeError::Network(format!(
+                "no sidecar answers on {}",
+                ghola::SIDECAR_ADDR
+            )))
+        };
+        match client {
             Ok(client) => {
                 tracing::info!("Using Ghola sidecar for HTTP transport");
                 return Ok(Built {
@@ -378,18 +397,57 @@ mod tests {
         assert_eq!(built.kind, Kind::Native);
     }
 
-    #[test]
-    fn test_build_ghola_enabled_reports_its_choice() {
-        // The test machine may or may not run a Ghola sidecar. Either way,
-        // the result must say which transport it chose: Ghola with no
-        // notice, or native with a notice that names Ghola.
+    fn ghola_config() -> Config {
         let mut config = Config::default();
         config.ghola.enabled = true;
-        let built = build_with(&config, &no_env).unwrap();
-        match built.kind {
-            Kind::Ghola => assert!(built.notices.is_empty()),
-            Kind::Native => assert!(built.notices.iter().any(|n| n.contains("Ghola"))),
-            other => panic!("unexpected kind {other:?}"),
-        }
+        config
+    }
+
+    // #64: an enabled Ghola with no sidecar must not be selected, or every
+    // request fails at send time. Native takes over, and the user is told why.
+    #[test]
+    fn test_build_ghola_enabled_sidecar_down_falls_back_to_native() {
+        let built = build_probed(&ghola_config(), &no_env, &|| false).unwrap();
+        assert_eq!(built.kind, Kind::Native);
+        assert!(
+            built
+                .notices
+                .iter()
+                .any(|n| n.contains(ghola::SIDECAR_ADDR))
+        );
+        assert!(built.notices.iter().any(|n| n.contains("native")));
+    }
+
+    #[test]
+    fn test_build_ghola_enabled_sidecar_up_selects_ghola() {
+        let built = build_probed(&ghola_config(), &no_env, &|| true).unwrap();
+        assert_eq!(built.kind, Kind::Ghola);
+        assert!(built.notices.is_empty());
+    }
+
+    #[test]
+    fn test_build_ghola_disabled_never_probes() {
+        let built = build_probed(&Config::default(), &no_env, &|| {
+            panic!("probed the sidecar with Ghola disabled")
+        })
+        .unwrap();
+        assert_eq!(built.kind, Kind::Native);
+    }
+
+    // Record mode wraps the normal transport, so it must use the same probe.
+    #[test]
+    fn test_record_mode_falls_back_when_sidecar_down() {
+        let env = env_of(&[
+            ("SCOPE_HTTP_MODE", "record"),
+            ("SCOPE_HTTP_FIXTURES", "/tmp/x"),
+        ]);
+        let built = build_probed(&ghola_config(), &env, &|| false).unwrap();
+        assert_eq!(built.kind, Kind::Record);
+        assert!(
+            built
+                .notices
+                .iter()
+                .any(|n| n.contains(ghola::SIDECAR_ADDR))
+        );
     }
 }

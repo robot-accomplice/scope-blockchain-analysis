@@ -42,6 +42,9 @@ pub async fn handle(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "color_enabled": config.output.color,
         "api_keys": api_keys_status,
         "rpc_endpoints": rpc_status,
+        // Resolved market defaults; the web market panel fills its peg field
+        // from here and sends a peg only when the user changes it.
+        "market": { "peg_target": config.market.health.peg_target },
         "version": scope::VERSION,
     }))
     .into_response()
@@ -145,6 +148,27 @@ mod tests {
     // can be held across `.await` without tripping `clippy::await_holding_lock`.
     static HOME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+    /// H6: the web market panel fills its peg field from here, so the
+    /// resolved config value, not 1.0, is what the user sees.
+    #[tokio::test]
+    async fn test_status_reports_the_configured_peg_target() {
+        let mut config = Config::default();
+        config.market.health.peg_target = 0.92;
+        let http: Arc<dyn scope::http::HttpClient> =
+            Arc::new(scope::http::NativeHttpClient::new().unwrap());
+        let factory = scope::chains::DefaultClientFactory {
+            chains_config: config.chains.clone(),
+            http,
+        };
+        let state = Arc::new(AppState::new(config, factory));
+        let response = handle(State(state)).await.into_response();
+        let body = axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["market"]["peg_target"], 0.92);
+    }
+
     #[test]
     fn test_deserialize_save_config_full() {
         let json = serde_json::json!({
@@ -217,7 +241,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let response = handle(State(state)).await.into_response();
         assert_eq!(response.status(), axum::http::StatusCode::OK);
 
@@ -246,7 +270,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = SaveConfigRequest {
             api_keys: std::collections::HashMap::new(),
             rpc_endpoints: std::collections::HashMap::new(),
@@ -290,7 +314,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
 
         let req = SaveConfigRequest {
             api_keys: std::collections::HashMap::new(),
@@ -361,7 +385,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
 
         let req = SaveConfigRequest {
             api_keys: std::collections::HashMap::new(),
@@ -411,7 +435,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
 
         let mut api_keys = std::collections::HashMap::new();
         api_keys.insert("etherscan".to_string(), "test_key_abc".to_string());

@@ -33,6 +33,27 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// Symbols treated as USD stablecoins, in upper case. Market pair parsing
+/// reads them as quote currencies too (`market::pair`).
+pub const STABLECOIN_SYMBOLS: [&str; 10] = [
+    "USDC", "USDT", "DAI", "BUSD", "TUSD", "USDP", "FRAX", "LUSD", "GUSD", "FDUSD",
+];
+
+/// Whether `symbol` is a known USD stablecoin (case-insensitive). The one
+/// symbol list: insights, the monitor and the ticker volume rules use it.
+pub fn is_stablecoin_symbol(symbol: &str) -> bool {
+    let upper = symbol.to_uppercase();
+    STABLECOIN_SYMBOLS.contains(&upper.as_str())
+}
+
+/// A price that counts as a stablecoin's: within this range of one dollar.
+const STABLECOIN_PRICE_RANGE: std::ops::RangeInclusive<f64> = 0.95..=1.05;
+
+/// Whether `price` (in USD) looks like a stablecoin's price.
+pub fn is_stablecoin_price(price: f64) -> bool {
+    STABLECOIN_PRICE_RANGE.contains(&price)
+}
+
 /// A saved token alias with its address and metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenInfo {

@@ -763,13 +763,13 @@ function renderMarketSummary(resultEl, data) {
     if (data.execution_10k_buy) {
       var b = data.execution_10k_buy;
       execGrid.appendChild(metricCard('Buy VWAP', formatPrice(b.vwap),
-        { text: b.slippage_bps.toFixed(1) + ' bps slippage', cls: b.slippage_bps > 10 ? 'negative' : 'positive' }
+        { text: b.slippage_bps.toFixed(1) + ' bps slippage', cls: b.slippage_bps > data.slippage_warn_bps ? 'negative' : 'positive' }
       ));
     }
     if (data.execution_10k_sell) {
       var s = data.execution_10k_sell;
       execGrid.appendChild(metricCard('Sell VWAP', formatPrice(s.vwap),
-        { text: s.slippage_bps.toFixed(1) + ' bps slippage', cls: s.slippage_bps > 10 ? 'negative' : 'positive' }
+        { text: s.slippage_bps.toFixed(1) + ' bps slippage', cls: s.slippage_bps > data.slippage_warn_bps ? 'negative' : 'positive' }
       ));
     }
     view.appendChild(execGrid);
@@ -1633,11 +1633,17 @@ function runTokenHealth() {
 function runMarket() {
   var pair = document.getElementById('mkt-pair').value.trim();
   if (!pair) return;
-  apiPost('/api/market/summary', {
+  var body = {
     pair: pair,
     market_venue: document.getElementById('mkt-venue').value,
-    peg: parseFloat(document.getElementById('mkt-peg').value) || 1.0,
-  }, document.getElementById('market-results'), renderMarketSummary);
+  };
+  // Send a peg only when the user set one; otherwise the server uses the
+  // configured market.health.peg_target, as the CLI and token health do.
+  var pegEl = document.getElementById('mkt-peg');
+  if (pegEl.dataset.pegUserSet && pegEl.value !== '') {
+    body.peg = parseFloat(pegEl.value);
+  }
+  apiPost('/api/market/summary', body, document.getElementById('market-results'), renderMarketSummary);
 }
 
 function runCompliance() {
@@ -1771,31 +1777,25 @@ async function loadVenues() {
       populateVenueSelects(data.venues);
     }
   } catch (e) {
-    // Silently fall back to hardcoded options
+    // Silently keep the default option in the page
   }
 }
 
+// DEX venues go only to selects marked data-dex (token health, market);
+// the exchange snapshot and monitor read CEX venues only.
 function populateVenueSelects(venues) {
+  var cexVenues = venues.filter(function(v) { return v.kind !== 'dex'; });
   document.querySelectorAll('.venue-select').forEach(function(sel) {
     var hasNone = sel.options.length > 0 && sel.options[0].value === '';
     var currentValue = sel.value;
     while (sel.options.length > (hasNone ? 1 : 0)) {
       sel.remove(hasNone ? 1 : 0);
     }
-    venues.forEach(function(v) {
+    var listed = sel.dataset.dex === undefined ? cexVenues : venues;
+    listed.forEach(function(v) {
       var opt = document.createElement('option');
       opt.value = v.id;
       opt.textContent = v.name;
-      sel.appendChild(opt);
-    });
-    var dexVenues = [
-      { id: 'eth', name: 'Ethereum DEX' },
-      { id: 'solana', name: 'Solana DEX' },
-    ];
-    dexVenues.forEach(function(d) {
-      var opt = document.createElement('option');
-      opt.value = d.id;
-      opt.textContent = d.name;
       sel.appendChild(opt);
     });
     if (currentValue) sel.value = currentValue;
@@ -2209,6 +2209,10 @@ async function loadConfigStatus() {
 
     document.getElementById('version').textContent = 'v' + (data.version || '?');
 
+    // The market panel shows the configured peg until the user edits it.
+    var pegEl = document.getElementById('mkt-peg');
+    if (data.market && !pegEl.dataset.pegUserSet) pegEl.value = data.market.peg_target;
+
     var statusEl = document.getElementById('setup-status');
     clearElement(statusEl);
 
@@ -2304,6 +2308,9 @@ document.querySelectorAll('input[type="text"]').forEach(function(input) {
 });
 
 // ===== Init =====
+document.getElementById('mkt-peg').addEventListener('input', function(e) {
+  e.target.dataset.pegUserSet = '1';
+});
 loadConfigStatus();
 loadAddressBook();
 loadVenues();

@@ -11,7 +11,7 @@ use crate::cli::textfit::{cols, cut_with_ellipsis};
 use scope::chains::dex::TokenSearchResult;
 use scope::display::text::abbreviate;
 use scope::error::Result;
-use scope::market::{ExchangeClient, VenueRegistry};
+use scope::market::{ExchangeClient, Pair, VenueRegistry};
 use std::io::BufRead;
 
 /// The quote a fallback pair uses.
@@ -55,7 +55,7 @@ pub(crate) async fn cex_fallback(
     let registry = VenueRegistry::load().ok()?;
     let client = ExchangeClient::from_descriptor(registry.get(scope::market::DEFAULT_VENUE)?);
     let symbol = symbol.to_uppercase();
-    let pair = client.format_pair(&format!("{symbol}{CEX_FALLBACK_QUOTE}"));
+    let pair = fallback_pair(&client, &symbol);
     let ticker = client.fetch_ticker(&pair).await.ok()?;
     let found = TokenSearchResult {
         address: String::new(),
@@ -73,6 +73,15 @@ pub(crate) async fn cex_fallback(
     );
     progress::notice(spinner, out, &line);
     Some(found)
+}
+
+/// The venue symbol a CEX fallback asks for: `symbol` quoted in
+/// [`CEX_FALLBACK_QUOTE`].
+fn fallback_pair(client: &ExchangeClient, symbol: &str) -> String {
+    client.venue_symbol(&Pair {
+        base: symbol.to_string(),
+        quote: Some(CEX_FALLBACK_QUOTE.to_string()),
+    })
 }
 
 /// The one line that names the token a command uses: symbol, name, chain,
@@ -169,6 +178,17 @@ fn row(cells: [String; 7]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The fallback asked Binance for USDCUSDTUSDT: the quote was glued onto
+    // the symbol and the venue added its default quote again.
+    #[test]
+    fn test_fallback_pair_quotes_the_symbol_once() {
+        let registry = VenueRegistry::load().unwrap();
+        let client =
+            ExchangeClient::from_descriptor(registry.get(scope::market::DEFAULT_VENUE).unwrap());
+        assert_eq!(fallback_pair(&client, "USDC"), "USDCUSDT");
+        assert_eq!(fallback_pair(&client, "OP"), "OPUSDT");
+    }
 
     fn result(symbol: &str, name: &str, address: &str) -> TokenSearchResult {
         TokenSearchResult {

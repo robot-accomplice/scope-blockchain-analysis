@@ -9,6 +9,11 @@ symbol:
   default_quote: usdt
   case: lower
 
+error_envelope:
+  code_key: status
+  ok_codes: ["ok"]
+  message_key: err-msg
+
 capabilities:
   order_book:
     path: /market/depth

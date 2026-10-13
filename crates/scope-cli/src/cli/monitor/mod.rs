@@ -416,7 +416,7 @@ pub(crate) async fn fetch_initial_data(
     match (dex, venue) {
         (Ok(data), _) => Ok((data, None)),
         (Err(dex_err), Some((venue_id, ex))) => {
-            let pair = ex.format_pair(token_input);
+            let pair = crate::cli::market::venue_pair(ex, token_input);
             note!(
                 out,
                 "DexScreener lookup failed ({}); using the {} ticker {} instead",
@@ -470,7 +470,7 @@ async fn exchange_token_data(
 /// currency, so it counts as USD only when the quote is USD or a USD stable.
 pub(crate) fn ticker_usd_volume(ticker: &scope::market::Ticker) -> Option<f64> {
     let (_, quote) = ticker.pair.split_once('/')?;
-    let usd = quote.eq_ignore_ascii_case("USD") || crate::cli::insights::is_stablecoin(quote);
+    let usd = quote.eq_ignore_ascii_case("USD") || scope::tokens::is_stablecoin_symbol(quote);
     if usd {
         ticker.quote_volume(ticker.last_price)
     } else {
@@ -608,6 +608,7 @@ mod tests {
     use super::input::*;
     use super::widgets::*;
     use super::*;
+    use scope::tokens::is_stablecoin_price;
 
     use crossterm::event::{KeyCode, KeyModifiers};
     use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -6251,6 +6252,29 @@ refresh_seconds: 5
     // ========================================================================
     // Coverage gap: Exchange layout render functions (order book, trades, market info)
     // ========================================================================
+
+    #[test]
+    fn test_spread_line_matches_the_market_summary_for_the_same_book() {
+        use scope::market::{
+            BookSource, HealthThresholds, MarketSummary, OrderBook, OrderBookLevel,
+        };
+        let level = |price, quantity| OrderBookLevel { price, quantity };
+        // Zero-quantity top levels are not real orders.
+        let book = OrderBook {
+            pair: "X/USDT".to_string(),
+            source: BookSource::Exchange,
+            bids: vec![level(1.0, 0.0), level(0.999, 500.0)],
+            asks: vec![level(1.0001, 0.0), level(1.001, 500.0)],
+        };
+        let summary = MarketSummary::from_order_book(&book, &HealthThresholds::default(), None);
+        let expected = format!(
+            "  Spread: {:.6} ({:.3}%)",
+            summary.spread.unwrap(),
+            summary.spread_pct.unwrap()
+        );
+        assert_eq!(widgets::spread_line(&book), expected);
+        assert_eq!(expected, "  Spread: 0.002000 (0.200%)");
+    }
 
     #[test]
     fn test_render_order_book_panel_no_data() {

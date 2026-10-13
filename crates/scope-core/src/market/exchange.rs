@@ -78,14 +78,11 @@ impl ExchangeClient {
         &self.venue_name
     }
 
-    /// Format a trading pair for this venue.
-    pub fn format_pair(&self, base: &str) -> String {
-        self.descriptor.format_pair(base, None)
-    }
-
-    /// Format a trading pair with explicit quote currency.
-    pub fn format_pair_with_quote(&self, base: &str, quote: &str) -> String {
-        self.descriptor.format_pair(base, Some(quote))
+    /// The venue's symbol for a pair; a pair with no quote uses the venue's
+    /// default quote.
+    pub fn venue_symbol(&self, pair: &super::pair::Pair) -> String {
+        self.descriptor
+            .format_pair(&pair.base, pair.quote.as_deref())
     }
 
     // =========================================================================
@@ -204,6 +201,7 @@ impl std::fmt::Debug for ExchangeClient {
 mod tests {
     use super::*;
     use crate::market::descriptor::{CapabilitySet, SymbolCase, SymbolConfig, VenueDescriptor};
+    use crate::market::pair::Pair;
     use crate::market::registry::VenueRegistry;
     use std::collections::HashMap;
 
@@ -220,6 +218,7 @@ mod tests {
                 case: SymbolCase::Upper,
             },
             headers: HashMap::new(),
+            error_envelope: None,
             capabilities: CapabilitySet::default(),
         }
     }
@@ -242,8 +241,17 @@ mod tests {
         let registry = VenueRegistry::default();
         let desc = registry.get("binance").unwrap();
         let client = ExchangeClient::from_descriptor(desc);
-        assert_eq!(client.format_pair("BTC"), "BTCUSDT");
-        assert_eq!(client.format_pair_with_quote("ETH", "USD"), "ETHUSD");
+        assert_eq!(client.venue_symbol(&Pair::parse("ETH_USD")), "ETHUSD");
+        assert_eq!(client.venue_symbol(&Pair::parse("BTC")), "BTCUSDT");
+    }
+
+    /// The audit input: the CLI and the web both send `DAIUSDC`, not
+    /// `DAI_USDCUSDT`.
+    #[test]
+    fn test_dai_usdc_on_binance_is_daiusdc() {
+        let registry = VenueRegistry::default();
+        let client = ExchangeClient::from_descriptor(registry.get("binance").unwrap());
+        assert_eq!(client.venue_symbol(&Pair::parse("DAI_USDC")), "DAIUSDC");
     }
 
     #[test]

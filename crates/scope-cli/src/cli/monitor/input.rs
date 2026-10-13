@@ -64,7 +64,7 @@ impl MonitorApp {
 
         // If we have an exchange client, set up the venue pair for OHLC queries
         if let Some(ref ex) = exchange_client {
-            let pair = ex.format_pair(&initial_data.symbol);
+            let pair = ex.venue_symbol(&scope::market::Pair::parse(&initial_data.symbol));
             state.venue_pair = Some(pair);
             state.venue = Some(ex.venue_id().to_string());
         }

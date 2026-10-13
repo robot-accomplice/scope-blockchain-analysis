@@ -27,7 +27,7 @@ pub mod monitor;
 
 use axum::Router;
 use axum::response::IntoResponse;
-use scope::chains::DefaultClientFactory;
+use scope::chains::{ChainClientFactory, DefaultClientFactory};
 use scope::config::Config;
 use scope_cli::cli::output::Output;
 use scope_cli::note;
@@ -39,8 +39,19 @@ use tower_http::cors::{Any, CorsLayer};
 pub struct AppState {
     /// Application configuration (same as CLI).
     pub config: Config,
-    /// Client factory for creating chain and DEX clients.
-    pub factory: DefaultClientFactory,
+    /// Client factory for creating chain and DEX clients. A trait object, so
+    /// handler tests can run on a mock factory without network.
+    pub factory: Box<dyn ChainClientFactory>,
+}
+
+impl AppState {
+    /// State with `config` and the `factory` that builds chain clients.
+    pub fn new(config: Config, factory: impl ChainClientFactory + 'static) -> Self {
+        Self {
+            config,
+            factory: Box::new(factory),
+        }
+    }
 }
 
 /// Builds the Axum router with all API routes and static file serving.
@@ -112,7 +123,7 @@ pub async fn start_server(addr: SocketAddr, config: Config, out: &Output) -> any
         chains_config: config.chains.clone(),
         http,
     };
-    let state = Arc::new(AppState { config, factory });
+    let state = Arc::new(AppState::new(config, factory));
     let app = build_router(state);
 
     tracing::info!("Scope web server listening on http://{}", addr);
@@ -290,7 +301,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = Arc::new(AppState { config, factory });
+        let state = Arc::new(AppState::new(config, factory));
         let _router = build_router(state);
     }
 
@@ -313,6 +324,39 @@ mod tests {
         let html = String::from_utf8(body.to_vec()).unwrap();
         assert!(html.contains("<!DOCTYPE html>"));
         assert!(html.contains("Scope"));
+    }
+
+    /// H6: the market panel must not send a peg the user did not set, or the
+    /// configured `market.health.peg_target` never applies on the web.
+    #[test]
+    fn test_ui_sends_peg_only_when_the_user_sets_it() {
+        let js = include_str!("static/app.js");
+        let html = include_str!("static/index.html");
+        assert!(!js.contains("|| 1.0"), "app.js falls back to a fixed peg");
+        assert!(
+            !html.contains(r#"id="mkt-peg" value="#),
+            "index.html fixes the peg field value"
+        );
+        assert!(
+            js.contains("market.peg_target"),
+            "peg field not filled from config"
+        );
+        assert!(js.contains("pegUserSet"), "peg not gated on a user edit");
+    }
+
+    /// M5: DEX venues come from `/api/venues`, not from lists in the UI.
+    #[test]
+    fn test_ui_hard_codes_no_dex_venue() {
+        let js = include_str!("static/app.js");
+        let html = include_str!("static/index.html");
+        for text in ["Ethereum DEX", "Solana DEX"] {
+            assert!(!js.contains(text), "app.js lists {text}");
+            assert!(!html.contains(text), "index.html lists {text}");
+        }
+        assert!(
+            js.contains("v.kind !== 'dex'"),
+            "CEX-only selects must drop DEX venues"
+        );
     }
 
     #[tokio::test]
@@ -461,7 +505,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = AppState { config, factory };
+        let state = AppState::new(config, factory);
         // Verify state fields are accessible
         let _ = state.config.chains.api_keys.len();
     }
@@ -493,7 +537,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        Arc::new(AppState { config, factory })
+        Arc::new(AppState::new(config, factory))
     }
 
     // ========================================================================

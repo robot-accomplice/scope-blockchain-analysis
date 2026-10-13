@@ -67,7 +67,7 @@ pub async fn handle(
         &chain,
         period,
         req.holders_limit,
-        &state.factory,
+        state.factory.as_ref(),
         None,
         &scope_cli::cli::output::Output::stdio(),
     )
@@ -164,7 +164,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = CrawlRequest {
             token: "USDC".to_string(),
             chain: "ethereum".to_string(),
@@ -198,7 +198,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = CrawlRequest {
             token: "@no-such-token".to_string(),
             chain: "ethereum".to_string(),

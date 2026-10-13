@@ -17,8 +17,9 @@ use scope::config::Config;
 use super::health_args::HealthArgs;
 use scope::display::report;
 use scope::error::Result;
-use scope::market::{MarketSummary, VenueRegistry};
-use scope::tokens::TokenAliases;
+use scope::market::health::PegStatus;
+use scope::market::{MarketSummary, MarketVenue, VenueRegistry, fetch_token_summary};
+use scope::tokens::{TokenAliases, is_stablecoin_symbol};
 
 /// Target type inferred from user input.
 #[derive(Debug, Clone)]
@@ -372,8 +373,8 @@ pub async fn run(
             ));
 
             // Stablecoin: auto-include market/peg via venue registry
-            let mut peg_healthy: Option<bool> = None;
-            if is_stablecoin(&analytics.token.symbol)
+            let mut peg_status: Option<PegStatus> = None;
+            if is_stablecoin_symbol(&analytics.token.symbol)
                 && let Ok(registry) = VenueRegistry::load()
             {
                 // Try binance first, fall back to any available CEX
@@ -386,41 +387,14 @@ pub async fn run(
                         .copied()
                         .unwrap_or(scope::market::DEFAULT_VENUE)
                 };
-                if let Ok(exchange) = registry.create_exchange_client(venue_id) {
-                    let pair = exchange.format_pair(&analytics.token.symbol);
-                    if let Ok(book) = exchange.fetch_order_book(&pair).await {
-                        let thresholds = args.health.resolve(config);
-                        let volume_24h = if exchange.has_ticker() {
-                            exchange
-                                .fetch_ticker(&pair)
-                                .await
-                                .ok()
-                                .and_then(|t| t.quote_volume(book.mid_price()))
-                        } else {
-                            None
-                        };
-                        let summary =
-                            MarketSummary::from_order_book(&book, &thresholds, volume_24h);
-                        let deviation_bps = summary
-                            .mid_price
-                            .map(|m| (m - 1.0) * 10_000.0)
-                            .unwrap_or(0.0);
-                        peg_healthy = Some(deviation_bps.abs() < 10.0);
-                        let peg_status = if peg_healthy.unwrap_or(false) {
-                            "Peg healthy"
-                        } else if deviation_bps.abs() < 50.0 {
-                            "Slight peg deviation"
-                        } else {
-                            "Peg deviation"
-                        };
-                        output.push_str(&format!(
-                            "- **Market ({} {}):** {} (deviation: {:.1} bps)\n",
-                            exchange.venue_name(),
-                            pair,
-                            peg_status,
-                            deviation_bps
-                        ));
-                    }
+                let thresholds = args.health.resolve(config);
+                if let (Some(desc), Ok(venue)) = (
+                    registry.get(venue_id),
+                    MarketVenue::resolve(venue_id, &registry),
+                ) && let Ok(summary) = fetch_token_summary(&venue, &analytics, &thresholds).await
+                {
+                    peg_status = Some(summary.peg_status());
+                    output.push_str(&peg_line(&desc.name, &summary.pair, &summary));
                 }
             }
 
@@ -428,8 +402,8 @@ pub async fn run(
             let top_holder_pct = analytics.holders.first().map(|h| h.percentage);
             let meta = meta_analysis_token(
                 &risk_summary,
-                is_stablecoin(&analytics.token.symbol),
-                peg_healthy,
+                is_stablecoin_symbol(&analytics.token.symbol),
+                peg_status,
                 top_holder_pct,
                 analytics.liquidity_usd,
             );
@@ -518,12 +492,72 @@ fn format_tx_value(value_str: &str, chain: &str) -> (String, bool) {
     (formatted, high_value)
 }
 
-/// Common stablecoin symbols for auto-including market/peg analysis.
-pub(crate) fn is_stablecoin(symbol: &str) -> bool {
-    matches!(
-        symbol.to_uppercase().as_str(),
-        "USDC" | "USDT" | "DAI" | "BUSD" | "TUSD" | "USDP" | "FRAX" | "LUSD" | "GUSD"
-    )
+/// The words for one peg status, written once. The market line, the
+/// executive summary, the key takeaway and the recommendation all read it.
+struct PegWords {
+    /// Label on the market line.
+    label: &'static str,
+    /// Sentence for the executive summary, when there is something to say.
+    synthesis: Option<&'static str>,
+    /// Key takeaway that replaces the generic one, when the peg is a concern.
+    takeaway: Option<&'static str>,
+    /// Whether to recommend verifying the peg on other venues.
+    verify_elsewhere: bool,
+}
+
+fn peg_words(status: PegStatus) -> PegWords {
+    const DEVIATION_SYNTHESIS: &str =
+        "Stablecoin peg deviation detected — verify on multiple venues.";
+    const DEVIATION_TAKEAWAY: &str =
+        "Stablecoin deviating from peg — check additional venues before trading.";
+    match status {
+        PegStatus::OnPeg => PegWords {
+            label: "Peg healthy",
+            synthesis: Some("Stablecoin peg is healthy on observed venue."),
+            takeaway: None,
+            verify_elsewhere: false,
+        },
+        PegStatus::BookUnhealthy => PegWords {
+            label: "Peg on target, but market health checks fail",
+            synthesis: Some(
+                "Stablecoin peg is on target, but the market's health checks fail — verify on multiple venues.",
+            ),
+            takeaway: Some(
+                "Stablecoin market health checks fail — check additional venues before trading.",
+            ),
+            verify_elsewhere: true,
+        },
+        PegStatus::SlightDeviation => PegWords {
+            label: "Slight peg deviation",
+            synthesis: Some(DEVIATION_SYNTHESIS),
+            takeaway: Some(DEVIATION_TAKEAWAY),
+            verify_elsewhere: true,
+        },
+        PegStatus::Deviation => PegWords {
+            label: "Peg deviation",
+            synthesis: Some(DEVIATION_SYNTHESIS),
+            takeaway: Some(DEVIATION_TAKEAWAY),
+            verify_elsewhere: true,
+        },
+        PegStatus::NoPrice => PegWords {
+            label: "Peg unknown (no mid price: a side has no valid level)",
+            synthesis: None,
+            takeaway: None,
+            verify_elsewhere: true,
+        },
+    }
+}
+
+/// The peg line of the insights report. The verdict is the market
+/// summary's own ([`MarketSummary::peg_status`]); this only words it.
+fn peg_line(venue: &str, pair: &str, summary: &MarketSummary) -> String {
+    let label = peg_words(summary.peg_status()).label;
+    let deviation = summary
+        .mid_price
+        .and_then(|mid| summary.peg_deviation_bps(mid))
+        .map(|bps| format!(" (deviation: {bps:.1} bps)"))
+        .unwrap_or_default();
+    format!("- **Market ({venue} {pair}):** {label}{deviation}\n")
 }
 
 /// Meta-analysis: synthesizes observations into an executive summary, key takeaway, and recommendations.
@@ -665,7 +699,7 @@ fn meta_analysis_tx(
 fn meta_analysis_token(
     risk_summary: &report::TokenRiskSummary,
     is_stablecoin: bool,
-    peg_healthy: Option<bool>,
+    peg: Option<PegStatus>,
     top_holder_pct: Option<f64>,
     liquidity_usd: f64,
 ) -> MetaAnalysis {
@@ -679,13 +713,9 @@ fn meta_analysis_token(
         synthesis_parts.push("Moderate risk — mixed signals.".to_string());
     }
 
-    if is_stablecoin && let Some(healthy) = peg_healthy {
-        if healthy {
-            synthesis_parts.push("Stablecoin peg is healthy on observed venue.".to_string());
-        } else {
-            synthesis_parts
-                .push("Stablecoin peg deviation detected — verify on multiple venues.".to_string());
-        }
+    let peg_words = peg.filter(|_| is_stablecoin).map(peg_words);
+    if let Some(sentence) = peg_words.as_ref().and_then(|w| w.synthesis) {
+        synthesis_parts.push(sentence.to_string());
     }
 
     if top_holder_pct.map(|p| p > 30.0).unwrap_or(false) {
@@ -710,8 +740,8 @@ fn meta_analysis_token(
                 .cloned()
                 .unwrap_or_else(|| "multiple factors".to_string())
         )
-    } else if is_stablecoin && peg_healthy == Some(false) {
-        "Stablecoin deviating from peg — check additional venues before trading.".to_string()
+    } else if let Some(takeaway) = peg_words.as_ref().and_then(|w| w.takeaway) {
+        takeaway.to_string()
     } else if !risk_summary.positives.is_empty() && risk_summary.concerns.is_empty() {
         "Favorable risk profile — standard diligence applies.".to_string()
     } else {
@@ -729,7 +759,7 @@ fn meta_analysis_token(
     if top_holder_pct.map(|p| p > 25.0).unwrap_or(false) {
         recommendations.push("Monitor top holder movements for distribution changes.".to_string());
     }
-    if is_stablecoin && peg_healthy != Some(true) {
+    if is_stablecoin && peg_words.as_ref().is_none_or(|w| w.verify_elsewhere) {
         recommendations.push("Verify peg across multiple DEX/CEX venues.".to_string());
     }
     if liquidity_usd < 100_000.0 && risk_summary.score <= 5 {
@@ -746,6 +776,100 @@ fn meta_analysis_token(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use scope::market::{BookSource, HealthThresholds, OrderBook, OrderBookLevel};
+
+    fn summary_with_peg(peg_target: f64, mid_price: Option<f64>) -> MarketSummary {
+        let level = |price| OrderBookLevel {
+            price,
+            quantity: 1000.0,
+        };
+        let book = OrderBook {
+            pair: "X/USDT".to_string(),
+            source: BookSource::Exchange,
+            bids: vec![level(peg_target)],
+            asks: vec![level(peg_target)],
+        };
+        let thresholds = HealthThresholds {
+            peg_target,
+            ..HealthThresholds::default()
+        };
+        let mut summary = MarketSummary::from_order_book(&book, &thresholds, None);
+        summary.mid_price = mid_price;
+        // A one-level book fails the level checks; these tests judge the peg.
+        summary.healthy = true;
+        summary
+    }
+
+    #[test]
+    fn test_peg_line_uses_the_summary_peg_target_not_one() {
+        // 6 bps above a 0.5 peg is healthy; measured against 1.0 it would be 5000 bps.
+        let on_peg = summary_with_peg(0.5, Some(0.5003));
+        assert_eq!(on_peg.peg_status(), PegStatus::OnPeg);
+        let line = peg_line("v", "X/USDT", &on_peg);
+        assert!(
+            line.contains("Peg healthy") && line.contains("6.0 bps"),
+            "{line}"
+        );
+        assert_eq!(
+            summary_with_peg(0.5, Some(0.5020)).peg_status(),
+            PegStatus::SlightDeviation
+        );
+        assert_eq!(
+            summary_with_peg(0.5, Some(0.52)).peg_status(),
+            PegStatus::Deviation
+        );
+    }
+
+    #[test]
+    fn test_peg_line_never_says_healthy_without_a_mid() {
+        let summary = summary_with_peg(1.0, None);
+        assert_eq!(summary.peg_status(), PegStatus::NoPrice);
+        assert!(!peg_line("v", "X/USDT", &summary).contains("Peg healthy"));
+    }
+
+    #[test]
+    fn test_peg_line_never_says_healthy_when_the_market_summary_is_unhealthy() {
+        let mut summary = summary_with_peg(1.0, Some(1.0));
+        summary.healthy = false;
+        assert_eq!(summary.peg_status(), PegStatus::BookUnhealthy);
+        assert!(!peg_line("v", "X/USDT", &summary).contains("Peg healthy"));
+    }
+
+    #[test]
+    fn test_book_unhealthy_is_worded_the_same_on_every_line() {
+        let mut summary = summary_with_peg(1.0, Some(1.0));
+        summary.healthy = false;
+        let status = summary.peg_status();
+        let line = peg_line("v", "X/USDT", &summary);
+        assert!(line.contains("market health checks fail"), "{line}");
+        let risk = report::TokenRiskSummary {
+            score: 3,
+            level: "Low",
+            emoji: "🟢",
+            concerns: vec![],
+            positives: vec![],
+        };
+        let meta = meta_analysis_token(&risk, true, Some(status), None, 5_000_000.0);
+        assert!(
+            meta.synthesis.contains("health checks fail"),
+            "{}",
+            meta.synthesis
+        );
+        assert!(!meta.synthesis.contains("deviation detected"));
+        assert!(meta.key_takeaway.contains("health checks fail"));
+        assert!(meta.recommendations.iter().any(|r| r.contains("peg")));
+    }
+
+    #[test]
+    fn test_peg_bands_follow_the_configured_peg_range() {
+        // With a range of 0.01, a mid 0.4% off the peg is still on the peg.
+        let mut summary = summary_with_peg(1.0, Some(1.004));
+        summary.peg_range = 0.01;
+        assert_eq!(summary.peg_status(), PegStatus::OnPeg);
+        summary.peg_range = 0.001;
+        assert_eq!(summary.peg_status(), PegStatus::SlightDeviation);
+    }
+
     use async_trait::async_trait;
     use scope::chains::{
         Balance as ChainBalance, ChainClient, ChainClientFactory, DexDataSource,
@@ -1327,31 +1451,31 @@ mod tests {
 
     #[test]
     fn test_is_stablecoin() {
-        assert!(is_stablecoin("USDC"));
-        assert!(is_stablecoin("usdt"));
-        assert!(is_stablecoin("DAI"));
-        assert!(is_stablecoin("BUSD"));
-        assert!(is_stablecoin("TUSD"));
-        assert!(is_stablecoin("USDP"));
-        assert!(is_stablecoin("FRAX"));
-        assert!(is_stablecoin("LUSD"));
-        assert!(is_stablecoin("GUSD"));
-        assert!(!is_stablecoin("ETH"));
-        assert!(!is_stablecoin("PEPE"));
-        assert!(!is_stablecoin("WBTC"));
+        assert!(is_stablecoin_symbol("USDC"));
+        assert!(is_stablecoin_symbol("usdt"));
+        assert!(is_stablecoin_symbol("DAI"));
+        assert!(is_stablecoin_symbol("BUSD"));
+        assert!(is_stablecoin_symbol("TUSD"));
+        assert!(is_stablecoin_symbol("USDP"));
+        assert!(is_stablecoin_symbol("FRAX"));
+        assert!(is_stablecoin_symbol("LUSD"));
+        assert!(is_stablecoin_symbol("GUSD"));
+        assert!(!is_stablecoin_symbol("ETH"));
+        assert!(!is_stablecoin_symbol("PEPE"));
+        assert!(!is_stablecoin_symbol("WBTC"));
     }
 
     #[test]
     fn test_is_stablecoin_empty_string() {
-        assert!(!is_stablecoin(""));
+        assert!(!is_stablecoin_symbol(""));
     }
 
     #[test]
     fn test_is_stablecoin_case_insensitive() {
         // to_uppercase() makes comparison case-insensitive
-        assert!(is_stablecoin("UsDc"));
-        assert!(is_stablecoin("FraX"));
-        assert!(!is_stablecoin("SOL")); // SOL is not a stablecoin
+        assert!(is_stablecoin_symbol("UsDc"));
+        assert!(is_stablecoin_symbol("FraX"));
+        assert!(!is_stablecoin_symbol("SOL")); // SOL is not a stablecoin
     }
 
     // ====================================================================
@@ -1797,7 +1921,7 @@ mod tests {
             concerns: vec![],
             positives: vec!["Stable peg".to_string()],
         };
-        let meta = meta_analysis_token(&summary, true, Some(true), None, 5_000_000.0);
+        let meta = meta_analysis_token(&summary, true, Some(PegStatus::OnPeg), None, 5_000_000.0);
         assert!(meta.synthesis.contains("Stablecoin peg is healthy"));
     }
 
@@ -1810,7 +1934,7 @@ mod tests {
             concerns: vec![],
             positives: vec![],
         };
-        let meta = meta_analysis_token(&summary, true, Some(false), None, 500_000.0);
+        let meta = meta_analysis_token(&summary, true, Some(PegStatus::Deviation), None, 500_000.0);
         assert!(meta.synthesis.contains("peg deviation"));
         assert!(meta.key_takeaway.contains("deviating from peg"));
         assert!(meta.recommendations.iter().any(|r| r.contains("peg")));
@@ -1861,7 +1985,7 @@ mod tests {
             positives: vec![],
         };
         let meta = meta_analysis_token(&summary, true, None, None, 1_000_000.0);
-        // When peg_healthy is None, recommendation should still suggest verifying peg
+        // When there is no peg status, recommendation should still suggest verifying peg
         assert!(meta.recommendations.iter().any(|r| r.contains("peg")));
     }
 
@@ -2166,7 +2290,7 @@ mod tests {
             concerns: vec![],
             positives: vec!["Strong liquidity".to_string()],
         };
-        let meta = meta_analysis_token(&risk, true, Some(true), Some(5.0), 5_000_000.0);
+        let meta = meta_analysis_token(&risk, true, Some(PegStatus::OnPeg), Some(5.0), 5_000_000.0);
         assert!(meta.synthesis.contains("peg is healthy"));
         assert!(meta.synthesis.contains("Strong liquidity"));
     }
@@ -2180,7 +2304,13 @@ mod tests {
             concerns: vec!["Peg deviation".to_string()],
             positives: vec![],
         };
-        let meta = meta_analysis_token(&risk, true, Some(false), Some(40.0), 100_000.0);
+        let meta = meta_analysis_token(
+            &risk,
+            true,
+            Some(PegStatus::Deviation),
+            Some(40.0),
+            100_000.0,
+        );
         assert!(meta.synthesis.contains("peg deviation"));
         assert!(meta.synthesis.contains("Concentration risk"));
     }

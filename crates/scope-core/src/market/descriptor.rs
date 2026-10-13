@@ -201,6 +201,68 @@ pub struct VenueDescriptor {
     /// Available API capabilities.
     #[serde(default)]
     pub capabilities: CapabilitySet,
+    /// How the venue reports an error inside an HTTP 200 reply (#69).
+    #[serde(default)]
+    pub error_envelope: Option<ErrorEnvelope>,
+}
+
+/// The fields that carry an error in a successful (HTTP 200) venue reply.
+///
+/// With `code_key`, the reply is an error when that field is present and its
+/// value is not in `ok_codes`. Without it, the reply is an error when
+/// `message_key` holds a non-empty string or array (Kraken's `error: [...]`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ErrorEnvelope {
+    /// Field with the status code (e.g. `retCode`). A missing field means success.
+    #[serde(default)]
+    pub code_key: Option<String>,
+    /// Code values that mean success, compared as strings (e.g. `"0"`).
+    #[serde(default)]
+    pub ok_codes: Vec<String>,
+    /// Field with the venue's error message (e.g. `retMsg`).
+    pub message_key: String,
+}
+
+impl ErrorEnvelope {
+    /// The venue's error message, or `None` when the reply is not an error.
+    pub fn error_message(&self, reply: &serde_json::Value) -> Option<String> {
+        let message = reply.get(&self.message_key);
+        let text = || match message {
+            Some(serde_json::Value::String(s)) => s.clone(),
+            Some(serde_json::Value::Array(items)) => items
+                .iter()
+                .map(|v| v.as_str().map_or_else(|| v.to_string(), str::to_string))
+                .collect::<Vec<_>>()
+                .join("; "),
+            Some(other) => other.to_string(),
+            None => String::new(),
+        };
+        match &self.code_key {
+            Some(key) => {
+                let code = reply.get(key)?;
+                let code = code
+                    .as_str()
+                    .map_or_else(|| code.to_string(), str::to_string);
+                if self.ok_codes.contains(&code) {
+                    return None;
+                }
+                let msg = text();
+                Some(if msg.is_empty() {
+                    format!("error code {code}")
+                } else {
+                    format!("{msg} (code {code})")
+                })
+            }
+            None => {
+                let failed = match message {
+                    Some(serde_json::Value::String(s)) => !s.is_empty(),
+                    Some(serde_json::Value::Array(items)) => !items.is_empty(),
+                    _ => false,
+                };
+                failed.then(text)
+            }
+        }
+    }
 }
 
 impl VenueDescriptor {
@@ -283,6 +345,7 @@ mod tests {
                 case: SymbolCase::Upper,
             },
             headers: HashMap::new(),
+            error_envelope: None,
             capabilities: CapabilitySet::default(),
         };
         assert_eq!(desc.format_pair("BTC", None), "BTCUSDT");
@@ -304,6 +367,7 @@ mod tests {
                 case: SymbolCase::Lower,
             },
             headers: HashMap::new(),
+            error_envelope: None,
             capabilities: CapabilitySet::default(),
         };
         assert_eq!(desc.format_pair("BTC", None), "btcusdt");
@@ -323,6 +387,7 @@ mod tests {
                 case: SymbolCase::Upper,
             },
             headers: HashMap::new(),
+            error_envelope: None,
             capabilities: CapabilitySet::default(),
         };
         assert_eq!(desc.format_pair("DAI", None), "DAI_USDT");
@@ -342,6 +407,7 @@ mod tests {
                 case: SymbolCase::Upper,
             },
             headers: HashMap::new(),
+            error_envelope: None,
             capabilities: CapabilitySet::default(),
         };
         assert_eq!(desc.format_pair("BTC", None), "BTC-USDT");
@@ -361,6 +427,7 @@ mod tests {
                 case: SymbolCase::Upper,
             },
             headers: HashMap::new(),
+            error_envelope: None,
             capabilities: CapabilitySet {
                 order_book: Some(EndpointDescriptor {
                     method: HttpMethod::GET,
@@ -410,6 +477,7 @@ mod tests {
                 case: SymbolCase::Upper,
             },
             headers: HashMap::new(),
+            error_envelope: None,
             capabilities: CapabilitySet {
                 order_book: Some(EndpointDescriptor {
                     method: HttpMethod::GET,
@@ -440,6 +508,7 @@ rate_limit_per_sec: 10
 symbol:
   template: "{base}{quote}"
   default_quote: USDT
+
 
 capabilities:
   order_book:
@@ -523,6 +592,7 @@ symbol:
   default_quote: USDT
   case: lower
 
+
 capabilities:
   order_book:
     path: /market/depth
@@ -552,6 +622,7 @@ base_url: https://api.crypto.com/exchange/v1
 symbol:
   template: "{base}_{quote}"
   default_quote: USDT
+
 
 capabilities:
   order_book:
@@ -585,6 +656,7 @@ base_url: https://api.coinbase.com
 symbol:
   template: "{base}-{quote}"
   default_quote: USD
+
 
 capabilities:
   order_book:
@@ -622,6 +694,7 @@ capabilities:
                 case: SymbolCase::Upper,
             },
             headers: HashMap::new(),
+            error_envelope: None,
             capabilities: CapabilitySet::default(),
         };
         assert_eq!(desc.format_pair("btc", None), "BTCUSDT");
@@ -642,6 +715,7 @@ capabilities:
                 case: SymbolCase::Lower,
             },
             headers: HashMap::new(),
+            error_envelope: None,
             capabilities: CapabilitySet::default(),
         };
         assert_eq!(desc.format_pair("BTC", None), "btcusdt");
@@ -662,6 +736,7 @@ capabilities:
                 case: SymbolCase::Upper,
             },
             headers: HashMap::new(),
+            error_envelope: None,
             capabilities: CapabilitySet::default(),
         };
         assert_eq!(desc.format_pair("BTC", None), "BTC_USDT");
@@ -683,6 +758,7 @@ capabilities:
                 case: SymbolCase::Upper,
             },
             headers: HashMap::new(),
+            error_envelope: None,
             capabilities: CapabilitySet::default(),
         };
         assert!(desc.capability_names().is_empty());
@@ -700,6 +776,7 @@ capabilities:
                 case: SymbolCase::Upper,
             },
             headers: HashMap::new(),
+            error_envelope: None,
             capabilities: CapabilitySet {
                 order_book: None,
                 ticker: None,
@@ -732,6 +809,7 @@ capabilities:
                 case: SymbolCase::Upper,
             },
             headers: HashMap::new(),
+            error_envelope: None,
             capabilities: CapabilitySet {
                 order_book: Some(EndpointDescriptor {
                     method: HttpMethod::GET,
@@ -750,6 +828,7 @@ capabilities:
         assert!(with_ob.has_order_book());
 
         let without = VenueDescriptor {
+            error_envelope: None,
             capabilities: CapabilitySet::default(),
             ..with_ob
         };
@@ -770,6 +849,7 @@ capabilities:
                 case: SymbolCase::Upper,
             },
             headers: HashMap::new(),
+            error_envelope: None,
             capabilities: CapabilitySet {
                 order_book: None,
                 ticker: Some(EndpointDescriptor {
@@ -788,6 +868,7 @@ capabilities:
         assert!(with_ticker.has_ticker());
 
         let without = VenueDescriptor {
+            error_envelope: None,
             capabilities: CapabilitySet::default(),
             ..with_ticker
         };
@@ -808,6 +889,7 @@ capabilities:
                 case: SymbolCase::Upper,
             },
             headers: HashMap::new(),
+            error_envelope: None,
             capabilities: CapabilitySet {
                 order_book: None,
                 ticker: None,
@@ -826,6 +908,7 @@ capabilities:
         assert!(with_trades.has_trades());
 
         let without = VenueDescriptor {
+            error_envelope: None,
             capabilities: CapabilitySet::default(),
             ..with_trades
         };
@@ -846,6 +929,7 @@ capabilities:
                 case: SymbolCase::Upper,
             },
             headers: HashMap::new(),
+            error_envelope: None,
             capabilities: CapabilitySet {
                 order_book: None,
                 ticker: None,
@@ -865,6 +949,7 @@ capabilities:
         assert!(with_ohlc.capability_names().contains(&"ohlc"));
 
         let without = VenueDescriptor {
+            error_envelope: None,
             capabilities: CapabilitySet::default(),
             ..with_ohlc
         };
@@ -900,6 +985,7 @@ base_url: https://api.example.com
 symbol:
   template: "{base}{quote}"
   default_quote: USDT
+
 
 capabilities:
   order_book:
@@ -940,6 +1026,7 @@ base_url: https://api.biconomy.com
 symbol:
   template: "{base}_{quote}"
   default_quote: USDT
+
 
 capabilities:
   ohlc:
@@ -1024,6 +1111,7 @@ symbol:
 headers:
   X-API-KEY: "placeholder"
 
+
 capabilities:
   order_book:
     path: /book
@@ -1061,5 +1149,68 @@ capabilities:
             desc.capability_names(),
             vec!["order_book", "ticker", "trades"]
         );
+    }
+
+    // #69: each built-in envelope must flag the venue's real error reply and
+    // pass its real success reply. The replies were recorded on 2026-10-13
+    // with an unknown symbol (error) and BTC (success).
+    #[test]
+    fn test_builtin_error_envelopes_match_recorded_replies() {
+        let cases: [(&str, &str, &str, &str); 5] = [
+            (
+                include_str!("../../venues/bybit.yaml"),
+                r#"{"retCode":10001,"retMsg":"Not supported symbols","result":{}}"#,
+                r#"{"retCode":0,"retMsg":"OK","result":{"a":[],"b":[]}}"#,
+                "Not supported symbols (code 10001)",
+            ),
+            (
+                include_str!("../../venues/okx.yaml"),
+                r#"{"code":"51001","msg":"Instrument ID does not exist."}"#,
+                r#"{"code":"0","msg":"","data":[]}"#,
+                "Instrument ID does not exist. (code 51001)",
+            ),
+            (
+                include_str!("../../venues/htx.yaml"),
+                r#"{"status":"error","err-code":"invalid-parameter","err-msg":"invalid symbol"}"#,
+                r#"{"ch":"market.btcusdt.depth.step0","status":"ok","tick":{}}"#,
+                "invalid symbol (code error)",
+            ),
+            (
+                include_str!("../../venues/kraken.yaml"),
+                r#"{"error":["EQuery:Unknown asset pair"]}"#,
+                r#"{"error":[],"result":{"XXBTZUSD":{}}}"#,
+                "EQuery:Unknown asset pair",
+            ),
+            (
+                include_str!("../../venues/biconomy.yaml"),
+                r#"{"code":1,"message":"Illegal parameter","result":null}"#,
+                r#"{"asks":[["83528.01","0.18615"]],"bids":[["83528","0.17478"]]}"#,
+                "Illegal parameter (code 1)",
+            ),
+        ];
+        for (yaml, error_reply, ok_reply, expected) in cases {
+            let desc: VenueDescriptor = serde_yaml::from_str(yaml).unwrap();
+            let env = desc.error_envelope.as_ref().expect("envelope");
+            let error: serde_json::Value = serde_json::from_str(error_reply).unwrap();
+            let ok: serde_json::Value = serde_json::from_str(ok_reply).unwrap();
+            assert_eq!(
+                env.error_message(&error).as_deref(),
+                Some(expected),
+                "{}",
+                desc.id
+            );
+            assert_eq!(env.error_message(&ok), None, "{}", desc.id);
+        }
+    }
+
+    #[test]
+    fn test_error_envelope_code_without_message() {
+        let env = ErrorEnvelope {
+            code_key: Some("code".into()),
+            ok_codes: vec!["0".into()],
+            message_key: "msg".into(),
+        };
+        let reply = serde_json::json!({"code": 7});
+        assert_eq!(env.error_message(&reply).as_deref(), Some("error code 7"));
     }
 }

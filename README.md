@@ -803,7 +803,7 @@ Use `--venue binance` (or any CEX venue) to fetch real exchange OHLC data instea
 
 - **`--venue`** must name a known venue (`scope venues list`). An unknown venue is an error.
 - **When DexScreener fails** (unreachable, blocked, or the token is unknown there) and `--venue` is set, the monitor uses that venue's ticker for the token and tells you why.
-- **`--pair`** prices the token from the venue alone (exchange-only mode). Write the pair in any common form, `USDN_USDT`, `USDN/USDT`, `USDN-USDT` or `USDNUSDT`; scope converts it to the venue's own format.
+- **`--pair`** prices the token from the venue alone (exchange-only mode). Write the pair in any common form, `USDN_USDT`, `USDN/USDT`, `USDN-USDT` or `USDNUSDT` (the joined form only for a stable or fiat quote such as USDT, USDC, DAI, EUR); scope converts it to the venue's own format.
 - **`--export FILE`** starts CSV export to that file at launch. The `E` key starts an export in the directory set by `monitor.export.path` in `config.yaml` (default `./scope-exports/`). A file that cannot be written is an error, not a silent no-op.
 
 The monitor supports five layout presets that can be switched at runtime or configured in `config.yaml`:
@@ -980,7 +980,10 @@ just lint      # Run lints
 just summary   # USDC market summary (peg, spread, volume, execution, health checks)
 ```
 
-**Git hooks**: A pre-push hook runs the coverage check (80% minimum, no regression) before allowing a push. Install with `just install-hooks`. Requires `cargo install cargo-tarpaulin`.
+**Git hooks**: Install with `just install-hooks`. Requires `cargo install cargo-audit cargo-tarpaulin`. Before a push, the pre-push hook:
+1. Stops commits whose author or committer email is not `robot@accomplice.ch`. Set it once in your checkout: `git config --local user.name robot-accomplice` and `git config --local user.email robot@accomplice.ch`.
+2. Runs `cargo fmt --check`, `cargo clippy -D warnings` and `cargo audit`. The audit ignore list is `.cargo/audit.toml`, which CI also reads.
+3. Runs the coverage check: 80% minimum, and no drop below the committed `.coverage-last`. The hook does not change `.coverage-last`. To raise the baseline, run `just coverage-baseline` and commit the file.
 
 ### Peg & Order Book Health (`scope market`)
 

@@ -10,7 +10,7 @@ use scope::display::terminal::{
     check_fail, check_pass, kv_row, section_footer, section_header, separator,
 };
 use scope::error::Result;
-use scope::market::{VenueDescriptor, VenueRegistry};
+use scope::market::{MarketVenue, VenueDescriptor, VenueRegistry};
 
 /// Venue management subcommands.
 ///
@@ -30,8 +30,8 @@ use scope::market::{VenueDescriptor, VenueRegistry};
 pub enum VenuesCommands {
     /// List all available exchange venues and their capabilities.
     ///
-    /// Shows built-in and user-defined venues with their supported
-    /// API capabilities (order_book, ticker, trades).
+    /// Shows built-in and user-defined CEX venues with their supported
+    /// API capabilities (order_book, ticker, trades), then the DEX venues.
     ///
     /// # Examples
     ///
@@ -164,11 +164,13 @@ fn run_list(args: ListArgs, out: &Output) -> Result<()> {
     match args.format {
         ListFormat::Table => {
             outln!(out, "{}", section_header("Available Venues"))?;
-            for id in registry.list() {
-                if let Some(desc) = registry.get(id) {
-                    let caps = desc.capability_names().join(", ");
-                    outln!(out, "{}", kv_row(id, &caps))?;
-                }
+            for listing in MarketVenue::listings(&registry) {
+                let caps = listing.capabilities.join(", ");
+                let detail = match listing.chain {
+                    Some(chain) => format!("{caps} (DEX on {chain})"),
+                    None => caps,
+                };
+                outln!(out, "{}", kv_row(&listing.id, &detail))?;
             }
             outln!(out, "{}", separator())?;
             let user_dir = VenueRegistry::user_venues_dir();
@@ -194,23 +196,11 @@ fn run_list(args: ListArgs, out: &Output) -> Result<()> {
             outln!(out, "{}", section_footer())?;
         }
         ListFormat::Json => {
-            let venues: Vec<serde_json::Value> = registry
-                .list()
-                .iter()
-                .filter_map(|id| {
-                    registry.get(id).map(|desc| {
-                        serde_json::json!({
-                            "id": desc.id,
-                            "name": desc.name,
-                            "base_url": desc.base_url,
-                            "capabilities": desc.capability_names(),
-                        })
-                    })
-                })
-                .collect();
+            // The same list the web serves at /api/venues.
+            let venues = MarketVenue::listings(&registry);
             let output = serde_json::json!({
+                "total": venues.len(),
                 "venues": venues,
-                "total": registry.len(),
                 "user_venues_dir": VenueRegistry::user_venues_dir().display().to_string(),
             });
             outln!(out, "{}", serde_json::to_string_pretty(&output).unwrap())?;
@@ -272,6 +262,11 @@ Each file defines one venue with the following structure:
     template: "{{base}}{{quote}}"  # Pair format (placeholders: {{base}}, {{quote}})
     default_quote: USDT          # Quote currency when user omits it
     case: upper                  # "upper" or "lower" (default: upper)
+
+  error_envelope:                # Optional: errors sent with HTTP 200
+    code_key: retCode            # Status field; omit to test message_key only
+    ok_codes: ["0"]              # Status values that mean success
+    message_key: retMsg          # Error text (a string, or an array like Kraken's)
 
   capabilities:
     order_book:                  # Omit if the venue has no depth API
@@ -414,6 +409,16 @@ fn print_json_schema(out: &Output) -> std::io::Result<()> {
                     "template": str_prop("Pair template with {base} and {quote} placeholders"),
                     "default_quote": str_prop("Default quote currency (e.g., 'USDT')"),
                     "case": {"type": "string", "enum": ["upper", "lower"], "default": "upper"}
+                }
+            },
+            "error_envelope": {
+                "type": "object",
+                "description": "How the venue reports an error inside an HTTP 200 reply",
+                "required": ["message_key"],
+                "properties": {
+                    "code_key": str_prop("Status field; a missing field means success"),
+                    "ok_codes": {"type": "array", "items": {"type": "string"}, "description": "Status values that mean success, compared as strings"},
+                    "message_key": str_prop("Field with the error message (string or array)")
                 }
             },
             "capabilities": {
@@ -796,6 +801,14 @@ mod tests {
         assert_eq!(
             v["total"].as_u64().unwrap() as usize,
             v["venues"].as_array().unwrap().len()
+        );
+        // DEX venues are listed too, marked by kind.
+        assert!(
+            v["venues"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|venue| venue["kind"] == "dex")
         );
     }
 
