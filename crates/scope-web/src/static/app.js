@@ -1768,34 +1768,27 @@ async function loadVenues() {
     var data = await res.json();
     if (data.venues) {
       venuesCache = data.venues;
-      populateVenueSelects(data.venues);
+      populateVenueSelects(data.venues, data.dex_venues || []);
     }
   } catch (e) {
-    // Silently fall back to hardcoded options
+    // Silently keep the default option in the page
   }
 }
 
-function populateVenueSelects(venues) {
+// DEX venues go only to selects marked data-dex (token health, market);
+// the exchange snapshot and monitor read CEX venues only.
+function populateVenueSelects(venues, dexVenues) {
   document.querySelectorAll('.venue-select').forEach(function(sel) {
     var hasNone = sel.options.length > 0 && sel.options[0].value === '';
     var currentValue = sel.value;
     while (sel.options.length > (hasNone ? 1 : 0)) {
       sel.remove(hasNone ? 1 : 0);
     }
-    venues.forEach(function(v) {
+    var listed = sel.dataset.dex === undefined ? venues : venues.concat(dexVenues);
+    listed.forEach(function(v) {
       var opt = document.createElement('option');
       opt.value = v.id;
       opt.textContent = v.name;
-      sel.appendChild(opt);
-    });
-    var dexVenues = [
-      { id: 'eth', name: 'Ethereum DEX' },
-      { id: 'solana', name: 'Solana DEX' },
-    ];
-    dexVenues.forEach(function(d) {
-      var opt = document.createElement('option');
-      opt.value = d.id;
-      opt.textContent = d.name;
       sel.appendChild(opt);
     });
     if (currentValue) sel.value = currentValue;

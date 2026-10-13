@@ -299,6 +299,18 @@ mod tests {
         assert!(html.contains("Scope"));
     }
 
+    /// M5: DEX venues come from `/api/venues`, not from lists in the UI.
+    #[test]
+    fn test_ui_hard_codes_no_dex_venue() {
+        let js = include_str!("static/app.js");
+        let html = include_str!("static/index.html");
+        for text in ["Ethereum DEX", "Solana DEX"] {
+            assert!(!js.contains(text), "app.js lists {text}");
+            assert!(!html.contains(text), "index.html lists {text}");
+        }
+        assert!(js.contains("dex_venues"));
+    }
+
     #[tokio::test]
     async fn test_serve_ui_index_html() {
         let response = serve_ui(axum::http::Uri::from_static("/index.html"))
