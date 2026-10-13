@@ -3,7 +3,7 @@
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
+    style::Style,
     symbols,
     text::{Line, Span},
     widgets::{
@@ -20,6 +20,7 @@ use super::config::{ChartMode, LayoutPreset, ScaleMode, WidgetVisibility};
 use super::state::MonitorState;
 use crate::cli::textfit::{cols, cut_with_ellipsis, draw_note_alone};
 use crate::cli::theme::SECONDARY;
+use scope::display::theme::Role;
 
 /// The smallest terminal the monitor draws in, in columns and rows.
 pub(crate) const MIN_W: u16 = 60;
@@ -423,7 +424,7 @@ pub(crate) fn render_header(f: &mut Frame, area: Rect, state: &MonitorState) {
         Block::default()
             .title(title)
             .borders(Borders::ALL)
-            .border_style(Style::new().cyan()),
+            .border_style(crate::cli::theme::ACCENT),
     );
 
     f.render_widget(header, header_chunks[0]);
@@ -433,7 +434,7 @@ pub(crate) fn render_header(f: &mut Frame, area: Rect, state: &MonitorState) {
     let chart_label = state.chart_mode.label();
     let tabs = Tabs::new(tab_titles)
         .select(state.time_period.index())
-        .highlight_style(Style::new().cyan().bold())
+        .highlight_style(crate::cli::theme::strong(Role::Accent))
         .divider("│")
         .padding(" ", " ");
     let tabs_line = Layout::default()
@@ -444,7 +445,7 @@ pub(crate) fn render_header(f: &mut Frame, area: Rect, state: &MonitorState) {
     f.render_widget(
         Paragraph::new(Span::styled(
             format!("⊞ {}", chart_label),
-            Style::new().magenta(),
+            crate::cli::theme::ACCENT,
         )),
         tabs_line[1],
     );
@@ -464,7 +465,7 @@ fn header_title(state: &MonitorState, width: u16) -> Line<'static> {
         // Inside the borders, after the base and "│ " ... " ".
         let room = (width as usize).saturating_sub(2 + cols(&base) + 3);
         let err = cut_with_ellipsis(&format!("⚠ {}", err), room);
-        spans.push(Span::styled(format!("│ {} ", err), Style::new().red()));
+        spans.push(Span::styled(format!("│ {} ", err), crate::cli::theme::ERR));
     }
     Line::from(spans)
 }
@@ -605,7 +606,7 @@ pub(crate) fn render_price_chart(f: &mut Frame, area: Rect, state: &MonitorState
                 .name("◇Est")
                 .marker(symbols::Marker::Braille)
                 .graph_type(GraphType::Line)
-                .style(Style::new().cyan())
+                .style(crate::cli::theme::ACCENT)
                 .data(&synthetic_data),
         );
     }
@@ -760,7 +761,7 @@ pub(crate) fn render_candlestick_chart(f: &mut Frame, area: Rect, state: &Monito
         ),
         Span::styled(format!("({}) ", change_str), Style::new().fg(trend_color)),
         Span::styled(format!("│{}│ ", state.time_period.label()), SECONDARY),
-        Span::styled("⊞Candles ", Style::new().magenta()),
+        Span::styled("⊞Candles ", crate::cli::theme::ACCENT),
     ]);
 
     // Apply scale transformation (log or linear)
@@ -841,7 +842,7 @@ pub(crate) fn render_volume_profile_chart(f: &mut Frame, area: Rect, state: &Mon
         let block = Block::default()
             .title(" ◨ Volume Profile (collecting data...) ")
             .borders(Borders::ALL)
-            .border_style(Style::new().fg(Color::DarkGray));
+            .border_style(crate::cli::theme::SECONDARY);
         f.render_widget(block, area);
         return;
     }
@@ -854,7 +855,7 @@ pub(crate) fn render_volume_profile_chart(f: &mut Frame, area: Rect, state: &Mon
         let block = Block::default()
             .title(" ◨ Volume Profile (no price range) ")
             .borders(Borders::ALL)
-            .border_style(Style::new().fg(Color::DarkGray));
+            .border_style(crate::cli::theme::SECONDARY);
         f.render_widget(block, area);
         return;
     }
@@ -1019,7 +1020,7 @@ pub(crate) fn render_volume_chart(f: &mut Frame, area: Rect, state: &MonitorStat
             Block::default()
                 .title(chart_title)
                 .borders(Borders::ALL)
-                .border_style(Style::new().blue()),
+                .border_style(crate::cli::theme::INFO),
         )
         .bar_width(bar_width)
         .bar_gap(1)
@@ -1108,7 +1109,7 @@ pub(crate) fn render_activity_feed(f: &mut Frame, area: Rect, state: &mut Monito
             Block::default()
                 .title(log_title)
                 .borders(Borders::ALL)
-                .border_style(Style::new().dark_gray()),
+                .border_style(crate::cli::theme::SECONDARY),
         )
         .highlight_style(Style::new().bold())
         .highlight_symbol("▸ ");
@@ -1134,23 +1135,28 @@ pub(crate) fn render_alert_overlay(f: &mut Frame, area: Rect, state: &MonitorSta
         })
         .unwrap_or(false);
 
-    let border_color = if is_flash_on {
-        Color::Red
+    let border_style = if is_flash_on {
+        crate::cli::theme::strong(Role::Err)
     } else {
-        Color::Yellow
+        crate::cli::theme::strong(Role::Warn)
     };
 
     let alert_lines: Vec<Line> = state
         .active_alerts
         .iter()
-        .map(|a| Line::from(Span::styled(&a.message, Style::new().fg(Color::Red).bold())))
+        .map(|a| {
+            Line::from(Span::styled(
+                &a.message,
+                crate::cli::theme::strong(Role::Err),
+            ))
+        })
         .collect();
 
     let alert_widget = Paragraph::new(alert_lines).block(
         Block::default()
             .title(" ⚠ ALERTS ")
             .borders(Borders::ALL)
-            .border_style(Style::new().fg(border_color).bold()),
+            .border_style(border_style),
     );
 
     f.render_widget(alert_widget, area);
@@ -1164,7 +1170,7 @@ pub(crate) fn render_liquidity_depth(f: &mut Frame, area: Rect, state: &MonitorS
         let block = Block::default()
             .title(" ◫ Liquidity Depth (no data) ")
             .borders(Borders::ALL)
-            .border_style(Style::new().fg(Color::DarkGray));
+            .border_style(crate::cli::theme::SECONDARY);
         f.render_widget(block, area);
         return;
     }
@@ -1199,7 +1205,7 @@ pub(crate) fn render_liquidity_depth(f: &mut Frame, area: Rect, state: &MonitorS
             state.liquidity_pairs.len()
         ))
         .borders(Borders::ALL)
-        .border_style(Style::new().fg(pal.border));
+        .border_style(crate::cli::theme::SECONDARY);
 
     let paragraph = Paragraph::new(lines).block(block);
     f.render_widget(paragraph, area);
@@ -1367,7 +1373,7 @@ pub(crate) fn render_metrics_panel(f: &mut Frame, area: Rect, state: &MonitorSta
         Block::default()
             .title(" ◉ Key Metrics ")
             .borders(Borders::ALL)
-            .border_style(Style::new().magenta()),
+            .border_style(crate::cli::theme::ACCENT),
     );
 
     f.render_widget(table, chunks[1]);
@@ -1453,7 +1459,7 @@ pub(crate) fn render_order_book_panel(f: &mut Frame, area: Rect, state: &Monitor
     let spread = spread_line(book);
     lines.push(Line::from(Span::styled(
         spread,
-        Style::new().fg(Color::Yellow).bold(),
+        crate::cli::theme::strong(Role::Warn),
     )));
 
     // --- Bid side ---
@@ -1483,7 +1489,7 @@ pub(crate) fn render_order_book_panel(f: &mut Frame, area: Rect, state: &Monitor
     let block = Block::default()
         .title(order_book_title(state))
         .borders(Borders::ALL)
-        .border_style(Style::new().fg(pal.border));
+        .border_style(crate::cli::theme::SECONDARY);
 
     let paragraph = Paragraph::new(lines).block(block);
     f.render_widget(paragraph, area);
@@ -1529,7 +1535,7 @@ fn render_empty_panel(f: &mut Frame, area: Rect, title: String, venue_only: bool
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
-        .border_style(Style::new().fg(Color::DarkGray));
+        .border_style(crate::cli::theme::SECONDARY);
     let body = if venue_only {
         "Not available in venue-only mode."
     } else {
@@ -1631,7 +1637,7 @@ pub(crate) fn render_recent_trades_panel(f: &mut Frame, area: Rect, state: &Moni
     let block = Block::default()
         .title(trades_title(state))
         .borders(Borders::ALL)
-        .border_style(Style::new().fg(pal.border));
+        .border_style(crate::cli::theme::SECONDARY);
 
     let paragraph = Paragraph::new(lines).block(block);
     f.render_widget(paragraph, area);
@@ -1653,7 +1659,7 @@ pub(crate) fn render_market_info_panel(f: &mut Frame, area: Rect, state: &Monito
     // ── Left: Trading pairs table ──
     {
         let header = Row::new(vec!["DEX / Pair", "Volume 24h", "Liquidity", "Δ 24h"])
-            .style(Style::new().fg(Color::Cyan).bold())
+            .style(crate::cli::theme::strong(Role::Accent))
             .bottom_margin(0);
 
         let rows: Vec<Row> = state
@@ -1691,7 +1697,7 @@ pub(crate) fn render_market_info_panel(f: &mut Frame, area: Rect, state: &Monito
             Block::default()
                 .title(format!(" ◫ Trading Pairs ({}) ", state.dex_pairs.len()))
                 .borders(Borders::ALL)
-                .border_style(Style::new().fg(pal.border)),
+                .border_style(crate::cli::theme::SECONDARY),
         );
 
         f.render_widget(table, cols[0]);
@@ -1830,7 +1836,7 @@ pub(crate) fn render_market_info_panel(f: &mut Frame, area: Rect, state: &Monito
             for (platform, _url) in &state.socials {
                 link_spans.push(Span::styled(
                     format!("[{}] ", platform),
-                    Style::new().fg(Color::Cyan),
+                    crate::cli::theme::ACCENT,
                 ));
             }
             for url in &state.websites {
@@ -1843,7 +1849,7 @@ pub(crate) fn render_market_info_panel(f: &mut Frame, area: Rect, state: &Monito
                     .unwrap_or(url);
                 link_spans.push(Span::styled(
                     format!("[{}] ", domain),
-                    Style::new().fg(Color::Blue),
+                    crate::cli::theme::LINK,
                 ));
             }
             info_lines.push(Line::from(link_spans));
@@ -1906,50 +1912,47 @@ pub(crate) fn footer_spans(state: &MonitorState) -> Vec<Span<'static>> {
     );
 
     let widget_hint = if state.widget_toggle_mode {
-        Span::styled("W:1-5?", Style::new().fg(Color::Yellow).bold())
+        Span::styled("W:1-5?", crate::cli::theme::strong(Role::Warn))
     } else {
-        Span::styled("W", Style::new().fg(Color::Cyan).bold())
+        Span::styled("W", crate::cli::theme::KEY)
     };
 
-    let mut spans = vec![
-        Span::styled("Q", Style::new().red().bold()),
-        Span::raw("uit "),
-    ];
+    let mut spans = vec![Span::styled("Q", crate::cli::theme::KEY), Span::raw("uit ")];
     if state.paused {
         spans.push(Span::styled(
             "⏸ PAUSED ",
-            Style::new().fg(Color::Yellow).bold(),
+            crate::cli::theme::strong(Role::Warn),
         ));
     } else if state.is_auto_paused() {
         spans.push(Span::styled(
             "⏸ AUTO-PAUSED ",
-            Style::new().fg(Color::Cyan).bold(),
+            crate::cli::theme::strong(Role::Accent),
         ));
     }
 
     // REC indicator when CSV export is active
     if state.export_active {
-        spans.push(Span::styled("● REC ", Style::new().fg(Color::Red).bold()));
+        spans.push(Span::styled("● REC ", crate::cli::theme::strong(Role::Err)));
     }
 
     spans.extend([
-        Span::styled("R", Style::new().fg(Color::Green).bold()),
+        Span::styled("R", crate::cli::theme::KEY),
         Span::raw("efresh "),
-        Span::styled("P", Style::new().fg(Color::Yellow).bold()),
+        Span::styled("P", crate::cli::theme::KEY),
         Span::raw("ause "),
-        Span::styled("E", Style::new().fg(Color::LightRed).bold()),
+        Span::styled("E", crate::cli::theme::KEY),
         Span::raw("xport "),
-        Span::styled("L", Style::new().fg(Color::Cyan).bold()),
+        Span::styled("L", crate::cli::theme::KEY),
         Span::raw(format!(":{} ", state.layout.label())),
         widget_hint,
         Span::raw("idget "),
-        Span::styled("C", Style::new().fg(Color::LightBlue).bold()),
+        Span::styled("C", crate::cli::theme::KEY),
         Span::raw(format!("hart:{} ", state.chart_mode.label())),
-        Span::styled("S", Style::new().fg(Color::LightGreen).bold()),
+        Span::styled("S", crate::cli::theme::KEY),
         Span::raw(format!("cale:{} ", state.scale_mode.label())),
-        Span::styled("/", Style::new().fg(Color::LightRed).bold()),
+        Span::styled("/", crate::cli::theme::KEY),
         Span::raw(format!(":{} ", state.color_scheme.label())),
-        Span::styled("T", Style::new().fg(Color::Magenta).bold()),
+        Span::styled("T", crate::cli::theme::KEY),
         Span::raw("ime "),
         Span::raw("║ "),
         stats,

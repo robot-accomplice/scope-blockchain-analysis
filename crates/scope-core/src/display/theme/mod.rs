@@ -178,5 +178,15 @@ pub const fn scheme_tone(scheme: Scheme, direction: Direction) -> Tone {
     }
 }
 
+/// The tone of `role` in a monitor under `scheme`. The monochrome scheme
+/// shows no color, so it keeps only the role's effects (bold, dim, ...).
+pub const fn scheme_role_tone(scheme: Scheme, role: Role) -> Tone {
+    let t = tone(role);
+    match scheme {
+        Scheme::Monochrome => Tone { color: None, ..t },
+        Scheme::GreenRed | Scheme::BlueOrange => t,
+    }
+}
+
 #[cfg(test)]
 mod tests;

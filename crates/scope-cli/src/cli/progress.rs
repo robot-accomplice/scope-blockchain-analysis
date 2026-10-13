@@ -27,7 +27,7 @@
 use crate::cli::output::Output;
 use crate::note;
 use indicatif::{ProgressBar, ProgressStyle, WeakProgressBar};
-use scope::display::terminal::color_enabled_stderr;
+use scope::display::theme::color_enabled_stderr;
 use std::sync::Mutex;
 use std::time::Duration;
 

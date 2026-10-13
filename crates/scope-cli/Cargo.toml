@@ -59,7 +59,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 # Terminal coloring
-owo-colors = "4.2.3"
 
 # Utilities used by CLI handlers
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip", "brotli"] }

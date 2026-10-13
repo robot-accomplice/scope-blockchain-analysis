@@ -23,7 +23,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use scope::config::Config;
-use scope::display::terminal::color_enabled;
+use scope::display::theme::color_enabled;
 use std::cell::Cell;
 use std::time::Instant;
 use unicode_width::UnicodeWidthStr;

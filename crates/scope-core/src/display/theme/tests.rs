@@ -105,3 +105,29 @@ fn schemes_color_up_and_down_and_leave_flat_plain() {
         assert_eq!(scheme_tone(scheme, Direction::Flat), Tone::PLAIN);
     }
 }
+
+#[test]
+fn monochrome_keeps_a_roles_effects_but_not_its_color() {
+    for role in Role::ALL {
+        let mono = scheme_role_tone(Scheme::Monochrome, role);
+        assert_eq!(mono.color, None, "{role:?}");
+        assert_eq!(
+            mono,
+            Tone {
+                color: None,
+                ..tone(role)
+            },
+            "{role:?}"
+        );
+        assert_eq!(
+            scheme_role_tone(Scheme::GreenRed, role),
+            tone(role),
+            "{role:?}"
+        );
+        assert_eq!(
+            scheme_role_tone(Scheme::BlueOrange, role),
+            tone(role),
+            "{role:?}"
+        );
+    }
+}

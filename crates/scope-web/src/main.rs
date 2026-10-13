@@ -92,7 +92,7 @@ async fn main() -> Result<()> {
     init_logging(cli.verbose);
 
     if cli.no_color {
-        scope::display::terminal::set_color_override(Some(false));
+        scope::display::theme::set_color_override(Some(false));
     }
 
     // The TUI needs a terminal. Check before the config load and the setup

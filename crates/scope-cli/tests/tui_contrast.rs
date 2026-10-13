@@ -3,8 +3,10 @@
 //! foreground plus the DIM modifier, or a named ANSI color. Borders may keep
 //! DarkGray.
 //!
-//! The TUI names no color outside `cli/theme.rs`. Its test modules are exempt:
-//! they read colors back from a rendered buffer.
+//! No terminal crate names a color outside the theme: `scope::display::theme`
+//! (the policy and the text painter) and `cli/theme.rs` (the ratatui
+//! adapter). `scope-web` keeps its own CSS and is not scanned. Test modules
+//! are exempt: they read colors back from rendered output.
 
 use std::path::{Path, PathBuf};
 
@@ -96,7 +98,7 @@ fn scanner_flags_text_and_spares_only_border_styles() {
     assert_eq!(lines, vec![1, 3, 4, 5, 7, 8, 9, 10, 11, 12, 14, 16]);
 }
 
-/// Any named color or ratatui color shorthand.
+/// Any named color, ratatui or owo-colors color shorthand, or color crate.
 const COLOR_TOKENS: &[&str] = &[
     "Color::",
     ".red()",
@@ -105,7 +107,27 @@ const COLOR_TOKENS: &[&str] = &[
     ".green()",
     ".blue()",
     ".magenta()",
+    ".bright_",
+    "OwoColorize",
+    "use colored::",
 ];
+
+/// True when `line` holds a raw SGR escape that sets a color: a parameter in
+/// 30–49 (foreground, background) or 90–107 (bright). Effect-only escapes
+/// (bold 1, dim 2, underline 4, reverse 7, reset 0) set no color, so clap
+/// help text may use them.
+fn sets_color_sgr(line: &str) -> bool {
+    ["\\x1b[", "\\u{1b}["].iter().any(|open| {
+        line.match_indices(open).any(|(at, _)| {
+            let rest = &line[at + open.len()..];
+            let params = rest.split('m').next().unwrap_or("");
+            params
+                .split(';')
+                .filter_map(|p| p.parse::<u16>().ok())
+                .any(|n| (30..=49).contains(&n) || (90..=107).contains(&n))
+        })
+    })
+}
 
 /// True when the `use` statement `stmt` imports ratatui's `Color`, alone
 /// (`style::Color`) or in a group (`style::{Color, …}`).
@@ -120,6 +142,17 @@ fn imports_color(stmt: &str) -> bool {
         .any(|name| name == "Color" || name.starts_with("Color as "))
 }
 
+/// True for `mod tests {`, with or without a visibility (`pub(crate) mod tests`).
+fn is_test_module(line: &str) -> bool {
+    let rest = line.trim_start();
+    let rest = rest
+        .strip_prefix("pub(crate) ")
+        .or_else(|| rest.strip_prefix("pub "))
+        .unwrap_or(rest);
+    rest.strip_prefix("mod tests")
+        .is_some_and(|after| after.is_empty() || after.starts_with([' ', '{', ';']))
+}
+
 /// `file:line: text` for each line of the non-test code that names a color,
 /// and for each `use` that imports `Color`. The scan stops at the test
 /// module: a `#[cfg(test)]` followed by `mod tests`. Another `#[cfg(test)]`
@@ -128,7 +161,7 @@ fn color_uses(file: &str, src: &str) -> Vec<String> {
     let lines: Vec<&str> = src.lines().collect();
     let end = lines
         .windows(2)
-        .position(|w| w[0].trim() == "#[cfg(test)]" && w[1].trim_start().starts_with("mod tests"))
+        .position(|w| w[0].trim() == "#[cfg(test)]" && is_test_module(w[1]))
         .unwrap_or(lines.len());
     let mut found = Vec::new();
     let mut i = 0;
@@ -149,7 +182,7 @@ fn color_uses(file: &str, src: &str) -> Vec<String> {
             i = last + 1;
             continue;
         }
-        if COLOR_TOKENS.iter().any(|t| line.contains(t)) {
+        if COLOR_TOKENS.iter().any(|t| line.contains(t)) || sets_color_sgr(line) {
             flag(&mut found);
         }
         i += 1;
@@ -157,24 +190,57 @@ fn color_uses(file: &str, src: &str) -> Vec<String> {
     found
 }
 
+/// The files that may name a color: the theme and its ratatui adapter.
+fn is_theme_file(path: &Path) -> bool {
+    let p = path.to_string_lossy().replace('\\', "/");
+    p.contains("scope-core/src/display/theme/") || p.ends_with("scope-cli/src/cli/theme.rs")
+}
+
+/// A file that holds only tests (`tests.rs`, `golden_tests.rs`).
+fn is_test_file(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|n| n.to_string_lossy().ends_with("tests.rs"))
+}
+
 #[test]
-fn tui_files_name_no_color_outside_theme_rs() {
+fn no_crate_names_a_color_outside_the_theme() {
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let mut files = Vec::new();
-    rs_files(
-        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cli/tui"),
-        &mut files,
-    );
+    for krate in ["scope-core", "scope-cli", "scope-tui-harness"] {
+        rs_files(&crates.join(krate).join("src"), &mut files);
+    }
     files.sort();
     let mut found = Vec::new();
-    for path in files {
-        let src = std::fs::read_to_string(&path).unwrap();
+    for path in files
+        .iter()
+        .filter(|p| !is_theme_file(p) && !is_test_file(p))
+    {
+        let src = std::fs::read_to_string(path).unwrap();
         found.extend(color_uses(&path.to_string_lossy(), &src));
     }
     assert!(
         found.is_empty(),
-        "name colors only in cli/theme.rs (ACCENT, KEY, OK, WARN, ERR, INFO, SECONDARY, SELECTED, MATCH):\n{}",
+        "name colors only in scope::display::theme or cli/theme.rs (style, strong, ACCENT, KEY, ...):\n{}",
         found.join("\n")
     );
+}
+
+#[test]
+fn sgr_scanner_flags_colors_and_spares_effects() {
+    assert!(sets_color_sgr(r"x \x1b[31mred\x1b[0m"));
+    assert!(sets_color_sgr(r"x \x1b[1;35mkey"));
+    assert!(sets_color_sgr(r"x \u{1b}[92mbright"));
+    assert!(sets_color_sgr(r"x \x1b[38;5;208m"));
+    assert!(!sets_color_sgr(r"x \x1b[1mExamples:\x1b[0m"));
+    assert!(!sets_color_sgr(r"x \x1b[2m# note\x1b[0m"));
+    assert!(!sets_color_sgr(r"x \x1b[7mreverse"));
+}
+
+#[test]
+fn a_visible_test_module_also_ends_the_scan() {
+    let src = "#[cfg(test)]\npub(crate) mod tests {\na.fg(Color::Red)\n}";
+    assert!(color_uses("x.rs", src).is_empty());
+    assert!(!is_test_module("mod testsupport_helpers"));
 }
 
 #[test]

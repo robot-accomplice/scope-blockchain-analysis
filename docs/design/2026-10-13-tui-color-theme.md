@@ -89,3 +89,11 @@ The strong (bold) form of a role is `tone(role).strong()`. The text painter offe
 
 ### Guard
 One test scans every Rust crate. It allows color literals (`Color::`, `.cyan()`-style calls, raw SGR codes) only in `scope::display::theme` and the ratatui adapter file. It reports `file:line`. It does not scan `scope-web`.
+
+### B-2 decisions (Jon, 2026-10-13)
+- **Monitor palette from roles.** Up and down stay per scheme (`scheme_tone`). The other monitor colors come from roles: highlight → `Warn`, volume bar → `Info`, sparkline → `Accent`. `scheme_role_tone` holds the one Monochrome rule: no color, effects kept. BlueOrange no longer has its own cyan, magenta and light-blue accents; they carried no up or down meaning.
+- **Borders are `Secondary`** (default foreground, dim). DarkGray vanishes on some dark themes. The palette has no `border` field.
+- **Fixed widget colors map to roles:** alerts and `● REC` → strong `Err`; `PAUSED` → strong `Warn`; `AUTO-PAUSED` → strong `Accent`; panel borders → `Accent` or `Info`; website chips → `Link`; every footer key letter → `Key`, as in the TUI.
+- **`ColorPalette` lives in the ratatui adapter** (`cli/theme.rs`); `monitor/config.rs` re-exports it.
+- **Guard scope.** The guard scans scope-core, scope-cli and scope-tui-harness. It flags color tokens and raw SGR escapes that set a color (parameters 30–49, 90–107). Effect-only escapes (bold, dim, reset) stay allowed, so clap help text can mark headings; they carry no color, and clap strips them when output is not a terminal.
+- `owo-colors` is no longer a dependency: `cli/errors.rs` uses the text painter.

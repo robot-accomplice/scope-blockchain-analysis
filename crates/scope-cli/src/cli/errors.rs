@@ -5,8 +5,7 @@
 
 use crate::cli::output::Output;
 use crate::errln;
-use owo_colors::OwoColorize;
-use scope::display::terminal::color_enabled_stderr;
+use scope::display::theme::{Painter, Role, color_enabled_stderr};
 use scope::error::ScopeError;
 
 /// Displays an error with a remediation hint when available.
@@ -23,21 +22,25 @@ fn display_error_styled(e: &ScopeError, tty: bool, out: &Output) -> std::io::Res
         other => format!("{}", other),
     };
 
-    if tty {
-        errln!(out, "\n  {} {}", "✗".red().bold(), msg.red())?;
-    } else {
-        errln!(out, "\n  ✗ {}", msg)?;
-    }
+    // A disabled painter returns the text unchanged.
+    let painter = Painter::new(tty);
+    errln!(
+        out,
+        "\n  {} {}",
+        painter.paint_strong(Role::Err, "✗"),
+        painter.paint(Role::Err, &msg)
+    )?;
 
     // The source chain names the real cause (for example a TLS failure
     // under "error sending request"). Show each link once.
     let causes = cause_chain(e, &msg);
     for cause in &causes {
-        if tty {
-            errln!(out, "    {} {}", "caused by:".dimmed(), cause)?;
-        } else {
-            errln!(out, "    caused by: {}", cause)?;
-        }
+        errln!(
+            out,
+            "    {} {}",
+            painter.paint(Role::Secondary, "caused by:"),
+            cause
+        )?;
     }
 
     let hint = if causes.iter().any(|c| is_non_tls_reply(c)) {
@@ -46,11 +49,7 @@ fn display_error_styled(e: &ScopeError, tty: bool, out: &Output) -> std::io::Res
         error_suggestion(e, out.is_tui())
     };
     if let Some(hint) = hint {
-        if tty {
-            errln!(out, "\n  {}", hint.dimmed())?;
-        } else {
-            errln!(out, "\n  {}", hint)?;
-        }
+        errln!(out, "\n  {}", painter.paint(Role::Secondary, hint))?;
     }
     errln!(out)?;
     Ok(())

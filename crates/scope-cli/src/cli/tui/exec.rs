@@ -10,7 +10,6 @@
 
 use crate::cli::interactive::SessionContext;
 use crate::cli::output::Output;
-use crate::cli::theme::{KEY_ANSI, RESET_ANSI, SECONDARY_ANSI};
 use crate::cli::{Cli, Commands};
 use crate::{errln, out, outln};
 use clap::error::ErrorKind;
@@ -679,8 +678,9 @@ fn write_help(out: &Output) -> io::Result<()> {
     outln!(out)?;
     // Key names in the key color, what they do dim. The ANSI becomes styles
     // in the pane; the copy and the log strip it.
-    let key = |k: &str| format!("{KEY_ANSI}{k}{RESET_ANSI}");
-    let what = |w: &str| format!("{SECONDARY_ANSI}{w}{RESET_ANSI}");
+    let painter = scope::display::theme::Painter::new(true);
+    let key = |k: &str| painter.paint(scope::display::theme::Role::Key, k);
+    let what = |w: &str| painter.paint(scope::display::theme::Role::Secondary, w);
     outln!(
         out,
         "Keys: {} {} · {} {} · {} {} · {} {} · {} {} · {} {}",
