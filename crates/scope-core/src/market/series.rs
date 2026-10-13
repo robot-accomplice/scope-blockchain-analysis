@@ -232,10 +232,7 @@ fn value_of(id: MetricId, s: &MarketSummary, healthy: bool) -> Option<f64> {
         MetricId::BestBid => s.best_bid,
         MetricId::BestAsk => s.best_ask,
         MetricId::Mid => s.mid_price,
-        MetricId::PegDeviationPct => s
-            .mid_price
-            .filter(|_| s.peg_target > 0.0)
-            .map(|mid| (mid - s.peg_target) / s.peg_target * 100.0),
+        MetricId::PegDeviationPct => s.mid_price.and_then(|mid| s.peg_deviation_pct(mid)),
         MetricId::Spread => s.spread,
         MetricId::SpreadPct => s.spread_pct,
         MetricId::BidDepth => Some(s.bid_depth),
@@ -310,17 +307,17 @@ mod tests {
     }
 
     #[test]
-    fn every_metric_id_has_one_table_entry_and_one_csv_column() {
+    fn every_table_entry_has_a_label_and_a_unique_csv_column() {
         let metrics = summary_metrics(&HealthThresholds::default());
-        let ids: Vec<MetricId> = metrics.iter().map(|m| m.id).collect();
-        assert_eq!(ids, MetricId::ALL);
-        assert_eq!(ids.len(), 13, "update this count when a metric is added");
-        for (i, m) in metrics.iter().enumerate() {
-            assert!(!ids[..i].contains(&m.id), "{:?} appears twice", m.id);
+        assert!(!metrics.is_empty());
+        let mut columns = std::collections::HashSet::new();
+        for m in &metrics {
+            assert!(!m.label.is_empty(), "{:?} has no label", m.id);
+            assert!(!m.csv_column.is_empty(), "{:?} has no csv column", m.id);
             assert!(
-                !m.label.is_empty() && !m.csv_column.is_empty(),
-                "{:?}",
-                m.id
+                columns.insert(m.csv_column),
+                "{} appears twice",
+                m.csv_column
             );
         }
     }

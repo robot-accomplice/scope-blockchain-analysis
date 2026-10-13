@@ -406,18 +406,9 @@ pub async fn run(
                         };
                         let summary =
                             MarketSummary::from_order_book(&book, &thresholds, volume_24h);
-                        let deviation_bps = summary
-                            .mid_price
-                            .map(|m| (m - 1.0) * 10_000.0)
-                            .unwrap_or(0.0);
-                        peg_healthy = Some(deviation_bps.abs() < 10.0);
-                        let peg_status = if peg_healthy.unwrap_or(false) {
-                            "Peg healthy"
-                        } else if deviation_bps.abs() < 50.0 {
-                            "Slight peg deviation"
-                        } else {
-                            "Peg deviation"
-                        };
+                        let (status, deviation_bps) = peg_assessment(&summary);
+                        peg_healthy = Some(status == PegStatus::Healthy);
+                        let peg_status = status.label();
                         output.push_str(&format!(
                             "- **Market ({} {}):** {} (deviation: {:.1} bps)\n",
                             exchange.venue_name(),
@@ -522,6 +513,46 @@ fn format_tx_value(value_str: &str, chain: &str) -> (String, bool) {
     let high_value = human > 10.0;
     (formatted, high_value)
 }
+
+/// How far the mid price is from the peg target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PegStatus {
+    Healthy,
+    SlightDeviation,
+    Deviation,
+}
+
+impl PegStatus {
+    fn label(self) -> &'static str {
+        match self {
+            PegStatus::Healthy => "Peg healthy",
+            PegStatus::SlightDeviation => "Slight peg deviation",
+            PegStatus::Deviation => "Peg deviation",
+        }
+    }
+}
+
+/// Peg status and the mid price's deviation in basis points, measured
+/// against the summary's peg target. No mid price counts as no deviation.
+fn peg_assessment(summary: &MarketSummary) -> (PegStatus, f64) {
+    let bps = summary
+        .mid_price
+        .and_then(|mid| summary.peg_deviation_bps(mid))
+        .unwrap_or(0.0);
+    let status = if bps.abs() < PEG_HEALTHY_BPS {
+        PegStatus::Healthy
+    } else if bps.abs() < PEG_SLIGHT_DEVIATION_BPS {
+        PegStatus::SlightDeviation
+    } else {
+        PegStatus::Deviation
+    };
+    (status, bps)
+}
+
+/// Below this many basis points from the peg, the peg is healthy.
+const PEG_HEALTHY_BPS: f64 = 10.0;
+/// Below this many basis points, the deviation is slight.
+const PEG_SLIGHT_DEVIATION_BPS: f64 = 50.0;
 
 /// Common stablecoin symbols for auto-including market/peg analysis.
 pub(crate) fn is_stablecoin(symbol: &str) -> bool {
@@ -750,6 +781,51 @@ fn meta_analysis_token(
 
 #[cfg(test)]
 mod tests {
+    use scope::market::{BookSource, HealthThresholds, OrderBook, OrderBookLevel};
+
+    fn summary_with_peg(peg_target: f64, mid_price: Option<f64>) -> MarketSummary {
+        let level = |price| OrderBookLevel {
+            price,
+            quantity: 1000.0,
+        };
+        let book = OrderBook {
+            pair: "X/USDT".to_string(),
+            source: BookSource::Exchange,
+            bids: vec![level(peg_target)],
+            asks: vec![level(peg_target)],
+        };
+        let thresholds = HealthThresholds {
+            peg_target,
+            ..HealthThresholds::default()
+        };
+        let mut summary = MarketSummary::from_order_book(&book, &thresholds, None);
+        summary.mid_price = mid_price;
+        summary
+    }
+
+    #[test]
+    fn test_peg_assessment_uses_the_summary_peg_target_not_one() {
+        // 6 bps above a 0.5 peg is healthy; measured against 1.0 it would be 5000 bps.
+        let (status, bps) = peg_assessment(&summary_with_peg(0.5, Some(0.5003)));
+        assert_eq!(status, PegStatus::Healthy);
+        assert!((bps - 6.0).abs() < 1e-6, "{bps}");
+        let (status, _) = peg_assessment(&summary_with_peg(0.5, Some(0.5020)));
+        assert_eq!(status, PegStatus::SlightDeviation);
+        let (status, _) = peg_assessment(&summary_with_peg(0.5, Some(0.52)));
+        assert_eq!(status, PegStatus::Deviation);
+    }
+
+    #[test]
+    fn test_peg_assessment_without_a_mid_or_a_peg_counts_as_no_deviation() {
+        assert_eq!(
+            peg_assessment(&summary_with_peg(1.0, None)),
+            (PegStatus::Healthy, 0.0)
+        );
+        assert_eq!(
+            peg_assessment(&summary_with_peg(0.0, Some(1.0))),
+            (PegStatus::Healthy, 0.0)
+        );
+    }
     use super::*;
     use async_trait::async_trait;
     use scope::chains::{

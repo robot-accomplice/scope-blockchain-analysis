@@ -346,11 +346,11 @@ impl ConfigurableExchangeClient {
                 }
             };
 
-            if let (Some(price), Some(quantity)) = (price, quantity)
-                && price > 0.0
-                && quantity > 0.0
-            {
-                levels.push(OrderBookLevel { price, quantity });
+            if let (Some(price), Some(quantity)) = (price, quantity) {
+                let level = OrderBookLevel { price, quantity };
+                if level.is_valid() {
+                    levels.push(level);
+                }
             }
         }
 

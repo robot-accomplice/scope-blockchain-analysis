@@ -195,8 +195,8 @@ fn attach_exchange_data(frame: &mut serde_json::Value, snap: &scope::market::Mar
             "best_ask": book.best_ask(),
             "mid_price": book.mid_price(),
             "spread": book.spread(),
-            "bid_depth": book.bid_depth(),
-            "ask_depth": book.ask_depth(),
+            "total_bid_depth": book.total_depth(scope::market::BookSide::Bid),
+            "total_ask_depth": book.total_depth(scope::market::BookSide::Ask),
             "bids": book.bids.iter().take(20).map(|l| {
                 serde_json::json!({"price": l.price, "quantity": l.quantity})
             }).collect::<Vec<_>>(),

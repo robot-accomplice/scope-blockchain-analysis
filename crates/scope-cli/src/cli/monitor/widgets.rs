@@ -14,7 +14,7 @@ use ratatui::{
 };
 use std::time::Instant;
 
-use scope::market::TradeSide;
+use scope::market::{BookSide, TradeSide};
 
 use super::config::{ChartMode, LayoutPreset, ScaleMode, WidgetVisibility};
 use super::state::MonitorState;
@@ -1503,8 +1503,8 @@ pub(crate) fn order_book_title(state: &MonitorState) -> String {
     }
     match &state.order_book {
         Some(book) => {
-            let ask_depth: f64 = book.asks.iter().map(|l| l.value()).sum();
-            let bid_depth: f64 = book.bids.iter().map(|l| l.value()).sum();
+            let ask_depth = book.total_depth(BookSide::Ask);
+            let bid_depth = book.total_depth(BookSide::Bid);
             format!(
                 " ◈ Order Book {SYNTHETIC_NOTE} │ {} │ Ask {} │ Bid {} ",
                 book.pair,

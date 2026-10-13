@@ -3,7 +3,9 @@
 //! Provides configurable health checks for stablecoin market monitoring:
 //! peg deviation, spread, bid/ask balance, level count, and depth thresholds.
 
-use super::types::{BookSource, ExecutionEstimate, HealthCheck, OrderBook, OrderBookLevel};
+use super::types::{
+    BookSide, BookSource, ExecutionEstimate, HealthCheck, OrderBook, OrderBookLevel,
+};
 use serde::{Deserialize, Serialize};
 
 /// Default peg target (USD stablecoins).
@@ -42,6 +44,9 @@ pub const DEFAULT_AMM_STEP_PCT: f64 = 0.1;
 pub const TOP3_LEVELS: usize = 3;
 /// Number of levels summed for the top-10 depth check.
 pub const TOP10_LEVELS: usize = 10;
+
+/// Basis points in one percent.
+pub const BPS_PER_PERCENT: f64 = 100.0;
 
 /// Health check thresholds for order book validation.
 ///
@@ -143,16 +148,6 @@ impl HealthThresholds {
     }
 }
 
-/// Sum of quote value over the first `n` valid levels (book order = best first).
-fn top_n_depth(levels: &[OrderBookLevel], n: usize) -> f64 {
-    levels
-        .iter()
-        .filter(|l| l.is_valid())
-        .take(n)
-        .map(OrderBookLevel::value)
-        .sum()
-}
-
 /// Quote depth of the top valid levels per side, summed once per book.
 ///
 /// The health checks and the repeating-view series both read these values.
@@ -167,10 +162,10 @@ pub struct TopDepth {
 impl TopDepth {
     fn from_book(book: &OrderBook) -> Self {
         Self {
-            bid_top3: top_n_depth(&book.bids, TOP3_LEVELS),
-            bid_top10: top_n_depth(&book.bids, TOP10_LEVELS),
-            ask_top3: top_n_depth(&book.asks, TOP3_LEVELS),
-            ask_top10: top_n_depth(&book.asks, TOP10_LEVELS),
+            bid_top3: book.top_depth(BookSide::Bid, TOP3_LEVELS),
+            bid_top10: book.top_depth(BookSide::Bid, TOP10_LEVELS),
+            ask_top3: book.top_depth(BookSide::Ask, TOP3_LEVELS),
+            ask_top10: book.top_depth(BookSide::Ask, TOP10_LEVELS),
         }
     }
 }
@@ -183,14 +178,8 @@ impl TopDepth {
 fn depth_within(book: &OrderBook, mid: f64, window_pct: f64) -> (f64, bool) {
     let lo = mid * (1.0 - window_pct / 100.0);
     let hi = mid * (1.0 + window_pct / 100.0);
-    let in_window = |l: &&OrderBookLevel| l.is_valid() && l.price >= lo && l.price <= hi;
-    let depth = book
-        .bids
-        .iter()
-        .chain(&book.asks)
-        .filter(in_window)
-        .map(OrderBookLevel::value)
-        .sum();
+    let depth =
+        book.depth_in_band(BookSide::Bid, lo..=hi) + book.depth_in_band(BookSide::Ask, lo..=hi);
     let ends_inside = |levels: &[OrderBookLevel]| {
         levels
             .iter()
@@ -285,6 +274,19 @@ pub struct MarketSummary {
 }
 
 impl MarketSummary {
+    /// Deviation of `price` from the peg target, in percent of the target.
+    /// `None` when the peg target is not positive. The one definition: text,
+    /// markdown, series and insights all call it.
+    pub fn peg_deviation_pct(&self, price: f64) -> Option<f64> {
+        (self.peg_target > 0.0).then(|| (price - self.peg_target) / self.peg_target * 100.0)
+    }
+
+    /// The same deviation in basis points.
+    pub fn peg_deviation_bps(&self, price: f64) -> Option<f64> {
+        self.peg_deviation_pct(price)
+            .map(|pct| pct * BPS_PER_PERCENT)
+    }
+
     /// Build summary from order book; the peg is `thresholds.peg_target`.
     /// Optionally includes 24h volume (from venue ticker) and execution estimates for 10k USDT.
     pub fn from_order_book(
@@ -296,24 +298,23 @@ impl MarketSummary {
         let price_lo = peg_target - thresholds.peg_range * 5.0;
         let price_hi = peg_target + thresholds.peg_range * 5.0;
 
+        // The peg band cuts outliers on the far side of each book.
+        let ask_band = ..=price_hi;
+        let bid_band = price_lo..;
         let asks: Vec<OrderBookLevel> = book
-            .asks
-            .iter()
-            .filter(|l| l.price <= price_hi)
+            .levels_in_band(BookSide::Ask, ask_band)
             .cloned()
             .collect();
         let bids: Vec<OrderBookLevel> = book
-            .bids
-            .iter()
-            .filter(|l| l.price >= price_lo)
+            .levels_in_band(BookSide::Bid, bid_band.clone())
             .cloned()
             .collect();
 
         let ask_outliers = book.asks.len().saturating_sub(asks.len());
         let bid_outliers = book.bids.len().saturating_sub(bids.len());
 
-        let ask_depth: f64 = asks.iter().map(OrderBookLevel::value).sum();
-        let bid_depth: f64 = bids.iter().map(OrderBookLevel::value).sum();
+        let ask_depth = book.depth_in_band(BookSide::Ask, ask_band);
+        let bid_depth = book.depth_in_band(BookSide::Bid, bid_band);
 
         let mut checks = Vec::new();
 
@@ -486,6 +487,16 @@ impl MarketSummary {
         }
     }
 
+    /// A price as text, with its deviation from the peg when there is one.
+    fn price_with_peg_deviation(&self, price: f64) -> String {
+        use crate::display::terminal as t;
+        let shown = t::format_price_peg(price, self.peg_target);
+        match self.peg_deviation_pct(price) {
+            Some(pct) => format!("{shown}  ({pct:+.3}%)"),
+            None => shown,
+        }
+    }
+
     /// Format as human-readable text report.
     /// When `venue_or_chain` is provided, it is displayed in the header (e.g. binance, ethereum).
     pub fn format_text(&self, venue_or_chain: Option<&str>) -> String {
@@ -513,39 +524,15 @@ impl MarketSummary {
         out.push('\n');
 
         if let Some(bb) = self.best_bid {
-            let pct = (bb - self.peg_target) / self.peg_target * 100.0;
-            out.push_str(&t::kv_row(
-                "Best Bid",
-                &format!(
-                    "{}  ({:+.3}%)",
-                    t::format_price_peg(bb, self.peg_target),
-                    pct
-                ),
-            ));
+            out.push_str(&t::kv_row("Best Bid", &self.price_with_peg_deviation(bb)));
             out.push('\n');
         }
         if let Some(ba) = self.best_ask {
-            let pct = (ba - self.peg_target) / self.peg_target * 100.0;
-            out.push_str(&t::kv_row(
-                "Best Ask",
-                &format!(
-                    "{}  ({:+.3}%)",
-                    t::format_price_peg(ba, self.peg_target),
-                    pct
-                ),
-            ));
+            out.push_str(&t::kv_row("Best Ask", &self.price_with_peg_deviation(ba)));
             out.push('\n');
         }
         if let Some(mid) = self.mid_price {
-            let pct = (mid - self.peg_target) / self.peg_target * 100.0;
-            out.push_str(&t::kv_row(
-                "Mid Price",
-                &format!(
-                    "{}  ({:+.3}%)",
-                    t::format_price_peg(mid, self.peg_target),
-                    pct
-                ),
-            ));
+            out.push_str(&t::kv_row("Mid Price", &self.price_with_peg_deviation(mid)));
             out.push('\n');
         }
         if let (Some(spread), Some(pct)) = (self.spread, self.spread_pct) {

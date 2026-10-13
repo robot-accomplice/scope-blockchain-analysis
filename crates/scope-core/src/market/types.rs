@@ -3,6 +3,8 @@
 //! Defines order book levels, full order books, execution estimates, and
 //! the newer trade/ticker/snapshot types used by the exchange system.
 
+use std::ops::RangeBounds;
+
 // =============================================================================
 // Order Book
 // =============================================================================
@@ -58,6 +60,13 @@ impl BookSource {
     }
 }
 
+/// One side of an order book.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BookSide {
+    Bid,
+    Ask,
+}
+
 /// Full order book snapshot with bids and asks.
 #[derive(Debug, Clone)]
 pub struct OrderBook {
@@ -109,96 +118,103 @@ impl OrderBook {
             .map(|(spread, mid)| spread / mid * 100.0)
     }
 
-    /// Total bid depth in quote terms (sum of price × quantity).
-    pub fn bid_depth(&self) -> f64 {
-        self.bids.iter().map(OrderBookLevel::value).sum()
+    /// The levels of one side, best first.
+    pub fn levels(&self, side: BookSide) -> &[OrderBookLevel] {
+        match side {
+            BookSide::Bid => &self.bids,
+            BookSide::Ask => &self.asks,
+        }
     }
 
-    /// Total ask depth in quote terms.
-    pub fn ask_depth(&self) -> f64 {
-        self.asks.iter().map(OrderBookLevel::value).sum()
+    /// The levels of one side whose price is in `band`, best first. Valid or
+    /// not: the caller decides what to do with an invalid level.
+    pub fn levels_in_band(
+        &self,
+        side: BookSide,
+        band: impl RangeBounds<f64>,
+    ) -> impl Iterator<Item = &OrderBookLevel> {
+        self.levels(side)
+            .iter()
+            .filter(move |l| band.contains(&l.price))
     }
 
-    /// Estimate slippage for buying a given USDT notional by walking the ask side.
-    /// Returns (vwap, slippage_bps) if fillable, or None if insufficient liquidity.
+    /// Quote depth (sum of price × quantity) of the valid levels of one side
+    /// whose price is in `band`. This is the one depth sum; every other
+    /// depth is a call to it with a band.
+    pub fn depth_in_band(&self, side: BookSide, band: impl RangeBounds<f64>) -> f64 {
+        self.levels_in_band(side, band)
+            .filter(|l| l.is_valid())
+            .map(OrderBookLevel::value)
+            .sum()
+    }
+
+    /// Quote depth of the whole side, at any price.
+    pub fn total_depth(&self, side: BookSide) -> f64 {
+        self.depth_in_band(side, ..)
+    }
+
+    /// Quote depth of the first `n` valid levels of one side.
+    pub fn top_depth(&self, side: BookSide, n: usize) -> f64 {
+        self.levels(side)
+            .iter()
+            .filter(|l| l.is_valid())
+            .take(n)
+            .map(OrderBookLevel::value)
+            .sum()
+    }
+
+    /// Estimate slippage for buying a given USDT notional by walking the ask
+    /// side. `None` when the book has no mid price (a side has no valid
+    /// level); `fillable` is false when the asks cannot fill the notional.
     pub fn estimate_buy_execution(&self, notional_usdt: f64) -> Option<ExecutionEstimate> {
         let mid = self.mid_price()?;
-        if mid <= 0.0 {
-            return None;
-        }
-        let mut remaining = notional_usdt;
-        let mut filled_value = 0.0;
-        let mut filled_qty = 0.0;
-        for level in &self.asks {
-            let level_value = level.value();
-            if remaining <= 0.0 {
-                break;
-            }
-            let take_value = level_value.min(remaining);
-            let take_qty = if level.price > 0.0 {
-                take_value / level.price
-            } else {
-                0.0
-            };
-            filled_value += take_value;
-            filled_qty += take_qty;
-            remaining -= take_value;
-        }
-        let fillable = remaining <= 0.01;
-        let vwap = if filled_qty > 0.0 {
-            filled_value / filled_qty
-        } else {
-            mid
-        };
-        let slippage_bps = (vwap - mid) / mid * 10_000.0;
+        let (vwap, fillable) = walk_levels(&self.asks, notional_usdt, mid);
         Some(ExecutionEstimate {
             notional_usdt,
             side: ExecutionSide::Buy,
             vwap,
-            slippage_bps,
+            slippage_bps: (vwap - mid) / mid * 10_000.0,
             fillable,
         })
     }
 
     /// Estimate slippage for selling (hitting bids) a given USDT notional.
+    /// `None` when the book has no mid price.
     pub fn estimate_sell_execution(&self, notional_usdt: f64) -> Option<ExecutionEstimate> {
         let mid = self.mid_price()?;
-        if mid <= 0.0 {
-            return None;
-        }
-        let mut remaining = notional_usdt;
-        let mut filled_value = 0.0;
-        let mut filled_qty = 0.0;
-        for level in &self.bids {
-            if remaining <= 0.0 {
-                break;
-            }
-            let level_value = level.value();
-            let take_value = level_value.min(remaining);
-            let take_qty = if level.price > 0.0 {
-                take_value / level.price
-            } else {
-                0.0
-            };
-            filled_value += take_value;
-            filled_qty += take_qty;
-            remaining -= take_value;
-        }
-        let fillable = remaining <= 0.01;
-        let vwap = if filled_qty > 0.0 {
-            filled_value / filled_qty
-        } else {
-            mid
-        };
-        let slippage_bps = (mid - vwap) / mid * 10_000.0;
+        let (vwap, fillable) = walk_levels(&self.bids, notional_usdt, mid);
         Some(ExecutionEstimate {
             notional_usdt,
             side: ExecutionSide::Sell,
             vwap,
-            slippage_bps,
+            slippage_bps: (mid - vwap) / mid * 10_000.0,
             fillable,
         })
     }
+}
+
+/// Walks the valid levels (best first) until `notional` of quote value is
+/// taken. Returns the volume-weighted price (the mid when nothing fills) and
+/// whether the notional was filled.
+fn walk_levels(levels: &[OrderBookLevel], notional: f64, mid: f64) -> (f64, bool) {
+    let mut remaining = notional;
+    let mut filled_value = 0.0;
+    let mut filled_qty = 0.0;
+    for level in levels.iter().filter(|l| l.is_valid()) {
+        if remaining <= 0.0 {
+            break;
+        }
+        let take_value = level.value().min(remaining);
+        filled_value += take_value;
+        filled_qty += take_value / level.price;
+        remaining -= take_value;
+    }
+    let vwap = if filled_qty > 0.0 {
+        filled_value / filled_qty
+    } else {
+        mid
+    };
+    (vwap, remaining <= 0.01)
 }
 
 /// Side of execution (buy = hit asks, sell = hit bids).
@@ -442,8 +458,8 @@ mod tests {
         assert!(book.best_bid().is_none());
         assert!(book.best_ask().is_none());
         assert!(book.mid_price().is_none());
-        assert_eq!(book.bid_depth(), 0.0);
-        assert_eq!(book.ask_depth(), 0.0);
+        assert_eq!(book.total_depth(BookSide::Bid), 0.0);
+        assert_eq!(book.total_depth(BookSide::Ask), 0.0);
     }
 
     #[test]
@@ -476,8 +492,8 @@ mod tests {
         assert_eq!(book.best_ask(), Some(1.0001));
         assert_eq!(book.mid_price(), Some(0.99995));
         assert!((book.spread().unwrap() - 0.0003).abs() < 1e-10);
-        assert!((book.bid_depth() - 99.98 - 49.985).abs() < 0.01);
-        assert!((book.ask_depth() - 200.02 - 150.03).abs() < 0.01);
+        assert!((book.total_depth(BookSide::Bid) - 99.98 - 49.985).abs() < 0.01);
+        assert!((book.total_depth(BookSide::Ask) - 200.02 - 150.03).abs() < 0.01);
     }
 
     #[test]
@@ -798,5 +814,55 @@ mod tests {
         assert!(book.mid_price().is_some());
         assert_eq!(book.spread(), None);
         assert_eq!(book.spread_pct(), None);
+    }
+
+    #[test]
+    fn test_depth_in_band_counts_valid_levels_in_the_price_range() {
+        let book = OrderBook {
+            pair: "X/Y".to_string(),
+            source: BookSource::Exchange,
+            bids: vec![level(1.0, 0.0), level(0.99, 10.0), level(0.5, 10.0)],
+            asks: vec![level(1.01, 10.0), level(2.0, 10.0)],
+        };
+        // The zero-quantity level adds nothing; the 0.5 bid is out of band.
+        let in_band = book.depth_in_band(BookSide::Bid, 0.9..=1.1);
+        assert!((in_band - 9.9).abs() < 1e-12);
+        let whole = book.total_depth(BookSide::Bid);
+        assert!((whole - 14.9).abs() < 1e-12);
+        assert!((book.total_depth(BookSide::Ask) - 30.1).abs() < 1e-12);
+        assert!((book.top_depth(BookSide::Bid, 1) - 9.9).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_no_valid_level_on_a_side_gives_no_execution_estimate() {
+        // One rule for an empty side and a side of invalid levels: no mid,
+        // so no estimate.
+        let empty = OrderBook {
+            pair: "X/Y".to_string(),
+            source: BookSource::Exchange,
+            bids: vec![level(1.0, 10.0)],
+            asks: vec![],
+        };
+        let invalid = OrderBook {
+            asks: vec![level(1.001, 0.0)],
+            ..empty.clone()
+        };
+        for book in [empty, invalid] {
+            assert!(book.estimate_buy_execution(5.0).is_none());
+            assert!(book.estimate_sell_execution(5.0).is_none());
+        }
+    }
+
+    #[test]
+    fn test_execution_estimate_skips_invalid_levels_and_reports_unfillable() {
+        let book = OrderBook {
+            pair: "X/Y".to_string(),
+            source: BookSource::Exchange,
+            bids: vec![level(1.0, 100.0)],
+            asks: vec![level(1.0, 0.0), level(1.002, 10.0)],
+        };
+        let est = book.estimate_buy_execution(1000.0).unwrap();
+        assert!(!est.fillable);
+        assert!((est.vwap - 1.002).abs() < 1e-12);
     }
 }

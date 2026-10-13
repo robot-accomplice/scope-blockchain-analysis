@@ -348,12 +348,8 @@ fn parse_duration(s: &str) -> Result<u64> {
 
 /// Builds markdown report content for a market summary.
 fn market_summary_to_markdown(summary: &MarketSummary, venue: &str, pair: &str) -> String {
-    let bid_dev = summary
-        .best_bid
-        .map(|b| (b - summary.peg_target) / summary.peg_target * 100.0);
-    let ask_dev = summary
-        .best_ask
-        .map(|a| (a - summary.peg_target) / summary.peg_target * 100.0);
+    let bid_dev = summary.best_bid.and_then(|b| summary.peg_deviation_pct(b));
+    let ask_dev = summary.best_ask.and_then(|a| summary.peg_deviation_pct(a));
     let volume_row = summary
         .volume_24h
         .map(|v| format!("| Volume (24h) | {:.0} USDT |  \n", v))
