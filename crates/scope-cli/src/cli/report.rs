@@ -148,9 +148,9 @@ fn resolve_targets(args: &BatchArgs) -> Result<Vec<(String, String)>> {
 
     if let Some(ref path) = args.from_file {
         if !path.exists() {
-            return Err(ScopeError::Io(format!(
-                "File not found: {}",
-                path.display()
+            return Err(ScopeError::IoError(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("File not found: {}", path.display()),
             )));
         }
         let content = std::fs::read_to_string(path)?;

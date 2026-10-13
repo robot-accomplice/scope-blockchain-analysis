@@ -993,7 +993,9 @@ mod tests {
         let save = |_: &TokenAliases| {
             saves.set(saves.get() + 1);
             if fail_save {
-                Err(scope::error::ScopeError::Io("disk full".into()))
+                Err(scope::error::ScopeError::IoError(std::io::Error::other(
+                    "disk full",
+                )))
             } else {
                 Ok(())
             }

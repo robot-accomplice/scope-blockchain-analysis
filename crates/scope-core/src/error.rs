@@ -82,13 +82,11 @@ pub enum ScopeError {
     #[error("Invalid transaction hash: {0}")]
     InvalidHash(String),
 
-    /// File system operation failed.
+    /// An I/O operation failed. Context goes into the error's message
+    /// (`io::Error::new(e.kind(), …)`); the kind stays, so callers can
+    /// tell a closed pipe from a full disk.
     #[error("I/O error: {0}")]
     IoError(#[from] std::io::Error),
-
-    /// File system operation failed (string variant).
-    #[error("I/O error: {0}")]
-    Io(String),
 
     /// Data export operation failed.
     #[error("Export failed: {0}")]
@@ -259,6 +257,35 @@ mod tests {
         let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
         let bca_err: ScopeError = io_err.into();
         assert!(matches!(bca_err, ScopeError::IoError(_)));
+    }
+
+    #[test]
+    fn test_io_error_with_context_keeps_its_kind_and_the_old_text() {
+        // One I/O variant: the context is in the message, and the kind
+        // stays for checks such as a closed pipe.
+        let context = std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "Failed to write token aliases: denied",
+        );
+        let err = ScopeError::IoError(context);
+        assert_eq!(
+            err.to_string(),
+            "I/O error: Failed to write token aliases: denied"
+        );
+        assert!(
+            matches!(&err, ScopeError::IoError(e) if e.kind() == std::io::ErrorKind::PermissionDenied)
+        );
+    }
+
+    #[test]
+    fn test_save_report_failure_names_the_path_and_keeps_the_kind() {
+        let dir = std::env::temp_dir().join("scope-no-such-dir-for-report-test");
+        let err = crate::display::report::save_report("x", dir.join("r.md")).unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with("I/O error: Failed to write report to ")
+        );
+        assert!(matches!(&err, ScopeError::IoError(e) if e.kind() == std::io::ErrorKind::NotFound));
     }
 
     #[test]

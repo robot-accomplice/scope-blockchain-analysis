@@ -104,7 +104,7 @@ pub struct ExportReport {
 /// # Errors
 ///
 /// Returns [`ScopeError::Export`] if the export operation fails.
-/// Returns [`ScopeError::Io`] if file operations fail.
+/// Returns [`ScopeError::IoError`] if file operations fail.
 pub async fn run(
     mut args: ExportArgs,
     config: &Config,

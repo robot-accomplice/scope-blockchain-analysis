@@ -1441,7 +1441,10 @@ mod tests {
         // failure, and its INT must not reach the TUI later and end the
         // session with 130.
         let _lock = DIAG_LOCK.lock().await;
-        for result in [Err(ScopeError::Io("cancelled".into())), Ok(())] {
+        for result in [
+            Err(ScopeError::IoError(io::Error::other("cancelled"))),
+            Ok(()),
+        ] {
             let (exit, state, mut host, dir) = prompt_stopped_by(Some(Signal::Int), result).await;
             assert_eq!(exit, None);
             assert_ran_note(&state, "setup", "cancelled");
@@ -1453,7 +1456,7 @@ mod tests {
     #[tokio::test]
     async fn test_term_at_a_prompt_ends_the_session_from_suspend_mode() {
         let _lock = DIAG_LOCK.lock().await;
-        let failed = Err(ScopeError::Io("cancelled".into()));
+        let failed = Err(ScopeError::IoError(io::Error::other("cancelled")));
         let (exit, _, _, dir) = prompt_stopped_by(Some(Signal::Term), failed).await;
         assert_eq!(exit, Some(TuiExit { code: 143 }));
         let rec = records(&dir);
@@ -1563,7 +1566,7 @@ mod tests {
         // the TUI must not wait forever on a cooked terminal.
         let _lock = DIAG_LOCK.lock().await;
         let started = tokio::time::Instant::now();
-        let failed = Err(ScopeError::Io("cancelled".into()));
+        let failed = Err(ScopeError::IoError(io::Error::other("cancelled")));
         let (exit, state, _, dir) = prompt_stopped_by(None, failed).await;
         assert_eq!(exit, None);
         assert!(started.elapsed() <= PROMPT_SIGNAL_WAIT + Duration::from_millis(100));
