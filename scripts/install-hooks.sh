@@ -19,4 +19,4 @@ mkdir -p "$HOOKS_DIR"
 cp "$SCRIPT_DIR/pre-push" "$HOOKS_DIR/pre-push"
 chmod +x "$HOOKS_DIR/pre-push"
 
-echo "✓ Installed pre-push hook (coverage check before push)"
+echo "✓ Installed pre-push hook (identity, fmt, clippy, audit, coverage)"

@@ -284,6 +284,10 @@ unyank VERSION:
     cargo yank --version {{VERSION}} --undo scope-bca-cli
     cargo yank --version {{VERSION}} --undo scope-bca-core
 
+# Measure coverage and record it as the new baseline in .coverage-last (commit the file)
+coverage-baseline:
+    scripts/check-coverage.sh --record
+
 # Release step 1, on develop: make release/vX.Y.Z with the version bump, changelog and checks
 release-prep VERSION:
     scripts/release.sh prep {{VERSION}}

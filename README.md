@@ -980,7 +980,10 @@ just lint      # Run lints
 just summary   # USDC market summary (peg, spread, volume, execution, health checks)
 ```
 
-**Git hooks**: A pre-push hook runs the coverage check (80% minimum, no regression) before allowing a push. Install with `just install-hooks`. Requires `cargo install cargo-tarpaulin`.
+**Git hooks**: Install with `just install-hooks`. Requires `cargo install cargo-audit cargo-tarpaulin`. Before a push, the pre-push hook:
+1. Stops commits whose author or committer email is not `robot@accomplice.ch`. Set it once in your checkout: `git config --local user.name robot-accomplice` and `git config --local user.email robot@accomplice.ch`.
+2. Runs `cargo fmt --check`, `cargo clippy -D warnings` and `cargo audit`. The audit ignore list is `.cargo/audit.toml`, which CI also reads.
+3. Runs the coverage check: 80% minimum, and no drop below the committed `.coverage-last`. The hook does not change `.coverage-last`. To raise the baseline, run `just coverage-baseline` and commit the file.
 
 ### Peg & Order Book Health (`scope market`)
 
