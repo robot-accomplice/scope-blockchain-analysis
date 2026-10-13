@@ -27,20 +27,27 @@ fn format_http_api_error(venue: &str, status: u16, body: &str) -> ScopeError {
             || body.contains("\"code\": -1121")
             || body.to_lowercase().contains("invalid symbol"));
 
-    if body.is_empty() {
-        ScopeError::Chain(format!("{venue} API error: HTTP {status}"))
+    let message = if body.is_empty() {
+        format!("API error: HTTP {status}")
     } else if binance_invalid_symbol {
         let preview: String = body.chars().take(200).collect();
-        ScopeError::Chain(format!(
-            "{venue} API error: HTTP {status} — response: {preview}\n\
+        format!(
+            "API error: HTTP {status} — response: {preview}\n\
              Hint: Binance returned 'Invalid symbol'. Verify pair ordering and venue format \
              (e.g. BASE/QUOTE -> BASEQUOTE), or try another venue if the market is unavailable."
-        ))
+        )
     } else {
         let preview: String = body.chars().take(200).collect();
-        ScopeError::Chain(format!(
-            "{venue} API error: HTTP {status} — response: {preview}"
-        ))
+        format!("API error: HTTP {status} — response: {preview}")
+    };
+    venue_error(venue, message)
+}
+
+/// A venue failure that names the venue by its descriptor id.
+pub(crate) fn venue_error(venue: &str, message: impl Into<String>) -> ScopeError {
+    ScopeError::Venue {
+        venue: venue.to_string(),
+        message: message.into(),
     }
 }
 
@@ -175,7 +182,7 @@ impl ConfigurableExchangeClient {
         let mut req = match endpoint.method {
             HttpMethod::GET => {
                 let mut full_url = reqwest::Url::parse(&url).map_err(|e| {
-                    ScopeError::Chain(format!("{} invalid URL {url}: {e}", self.descriptor.name))
+                    venue_error(&self.descriptor.id, format!("invalid URL {url}: {e}"))
                 })?;
                 let params: Vec<(String, String)> = endpoint
                     .params
@@ -213,14 +220,13 @@ impl ConfigurableExchangeClient {
         let resp = self.http.send(req).await?;
         if !resp.is_success() {
             return Err(format_http_api_error(
-                &self.descriptor.name,
+                &self.descriptor.id,
                 resp.status_code,
                 &resp.body,
             ));
         }
-        serde_json::from_str::<Value>(&resp.body).map_err(|e| {
-            ScopeError::Chain(format!("{} JSON parse error: {}", self.descriptor.name, e))
-        })
+        serde_json::from_str::<Value>(&resp.body)
+            .map_err(|e| venue_error(&self.descriptor.id, format!("JSON parse error: {e}")))
     }
 
     // =========================================================================
@@ -247,34 +253,30 @@ impl ConfigurableExchangeClient {
                 // Wildcard: take the first value in the object (for Kraken)
                 current = match current {
                     Value::Object(map) => map.values().next().ok_or_else(|| {
-                        ScopeError::Chain(format!(
-                            "{}: empty object at wildcard '*'",
-                            self.descriptor.name
-                        ))
+                        venue_error(&self.descriptor.id, "empty object at wildcard '*'")
                     })?,
                     _ => {
-                        return Err(ScopeError::Chain(format!(
-                            "{}: expected object at wildcard '*', got {:?}",
-                            self.descriptor.name,
-                            current_type(current)
-                        )));
+                        return Err(venue_error(
+                            &self.descriptor.id,
+                            format!(
+                                "expected object at wildcard '*', got {:?}",
+                                current_type(current)
+                            ),
+                        ));
                     }
                 };
             } else if let Ok(idx) = segment.parse::<usize>() {
                 // Numeric index
                 current = current.get(idx).ok_or_else(|| {
-                    ScopeError::Chain(format!(
-                        "{}: index {} out of bounds",
-                        self.descriptor.name, idx
-                    ))
+                    venue_error(&self.descriptor.id, format!("index {} out of bounds", idx))
                 })?;
             } else {
                 // Object key
                 current = current.get(segment).ok_or_else(|| {
-                    ScopeError::Chain(format!(
-                        "{}: missing key '{}' in response",
-                        self.descriptor.name, segment
-                    ))
+                    venue_error(
+                        &self.descriptor.id,
+                        format!("missing key '{}' in response", segment),
+                    )
                 })?;
             }
         }
@@ -318,12 +320,9 @@ impl ConfigurableExchangeClient {
 
     /// Parse order book levels from a JSON array.
     fn parse_levels(&self, arr: &Value, mapping: &ResponseMapping) -> Result<Vec<OrderBookLevel>> {
-        let items = arr.as_array().ok_or_else(|| {
-            ScopeError::Chain(format!(
-                "{}: expected array for levels",
-                self.descriptor.name
-            ))
-        })?;
+        let items = arr
+            .as_array()
+            .ok_or_else(|| venue_error(&self.descriptor.id, "expected array for levels"))?;
 
         let level_format = mapping.level_format.as_deref().unwrap_or("positional");
         let mut levels = Vec::with_capacity(items.len());
@@ -396,12 +395,7 @@ impl OrderBookClient for ConfigurableExchangeClient {
             .capabilities
             .order_book
             .as_ref()
-            .ok_or_else(|| {
-                ScopeError::Chain(format!(
-                    "{} does not support order book",
-                    self.descriptor.name
-                ))
-            })?;
+            .ok_or_else(|| venue_error(&self.descriptor.id, "does not support order book"))?;
 
         let json = self.fetch_endpoint(endpoint, pair_symbol, None).await?;
         let data = self.navigate_root(&json, endpoint.response_root.as_deref())?;
@@ -410,16 +404,16 @@ impl OrderBookClient for ConfigurableExchangeClient {
         let bids_key = endpoint.response.bids_key.as_deref().unwrap_or("bids");
 
         let asks_arr = data.get(asks_key).ok_or_else(|| {
-            ScopeError::Chain(format!(
-                "{}: missing '{}' in order book response",
-                self.descriptor.name, asks_key
-            ))
+            venue_error(
+                &self.descriptor.id,
+                format!("missing '{}' in order book response", asks_key),
+            )
         })?;
         let bids_arr = data.get(bids_key).ok_or_else(|| {
-            ScopeError::Chain(format!(
-                "{}: missing '{}' in order book response",
-                self.descriptor.name, bids_key
-            ))
+            venue_error(
+                &self.descriptor.id,
+                format!("missing '{}' in order book response", bids_key),
+            )
         })?;
 
         let mut asks = self.parse_levels(asks_arr, &endpoint.response)?;
@@ -457,9 +451,7 @@ impl TickerClient for ConfigurableExchangeClient {
             .capabilities
             .ticker
             .as_ref()
-            .ok_or_else(|| {
-                ScopeError::Chain(format!("{} does not support ticker", self.descriptor.name))
-            })?;
+            .ok_or_else(|| venue_error(&self.descriptor.id, "does not support ticker"))?;
 
         let json = self.fetch_endpoint(endpoint, pair_symbol, None).await?;
 
@@ -473,10 +465,7 @@ impl TickerClient for ConfigurableExchangeClient {
                 root.get(items_key).unwrap_or(root)
             };
             let arr = items.as_array().ok_or_else(|| {
-                ScopeError::Chain(format!(
-                    "{}: expected array for ticker filter",
-                    self.descriptor.name
-                ))
+                venue_error(&self.descriptor.id, "expected array for ticker filter")
             })?;
             let filter_value = filter.value.replace("{pair}", pair_symbol);
             arr.iter()
@@ -486,10 +475,10 @@ impl TickerClient for ConfigurableExchangeClient {
                         .is_some_and(|s| s == filter_value)
                 })
                 .ok_or_else(|| {
-                    ScopeError::Chain(format!(
-                        "{}: no ticker found for pair {}",
-                        self.descriptor.name, pair_symbol
-                    ))
+                    venue_error(
+                        &self.descriptor.id,
+                        format!("no ticker found for pair {}", pair_symbol),
+                    )
                 })?
                 .clone()
         } else {
@@ -530,9 +519,7 @@ impl TradeHistoryClient for ConfigurableExchangeClient {
             .capabilities
             .trades
             .as_ref()
-            .ok_or_else(|| {
-                ScopeError::Chain(format!("{} does not support trades", self.descriptor.name))
-            })?;
+            .ok_or_else(|| venue_error(&self.descriptor.id, "does not support trades"))?;
 
         let json = self
             .fetch_endpoint(endpoint, pair_symbol, Some(limit))
@@ -547,12 +534,9 @@ impl TradeHistoryClient for ConfigurableExchangeClient {
             data.get(items_key).unwrap_or(data)
         };
 
-        let items = arr.as_array().ok_or_else(|| {
-            ScopeError::Chain(format!(
-                "{}: expected array for trades",
-                self.descriptor.name
-            ))
-        })?;
+        let items = arr
+            .as_array()
+            .ok_or_else(|| venue_error(&self.descriptor.id, "expected array for trades"))?;
 
         let r = &endpoint.response;
         let mut trades = Vec::with_capacity(items.len());
@@ -598,9 +582,12 @@ impl OhlcClient for ConfigurableExchangeClient {
         interval: &str,
         limit: u32,
     ) -> Result<Vec<Candle>> {
-        let endpoint = self.descriptor.capabilities.ohlc.as_ref().ok_or_else(|| {
-            ScopeError::Chain(format!("{} does not support OHLC", self.descriptor.name))
-        })?;
+        let endpoint = self
+            .descriptor
+            .capabilities
+            .ohlc
+            .as_ref()
+            .ok_or_else(|| venue_error(&self.descriptor.id, "does not support OHLC"))?;
 
         // Map canonical interval (e.g., "1m") to venue-specific format (e.g., "1min")
         let mapped_interval = endpoint
@@ -622,12 +609,9 @@ impl OhlcClient for ConfigurableExchangeClient {
             data.get(items_key).unwrap_or(data)
         };
 
-        let items = arr.as_array().ok_or_else(|| {
-            ScopeError::Chain(format!(
-                "{}: expected array for OHLC data",
-                self.descriptor.name
-            ))
-        })?;
+        let items = arr
+            .as_array()
+            .ok_or_else(|| venue_error(&self.descriptor.id, "expected array for OHLC data"))?;
 
         let r = &endpoint.response;
         let format = r.ohlc_format.as_deref().unwrap_or("objects");
@@ -1619,7 +1603,7 @@ mod tests {
             .await;
 
         let mut desc = make_http_test_descriptor(&server.url());
-        desc.name = "Binance Spot".to_string();
+        desc.id = "binance".to_string();
         let client = ConfigurableExchangeClient::new(desc);
         let err = client.fetch_order_book("USDTPUSD").await.unwrap_err();
         let err_msg = err.to_string();
@@ -2804,6 +2788,71 @@ mod tests {
                     binance_like().timeout_secs.unwrap_or(15)
                 ))
             );
+        }
+
+        #[tokio::test]
+        async fn test_venue_http_400_names_the_venue_that_failed() {
+            let spy = Arc::new(Spy {
+                seen: Mutex::new(vec![]),
+                status: 400,
+                body: r#"{"msg":"bad"}"#.into(),
+            });
+            let client = ConfigurableExchangeClient::with_http(binance_like(), spy);
+            let err = client.fetch_order_book("BADPAIR").await.unwrap_err();
+            assert!(matches!(err, ScopeError::Venue { .. }), "{err:?}");
+            assert!(
+                err.to_string().starts_with("Venue error (binance):"),
+                "{err}"
+            );
+        }
+
+        /// Issue #69: `--venue bybit` reported a Binance error. The label and
+        /// the request host must both come from the chosen venue.
+        #[tokio::test]
+        async fn test_each_venue_labels_errors_and_requests_with_its_own_id() {
+            let registry = crate::market::VenueRegistry::load().unwrap();
+            for id in ["bybit", "mexc", "okx", "gateio", "kraken"] {
+                let desc = registry.get(id).unwrap().clone();
+                let spy = Arc::new(Spy {
+                    seen: Mutex::new(vec![]),
+                    status: 500,
+                    body: String::new(),
+                });
+                let client = ConfigurableExchangeClient::with_http(desc.clone(), spy.clone());
+                let pair = desc.format_pair("BTC", None);
+                let err = client.fetch_order_book(&pair).await.unwrap_err();
+                let text = err.to_string();
+                assert!(
+                    text.starts_with(&format!("Venue error ({id}):")),
+                    "{id}: {text}"
+                );
+                assert!(!text.to_lowercase().contains("binance"), "{id}: {text}");
+                let seen = spy.seen.lock().unwrap();
+                assert!(
+                    seen[0].url.starts_with(&desc.base_url),
+                    "{id}: request went to {}",
+                    seen[0].url
+                );
+                assert!(!seen[0].url.contains("binance"), "{id}: {}", seen[0].url);
+            }
+        }
+
+        #[tokio::test]
+        async fn test_missing_response_key_names_the_venue() {
+            let spy = Arc::new(Spy {
+                seen: Mutex::new(vec![]),
+                status: 200,
+                body: r#"{"retCode":10001,"retMsg":"params error"}"#.into(),
+            });
+            let desc = crate::market::VenueRegistry::load()
+                .unwrap()
+                .get("bybit")
+                .unwrap()
+                .clone();
+            let client = ConfigurableExchangeClient::with_http(desc, spy);
+            let err = client.fetch_order_book("USDDUSDT").await.unwrap_err();
+            assert!(matches!(err, ScopeError::Venue { .. }), "{err:?}");
+            assert!(err.to_string().starts_with("Venue error (bybit):"), "{err}");
         }
 
         #[tokio::test]

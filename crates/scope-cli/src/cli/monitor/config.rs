@@ -223,8 +223,8 @@ impl ColorSchemeExt for ColorScheme {
             ColorScheme::GreenRed => ColorPalette {
                 up: Color::Green,
                 down: Color::Red,
-                neutral: Color::Gray,
-                header_fg: Color::White,
+                neutral: Color::Reset,
+                header_fg: Color::Reset,
                 border: Color::DarkGray,
                 highlight: Color::Yellow,
                 volume_bar: Color::Blue,
@@ -233,22 +233,22 @@ impl ColorSchemeExt for ColorScheme {
             ColorScheme::BlueOrange => ColorPalette {
                 up: Color::Blue,
                 down: Color::Rgb(255, 165, 0), // orange
-                neutral: Color::Gray,
-                header_fg: Color::White,
+                neutral: Color::Reset,
+                header_fg: Color::Reset,
                 border: Color::DarkGray,
                 highlight: Color::Cyan,
                 volume_bar: Color::Magenta,
                 sparkline: Color::LightBlue,
             },
             ColorScheme::Monochrome => ColorPalette {
-                up: Color::White,
-                down: Color::DarkGray,
-                neutral: Color::Gray,
-                header_fg: Color::White,
+                up: Color::Reset,
+                down: Color::Reset,
+                neutral: Color::Reset,
+                header_fg: Color::Reset,
                 border: Color::DarkGray,
-                highlight: Color::White,
-                volume_bar: Color::Gray,
-                sparkline: Color::White,
+                highlight: Color::Reset,
+                volume_bar: Color::Reset,
+                sparkline: Color::Reset,
             },
         }
     }

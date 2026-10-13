@@ -18,6 +18,7 @@ use scope::market::TradeSide;
 
 use super::config::{ChartMode, LayoutPreset, ScaleMode, WidgetVisibility};
 use super::state::MonitorState;
+use crate::cli::style::SECONDARY;
 
 /// Renders the UI.
 /// Computed layout areas for each widget. `None` means the widget is hidden.
@@ -352,10 +353,11 @@ pub(crate) fn ui(f: &mut Frame, state: &mut MonitorState) {
 
 /// Renders the header with token info and time period tabs.
 pub(crate) fn render_header(f: &mut Frame, area: Rect, state: &MonitorState) {
+    let pal = state.palette();
     let price_color = if state.price_change_24h >= 0.0 {
-        Color::Green
+        pal.up
     } else {
-        Color::Red
+        pal.down
     };
 
     // Use Unicode arrows for trend indication
@@ -483,10 +485,7 @@ pub(crate) fn render_price_chart(f: &mut Frame, area: Rect, state: &MonitorState
             Style::new().fg(trend_color).bold(),
         ),
         Span::styled(format!("({}) ", change_str), Style::new().fg(trend_color)),
-        Span::styled(
-            format!("│{}│ ", state.time_period.label()),
-            Style::new().gray(),
-        ),
+        Span::styled(format!("│{}│ ", state.time_period.label()), SECONDARY),
     ]);
 
     // Calculate bounds
@@ -560,7 +559,7 @@ pub(crate) fn render_price_chart(f: &mut Frame, area: Rect, state: &MonitorState
             .name("━Start")
             .marker(symbols::Marker::Braille)
             .graph_type(GraphType::Line)
-            .style(Style::new().dark_gray())
+            .style(SECONDARY)
             .data(&reference_line),
     );
 
@@ -615,15 +614,15 @@ pub(crate) fn render_price_chart(f: &mut Frame, area: Rect, state: &MonitorState
         )
         .x_axis(
             Axis::default()
-                .title(Span::styled("Time", Style::new().gray()))
-                .style(Style::new().gray())
+                .title(Span::styled("Time", SECONDARY))
+                .style(SECONDARY)
                 .bounds([x_min, x_max])
                 .labels(vec![Span::raw(time_label), Span::raw("now")]),
         )
         .y_axis(
             Axis::default()
-                .title(Span::styled(scale_label, Style::new().gray()))
-                .style(Style::new().gray())
+                .title(Span::styled(scale_label, SECONDARY))
+                .style(SECONDARY)
                 .bounds([y_min, y_max])
                 .labels(vec![
                     Span::raw(y_label(y_min)),
@@ -730,10 +729,7 @@ pub(crate) fn render_candlestick_chart(f: &mut Frame, area: Rect, state: &Monito
             Style::new().fg(trend_color).bold(),
         ),
         Span::styled(format!("({}) ", change_str), Style::new().fg(trend_color)),
-        Span::styled(
-            format!("│{}│ ", state.time_period.label()),
-            Style::new().gray(),
-        ),
+        Span::styled(format!("│{}│ ", state.time_period.label()), SECONDARY),
         Span::styled("⊞Candles ", Style::new().magenta()),
     ]);
 
@@ -890,7 +886,7 @@ pub(crate) fn render_volume_profile_chart(f: &mut Frame, area: Rect, state: &Mon
                 Style::new().fg(pal.sparkline)
             };
             Line::from(vec![
-                Span::styled(label, Style::new().dark_gray()),
+                Span::styled(label, SECONDARY),
                 Span::raw(" "),
                 Span::styled(bar_str, style),
             ])
@@ -942,11 +938,8 @@ pub(crate) fn render_volume_chart(f: &mut Frame, area: Rect, state: &MonitorStat
             format!("24h Vol: {} ", volume_str),
             Style::new().fg(pal.volume_bar).bold(),
         ),
-        Span::styled(
-            format!("│{}│ ", state.time_period.label()),
-            Style::new().gray(),
-        ),
-        Span::styled(data_indicator, Style::new().dark_gray()),
+        Span::styled(format!("│{}│ ", state.time_period.label()), SECONDARY),
+        Span::styled(data_indicator, SECONDARY),
     ]);
 
     // Build bars from data points — bucket into a reasonable number of bars
@@ -1000,7 +993,7 @@ pub(crate) fn render_volume_chart(f: &mut Frame, area: Rect, state: &MonitorStat
         )
         .bar_width(bar_width)
         .bar_gap(1)
-        .value_style(Style::new().dark_gray());
+        .value_style(SECONDARY);
 
     f.render_widget(barchart, area);
 }
@@ -1048,8 +1041,7 @@ pub(crate) fn render_buy_sell_gauge(f: &mut Frame, area: Rect, state: &mut Monit
         if label_len <= inner.width {
             let x_offset = (inner.width.saturating_sub(label_len)) / 2;
             let label_area = Rect::new(inner.x + x_offset, inner.y, label_len, 1);
-            let label_widget =
-                Paragraph::new(Span::styled(label, Style::new().fg(Color::White).bold()));
+            let label_widget = Paragraph::new(Span::styled(label, Style::new().bold()));
             f.render_widget(label_widget, label_area);
         }
     }
@@ -1069,7 +1061,7 @@ pub(crate) fn render_activity_feed(f: &mut Frame, area: Rect, state: &mut Monito
         .log_messages
         .iter()
         .rev()
-        .map(|msg| ListItem::new(msg.as_str()).style(Style::new().gray()))
+        .map(|msg| ListItem::new(msg.as_str()).style(SECONDARY))
         .collect();
 
     let log_list = List::new(items)
@@ -1079,7 +1071,7 @@ pub(crate) fn render_activity_feed(f: &mut Frame, area: Rect, state: &mut Monito
                 .borders(Borders::ALL)
                 .border_style(Style::new().dark_gray()),
         )
-        .highlight_style(Style::new().white().bold())
+        .highlight_style(Style::new().bold())
         .highlight_symbol("▸ ");
 
     f.render_stateful_widget(log_list, area, &mut state.log_list_state);
@@ -1264,39 +1256,39 @@ pub(crate) fn render_metrics_panel(f: &mut Frame, area: Rect, state: &MonitorSta
 
     let mut rows = vec![
         Row::new(vec![
-            Span::styled("Price", Style::new().gray()),
+            Span::styled("Price", SECONDARY),
             Span::styled(format_price_usd(state.current_price), Style::new().bold()),
         ]),
         Row::new(vec![
-            Span::styled("5m Chg", Style::new().gray()),
+            Span::styled("5m Chg", SECONDARY),
             Span::styled(change_5m_str, Style::new().fg(change_5m_color)),
         ]),
         Row::new(vec![
-            Span::styled("Last Δ", Style::new().gray()),
+            Span::styled("Last Δ", SECONDARY),
             Span::styled(last_change_str, Style::new().fg(last_change_color)),
         ]),
         Row::new(vec![
-            Span::styled("24h Chg", Style::new().gray()),
+            Span::styled("24h Chg", SECONDARY),
             Span::raw(change_24h_str),
         ]),
         Row::new(vec![
-            Span::styled("Liq", Style::new().gray()),
+            Span::styled("Liq", SECONDARY),
             Span::raw(scope::display::format_usd(state.liquidity_usd)),
         ]),
         Row::new(vec![
-            Span::styled("Vol 24h", Style::new().gray()),
+            Span::styled("Vol 24h", SECONDARY),
             Span::raw(scope::display::format_usd(state.volume_24h)),
         ]),
         Row::new(vec![
-            Span::styled("Mkt Cap", Style::new().gray()),
+            Span::styled("Mkt Cap", SECONDARY),
             Span::raw(market_cap_str),
         ]),
         Row::new(vec![
-            Span::styled("Buys", Style::new().gray()),
+            Span::styled("Buys", SECONDARY),
             Span::styled(format!("{}", state.buys_24h), Style::new().fg(pal.up)),
         ]),
         Row::new(vec![
-            Span::styled("Sells", Style::new().gray()),
+            Span::styled("Sells", SECONDARY),
             Span::styled(format!("{}", state.sells_24h), Style::new().fg(pal.down)),
         ]),
     ];
@@ -1306,7 +1298,7 @@ pub(crate) fn render_metrics_panel(f: &mut Frame, area: Rect, state: &MonitorSta
         && let Some(count) = state.holder_count
     {
         rows.push(Row::new(vec![
-            Span::styled("Holders", Style::new().gray()),
+            Span::styled("Holders", SECONDARY),
             Span::styled(format_number(count as f64), Style::new().fg(pal.highlight)),
         ]));
     }
@@ -1388,7 +1380,7 @@ pub(crate) fn render_order_book_panel(f: &mut Frame, area: Rect, state: &Monitor
             Span::raw(" ".repeat(padding.max(1))),
             Span::styled(qty_str, Style::new().fg(pal.neutral)),
             Span::raw(" "),
-            Span::styled(val_str, Style::new().fg(Color::DarkGray)),
+            Span::styled(val_str, SECONDARY),
         ]));
     }
 
@@ -1427,7 +1419,7 @@ pub(crate) fn render_order_book_panel(f: &mut Frame, area: Rect, state: &Monitor
             Span::raw(" ".repeat(padding.max(1))),
             Span::styled(qty_str, Style::new().fg(pal.neutral)),
             Span::raw(" "),
-            Span::styled(val_str, Style::new().fg(Color::DarkGray)),
+            Span::styled(val_str, SECONDARY),
         ]));
     }
 
@@ -1486,25 +1478,13 @@ pub(crate) fn render_recent_trades_panel(f: &mut Frame, area: Rect, state: &Moni
 
     // Header row
     lines.push(Line::from(vec![
-        Span::styled(
-            format!("{:<time_width$}", "Time"),
-            Style::new().fg(Color::DarkGray).bold(),
-        ),
+        Span::styled(format!("{:<time_width$}", "Time"), SECONDARY.bold()),
         Span::raw(" "),
-        Span::styled(
-            format!("{:<side_width$}", "Side"),
-            Style::new().fg(Color::DarkGray).bold(),
-        ),
+        Span::styled(format!("{:<side_width$}", "Side"), SECONDARY.bold()),
         Span::raw(" "),
-        Span::styled(
-            format!("{:>price_width$}", "Price"),
-            Style::new().fg(Color::DarkGray).bold(),
-        ),
+        Span::styled(format!("{:>price_width$}", "Price"), SECONDARY.bold()),
         Span::raw(" "),
-        Span::styled(
-            format!("{:>qty_width$}", "Qty"),
-            Style::new().fg(Color::DarkGray).bold(),
-        ),
+        Span::styled(format!("{:>qty_width$}", "Qty"), SECONDARY.bold()),
     ]));
 
     // Trade rows (most recent first)
@@ -1533,10 +1513,7 @@ pub(crate) fn render_recent_trades_panel(f: &mut Frame, area: Rect, state: &Moni
         let qty_str = format_number(trade.quantity);
 
         lines.push(Line::from(vec![
-            Span::styled(
-                format!("{:<time_width$}", time_str),
-                Style::new().fg(Color::DarkGray),
-            ),
+            Span::styled(format!("{:<time_width$}", time_str), SECONDARY),
             Span::raw(" "),
             Span::styled(
                 format!("{:<side_width$}", side_str),
@@ -1636,11 +1613,8 @@ pub(crate) fn render_market_info_panel(f: &mut Frame, area: Rect, state: &Monito
             pal.down
         };
         info_lines.push(Line::from(vec![
-            Span::styled(" Price  ", Style::new().fg(Color::DarkGray)),
-            Span::styled(
-                format!("${:.6}", state.current_price),
-                Style::new().fg(Color::White).bold(),
-            ),
+            Span::styled(" Price  ", SECONDARY),
+            Span::styled(format!("${:.6}", state.current_price), Style::new().bold()),
         ]));
 
         // Multi-timeframe changes
@@ -1655,7 +1629,7 @@ pub(crate) fn render_market_info_panel(f: &mut Frame, area: Rect, state: &Monito
             .flat_map(|(label, val)| {
                 let color = if *val >= 0.0 { pal.up } else { pal.down };
                 vec![
-                    Span::styled(format!(" {}: ", label), Style::new().fg(Color::DarkGray)),
+                    Span::styled(format!(" {}: ", label), SECONDARY),
                     Span::styled(format!("{:+.2}%", val), Style::new().fg(color)),
                 ]
             })
@@ -1666,14 +1640,14 @@ pub(crate) fn render_market_info_panel(f: &mut Frame, area: Rect, state: &Monito
 
         // Volume & Liquidity
         info_lines.push(Line::from(vec![
-            Span::styled(" Vol 24h ", Style::new().fg(Color::DarkGray)),
+            Span::styled(" Vol 24h ", SECONDARY),
             Span::styled(
                 format!("${}", format_number(state.volume_24h)),
                 Style::new().fg(pal.neutral),
             ),
         ]));
         info_lines.push(Line::from(vec![
-            Span::styled(" Liq     ", Style::new().fg(Color::DarkGray)),
+            Span::styled(" Liq     ", SECONDARY),
             Span::styled(
                 format!("${}", format_number(state.liquidity_usd)),
                 Style::new().fg(pal.volume_bar),
@@ -1683,7 +1657,7 @@ pub(crate) fn render_market_info_panel(f: &mut Frame, area: Rect, state: &Monito
         // Market cap / FDV
         if let Some(mc) = state.market_cap {
             info_lines.push(Line::from(vec![
-                Span::styled(" MCap    ", Style::new().fg(Color::DarkGray)),
+                Span::styled(" MCap    ", SECONDARY),
                 Span::styled(
                     format!("${}", format_number(mc)),
                     Style::new().fg(pal.neutral),
@@ -1692,7 +1666,7 @@ pub(crate) fn render_market_info_panel(f: &mut Frame, area: Rect, state: &Monito
         }
         if let Some(fdv) = state.fdv {
             info_lines.push(Line::from(vec![
-                Span::styled(" FDV     ", Style::new().fg(Color::DarkGray)),
+                Span::styled(" FDV     ", SECONDARY),
                 Span::styled(
                     format!("${}", format_number(fdv)),
                     Style::new().fg(pal.neutral),
@@ -1709,14 +1683,14 @@ pub(crate) fn render_market_info_panel(f: &mut Frame, area: Rect, state: &Monito
             50.0
         };
         info_lines.push(Line::from(vec![
-            Span::styled(" Buys    ", Style::new().fg(Color::DarkGray)),
+            Span::styled(" Buys    ", SECONDARY),
             Span::styled(
                 format!("{} ({:.0}%)", state.buys_24h, buy_pct),
                 Style::new().fg(pal.up),
             ),
         ]));
         info_lines.push(Line::from(vec![
-            Span::styled(" Sells   ", Style::new().fg(Color::DarkGray)),
+            Span::styled(" Sells   ", SECONDARY),
             Span::styled(
                 format!("{} ({:.0}%)", state.sells_24h, 100.0 - buy_pct),
                 Style::new().fg(pal.down),
@@ -1726,7 +1700,7 @@ pub(crate) fn render_market_info_panel(f: &mut Frame, area: Rect, state: &Monito
         // Holder count
         if let Some(holders) = state.holder_count {
             info_lines.push(Line::from(vec![
-                Span::styled(" Holders ", Style::new().fg(Color::DarkGray)),
+                Span::styled(" Holders ", SECONDARY),
                 Span::styled(format_number(holders as f64), Style::new().fg(pal.neutral)),
             ]));
         }
@@ -1737,7 +1711,7 @@ pub(crate) fn render_market_info_panel(f: &mut Frame, area: Rect, state: &Monito
                 .map(|d| d.format("%Y-%m-%d").to_string())
                 .unwrap_or_else(|| "?".to_string());
             info_lines.push(Line::from(vec![
-                Span::styled(" Listed  ", Style::new().fg(Color::DarkGray)),
+                Span::styled(" Listed  ", SECONDARY),
                 Span::styled(dt, Style::new().fg(pal.neutral)),
             ]));
         }
@@ -1745,7 +1719,7 @@ pub(crate) fn render_market_info_panel(f: &mut Frame, area: Rect, state: &Monito
         // Links
         if !state.websites.is_empty() || !state.socials.is_empty() {
             info_lines.push(Line::from(""));
-            let mut link_spans = vec![Span::styled(" Links   ", Style::new().fg(Color::DarkGray))];
+            let mut link_spans = vec![Span::styled(" Links   ", SECONDARY)];
             for (platform, _url) in &state.socials {
                 link_spans.push(Span::styled(
                     format!("[{}] ", platform),
@@ -1820,7 +1794,7 @@ pub(crate) fn render_footer(f: &mut Frame, area: Rect, state: &MonitorState) {
                 synthetic_count + real_count,
                 memory_str
             ),
-            Style::new().gray(),
+            SECONDARY,
         )
     };
 

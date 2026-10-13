@@ -58,6 +58,7 @@ pub struct Output {
     err: Sink,
     progress: bool,
     hook: Option<ProgressHook>,
+    tui: bool,
 }
 
 impl Output {
@@ -69,6 +70,7 @@ impl Output {
             err: Arc::new(Mutex::new(io::stderr())),
             progress: true,
             hook: None,
+            tui: false,
         }
     }
 
@@ -88,6 +90,7 @@ impl Output {
             err,
             progress: false,
             hook: None,
+            tui: false,
         };
         (output, captured)
     }
@@ -115,6 +118,7 @@ impl Output {
             err: buf,
             progress: false,
             hook: Some(ProgressHook::default()),
+            tui: true,
         };
         (output, captured)
     }
@@ -130,12 +134,19 @@ impl Output {
             err: Arc::new(Mutex::new(err)),
             progress: false,
             hook: None,
+            tui: false,
         }
     }
 
     /// True when animated progress indicators may draw on the terminal.
     pub fn progress_enabled(&self) -> bool {
         self.progress
+    }
+
+    /// True when this output belongs to the TUI. Error text then gives TUI
+    /// next steps, not CLI flags.
+    pub fn is_tui(&self) -> bool {
+        self.tui
     }
 
     /// The progress record of this run, when the output has one. The TUI's
@@ -334,6 +345,13 @@ pub(crate) mod tests {
             errln!(o, "warn").unwrap_err().kind(),
             io::ErrorKind::BrokenPipe
         );
+    }
+
+    #[test]
+    fn test_only_the_tui_capture_is_tui() {
+        assert!(Output::capture_merged().0.is_tui());
+        assert!(!Output::capture().0.is_tui());
+        assert!(!Output::stdio().is_tui());
     }
 
     #[test]

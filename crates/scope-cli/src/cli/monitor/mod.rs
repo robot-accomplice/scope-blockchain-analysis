@@ -3703,7 +3703,7 @@ capabilities:
 
     #[tokio::test]
     async fn test_ticker_failure_has_one_error_prefix() {
-        // "Chain client error: … Chain client error: …" read as noise.
+        // "Venue error (…): … Venue error (…): …" read as noise.
         let (_server, ex) = mock_venue(500).await;
         let mut notes = Vec::new();
         let err = fetch_initial_data(
@@ -3718,7 +3718,7 @@ capabilities:
         .await
         .unwrap_err()
         .to_string();
-        assert_eq!(err.matches("Chain client error").count(), 1, "{}", err);
+        assert_eq!(err.matches("Venue error (mockvenue)").count(), 1, "{}", err);
     }
 
     #[test]
@@ -4106,14 +4106,9 @@ refresh_seconds: 5
 
     #[test]
     fn test_color_palette_fields_populated() {
-        // Verify each palette has distinct meaningful values
-        for scheme in &[
-            ColorScheme::GreenRed,
-            ColorScheme::BlueOrange,
-            ColorScheme::Monochrome,
-        ] {
+        // The colored schemes tell up from down by color.
+        for scheme in &[ColorScheme::GreenRed, ColorScheme::BlueOrange] {
             let pal = scheme.palette();
-            // up and down colors should differ (visually distinct)
             assert_ne!(
                 format!("{:?}", pal.up),
                 format!("{:?}", pal.down),
@@ -4121,6 +4116,33 @@ refresh_seconds: 5
                 scheme
             );
         }
+    }
+
+    #[test]
+    fn test_monochrome_adds_no_color_and_keeps_direction_in_glyphs() {
+        // Monochrome must not add color, so direction rides on the glyph.
+        let pal = ColorScheme::Monochrome.palette();
+        assert_eq!(pal.up, ratatui::style::Color::Reset);
+        assert_eq!(pal.down, ratatui::style::Color::Reset);
+        let header = |change: f64| {
+            let mut terminal = create_test_terminal();
+            let mut state = create_populated_state();
+            state.color_scheme = ColorScheme::Monochrome;
+            state.price_change_24h = change;
+            terminal
+                .draw(|f| render_header(f, f.area(), &state))
+                .unwrap();
+            let buf = terminal.backend().buffer();
+            for cell in &buf.content {
+                for c in [ratatui::style::Color::Green, ratatui::style::Color::Red] {
+                    assert_ne!(cell.fg, c, "Monochrome header drew {c:?}");
+                }
+            }
+            format!("{}", terminal.backend())
+        };
+        let (up, down) = (header(50.0), header(-50.0));
+        assert!(up.contains('▲') && !up.contains('▼'));
+        assert!(down.contains('▼') && !down.contains('▲'));
     }
 
     #[test]
