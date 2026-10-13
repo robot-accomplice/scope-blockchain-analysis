@@ -9,14 +9,15 @@ use crate::cli::crawl::{self, Period};
 use crate::cli::output::Output;
 use crate::{errln, out, outln};
 use clap::{Args, Subcommand};
-use scope::chains::ChainClientFactory;
+use scope::chains::{ChainClientFactory, TokenAnalytics};
 use scope::config::Config;
 
 use super::health_args::HealthArgs;
 use scope::display::terminal as t;
 use scope::error::{Result, ScopeError};
 use scope::market::{
-    HealthThresholds, MarketSummary, OrderBook, VenueRegistry, order_book_from_analytics,
+    DexAnalyticsSource, HealthThresholds, MarketSummary, MarketVenue, OrderBook, Pair,
+    VenueRegistry,
 };
 use std::time::Duration;
 
@@ -88,18 +89,21 @@ pub enum MarketCommands {
   ..."
 )]
 pub struct SummaryArgs {
-    /// Base token symbol (e.g., USDC, DAI) or @label from address book. Quote is USDT.
+    /// Pair (DAI_USDC, BTC/GBP, BTCUSDT) or base symbol (USDC). A bare base
+    /// uses the venue's default quote.
     #[arg(default_value = "USDC", value_name = "SYMBOL")]
     pub pair: String,
 
-    /// Market venue (e.g., binance, biconomy, mexc, okx, eth, solana).
+    /// Market venue: a CEX (e.g., binance, mexc, okx) or a DEX (ethereum/eth,
+    /// solana/sol).
     /// Use `scope venues list` to see all available venues.
     #[arg(long, default_value = "binance", value_name = "VENUE")]
     pub venue: String,
 
-    /// Chain for DEX venues (ethereum or solana). Ignored for CEX.
-    #[arg(long, default_value = "ethereum", value_name = "CHAIN")]
-    pub chain: String,
+    /// Chain for a DEX venue. The venue already names its chain, so this is
+    /// only a check: a different chain is an error. Ignored for CEX venues.
+    #[arg(long, value_name = "CHAIN")]
+    pub chain: Option<String>,
 
     /// Health threshold overrides (flag > config `market.health` > default).
     #[command(flatten)]
@@ -246,71 +250,40 @@ pub async fn run(
     }
 }
 
-/// Parse duration strings like "30s", "5m", "1h", "24h" into seconds.
-/// Normalize a pair argument to tolerate `key=value` style invocations.
+/// The venue symbol for user pair input (see [`Pair::parse`]).
 ///
-/// Examples:
-/// - `USDC_USDT` -> `USDC_USDT`
-/// - `pair=USDC_USDT` -> `USDC_USDT`
-/// - `pair_symbol=USDC_USDT` -> `USDC_USDT`
-fn normalize_pair_input(pair: &str) -> &str {
-    let p = pair.trim();
-    if let Some((lhs, rhs)) = p.split_once('=')
-        && !rhs.is_empty()
-        && lhs
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-    {
-        return rhs;
-    }
-    p
-}
-
-/// Writes a pair the way a venue expects it. Accepts `BASE_QUOTE`,
-/// `BASE/QUOTE`, `BASE-QUOTE`, `BASEUSDT` and a bare `BASE` (the venue's
-/// default quote), so users need not know each venue's own format.
+/// Kept only for the monitor (`monitor/mod.rs`), which still calls it; the
+/// market commands call `venue_symbol` directly.
 pub(crate) fn venue_pair(exchange: &scope::market::ExchangeClient, input: &str) -> String {
-    match parse_pair_components(input) {
-        (base, Some(quote)) => exchange.format_pair_with_quote(base, quote),
-        (base, None) => exchange.format_pair(base),
+    exchange.venue_symbol(&Pair::parse(input))
+}
+
+/// Token analytics from the crawl pipeline: the CLI and web adapter for the
+/// core [`DexAnalyticsSource`] port.
+pub struct CrawlDexSource<'a> {
+    /// Chain clients for the token lookup.
+    pub factory: &'a dyn ChainClientFactory,
+    /// Where the crawl reports progress and warnings.
+    pub out: &'a Output,
+}
+
+#[async_trait::async_trait]
+impl DexAnalyticsSource for CrawlDexSource<'_> {
+    async fn token_analytics(&self, token: &str, chain: &str) -> Result<TokenAnalytics> {
+        crawl::fetch_analytics_for_input(
+            token,
+            chain,
+            Period::Hour24,
+            10,
+            self.factory,
+            None,
+            self.out,
+        )
+        .await
     }
 }
 
-/// Parse base/quote symbols from user input.
-///
-/// Supports:
-/// - Delimited forms: `BASE_QUOTE`, `BASE/QUOTE`, `BASE-QUOTE`
-/// - Concatenated common quote forms: `BASEUSDT`, `BASEUSDC`, `BASEUSD`, `BASEBTC`
-/// - Fallback: treat input as base-only and let venue default quote apply.
-fn parse_pair_components(pair: &str) -> (&str, Option<&str>) {
-    let p = normalize_pair_input(pair);
-
-    for sep in ['_', '/', '-'] {
-        if let Some((base, quote)) = p.split_once(sep)
-            && !base.is_empty()
-            && !quote.is_empty()
-        {
-            return (base, Some(quote));
-        }
-    }
-
-    const COMMON_QUOTES: [&str; 7] = ["USDT", "USDC", "USD", "BTC", "ETH", "EUR", "TRY"];
-    for quote in COMMON_QUOTES {
-        if p.len() > quote.len() && p.to_uppercase().ends_with(quote) {
-            let base_len = p.len() - quote.len();
-            return (&p[..base_len], Some(quote));
-        }
-    }
-
-    (p, None)
-}
-
-/// Extract base symbol from pair (e.g. "DAI_USDT" -> "DAI", "USDCUSDT" -> "USDC", "USDC" -> "USDC").
-#[cfg(test)]
-fn base_symbol_from_pair(pair: &str) -> &str {
-    parse_pair_components(pair).0
-}
-
+/// Parse duration strings like "30s", "5m", "1h", "24h" into seconds.
 fn parse_duration(s: &str) -> Result<u64> {
     let s = s.trim();
     if s.is_empty() {
@@ -434,72 +407,20 @@ fn market_summary_to_markdown(summary: &MarketSummary, venue: &str, pair: &str) 
     md
 }
 
-/// Whether the venue string refers to a DEX venue (handled by DexScreener, not the registry).
-fn is_dex_venue(venue: &str) -> bool {
-    matches!(venue.to_lowercase().as_str(), "ethereum" | "eth" | "solana")
-}
-
-/// Resolve DEX venue name to a canonical chain name.
-fn dex_venue_to_chain(venue: &str) -> &str {
-    match venue.to_lowercase().as_str() {
-        "ethereum" | "eth" => "ethereum",
-        "solana" => "solana",
-        _ => "ethereum",
-    }
-}
-
+/// Fetches the book and volume for the summary arguments. `--chain`, when
+/// given, must name the DEX venue's chain.
 async fn fetch_book_and_volume(
     args: &SummaryArgs,
     thresholds: &HealthThresholds,
     factory: &dyn ChainClientFactory,
     out: &Output,
 ) -> Result<(OrderBook, Option<f64>)> {
-    let (base, _) = parse_pair_components(&args.pair);
-    let base = base.to_string();
-
-    if is_dex_venue(&args.venue) {
-        // DEX path: synthesize from DexScreener analytics
-        let chain = dex_venue_to_chain(&args.venue);
-        let analytics =
-            crawl::fetch_analytics_for_input(&base, chain, Period::Hour24, 10, factory, None, out)
-                .await?;
-        if analytics.dex_pairs.is_empty() {
-            return Err(ScopeError::Chain(format!(
-                "No DEX pairs found for {} on {}",
-                base, chain
-            )));
-        }
-        let best_pair = analytics
-            .dex_pairs
-            .iter()
-            .max_by(|a, b| {
-                a.liquidity_usd
-                    .partial_cmp(&b.liquidity_usd)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .ok_or_else(|| ScopeError::Chain("No DEX pairs after filter".to_string()))?;
-        let book = order_book_from_analytics(chain, best_pair, &analytics.token.symbol, thresholds);
-        let volume = Some(best_pair.volume_24h);
-        Ok((book, volume))
-    } else {
-        // CEX path: use VenueRegistry + ExchangeClient
-        let registry = VenueRegistry::load()?;
-        let exchange = registry.create_exchange_client(&args.venue)?;
-        let pair = venue_pair(&exchange, &args.pair);
-        let book = exchange.fetch_order_book(&pair).await?;
-
-        // Get volume from ticker if available
-        let volume = if exchange.has_ticker() {
-            exchange
-                .fetch_ticker(&pair)
-                .await
-                .ok()
-                .and_then(|t| t.quote_volume(book.mid_price()))
-        } else {
-            None
-        };
-        Ok((book, volume))
+    let venue = MarketVenue::resolve(&args.venue, &VenueRegistry::load()?)?;
+    if let Some(chain) = &args.chain {
+        venue.require_chain(chain)?;
     }
+    let dex = CrawlDexSource { factory, out };
+    scope::market::fetch_book_and_volume(&venue, &Pair::parse(&args.pair), thresholds, &dex).await
 }
 
 async fn run_summary_once(
@@ -722,7 +643,7 @@ async fn run_ohlc(args: OhlcArgs, out: &Output) -> Result<()> {
     })?;
 
     let client = scope::market::ExchangeClient::from_descriptor(descriptor);
-    let pair = venue_pair(&client, &args.pair);
+    let pair = client.venue_symbol(&Pair::parse(&args.pair));
 
     let candles = client.fetch_ohlc(&pair, &args.interval, args.limit).await?;
 
@@ -835,7 +756,7 @@ async fn run_trades(args: TradesArgs, out: &Output) -> Result<()> {
     })?;
 
     let client = scope::market::ExchangeClient::from_descriptor(descriptor);
-    let pair = venue_pair(&client, &args.pair);
+    let pair = client.venue_symbol(&Pair::parse(&args.pair));
 
     let trades = client.fetch_recent_trades(&pair, args.limit).await?;
 
@@ -922,6 +843,7 @@ async fn run_trades(args: TradesArgs, out: &Output) -> Result<()> {
 mod tests {
     use super::*;
     use scope::chains::DefaultClientFactory;
+    use scope::market::DexVenue;
 
     fn quiet() -> crate::cli::output::Output {
         crate::cli::output::Output::capture().0
@@ -976,7 +898,7 @@ capabilities:
         let args = SummaryArgs {
             pair: "USDC".to_string(),
             venue: "eth".to_string(),
-            chain: "ethereum".to_string(),
+            chain: None,
             health: HealthArgs {
                 peg_target: Some(1.0),
                 peg_range: Some(0.01),
@@ -1009,7 +931,7 @@ capabilities:
         let args = SummaryArgs {
             pair: "USDC".to_string(),
             venue: "eth".to_string(),
-            chain: "ethereum".to_string(),
+            chain: None,
             health: HealthArgs {
                 peg_target: Some(1.0),
                 peg_range: Some(0.01),
@@ -1089,56 +1011,59 @@ capabilities:
 
     #[test]
     fn test_base_symbol_from_pair_underscore() {
-        assert_eq!(base_symbol_from_pair("DAI_USDT"), "DAI");
-        assert_eq!(base_symbol_from_pair("USDC_USDT"), "USDC");
+        assert_eq!(Pair::parse("DAI_USDT").base, "DAI");
+        assert_eq!(Pair::parse("USDC_USDT").base, "USDC");
     }
 
     #[test]
     fn test_base_symbol_from_pair_lowercase_underscore() {
-        assert_eq!(base_symbol_from_pair("dai_usdt"), "dai");
+        assert_eq!(Pair::parse("dai_usdt").base, "dai");
     }
 
     #[test]
     fn test_base_symbol_from_pair_slash() {
-        assert_eq!(base_symbol_from_pair("USDC/USDT"), "USDC");
+        assert_eq!(Pair::parse("USDC/USDT").base, "USDC");
     }
 
     #[test]
     fn test_base_symbol_from_pair_concat() {
-        assert_eq!(base_symbol_from_pair("USDCUSDT"), "USDC");
-        assert_eq!(base_symbol_from_pair("DAIUSDT"), "DAI");
+        assert_eq!(Pair::parse("USDCUSDT").base, "USDC");
+        assert_eq!(Pair::parse("DAIUSDT").base, "DAI");
     }
 
     #[test]
     fn test_base_symbol_from_pair_plain() {
-        assert_eq!(base_symbol_from_pair("USDC"), "USDC");
-        assert_eq!(base_symbol_from_pair("ETH"), "ETH");
+        assert_eq!(Pair::parse("USDC").base, "USDC");
+        assert_eq!(Pair::parse("ETH").base, "ETH");
     }
 
     #[test]
     fn test_base_symbol_from_pair_whitespace() {
-        assert_eq!(base_symbol_from_pair("  DAI_USDT  "), "DAI");
+        assert_eq!(Pair::parse("  DAI_USDT  ").base, "DAI");
     }
 
     #[test]
     fn test_normalize_pair_input_key_value() {
-        assert_eq!(normalize_pair_input("pair=USDT_PUSD"), "USDT_PUSD");
-        assert_eq!(normalize_pair_input("pair_symbol=USDT_PUSD"), "USDT_PUSD");
-        assert_eq!(normalize_pair_input("USDT_PUSD"), "USDT_PUSD");
+        assert_eq!(Pair::parse("pair=USDT_PUSD").to_string(), "USDT/PUSD");
+        assert_eq!(
+            Pair::parse("pair_symbol=USDT_PUSD").to_string(),
+            "USDT/PUSD"
+        );
+        assert_eq!(Pair::parse("USDT_PUSD").to_string(), "USDT/PUSD");
     }
 
     #[test]
     fn test_parse_pair_components_delimited() {
-        assert_eq!(parse_pair_components("USDT_PUSD"), ("USDT", Some("PUSD")));
-        assert_eq!(parse_pair_components("ETH/USDC"), ("ETH", Some("USDC")));
-        assert_eq!(parse_pair_components("BTC-USDT"), ("BTC", Some("USDT")));
+        assert_eq!(Pair::parse("USDT_PUSD").to_string(), "USDT/PUSD");
+        assert_eq!(Pair::parse("ETH/USDC").to_string(), "ETH/USDC");
+        assert_eq!(Pair::parse("BTC-USDT").to_string(), "BTC/USDT");
     }
 
     #[test]
     fn test_parse_pair_components_concat_common_quote() {
-        assert_eq!(parse_pair_components("BTCUSDT"), ("BTC", Some("USDT")));
-        assert_eq!(parse_pair_components("ETHUSD"), ("ETH", Some("USD")));
-        assert_eq!(parse_pair_components("ARB"), ("ARB", None));
+        assert_eq!(Pair::parse("BTCUSDT").to_string(), "BTC/USDT");
+        assert_eq!(Pair::parse("ETHUSD").to_string(), "ETH/USD");
+        assert_eq!(Pair::parse("ARB").quote, None);
     }
 
     // ====================================================================
@@ -1305,12 +1230,12 @@ capabilities:
     #[test]
     fn test_base_symbol_from_pair_various_inputs() {
         // Additional coverage for edge cases
-        assert_eq!(base_symbol_from_pair("USDC"), "USDC");
-        assert_eq!(base_symbol_from_pair("BTCUSDT"), "BTC");
-        assert_eq!(base_symbol_from_pair("ETH/USDT"), "ETH");
-        assert_eq!(base_symbol_from_pair("DAI_USDT"), "DAI");
-        assert_eq!(base_symbol_from_pair("X"), "X"); // short symbol, no USDT suffix
-        assert_eq!(base_symbol_from_pair(""), "");
+        assert_eq!(Pair::parse("USDC").base, "USDC");
+        assert_eq!(Pair::parse("BTCUSDT").base, "BTC");
+        assert_eq!(Pair::parse("ETH/USDT").base, "ETH");
+        assert_eq!(Pair::parse("DAI_USDT").base, "DAI");
+        assert_eq!(Pair::parse("X").base, "X"); // short symbol, no USDT suffix
+        assert_eq!(Pair::parse("").base, "");
     }
 
     #[test]
@@ -1318,7 +1243,7 @@ capabilities:
         let args = SummaryArgs {
             pair: "USDC".to_string(),
             venue: "binance".to_string(),
-            chain: "ethereum".to_string(),
+            chain: None,
             health: HealthArgs {
                 peg_target: Some(1.0),
                 peg_range: Some(0.001),
@@ -1423,7 +1348,7 @@ capabilities:
         let args = MarketCommands::Summary(SummaryArgs {
             pair: "USDC".to_string(),
             venue: "eth".to_string(),
-            chain: "ethereum".to_string(),
+            chain: None,
             health: HealthArgs {
                 peg_target: Some(1.0),
                 peg_range: Some(0.01),
@@ -1453,22 +1378,34 @@ capabilities:
 
     #[test]
     fn test_is_dex_venue() {
-        assert!(is_dex_venue("eth"));
-        assert!(is_dex_venue("ethereum"));
-        assert!(is_dex_venue("Ethereum"));
-        assert!(is_dex_venue("solana"));
-        assert!(is_dex_venue("Solana"));
-        assert!(!is_dex_venue("binance"));
-        assert!(!is_dex_venue("okx"));
-        assert!(!is_dex_venue("mexc"));
+        assert!(DexVenue::parse("eth").is_some());
+        assert!(DexVenue::parse("ethereum").is_some());
+        assert!(DexVenue::parse("Ethereum").is_some());
+        assert!(DexVenue::parse("solana").is_some());
+        assert!(DexVenue::parse("Solana").is_some());
+        assert!(DexVenue::parse("binance").is_none());
+        assert!(DexVenue::parse("okx").is_none());
+        assert!(DexVenue::parse("mexc").is_none());
     }
 
     #[test]
     fn test_dex_venue_to_chain() {
-        assert_eq!(dex_venue_to_chain("eth"), "ethereum");
-        assert_eq!(dex_venue_to_chain("ethereum"), "ethereum");
-        assert_eq!(dex_venue_to_chain("Ethereum"), "ethereum");
-        assert_eq!(dex_venue_to_chain("solana"), "solana");
+        assert_eq!(
+            DexVenue::parse("eth").map(DexVenue::chain),
+            Some("ethereum")
+        );
+        assert_eq!(
+            DexVenue::parse("ethereum").map(DexVenue::chain),
+            Some("ethereum")
+        );
+        assert_eq!(
+            DexVenue::parse("Ethereum").map(DexVenue::chain),
+            Some("ethereum")
+        );
+        assert_eq!(
+            DexVenue::parse("solana").map(DexVenue::chain),
+            Some("solana")
+        );
     }
 
     #[test]
@@ -1495,7 +1432,7 @@ capabilities:
         let args = SummaryArgs {
             pair: "USDC".to_string(),
             venue: "eth".to_string(),
-            chain: "ethereum".to_string(),
+            chain: None,
             health: HealthArgs {
                 peg_target: Some(1.0),
                 peg_range: Some(0.01),
@@ -1772,14 +1709,14 @@ capabilities:
     }
 
     // ====================================================================
-    // dex_venue_to_chain — unknown venue fallback
+    // An unknown venue is not a DEX venue (it used to map to ethereum)
     // ====================================================================
 
     #[test]
-    fn test_dex_venue_to_chain_unknown_returns_ethereum() {
-        assert_eq!(dex_venue_to_chain("binance"), "ethereum");
-        assert_eq!(dex_venue_to_chain("kraken"), "ethereum");
-        assert_eq!(dex_venue_to_chain("unknown"), "ethereum");
+    fn test_unknown_venue_is_not_a_dex_venue() {
+        assert_eq!(DexVenue::parse("binance"), None);
+        assert_eq!(DexVenue::parse("kraken"), None);
+        assert_eq!(DexVenue::parse("unknown"), None);
     }
 
     // ====================================================================
@@ -1880,7 +1817,7 @@ capabilities:
         let args = SummaryArgs {
             pair: "USDC".to_string(),
             venue: "eth".to_string(),
-            chain: "ethereum".to_string(),
+            chain: None,
             health: HealthArgs {
                 peg_target: Some(1.0),
                 peg_range: Some(0.01),
@@ -1921,7 +1858,7 @@ capabilities:
         let cmd = MarketCommands::Summary(SummaryArgs {
             pair: "USDC".to_string(),
             venue: "binance".to_string(),
-            chain: "ethereum".to_string(),
+            chain: None,
             health: HealthArgs {
                 peg_target: Some(1.0),
                 peg_range: Some(0.001),
@@ -1963,7 +1900,7 @@ capabilities:
         let args = SummaryArgs {
             pair: "DAI".to_string(),
             venue: "binance".to_string(),
-            chain: "ethereum".to_string(),
+            chain: None,
             health: HealthArgs {
                 peg_target: Some(1.0),
                 peg_range: Some(0.001),
@@ -1990,7 +1927,7 @@ capabilities:
     #[test]
     fn test_base_symbol_from_pair_4char_usdt() {
         // "USDT" itself has len 4, so doesn't satisfy p.len() > 4
-        assert_eq!(base_symbol_from_pair("USDT"), "USDT");
+        assert_eq!(Pair::parse("USDT").base, "USDT");
     }
 
     #[test]
@@ -2083,7 +2020,7 @@ capabilities:
         SummaryArgs {
             pair: USDC_ADDR.to_string(),
             venue: "eth".to_string(),
-            chain: "ethereum".to_string(),
+            chain: None,
             health: HealthArgs::default(),
             format,
             every: None,
@@ -2109,6 +2046,54 @@ capabilities:
         let depth = book.total_depth(scope::market::BookSide::Bid)
             + book.total_depth(scope::market::BookSide::Ask);
         assert!((depth - 50_000.0).abs() < 1.0, "depth {depth}");
+    }
+
+    /// `--venue sol` is the Solana DEX (it used to go to the CEX registry
+    /// and fail with "unknown venue").
+    #[tokio::test]
+    async fn test_venue_sol_reads_the_solana_dex() {
+        let factory = dex_factory(&[(50_000.0, 777.0)]);
+        let mut args = dex_args(SummaryFormat::Text);
+        args.venue = "sol".to_string();
+        let result =
+            fetch_book_and_volume(&args, &HealthThresholds::default(), &factory, &quiet()).await;
+        let (book, volume) = result.unwrap();
+        assert_eq!(volume, Some(777.0));
+        assert_eq!(book.pair, "USDC/USD");
+    }
+
+    /// `--chain` is one rule with the venue: a chain that is not the DEX
+    /// venue's chain is an error, in any case.
+    #[tokio::test]
+    async fn test_chain_must_match_the_dex_venue() {
+        let factory = dex_factory(&[(50_000.0, 1.0)]);
+        let mut args = dex_args(SummaryFormat::Text);
+        args.chain = Some("Solana".to_string());
+        let err = fetch_book_and_volume(&args, &HealthThresholds::default(), &factory, &quiet())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("reads chain ethereum"), "{err}");
+
+        args.chain = Some("ETH".to_string());
+        assert!(
+            fetch_book_and_volume(&args, &HealthThresholds::default(), &factory, &quiet())
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unknown_venue_is_an_error() {
+        let factory = dex_factory(&[(50_000.0, 1.0)]);
+        let mut args = dex_args(SummaryFormat::Text);
+        args.venue = "polygon".to_string();
+        let err = fetch_book_and_volume(&args, &HealthThresholds::default(), &factory, &quiet())
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("Unknown venue \"polygon\""),
+            "{err}"
+        );
     }
 
     #[tokio::test]

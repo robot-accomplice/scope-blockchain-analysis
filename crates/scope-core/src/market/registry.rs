@@ -157,10 +157,15 @@ impl VenueRegistry {
         venue_id: &str,
     ) -> Result<crate::market::exchange::ExchangeClient> {
         let desc = self.get(venue_id).ok_or_else(|| {
-            let hint = self
-                .suggest(venue_id)
-                .map(|s| format!("\n\n  Did you mean \"{}\"?\n\n  Available venues: {}\n  Run `scope venues list` for details.", s, self.list().join(", ")))
-                .unwrap_or_else(|| format!("\n\n  Available venues: {}\n  Run `scope venues list` for details.", self.list().join(", ")));
+            let available = format!(
+                "\n\n  Available venues: {}\n  DEX venues: {}\n  Run `scope venues list` for details.",
+                self.list().join(", "),
+                crate::market::venue::DexVenue::id_list()
+            );
+            let hint = match self.suggest(venue_id) {
+                Some(s) => format!("\n\n  Did you mean \"{s}\"?{available}"),
+                None => available,
+            };
             venue_error(venue_id, format!("Unknown venue \"{}\"{}", venue_id, hint))
         })?;
         Ok(crate::market::exchange::ExchangeClient::from_descriptor(

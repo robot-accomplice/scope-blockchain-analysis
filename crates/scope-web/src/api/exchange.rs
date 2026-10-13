@@ -6,7 +6,7 @@
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use scope::market::VenueRegistry;
+use scope::market::{Pair, VenueRegistry};
 use serde::Deserialize;
 
 /// Request body for exchange snapshot.
@@ -54,7 +54,7 @@ pub async fn handle(Json(req): Json<SnapshotRequest>) -> impl IntoResponse {
         }
     };
 
-    let pair = exchange.format_pair(&req.pair);
+    let pair = exchange.venue_symbol(&Pair::parse(&req.pair));
     let snapshot = exchange.fetch_market_snapshot(&pair).await;
 
     let order_book_json = snapshot.order_book.as_ref().map(order_book_json);
@@ -143,7 +143,7 @@ pub async fn handle_trades(Json(req): Json<TradesRequest>) -> impl IntoResponse 
         }
     };
 
-    let pair = exchange.format_pair(&req.pair);
+    let pair = exchange.venue_symbol(&Pair::parse(&req.pair));
     match exchange.fetch_recent_trades(&pair, req.limit).await {
         Ok(trades) => {
             let json_trades: Vec<serde_json::Value> = trades
@@ -229,7 +229,7 @@ pub async fn handle_ohlc(Json(req): Json<OhlcRequest>) -> impl IntoResponse {
         }
     };
 
-    let pair = exchange.format_pair(&req.pair);
+    let pair = exchange.venue_symbol(&Pair::parse(&req.pair));
     match exchange.fetch_ohlc(&pair, &req.interval, req.limit).await {
         Ok(candles) => {
             let json_candles: Vec<serde_json::Value> = candles

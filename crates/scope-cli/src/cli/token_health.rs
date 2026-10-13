@@ -14,7 +14,7 @@ use scope::config::Config;
 use super::health_args::HealthArgs;
 use scope::display::report;
 use scope::error::{Result, ScopeError};
-use scope::market::{MarketSummary, VenueRegistry, order_book_from_analytics};
+use scope::market::{MarketSummary, fetch_token_summary};
 
 /// Arguments for the token-health command.
 #[derive(Debug, Args)]
@@ -130,82 +130,11 @@ pub async fn run(
     let market_summary = if args.with_market {
         sp.set_message("Fetching market data...");
         let thresholds = args.health.resolve(config);
-        if is_dex_venue(&args.venue) {
-            // DEX venues: synthesize from analytics (only when chain matches venue)
-            let venue_chain = dex_venue_to_chain(&args.venue);
-            if analytics.chain.eq_ignore_ascii_case(venue_chain) && !analytics.dex_pairs.is_empty()
-            {
-                let best_pair = analytics
-                    .dex_pairs
-                    .iter()
-                    .max_by(|a, b| {
-                        a.liquidity_usd
-                            .partial_cmp(&b.liquidity_usd)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    })
-                    .unwrap();
-                let book = order_book_from_analytics(
-                    &analytics.chain,
-                    best_pair,
-                    &analytics.token.symbol,
-                    &thresholds,
-                );
-                let volume_24h = Some(best_pair.volume_24h);
-                Some(MarketSummary::from_order_book(
-                    &book,
-                    &thresholds,
-                    volume_24h,
-                ))
-            } else {
-                if analytics.chain.ne(venue_chain) {
-                    sp.println(&format!(
-                        "  Warning: DEX venue '{}' requires --chain {} (got {})",
-                        args.venue, venue_chain, analytics.chain
-                    ))?;
-                } else if analytics.dex_pairs.is_empty() {
-                    sp.println(&format!(
-                        "  Warning: No DEX pairs found for {} on {}",
-                        analytics.token.symbol, analytics.chain
-                    ))?;
-                }
+        match fetch_token_summary(&args.venue, &analytics, &thresholds).await {
+            Ok(summary) => Some(summary),
+            Err(e) => {
+                sp.println(&format!("  Warning: market data unavailable: {e}"))?;
                 None
-            }
-        } else {
-            // CEX venues: use VenueRegistry + ExchangeClient
-            match VenueRegistry::load().and_then(|r| r.create_exchange_client(&args.venue)) {
-                Ok(exchange) => {
-                    let pair = exchange.format_pair(&analytics.token.symbol);
-                    match exchange.fetch_order_book(&pair).await {
-                        Ok(book) => {
-                            let volume_24h = if exchange.has_ticker() {
-                                exchange
-                                    .fetch_ticker(&pair)
-                                    .await
-                                    .ok()
-                                    .and_then(|t| t.quote_volume(book.mid_price()))
-                            } else {
-                                None
-                            };
-                            Some(MarketSummary::from_order_book(
-                                &book,
-                                &thresholds,
-                                volume_24h,
-                            ))
-                        }
-                        Err(e) => {
-                            sp.println(&format!(
-                                "  Warning: Market data unavailable for {} on {}",
-                                analytics.token.symbol, args.venue
-                            ))?;
-                            tracing::debug!("Market data error: {}", e);
-                            None
-                        }
-                    }
-                }
-                Err(e) => {
-                    sp.println(&format!("  Warning: {}", e))?;
-                    None
-                }
             }
         }
     } else {
@@ -235,20 +164,6 @@ pub async fn run(
     }
 
     Ok(())
-}
-
-/// Whether the venue string refers to a DEX venue.
-fn is_dex_venue(venue: &str) -> bool {
-    matches!(venue.to_lowercase().as_str(), "ethereum" | "eth" | "solana")
-}
-
-/// Resolve DEX venue name to a canonical chain name.
-fn dex_venue_to_chain(venue: &str) -> &str {
-    match venue.to_lowercase().as_str() {
-        "ethereum" | "eth" => "ethereum",
-        "solana" => "solana",
-        _ => "ethereum",
-    }
 }
 
 fn token_health_to_markdown(
@@ -465,6 +380,7 @@ mod tests {
     use scope::chains::mocks::MockClientFactory;
     use scope::chains::{DexPair, Token, TokenAnalytics, TokenHolder, TokenSocial};
     use scope::config::OutputFormat;
+    use scope::market::DexVenue;
     use scope::market::{HealthCheck, MarketSummary};
 
     fn quiet() -> crate::cli::output::Output {
@@ -591,28 +507,38 @@ mod tests {
 
     #[test]
     fn test_is_dex_venue() {
-        assert!(is_dex_venue("eth"));
-        assert!(is_dex_venue("ethereum"));
-        assert!(is_dex_venue("solana"));
-        assert!(!is_dex_venue("binance"));
-        assert!(!is_dex_venue("okx"));
+        assert!(DexVenue::parse("eth").is_some());
+        assert!(DexVenue::parse("ethereum").is_some());
+        assert!(DexVenue::parse("solana").is_some());
+        assert!(DexVenue::parse("binance").is_none());
+        assert!(DexVenue::parse("okx").is_none());
     }
 
     #[test]
     fn test_is_dex_venue_values() {
-        assert!(is_dex_venue("eth"));
-        assert!(is_dex_venue("ethereum"));
-        assert!(is_dex_venue("solana"));
-        assert!(!is_dex_venue("binance"));
-        assert!(!is_dex_venue("mexc"));
+        assert!(DexVenue::parse("eth").is_some());
+        assert!(DexVenue::parse("ethereum").is_some());
+        assert!(DexVenue::parse("solana").is_some());
+        assert!(DexVenue::parse("binance").is_none());
+        assert!(DexVenue::parse("mexc").is_none());
     }
 
     #[test]
     fn test_dex_venue_to_chain_values() {
-        assert_eq!(dex_venue_to_chain("eth"), "ethereum");
-        assert_eq!(dex_venue_to_chain("ethereum"), "ethereum");
-        assert_eq!(dex_venue_to_chain("solana"), "solana");
-        assert_eq!(dex_venue_to_chain("unknown"), "ethereum");
+        assert_eq!(
+            DexVenue::parse("eth").map(DexVenue::chain),
+            Some("ethereum")
+        );
+        assert_eq!(
+            DexVenue::parse("ethereum").map(DexVenue::chain),
+            Some("ethereum")
+        );
+        assert_eq!(
+            DexVenue::parse("solana").map(DexVenue::chain),
+            Some("solana")
+        );
+        // An unknown name is not a DEX venue; it used to map to ethereum.
+        assert_eq!(DexVenue::parse("unknown"), None);
     }
 
     #[test]
@@ -689,6 +615,19 @@ mod tests {
         assert!(md.contains("✗")); // Should show fail checks
         assert!(md.contains("Peg deviation too high"));
         assert!(md.contains("Insufficient bid depth"));
+    }
+
+    /// token-health and market share one chain rule: a DEX venue never builds
+    /// a book from another chain's pools, and `sol` names the Solana DEX.
+    #[tokio::test]
+    async fn test_dex_venue_on_another_chain_is_an_error() {
+        let analytics = make_test_analytics(true);
+        let t = scope::market::HealthThresholds::default();
+        let err = fetch_token_summary("sol", &analytics, &t)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("reads chain solana"), "{err}");
+        assert!(fetch_token_summary("ETH", &analytics, &t).await.is_ok());
     }
 
     #[test]
@@ -977,16 +916,25 @@ mod tests {
 
     #[test]
     fn test_dex_venue_to_chain_case_insensitive() {
-        assert_eq!(dex_venue_to_chain("ETH"), "ethereum");
-        assert_eq!(dex_venue_to_chain("Ethereum"), "ethereum");
-        assert_eq!(dex_venue_to_chain("SOLANA"), "solana");
+        assert_eq!(
+            DexVenue::parse("ETH").map(DexVenue::chain),
+            Some("ethereum")
+        );
+        assert_eq!(
+            DexVenue::parse("Ethereum").map(DexVenue::chain),
+            Some("ethereum")
+        );
+        assert_eq!(
+            DexVenue::parse("SOLANA").map(DexVenue::chain),
+            Some("solana")
+        );
     }
 
     #[test]
     fn test_is_dex_venue_uppercase() {
-        assert!(is_dex_venue("ETH"));
-        assert!(is_dex_venue("SOLANA"));
-        assert!(!is_dex_venue("BINANCE"));
+        assert!(DexVenue::parse("ETH").is_some());
+        assert!(DexVenue::parse("SOLANA").is_some());
+        assert!(DexVenue::parse("BINANCE").is_none());
     }
 
     #[test]

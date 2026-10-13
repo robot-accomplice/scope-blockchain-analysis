@@ -198,7 +198,7 @@ scope market summary USDC --format json
 scope market summary USDC --report peg-report.md
 ```
 
-**Venues:** `binance`, `biconomy`, `eth` (Ethereum DEX), `solana` (Solana DEX).
+**Venues:** `binance`, `biconomy`, `ethereum`/`eth` (Ethereum DEX), `solana`/`sol` (Solana DEX).
 
 ---
 

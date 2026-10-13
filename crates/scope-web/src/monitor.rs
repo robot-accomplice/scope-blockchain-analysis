@@ -9,7 +9,7 @@ use axum::extract::{Query, State};
 use axum::response::IntoResponse;
 use scope::chains::dex::DexTokenData;
 use scope::chains::{ChainClientFactory, DexDataSource};
-use scope::market::{ExchangeClient, TradeSide, VenueRegistry};
+use scope::market::{ExchangeClient, Pair, TradeSide, VenueRegistry};
 use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,7 +29,8 @@ pub struct MonitorQuery {
     /// (order book, ticker, recent trades) is included in each update frame.
     #[serde(default)]
     pub venue: Option<String>,
-    /// Base pair for exchange data (default: same as token).
+    /// Pair for exchange data, read like the CLI pair (default: the token
+    /// symbol with the venue's default quote).
     #[serde(default)]
     pub pair: Option<String>,
 }
@@ -71,8 +72,11 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, params: Moni
     });
 
     let exchange_pair: Option<String> = exchange_client.as_ref().map(|ec| {
-        let base = params.pair.as_deref().unwrap_or(&token_input);
-        ec.format_pair(base)
+        let pair = match params.pair.as_deref() {
+            Some(pair) => Pair::parse(pair),
+            None => Pair::base_only(&token_input),
+        };
+        ec.venue_symbol(&pair)
     });
 
     // Send initial connection message

@@ -31,7 +31,9 @@
 
 // Submodules (split from the original monolithic orderbook.rs)
 pub mod analytics;
+pub mod fetch;
 pub mod health;
+pub mod pair;
 pub mod series;
 pub mod traits;
 pub mod types;
@@ -41,6 +43,7 @@ pub mod configurable_client;
 pub mod descriptor;
 pub mod exchange;
 pub mod registry;
+pub mod venue;
 
 // Backward-compatible re-export shim (allows `use crate::market::OrderBook` etc.)
 mod orderbook;
@@ -48,10 +51,13 @@ mod orderbook;
 pub use configurable_client::ConfigurableExchangeClient;
 pub use descriptor::VenueDescriptor;
 pub use exchange::ExchangeClient;
+pub use fetch::{DexAnalyticsSource, fetch_book_and_volume, fetch_summary, fetch_token_summary};
 pub use orderbook::{
     BookSide, BookSource, Candle, ExecutionEstimate, ExecutionSide, HealthCheck, HealthOverrides,
     HealthThresholds, MarketSnapshot, MarketSummary, OhlcClient, OrderBook, OrderBookClient,
     OrderBookLevel, Ticker, TickerClient, Trade, TradeHistoryClient, TradeSide,
     order_book_from_analytics,
 };
+pub use pair::Pair;
 pub use registry::VenueRegistry;
+pub use venue::{DexVenue, MarketVenue};

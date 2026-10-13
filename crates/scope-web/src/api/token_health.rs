@@ -5,7 +5,7 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use scope::market::{HealthOverrides, MarketSummary, VenueRegistry, order_book_from_analytics};
+use scope::market::{HealthOverrides, fetch_token_summary};
 use scope_cli::cli::crawl::{self, Period};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -21,7 +21,7 @@ pub struct TokenHealthRequest {
     /// Include market/order book data.
     #[serde(default)]
     pub with_market: bool,
-    /// Market venue: "binance", "biconomy", "eth", "solana".
+    /// Market venue: a CEX id ("binance") or a DEX ("ethereum", "solana").
     #[serde(default = "default_venue")]
     pub market_venue: String,
     /// Health threshold overrides for `with_market` (top-level JSON keys).
@@ -82,69 +82,13 @@ pub async fn handle(
         }
     };
 
-    // Optionally fetch market data
-    let venue_id = &req.market_venue;
+    // Optionally fetch market data; a market error leaves `market` null.
     let market_summary = if req.with_market {
         let thresholds = state.config.market.health.with_overrides(&req.health);
-
-        if !is_dex_venue(venue_id) {
-            // CEX venue — use venue registry
-            if let Ok(registry) = VenueRegistry::load()
-                && let Ok(exchange) = registry.create_exchange_client(venue_id)
-            {
-                let pair = exchange.format_pair(&analytics.token.symbol);
-                match exchange.fetch_order_book(&pair).await {
-                    Ok(book) => {
-                        let volume_24h = if exchange.has_ticker() {
-                            exchange
-                                .fetch_ticker(&pair)
-                                .await
-                                .ok()
-                                .and_then(|t| t.quote_volume(book.mid_price()))
-                        } else {
-                            None
-                        };
-                        Some(MarketSummary::from_order_book(
-                            &book,
-                            &thresholds,
-                            volume_24h,
-                        ))
-                    }
-                    Err(_) => None,
-                }
-            } else {
-                None
-            }
-        } else {
-            // DEX venue
-            let venue_chain = dex_venue_to_chain(venue_id);
-            if analytics.chain.eq_ignore_ascii_case(venue_chain) && !analytics.dex_pairs.is_empty()
-            {
-                let best_pair = analytics
-                    .dex_pairs
-                    .iter()
-                    .max_by(|a, b| {
-                        a.liquidity_usd
-                            .partial_cmp(&b.liquidity_usd)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    })
-                    .unwrap();
-                let book = order_book_from_analytics(
-                    &analytics.chain,
-                    best_pair,
-                    &analytics.token.symbol,
-                    &thresholds,
-                );
-                let volume_24h = Some(best_pair.volume_24h);
-                Some(MarketSummary::from_order_book(
-                    &book,
-                    &thresholds,
-                    volume_24h,
-                ))
-            } else {
-                None
-            }
-        }
+        fetch_token_summary(&req.market_venue, &analytics, &thresholds)
+            .await
+            .inspect_err(|e| tracing::debug!("market data unavailable: {e}"))
+            .ok()
     } else {
         None
     };
@@ -174,23 +118,10 @@ pub async fn handle(
     .into_response()
 }
 
-/// Whether the venue string refers to a DEX venue.
-fn is_dex_venue(venue: &str) -> bool {
-    matches!(venue.to_lowercase().as_str(), "ethereum" | "eth" | "solana")
-}
-
-/// Resolve DEX venue name to a canonical chain name.
-fn dex_venue_to_chain(venue: &str) -> &str {
-    match venue.to_lowercase().as_str() {
-        "ethereum" | "eth" => "ethereum",
-        "solana" => "solana",
-        _ => "ethereum",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use scope::market::DexVenue;
 
     #[test]
     fn test_deserialize_full() {
@@ -329,26 +260,41 @@ mod tests {
 
     #[test]
     fn test_is_dex_venue() {
-        assert!(is_dex_venue("ethereum"));
-        assert!(is_dex_venue("eth"));
-        assert!(is_dex_venue("Ethereum"));
-        assert!(is_dex_venue("ETH"));
-        assert!(is_dex_venue("solana"));
-        assert!(is_dex_venue("Solana"));
-        assert!(!is_dex_venue("binance"));
-        assert!(!is_dex_venue("mexc"));
-        assert!(!is_dex_venue("okx"));
-        assert!(!is_dex_venue(""));
+        assert!(DexVenue::parse("ethereum").is_some());
+        assert!(DexVenue::parse("eth").is_some());
+        assert!(DexVenue::parse("Ethereum").is_some());
+        assert!(DexVenue::parse("ETH").is_some());
+        assert!(DexVenue::parse("solana").is_some());
+        assert!(DexVenue::parse("Solana").is_some());
+        assert!(DexVenue::parse("binance").is_none());
+        assert!(DexVenue::parse("mexc").is_none());
+        assert!(DexVenue::parse("okx").is_none());
+        assert!(DexVenue::parse("").is_none());
     }
 
     #[test]
     fn test_dex_venue_to_chain() {
-        assert_eq!(dex_venue_to_chain("ethereum"), "ethereum");
-        assert_eq!(dex_venue_to_chain("eth"), "ethereum");
-        assert_eq!(dex_venue_to_chain("Ethereum"), "ethereum");
-        assert_eq!(dex_venue_to_chain("solana"), "solana");
-        assert_eq!(dex_venue_to_chain("Solana"), "solana");
-        assert_eq!(dex_venue_to_chain("unknown"), "ethereum"); // default
+        assert_eq!(
+            DexVenue::parse("ethereum").map(DexVenue::chain),
+            Some("ethereum")
+        );
+        assert_eq!(
+            DexVenue::parse("eth").map(DexVenue::chain),
+            Some("ethereum")
+        );
+        assert_eq!(
+            DexVenue::parse("Ethereum").map(DexVenue::chain),
+            Some("ethereum")
+        );
+        assert_eq!(
+            DexVenue::parse("solana").map(DexVenue::chain),
+            Some("solana")
+        );
+        assert_eq!(
+            DexVenue::parse("Solana").map(DexVenue::chain),
+            Some("solana")
+        );
+        assert_eq!(DexVenue::parse("unknown"), None); // no silent ethereum
     }
 
     #[tokio::test]

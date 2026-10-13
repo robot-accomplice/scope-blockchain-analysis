@@ -5,23 +5,27 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use scope::market::{HealthOverrides, MarketSummary, VenueRegistry, order_book_from_analytics};
-use scope_cli::cli::crawl::{self, Period};
+use scope::market::{
+    HealthOverrides, MarketSummary, MarketVenue, Pair, VenueRegistry, fetch_summary,
+};
+use scope_cli::cli::market::CrawlDexSource;
+use scope_cli::cli::output::Output;
 use serde::Deserialize;
 use std::sync::Arc;
 
 /// Request body for market summary.
 #[derive(Debug, Deserialize)]
 pub struct MarketRequest {
-    /// Token symbol (e.g., "USDC", "DAI"). Default: "USDC".
+    /// Pair ("DAI_USDC", "BTCGBP") or base symbol ("USDC"). Default: "USDC".
     #[serde(default = "default_pair")]
     pub pair: String,
-    /// Market venue: "binance", "biconomy", "eth", "solana".
+    /// Market venue: a CEX id ("binance") or a DEX ("ethereum", "solana").
     #[serde(default = "default_venue")]
     pub market_venue: String,
-    /// Chain for DEX venues.
-    #[serde(default = "default_chain")]
-    pub chain: String,
+    /// Chain check for a DEX venue: when set, it must name the venue's chain.
+    /// The venue already names its chain. Ignored for CEX venues.
+    #[serde(default)]
+    pub chain: Option<String>,
     /// Health threshold overrides (top-level JSON keys, e.g. `peg`,
     /// `min_levels`, `max_spread_pct`). Unset keys use config `market.health`.
     #[serde(flatten)]
@@ -33,9 +37,6 @@ fn default_pair() -> String {
 }
 fn default_venue() -> String {
     "binance".to_string()
-}
-fn default_chain() -> String {
-    "ethereum".to_string()
 }
 
 /// Converts a MarketSummary to a JSON Value.
@@ -84,127 +85,50 @@ fn summary_to_json(summary: &MarketSummary) -> serde_json::Value {
     })
 }
 
-/// POST /api/market/summary — Peg and order book health.
+/// POST /api/market/summary — Peg and order book health. The pair and venue
+/// are read exactly as the CLI reads them (core `Pair` and `MarketVenue`).
 pub async fn handle(
     State(state): State<Arc<AppState>>,
     Json(req): Json<MarketRequest>,
 ) -> impl IntoResponse {
-    let venue_id = &req.market_venue;
-
     let thresholds = state.config.market.health.with_overrides(&req.health);
-
-    if !is_dex_venue(venue_id) {
-        // CEX venue — use the venue registry
-        let registry = match VenueRegistry::load() {
-            Ok(r) => r,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({ "error": format!("Registry error: {e}") })),
-                )
-                    .into_response();
-            }
-        };
-        let exchange = match registry.create_exchange_client(venue_id) {
-            Ok(c) => c,
-            Err(e) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({ "error": e.to_string() })),
-                )
-                    .into_response();
-            }
-        };
-
-        let pair = exchange.format_pair(&req.pair);
-        match exchange.fetch_order_book(&pair).await {
-            Ok(book) => {
-                let volume_24h = if exchange.has_ticker() {
-                    exchange
-                        .fetch_ticker(&pair)
-                        .await
-                        .ok()
-                        .and_then(|t| t.quote_volume(book.mid_price()))
-                } else {
-                    None
-                };
-                let summary = MarketSummary::from_order_book(&book, &thresholds, volume_24h);
-                Json(summary_to_json(&summary)).into_response()
-            }
-            Err(e) => (
+    let registry = match VenueRegistry::load() {
+        Ok(r) => r,
+        Err(e) => {
+            return error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response(),
+                format!("Registry error: {e}"),
+            );
         }
-    } else {
-        // DEX venue: fetch analytics then synthesize order book
-        let venue_chain = dex_venue_to_chain(venue_id);
-
-        match crawl::fetch_analytics_for_input(
-            &req.pair,
-            venue_chain,
-            Period::Hour24,
-            10,
-            &state.factory,
-            None,
-            &scope_cli::cli::output::Output::stdio(),
-        )
-        .await
-        {
-            Ok(analytics) => {
-                if analytics.dex_pairs.is_empty() {
-                    return (
-                        StatusCode::NOT_FOUND,
-                        Json(serde_json::json!({ "error": "No DEX pairs found" })),
-                    )
-                        .into_response();
-                }
-                let best_pair = analytics
-                    .dex_pairs
-                    .iter()
-                    .max_by(|a, b| {
-                        a.liquidity_usd
-                            .partial_cmp(&b.liquidity_usd)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    })
-                    .unwrap();
-                let book = order_book_from_analytics(
-                    venue_chain,
-                    best_pair,
-                    &analytics.token.symbol,
-                    &thresholds,
-                );
-                let summary =
-                    MarketSummary::from_order_book(&book, &thresholds, Some(best_pair.volume_24h));
-                Json(summary_to_json(&summary)).into_response()
-            }
-            Err(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response(),
-        }
+    };
+    let venue = match MarketVenue::resolve(&req.market_venue, &registry) {
+        Ok(v) => v,
+        Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
+    };
+    if let Some(chain) = &req.chain
+        && let Err(e) = venue.require_chain(chain)
+    {
+        return error(StatusCode::BAD_REQUEST, e.to_string());
+    }
+    let out = Output::stdio();
+    let dex = CrawlDexSource {
+        factory: &state.factory,
+        out: &out,
+    };
+    match fetch_summary(&venue, &Pair::parse(&req.pair), &thresholds, &dex).await {
+        Ok(summary) => Json(summary_to_json(&summary)).into_response(),
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
-/// Whether the venue string refers to a DEX venue.
-fn is_dex_venue(venue: &str) -> bool {
-    matches!(venue.to_lowercase().as_str(), "ethereum" | "eth" | "solana")
-}
-
-/// Resolve DEX venue name to a canonical chain name.
-fn dex_venue_to_chain(venue: &str) -> &str {
-    match venue.to_lowercase().as_str() {
-        "ethereum" | "eth" => "ethereum",
-        "solana" => "solana",
-        _ => "ethereum",
-    }
+fn error(status: StatusCode, message: String) -> axum::response::Response {
+    (status, Json(serde_json::json!({ "error": message }))).into_response()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use scope::market::DexVenue;
 
     #[test]
     fn test_deserialize_full() {
@@ -220,7 +144,7 @@ mod tests {
         let req: MarketRequest = serde_json::from_value(json).unwrap();
         assert_eq!(req.pair, "DAI");
         assert_eq!(req.market_venue, "binance");
-        assert_eq!(req.chain, "polygon");
+        assert_eq!(req.chain.as_deref(), Some("polygon"));
         assert_eq!(req.health.peg_target, Some(1.0));
         assert_eq!(req.health.min_levels, Some(10));
         assert_eq!(req.health.min_depth, Some(5000.0));
@@ -233,7 +157,7 @@ mod tests {
         let req: MarketRequest = serde_json::from_value(json).unwrap();
         assert_eq!(req.pair, "USDC");
         assert_eq!(req.market_venue, "binance");
-        assert_eq!(req.chain, "ethereum");
+        assert_eq!(req.chain, None);
         // No threshold keys: every value comes from config `market.health`.
         assert_eq!(req.health, HealthOverrides::default());
     }
@@ -242,7 +166,6 @@ mod tests {
     fn test_all_defaults() {
         assert_eq!(default_pair(), "USDC");
         assert_eq!(default_venue(), "binance");
-        assert_eq!(default_chain(), "ethereum");
     }
 
     #[test]
@@ -274,6 +197,23 @@ mod tests {
         assert_eq!(t.amm_step_pct, 0.05);
     }
 
+    /// H6: with `peg_target: 0.92` in the config, a market request and a
+    /// token-health request that send no peg both judge against 0.92.
+    #[test]
+    fn test_configured_peg_applies_to_both_panels() {
+        let mut config = scope::config::Config::default();
+        config.market.health.peg_target = 0.92;
+        let market: MarketRequest =
+            serde_json::from_value(serde_json::json!({ "pair": "EURC" })).unwrap();
+        let health: super::super::token_health::TokenHealthRequest =
+            serde_json::from_value(serde_json::json!({ "token": "EURC", "with_market": true }))
+                .unwrap();
+        let from_market = config.market.health.with_overrides(&market.health);
+        let from_health = config.market.health.with_overrides(&health.health);
+        assert_eq!(from_market.peg_target, 0.92);
+        assert_eq!(from_health.peg_target, 0.92);
+    }
+
     #[test]
     fn test_request_overrides_config() {
         let mut config = scope::config::Config::default();
@@ -300,7 +240,7 @@ mod tests {
         // Other fields should use defaults
         assert_eq!(req.pair, "USDC");
         assert_eq!(req.market_venue, "binance");
-        assert_eq!(req.chain, "ethereum");
+        assert_eq!(req.chain, None);
         assert_eq!(req.health.peg_target, None);
     }
 
@@ -323,7 +263,7 @@ mod tests {
         let req = MarketRequest {
             pair: "USDC".to_string(),
             market_venue: "binance".to_string(),
-            chain: "ethereum".to_string(),
+            chain: None,
             health: HealthOverrides::default(),
         };
         let response = handle(State(state), axum::Json(req)).await.into_response();
@@ -350,7 +290,7 @@ mod tests {
         let req = MarketRequest {
             pair: "USDC".to_string(),
             market_venue: "eth".to_string(),
-            chain: "ethereum".to_string(),
+            chain: None,
             health: HealthOverrides::default(),
         };
         let response = handle(State(state), axum::Json(req)).await.into_response();
@@ -377,7 +317,7 @@ mod tests {
         let req = MarketRequest {
             pair: "BTC".to_string(),
             market_venue: "binance".to_string(),
-            chain: "ethereum".to_string(),
+            chain: None,
             health: HealthOverrides::default(),
         };
         let response = handle(State(state), axum::Json(req)).await.into_response();
@@ -391,19 +331,28 @@ mod tests {
 
     #[test]
     fn test_is_dex_venue() {
-        assert!(is_dex_venue("eth"));
-        assert!(is_dex_venue("ethereum"));
-        assert!(is_dex_venue("solana"));
-        assert!(!is_dex_venue("binance"));
-        assert!(!is_dex_venue("mexc"));
+        assert!(DexVenue::parse("eth").is_some());
+        assert!(DexVenue::parse("ethereum").is_some());
+        assert!(DexVenue::parse("solana").is_some());
+        assert!(DexVenue::parse("binance").is_none());
+        assert!(DexVenue::parse("mexc").is_none());
     }
 
     #[test]
     fn test_dex_venue_to_chain() {
-        assert_eq!(dex_venue_to_chain("eth"), "ethereum");
-        assert_eq!(dex_venue_to_chain("ethereum"), "ethereum");
-        assert_eq!(dex_venue_to_chain("solana"), "solana");
-        assert_eq!(dex_venue_to_chain("unknown"), "ethereum");
+        assert_eq!(
+            DexVenue::parse("eth").map(DexVenue::chain),
+            Some("ethereum")
+        );
+        assert_eq!(
+            DexVenue::parse("ethereum").map(DexVenue::chain),
+            Some("ethereum")
+        );
+        assert_eq!(
+            DexVenue::parse("solana").map(DexVenue::chain),
+            Some("solana")
+        );
+        assert_eq!(DexVenue::parse("unknown"), None); // no silent ethereum
     }
 
     #[test]
@@ -411,7 +360,7 @@ mod tests {
         let req = MarketRequest {
             pair: "USDC".to_string(),
             market_venue: "binance".to_string(),
-            chain: "ethereum".to_string(),
+            chain: None,
             health: HealthOverrides::default(),
         };
         let debug = format!("{:?}", req);
@@ -437,7 +386,7 @@ mod tests {
         let req = MarketRequest {
             pair: "USDC".to_string(),
             market_venue: "nonexistent_venue_xyz".to_string(),
-            chain: "ethereum".to_string(),
+            chain: None,
             health: HealthOverrides::default(),
         };
         let response = handle(State(state), axum::Json(req)).await.into_response();
@@ -466,7 +415,7 @@ mod tests {
         let req = MarketRequest {
             pair: "USDC".to_string(),
             market_venue: "binance".to_string(),
-            chain: "ethereum".to_string(),
+            chain: None,
             health: HealthOverrides::default(),
         };
         let response = handle(State(state), axum::Json(req)).await.into_response();
@@ -486,9 +435,9 @@ mod tests {
 
     #[test]
     fn test_is_dex_venue_case_insensitive() {
-        assert!(is_dex_venue("ETHEREUM"));
-        assert!(is_dex_venue("SOLANA"));
-        assert!(!is_dex_venue("BINANCE"));
+        assert!(DexVenue::parse("ETHEREUM").is_some());
+        assert!(DexVenue::parse("SOLANA").is_some());
+        assert!(DexVenue::parse("BINANCE").is_none());
     }
 
     #[test]

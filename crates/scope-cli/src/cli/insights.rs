@@ -18,7 +18,7 @@ use super::health_args::HealthArgs;
 use scope::display::report;
 use scope::error::Result;
 use scope::market::health::PegStatus;
-use scope::market::{MarketSummary, VenueRegistry};
+use scope::market::{MarketSummary, VenueRegistry, fetch_token_summary};
 use scope::tokens::{TokenAliases, is_stablecoin_symbol};
 
 /// Target type inferred from user input.
@@ -392,24 +392,13 @@ pub async fn run(
                 } else {
                     registry.list().first().copied().unwrap_or("binance")
                 };
-                if let Ok(exchange) = registry.create_exchange_client(venue_id) {
-                    let pair = exchange.format_pair(&analytics.token.symbol);
-                    if let Ok(book) = exchange.fetch_order_book(&pair).await {
-                        let thresholds = args.health.resolve(config);
-                        let volume_24h = if exchange.has_ticker() {
-                            exchange
-                                .fetch_ticker(&pair)
-                                .await
-                                .ok()
-                                .and_then(|t| t.quote_volume(book.mid_price()))
-                        } else {
-                            None
-                        };
-                        let summary =
-                            MarketSummary::from_order_book(&book, &thresholds, volume_24h);
-                        peg_status = Some(summary.peg_status());
-                        output.push_str(&peg_line(exchange.venue_name(), &pair, &summary));
-                    }
+                let thresholds = args.health.resolve(config);
+                if let (Some(desc), Ok(summary)) = (
+                    registry.get(venue_id),
+                    fetch_token_summary(venue_id, &analytics, &thresholds).await,
+                ) {
+                    peg_status = Some(summary.peg_status());
+                    output.push_str(&peg_line(&desc.name, &summary.pair, &summary));
                 }
             }
 
