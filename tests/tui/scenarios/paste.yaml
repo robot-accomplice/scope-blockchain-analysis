@@ -1,0 +1,11 @@
+name: Bracketed paste joins lines into the input and never runs them
+tiers: [offline]
+steps:
+  - wait_for: { text: "scope:auto>" }
+  - expect_paste_mode: true
+  - type: "\e[200~venues list\nhelp\e[201~"
+  - wait_for: { text: "pasted 2 lines as one line" }
+  - expect_screen: { contains: ["venues list help"], not_contains: ["Available Venues"] }
+  - key: Ctrl-U
+  - key: Ctrl-D
+  - expect_exit: 0

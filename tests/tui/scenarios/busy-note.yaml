@@ -1,0 +1,13 @@
+name: Ctrl-D while a command runs explains why it waits
+tiers: [offline]
+steps:
+  - type: "market summary USDC --venue binance --every 5s --duration 1m"
+  - key: Enter
+  - wait_for: { text: "running" }
+  - key: Ctrl-D
+  # The hint row under the input shows the note; no scrolling needed.
+  - wait_for: { text: "A command is running; Esc or Ctrl-C cancels it first." }
+  - key: Esc
+  - wait_for: { text: "Cancelled" }
+  - key: Ctrl-D
+  - expect_exit: 0

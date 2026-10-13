@@ -257,6 +257,13 @@ fn run_step(
                 }
             }
         }
+        Step::ExpectPasteMode(want) => {
+            exited(sess)?;
+            sess.pump(SETTLE)?;
+            if sess.bracketed_paste() != *want {
+                anyhow::bail!("bracketed paste mode is not {want}");
+            }
+        }
         Step::ExpectJournal {
             argv_prefix,
             outcome,

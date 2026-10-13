@@ -155,6 +155,11 @@ impl Session {
         crate::screen::text(&self.parser)
     }
 
+    /// True when the child turned bracketed paste on and has not turned it off.
+    pub fn bracketed_paste(&self) -> bool {
+        self.parser.screen().bracketed_paste()
+    }
+
     pub fn raw(&self) -> &[u8] {
         &self.raw
     }

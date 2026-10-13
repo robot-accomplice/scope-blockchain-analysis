@@ -1,0 +1,8 @@
+name: Enter typed before the first paint runs the command (#63)
+tiers: [offline]
+wait_for_paint: false
+steps:
+  - type: "ctx\r"
+  - wait_for: { text: "Current Context", timeout: 15s }
+  - key: Ctrl-D
+  - expect_exit: 0
