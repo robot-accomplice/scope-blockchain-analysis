@@ -25,9 +25,29 @@
 use std::fmt;
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 /// A shared, thread-safe writer.
 type Sink = Arc<Mutex<dyn Write + Send>>;
+
+/// Where a repeating command is, for a screen that draws it.
+///
+/// It is not output. It never reaches the pane text, the copy or the
+/// journal. Only the command writes it; the TUI reads it.
+#[derive(Debug, Clone, Default)]
+pub struct RunProgress {
+    /// The run that is in progress or just ended. 0 before the first.
+    pub run: u64,
+    /// How many runs the command will make, when it is known.
+    pub total: Option<u64>,
+    /// When the next run starts. None while a run is in progress.
+    pub next_at: Option<Instant>,
+    /// The line the command printed when it started repeating.
+    pub banner: Option<String>,
+}
+
+/// A progress record shared between a command and the screen.
+pub type ProgressHook = Arc<Mutex<RunProgress>>;
 
 /// The output channels for one command run.
 ///
@@ -37,6 +57,7 @@ pub struct Output {
     out: Sink,
     err: Sink,
     progress: bool,
+    hook: Option<ProgressHook>,
 }
 
 impl Output {
@@ -47,6 +68,7 @@ impl Output {
             out: Arc::new(Mutex::new(io::stdout())),
             err: Arc::new(Mutex::new(io::stderr())),
             progress: true,
+            hook: None,
         }
     }
 
@@ -57,6 +79,7 @@ impl Output {
         let out = Arc::new(Mutex::new(Vec::new()));
         let err = Arc::new(Mutex::new(Vec::new()));
         let captured = Captured {
+            data: out.clone(),
             out: out.clone(),
             err: err.clone(),
         };
@@ -64,6 +87,7 @@ impl Output {
             out,
             err,
             progress: false,
+            hook: None,
         };
         (output, captured)
     }
@@ -74,16 +98,23 @@ impl Output {
     /// The TUI uses it: its output pane shows data and diagnostics as one
     /// stream, as a terminal does. [`Captured::out`] returns the whole
     /// stream and [`Captured::err`] returns the same text.
+    /// [`Captured::data`] returns only what went to the data channel.
     pub fn capture_merged() -> (Self, Captured) {
         let buf = Arc::new(Mutex::new(Vec::new()));
+        let data = Arc::new(Mutex::new(Vec::new()));
         let captured = Captured {
             out: buf.clone(),
             err: buf.clone(),
+            data: data.clone(),
         };
         let output = Self {
-            out: buf.clone(),
+            out: Arc::new(Mutex::new(Tee {
+                merged: buf.clone(),
+                data,
+            })),
             err: buf,
             progress: false,
+            hook: Some(ProgressHook::default()),
         };
         (output, captured)
     }
@@ -98,12 +129,26 @@ impl Output {
             out: Arc::new(Mutex::new(out)),
             err: Arc::new(Mutex::new(err)),
             progress: false,
+            hook: None,
         }
     }
 
     /// True when animated progress indicators may draw on the terminal.
     pub fn progress_enabled(&self) -> bool {
         self.progress
+    }
+
+    /// The progress record of this run, when the output has one. The TUI's
+    /// output has one; the plain CLI output does not.
+    pub fn progress_hook(&self) -> Option<ProgressHook> {
+        self.hook.clone()
+    }
+
+    /// Changes the progress record. Does nothing when there is no hook.
+    pub fn update_progress(&self, change: impl FnOnce(&mut RunProgress)) {
+        if let Some(hook) = &self.hook {
+            change(&mut lock(hook));
+        }
     }
 
     /// Writes formatted data to the data channel. Use [`outln!`](crate::outln) / [`out!`](crate::out).
@@ -129,6 +174,8 @@ impl Output {
 /// Reads back what an [`Output::capture`] output received.
 #[derive(Clone)]
 pub struct Captured {
+    /// Only the data channel. Same buffer as `out` unless merged.
+    data: Arc<Mutex<Vec<u8>>>,
     out: Arc<Mutex<Vec<u8>>>,
     err: Arc<Mutex<Vec<u8>>>,
 }
@@ -137,6 +184,12 @@ impl Captured {
     /// Everything written to the data channel so far.
     pub fn out(&self) -> String {
         String::from_utf8_lossy(&lock(&self.out)).into_owned()
+    }
+
+    /// Only what was written to the data channel, without the diagnostics
+    /// that a merged capture mixes in.
+    pub fn data(&self) -> String {
+        String::from_utf8_lossy(&lock(&self.data)).into_owned()
     }
 
     /// Everything written to the diagnostic channel so far.
@@ -148,6 +201,24 @@ impl Captured {
     /// [`scope::diag::redirect`] so library warnings join the same stream.
     pub fn out_sink(&self) -> scope::diag::Sink {
         self.out.clone()
+    }
+}
+
+/// The data channel of a merged capture: writes to the merged stream and
+/// to a data-only buffer.
+struct Tee {
+    merged: Arc<Mutex<Vec<u8>>>,
+    data: Arc<Mutex<Vec<u8>>>,
+}
+
+impl Write for Tee {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        lock(&self.merged).extend_from_slice(buf);
+        lock(&self.data).extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -242,6 +313,15 @@ pub(crate) mod tests {
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn test_merged_capture_keeps_data_apart_from_diagnostics() {
+        let (o, cap) = Output::capture_merged();
+        outln!(o, "data").unwrap();
+        errln!(o, "warn").unwrap();
+        assert_eq!(cap.data(), "data\n");
+        assert_eq!(cap.out(), "data\nwarn\n");
     }
 
     #[test]

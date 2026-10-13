@@ -7,7 +7,8 @@
 
 use owo_colors::OwoColorize;
 use std::io::IsTerminal;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use unicode_width::UnicodeWidthStr;
 
 // ============================================================================
 // Terminal detection
@@ -61,13 +62,64 @@ pub fn color_enabled_stderr() -> bool {
     color_enabled_for(std::io::stderr().is_terminal())
 }
 
+/// Width override in columns: 0 = none. The TUI sets it to the width of
+/// its output pane, so command output fits the pane.
+static WIDTH_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
+
+/// Sets the width that [`terminal_width`] returns for the whole process,
+/// or removes the override (`None`). `Some(0)` also removes it. The TUI
+/// removes it each time it gives the terminal back.
+pub fn set_width_override(width: Option<usize>) {
+    WIDTH_OVERRIDE.store(width.unwrap_or(0), Ordering::Relaxed);
+}
+
+/// The width override, if one is set.
+pub fn width_override() -> Option<usize> {
+    match WIDTH_OVERRIDE.load(Ordering::Relaxed) {
+        0 => None,
+        w => Some(w),
+    }
+}
+
 /// Returns the current terminal width in columns.
 ///
-/// Uses `crossterm::terminal::size()` when available, falls back to 80 columns.
+/// Uses the width override when one is set (the TUI pane). Otherwise uses
+/// `crossterm::terminal::size()` when available, and falls back to 80
+/// columns.
 pub fn terminal_width() -> usize {
-    crossterm::terminal::size()
-        .map(|(w, _)| w as usize)
-        .unwrap_or(80)
+    width_or_real(width_override())
+}
+
+/// `over`, or the real terminal width when it is `None`.
+fn width_or_real(over: Option<usize>) -> usize {
+    over.unwrap_or_else(|| {
+        crossterm::terminal::size()
+            .map(|(w, _)| w as usize)
+            .unwrap_or(80)
+    })
+}
+
+/// Serialises the tests that set the width override or depend on
+/// `terminal_width()`.
+#[cfg(test)]
+pub(crate) fn width_lock() -> std::sync::MutexGuard<'static, ()> {
+    static WIDTH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    WIDTH_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// The widest rule, in columns, that the section helpers draw.
+const RULE_WIDTH: usize = 50;
+
+/// The `─` run of a rule of `len` columns that starts after `prefix_cols`
+/// columns. Only the width override (`cap`, the TUI pane) shortens it:
+/// with no override a rule keeps its fixed width, so CLI and piped output
+/// stay the same at every terminal width.
+fn rule_at(len: usize, prefix_cols: usize, cap: Option<usize>) -> String {
+    let len = match cap {
+        Some(w) => len.min(w.saturating_sub(prefix_cols)),
+        None => len,
+    };
+    "─".repeat(len)
 }
 
 // ============================================================================
@@ -92,7 +144,7 @@ pub fn wrap_lines(text: &str, content_width: usize) -> Vec<String> {
     let mut current_len = 0usize;
 
     for word in text.split_whitespace() {
-        let word_len = word.len();
+        let word_len = word.width();
 
         if current_len == 0 {
             // First word on the line — always accept it even if it exceeds width
@@ -145,17 +197,23 @@ pub fn section_header(title: &str) -> String {
 }
 
 fn section_header_styled(title: &str, tty: bool) -> String {
-    let width: usize = 50;
-    let pad = width.saturating_sub(title.len() + 4);
+    section_header_at(title, tty, width_override())
+}
+
+/// `section_header_styled` with the width cap given.
+fn section_header_at(title: &str, tty: bool, cap: Option<usize>) -> String {
+    // "┌─ " + title + " " come before the rule.
+    let prefix = title.width() + 4;
+    let pad = rule_at(RULE_WIDTH.saturating_sub(prefix), prefix, cap);
     if tty {
         format!(
             "\n{} {} {}",
             "┌─".cyan(),
             title.bold().bright_white(),
-            "─".repeat(pad).cyan()
+            pad.cyan()
         )
     } else {
-        format!("\n┌─ {} {}", title, "─".repeat(pad))
+        format!("\n┌─ {} {}", title, pad)
     }
 }
 
@@ -384,7 +442,12 @@ pub fn section_footer() -> String {
 }
 
 fn section_footer_styled(tty: bool) -> String {
-    let line = "─".repeat(50);
+    section_footer_at(tty, width_override())
+}
+
+/// `section_footer_styled` with the width cap given.
+fn section_footer_at(tty: bool, cap: Option<usize>) -> String {
+    let line = rule_at(RULE_WIDTH, 1, cap);
     if tty {
         format!("{}", format!("└{}", line).cyan())
     } else {
@@ -402,7 +465,12 @@ pub fn separator() -> String {
 }
 
 fn separator_styled(tty: bool) -> String {
-    let line = "─".repeat(50);
+    separator_at(tty, width_override())
+}
+
+/// `separator_styled` with the width cap given.
+fn separator_at(tty: bool, cap: Option<usize>) -> String {
+    let line = rule_at(RULE_WIDTH, 1, cap);
     if tty {
         format!("{}", format!("├{}", line).cyan())
     } else {
@@ -702,6 +770,11 @@ pub fn table_header(cols: &[Col]) -> String {
 }
 
 fn table_header_styled(cols: &[Col], tty: bool) -> String {
+    table_header_at(cols, tty, width_override())
+}
+
+/// `table_header_styled` with the width cap given.
+fn table_header_at(cols: &[Col], tty: bool, cap: Option<usize>) -> String {
     let mut header = String::new();
     for col in cols {
         if col.align == '>' {
@@ -712,7 +785,7 @@ fn table_header_styled(cols: &[Col], tty: bool) -> String {
     }
     let header = header.trim_end().to_string();
     let rule_len = cols.iter().map(|c| c.width + 2).sum::<usize>();
-    let rule = "─".repeat(rule_len);
+    let line = rule_at(rule_len, 3, cap);
 
     if tty {
         format!(
@@ -720,10 +793,10 @@ fn table_header_styled(cols: &[Col], tty: bool) -> String {
             "│".cyan(),
             header.dimmed(),
             "│".cyan(),
-            rule.cyan()
+            line.cyan()
         )
     } else {
-        format!("│    {}\n│  {}", header, rule)
+        format!("│    {}\n│  {}", header, line)
     }
 }
 
@@ -1342,12 +1415,14 @@ mod tests {
 
     #[test]
     fn test_terminal_width_returns_positive() {
+        let _lock = width_lock();
         let w = terminal_width();
         assert!(w > 0);
     }
 
     #[test]
     fn test_content_width_for_reasonable_prefix() {
+        let _lock = width_lock();
         let w = content_width_for(7);
         // Should be terminal_width - 7; at minimum > 0 even in CI
         assert!(w > 0 || terminal_width() <= 7);
@@ -1359,6 +1434,7 @@ mod tests {
 
     #[test]
     fn test_detail_row_wraps_long_text() {
+        let _lock = width_lock();
         // detail_row prefix is 7 cols ("│      "); with width=40 that gives 33 cols for content
         let long = "Contract source code is not verified and full vulnerability analysis requires verified source code for accurate results";
         let row = detail_row_styled(long, false);
@@ -1385,6 +1461,7 @@ mod tests {
 
     #[test]
     fn test_check_pass_wraps_long_text() {
+        let _lock = width_lock();
         let long = "No sells detected below the configured peg target during the monitoring window across all tracked pairs";
         let row = check_pass_styled(long, false);
         assert!(row.contains("✓"));
@@ -1397,6 +1474,7 @@ mod tests {
 
     #[test]
     fn test_check_fail_wraps_long_text() {
+        let _lock = width_lock();
         let long = "Bid depth is significantly below the minimum threshold required for healthy market conditions on this trading pair";
         let row = check_fail_styled(long, false);
         assert!(row.contains("✗"));
@@ -1407,6 +1485,7 @@ mod tests {
 
     #[test]
     fn test_warning_row_wraps_long_text() {
+        let _lock = width_lock();
         let long = "Source code is NOT verified — unable to perform source-level analysis. Consider requesting verification.";
         let row = warning_row_styled(long, false);
         assert!(row.contains("⚠"));
@@ -1417,6 +1496,7 @@ mod tests {
 
     #[test]
     fn test_info_row_wraps_long_text() {
+        let _lock = width_lock();
         let long = "No audit reports found. Check block explorer and auditor databases manually for third-party audit information.";
         let row = info_row_styled(long, false);
         assert!(row.contains("ℹ"));
@@ -1427,6 +1507,7 @@ mod tests {
 
     #[test]
     fn test_bullet_row_wraps_long_text() {
+        let _lock = width_lock();
         let long = "Uniswap V3 integration detected with slippage protection enabled and deadline protection enabled for all swap calls";
         let row = bullet_row_styled(long, false);
         assert!(row.contains("•"));
@@ -1437,6 +1518,7 @@ mod tests {
 
     #[test]
     fn test_kv_row_wraps_long_value() {
+        let _lock = width_lock();
         let long_val = "Verified contract with comprehensive access controls and multiple security features including role-based permissions";
         let row = kv_row_styled("Summary", long_val, false);
         assert!(row.contains("Summary"));
@@ -1449,6 +1531,7 @@ mod tests {
 
     #[test]
     fn test_kv_row_short_value_no_wrap() {
+        let _lock = width_lock();
         let row = kv_row_styled("Chain", "ethereum", false);
         assert_eq!(row.lines().count(), 1);
         assert!(row.contains("Chain"));
@@ -1457,6 +1540,7 @@ mod tests {
 
     #[test]
     fn test_detail_row_wraps_tty() {
+        let _lock = width_lock();
         let long = "Contract source code is not verified and full vulnerability analysis requires verified source code for accurate results";
         let row = detail_row_styled(long, true);
         assert!(row.contains("│"));
@@ -1466,6 +1550,7 @@ mod tests {
 
     #[test]
     fn test_bullet_row_wraps_tty() {
+        let _lock = width_lock();
         let long = "Uniswap V3 integration detected with slippage protection enabled and deadline protection enabled for all swap calls";
         let row = bullet_row_styled(long, true);
         assert!(row.contains("•"));
@@ -1475,6 +1560,7 @@ mod tests {
 
     #[test]
     fn test_kv_row_wraps_tty() {
+        let _lock = width_lock();
         let long_val = "Verified contract with comprehensive access controls and multiple security features including role-based permissions";
         let row = kv_row_styled("Summary", long_val, true);
         assert!(row.contains("Summary"));
@@ -1580,6 +1666,7 @@ mod tests {
 
     #[test]
     fn test_numbered_row_wraps() {
+        let _lock = width_lock();
         let long = "This is a very long description that should eventually wrap to the next line when the terminal width is narrow enough";
         let row = numbered_row(1, long);
         assert!(row.contains("1."));
@@ -1609,7 +1696,9 @@ mod tests {
 
     #[test]
     fn test_check_pass_wraps_tty() {
-        let long = "No sells detected below the configured peg target during the monitoring window across all tracked pairs and venues in scope";
+        let _lock = width_lock();
+        // Long enough to wrap on any real terminal (up to ~500 columns).
+        let long = &format!("{} ", "No sells detected below the configured peg target during the monitoring window across all tracked pairs and venues in scope").repeat(4);
         let row = check_pass_styled(long, true);
         assert!(row.contains("✓"));
         assert!(row.lines().count() > 1, "should wrap to multiple lines");
@@ -1617,7 +1706,9 @@ mod tests {
 
     #[test]
     fn test_check_fail_wraps_tty() {
-        let long = "Bid depth is significantly below the minimum threshold required for healthy market conditions on this particular trading pair";
+        let _lock = width_lock();
+        // Long enough to wrap on any real terminal (up to ~500 columns).
+        let long = &format!("{} ", "Bid depth is significantly below the minimum threshold required for healthy market conditions on this particular trading pair").repeat(4);
         let row = check_fail_styled(long, true);
         assert!(row.contains("✗"));
         assert!(row.lines().count() > 1, "should wrap to multiple lines");
@@ -1625,8 +1716,10 @@ mod tests {
 
     #[test]
     fn test_check_na_plain_and_tty_wrap() {
+        let _lock = width_lock();
+        // Long enough to wrap on any real terminal (up to ~500 columns).
         // n/a rows (#37) must read as neither pass nor fail.
-        let long = "Spread: n/a (synthetic AMM book; the real spread is the pool fee, which the data source does not report)";
+        let long = &format!("{} ", "Spread: n/a (synthetic AMM book; the real spread is the pool fee, which the data source does not report)").repeat(4);
         for tty in [false, true] {
             let row = check_na_styled(long, tty);
             assert!(row.contains("–"), "tty={}", tty);
@@ -1638,7 +1731,9 @@ mod tests {
 
     #[test]
     fn test_warning_row_wraps_tty() {
-        let long = "Source code is NOT verified — unable to perform full source-level analysis on this contract. Consider requesting verification from the deployer.";
+        let _lock = width_lock();
+        // Long enough to wrap on any real terminal (up to ~500 columns).
+        let long = &format!("{} ", "Source code is NOT verified — unable to perform full source-level analysis on this contract. Consider requesting verification from the deployer.").repeat(4);
         let row = warning_row_styled(long, true);
         assert!(row.contains("⚠"));
         assert!(row.lines().count() > 1, "should wrap to multiple lines");
@@ -1646,7 +1741,9 @@ mod tests {
 
     #[test]
     fn test_info_row_wraps_tty() {
-        let long = "No audit reports found in any public database. Check block explorer and auditor databases manually for third-party audit information and verification.";
+        let _lock = width_lock();
+        // Long enough to wrap on any real terminal (up to ~500 columns).
+        let long = &format!("{} ", "No audit reports found in any public database. Check block explorer and auditor databases manually for third-party audit information and verification.").repeat(4);
         let row = info_row_styled(long, true);
         assert!(row.contains("ℹ"));
         assert!(row.lines().count() > 1, "should wrap to multiple lines");
@@ -1654,7 +1751,9 @@ mod tests {
 
     #[test]
     fn test_numbered_row_wraps_tty() {
-        let long = "This is a very long description that should eventually wrap to the next line when the terminal width is narrow enough to force it";
+        let _lock = width_lock();
+        // Long enough to wrap on any real terminal (up to ~500 columns).
+        let long = &format!("{} ", "This is a very long description that should eventually wrap to the next line when the terminal width is narrow enough to force it").repeat(4);
         let row = numbered_row_styled(1, long, true);
         assert!(row.contains("1."));
         assert!(row.lines().count() > 1, "should wrap to multiple lines");
@@ -1674,5 +1773,103 @@ mod tests {
         let words = |s: &str| s.matches("word").count();
         assert_eq!(words(&plain), 60);
         assert_eq!(words(&styled), 60);
+    }
+
+    // ============================================================
+    // Width override (R11): the TUI sets it to the pane width
+    // ============================================================
+
+    fn widest(text: &str) -> usize {
+        text.lines().map(UnicodeWidthStr::width).max().unwrap_or(0)
+    }
+
+    fn two_cols() -> [Col<'static>; 2] {
+        [
+            Col {
+                label: "Rank",
+                width: 150,
+                align: '<',
+            },
+            Col {
+                label: "Value",
+                width: 150,
+                align: '>',
+            },
+        ]
+    }
+
+    #[test]
+    fn test_rules_fit_a_narrow_pane() {
+        // A rule wider than the pane wraps onto the next row in the TUI.
+        let cap = Some(40);
+        assert!(widest(&section_footer_at(false, cap)) <= 40);
+        assert!(widest(&separator_at(false, cap)) <= 40);
+        assert!(widest(&section_header_at("Available Venues", false, cap)) <= 40);
+        let header = table_header_at(&two_cols(), false, cap);
+        let rule = header.lines().nth(1).unwrap_or_default();
+        assert_eq!(rule.width(), 40, "{header}");
+    }
+
+    #[test]
+    fn test_a_wide_pane_keeps_the_fixed_rules() {
+        // The override only shortens rules; it never makes them longer.
+        let cap = Some(200);
+        assert_eq!(section_footer_at(false, cap).width(), 51);
+        assert_eq!(separator_at(false, cap).width(), 51);
+        let header = section_header_at("Available Venues", false, cap);
+        assert_eq!(header.trim().width(), 50);
+    }
+
+    #[test]
+    fn test_without_an_override_rules_keep_their_fixed_widths() {
+        // CLI and piped output must not change with the terminal width:
+        // only the TUI pane (the override) shortens a rule.
+        let _lock = width_lock();
+        assert_eq!(width_override(), None);
+        assert_eq!(section_footer_styled(false).width(), 51);
+        assert_eq!(separator_styled(false).width(), 51);
+        let header = section_header_styled("Available Venues", false);
+        assert_eq!(header.trim().width(), 50);
+        // Two 150-column cols, wider than any terminal: (150 + 2) * 2 = 304
+        // `─` after "│  ".
+        let table = table_header_styled(&two_cols(), false);
+        assert_eq!(table.lines().nth(1).unwrap_or_default().width(), 3 + 304);
+        assert_eq!(section_footer_at(false, None), section_footer_styled(false));
+    }
+
+    #[test]
+    fn test_terminal_width_uses_the_override_first() {
+        assert_eq!(width_or_real(Some(40)), 40);
+        let real = crossterm::terminal::size()
+            .map(|(w, _)| w as usize)
+            .unwrap_or(80);
+        assert_eq!(width_or_real(None), real);
+    }
+
+    #[test]
+    fn test_width_override_set_and_clear() {
+        // The only test that sets the global. It sets the real width, so
+        // tests that read terminal_width() without the lock see no change.
+        let _lock = width_lock();
+        let real = terminal_width();
+        set_width_override(Some(real));
+        assert_eq!(width_override(), Some(real));
+        set_width_override(Some(0));
+        assert_eq!(width_override(), None, "Some(0) removes it");
+        set_width_override(Some(real));
+        set_width_override(None);
+        assert_eq!(width_override(), None);
+        assert_eq!(terminal_width(), real);
+    }
+
+    #[test]
+    fn test_wrap_lines_counts_display_width_of_cjk() {
+        // Each CJK char is two columns. Bytes (3 per char) wrap too early;
+        // chars (1 per char) would put all five words on one 12-column row.
+        let lines = wrap_lines("日本 語 です", 7);
+        assert_eq!(lines, vec!["日本 語", "です"]);
+        for l in &lines {
+            assert!(l.width() <= 7, "{l}");
+        }
     }
 }

@@ -24,9 +24,11 @@
 //! mode: the TUI gives the terminal back while it runs.
 
 pub mod app;
+pub mod clip;
 pub mod complete;
 pub mod crash;
 pub mod exec;
+pub mod fit;
 pub mod hint;
 pub mod journal;
 pub mod palette;
@@ -42,7 +44,7 @@ use scope::chains::ChainClientFactory;
 use scope::config::Config;
 use scope::error::{Result, ScopeError};
 use std::future::Future;
-use std::io;
+use std::io::{self, Write};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -187,6 +189,9 @@ async fn session<H: Host>(
     save_ctx: impl FnOnce(&SessionContext) -> Result<()>,
 ) -> Result<TuiExit> {
     let result = event_loop(host, state, config, clients).await;
+    // The CLI after the TUI, also after an error or a signal, uses the
+    // real width.
+    host.set_width(None);
     host.restore();
 
     // Save both even if one fails, then report the first failure.
@@ -271,6 +276,11 @@ pub(crate) trait Host {
     fn clear(&mut self) -> io::Result<()>;
     /// The output a suspend-mode command writes to.
     fn suspended_output(&self) -> Output;
+    /// Writes `text` to the terminal as is (the OSC 52 copy sequence).
+    fn write_raw(&mut self, text: &str) -> io::Result<()>;
+    /// Sets the width that command output fits (`None`: the real terminal
+    /// width). Production sets the process-wide width override.
+    fn set_width(&mut self, width: Option<usize>);
 }
 
 /// The real terminal.
@@ -335,6 +345,14 @@ impl Host for RealHost {
     fn suspended_output(&self) -> Output {
         Output::stdio()
     }
+    fn write_raw(&mut self, text: &str) -> io::Result<()> {
+        let mut out = io::stdout();
+        out.write_all(text.as_bytes())?;
+        out.flush()
+    }
+    fn set_width(&mut self, width: Option<usize>) {
+        scope::display::terminal::set_width_override(width);
+    }
 }
 
 type PaneFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + 'a>>;
@@ -366,6 +384,9 @@ async fn event_loop<H: Host>(
                 crate::cli::plain::finish_frame(f);
             })
             .map_err(|e| ScopeError::Other(format!("terminal draw failed: {}", e)))?;
+        // Command output fits the pane. Set after each draw, so it follows
+        // a resize and comes back after the TUI leaves the terminal.
+        host.set_width(state.pane_width());
 
         // Biased: a finished command is handled before the next key, so
         // the key that follows it sees the command as done. A signal comes
@@ -396,7 +417,7 @@ async fn event_loop<H: Host>(
                 } else if !std::mem::take(&mut cont_expected) {
                     // SIGCONT after an outside SIGSTOP: the shell reset the
                     // terminal, so set it up again from scratch.
-                    host.suspend();
+                    leave(host);
                     retake(host)?;
                 }
             }
@@ -415,6 +436,10 @@ async fn event_loop<H: Host>(
                     Action::None => {}
                     Action::Exit => return Ok(LEFT),
                     Action::Suspend => cont_expected = stop_and_return(host, state)?,
+                    Action::Copy(text) => {
+                        let result = host.write_raw(&clip::osc52(&text));
+                        state.copied(text.lines().count(), result);
+                    }
                     Action::Cancel => {
                         // Dropping the future cancels the handler at its
                         // next await point.
@@ -433,7 +458,7 @@ async fn event_loop<H: Host>(
                             }
                             Route::Suspend => {
                                 drop(idle_diag.take());
-                                host.suspend();
+                                leave(host);
                                 let out = host.suspended_output();
                                 let argv = inv.argv.clone();
                                 let command = run_invocation(*inv, config, clients, &out);
@@ -465,7 +490,7 @@ async fn event_loop<H: Host>(
 /// is kept; it is not polled while the process is stopped. Returns true
 /// when the process stopped, so a SIGCONT follows.
 fn stop_and_return<H: Host>(host: &mut H, state: &mut TuiState) -> Result<bool> {
-    host.suspend();
+    leave(host);
     let stopped = match host.stop_self() {
         Ok(()) => true,
         Err(e) => {
@@ -475,6 +500,13 @@ fn stop_and_return<H: Host>(host: &mut H, state: &mut TuiState) -> Result<bool> 
     };
     retake(host)?;
     Ok(stopped)
+}
+
+/// Gives the terminal back. Output written while the TUI is away (a
+/// suspend-mode command, the shell after Ctrl-Z) uses the real width.
+fn leave<H: Host>(host: &mut H) {
+    host.set_width(None);
+    host.suspend();
 }
 
 /// Takes the terminal again and clears it. The next draw then repaints
@@ -770,6 +802,14 @@ mod tests {
         draws_at_stop: usize,
         /// `stop_self` fails, as `kill` could.
         stop_fails: bool,
+        /// Everything `write_raw` got.
+        raw: String,
+        /// `write_raw` fails.
+        raw_fails: bool,
+        /// The width override at each draw, suspend and restore, in order.
+        widths: Vec<(&'static str, Option<usize>)>,
+        /// The width the loop set last.
+        width: Option<usize>,
     }
 
     impl Host for TestHost {
@@ -778,6 +818,7 @@ mod tests {
         type Signals = mpsc::UnboundedReceiver<Signal>;
         fn terminal(&mut self) -> &mut Terminal<TestBackend> {
             self.draws += 1;
+            self.widths.push(("draw", self.width));
             &mut self.terminal
         }
         fn streams(&mut self) -> (&mut Self::Events, &mut Self::Signals) {
@@ -785,6 +826,7 @@ mod tests {
         }
         fn suspend(&mut self) {
             self.suspends += 1;
+            self.widths.push(("suspend", self.width));
             for s in self.suspend_signals.drain(..) {
                 self.signal_tx.unbounded_send(s).unwrap();
             }
@@ -794,6 +836,7 @@ mod tests {
         }
         fn restore(&mut self) {
             self.restores += 1;
+            self.widths.push(("restore", self.width));
         }
         /// Does not stop the test process. It sends SIGCONT, as the kernel
         /// does when the shell continues a stopped process.
@@ -812,6 +855,17 @@ mod tests {
         }
         fn suspended_output(&self) -> Output {
             self.suspended.clone()
+        }
+        fn write_raw(&mut self, text: &str) -> io::Result<()> {
+            self.raw.push_str(text);
+            if self.raw_fails {
+                return Err(io::Error::other("tty gone"));
+            }
+            Ok(())
+        }
+        /// Records the width; tests never set the process-wide override.
+        fn set_width(&mut self, width: Option<usize>) {
+            self.width = width;
         }
     }
 
@@ -895,6 +949,10 @@ mod tests {
             draws: 0,
             draws_at_stop: 0,
             stop_fails: false,
+            raw: String::new(),
+            raw_fails: false,
+            widths: Vec::new(),
+            width: None,
         };
         (host, captured)
     }
@@ -999,6 +1057,34 @@ mod tests {
     fn screen_text(host: &TestHost) -> String {
         let buf = host.terminal.backend().buffer().clone();
         buf.content().iter().map(|c| c.symbol()).collect()
+    }
+
+    /// The width override at each `stage` (draw, suspend, restore).
+    fn widths_at(host: &TestHost, stage: &str) -> Vec<Option<usize>> {
+        host.widths
+            .iter()
+            .filter(|(s, _)| *s == stage)
+            .map(|(_, w)| *w)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_width_override_is_the_pane_and_is_removed_when_the_tui_leaves() {
+        // Output fits the pane while the TUI owns the screen. A suspend-mode
+        // command, the shell after Ctrl-Z and the CLI after exit use the
+        // real width (review focus 5).
+        let _lock = DIAG_LOCK.lock().await;
+        let mut events = script(&["setup --key nosuchkey"]);
+        events.push(ctrl_z());
+        events.push(press(KeyCode::Char('x')));
+        let (res, _, host, _) = drive(events).await;
+        res.unwrap();
+        // Suspend-mode command, then Ctrl-Z: the override is off both times.
+        assert_eq!(widths_at(&host, "suspend"), vec![None, None]);
+        assert_eq!(widths_at(&host, "restore"), vec![None]);
+        // The pane of the 100-column test screen has no side borders.
+        let draws = widths_at(&host, "draw");
+        assert_eq!(draws.last(), Some(&Some(100)), "set again after Ctrl-Z");
     }
 
     #[tokio::test]
@@ -1472,6 +1558,110 @@ mod tests {
         assert!(screen.contains("scope:base>"));
     }
 
+    fn ctrl_y_event() -> io::Result<Event> {
+        Ok(Event::Key(KeyEvent::new(
+            KeyCode::Char('y'),
+            KeyModifiers::CONTROL,
+        )))
+    }
+
+    #[tokio::test]
+    async fn test_ctrl_y_sends_the_json_and_save_writes_it() {
+        use base64::Engine as _;
+        let _lock = DIAG_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("one.json");
+        let mut events = script(&[
+            "venues list --format json",
+            &format!("save {}", file.display()),
+        ]);
+        events.push(ctrl_y_event());
+        let (res, state, host, _) = drive(events).await;
+        res.unwrap();
+        let body = std::fs::read_to_string(&file).unwrap();
+        serde_json::from_str::<serde_json::Value>(&body).unwrap();
+        let text = state.scrollback_text();
+        assert!(text.contains("copied "), "{text}");
+        let payload = host
+            .raw
+            .strip_prefix("\x1b]52;c;")
+            .and_then(|r| r.strip_suffix('\x07'))
+            .unwrap_or_else(|| panic!("not an OSC 52 sequence: {:?}", host.raw));
+        let sent = base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .unwrap();
+        assert_eq!(String::from_utf8(sent).unwrap(), body);
+    }
+
+    #[tokio::test]
+    async fn test_save_refuses_to_overwrite_then_force_replaces_and_both_are_journaled() {
+        let _lock = DIAG_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("two.json");
+        std::fs::write(&file, "old").unwrap();
+        let save = format!("save {}", file.display());
+        let journal = Journal::at(dir.path().join("h"), dir.path().join("e.jsonl"));
+        let (res, state, _, _) = drive_with(
+            journal,
+            script(&[
+                "venues list --format json",
+                &save,
+                &format!("{save} --force"),
+            ]),
+            Vec::new(),
+        )
+        .await;
+        res.unwrap();
+        let text = state.scrollback_text();
+        assert!(text.contains("exists; add --force"), "{text}");
+        assert!(text.contains("saved "), "{text}");
+        let body = std::fs::read_to_string(&file).unwrap();
+        assert_ne!(body, "old", "--force replaced the file");
+        serde_json::from_str::<serde_json::Value>(&body).unwrap();
+        let recs = records(&dir);
+        let refused = recs.iter().find(|r| r["outcome"] == "refused").unwrap();
+        assert_eq!(refused["input"], save);
+        assert!(refused["error"].as_str().unwrap().contains("exists"));
+        assert!(
+            recs.iter()
+                .any(|r| r["input"] == format!("{save} --force") && r["outcome"] == "session")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ctrl_y_results_are_journaled() {
+        let _lock = DIAG_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Journal::at(dir.path().join("h"), dir.path().join("e.jsonl"));
+        let mut events = vec![ctrl_y_event()];
+        events.extend(script(&["venues list"]));
+        events.push(ctrl_y_event());
+        let (mut host, captured) = test_host(events, Vec::new());
+        host.raw_fails = true;
+        let (_, _, _, _) = drive_host(journal, host, captured).await;
+        let recs = records(&dir);
+        let ctrl_y: Vec<_> = recs.iter().filter(|r| r["input"] == "Ctrl-Y").collect();
+        assert_eq!(ctrl_y.len(), 2, "{recs:?}");
+        assert_eq!(ctrl_y[0]["outcome"], "refused");
+        assert_eq!(ctrl_y[0]["error"], "nothing to copy yet");
+        assert_eq!(ctrl_y[1]["outcome"], "error");
+        assert!(ctrl_y[1]["error"].as_str().unwrap().contains("tty gone"));
+    }
+
+    #[tokio::test]
+    async fn test_a_failed_copy_is_noted() {
+        let _lock = DIAG_LOCK.lock().await;
+        let mut events = script(&["venues list"]);
+        events.push(Ok(Event::Key(KeyEvent::new(
+            KeyCode::Char('y'),
+            KeyModifiers::CONTROL,
+        ))));
+        let (mut host, captured) = test_host(events, Vec::new());
+        host.raw_fails = true;
+        let (_, state, _, _) = drive_host(Journal::default(), host, captured).await;
+        assert!(state.scrollback_text().contains("Could not copy: tty gone"));
+    }
+
     #[tokio::test]
     async fn test_loop_esc_cancels_a_running_repeat_command() {
         // `--every` sleeps between runs; Esc must stop it, not wait 1 minute.
@@ -1483,7 +1673,7 @@ mod tests {
         .await;
         res.unwrap();
         let text = state.scrollback_text();
-        assert!(text.contains("Cancelled."), "{}", text);
+        assert!(text.contains("Cancelled after"), "{}", text);
         assert!(state.running.is_none());
     }
 

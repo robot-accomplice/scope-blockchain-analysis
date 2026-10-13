@@ -1,0 +1,13 @@
+name: a repeating run shows its run number and goes away when it ends
+tiers: [offline]
+steps:
+  - type: "market summary USDC --venue binance --every 2s --duration 5s"
+  - key: Enter
+  # The status line is drawn while the command runs: runs at 0s, 2s, 4s
+  # and 5s make four.
+  - wait_for: { text: "run 2 of 4", timeout: 10s }
+  - wait_for: { text: "Done in", timeout: 20s }
+  # It is not output: nothing of it stays after the run.
+  - expect_screen: { contains: ["Completed"], not_contains: ["next in", "run 2 of"] }
+  - key: Ctrl-D
+  - expect_exit: 0

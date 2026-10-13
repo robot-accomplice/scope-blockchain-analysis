@@ -1,0 +1,24 @@
+name: output fits a 40-column pane; wrapped rows keep their gutter
+tiers: [offline]
+terminal: { cols: 40, rows: 20 }
+# The version in the pane title changes with each release.
+masks: ['scope v\d+\.\d+\.\d+\S*']
+steps:
+  - type: "venues list"
+  - key: Enter
+  - wait_for: { text: "Done in", timeout: 10s }
+  # The bottom of the output: the separator and footer fit the pane, and
+  # no rule continues on the next row. The user dir row holds the temp
+  # HOME path, so it is checked here and not in the snapshot.
+  - expect_screen:
+      contains: ["├─", "└─", "│  Loaded"]
+      not_contains: ['─\n─']
+  # The top of the output does not depend on the temp HOME path.
+  - key: PageUp
+  - key: PageUp
+  - key: PageUp
+  - key: PageUp
+  - key: PageUp
+  - snapshot: venues-40
+  - key: Ctrl-D
+  - expect_exit: 0

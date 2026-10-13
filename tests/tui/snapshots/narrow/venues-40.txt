@@ -1,0 +1,20 @@
+ <MASK> ──────────────────────────
+Type `help` for commands. `exit` or
+Ctrl-D leaves.
+scope:auto> venues list
+
+┌─ Available Venues ────────────────────
+│  biconomy          order_book, ticker,
+│                    trades, ohlc
+│  binance           order_book, ticker,
+│                    trades, ohlc
+│  bitget            order_book, ticker,
+│                    trades, ohlc
+│  bybit             order_book, ticker,
+│                    trades, ohlc
+────────────────────────────────────────
+┌scope:auto> ──────────────────────────┐
+│                                      │
+└──────────────────────────────────────┘
+
+ scrolled up 50 lines · PgDn …

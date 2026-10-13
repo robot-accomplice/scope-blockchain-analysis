@@ -5,7 +5,9 @@
 //! terminal I/O, so tests drive it with key events and render it on a
 //! `TestBackend`.
 
+use super::clip::{self, SaveError};
 use super::exec::{self, Invocation, Plan, Route};
+use super::fit;
 use super::journal::{Event, Journal};
 use super::vocab::Vocab;
 use crate::cli::interactive::SessionContext;
@@ -17,8 +19,9 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph};
 use scope::config::Config;
+use scope::display::terminal::color_enabled;
 use std::cell::Cell;
 use std::time::Instant;
 use unicode_width::UnicodeWidthStr;
@@ -107,6 +110,9 @@ pub enum Action {
     Exit,
     /// Stop the process (Ctrl-Z); it comes back on `fg`.
     Suspend,
+    /// Put this text on the clipboard (Ctrl-Y). The loop writes the OSC 52
+    /// sequence through the host and notes the result.
+    Copy(String),
 }
 
 /// A command that runs in the output pane now.
@@ -170,8 +176,14 @@ pub struct TuiState {
     /// The first display column of the input line that is shown. It moves
     /// only when the cursor leaves the window (set while drawing).
     scroll_x: Cell<usize>,
+    /// The inner width of the output pane at the last draw; 0 before the
+    /// first. The event loop makes it the width override.
+    pane_width: Cell<u16>,
     /// Show the busy note in the hint row until the next key press.
     busy_hint: bool,
+    /// The plain output of the last pane command that succeeded. Ctrl-Y
+    /// copies it and `save` writes it.
+    last_output: Option<String>,
     /// The event log.
     journal: Journal,
     /// Completion values from the user's stores.
@@ -195,7 +207,9 @@ impl TuiState {
             ctx,
             running: None,
             scroll_x: Cell::new(0),
+            pane_width: Cell::new(0),
             busy_hint: false,
+            last_output: None,
             journal,
             vocab,
             overlay: None,
@@ -293,6 +307,7 @@ impl TuiState {
                     self.set_input(String::new());
                 }
             }
+            KeyCode::Char('y') if ctrl => return self.copy_key(),
             KeyCode::Char('d') if ctrl => {
                 if self.running.is_some() {
                     self.busy_hint = true;
@@ -587,6 +602,11 @@ impl TuiState {
         )]);
     }
 
+    /// Appends a note line in `style`.
+    fn push_styled_note(&mut self, note: &str, style: Style) {
+        self.push_lines(vec![Line::styled(note.to_string(), style)]);
+    }
+
     fn push_lines(&mut self, lines: Vec<Line<'static>>) {
         self.scrollback.extend(lines);
         let excess = self.scrollback.len().saturating_sub(SCROLLBACK_LIMIT);
@@ -625,6 +645,15 @@ impl TuiState {
     /// CLI command comes back for the event loop to run.
     pub fn submit(&mut self, line: &str, config: &Config) -> Plan {
         self.push_echo(line);
+        if line
+            .split_whitespace()
+            .next()
+            .is_some_and(|w| w.eq_ignore_ascii_case("save"))
+        {
+            let words = shlex::split(line);
+            self.save(line, words.as_ref().map(|w| &w[1..]));
+            return Plan::Done;
+        }
         let (out, captured) = Output::capture_merged();
         let started = Instant::now();
         let started_at = Utc::now().to_rfc3339();
@@ -651,6 +680,98 @@ impl TuiState {
         plan
     }
 
+    /// Journals a save or copy: `session` when it worked, `refused` when
+    /// the request was turned down, `error` when the OS failed it.
+    fn log_action(
+        &mut self,
+        input: &str,
+        started: Instant,
+        outcome: &'static str,
+        error: Option<String>,
+    ) {
+        self.log(Event {
+            started: Utc::now().to_rfc3339(),
+            duration_ms: started.elapsed().as_millis(),
+            input,
+            argv: &[],
+            route: "session",
+            outcome: outcome.into(),
+            error,
+        });
+    }
+
+    /// Runs the `save` session command over the last output. `words` is
+    /// the split line, or `None` when the quotes did not balance.
+    fn save(&mut self, line: &str, words: Option<&[String]>) {
+        let started = Instant::now();
+        let result = match words {
+            None => Err(SaveError::Refused(format!(
+                "Unbalanced quotes. {}",
+                clip::SAVE_USAGE
+            ))),
+            Some(args) => {
+                let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+                match std::env::current_dir() {
+                    Ok(cwd) => {
+                        clip::save(&args, self.last_output.as_deref(), &cwd, home.as_deref())
+                    }
+                    Err(e) => Err(SaveError::Failed(format!(
+                        "Could not read the current directory: {}",
+                        e
+                    ))),
+                }
+            }
+        };
+        match result {
+            Ok(note) => {
+                self.push_note(&note);
+                self.log_action(line, started, "session", None);
+            }
+            Err(e) => {
+                self.push_note(e.message());
+                let outcome = match e {
+                    SaveError::Refused(_) => "refused",
+                    SaveError::Failed(_) => "error",
+                };
+                self.log_action(line, started, outcome, Some(e.message().to_string()));
+            }
+        }
+    }
+
+    /// Ctrl-Y: returns the copy action, or notes and journals why there
+    /// is nothing to send.
+    fn copy_key(&mut self) -> Action {
+        let started = Instant::now();
+        let refusal = match self.last_output.clone() {
+            None => "nothing to copy yet".to_string(),
+            Some(text) if clip::fits_osc52(&text) => return Action::Copy(text),
+            Some(text) => format!(
+                "too large to copy ({} lines); use save <file>",
+                text.lines().count()
+            ),
+        };
+        self.push_note(&refusal);
+        self.log_action("Ctrl-Y", started, "refused", Some(refusal));
+        Action::None
+    }
+
+    /// Notes and journals the result of writing the copy sequence.
+    pub fn copied(&mut self, lines: usize, result: std::io::Result<()>) {
+        let started = Instant::now();
+        match result {
+            Ok(()) => {
+                self.push_note(&format!("copied {} lines", lines));
+                self.log_action("Ctrl-Y", started, "session", None);
+            }
+            Err(e) => {
+                let note = format!("Could not copy: {}", e);
+                self.push_note(&note);
+                self.log_action("Ctrl-Y", started, "error", Some(note));
+            }
+        }
+    }
+
     /// Starts a pane command. Returns the output its handler must write to.
     pub fn start(&mut self, input: &str, inv: &Invocation) -> Output {
         let (out, captured) = Output::capture_merged();
@@ -670,6 +791,12 @@ impl TuiState {
     /// Ends the pane command: moves its output into the scrollback, shows
     /// the error if it failed, and logs the event.
     pub fn finish(&mut self, ending: Ending) {
+        self.finish_with(ending, color_enabled());
+    }
+
+    /// `finish`, with the color choice given. The failure footer always
+    /// carries the `✗` glyph and its words; `color` only adds the red.
+    fn finish_with(&mut self, ending: Ending, color: bool) {
         let Some(run) = self.running.take() else {
             return;
         };
@@ -680,13 +807,27 @@ impl TuiState {
                 self.push_note(&format!("Output error: {}", write_err));
             }
         }
-        self.push_ansi(&run.captured.out());
+        let output = run.captured.out();
+        // The copy is the command's own data: no warnings, error text or
+        // footer. A success with no data clears it; a failed or cancelled
+        // run keeps the earlier copy.
+        if matches!(ending, Ending::Finished(Ok(()))) {
+            let data = clip::strip_ansi(&run.captured.data());
+            self.last_output = (!data.trim().is_empty()).then_some(data);
+        }
+        self.push_ansi(&output);
+        let secs = run.started.elapsed().as_secs_f64();
         match &ending {
-            Ending::Cancelled => self.push_note("Cancelled."),
-            Ending::Finished(_) => self.push_note(&format!(
-                "Done in {:.1}s.",
-                run.started.elapsed().as_secs_f64()
-            )),
+            Ending::Cancelled => self.push_note(&format!("Cancelled after {:.1}s.", secs)),
+            Ending::Finished(Err(_)) => {
+                let style = if color {
+                    Style::new().fg(Color::Red)
+                } else {
+                    Style::new().add_modifier(Modifier::BOLD)
+                };
+                self.push_styled_note(&format!("✗ Failed in {:.1}s.", secs), style);
+            }
+            Ending::Finished(Ok(())) => self.push_note(&format!("Done in {:.1}s.", secs)),
         }
         self.log(Event {
             started: run.started_at,
@@ -756,6 +897,15 @@ impl TuiState {
 
     // -------------------------------------------------------------- render
 
+    /// The inner width of the output pane at the last draw, or `None`
+    /// before the first draw. Command output is fitted to it.
+    pub fn pane_width(&self) -> Option<usize> {
+        match self.pane_width.get() {
+            0 => None,
+            w => Some(w as usize),
+        }
+    }
+
     /// Draws the screen: output pane, input line, status line.
     pub fn render(&self, f: &mut Frame) {
         let [pane, input, hint_row, status] = Layout::vertical([
@@ -768,16 +918,23 @@ impl TuiState {
 
         // Output pane: scrollback plus the live output of a running command.
         let mut lines = self.scrollback.clone();
-        if let Some(run) = &self.running
-            && let Ok(t) = run.captured.out().into_text()
-        {
-            lines.extend(t.lines);
+        if let Some(run) = &self.running {
+            if let Ok(t) = run.captured.out().into_text() {
+                lines.extend(t.lines);
+            }
+            // Drawn only: these lines are not output, so they never reach
+            // the scrollback, the copy or the journal.
+            lines.extend(self.liveness_lines(run, color_enabled()));
         }
-        let block = Block::bordered().title(format!(" scope v{} ", scope::VERSION));
+        let block = Block::new()
+            .borders(Borders::TOP | Borders::BOTTOM)
+            .title(format!(" scope v{} ", scope::VERSION));
         let inner = block.inner(pane);
-        let para = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
-        // Count wrapped rows at the inner width, without the borders, so the
-        // newest line sits on the last inner row.
+        self.pane_width.set(inner.width);
+        // Fit the lines to the inner width here, not with ratatui wrap: a
+        // wrapped row keeps its gutter and a rule is cut. Every line then
+        // is one row, so the newest line sits on the last inner row.
+        let para = Paragraph::new(Text::from(fit::fit(lines, inner.width as usize)));
         let total = para.line_count(inner.width);
         let max_top = total.saturating_sub(inner.height as usize);
         let top = max_top.saturating_sub(self.scroll.min(max_top));
@@ -890,15 +1047,48 @@ impl TuiState {
                 rect,
             );
         }
-        f.render_widget(Paragraph::new(self.status_line()), status);
+        f.render_widget(
+            Paragraph::new(fit_status(&self.status_parts(), status.width as usize)),
+            status,
+        );
     }
 
-    fn status_line(&self) -> Line<'static> {
+    /// The spinner line and, for a repeating command, its run status.
+    fn liveness_lines(&self, run: &Running, color: bool) -> Vec<Line<'static>> {
+        let dim = Style::new().fg(Color::DarkGray);
+        let elapsed = run.started.elapsed();
+        let mut lines = vec![Line::styled(
+            format!(
+                "{} running {}… {}s",
+                spinner_glyph(elapsed, color),
+                run.input,
+                elapsed.as_secs()
+            ),
+            dim,
+        )];
+        if let Some(hook) = run.out.progress_hook() {
+            // Copy the record out: the lock is not held while drawing.
+            let p = hook.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            if p.run > 0 {
+                let mut text = match p.total {
+                    Some(total) => format!("run {} of {}", p.run, total),
+                    None => format!("run {}", p.run),
+                };
+                if let Some(at) = p.next_at {
+                    let wait = at.saturating_duration_since(Instant::now());
+                    text.push_str(&format!(" · next in {}s", wait.as_secs_f64().ceil() as u64));
+                }
+                lines.push(Line::styled(text, dim));
+            }
+        }
+        lines
+    }
+
+    /// What the status bar says now, before it is fitted to a width.
+    fn status_parts(&self) -> StatusParts {
         let ctx = &self.ctx;
-        let left = format!(
-            " chain {} · format {:?} · limit {}{}{}",
-            ctx.chain,
-            ctx.format,
+        let limit = format!(
+            "limit {}{}{}",
             ctx.limit,
             if ctx.include_tokens {
                 " · +tokens"
@@ -907,20 +1097,143 @@ impl TuiState {
             },
             if ctx.include_txs { " · +txs" } else { "" },
         );
-        let right = match &self.running {
-            Some(run) => format!(
-                "  running {:.0}s · Esc cancels · `{}`",
-                run.started.elapsed().as_secs_f64(),
-                run.input
+        // Highest priority first: the fit drops from the end.
+        let context = vec![
+            format!("chain {}", ctx.chain),
+            format!("format {:?}", ctx.format),
+            limit,
+        ];
+        let (state, command) = match &self.running {
+            Some(run) => (
+                format!(
+                    "running {:.0}s · Esc cancels",
+                    run.started.elapsed().as_secs_f64()
+                ),
+                Some(run.input.clone()),
             ),
-            None if self.scroll > 0 => format!("  scrolled up {} lines · PgDn", self.scroll),
-            None => "  help · exit".to_string(),
+            None if self.scroll > 0 => (format!("scrolled up {} lines · PgDn", self.scroll), None),
+            None => ("help · exit".to_string(), None),
         };
-        Line::from(vec![
-            Span::styled(left, Style::new().fg(Color::DarkGray)),
-            Span::styled(right, Style::new().fg(Color::Yellow)),
-        ])
+        StatusParts {
+            context,
+            state,
+            command,
+        }
     }
+}
+
+/// The parts of the status bar, in priority order.
+struct StatusParts {
+    /// Chain, format and limit. Dropped from the end when the bar is narrow.
+    context: Vec<String>,
+    /// `running Ns · Esc cancels`, `scrolled up N lines · PgDn` or
+    /// `help · exit`. Kept at every width.
+    state: String,
+    /// The command that runs. The last part to go.
+    command: Option<String>,
+}
+
+/// The spinner frames with color on.
+const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// The spinner frames with color off, where a braille glyph may not draw.
+const SPINNER_ASCII: [&str; 4] = ["-", "\\", "|", "/"];
+
+/// The spinner moves one frame per redraw tick. It adds no timer of its own.
+fn spinner_glyph(elapsed: std::time::Duration, color: bool) -> &'static str {
+    let step = (elapsed.as_millis() / super::LIVE_REDRAW.as_millis()) as usize;
+    if color {
+        SPINNER_FRAMES[step % SPINNER_FRAMES.len()]
+    } else {
+        SPINNER_ASCII[step % SPINNER_ASCII.len()]
+    }
+}
+
+/// Marks text that was cut or dropped.
+const ELLIPSIS: &str = "…";
+
+/// Columns around a command in the bar: ` · ` before it, a backtick on
+/// each side.
+const COMMAND_FRAME_COLS: usize = 5;
+
+/// The shortest cut command worth showing: one column and the `…`.
+const MIN_CUT_COMMAND_COLS: usize = 2;
+
+fn cols(text: &str) -> usize {
+    UnicodeWidthStr::width(text)
+}
+
+/// Cuts `text` to at most `max` display columns, ending in `…` when it cuts.
+fn cut_with_ellipsis(text: &str, max: usize) -> String {
+    use unicode_segmentation::UnicodeSegmentation;
+    if cols(text) <= max {
+        return text.to_string();
+    }
+    let room = max.saturating_sub(cols(ELLIPSIS));
+    let mut out = String::new();
+    let mut used = 0;
+    for g in text.graphemes(true) {
+        let w = cols(g);
+        if used + w > room {
+            break;
+        }
+        out.push_str(g);
+        used += w;
+    }
+    if max >= cols(ELLIPSIS) {
+        out.push_str(ELLIPSIS);
+    }
+    out
+}
+
+/// Fits the status bar to `width` display columns. Drops limit, then
+/// format, then chain, then the command text. The state text stays at
+/// every width, and a `…` shows that something was cut or dropped.
+fn fit_status(parts: &StatusParts, width: usize) -> Line<'static> {
+    let dim = Style::new().fg(Color::DarkGray);
+    let hot = Style::new().fg(Color::Yellow);
+    let bar = |left: String, right: String| {
+        Line::from(vec![Span::styled(left, dim), Span::styled(right, hot)])
+    };
+    if width == 0 {
+        return Line::default();
+    }
+    let command = |c: &str| format!(" · `{}`", c);
+    let total = parts.context.len();
+    for kept in (0..=total).rev() {
+        let left = if kept == 0 {
+            " ".to_string()
+        } else {
+            format!(" {}  ", parts.context[..kept].join(" · "))
+        };
+        let mut right = parts.state.clone();
+        if let Some(c) = &parts.command {
+            right.push_str(&command(c));
+        }
+        if kept < total {
+            right.push_str(&format!(" {}", ELLIPSIS));
+        }
+        if cols(&left) + cols(&right) <= width {
+            return bar(left, right);
+        }
+    }
+    // The whole context is gone. Cut the command text to what is left.
+    let used = 1 + cols(&parts.state) + COMMAND_FRAME_COLS;
+    if let Some(c) = &parts.command
+        && width >= used + MIN_CUT_COMMAND_COLS
+    {
+        let cut = cut_with_ellipsis(c, width - used);
+        return bar(" ".to_string(), format!("{}{}", parts.state, command(&cut)));
+    }
+    // The command is gone too. A `…` after the state shows it, if it fits.
+    let text = format!(" {} {}", parts.state, ELLIPSIS);
+    if cols(&text) <= width {
+        return bar(String::new(), text);
+    }
+    bar(
+        String::new(),
+        cut_with_ellipsis(&format!(" {}", parts.state), width),
+    )
 }
 
 /// Runs a parsed command with the given output. `--ai` switches this one
@@ -1331,7 +1644,7 @@ mod tests {
         assert_eq!(s.handle_key(key(KeyCode::Enter)), Action::None);
         assert_eq!(s.input, "x", "the next line waits for the command to end");
         s.finish(Ending::Cancelled);
-        assert!(s.scrollback_text().contains("Cancelled."));
+        assert!(s.scrollback_text().contains("Cancelled after"));
     }
 
     #[test]
@@ -1385,6 +1698,190 @@ mod tests {
         assert!(text.contains("scrolled up 10 lines"));
     }
 
+    /// The status bar row (the last row) of a screen.
+    fn status_row(s: &TuiState, w: u16) -> String {
+        screen(s, w, 12).lines().last().unwrap().to_string()
+    }
+
+    fn running_state(input: &str) -> (TuiState, Output) {
+        let mut s = state();
+        let inv = Invocation {
+            command: venues_list(),
+            route: Route::Pane,
+            ai: false,
+            argv: vec![],
+        };
+        let out = s.start(input, &inv);
+        (s, out)
+    }
+
+    #[test]
+    fn test_status_bar_keeps_the_running_state_at_every_width() {
+        // The cancel hint is the only way out of a stuck command: no width
+        // may hide it.
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let (s, _out) = running_state("market summary USDC --venue binance --every 2s");
+        for w in [120, 60, 40, 30] {
+            let row = status_row(&s, w);
+            assert!(row.contains("running "), "{w}: {row:?}");
+            assert!(row.contains("Esc cancels"), "{w}: {row:?}");
+        }
+        let wide = status_row(&s, 120);
+        assert!(
+            wide.contains("limit") && wide.contains("format"),
+            "{wide:?}"
+        );
+        assert!(wide.contains("market summary USDC"), "{wide:?}");
+    }
+
+    #[test]
+    fn test_status_bar_drops_limit_and_format_before_the_cancel_hint() {
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let (s, _out) = running_state("market summary USDC --venue binance --every 2s");
+        let row = status_row(&s, 40);
+        assert!(!row.contains("limit"), "{row:?}");
+        assert!(!row.contains("format"), "{row:?}");
+        // Something was cut, and the bar says so.
+        assert!(row.contains('…'), "{row:?}");
+    }
+
+    #[test]
+    fn test_idle_status_bar_keeps_help_at_a_narrow_width() {
+        let s = state();
+        let row = status_row(&s, 30);
+        assert!(row.contains("help"), "{row:?}");
+        assert!(!row.contains("limit"), "{row:?}");
+    }
+
+    #[test]
+    fn test_scrolled_status_bar_keeps_the_scroll_hint_at_a_narrow_width() {
+        let mut s = state();
+        for i in 0..40 {
+            s.push_ansi(&format!("line {}\n", i));
+        }
+        s.handle_key(key(KeyCode::PageUp));
+        let row = status_row(&s, 40);
+        assert!(row.contains("scrolled up 10 lines"), "{row:?}");
+    }
+
+    #[test]
+    fn test_fit_status_never_panics_and_never_exceeds_the_width() {
+        // Width math runs on every redraw: width 0 and tiny widths must
+        // give a line, and no line may be wider than the bar.
+        let parts = StatusParts {
+            context: vec![
+                "chain auto".into(),
+                "format Table".into(),
+                "limit 100".into(),
+            ],
+            state: "running 12s · Esc cancels".into(),
+            command: Some("market summary ✓✓ --every 2s".into()),
+        };
+        for w in 0..=130 {
+            let line = fit_status(&parts, w);
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(cols(&text) <= w, "{w}: {text:?}");
+        }
+        let text: String = fit_status(&parts, 0)
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(text.is_empty());
+    }
+
+    use crate::cli::output::RunProgress;
+    use std::time::Duration;
+
+    #[test]
+    fn test_running_pane_shows_a_spinner_and_the_repeat_status() {
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let (s, out) = running_state("market summary USDC --every 2s");
+        let hook = out.progress_hook().expect("the pane output has a hook");
+        *hook.lock().unwrap() = RunProgress {
+            run: 2,
+            total: Some(4),
+            next_at: Some(Instant::now() + Duration::from_secs(3)),
+            banner: None,
+        };
+        let text = screen(&s, 80, 12);
+        assert!(text.contains("run 2 of 4 · next in 3s"), "{text}");
+        assert!(
+            text.contains("running market summary USDC --every 2s…"),
+            "{text}"
+        );
+        // The glyph leads the line: braille with color, ASCII without.
+        let row = text.lines().find(|l| l.contains("running market")).unwrap();
+        let glyph = row.trim_start().chars().next().unwrap().to_string();
+        assert!(
+            SPINNER_FRAMES.contains(&glyph.as_str()) || SPINNER_ASCII.contains(&glyph.as_str()),
+            "{row:?}"
+        );
+    }
+
+    #[test]
+    fn test_spinner_uses_ascii_without_color_and_advances_with_time() {
+        assert_eq!(spinner_glyph(Duration::from_millis(0), false), "-");
+        assert_eq!(spinner_glyph(Duration::from_millis(100), false), "\\");
+        assert_eq!(spinner_glyph(Duration::from_millis(200), false), "|");
+        assert_eq!(spinner_glyph(Duration::from_millis(300), false), "/");
+        assert_eq!(spinner_glyph(Duration::from_millis(400), false), "-");
+        assert_ne!(
+            spinner_glyph(Duration::from_millis(0), true),
+            spinner_glyph(Duration::from_millis(100), true)
+        );
+    }
+
+    #[test]
+    fn test_spinner_and_run_status_never_enter_the_record() {
+        // They are drawn, not output: the copy, the scrollback and the
+        // journal must not hold them.
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Journal::at(dir.path().join("history"), dir.path().join("events"));
+        let mut s = TuiState::new(SessionContext::default(), journal, Vocab::default());
+        let inv = Invocation {
+            command: venues_list(),
+            route: Route::Pane,
+            ai: false,
+            argv: vec![],
+        };
+        let out = s.start("market summary USDC --every 2s", &inv);
+        crate::outln!(out, "data line").unwrap();
+        *out.progress_hook().unwrap().lock().unwrap() = RunProgress {
+            run: 2,
+            total: Some(4),
+            next_at: Some(Instant::now() + Duration::from_secs(3)),
+            banner: Some("Running market summary every 2s".into()),
+        };
+        let drawn = screen(&s, 80, 12);
+        assert!(drawn.contains("run 2 of 4"), "{drawn}");
+        s.finish(Ending::Finished(Ok(())));
+        let kept = format!(
+            "{}\n{}",
+            s.scrollback_text(),
+            s.last_output.clone().unwrap_or_default()
+        );
+        assert!(kept.contains("data line"));
+        for gone in [
+            "run 2 of",
+            "next in",
+            "running market",
+            "⠋",
+            "Running market",
+        ] {
+            assert!(!kept.contains(gone), "{gone:?} leaked into: {kept}");
+        }
+        let events = std::fs::read_to_string(dir.path().join("events")).unwrap();
+        assert!(
+            !events.contains("run 2 of") && !events.contains("next in"),
+            "{events}"
+        );
+        // And the finished screen shows none of it.
+        let after = screen(&s, 80, 12);
+        assert!(!after.contains("run 2 of"), "{after}");
+    }
+
     #[test]
     fn test_render_shows_live_output_of_a_running_command() {
         // Output must appear while the command runs, not only when it ends.
@@ -1416,7 +1913,7 @@ mod tests {
         let rows: Vec<String> = screen(&s, 40, 15).lines().map(str::to_string).collect();
         // Layout: pane rows 0..=9 (border at 0 and 9), input 10..=12, hint 13, status 14.
         assert!(rows[8].contains("line 39"), "{:#?}", rows);
-        assert!(rows[9].starts_with('└'), "{:#?}", rows);
+        assert!(rows[9].starts_with('─'), "{:#?}", rows);
     }
 
     #[test]
@@ -1943,5 +2440,262 @@ mod tests {
             p.x + 2 <= 59,
             "wide char at the cursor fits inside the border"
         );
+    }
+
+    /// Starts a pane command and ends it with `ending`, after it wrote `text`.
+    fn run_pane(s: &mut TuiState, text: &str, ending: Ending) {
+        let inv = Invocation {
+            command: venues_list(),
+            route: Route::Pane,
+            ai: false,
+            argv: vec![],
+        };
+        let out = s.start("venues list", &inv);
+        out.write_out(format_args!("{}", text)).unwrap();
+        s.finish(ending);
+    }
+
+    #[test]
+    fn test_ctrl_y_copies_the_plain_output_of_the_last_success() {
+        let mut s = state();
+        assert_eq!(s.handle_key(ctrl('y')), Action::None);
+        assert!(s.scrollback_text().contains("nothing to copy yet"));
+        run_pane(&mut s, "\x1b[1;36mA\x1b[0m\nb\n", Ending::Finished(Ok(())));
+        assert_eq!(s.handle_key(ctrl('y')), Action::Copy("A\nb\n".into()));
+    }
+
+    #[test]
+    fn test_failed_or_cancelled_run_keeps_the_earlier_copy() {
+        let mut s = state();
+        run_pane(&mut s, "good\n", Ending::Finished(Ok(())));
+        run_pane(
+            &mut s,
+            "partial\n",
+            Ending::Finished(Err(scope::error::ScopeError::Chain("boom".into()))),
+        );
+        run_pane(&mut s, "partial\n", Ending::Cancelled);
+        assert_eq!(s.handle_key(ctrl('y')), Action::Copy("good\n".into()));
+    }
+
+    #[test]
+    fn test_save_without_output_says_so_and_escape_is_refused() {
+        let mut s = state();
+        s.submit("save out.json", &Config::default());
+        assert!(s.scrollback_text().contains("nothing to save yet"));
+        run_pane(&mut s, "x\n", Ending::Finished(Ok(())));
+        s.submit("save ../escape.json", &Config::default());
+        assert!(
+            s.scrollback_text()
+                .contains("save writes inside the current directory or to an absolute path")
+        );
+        s.submit("save", &Config::default());
+        assert!(s.scrollback_text().contains("Usage: save <file> [--force]"));
+    }
+
+    #[test]
+    fn test_pane_has_no_side_borders() {
+        let mut s = state();
+        s.push_note("hello");
+        let text = screen(&s, 40, 12);
+        let row = text.lines().find(|l| l.contains("hello")).unwrap();
+        assert!(row.starts_with("hello"), "{row:?}");
+    }
+
+    fn last_line(s: &TuiState) -> &Line<'static> {
+        s.scrollback.last().unwrap()
+    }
+
+    #[test]
+    fn test_ok_run_ends_with_done_footer() {
+        let mut s = state();
+        run_pane(&mut s, "x\n", Ending::Finished(Ok(())));
+        let text = last_line(&s).to_string();
+        assert!(
+            regex::Regex::new(r"^Done in \d+\.\ds\.$")
+                .unwrap()
+                .is_match(&text),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn test_failed_run_ends_with_a_red_failed_footer() {
+        let mut s = state();
+        let err = Ending::Finished(Err(scope::error::ScopeError::Chain("boom".into())));
+        s.start("x", &pane_invocation());
+        s.finish_with(err, true);
+        let line = last_line(&s);
+        let text = line.to_string();
+        assert!(
+            regex::Regex::new(r"^✗ Failed in \d+\.\ds\.$")
+                .unwrap()
+                .is_match(&text),
+            "{text}"
+        );
+        assert_eq!(line.style.fg, Some(Color::Red));
+    }
+
+    #[test]
+    fn test_failed_footer_keeps_glyph_and_words_without_color() {
+        let mut s = state();
+        s.start("x", &pane_invocation());
+        s.finish_with(
+            Ending::Finished(Err(scope::error::ScopeError::Chain("boom".into()))),
+            false,
+        );
+        let line = last_line(&s);
+        assert!(line.to_string().starts_with("✗ Failed in "));
+        assert_eq!(line.style.fg, None, "no color when color is off");
+    }
+
+    #[test]
+    fn test_cancelled_run_ends_with_cancelled_after_footer() {
+        let mut s = state();
+        run_pane(&mut s, "x\n", Ending::Cancelled);
+        let text = last_line(&s).to_string();
+        assert!(
+            regex::Regex::new(r"^Cancelled after \d+\.\ds\.$")
+                .unwrap()
+                .is_match(&text),
+            "{text}"
+        );
+    }
+
+    fn pane_invocation() -> Invocation {
+        Invocation {
+            command: venues_list(),
+            route: Route::Pane,
+            ai: false,
+            argv: vec![],
+        }
+    }
+
+    fn warned_json_run(s: &mut TuiState) {
+        let inv = pane_invocation();
+        let out = s.start("address 0x1 --format json", &inv);
+        crate::errln!(out, "\u{26a0} Token balances unavailable").unwrap();
+        crate::outln!(out, "{{\"a\": 1}}").unwrap();
+        s.finish(Ending::Finished(Ok(())));
+    }
+
+    #[test]
+    fn test_last_output_excludes_warnings_the_pane_still_shows() {
+        let mut s = state();
+        warned_json_run(&mut s);
+        let Action::Copy(text) = s.handle_key(ctrl('y')) else {
+            panic!("expected a copy");
+        };
+        serde_json::from_str::<serde_json::Value>(&text).unwrap();
+        assert!(!text.contains("Token balances"));
+        assert!(s.scrollback_text().contains("Token balances unavailable"));
+    }
+
+    #[test]
+    fn test_a_success_with_no_output_clears_the_copy() {
+        let mut s = state();
+        run_pane(&mut s, "data\n", Ending::Finished(Ok(())));
+        run_pane(&mut s, "", Ending::Finished(Ok(())));
+        assert_eq!(s.handle_key(ctrl('y')), Action::None);
+        s.submit("save out.json", &Config::default());
+        assert!(s.scrollback_text().contains("nothing to save yet"));
+    }
+
+    #[test]
+    fn test_ctrl_y_refuses_output_over_the_osc52_cap() {
+        let mut s = state();
+        let big = "x".repeat(clip::OSC52_MAX_PAYLOAD);
+        run_pane(&mut s, &format!("{big}\n"), Ending::Finished(Ok(())));
+        assert_eq!(s.handle_key(ctrl('y')), Action::None);
+        assert!(
+            s.scrollback_text()
+                .contains("too large to copy (1 lines); use save <file>")
+        );
+    }
+
+    #[test]
+    fn test_save_with_unbalanced_quotes_gets_the_save_usage() {
+        let mut s = state();
+        run_pane(&mut s, "x\n", Ending::Finished(Ok(())));
+        s.submit("save \"unclosed", &Config::default());
+        let text = s.scrollback_text();
+        assert!(
+            text.contains("Unbalanced quotes. Usage: save <file> [--force]"),
+            "{text}"
+        );
+    }
+
+    /// The pane rows of a `w`-column screen tall enough to show all output.
+    fn pane_rows(s: &TuiState, w: u16) -> Vec<String> {
+        let h = 200;
+        let rows: Vec<String> = screen(s, w, h).lines().map(str::to_string).collect();
+        // Pane border rows are the first and the one above the input box.
+        rows[1..(h as usize - 6)].to_vec()
+    }
+
+    #[tokio::test]
+    async fn test_venues_list_rules_never_wrap_in_a_narrow_pane() {
+        // R11: a rule wider than the pane must not continue on the next row,
+        // and a wrapped row inside a section keeps its `│` gutter. The
+        // output is written without a width override (a resize after the
+        // run does the same), so the pane itself must fit it.
+        let _lock = super::super::DIAG_LOCK.lock().await;
+        let mut s = state();
+        let inv = pane_invocation();
+        let out = s.start("venues list", &inv);
+        let factory = scope::chains::mocks::MockClientFactory::new();
+        let res = run_invocation(inv, &Config::default(), &factory, &out).await;
+        s.finish(Ending::Finished(res));
+        let rows = pane_rows(&s, 40);
+        for pair in rows.windows(2) {
+            let continued = pair[0].trim_end().ends_with('─') && pair[1].starts_with('─');
+            assert!(!continued, "a rule wrapped:\n{}", rows.join("\n"));
+        }
+        let first = rows
+            .iter()
+            .position(|r| r.starts_with("┌─ Available Venues"));
+        let last = rows.iter().position(|r| r.starts_with('└'));
+        let (Some(first), Some(last)) = (first, last) else {
+            panic!("no section:\n{}", rows.join("\n"));
+        };
+        for row in &rows[first + 1..last] {
+            assert!(
+                row.starts_with('│') || row.starts_with('├'),
+                "row lost its gutter: {row:?}\n{}",
+                rows.join("\n")
+            );
+        }
+        for row in &rows {
+            assert!(row.width() <= 40, "{row:?}");
+        }
+    }
+
+    #[test]
+    fn test_pane_wraps_never_reach_the_copy() {
+        // Ctrl-Y and `save` give the command's own text: no row breaks or
+        // gutters that the pane adds to fit its width.
+        let mut s = state();
+        let long = format!("│  {}", "word ".repeat(30).trim_end());
+        run_pane(&mut s, &format!("{long}\n"), Ending::Finished(Ok(())));
+        let rows = pane_rows(&s, 40);
+        let wrapped: Vec<_> = rows.iter().filter(|r| r.contains("word")).collect();
+        assert!(wrapped.len() > 1, "{rows:#?}");
+        assert!(
+            wrapped.iter().all(|r| r.starts_with("│  word")),
+            "{rows:#?}"
+        );
+        let Action::Copy(text) = s.handle_key(ctrl('y')) else {
+            panic!("expected a copy");
+        };
+        assert_eq!(text, format!("{long}\n"));
+    }
+
+    #[test]
+    fn test_render_records_the_pane_width() {
+        // The event loop sets the width override from it; with no side
+        // borders the pane is as wide as the screen.
+        let s = state();
+        assert_eq!(s.pane_width(), None, "nothing drawn yet");
+        screen(&s, 40, 20);
+        assert_eq!(s.pane_width(), Some(40));
     }
 }

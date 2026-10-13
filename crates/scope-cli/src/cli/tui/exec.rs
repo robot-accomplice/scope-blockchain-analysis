@@ -585,6 +585,11 @@ pub(crate) const SESSION_COMMANDS: &[(&str, &str, &str)] = &[
         "tokens [list|recent|add|remove]",
         "Manage saved token aliases",
     ),
+    (
+        "save",
+        "save <file> [--force]",
+        "Write the last output to a file",
+    ),
     ("ctx", "ctx", "Show the session context"),
     ("clear", "clear", "Reset the session context"),
     ("help", "help", "Show this help"),
@@ -613,6 +618,14 @@ fn write_help(out: &Output) -> io::Result<()> {
     outln!(
         out,
         "Keys: Enter run · Tab complete · Ctrl-K palette · ↑/↓ history · PgUp/PgDn scroll · Esc or Ctrl-C cancel"
+    )?;
+    outln!(
+        out,
+        "      Ctrl-Y copy last output · Shift-drag selects text"
+    )?;
+    outln!(
+        out,
+        "      Copy needs a terminal that allows OSC 52; save <file> works everywhere"
     )
 }
 
