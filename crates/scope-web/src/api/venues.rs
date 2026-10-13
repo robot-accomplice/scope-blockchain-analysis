@@ -1,12 +1,12 @@
 //! Venue listing API handler.
 //!
-//! GET /api/venues — Returns the CEX venues with their capabilities and the
-//! DEX venues (`dex_venues`), so the web UI hard-codes no venue.
+//! GET /api/venues — Returns every market venue (`MarketVenue::listings`):
+//! registry venues with their capabilities, then DEX venues (`kind: "dex"`).
 
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use scope::market::{DexVenue, VenueRegistry};
+use scope::market::{MarketVenue, VenueRegistry};
 
 /// GET /api/venues — List available exchange venues.
 pub async fn handle() -> impl IntoResponse {
@@ -21,30 +21,11 @@ pub async fn handle() -> impl IntoResponse {
         }
     };
 
-    let venues: Vec<serde_json::Value> = registry
-        .list()
-        .iter()
-        .filter_map(|id| {
-            registry.get(id).map(|desc| {
-                serde_json::json!({
-                    "id": desc.id,
-                    "name": desc.name,
-                    "base_url": desc.base_url,
-                    "capabilities": desc.capability_names(),
-                })
-            })
-        })
-        .collect();
-
-    let dex_venues: Vec<serde_json::Value> = DexVenue::ALL
-        .iter()
-        .map(|d| serde_json::json!({ "id": d.id(), "name": d.name(), "chain": d.chain() }))
-        .collect();
-
+    // One list: registry venues, then DEX venues, each with its `kind`.
+    let venues = MarketVenue::listings(&registry);
     let output = serde_json::json!({
+        "total": venues.len(),
         "venues": venues,
-        "dex_venues": dex_venues,
-        "total": registry.len(),
         "user_venues_dir": VenueRegistry::user_venues_dir().display().to_string(),
     });
 
@@ -83,7 +64,8 @@ mod tests {
         for venue in venues {
             assert!(venue["id"].is_string());
             assert!(venue["name"].is_string());
-            assert!(venue["base_url"].is_string());
+            // Only a registry (CEX) venue has an API base URL.
+            assert_eq!(venue["base_url"].is_string(), venue["kind"] == "cex");
             assert!(venue["capabilities"].is_array());
         }
     }
@@ -114,13 +96,15 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let ids: Vec<&str> = json["dex_venues"]
+        let dex: Vec<&serde_json::Value> = json["venues"]
             .as_array()
             .unwrap()
             .iter()
-            .map(|v| v["id"].as_str().unwrap())
+            .filter(|v| v["kind"] == "dex")
             .collect();
+        let ids: Vec<&str> = dex.iter().map(|v| v["id"].as_str().unwrap()).collect();
         assert_eq!(ids, ["ethereum", "solana"]);
-        assert_eq!(json["dex_venues"][1]["name"], "Solana DEX");
+        assert_eq!(dex[1]["name"], "Solana DEX");
+        assert_eq!(dex[1]["chain"], "solana");
     }
 }

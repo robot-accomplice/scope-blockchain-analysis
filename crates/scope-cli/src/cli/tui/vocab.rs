@@ -8,7 +8,7 @@
 use super::exec::CHAINS;
 use scope::config::Config;
 use scope::domain::address_book::AddressBook;
-use scope::market::VenueRegistry;
+use scope::market::{MarketVenue, VenueRegistry};
 use scope::tokens::TokenAliases;
 
 /// Dynamic completion values.
@@ -18,7 +18,7 @@ pub struct Vocab {
     pub labels: Vec<String>,
     /// Saved token alias symbols.
     pub aliases: Vec<String>,
-    /// Venue IDs from the registry.
+    /// Every venue id `--venue` accepts: the registry venues, then DEX.
     pub venues: Vec<String>,
     /// Chain names.
     pub chains: Vec<String>,
@@ -40,7 +40,7 @@ impl Vocab {
         aliases.sort();
         aliases.dedup();
         let venues = VenueRegistry::load()
-            .map(|r| r.list().into_iter().map(str::to_string).collect())
+            .map(|r| MarketVenue::ids(&r))
             .unwrap_or_default();
         Self {
             labels,

@@ -23,14 +23,16 @@ use axum::Router;
 use std::sync::Arc;
 
 /// The one map from a core error kind to an HTTP status: a missing resource
-/// is 404, bad input is 400, and anything else is 500. A handler that
-/// rejects the request itself (an unknown venue name) answers 400 directly.
+/// is 404, a request fault (unknown venue, chain mismatch, bad address) is
+/// 400, and anything else is 500.
 pub(crate) fn status_for(err: &scope::error::ScopeError) -> axum::http::StatusCode {
     use axum::http::StatusCode;
     use scope::error::ScopeError;
     match err {
         ScopeError::NotFound(_) => StatusCode::NOT_FOUND,
-        ScopeError::InvalidAddress(_) | ScopeError::InvalidHash(_) => StatusCode::BAD_REQUEST,
+        ScopeError::InvalidInput(_)
+        | ScopeError::InvalidAddress(_)
+        | ScopeError::InvalidHash(_) => StatusCode::BAD_REQUEST,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
@@ -141,7 +143,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = Arc::new(AppState { config, factory });
+        let state = Arc::new(AppState::new(config, factory));
         let _router = routes(state);
         // If this doesn't panic, routes are properly constructed
     }

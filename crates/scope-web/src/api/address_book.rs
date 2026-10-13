@@ -224,7 +224,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let response = handle_list(State(state)).await.into_response();
         let status = response.status();
         assert!(status.is_success() || status.is_server_error());
@@ -245,7 +245,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = AddAddressBookRequest {
             address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
             chain: "ethereum".to_string(),
@@ -283,7 +283,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = RemoveAddressBookRequest {
             address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
         };
@@ -314,7 +314,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = RemoveAddressBookRequest {
             address: "0x000000000000000000000000000000000000dead".to_string(),
         };
@@ -343,7 +343,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let response = handle_list(State(state)).await.into_response();
         if response.status().is_success() {
             let body_bytes = body::to_bytes(response.into_body(), 1_000_000)
@@ -374,7 +374,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
 
         let addr = "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string();
         let req1 = AddAddressBookRequest {
@@ -433,7 +433,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let response = handle_list(State(state)).await.into_response();
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }

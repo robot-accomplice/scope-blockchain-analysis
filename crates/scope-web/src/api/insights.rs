@@ -5,7 +5,6 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use scope::chains::ChainClientFactory;
 use scope_cli::cli::insights::{self, InsightsArgs};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -125,7 +124,7 @@ pub async fn handle(
                 chain,
                 args.decode,
                 args.trace,
-                &state.factory,
+                state.factory.as_ref(),
             )
             .await
             {
@@ -147,7 +146,7 @@ pub async fn handle(
                 chain,
                 scope_cli::cli::crawl::Period::Hour24,
                 10,
-                &state.factory,
+                state.factory.as_ref(),
                 None,
                 &scope_cli::cli::output::Output::stdio(),
             )
@@ -257,7 +256,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = InsightsRequest {
             target: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
             chain: None,
@@ -284,7 +283,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = InsightsRequest {
             target: "USDC".to_string(),
             chain: Some("ethereum".to_string()),
@@ -311,7 +310,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = InsightsRequest {
             target: "0xabc123def456789012345678901234567890123456789012345678901234abcd"
                 .to_string(),
@@ -340,7 +339,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = InsightsRequest {
             target: "0x0000000000000000000000000000000000000000".to_string(),
             chain: Some("ethereum".to_string()),
@@ -373,7 +372,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = InsightsRequest {
             target: "0x0000000000000000000000000000000000000000000000000000000000000000"
                 .to_string(),
@@ -407,7 +406,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = InsightsRequest {
             target: "NONEXISTENT_TOKEN_XYZ_123".to_string(),
             chain: Some("ethereum".to_string()),
@@ -447,7 +446,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = InsightsRequest {
             target: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
             chain: Some("bitcoin".to_string()), // Unsupported chain
@@ -490,7 +489,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = InsightsRequest {
             target: "@no-such-label".to_string(),
             chain: None,

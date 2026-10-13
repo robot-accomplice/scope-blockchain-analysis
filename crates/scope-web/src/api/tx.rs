@@ -34,8 +34,14 @@ pub async fn handle(
     State(state): State<Arc<AppState>>,
     Json(req): Json<TxRequest>,
 ) -> impl IntoResponse {
-    match tx::fetch_transaction_report(&req.hash, &req.chain, req.decode, req.trace, &state.factory)
-        .await
+    match tx::fetch_transaction_report(
+        &req.hash,
+        &req.chain,
+        req.decode,
+        req.trace,
+        state.factory.as_ref(),
+    )
+    .await
     {
         Ok(report) => Json(serde_json::json!(report)).into_response(),
         Err(e) => (
@@ -124,7 +130,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = TxRequest {
             hash: "0xabc123def456789012345678901234567890123456789012345678901234abcd".to_string(),
             chain: "ethereum".to_string(),

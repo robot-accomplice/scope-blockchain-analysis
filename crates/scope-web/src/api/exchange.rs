@@ -3,8 +3,8 @@
 //! POST /api/exchange/snapshot — Fetches full market snapshot (order book, ticker,
 //! recent trades) for a given venue and pair.
 
+use super::{error_response, status_for};
 use axum::Json;
-use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use scope::market::{Pair, VenueRegistry};
 use serde::Deserialize;
@@ -32,26 +32,10 @@ fn default_trades_limit() -> u32 {
 
 /// POST /api/exchange/snapshot — Full market snapshot.
 pub async fn handle(Json(req): Json<SnapshotRequest>) -> impl IntoResponse {
-    let registry = match VenueRegistry::load() {
-        Ok(r) => r,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": format!("Registry error: {e}") })),
-            )
-                .into_response();
-        }
-    };
-
-    let exchange = match registry.create_exchange_client(&req.venue) {
+    // An unknown venue is 400 (InvalidInput), via the one status map.
+    let exchange = match VenueRegistry::load().and_then(|r| r.create_exchange_client(&req.venue)) {
         Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response();
-        }
+        Err(e) => return error_response(status_for(&e), e.to_string()),
     };
 
     let pair = exchange.venue_symbol(&Pair::parse(&req.pair));
@@ -121,26 +105,10 @@ pub struct TradesRequest {
 
 /// POST /api/exchange/trades — Recent trades for a venue/pair.
 pub async fn handle_trades(Json(req): Json<TradesRequest>) -> impl IntoResponse {
-    let registry = match VenueRegistry::load() {
-        Ok(r) => r,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": format!("Registry error: {e}") })),
-            )
-                .into_response();
-        }
-    };
-
-    let exchange = match registry.create_exchange_client(&req.venue) {
+    // An unknown venue is 400 (InvalidInput), via the one status map.
+    let exchange = match VenueRegistry::load().and_then(|r| r.create_exchange_client(&req.venue)) {
         Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response();
-        }
+        Err(e) => return error_response(status_for(&e), e.to_string()),
     };
 
     let pair = exchange.venue_symbol(&Pair::parse(&req.pair));
@@ -169,11 +137,7 @@ pub async fn handle_trades(Json(req): Json<TradesRequest>) -> impl IntoResponse 
             }))
             .into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => error_response(status_for(&e), e.to_string()),
     }
 }
 
@@ -207,26 +171,10 @@ fn default_ohlc_limit() -> u32 {
 
 /// POST /api/exchange/ohlc — OHLC candlestick data for a venue/pair.
 pub async fn handle_ohlc(Json(req): Json<OhlcRequest>) -> impl IntoResponse {
-    let registry = match VenueRegistry::load() {
-        Ok(r) => r,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": format!("Registry error: {e}") })),
-            )
-                .into_response();
-        }
-    };
-
-    let exchange = match registry.create_exchange_client(&req.venue) {
+    // An unknown venue is 400 (InvalidInput), via the one status map.
+    let exchange = match VenueRegistry::load().and_then(|r| r.create_exchange_client(&req.venue)) {
         Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response();
-        }
+        Err(e) => return error_response(status_for(&e), e.to_string()),
     };
 
     let pair = exchange.venue_symbol(&Pair::parse(&req.pair));
@@ -254,11 +202,7 @@ pub async fn handle_ohlc(Json(req): Json<OhlcRequest>) -> impl IntoResponse {
             }))
             .into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => error_response(status_for(&e), e.to_string()),
     }
 }
 

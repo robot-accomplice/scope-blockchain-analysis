@@ -16,7 +16,7 @@ use super::health_args::HealthArgs;
 use scope::display::terminal as t;
 use scope::error::{Result, ScopeError};
 use scope::market::{
-    DexAnalyticsSource, HealthThresholds, MarketSummary, MarketVenue, OrderBook, Pair,
+    DexAnalyticsSource, HealthThresholds, MarketSummary, MarketVenue, OrderBook, Pair, VENUE_HELP,
     VenueRegistry,
 };
 use std::time::Duration;
@@ -97,10 +97,7 @@ pub struct SummaryArgs {
     #[arg(default_value = "USDC", value_name = "SYMBOL", help = PAIR_HELP)]
     pub pair: String,
 
-    /// Market venue: a CEX (e.g., binance, mexc, okx) or a DEX (ethereum/eth,
-    /// solana/sol).
-    /// Use `scope venues list` to see all available venues.
-    #[arg(long, default_value = "binance", value_name = "VENUE")]
+    #[arg(long, default_value = "binance", value_name = "VENUE", help = VENUE_HELP)]
     pub venue: String,
 
     /// Chain for a DEX venue. The venue already names its chain, so this is
@@ -416,7 +413,7 @@ async fn fetch_book_and_volume(
     factory: &dyn ChainClientFactory,
     out: &Output,
 ) -> Result<(OrderBook, Option<f64>)> {
-    let venue = MarketVenue::resolve(&args.venue, &VenueRegistry::load()?)?;
+    let venue = MarketVenue::from_name(&args.venue)?;
     if let Some(chain) = &args.chain {
         venue.require_chain(chain)?;
     }
@@ -635,15 +632,7 @@ async fn run_summary(
 
 /// Execute the `scope market ohlc` command.
 async fn run_ohlc(args: OhlcArgs, out: &Output) -> Result<()> {
-    let registry = VenueRegistry::load()?;
-    let descriptor = registry.get(&args.venue).ok_or_else(|| {
-        ScopeError::NotFound(format!(
-            "Venue '{}' not found. Use `scope venues list` to see available venues.",
-            args.venue
-        ))
-    })?;
-
-    let client = scope::market::ExchangeClient::from_descriptor(descriptor);
+    let client = VenueRegistry::load()?.create_exchange_client(&args.venue)?;
     let pair = client.venue_symbol(&Pair::parse(&args.pair));
 
     let candles = client.fetch_ohlc(&pair, &args.interval, args.limit).await?;
@@ -748,15 +737,7 @@ async fn run_ohlc(args: OhlcArgs, out: &Output) -> Result<()> {
 
 /// Execute the `scope market trades` command.
 async fn run_trades(args: TradesArgs, out: &Output) -> Result<()> {
-    let registry = VenueRegistry::load()?;
-    let descriptor = registry.get(&args.venue).ok_or_else(|| {
-        ScopeError::NotFound(format!(
-            "Venue '{}' not found. Use `scope venues list` to see available venues.",
-            args.venue
-        ))
-    })?;
-
-    let client = scope::market::ExchangeClient::from_descriptor(descriptor);
+    let client = VenueRegistry::load()?.create_exchange_client(&args.venue)?;
     let pair = client.venue_symbol(&Pair::parse(&args.pair));
 
     let trades = client.fetch_recent_trades(&pair, args.limit).await?;
@@ -1518,8 +1499,8 @@ capabilities:
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("not found"),
-            "expected 'not found' error, got: {}",
+            err.contains("Unknown venue"),
+            "expected 'Unknown venue' error, got: {}",
             err
         );
     }
@@ -1536,8 +1517,8 @@ capabilities:
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("not found"),
-            "expected 'not found' error, got: {}",
+            err.contains("Unknown venue"),
+            "expected 'Unknown venue' error, got: {}",
             err
         );
     }

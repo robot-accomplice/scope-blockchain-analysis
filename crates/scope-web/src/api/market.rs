@@ -4,11 +4,8 @@ use super::{error_response, status_for};
 use crate::AppState;
 use axum::Json;
 use axum::extract::State;
-use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use scope::market::{
-    HealthOverrides, MarketSummary, MarketVenue, Pair, VenueRegistry, fetch_summary,
-};
+use scope::market::{HealthOverrides, MarketSummary, MarketVenue, Pair, fetch_summary};
 use scope_cli::cli::market::CrawlDexSource;
 use scope_cli::cli::output::Output;
 use serde::Deserialize;
@@ -88,35 +85,33 @@ fn summary_to_json(summary: &MarketSummary) -> serde_json::Value {
 
 /// POST /api/market/summary — Peg and order book health. The pair and venue
 /// are read exactly as the CLI reads them (core `Pair` and `MarketVenue`).
+/// Errors map through `status_for`: an unknown venue or a chain mismatch is
+/// 400, no DEX pairs is 404.
 pub async fn handle(
     State(state): State<Arc<AppState>>,
     Json(req): Json<MarketRequest>,
 ) -> impl IntoResponse {
-    let thresholds = state.config.market.health.with_overrides(&req.health);
-    let registry = match VenueRegistry::load() {
-        Ok(r) => r,
-        Err(e) => return error_response(status_for(&e), format!("Registry error: {e}")),
-    };
-    // An unknown venue or a chain that is not the DEX venue's chain is a
-    // fault in the request itself.
-    let venue = match MarketVenue::resolve(&req.market_venue, &registry) {
-        Ok(v) => v,
-        Err(e) => return error_response(StatusCode::BAD_REQUEST, e.to_string()),
-    };
-    if let Some(chain) = &req.chain
-        && let Err(e) = venue.require_chain(chain)
-    {
-        return error_response(StatusCode::BAD_REQUEST, e.to_string());
-    }
-    let out = Output::stdio();
-    let dex = CrawlDexSource {
-        factory: &state.factory,
-        out: &out,
-    };
-    match fetch_summary(&venue, &Pair::parse(&req.pair), &thresholds, &dex).await {
+    match market_summary(&state, &req).await {
         Ok(summary) => Json(summary_to_json(&summary)).into_response(),
         Err(e) => error_response(status_for(&e), e.to_string()),
     }
+}
+
+async fn market_summary(
+    state: &AppState,
+    req: &MarketRequest,
+) -> scope::error::Result<MarketSummary> {
+    let venue = MarketVenue::from_name(&req.market_venue)?;
+    if let Some(chain) = &req.chain {
+        venue.require_chain(chain)?;
+    }
+    let thresholds = state.config.market.health.with_overrides(&req.health);
+    let out = Output::stdio();
+    let dex = CrawlDexSource {
+        factory: state.factory.as_ref(),
+        out: &out,
+    };
+    fetch_summary(&venue, &Pair::parse(&req.pair), &thresholds, &dex).await
 }
 
 #[cfg(test)]
@@ -253,7 +248,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = MarketRequest {
             pair: "USDC".to_string(),
             market_venue: "binance".to_string(),
@@ -280,7 +275,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = MarketRequest {
             pair: "USDC".to_string(),
             market_venue: "eth".to_string(),
@@ -307,7 +302,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = MarketRequest {
             pair: "BTC".to_string(),
             market_venue: "binance".to_string(),
@@ -376,7 +371,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = MarketRequest {
             pair: "USDC".to_string(),
             market_venue: "nonexistent_venue_xyz".to_string(),
@@ -405,7 +400,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = MarketRequest {
             pair: "USDC".to_string(),
             market_venue: "binance".to_string(),

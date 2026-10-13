@@ -18,7 +18,7 @@ use super::health_args::HealthArgs;
 use scope::display::report;
 use scope::error::Result;
 use scope::market::health::PegStatus;
-use scope::market::{MarketSummary, VenueRegistry, fetch_token_summary};
+use scope::market::{MarketSummary, MarketVenue, VenueRegistry, fetch_token_summary};
 use scope::tokens::{TokenAliases, is_stablecoin_symbol};
 
 /// Target type inferred from user input.
@@ -393,10 +393,11 @@ pub async fn run(
                     registry.list().first().copied().unwrap_or("binance")
                 };
                 let thresholds = args.health.resolve(config);
-                if let (Some(desc), Ok(summary)) = (
+                if let (Some(desc), Ok(venue)) = (
                     registry.get(venue_id),
-                    fetch_token_summary(venue_id, &analytics, &thresholds).await,
-                ) {
+                    MarketVenue::resolve(venue_id, &registry),
+                ) && let Ok(summary) = fetch_token_summary(&venue, &analytics, &thresholds).await
+                {
                     peg_status = Some(summary.peg_status());
                     output.push_str(&peg_line(&desc.name, &summary.pair, &summary));
                 }

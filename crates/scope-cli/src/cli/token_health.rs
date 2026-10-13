@@ -14,7 +14,7 @@ use scope::config::Config;
 use super::health_args::HealthArgs;
 use scope::display::report;
 use scope::error::{Result, ScopeError};
-use scope::market::{MarketSummary, fetch_token_summary};
+use scope::market::{MarketSummary, MarketVenue, fetch_token_summary};
 
 /// Arguments for the token-health command.
 #[derive(Debug, Args)]
@@ -75,10 +75,7 @@ pub struct TokenHealthArgs {
     #[arg(long)]
     pub with_market: bool,
 
-    /// Market venue for order book data (e.g., binance, mexc, okx, eth, solana).
-    /// CEX venues use the venue registry; "eth"/"solana" use DEX liquidity.
-    /// Run `scope venues list` to see available venues.
-    #[arg(long, default_value = "binance")]
+    #[arg(long, default_value = "binance", help = scope::market::VENUE_HELP)]
     pub venue: String,
 
     /// Output format.
@@ -130,7 +127,11 @@ pub async fn run(
     let market_summary = if args.with_market {
         sp.set_message("Fetching market data...");
         let thresholds = args.health.resolve(config);
-        match fetch_token_summary(&args.venue, &analytics, &thresholds).await {
+        let summary = match MarketVenue::from_name(&args.venue) {
+            Ok(venue) => fetch_token_summary(&venue, &analytics, &thresholds).await,
+            Err(e) => Err(e),
+        };
+        match summary {
             Ok(summary) => Some(summary),
             Err(e) => {
                 sp.println(&format!("  Warning: market data unavailable: {e}"))?;
@@ -623,11 +624,15 @@ mod tests {
     async fn test_dex_venue_on_another_chain_is_an_error() {
         let analytics = make_test_analytics(true);
         let t = scope::market::HealthThresholds::default();
-        let err = fetch_token_summary("sol", &analytics, &t)
+        let err = fetch_token_summary(&MarketVenue::from_name("sol").unwrap(), &analytics, &t)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("reads chain solana"), "{err}");
-        assert!(fetch_token_summary("ETH", &analytics, &t).await.is_ok());
+        assert!(
+            fetch_token_summary(&MarketVenue::from_name("ETH").unwrap(), &analytics, &t)
+                .await
+                .is_ok()
+        );
     }
 
     #[test]

@@ -5,7 +5,7 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use scope::market::{HealthOverrides, fetch_token_summary};
+use scope::market::{HealthOverrides, MarketVenue, fetch_token_summary};
 use scope_cli::cli::crawl::{self, Period};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -66,7 +66,7 @@ pub async fn handle(
         &chain,
         Period::Hour24,
         10,
-        &state.factory,
+        state.factory.as_ref(),
         None,
         &scope_cli::cli::output::Output::stdio(),
     )
@@ -76,15 +76,22 @@ pub async fn handle(
         Err(e) => return super::error_response(super::status_for(&e), e.to_string()),
     };
 
-    // Optionally fetch market data; a market error leaves `market` null.
-    let market_summary = if req.with_market {
+    // Optionally fetch market data. A market error leaves `market` null and
+    // is reported in `market_error`; the analytics still return.
+    let market_result = if req.with_market {
         let thresholds = state.config.market.health.with_overrides(&req.health);
-        fetch_token_summary(&req.market_venue, &analytics, &thresholds)
-            .await
-            .inspect_err(|e| tracing::debug!("market data unavailable: {e}"))
-            .ok()
+        let market = match MarketVenue::from_name(&req.market_venue) {
+            Ok(venue) => fetch_token_summary(&venue, &analytics, &thresholds).await,
+            Err(e) => Err(e),
+        };
+        Some(market)
     } else {
         None
+    };
+    let (market_summary, market_error) = match market_result {
+        Some(Ok(summary)) => (Some(summary), None),
+        Some(Err(e)) => (None, Some(e.to_string())),
+        None => (None, None),
     };
 
     // Build combined JSON
@@ -108,6 +115,7 @@ pub async fn handle(
     Json(serde_json::json!({
         "analytics": analytics,
         "market": market_json,
+        "market_error": market_error,
     }))
     .into_response()
 }
@@ -182,7 +190,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = TokenHealthRequest {
             token: "USDC".to_string(),
             chain: "ethereum".to_string(),
@@ -210,7 +218,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = TokenHealthRequest {
             token: "USDC".to_string(),
             chain: "ethereum".to_string(),
@@ -238,7 +246,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = TokenHealthRequest {
             token: "USDC".to_string(),
             chain: "ethereum".to_string(),
@@ -306,7 +314,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = TokenHealthRequest {
             token: "INVALID_TOKEN_XYZ_NONEXISTENT".to_string(),
             chain: "ethereum".to_string(),
@@ -366,7 +374,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = TokenHealthRequest {
             token: "USDC".to_string(),
             chain: "ethereum".to_string(),
@@ -407,7 +415,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = TokenHealthRequest {
             token: "@nonexistent".to_string(),
             chain: "ethereum".to_string(),

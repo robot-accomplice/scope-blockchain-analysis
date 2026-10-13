@@ -147,7 +147,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = ComplianceRiskRequest {
             address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
             chain: "ethereum".to_string(),
@@ -178,7 +178,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = ComplianceRiskRequest {
             address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
             chain: "ethereum".to_string(),
@@ -214,7 +214,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = ComplianceRiskRequest {
             address: "invalid-address".to_string(),
             chain: "ethereum".to_string(),
@@ -254,7 +254,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = ComplianceRiskRequest {
             address: "@fake-wallet".to_string(),
             chain: "ethereum".to_string(),

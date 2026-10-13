@@ -124,7 +124,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
 
         let params = DiscoverQuery {
             source: "profiles".to_string(),
@@ -151,7 +151,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
 
         let params = DiscoverQuery {
             source: "boosts".to_string(),
@@ -178,7 +178,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
 
         let params = DiscoverQuery {
             source: "top-boosts".to_string(),
@@ -205,7 +205,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
 
         let params = DiscoverQuery {
             source: "profiles".to_string(),
@@ -233,7 +233,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
 
         let params = DiscoverQuery {
             source: "unknown-source".to_string(),

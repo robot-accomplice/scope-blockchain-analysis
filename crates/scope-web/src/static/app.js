@@ -1774,7 +1774,7 @@ async function loadVenues() {
     var data = await res.json();
     if (data.venues) {
       venuesCache = data.venues;
-      populateVenueSelects(data.venues, data.dex_venues || []);
+      populateVenueSelects(data.venues);
     }
   } catch (e) {
     // Silently keep the default option in the page
@@ -1783,14 +1783,15 @@ async function loadVenues() {
 
 // DEX venues go only to selects marked data-dex (token health, market);
 // the exchange snapshot and monitor read CEX venues only.
-function populateVenueSelects(venues, dexVenues) {
+function populateVenueSelects(venues) {
+  var cexVenues = venues.filter(function(v) { return v.kind !== 'dex'; });
   document.querySelectorAll('.venue-select').forEach(function(sel) {
     var hasNone = sel.options.length > 0 && sel.options[0].value === '';
     var currentValue = sel.value;
     while (sel.options.length > (hasNone ? 1 : 0)) {
       sel.remove(hasNone ? 1 : 0);
     }
-    var listed = sel.dataset.dex === undefined ? venues : venues.concat(dexVenues);
+    var listed = sel.dataset.dex === undefined ? cexVenues : venues;
     listed.forEach(function(v) {
       var opt = document.createElement('option');
       opt.value = v.id;

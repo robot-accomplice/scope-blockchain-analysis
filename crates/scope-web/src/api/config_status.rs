@@ -160,7 +160,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = Arc::new(AppState { config, factory });
+        let state = Arc::new(AppState::new(config, factory));
         let response = handle(State(state)).await.into_response();
         let body = axum::body::to_bytes(response.into_body(), 1_000_000)
             .await
@@ -241,7 +241,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let response = handle(State(state)).await.into_response();
         assert_eq!(response.status(), axum::http::StatusCode::OK);
 
@@ -270,7 +270,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = SaveConfigRequest {
             api_keys: std::collections::HashMap::new(),
             rpc_endpoints: std::collections::HashMap::new(),
@@ -314,7 +314,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
 
         let req = SaveConfigRequest {
             api_keys: std::collections::HashMap::new(),
@@ -385,7 +385,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
 
         let req = SaveConfigRequest {
             api_keys: std::collections::HashMap::new(),
@@ -435,7 +435,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
 
         let mut api_keys = std::collections::HashMap::new();
         api_keys.insert("etherscan".to_string(), "test_key_abc".to_string());

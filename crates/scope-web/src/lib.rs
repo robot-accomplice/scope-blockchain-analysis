@@ -27,7 +27,7 @@ pub mod monitor;
 
 use axum::Router;
 use axum::response::IntoResponse;
-use scope::chains::DefaultClientFactory;
+use scope::chains::{ChainClientFactory, DefaultClientFactory};
 use scope::config::Config;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -37,8 +37,19 @@ use tower_http::cors::{Any, CorsLayer};
 pub struct AppState {
     /// Application configuration (same as CLI).
     pub config: Config,
-    /// Client factory for creating chain and DEX clients.
-    pub factory: DefaultClientFactory,
+    /// Client factory for creating chain and DEX clients. A trait object, so
+    /// handler tests can run on a mock factory without network.
+    pub factory: Box<dyn ChainClientFactory>,
+}
+
+impl AppState {
+    /// State with `config` and the `factory` that builds chain clients.
+    pub fn new(config: Config, factory: impl ChainClientFactory + 'static) -> Self {
+        Self {
+            config,
+            factory: Box::new(factory),
+        }
+    }
 }
 
 /// Builds the Axum router with all API routes and static file serving.
@@ -110,7 +121,7 @@ pub async fn start_server(addr: SocketAddr, config: Config) -> anyhow::Result<()
         chains_config: config.chains.clone(),
         http,
     };
-    let state = Arc::new(AppState { config, factory });
+    let state = Arc::new(AppState::new(config, factory));
     let app = build_router(state);
 
     tracing::info!("Scope web server listening on http://{}", addr);
@@ -274,7 +285,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = Arc::new(AppState { config, factory });
+        let state = Arc::new(AppState::new(config, factory));
         let _router = build_router(state);
     }
 
@@ -326,7 +337,10 @@ mod tests {
             assert!(!js.contains(text), "app.js lists {text}");
             assert!(!html.contains(text), "index.html lists {text}");
         }
-        assert!(js.contains("dex_venues"));
+        assert!(
+            js.contains("v.kind !== 'dex'"),
+            "CEX-only selects must drop DEX venues"
+        );
     }
 
     #[tokio::test]
@@ -475,7 +489,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = AppState { config, factory };
+        let state = AppState::new(config, factory);
         // Verify state fields are accessible
         let _ = state.config.chains.api_keys.len();
     }
@@ -506,7 +520,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        Arc::new(AppState { config, factory })
+        Arc::new(AppState::new(config, factory))
     }
 
     // ========================================================================
