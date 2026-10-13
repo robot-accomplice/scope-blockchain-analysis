@@ -8,7 +8,6 @@ use super::analytics::order_book_from_analytics;
 use super::exchange::ExchangeClient;
 use super::health::HealthThresholds;
 use super::pair::Pair;
-use super::registry::VenueRegistry;
 use super::types::OrderBook;
 use super::venue::{DexVenue, MarketVenue};
 use crate::chains::{DexPair, TokenAnalytics};
@@ -70,16 +69,14 @@ pub async fn fetch_summary(
 /// The market summary for a token the caller has already analyzed. The pair
 /// is the token symbol with the venue's default quote: a token symbol is
 /// never split (`WETH` is not `W/ETH`). A DEX venue reads these analytics,
-/// so they must be on its chain. `venue` is a venue name as the user wrote
-/// it (see [`MarketVenue::resolve`]).
+/// so they must be on its chain.
 pub async fn fetch_token_summary(
-    venue: &str,
+    venue: &MarketVenue,
     analytics: &TokenAnalytics,
     thresholds: &HealthThresholds,
 ) -> Result<MarketSummary> {
-    let venue = MarketVenue::resolve(venue, &VenueRegistry::load()?)?;
     let pair = Pair::base_only(&analytics.token.symbol);
-    fetch_summary(&venue, &pair, thresholds, &KnownAnalytics(analytics)).await
+    fetch_summary(venue, &pair, thresholds, &KnownAnalytics(analytics)).await
 }
 
 fn dex_book_and_volume(

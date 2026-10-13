@@ -5,7 +5,6 @@
 //! venues with the same `id`.
 
 use crate::error::{Result, ScopeError};
-use crate::market::configurable_client::venue_error;
 use crate::market::descriptor::VenueDescriptor;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -132,13 +131,7 @@ impl VenueRegistry {
 
     /// Find the closest venue name to a given input (for typo suggestions).
     pub fn suggest(&self, input: &str) -> Option<&str> {
-        let input_lower = input.to_lowercase();
-        self.venues
-            .keys()
-            .map(|k| (k.as_str(), strsim_distance(&input_lower, &k.to_lowercase())))
-            .filter(|(_, dist)| *dist <= 3)
-            .min_by_key(|(_, dist)| *dist)
-            .map(|(k, _)| k)
+        closest(input, self.list())
     }
 
     /// Path to the user venues directory (`~/.config/scope/venues/`).
@@ -150,24 +143,16 @@ impl VenueRegistry {
 
     /// Create an ExchangeClient for the given venue ID.
     ///
-    /// Returns an error if the venue is not found, with a suggestion if
-    /// a close match exists.
+    /// An unknown ID is [`ScopeError::InvalidInput`] that lists the registry
+    /// venues and names the closest one. DEX venues are not listed: this
+    /// lookup cannot serve them (see `MarketVenue::resolve`).
     pub fn create_exchange_client(
         &self,
         venue_id: &str,
     ) -> Result<crate::market::exchange::ExchangeClient> {
-        let desc = self.get(venue_id).ok_or_else(|| {
-            let available = format!(
-                "\n\n  Available venues: {}\n  DEX venues: {}\n  Run `scope venues list` for details.",
-                self.list().join(", "),
-                crate::market::venue::DexVenue::id_list()
-            );
-            let hint = match self.suggest(venue_id) {
-                Some(s) => format!("\n\n  Did you mean \"{s}\"?{available}"),
-                None => available,
-            };
-            venue_error(venue_id, format!("Unknown venue \"{}\"{}", venue_id, hint))
-        })?;
+        let desc = self
+            .get(venue_id)
+            .ok_or_else(|| unknown_venue(venue_id, &self.list()))?;
         Ok(crate::market::exchange::ExchangeClient::from_descriptor(
             desc,
         ))
@@ -178,6 +163,32 @@ impl VenueRegistry {
         serde_yaml::from_str(yaml)
             .map_err(|e| ScopeError::Config(crate::error::ConfigError::Parse { source: e }))
     }
+}
+
+/// The unknown-venue error: names the closest of `ids` and lists them all.
+/// Each lookup passes the ids it can serve, so it never suggests a venue it
+/// would reject.
+pub(crate) fn unknown_venue<S: AsRef<str>>(input: &str, ids: &[S]) -> ScopeError {
+    let ids: Vec<&str> = ids.iter().map(AsRef::as_ref).collect();
+    let available = format!(
+        "\n\n  Available venues: {}\n  Run `scope venues list` for details.",
+        ids.join(", ")
+    );
+    let hint = match closest(input, ids) {
+        Some(s) => format!("\n\n  Did you mean \"{s}\"?{available}"),
+        None => available,
+    };
+    ScopeError::InvalidInput(format!("Unknown venue \"{input}\"{hint}"))
+}
+
+/// The id nearest to `input` within a small edit distance, ignoring case.
+fn closest<'a>(input: &str, ids: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
+    let input_lower = input.to_lowercase();
+    ids.into_iter()
+        .map(|k| (k, strsim_distance(&input_lower, &k.to_lowercase())))
+        .filter(|(_, dist)| *dist <= 3)
+        .min_by_key(|(_, dist)| *dist)
+        .map(|(k, _)| k)
 }
 
 /// Simple Levenshtein distance for typo suggestions.

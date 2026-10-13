@@ -110,6 +110,12 @@ pub enum ScopeError {
     #[error("Not found: {0}")]
     NotFound(String),
 
+    /// The request itself is at fault and the caller can fix it: an unknown
+    /// venue, or a chain that a DEX venue does not read. The message is
+    /// shown as is.
+    #[error("{0}")]
+    InvalidInput(String),
+
     /// Compliance or risk analysis failed.
     #[error("Compliance error: {0}")]
     Compliance(String),

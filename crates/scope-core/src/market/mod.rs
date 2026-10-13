@@ -60,4 +60,4 @@ pub use orderbook::{
 };
 pub use pair::Pair;
 pub use registry::VenueRegistry;
-pub use venue::{DexVenue, MarketVenue};
+pub use venue::{DexVenue, MarketVenue, VENUE_HELP, VenueKind, VenueListing};
