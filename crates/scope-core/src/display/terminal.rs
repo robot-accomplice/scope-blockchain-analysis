@@ -868,6 +868,9 @@ fn numbered_row_styled(index: usize, msg: &str, tty: bool) -> String {
 // ============================================================================
 
 #[cfg(test)]
+mod golden_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
