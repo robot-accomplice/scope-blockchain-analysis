@@ -134,6 +134,7 @@ pub struct MonitorArgs {
     ///
     /// Controls how widgets are arranged on screen.
     /// Options: dashboard, chart-focus, feed, compact, exchange.
+    /// Pins the layout: auto-selection by terminal size stays off.
     #[arg(short, long)]
     pub layout: Option<LayoutPreset>,
 
@@ -195,7 +196,7 @@ pub async fn run_direct(
         }
     }
 
-    let (monitor_config, export_file) = monitor_config_from_args(&args, config);
+    let (monitor_config, export_file, layout_pinned) = monitor_config_from_args(&args, config);
 
     // Build a SessionContext from the CLI args (no interactive session needed)
     let ctx = SessionContext {
@@ -211,6 +212,7 @@ pub async fn run_direct(
         Some(args.token),
         args.pair,
         export_file,
+        layout_pinned,
         &ctx,
         &effective_config,
         clients,
@@ -221,13 +223,15 @@ pub async fn run_direct(
 /// Builds the monitor config from config-file defaults and CLI overrides.
 /// Returns the `--export` file separately: config `export.path` is the
 /// export directory for the E key, `--export` is a file to start at launch.
+/// The flag is true when `--layout` was given: it pins the layout. A config
+/// `layout` is only the starting preset; auto-layout still applies to it.
 pub(crate) fn monitor_config_from_args(
     args: &MonitorArgs,
     config: &Config,
-) -> (scope::config::MonitorConfig, Option<PathBuf>) {
+) -> (scope::config::MonitorConfig, Option<PathBuf>, bool) {
     let mut monitor_config = config.monitor.clone();
     if let Some(layout) = args.layout {
-        monitor_config.layout = Some(layout);
+        monitor_config.layout = layout;
     }
     if let Some(refresh) = args.refresh {
         monitor_config.refresh_seconds = refresh;
@@ -241,7 +245,7 @@ pub(crate) fn monitor_config_from_args(
     if let Some(ref venue) = args.venue {
         monitor_config.venue = Some(venue.clone());
     }
-    (monitor_config, args.export.clone())
+    (monitor_config, args.export.clone(), args.layout.is_some())
 }
 
 /// Entry point for the monitor command from interactive mode.
@@ -249,10 +253,13 @@ pub(crate) fn monitor_config_from_args(
 /// When `explicit_pair` is `Some`, token resolution is bypassed and the
 /// exchange ticker is used as the primary data source.  This enables
 /// monitoring tokens that are not indexed by DexScreener.
+///
+/// `layout_pinned` (from `--layout`) turns auto-layout off.
 pub async fn run(
     token: Option<String>,
     explicit_pair: Option<String>,
     export_file: Option<PathBuf>,
+    layout_pinned: bool,
     ctx: &SessionContext,
     config: &Config,
     clients: &dyn ChainClientFactory,
@@ -317,6 +324,8 @@ pub async fn run(
         chain_client,
         exchange_client,
     )?;
+
+    app.state.auto_layout = !layout_pinned;
 
     // In exchange-only mode, use the exact pair that priced the token, and
     // refresh from the venue alone.
@@ -2685,7 +2694,7 @@ mod tests {
     #[test]
     fn test_monitor_config_defaults() {
         let config = MonitorConfig::default();
-        assert_eq!(config.layout, None);
+        assert_eq!(config.layout, LayoutPreset::Dashboard);
         assert_eq!(config.refresh_seconds, DEFAULT_REFRESH_SECS);
         assert!(config.widgets.price_chart);
         assert!(config.widgets.volume_chart);
@@ -3028,7 +3037,7 @@ mod tests {
     #[test]
     fn test_monitor_config_serde_roundtrip() {
         let config = MonitorConfig {
-            layout: Some(LayoutPreset::ChartFocus),
+            layout: LayoutPreset::ChartFocus,
             refresh_seconds: 5,
             widgets: WidgetVisibility {
                 price_chart: true,
@@ -3049,7 +3058,7 @@ mod tests {
 
         let yaml = serde_yaml::to_string(&config).unwrap();
         let parsed: MonitorConfig = serde_yaml::from_str(&yaml).unwrap();
-        assert_eq!(parsed.layout, Some(LayoutPreset::ChartFocus));
+        assert_eq!(parsed.layout, LayoutPreset::ChartFocus);
         assert_eq!(parsed.refresh_seconds, 5);
         assert!(parsed.widgets.price_chart);
         assert!(!parsed.widgets.volume_chart);
@@ -3071,7 +3080,7 @@ widgets:
   activity_log: false
 "#;
         let config: MonitorConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.layout, Some(LayoutPreset::ChartFocus));
+        assert_eq!(config.layout, LayoutPreset::ChartFocus);
         assert_eq!(config.refresh_seconds, 15);
         assert!(!config.widgets.buy_sell_pressure);
         assert!(!config.widgets.activity_log);
@@ -3081,7 +3090,7 @@ widgets:
     fn test_monitor_config_serde_default_missing_fields() {
         let yaml = "layout: feed\n";
         let config: MonitorConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.layout, Some(LayoutPreset::Feed));
+        assert_eq!(config.layout, LayoutPreset::Feed);
         assert_eq!(config.refresh_seconds, DEFAULT_REFRESH_SECS);
         assert!(config.widgets.price_chart); // defaults
     }
@@ -3090,7 +3099,7 @@ widgets:
     fn test_state_apply_config() {
         let mut state = create_populated_state();
         let config = MonitorConfig {
-            layout: Some(LayoutPreset::Feed),
+            layout: LayoutPreset::Feed,
             refresh_seconds: 5,
             widgets: WidgetVisibility {
                 price_chart: false,
@@ -3548,7 +3557,7 @@ widgets:
             panic!("expected monitor")
         };
         let config = Config::default();
-        let (monitor_config, export_file) = monitor_config_from_args(&args, &config);
+        let (monitor_config, export_file, _) = monitor_config_from_args(&args, &config);
         assert_eq!(monitor_config.export.path, config.monitor.export.path);
         assert_eq!(export_file, Some(PathBuf::from("out.csv")));
     }
@@ -3986,7 +3995,7 @@ capabilities:
     #[test]
     fn test_monitor_config_full_serde_roundtrip() {
         let config = MonitorConfig {
-            layout: Some(LayoutPreset::Dashboard),
+            layout: LayoutPreset::Dashboard,
             refresh_seconds: 10,
             widgets: WidgetVisibility::default(),
             scale: ScaleMode::Log,
@@ -4006,7 +4015,7 @@ capabilities:
 
         let yaml = serde_yaml::to_string(&config).unwrap();
         let parsed: MonitorConfig = serde_yaml::from_str(&yaml).unwrap();
-        assert_eq!(parsed.layout, Some(LayoutPreset::Dashboard));
+        assert_eq!(parsed.layout, LayoutPreset::Dashboard);
         assert_eq!(parsed.refresh_seconds, 10);
         assert_eq!(parsed.venue, Some("binance".to_string()));
         assert_eq!(parsed.alerts.price_min, Some(0.5));
@@ -5772,7 +5781,7 @@ refresh_seconds: 5
     fn test_run_direct_config_override_layout() {
         // Verify that run_direct properly applies CLI overrides to config
         let config = Config::default();
-        assert_eq!(config.monitor.layout, None);
+        assert_eq!(config.monitor.layout, LayoutPreset::Dashboard);
 
         let args = MonitorArgs {
             token: "USDC".to_string(),
@@ -5789,9 +5798,9 @@ refresh_seconds: 5
         // Build the effective config the same way run_direct does
         let mut monitor_config = config.monitor.clone();
         if let Some(layout) = args.layout {
-            monitor_config.layout = Some(layout);
+            monitor_config.layout = layout;
         }
-        assert_eq!(monitor_config.layout, Some(LayoutPreset::ChartFocus));
+        assert_eq!(monitor_config.layout, LayoutPreset::ChartFocus);
     }
 
     #[test]
@@ -5811,7 +5820,7 @@ refresh_seconds: 5
 
         let mut mc = config.monitor.clone();
         if let Some(layout) = args.layout {
-            mc.layout = Some(layout);
+            mc.layout = layout;
         }
         if let Some(refresh) = args.refresh {
             mc.refresh_seconds = refresh;
@@ -5826,7 +5835,7 @@ refresh_seconds: 5
             mc.export.path = Some(path.to_string_lossy().into_owned());
         }
 
-        assert_eq!(mc.layout, Some(LayoutPreset::Compact));
+        assert_eq!(mc.layout, LayoutPreset::Compact);
         assert_eq!(mc.refresh_seconds, 2);
         assert_eq!(mc.scale, ScaleMode::Log);
         assert_eq!(mc.color_scheme, ColorScheme::BlueOrange);
@@ -5850,7 +5859,7 @@ refresh_seconds: 5
 
         let mut mc = config.monitor.clone();
         if let Some(layout) = args.layout {
-            mc.layout = Some(layout);
+            mc.layout = layout;
         }
         if let Some(refresh) = args.refresh {
             mc.refresh_seconds = refresh;
@@ -5863,7 +5872,7 @@ refresh_seconds: 5
         }
 
         // All should remain at defaults
-        assert_eq!(mc.layout, None);
+        assert_eq!(mc.layout, LayoutPreset::Dashboard);
         assert_eq!(mc.refresh_seconds, DEFAULT_REFRESH_SECS);
         assert_eq!(mc.scale, ScaleMode::Linear);
         assert_eq!(mc.color_scheme, ColorScheme::GreenRed);
@@ -6946,19 +6955,22 @@ refresh_seconds: 5
     }
 
     #[test]
-    fn test_a_chosen_layout_holds_on_the_first_frame() {
+    fn test_only_the_layout_flag_pins_the_layout() {
         use clap::Parser;
-        // The first frame's layout for these args and this config file.
-        let first_frame = |argv: &[&str], config: &Config| {
+        // The state as run() builds it, and its layout before and after
+        // the first frame.
+        let launch = |argv: &[&str], config: &Config| {
             let cli = crate::cli::Cli::try_parse_from(argv).unwrap();
             let crate::cli::Commands::Monitor(args) = cli.command else {
                 panic!("expected monitor")
             };
-            let (cfg, _) = monitor_config_from_args(&args, config);
+            let (cfg, _, pinned) = monitor_config_from_args(&args, config);
             let mut state = create_populated_state();
             state.apply_config(&cfg);
+            state.auto_layout = !pinned;
+            let start = state.layout;
             ui_text(&mut state, 120, 40);
-            state.layout
+            (start, state.layout)
         };
         let auto = auto_select_layout(Rect::new(0, 0, 120, 40));
         assert_ne!(
@@ -6966,24 +6978,24 @@ refresh_seconds: 5
             LayoutPreset::Exchange,
             "the test needs auto to differ"
         );
+        let bare = ["scope", "monitor", "USDC"];
 
-        // From `--layout`.
+        // `--layout` pins the layout on the first frame and after.
         let flag = ["scope", "monitor", "USDC", "--layout", "exchange"];
-        assert_eq!(
-            first_frame(&flag, &Config::default()),
-            LayoutPreset::Exchange
-        );
+        let (_, first) = launch(&flag, &Config::default());
+        assert_eq!(first, LayoutPreset::Exchange);
 
-        // From `monitor.layout` in the config file.
+        // A config `layout` is the starting preset only. Many saved configs
+        // hold `layout: dashboard` that the user never chose, so
+        // auto-layout still applies.
         let config = Config {
             monitor: serde_yaml::from_str("layout: exchange\n").unwrap(),
             ..Default::default()
         };
-        let bare = ["scope", "monitor", "USDC"];
-        assert_eq!(first_frame(&bare, &config), LayoutPreset::Exchange);
+        assert_eq!(launch(&bare, &config), (LayoutPreset::Exchange, auto));
 
-        // Neither: auto-layout picks for the terminal size.
-        assert_eq!(first_frame(&bare, &Config::default()), auto);
+        // Neither: auto-layout.
+        assert_eq!(launch(&bare, &Config::default()).1, auto);
     }
 
     const MONITOR_TOO_SMALL: &str = "Terminal too small: need at least 60×16";

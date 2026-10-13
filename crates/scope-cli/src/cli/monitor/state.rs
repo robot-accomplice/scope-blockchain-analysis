@@ -344,10 +344,7 @@ impl MonitorState {
 
     /// Applies monitor config settings to this state.
     pub fn apply_config(&mut self, config: &MonitorConfig) {
-        // A layout from config or `--layout` is the user's choice:
-        // auto-layout must not replace it.
-        self.layout = config.layout.unwrap_or_default();
-        self.auto_layout = config.layout.is_none();
+        self.layout = config.layout;
         self.widgets = config.widgets.clone();
         self.refresh_rate = Duration::from_secs(config.refresh_seconds);
         self.scale_mode = config.scale;

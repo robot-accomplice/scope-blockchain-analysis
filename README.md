@@ -816,7 +816,7 @@ The monitor supports five layout presets that can be switched at runtime or conf
 | **Compact** | Minimal single-column sparkline view for small terminals |
 | **Exchange** | Exchange-style view: order book, chart, recent trades, market info |
 
-The monitor automatically selects the best layout for your terminal size (responsive breakpoints). Manual layout switching disables auto-selection until you press `A`.
+The monitor automatically selects the best layout for your terminal size (responsive breakpoints). `monitor.layout` in `config.yaml` is only the starting preset; auto-selection still applies to it. The `--layout` flag pins the layout: auto-selection stays off. Manual layout switching also disables auto-selection until you press `A`.
 
 **Monitor features:**
 
@@ -900,7 +900,7 @@ portfolio:
 
 # Monitor TUI configuration (all optional, shown with defaults)
 monitor:
-  layout: dashboard          # dashboard | chart-focus | feed | compact | exchange
+  layout: dashboard          # starting preset; auto-layout still applies (--layout pins it)
   refresh_seconds: 10
   scale: linear              # linear | log
   color_scheme: green-red    # green-red | blue-orange | monochrome
