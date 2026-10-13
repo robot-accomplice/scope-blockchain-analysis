@@ -10,7 +10,7 @@
 //! single-level estimate is kept and marked as such.
 
 use super::health::{DEFAULT_AMM_STEP_PCT, HealthThresholds, TOP10_LEVELS};
-use super::types::{BookSource, OrderBook, OrderBookLevel};
+use super::types::{BookSource, OrderBook, OrderBookLevel, PERCENT_PER_RATIO};
 
 /// The most levels per side of a synthetic AMM book. It bounds the work for
 /// a very small step or a very wide band.
@@ -60,7 +60,7 @@ fn amm_book(label: String, p0: f64, x0: f64, t: &HealthThresholds) -> OrderBook 
     } else {
         DEFAULT_AMM_STEP_PCT
     };
-    let step = step_pct / 100.0;
+    let step = step_pct / PERCENT_PER_RATIO;
     let n = amm_levels_per_side(step, t);
     let base_at = |p: f64| x0 * (p0 / p).sqrt();
 

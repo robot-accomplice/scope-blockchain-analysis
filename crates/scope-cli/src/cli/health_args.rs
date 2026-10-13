@@ -67,8 +67,10 @@ fn positive_pct(s: &str) -> Result<f64, String> {
 
 /// Help for `--peg-range`, with the band width taken from the constants.
 fn peg_range_help() -> String {
-    let band_pct =
-        health::DEFAULT_PEG_RANGE * health::PEG_OUTLIER_FACTOR / health::DEFAULT_PEG_TARGET * 100.0;
+    let band_pct = health::PegBands::new(health::DEFAULT_PEG_TARGET, health::DEFAULT_PEG_RANGE)
+        .outlier_width()
+        / health::DEFAULT_PEG_TARGET
+        * health::PERCENT_PER_RATIO;
     format!(
         "Peg range. The outlier band is peg ± range×{factor}: levels outside it are left out of depth and level counts (best prices still include them). E.g., {range} = ±{band_pct}% around a peg of {target}.",
         factor = health::PEG_OUTLIER_FACTOR,

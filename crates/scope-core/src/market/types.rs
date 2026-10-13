@@ -115,7 +115,7 @@ impl OrderBook {
     pub fn spread_pct(&self) -> Option<f64> {
         self.spread()
             .zip(self.mid_price())
-            .map(|(spread, mid)| spread / mid * 100.0)
+            .map(|(spread, mid)| spread / mid * PERCENT_PER_RATIO)
     }
 
     /// The levels of one side, best first.
@@ -197,8 +197,14 @@ impl OrderBook {
     }
 }
 
+/// Percent in a ratio of 1.
+pub const PERCENT_PER_RATIO: f64 = 100.0;
+
+/// Basis points in one percent.
+pub const BPS_PER_PERCENT: f64 = 100.0;
+
 /// Basis points in a ratio of 1.
-const BPS_PER_RATIO: f64 = 10_000.0;
+pub const BPS_PER_RATIO: f64 = BPS_PER_PERCENT * PERCENT_PER_RATIO;
 
 /// Walks the valid levels (best first) until `notional` of quote value is
 /// taken. Returns the volume-weighted price (the mid when nothing fills) and

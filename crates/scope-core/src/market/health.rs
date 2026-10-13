@@ -48,8 +48,7 @@ pub const TOP3_LEVELS: usize = 3;
 /// Number of levels summed for the top-10 depth check.
 pub const TOP10_LEVELS: usize = 10;
 
-/// Basis points in one percent.
-pub const BPS_PER_PERCENT: f64 = 100.0;
+pub use super::types::{BPS_PER_PERCENT, PERCENT_PER_RATIO};
 
 /// The outlier band is `peg_range` times this, around the peg target.
 pub const PEG_OUTLIER_FACTOR: f64 = 5.0;
@@ -274,8 +273,8 @@ pub enum PegStatus {
 /// inside the window: the book may continue past what was fetched, so the
 /// depth is a lower bound.
 fn depth_within(book: &OrderBook, mid: f64, window_pct: f64) -> (f64, bool) {
-    let lo = mid * (1.0 - window_pct / 100.0);
-    let hi = mid * (1.0 + window_pct / 100.0);
+    let lo = mid * (1.0 - window_pct / PERCENT_PER_RATIO);
+    let hi = mid * (1.0 + window_pct / PERCENT_PER_RATIO);
     let depth =
         book.depth_in_band(BookSide::Bid, lo..=hi) + book.depth_in_band(BookSide::Ask, lo..=hi);
     let ends_inside = |levels: &[OrderBookLevel]| {
@@ -306,7 +305,7 @@ fn depth_volume_check(
         );
     };
     let (depth, truncated) = depth_within(book, mid, w);
-    let pct = depth / volume * 100.0;
+    let pct = depth / volume * PERCENT_PER_RATIO;
     let at_least = if truncated { "≥" } else { "" };
     let msg = format!(
         "Depth/volume: {at_least}{pct:.1}% ({at_least}{depth:.0} / {volume:.0} USDT within ±{w}%; target {lo}–{hi}%)"
@@ -379,7 +378,8 @@ impl MarketSummary {
     /// `None` when the peg target is not positive. The one definition: text,
     /// markdown, series and insights all call it.
     pub fn peg_deviation_pct(&self, price: f64) -> Option<f64> {
-        (self.peg_target > 0.0).then(|| (price - self.peg_target) / self.peg_target * 100.0)
+        (self.peg_target > 0.0)
+            .then(|| (price - self.peg_target) / self.peg_target * PERCENT_PER_RATIO)
     }
 
     /// The same deviation in basis points.
