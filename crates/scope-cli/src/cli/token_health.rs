@@ -178,48 +178,7 @@ fn token_health_to_markdown(
     if let Some(summary) = market {
         md.push_str("\n---\n\n");
         md.push_str("## Market / Order Book\n\n");
-        if let Some(v) = venue {
-            md.push_str(&format!("**Venue:** {}  \n\n", v));
-        }
-        md.push_str(&format!(
-            "| Metric | Value |\n|--------|-------|\n\
-             | Peg Target | {:.4} |\n\
-             | Book | {} |\n\
-             | Best Bid | {} |\n\
-             | Best Ask | {} |\n\
-             | Mid Price | {} |\n\
-             | Spread | {} |\n\
-             | Bid Depth | {:.0} |\n\
-             | Ask Depth | {:.0} |\n\
-             | Healthy | {} |\n",
-            summary.peg_target,
-            summary.source.label(),
-            summary
-                .best_bid
-                .map(|b| format!("{:.4}", b))
-                .unwrap_or_else(|| "-".to_string()),
-            summary
-                .best_ask
-                .map(|a| format!("{:.4}", a))
-                .unwrap_or_else(|| "-".to_string()),
-            summary
-                .mid_price
-                .map(|m| format!("{:.4}", m))
-                .unwrap_or_else(|| "-".to_string()),
-            summary
-                .spread
-                .map(|s| format!("{:.4}", s))
-                .unwrap_or_else(|| "-".to_string()),
-            summary.bid_depth,
-            summary.ask_depth,
-            if summary.healthy { "Yes" } else { "No" }
-        ));
-        if !summary.checks.is_empty() {
-            md.push_str("\n**Health Checks:**\n");
-            for check in &summary.checks {
-                md.push_str(&format!("- {} {}\n", check.icon(), check.message()));
-            }
-        }
+        md.push_str(&summary.format_markdown(venue));
     }
 
     md.push_str(&report::report_footer());
@@ -571,7 +530,7 @@ mod tests {
         assert!(md.contains("Market / Order Book"));
         assert!(md.contains("binance"));
         assert!(md.contains("0.9999"));
-        assert!(md.contains("Yes"));
+        assert!(md.contains("| Healthy | ✓ |"));
         assert!(md.contains("Health Checks"));
     }
 
@@ -583,7 +542,7 @@ mod tests {
         assert!(md.contains("Market / Order Book"));
         assert!(!md.contains("Venue:")); // Should not include venue when None
         assert!(md.contains("0.9999"));
-        assert!(md.contains("Yes"));
+        assert!(md.contains("| Healthy | ✓ |"));
     }
 
     #[test]
@@ -598,7 +557,7 @@ mod tests {
         ];
         let md = token_health_to_markdown(&analytics, Some(&market), Some("binance"));
         assert!(md.contains("Market / Order Book"));
-        assert!(md.contains("No")); // Should show unhealthy
+        assert!(md.contains("| Healthy | ✗ |")); // Should show unhealthy
         assert!(md.contains("Health Checks"));
         assert!(md.contains("✗")); // Should show fail checks
         assert!(md.contains("Peg deviation too high"));

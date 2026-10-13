@@ -319,88 +319,13 @@ fn parse_duration(s: &str) -> Result<u64> {
 
 /// Builds markdown report content for a market summary.
 fn market_summary_to_markdown(summary: &MarketSummary, venue: &str, pair: &str) -> String {
-    // A price with its peg deviation; no deviation is left out, not shown as 0.
-    let with_deviation = |price: f64| match summary.peg_deviation_pct(price) {
-        Some(pct) => format!("{price:.4} ({pct:+.3}%)"),
-        None => format!("{price:.4}"),
-    };
-    let volume_row = summary
-        .volume_24h
-        .map(|v| format!("| Volume (24h) | {:.0} USDT |  \n", v))
-        .unwrap_or_default();
-    let exec_buy = summary
-        .execution_10k_buy
-        .as_ref()
-        .map(|e| {
-            if e.fillable {
-                format!("{:.2} bps", e.slippage_bps)
-            } else {
-                "insufficient".to_string()
-            }
-        })
-        .unwrap_or_else(|| "-".to_string());
-    let exec_sell = summary
-        .execution_10k_sell
-        .as_ref()
-        .map(|e| {
-            if e.fillable {
-                format!("{:.2} bps", e.slippage_bps)
-            } else {
-                "insufficient".to_string()
-            }
-        })
-        .unwrap_or_else(|| "-".to_string());
     let mut md = format!(
         "# Market Health Report: {}  \n\
-        **Venue:** {}  \n\
-        **Generated:** {}  \n\n\
-        ## Peg & Spread  \n\
-        | Metric | Value |  \n\
-        |--------|-------|  \n\
-        | Peg Target | {:.4} |  \n\
-        | Book | {} |  \n\
-        | Best Bid | {} |  \n\
-        | Best Ask | {} |  \n\
-        | Mid Price | {} |  \n\
-        | Spread | {} |  \n\
-        {}\
-        | 10k Buy Slippage | {} |  \n\
-        | 10k Sell Slippage | {} |  \n\
-        | Bid Depth | {:.0} |  \n\
-        | Ask Depth | {:.0} |  \n\
-        | Healthy | {} |  \n\n\
-        ## Health Checks  \n",
+        **Generated:** {}  \n\n",
         pair,
-        venue,
         chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC"),
-        summary.peg_target,
-        summary.source.label(),
-        summary
-            .best_bid
-            .map(with_deviation)
-            .unwrap_or_else(|| "-".to_string()),
-        summary
-            .best_ask
-            .map(with_deviation)
-            .unwrap_or_else(|| "-".to_string()),
-        summary
-            .mid_price
-            .map(|m| format!("{:.4}", m))
-            .unwrap_or_else(|| "-".to_string()),
-        summary
-            .spread
-            .map(|s| format!("{:.4}", s))
-            .unwrap_or_else(|| "-".to_string()),
-        volume_row,
-        exec_buy,
-        exec_sell,
-        summary.bid_depth,
-        summary.ask_depth,
-        if summary.healthy { "✓" } else { "✗" }
     );
-    for check in &summary.checks {
-        md.push_str(&format!("- {} {}\n", check.icon(), check.message()));
-    }
+    md.push_str(&summary.format_markdown(Some(venue)));
     md.push_str(&scope::display::report::report_footer());
     md
 }
@@ -1747,7 +1672,8 @@ capabilities:
         };
         let md = market_summary_to_markdown(&summary, "Venue", "X");
         assert!(md.contains("Market Health Report"));
-        assert!(md.contains("Health Checks"));
+        // No checks, no checks section.
+        assert!(!md.contains("Health Checks:"));
     }
 
     // ====================================================================

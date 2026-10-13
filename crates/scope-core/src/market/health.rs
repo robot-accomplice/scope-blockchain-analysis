@@ -841,6 +841,82 @@ impl MarketSummary {
 
         out
     }
+
+    /// The one markdown rendering of a summary: metric table with peg
+    /// deviations, then the health checks. `market summary --report` wraps it
+    /// in a report header; token-health appends it to its own report. Missing
+    /// prices show as `-`; the venue line and the checks section appear only
+    /// when there is something to show.
+    pub fn format_markdown(&self, venue: Option<&str>) -> String {
+        let with_deviation = |price: f64| match self.peg_deviation_pct(price) {
+            Some(pct) => format!("{price:.4} ({pct:+.3}%)"),
+            None => format!("{price:.4}"),
+        };
+        let bid_ask_or_dash =
+            |price: Option<f64>| price.map(with_deviation).unwrap_or_else(|| "-".to_string());
+        let price_or_dash = |price: Option<f64>| {
+            price
+                .map(|p| format!("{p:.4}"))
+                .unwrap_or_else(|| "-".to_string())
+        };
+        let exec_or_dash = |e: &Option<ExecutionEstimate>| {
+            e.as_ref()
+                .map(|e| {
+                    if e.fillable {
+                        format!("{:.2} bps", e.slippage_bps)
+                    } else {
+                        "insufficient".to_string()
+                    }
+                })
+                .unwrap_or_else(|| "-".to_string())
+        };
+
+        let mut md = String::new();
+        if let Some(v) = venue {
+            md.push_str(&format!("**Venue:** {v}  \n\n"));
+        }
+        md.push_str("| Metric | Value |\n|--------|-------|\n");
+        md.push_str(&format!("| Peg Target | {:.4} |\n", self.peg_target));
+        md.push_str(&format!("| Book | {} |\n", self.source.label()));
+        md.push_str(&format!(
+            "| Best Bid | {} |\n",
+            bid_ask_or_dash(self.best_bid)
+        ));
+        md.push_str(&format!(
+            "| Best Ask | {} |\n",
+            bid_ask_or_dash(self.best_ask)
+        ));
+        md.push_str(&format!(
+            "| Mid Price | {} |\n",
+            price_or_dash(self.mid_price)
+        ));
+        md.push_str(&format!("| Spread | {} |\n", price_or_dash(self.spread)));
+        if let Some(v) = self.volume_24h {
+            md.push_str(&format!("| Volume (24h) | {v:.0} USDT |\n"));
+        }
+        md.push_str(&format!(
+            "| 10k Buy Slippage | {} |\n",
+            exec_or_dash(&self.execution_10k_buy)
+        ));
+        md.push_str(&format!(
+            "| 10k Sell Slippage | {} |\n",
+            exec_or_dash(&self.execution_10k_sell)
+        ));
+        md.push_str(&format!("| Bid Depth | {:.0} |\n", self.bid_depth));
+        md.push_str(&format!("| Ask Depth | {:.0} |\n", self.ask_depth));
+        md.push_str(&format!(
+            "| Healthy | {} |\n",
+            if self.healthy { "✓" } else { "✗" }
+        ));
+
+        if !self.checks.is_empty() {
+            md.push_str("\n**Health Checks:**\n");
+            for check in &self.checks {
+                md.push_str(&format!("- {} {}\n", check.icon(), check.message()));
+            }
+        }
+        md
+    }
 }
 
 // =============================================================================
@@ -1205,6 +1281,47 @@ mod tests {
         let v = s.to_json();
         assert_eq!(v["bids"].as_array().unwrap().len(), 20);
         assert_eq!(v["bid_levels"], 25);
+    }
+
+    #[test]
+    fn test_format_markdown_table_with_deviations_and_checks() {
+        let s = MarketSummary::from_order_book(
+            &healthy_book(),
+            &HealthThresholds::default(),
+            Some(50_000.0),
+        );
+        let md = s.format_markdown(Some("binance"));
+        assert!(md.contains("**Venue:** binance"), "{md}");
+        assert!(md.contains("| Peg Target | 1.0000 |"), "{md}");
+        // Best prices carry their peg deviation; mid and spread do not.
+        assert!(md.contains("0.9999 (-0.010%)"), "{md}");
+        assert!(md.contains("1.0001 (+0.010%)"), "{md}");
+        assert!(md.contains("| Mid Price | 1.0000 |"), "{md}");
+        assert!(md.contains("| Volume (24h) | 50000 USDT |"), "{md}");
+        assert!(md.contains("| Healthy | ✓ |"), "{md}");
+        assert!(md.contains("**Health Checks:**"), "{md}");
+        assert!(md.contains("- ✓ No sells below peg"), "{md}");
+
+        let md = s.format_markdown(None);
+        assert!(!md.contains("**Venue:**"), "{md}");
+    }
+
+    #[test]
+    fn test_format_markdown_dashes_and_unhealthy_icon() {
+        let mut s = summarize(&healthy_book());
+        s.best_bid = None;
+        s.best_ask = None;
+        s.mid_price = None;
+        s.spread = None;
+        s.volume_24h = None;
+        s.healthy = false;
+        s.checks = vec![];
+        let md = s.format_markdown(None);
+        assert!(md.contains("| Best Bid | - |"), "{md}");
+        assert!(!md.contains("Volume (24h)"), "{md}");
+        assert!(md.contains("| Healthy | ✗ |"), "{md}");
+        // No checks, no section.
+        assert!(!md.contains("Health Checks:"), "{md}");
     }
 
     #[test]
