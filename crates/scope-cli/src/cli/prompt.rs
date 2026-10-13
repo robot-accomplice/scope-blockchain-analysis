@@ -7,13 +7,13 @@
 //! terminal. Ctrl-C there must cancel the command and return to the TUI. A
 //! blocking `read_line` cannot be stopped, and a read on another thread
 //! would stay behind and take the TUI's next keys. So the reader waits for
-//! input in short steps and checks [`CANCEL`] between them. It reads one
+//! input in short steps and checks `CANCEL` between them. It reads one
 //! byte at a time, so it never takes bytes after the newline.
 //!
-//! Outside the TUI nothing sets [`CANCEL`], and the reader acts as
+//! Outside the TUI nothing sets `CANCEL`, and the reader acts as
 //! `read_line` does.
 //!
-//! Every prompt goes through [`ask`] (or [`pick`], for a numbered list).
+//! Every prompt goes through `ask` (or `pick`, for a numbered list).
 //! It pauses the progress bars, so a spinner never draws over a question.
 //! A question, a list to pick from and the text around a prompt are not
 //! data: they go to the diagnostic channel of the [`Output`]. So piped
@@ -57,7 +57,7 @@ pub(crate) fn ask(reader: &mut impl BufRead, out: &Output, question: &str) -> io
     })
 }
 
-/// [`ask`] on stdin (cancellable in the TUI). The `scope` binary's own
+/// `ask` on stdin (cancellable in the TUI). The `scope` binary's own
 /// prompts use it.
 ///
 /// # Errors

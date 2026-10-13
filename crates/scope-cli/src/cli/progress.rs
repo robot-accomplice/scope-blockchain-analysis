@@ -17,9 +17,9 @@
 //!
 //! ## Prompts
 //!
-//! A bar that draws on the terminal is registered here. [`paused`] stops
+//! A bar that draws on the terminal is registered here. `paused` stops
 //! every registered bar while it runs a closure, so an interactive prompt
-//! ([`crate::cli::prompt::ask`]) is never drawn over. Lines a command
+//! (`crate::cli::prompt::ask`) is never drawn over. Lines a command
 //! prints next to a bar ([`Spinner::println`]) go through its [`Output`],
 //! so the TUI keeps a copy; the bar's own finish line is progress and is
 //! not copied.

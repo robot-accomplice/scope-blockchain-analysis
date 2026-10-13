@@ -1,7 +1,7 @@
 //! # Crash log
 //!
 //! A panic in the TUI writes a crash log and tells the user where it is.
-//! The hook first gives the terminal back ([`screen::restore`], which does
+//! The hook first gives the terminal back (`screen::restore`, which does
 //! nothing when the screen is already back), so the notice is readable,
 //! then calls the previous hook.
 
