@@ -1216,15 +1216,8 @@ impl TuiState {
                 self.push_note(&format!("Output error: {}", write_err));
             }
         }
-        let output = run.captured.out();
-        // The copy is the command's own data: no warnings, error text or
-        // footer. A success with no data clears it; a failed or cancelled
-        // run keeps the earlier copy.
-        if matches!(ending, Ending::Finished(Ok(()))) {
-            let data = clip::strip_ansi(&run.captured.data());
-            self.last_output = (!data.trim().is_empty()).then_some(data);
-        }
-        self.push_ansi(&output);
+        self.keep_copy(&run.captured, &ending);
+        self.push_ansi(&run.captured.out());
         let secs = run.started.elapsed().as_secs_f64();
         match &ending {
             Ending::Cancelled => {
@@ -1248,6 +1241,29 @@ impl TuiState {
             outcome: outcome.into(),
             error,
         });
+    }
+
+    /// Keeps the data of a successful run for Ctrl-Y and `save`. The copy
+    /// is the command's own data: no warnings, error text or footer. A
+    /// success with no data clears it; a failed or cancelled run keeps the
+    /// earlier copy.
+    fn keep_copy(&mut self, captured: &Captured, ending: &Ending) {
+        if matches!(ending, Ending::Finished(Ok(()))) {
+            let data = clip::strip_ansi(&captured.data());
+            self.last_output = (!data.trim().is_empty()).then_some(data);
+        }
+    }
+
+    /// Shows the output of a command that ran outside the TUI (suspend
+    /// mode), and keeps its data as `finish` does for a pane command.
+    /// Call it before [`TuiState::record_suspended`], so the text comes
+    /// above the note.
+    pub fn show_outside(&mut self, copy: &Captured, ending: &Ending) {
+        if copy.trimmed() {
+            self.push_note("Its output was long; only the end is kept here.");
+        }
+        self.keep_copy(copy, ending);
+        self.push_ansi(&copy.out());
     }
 
     /// Records a command that ran outside the TUI (suspend mode), with a

@@ -1,0 +1,30 @@
+{
+  "recorded": "2026-10-13T07:13:51.581574+00:00",
+  "request": {
+    "method": "GET",
+    "url": "https://api.dexscreener.com/latest/dex/tokens/53EZNaGbfB9f8WiMqHpZX4k5Z7DLoEVA4zbq1Xtk6YkK",
+    "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "responses": [
+    {
+      "status": 200,
+      "headers": {
+        "access-control-allow-credentials": "true",
+        "access-control-allow-origin": "*",
+        "alt-svc": "h3=\":443\"; ma=86400",
+        "cache-control": "public, max-age=30",
+        "cf-cache-status": "HIT",
+        "cf-ray": "a49c8b4888357dd2-ZRH",
+        "connection": "keep-alive",
+        "content-type": "application/json; charset=utf-8",
+        "date": "Tue, 13 Oct 2026 07:13:51 GMT",
+        "etag": "W/\"32e-3XPxmjnLWl1JcZw6C6BGx344fok\"",
+        "expires": "Tue, 13 Oct 2026 07:14:21 GMT",
+        "server": "cloudflare",
+        "transfer-encoding": "chunked",
+        "vary": "Accept-Encoding"
+      },
+      "body": "{\"schemaVersion\":\"1.0.0\",\"pairs\":[{\"chainId\":\"solana\",\"dexId\":\"orca\",\"url\":\"https://dexscreener.com/solana/hbfnearvqwwj5qjjc1hdtt9zzi4nmepelv16sbhvwfbj\",\"pairAddress\":\"HBfNeArVqWwJ5QjJc1Hdtt9Zzi4nmepELV16sbHvWfbj\",\"labels\":[\"wp\"],\"baseToken\":{\"address\":\"53EZNaGbfB9f8WiMqHpZX4k5Z7DLoEVA4zbq1Xtk6YkK\",\"name\":\"USD Coin\",\"symbol\":\"USDC\"},\"quoteToken\":{\"address\":\"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v\",\"name\":\"USD Coin\",\"symbol\":\"USDC\"},\"priceNative\":\"0.9908\",\"priceUsd\":\"0.9908\",\"txns\":{\"m5\":{\"buys\":0,\"sells\":0},\"h1\":{\"buys\":0,\"sells\":0},\"h6\":{\"buys\":0,\"sells\":0},\"h24\":{\"buys\":1,\"sells\":1}},\"volume\":{\"h24\":906.04,\"h6\":0,\"h1\":0,\"m5\":0},\"priceChange\":{\"h24\":-0.02},\"liquidity\":{\"usd\":3963370516.2,\"base\":4000000000,\"quote\":0.04826},\"fdv\":990842629018,\"marketCap\":990842629018,\"pairCreatedAt\":1789014783000}]}"
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+name: a command run outside the TUI shows its report in the TUI when it returns
+tiers: [offline]
+steps:
+  # A crawl by symbol asks the user to pick a token, so it runs outside
+  # the TUI. Its report must not stay hidden on the main screen.
+  - type: "crawl USDC"
+  - key: Enter
+  - wait_for: { text: "Select token \\(1-20\\)", timeout: 20s }
+  # The answer ends in a line feed: the harness pty does not map the
+  # Enter key's CR to LF (no ICRNL), as a real terminal does.
+  - type: "1\n"
+  # The search spinner draws over the save prompt, so the screen cannot
+  # show it. Answer it now: the prompt reads one byte at a time, so this
+  # line waits in the terminal for it.
+  - type: "n\n"
+  - wait_for: { text: "Ran outside the TUI: crawl USDC \\(ok, \\d+\\.\\ds\\)", timeout: 20s }
+  # Lines of the crawl report, in the TUI scrollback above the note.
+  - expect_screen: { contains: ["Top Trading Pairs", "orca USDC/USDC"] }
+  - expect_journal: { argv_prefix: ["scope", "crawl"], outcome: ok }
+  - key: Ctrl-D
+  - expect_exit: 0

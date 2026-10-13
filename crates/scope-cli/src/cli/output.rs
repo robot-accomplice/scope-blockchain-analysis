@@ -24,6 +24,7 @@
 
 use std::fmt;
 use std::io::{self, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -84,6 +85,7 @@ impl Output {
             data: out.clone(),
             out: out.clone(),
             err: err.clone(),
+            trimmed: Arc::default(),
         };
         let output = Self {
             out,
@@ -109,6 +111,7 @@ impl Output {
             out: buf.clone(),
             err: buf.clone(),
             data: data.clone(),
+            trimmed: Arc::default(),
         };
         let output = Self {
             out: Arc::new(Mutex::new(Tee {
@@ -118,6 +121,48 @@ impl Output {
             err: buf,
             progress: false,
             hook: Some(ProgressHook::default()),
+            tui: true,
+        };
+        (output, captured)
+    }
+
+    /// Output that still writes to this output's writers and also keeps a
+    /// copy of the text, as [`Output::capture_merged`] does.
+    ///
+    /// The TUI uses it for a command that runs outside it: the user sees
+    /// the text live on the terminal, and the TUI shows the copy in its
+    /// scrollback after it returns. Progress indicators stay as they are
+    /// here (they draw on the real terminal and are not copied). The copy
+    /// keeps at most about `limit` bytes, the end of the text; whole lines
+    /// are dropped from its start. [`Captured::trimmed`] says when that
+    /// happened.
+    ///
+    /// The result is a TUI output ([`Output::is_tui`]): its hints are read
+    /// in the TUI scrollback.
+    pub fn teed(&self, limit: usize) -> (Self, Captured) {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let data = Arc::new(Mutex::new(Vec::new()));
+        let trimmed = Arc::new(AtomicBool::new(false));
+        let captured = Captured {
+            out: buf.clone(),
+            err: buf.clone(),
+            data: data.clone(),
+            trimmed: trimmed.clone(),
+        };
+        let copy = |real: &Sink, data: Option<Arc<Mutex<Vec<u8>>>>| -> Sink {
+            Arc::new(Mutex::new(TeeSink {
+                real: real.clone(),
+                merged: buf.clone(),
+                data,
+                limit,
+                trimmed: trimmed.clone(),
+            }))
+        };
+        let output = Self {
+            out: copy(&self.out, Some(data.clone())),
+            err: copy(&self.err, None),
+            progress: self.progress,
+            hook: None,
             tui: true,
         };
         (output, captured)
@@ -189,9 +234,17 @@ pub struct Captured {
     data: Arc<Mutex<Vec<u8>>>,
     out: Arc<Mutex<Vec<u8>>>,
     err: Arc<Mutex<Vec<u8>>>,
+    /// Set when a bounded copy ([`Output::teed`]) dropped text.
+    trimmed: Arc<AtomicBool>,
 }
 
 impl Captured {
+    /// True when the copy dropped the start of the text to stay in its
+    /// limit. Only an [`Output::teed`] copy has a limit.
+    pub fn trimmed(&self) -> bool {
+        self.trimmed.load(Ordering::Relaxed)
+    }
+
     /// Everything written to the data channel so far.
     pub fn out(&self) -> String {
         String::from_utf8_lossy(&lock(&self.out)).into_owned()
@@ -231,6 +284,52 @@ impl Write for Tee {
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
+}
+
+/// One channel of an [`Output::teed`] output: keeps a bounded copy, then
+/// writes to the real writer.
+struct TeeSink {
+    real: Sink,
+    merged: Arc<Mutex<Vec<u8>>>,
+    /// The data-only copy; `None` on the diagnostic channel.
+    data: Option<Arc<Mutex<Vec<u8>>>>,
+    limit: usize,
+    trimmed: Arc<AtomicBool>,
+}
+
+impl Write for TeeSink {
+    /// Copies first, so the TUI still shows text that the terminal could
+    /// not take; then returns the real writer's result.
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        for copy in std::iter::once(&self.merged).chain(self.data.as_ref()) {
+            let mut copy = lock(copy);
+            copy.extend_from_slice(buf);
+            if keep_tail(&mut copy, self.limit) {
+                self.trimmed.store(true, Ordering::Relaxed);
+            }
+        }
+        lock(&self.real).write_all(buf)?;
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        lock(&self.real).flush()
+    }
+}
+
+/// Drops whole lines from the start of `buf` when it is longer than
+/// `limit`, down to about half of it, so a long run trims rarely. Returns
+/// true when it dropped text.
+fn keep_tail(buf: &mut Vec<u8>, limit: usize) -> bool {
+    if buf.len() <= limit {
+        return false;
+    }
+    let cut = buf.len() - limit / 2;
+    let start = buf[cut..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map_or(buf.len(), |i| cut + i + 1);
+    buf.drain(..start);
+    true
 }
 
 /// Locks a mutex, recovering the data if a panicking writer poisoned it.
@@ -352,6 +451,7 @@ pub(crate) mod tests {
         assert!(Output::capture_merged().0.is_tui());
         assert!(!Output::capture().0.is_tui());
         assert!(!Output::stdio().is_tui());
+        assert!(Output::stdio().teed(1).0.is_tui());
     }
 
     #[test]
@@ -363,6 +463,52 @@ pub(crate) mod tests {
         errln!(o, "warning").unwrap();
         outln!(o, "row 2").unwrap();
         assert_eq!(cap.out(), "row 1\nwarning\nrow 2\n");
+    }
+
+    #[test]
+    fn test_teed_output_reaches_the_terminal_and_keeps_a_copy() {
+        // Outside the TUI the user reads the text live; the TUI shows the
+        // copy when it returns, and Ctrl-Y gets only the data.
+        let (terminal, screen) = Output::capture();
+        let (o, copy) = terminal.teed(1024);
+        outln!(o, "row").unwrap();
+        errln!(o, "warn").unwrap();
+        assert_eq!(screen.out(), "row\n");
+        assert_eq!(screen.err(), "warn\n");
+        assert_eq!(copy.out(), "row\nwarn\n");
+        assert_eq!(copy.data(), "row\n");
+        assert!(!copy.trimmed());
+        // The copy is read in the TUI: TUI wording for hints. Progress
+        // bars still draw on the real terminal as before.
+        assert!(o.is_tui());
+        assert_eq!(o.progress_enabled(), terminal.progress_enabled());
+        assert!(Output::stdio().teed(1).0.progress_enabled());
+        assert!(o.progress_hook().is_none());
+    }
+
+    #[test]
+    fn test_teed_copy_keeps_whole_lines_from_the_end_within_its_limit() {
+        // A long crawl must not grow the copy without bound.
+        let (terminal, screen) = Output::capture();
+        let (o, copy) = terminal.teed(100);
+        for i in 0..1000 {
+            outln!(o, "line {i:04}").unwrap();
+        }
+        assert!(copy.trimmed());
+        let kept = copy.out();
+        assert!(kept.len() <= 100, "{}", kept.len());
+        assert!(kept.starts_with("line "), "whole lines: {kept:?}");
+        assert!(kept.ends_with("line 0999\n"), "{kept:?}");
+        assert!(copy.data().ends_with("line 0999\n"));
+        assert_eq!(screen.out().lines().count(), 1000, "the terminal got all");
+    }
+
+    #[test]
+    fn test_teed_copy_keeps_text_the_terminal_refused() {
+        // A broken terminal must not lose the text the TUI can still show.
+        let (o, copy) = Output::from_writers(ClosedPipe, ClosedPipe).teed(64);
+        assert!(outln!(o, "data").is_err());
+        assert_eq!(copy.out(), "data\n");
     }
 
     #[test]
