@@ -136,7 +136,10 @@ impl VenueRegistry {
         self.venues
             .keys()
             .map(|k| (k.as_str(), strsim_distance(&input_lower, &k.to_lowercase())))
-            .filter(|(_, dist)| *dist <= 3)
+            // A fixed limit suggested `okx` for `weex` (#69). Scale it to the name.
+            .filter(|(k, dist)| {
+                *dist * SUGGEST_LENGTH_PER_EDIT <= input_lower.chars().count().max(k.len())
+            })
             .min_by_key(|(_, dist)| *dist)
             .map(|(k, _)| k)
     }
@@ -174,6 +177,10 @@ impl VenueRegistry {
             .map_err(|e| ScopeError::Config(crate::error::ConfigError::Parse { source: e }))
     }
 }
+
+/// A suggestion may differ by one edit for each this many characters of the
+/// longer name.
+const SUGGEST_LENGTH_PER_EDIT: usize = 3;
 
 /// Simple Levenshtein distance for typo suggestions.
 fn strsim_distance(a: &str, b: &str) -> usize {
@@ -250,6 +257,9 @@ mod tests {
     fn test_registry_suggest_typo() {
         let registry = VenueRegistry::default();
         assert_eq!(registry.suggest("binace"), Some("binance"));
+        assert_eq!(registry.suggest("gate"), Some("gateio"));
+        // #69: "weex" is 3 edits from "okx", too far for a 4-letter name.
+        assert_eq!(registry.suggest("weex"), None);
         assert_eq!(registry.suggest("krakn"), Some("kraken"));
         assert_eq!(registry.suggest("bybi"), Some("bybit"));
     }

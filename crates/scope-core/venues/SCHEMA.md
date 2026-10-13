@@ -34,6 +34,29 @@ To view the interactive schema: `scope venues schema`
 
 ---
 
+## `error_envelope` Object (optional)
+
+Some venues send an error with HTTP 200 and a status field in the JSON body. Without this object, Scope reads that body as data and reports a missing key. With it, Scope reports the venue's own message: `Venue error (<id>): <message> (code <code>)`.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `code_key` | string | No | — | Status field, for example `retCode` (Bybit) or `code` (OKX). A reply without this field is a success. |
+| `ok_codes` | list of strings | No | `[]` | Status values that mean success. Numbers are compared as strings, so write `"0"`. |
+| `message_key` | string | Yes | — | Field with the error text. Without `code_key`, the reply is an error when this field is a non-empty string or array (Kraken: `error: [...]`). |
+
+Example (Bybit):
+
+```yaml
+error_envelope:
+  code_key: retCode
+  ok_codes: ["0"]
+  message_key: retMsg
+```
+
+Venues that send errors with an HTTP 4xx or 5xx status do not need this object.
+
+---
+
 ## `capabilities` Object
 
 Each capability is optional. Omit a capability if the exchange doesn't support it.

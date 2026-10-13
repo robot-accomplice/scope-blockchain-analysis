@@ -8,6 +8,9 @@ symbol:
   template: "{base}{quote}"
   default_quote: USD
 
+error_envelope:
+  message_key: error
+
 capabilities:
   order_book:
     path: /public/Depth
