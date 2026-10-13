@@ -195,7 +195,7 @@ pub async fn run_direct(
         }
     }
 
-    let (monitor_config, export_file) = monitor_config_from_args(&args, config);
+    let (monitor_config, export_file, layout_chosen) = monitor_config_from_args(&args, config);
 
     // Build a SessionContext from the CLI args (no interactive session needed)
     let ctx = SessionContext {
@@ -211,6 +211,7 @@ pub async fn run_direct(
         Some(args.token),
         args.pair,
         export_file,
+        layout_chosen,
         &ctx,
         &effective_config,
         clients,
@@ -221,10 +222,11 @@ pub async fn run_direct(
 /// Builds the monitor config from config-file defaults and CLI overrides.
 /// Returns the `--export` file separately: config `export.path` is the
 /// export directory for the E key, `--export` is a file to start at launch.
+/// The flag is true when `--layout` was given: auto-layout then stays off.
 pub(crate) fn monitor_config_from_args(
     args: &MonitorArgs,
     config: &Config,
-) -> (scope::config::MonitorConfig, Option<PathBuf>) {
+) -> (scope::config::MonitorConfig, Option<PathBuf>, bool) {
     let mut monitor_config = config.monitor.clone();
     if let Some(layout) = args.layout {
         monitor_config.layout = layout;
@@ -241,7 +243,7 @@ pub(crate) fn monitor_config_from_args(
     if let Some(ref venue) = args.venue {
         monitor_config.venue = Some(venue.clone());
     }
-    (monitor_config, args.export.clone())
+    (monitor_config, args.export.clone(), args.layout.is_some())
 }
 
 /// Entry point for the monitor command from interactive mode.
@@ -249,10 +251,12 @@ pub(crate) fn monitor_config_from_args(
 /// When `explicit_pair` is `Some`, token resolution is bypassed and the
 /// exchange ticker is used as the primary data source.  This enables
 /// monitoring tokens that are not indexed by DexScreener.
+/// `layout_chosen` turns auto-layout off, so `--layout` holds.
 pub async fn run(
     token: Option<String>,
     explicit_pair: Option<String>,
     export_file: Option<PathBuf>,
+    layout_chosen: bool,
     ctx: &SessionContext,
     config: &Config,
     clients: &dyn ChainClientFactory,
@@ -319,9 +323,13 @@ pub async fn run(
         })?;
     }
 
-    // In exchange-only mode, use the exact pair that priced the token
+    app.state.auto_layout = !layout_chosen;
+
+    // In exchange-only mode, use the exact pair that priced the token, and
+    // refresh from the venue alone.
     if let Some(pair_str) = venue_pair {
         app.state.venue_pair = Some(pair_str);
+        app.state.venue_only = true;
     }
 
     let result = app.run().await;
@@ -3525,7 +3533,7 @@ widgets:
             panic!("expected monitor")
         };
         let config = Config::default();
-        let (monitor_config, export_file) = monitor_config_from_args(&args, &config);
+        let (monitor_config, export_file, _) = monitor_config_from_args(&args, &config);
         assert_eq!(monitor_config.export.path, config.monitor.export.path);
         assert_eq!(export_file, Some(PathBuf::from("out.csv")));
     }
@@ -4897,18 +4905,22 @@ refresh_seconds: 5
     struct MockDexDataSource {
         /// Data returned by `get_token_data`. If `Err`, simulates an API failure.
         token_data_result: std::sync::Mutex<Result<DexTokenData>>,
+        /// How many times `get_token_data` was called.
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl MockDexDataSource {
         fn new(data: DexTokenData) -> Self {
             Self {
                 token_data_result: std::sync::Mutex::new(Ok(data)),
+                calls: Default::default(),
             }
         }
 
         fn failing(msg: &str) -> Self {
             Self {
                 token_data_result: std::sync::Mutex::new(Err(ScopeError::Api(msg.to_string()))),
+                calls: Default::default(),
             }
         }
     }
@@ -4929,6 +4941,7 @@ refresh_seconds: 5
         }
 
         async fn get_token_data(&self, _chain: &str, _address: &str) -> Result<DexTokenData> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let guard = self.token_data_result.lock().unwrap();
             match &*guard {
                 Ok(data) => Ok(data.clone()),
@@ -6777,5 +6790,193 @@ refresh_seconds: 5
         if let Some(trade) = state.recent_trades.back() {
             assert_eq!(trade.quantity, 1.0);
         }
+    }
+
+    // ========================================================================
+    // R16: footer, header error, venue-only mode, layout, size guard
+    // ========================================================================
+
+    fn spans_text(spans: &[ratatui::text::Span]) -> String {
+        spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    fn ui_text(state: &mut MonitorState, w: u16, h: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal.draw(|f| ui(f, state)).unwrap();
+        format!("{}", terminal.backend())
+    }
+
+    /// A state priced from a venue ticker alone, as `--pair` builds it.
+    fn venue_only_state() -> MonitorState {
+        let ticker = scope::market::Ticker {
+            pair: "USDC/USDT".into(),
+            last_price: Some(1.0001),
+            high_24h: None,
+            low_24h: None,
+            volume_24h: Some(1000.0),
+            quote_volume_24h: None,
+            best_bid: None,
+            best_ask: None,
+        };
+        let data = build_exchange_token_data("USDC", "USDCUSDT", &ticker);
+        let mut state = MonitorState::new(&data, "ethereum");
+        state.venue_only = true;
+        state.venue = Some("binance".into());
+        state.venue_pair = Some("USDCUSDT".into());
+        state
+    }
+
+    #[test]
+    fn test_footer_puts_quit_first_and_keeps_pause_while_an_error_is_set() {
+        // A failed refresh used to replace the hints with a cut error, and
+        // hid PAUSED. Quit must stay reachable whatever the state.
+        let mut state = create_populated_state();
+        state.error_message = Some("API Error: boom".into());
+        state.paused = true;
+        let text = spans_text(&footer_spans(&state));
+        assert!(text.starts_with("Quit"), "{text}");
+        assert!(text.contains("PAUSED"), "{text}");
+        assert!(
+            !text.contains("API Error"),
+            "the error is in the header: {text}"
+        );
+        // At 80 columns the footer row still shows Quit and PAUSED.
+        let mut terminal = Terminal::new(TestBackend::new(80, 3)).unwrap();
+        terminal
+            .draw(|f| render_footer(f, f.area(), &state))
+            .unwrap();
+        let row = format!("{}", terminal.backend());
+        assert!(row.contains("Quit") && row.contains("PAUSED"), "{row}");
+    }
+
+    #[test]
+    fn test_header_title_carries_the_error_cut_to_fit() {
+        let mut state = create_populated_state();
+        state.error_message = Some(format!("API Error: {}", "x".repeat(300)));
+        let mut terminal = Terminal::new(TestBackend::new(80, 4)).unwrap();
+        terminal
+            .draw(|f| render_header(f, f.area(), &state))
+            .unwrap();
+        let text = format!("{}", terminal.backend());
+        let top = text.lines().next().unwrap();
+        assert!(top.contains("⚠ API Error: xx"), "{top}");
+        assert!(top.contains('…'), "a long error is cut with …: {top}");
+        assert!(top.trim_end_matches('"').ends_with('┐'), "{top}");
+    }
+
+    #[tokio::test]
+    async fn test_venue_only_refresh_never_calls_dexscreener() {
+        // `--pair` prices the token from the venue. A DexScreener call for
+        // `exchange:<pair>` can only fail, and it used to fail every refresh.
+        let (_server, ex) = mock_venue(200).await;
+        let dex = MockDexDataSource::new(create_test_token_data());
+        let calls = dex.calls.clone();
+        let mut state = venue_only_state();
+        state.venue_pair = Some("USDN_USDT".into());
+        let mut app = create_test_app_with_state(state, Box::new(dex), None);
+        app.exchange_client = Some(ex);
+        for _ in 0..3 {
+            app.fetch_data().await;
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(
+            app.state.error_message.is_none(),
+            "{:?}",
+            app.state.error_message
+        );
+        assert!(
+            (app.state.current_price - 1.0002).abs() < 1e-9,
+            "priced by the venue"
+        );
+
+        // The counter sees calls: DEX mode makes one per refresh.
+        let dex = MockDexDataSource::new(create_test_token_data());
+        let calls = dex.calls.clone();
+        let mut app = create_test_app(Box::new(dex), None);
+        for _ in 0..3 {
+            app.fetch_data().await;
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn test_panel_titles_name_their_source() {
+        let data = create_test_token_data_with_pairs();
+        let mut state = MonitorState::new(&data, "ethereum");
+        state.update(&data);
+        assert!(order_book_title(&state).contains("(synthetic, from DEX pairs)"));
+        assert!(trades_title(&state).contains("(synthetic, from DEX pairs)"));
+
+        let state = venue_only_state();
+        assert!(order_book_title(&state).contains("Order Book (not available in venue-only mode)"));
+        assert!(trades_title(&state).contains("Recent Trades (not available in venue-only mode)"));
+    }
+
+    #[test]
+    fn test_venue_only_screen_names_the_venue_and_hides_dex_only_stats() {
+        let mut state = venue_only_state();
+        state.layout = LayoutPreset::Exchange;
+        state.auto_layout = false;
+        let text = ui_text(&mut state, 220, 50);
+        assert!(text.contains("BINANCE USDCUSDT"), "{text}");
+        assert!(!text.contains("ETHEREUM"), "{text}");
+        assert!(
+            text.contains("Order Book (not available in venue-only mode)"),
+            "{text}"
+        );
+        assert!(!text.contains("$0.00"), "{text}");
+        assert!(!text.contains("0 (50%)"), "{text}");
+        assert!(!text.contains("Buys: 0"), "{text}");
+        assert!(text.contains("n/a"), "{text}");
+
+        state.layout = LayoutPreset::Dashboard;
+        let text = ui_text(&mut state, 220, 50);
+        assert!(!text.contains("$0.00"), "{text}");
+        assert!(!text.contains("Buys: 0"), "{text}");
+    }
+
+    #[test]
+    fn test_a_layout_given_on_the_command_line_holds_on_the_first_frame() {
+        use clap::Parser;
+        let parse = |argv: &[&str]| {
+            let cli = crate::cli::Cli::try_parse_from(argv).unwrap();
+            let crate::cli::Commands::Monitor(args) = cli.command else {
+                panic!("expected monitor")
+            };
+            monitor_config_from_args(&args, &Config::default())
+        };
+        let (cfg, _, chosen) = parse(&["scope", "monitor", "USDC", "--layout", "exchange"]);
+        assert!(chosen);
+        let mut state = create_populated_state();
+        state.apply_config(&cfg);
+        state.auto_layout = !chosen;
+        // Auto-layout would pick another preset at 120x40.
+        ui_text(&mut state, 120, 40);
+        assert_eq!(state.layout, LayoutPreset::Exchange);
+
+        let (_, _, chosen) = parse(&["scope", "monitor", "USDC"]);
+        assert!(!chosen, "no --layout: auto-layout stays on");
+    }
+
+    const MONITOR_TOO_SMALL: &str = "Terminal too small: need at least 60×16";
+
+    #[test]
+    fn test_below_60x16_only_the_too_small_message_is_drawn() {
+        let mut state = create_populated_state();
+        state.layout = LayoutPreset::Exchange;
+        let text = ui_text(&mut state, 50, 12);
+        assert!(text.contains(MONITOR_TOO_SMALL), "{text}");
+        assert!(!text.contains("Quit"), "{text}");
+        // 30x8 wraps on words and keeps the state.
+        let text = ui_text(&mut state, 30, 8);
+        assert!(text.contains("Terminal too small: need at"), "{text}");
+        assert!(text.contains("least 60×16"), "{text}");
+        assert_eq!(state.layout, LayoutPreset::Exchange, "state is kept");
+        // At the minimum the monitor draws, with its Quit hint.
+        let text = ui_text(&mut state, 60, 16);
+        assert!(!text.contains("Terminal too small"), "{text}");
+        assert!(text.contains("Quit"), "{text}");
+        assert!(ui_text(&mut state, 59, 16).contains("Terminal too small"));
+        assert!(ui_text(&mut state, 60, 15).contains("Terminal too small"));
     }
 }

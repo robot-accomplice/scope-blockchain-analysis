@@ -72,6 +72,7 @@ impl MonitorApp {
         if let Some(ref ex) = exchange_client {
             let pair = ex.format_pair(&initial_data.symbol);
             state.venue_pair = Some(pair);
+            state.venue = Some(ex.venue_id().to_string());
         }
 
         Ok(Self {
@@ -294,17 +295,22 @@ impl<B: ratatui::backend::Backend> MonitorApp<B> {
 
     /// Fetches new data from the API.
     pub(crate) async fn fetch_data(&mut self) {
-        match self
-            .dex_client
-            .get_token_data(&self.state.chain, &self.state.token_address)
-            .await
-        {
-            Ok(data) => {
-                self.state.update(&data);
-            }
-            Err(e) => {
-                self.state.error_message = Some(format!("API Error: {}", e));
-                self.state.last_update = Instant::now(); // Prevent rapid retries
+        if self.state.venue_only {
+            // DexScreener does not know an `exchange:<pair>` token.
+            self.fetch_venue_ticker().await;
+        } else {
+            match self
+                .dex_client
+                .get_token_data(&self.state.chain, &self.state.token_address)
+                .await
+            {
+                Ok(data) => {
+                    self.state.update(&data);
+                }
+                Err(e) => {
+                    self.state.error_message = Some(format!("API Error: {}", e));
+                    self.state.last_update = Instant::now(); // Prevent rapid retries
+                }
             }
         }
 
@@ -338,6 +344,7 @@ impl<B: ratatui::backend::Backend> MonitorApp<B> {
         // Periodically fetch holder count via chain client (~every 12th refresh ≈ 60s at 5s rate)
         self.state.holder_fetch_counter += 1;
         if self.state.holder_fetch_counter.is_multiple_of(12)
+            && !self.state.venue_only
             && let Some(ref client) = self.chain_client
         {
             match client
@@ -348,6 +355,25 @@ impl<B: ratatui::backend::Backend> MonitorApp<B> {
                     self.state.holder_count = Some(count);
                 }
                 _ => {} // Keep previous value or None
+            }
+        }
+    }
+}
+
+impl<B: ratatui::backend::Backend> MonitorApp<B> {
+    /// Venue-only refresh: prices the token from the venue ticker.
+    async fn fetch_venue_ticker(&mut self) {
+        let (Some(ex), Some(pair)) = (&self.exchange_client, self.state.venue_pair.clone()) else {
+            return;
+        };
+        match ex.fetch_ticker(&pair).await {
+            Ok(ticker) => {
+                let data = super::build_exchange_token_data(&self.state.symbol, &pair, &ticker);
+                self.state.update(&data);
+            }
+            Err(e) => {
+                self.state.error_message = Some(e.to_string());
+                self.state.last_update = Instant::now(); // Prevent rapid retries
             }
         }
     }

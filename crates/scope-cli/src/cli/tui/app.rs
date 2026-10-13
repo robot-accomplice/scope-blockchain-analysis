@@ -13,6 +13,7 @@ use super::vocab::Vocab;
 use crate::cli::interactive::SessionContext;
 use crate::cli::output::{Captured, Output};
 use crate::cli::style::SECONDARY;
+use crate::cli::textfit::{ELLIPSIS, cols, cut_with_ellipsis, draw_note_alone};
 use ansi_to_tui::IntoText;
 use chrono::Utc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -39,24 +40,6 @@ pub const MIN_H: u16 = 10;
 /// [`MIN_H`].
 fn too_small_note() -> String {
     format!("Terminal too small: need at least {MIN_W}×{MIN_H}")
-}
-
-/// Wraps `text` on word boundaries to `width` columns. A word wider than
-/// `width` is cut. At most `height` lines come back.
-fn wrap_words(text: &str, width: usize, height: usize) -> Vec<String> {
-    let mut lines: Vec<String> = Vec::new();
-    for word in text.split_whitespace() {
-        let word = cut_with_ellipsis(word, width);
-        match lines.last_mut() {
-            Some(last) if cols(last) + 1 + cols(&word) <= width => {
-                last.push(' ');
-                last.push_str(&word);
-            }
-            _ => lines.push(word),
-        }
-    }
-    lines.truncate(height);
-    lines
 }
 
 /// The most characters one paste adds to the input line.
@@ -1317,16 +1300,7 @@ impl TuiState {
             // then sets no width override.
             self.pane_width.set(0);
             self.last_pane_height.set(0);
-            let lines = wrap_words(&too_small_note(), area.width as usize, area.height as usize);
-            let top = area.y + (area.height as usize - lines.len()) as u16 / 2;
-            let rows = lines.len() as u16;
-            let text: Vec<Line> = lines.into_iter().map(Line::from).collect();
-            let rect = ratatui::layout::Rect {
-                y: top,
-                height: rows,
-                ..area
-            };
-            f.render_widget(Paragraph::new(text).centered(), rect);
+            draw_note_alone(f, &too_small_note());
             return;
         }
         let [pane, input, hint_row, status] = Layout::vertical([
@@ -1657,41 +1631,12 @@ fn spinner_glyph(elapsed: std::time::Duration, color: bool) -> &'static str {
 }
 
 /// Marks text that was cut or dropped.
-const ELLIPSIS: &str = "…";
-
 /// Columns around a command in the bar: ` · ` before it, a backtick on
 /// each side.
 const COMMAND_FRAME_COLS: usize = 5;
 
 /// The shortest cut command worth showing: one column and the `…`.
 const MIN_CUT_COMMAND_COLS: usize = 2;
-
-fn cols(text: &str) -> usize {
-    UnicodeWidthStr::width(text)
-}
-
-/// Cuts `text` to at most `max` display columns, ending in `…` when it cuts.
-fn cut_with_ellipsis(text: &str, max: usize) -> String {
-    use unicode_segmentation::UnicodeSegmentation;
-    if cols(text) <= max {
-        return text.to_string();
-    }
-    let room = max.saturating_sub(cols(ELLIPSIS));
-    let mut out = String::new();
-    let mut used = 0;
-    for g in text.graphemes(true) {
-        let w = cols(g);
-        if used + w > room {
-            break;
-        }
-        out.push_str(g);
-        used += w;
-    }
-    if max >= cols(ELLIPSIS) {
-        out.push_str(ELLIPSIS);
-    }
-    out
-}
 
 /// Fits the status bar to `width` display columns. Drops limit, then
 /// format, then chain, then the command text. The state text stays at

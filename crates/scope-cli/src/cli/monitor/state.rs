@@ -201,6 +201,13 @@ pub struct MonitorState {
 
     /// Venue-formatted pair symbol for OHLC queries (e.g., "BTCUSDT").
     pub venue_pair: Option<String>,
+
+    /// Venue id from `--venue` (e.g., "binance"), when a venue is set.
+    pub venue: Option<String>,
+
+    /// The token is priced from the venue ticker alone (`--pair`, or the
+    /// venue fallback). DexScreener is never called in this mode.
+    pub venue_only: bool,
 }
 
 impl MonitorState {
@@ -311,6 +318,8 @@ impl MonitorState {
             // Exchange OHLC
             exchange_ohlc: Vec::new(),
             venue_pair: None,
+            venue: None,
+            venue_only: false,
         }
     }
 
