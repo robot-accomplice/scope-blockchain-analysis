@@ -13,8 +13,10 @@ use scope::chains::{ChainClientFactory, TokenAnalytics};
 use scope::config::Config;
 
 use super::health_args::HealthArgs;
+use crate::cli::repeat::{self, RunOutput, Schedule};
 use scope::display::terminal as t;
 use scope::error::{Result, ScopeError};
+use scope::market::series;
 use scope::market::{
     DexAnalyticsSource, ExchangeClient, HealthThresholds, MarketSummary, MarketVenue, OrderBook,
     Pair, VENUE_HELP, VenueRegistry,
@@ -346,45 +348,54 @@ async fn fetch_book_and_volume(
     scope::market::fetch_book_and_volume(&venue, &Pair::parse(&args.pair), thresholds, &dex).await
 }
 
-async fn run_summary_once(
+/// One summary run: the summary and its report, as the CLI prints it.
+async fn summary_run(
     args: &SummaryArgs,
     factory: &dyn ChainClientFactory,
     thresholds: &HealthThresholds,
     run_num: Option<u64>,
     out: &Output,
-) -> Result<MarketSummary> {
-    if let Some(n) = run_num {
-        let ts = chrono::Utc::now().format("%H:%M:%S");
-        note!(out, "--- Run #{} at {} ---\n", n, ts);
-    }
-
+) -> Result<(MarketSummary, String)> {
     let (book, volume_24h) = fetch_book_and_volume(args, thresholds, factory, out).await?;
     let summary = MarketSummary::from_order_book(&book, thresholds, volume_24h);
-
-    let venue_label = args.venue.clone();
-
-    match args.format {
-        SummaryFormat::Text => {
-            out!(out, "{}", summary.format_text(Some(&venue_label)))?;
-        }
+    let report = match args.format {
+        SummaryFormat::Text => summary.format_text(Some(&args.venue)),
         SummaryFormat::Json => {
             let mut json = summary.to_json();
             if let Some(obj) = json.as_object_mut() {
                 obj.insert("run".to_string(), serde_json::json!(run_num));
-                obj.insert("venue".to_string(), serde_json::json!(venue_label));
+                obj.insert("venue".to_string(), serde_json::json!(args.venue));
             }
-            outln!(out, "{}", serde_json::to_string_pretty(&json)?)?;
+            format!("{}\n", serde_json::to_string_pretty(&json)?)
         }
-    }
-
-    Ok(summary)
+    };
+    Ok((summary, report))
 }
 
-/// How many runs a repeating summary makes: one every `every_secs` over
-/// `duration_secs`, and a last one at the end when the span is not a whole
-/// number of intervals (the final sleep is cut to the time left).
-fn repeat_total(duration_secs: u64, every_secs: u64) -> u64 {
-    duration_secs.div_ceil(every_secs).saturating_add(1)
+/// Writes the `--report` file for `summary`, when one was asked for.
+fn write_report(args: &SummaryArgs, summary: &MarketSummary, out: &Output) -> Result<()> {
+    if let Some(ref report_path) = args.report {
+        let md = market_summary_to_markdown(summary, &args.venue, &args.pair);
+        std::fs::write(report_path, md)?;
+        out.note_saved("Report", report_path.display());
+    }
+    Ok(())
+}
+
+/// The `--every`/`--duration` schedule, when either flag is set.
+fn summary_schedule(args: &SummaryArgs) -> Result<Option<Schedule>> {
+    if args.every.is_none() && args.duration.is_none() {
+        return Ok(None);
+    }
+    let secs = |flag: &Option<String>, default| {
+        flag.as_deref()
+            .map(parse_duration)
+            .transpose()
+            .map(|v| v.unwrap_or(default))
+    };
+    let every = secs(&args.every, DEFAULT_EVERY_SECS)?;
+    let duration = secs(&args.duration, DEFAULT_DURATION_SECS)?;
+    Schedule::new(Duration::from_secs(every), Duration::from_secs(duration)).map(Some)
 }
 
 async fn run_summary(
@@ -395,138 +406,38 @@ async fn run_summary(
 ) -> Result<()> {
     let thresholds = args.health.resolve(config);
 
-    let repeat_mode = args.every.is_some() || args.duration.is_some();
-
-    if !repeat_mode {
-        let summary = run_summary_once(&args, factory, &thresholds, None, out).await?;
-        if let Some(ref report_path) = args.report {
-            let venue_label = args.venue.clone();
-            let md = market_summary_to_markdown(&summary, &venue_label, &args.pair);
-            std::fs::write(report_path, md)?;
-            out.note_saved("Report", report_path.display());
-        }
-        return Ok(());
-    }
-
-    let every_secs = args
-        .every
-        .as_ref()
-        .map(|s| parse_duration(s))
-        .transpose()?
-        .unwrap_or(DEFAULT_EVERY_SECS);
-
-    let duration_secs = args
-        .duration
-        .as_ref()
-        .map(|s| parse_duration(s))
-        .transpose()?
-        .unwrap_or(DEFAULT_DURATION_SECS);
-
-    if every_secs == 0 {
-        return Err(ScopeError::Chain("Interval must be positive".to_string()));
-    }
-
-    let every = Duration::from_secs(every_secs);
-    let start = std::time::Instant::now();
-    let duration = Duration::from_secs(duration_secs);
+    let Some(schedule) = summary_schedule(&args)? else {
+        let (summary, report) = summary_run(&args, factory, &thresholds, None, out).await?;
+        out!(out, "{report}")?;
+        return write_report(&args, &summary, out);
+    };
 
     note!(
         out,
         "Running market summary every {}s for {}s (Ctrl+C to stop early)\n",
-        every_secs,
-        duration_secs
+        schedule.every.as_secs(),
+        schedule.duration.as_secs()
     );
-    out.update_progress(|p| {
-        p.run = 0;
-        p.total = Some(repeat_total(duration_secs, every_secs));
-        p.next_at = None;
-    });
-
-    let mut run_num: u64 = 1;
-    #[allow(unused_assignments)]
-    let mut last_summary: Option<MarketSummary> = None;
-
-    // Initialize CSV if requested
-    if let Some(ref csv_path) = args.csv {
-        let header =
-            "timestamp,run,best_bid,best_ask,mid_price,spread,bid_depth,ask_depth,healthy\n";
-        std::fs::write(csv_path, header)?;
-    }
-
-    loop {
-        out.update_progress(|p| {
-            p.run = run_num;
-            p.next_at = None;
-        });
-        // An error ends the repeat: `?` returns it and no later run starts.
-        let summary = run_summary_once(&args, factory, &thresholds, Some(run_num), out).await?;
-        last_summary = Some(summary.clone());
-
-        // Append CSV row
-        if let Some(ref csv_path) = args.csv {
-            let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
-            let bid = summary
-                .best_bid
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "-".to_string());
-            let ask = summary
-                .best_ask
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "-".to_string());
-            let mid = summary
-                .mid_price
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "-".to_string());
-            let spread = summary
-                .spread
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "-".to_string());
-            let row = format!(
-                "{},{},{},{},{},{},{},{},{}\n",
-                ts,
-                run_num,
-                bid,
-                ask,
-                mid,
-                spread,
-                summary.bid_depth,
-                summary.ask_depth,
-                summary.healthy
-            );
-            let mut f = std::fs::OpenOptions::new().append(true).open(csv_path)?;
-            use std::io::Write;
-            f.write_all(row.as_bytes())?;
+    let metrics = series::summary_metrics(&thresholds);
+    let last = repeat::run(&schedule, &metrics, args.csv.as_deref(), out, |n| {
+        let (args, thresholds, metrics) = (&args, &thresholds, &metrics);
+        async move {
+            let (summary, report) = summary_run(args, factory, thresholds, Some(n), out).await?;
+            Ok(RunOutput {
+                sample: series::sample(&summary, metrics),
+                snapshot: report,
+                value: summary,
+            })
         }
+    })
+    .await?;
 
-        if start.elapsed() >= duration {
-            note!(
-                out,
-                "\nCompleted {} run(s) over {}s.",
-                run_num,
-                duration_secs
-            );
-            break;
-        }
-
-        run_num += 1;
-
-        let remaining = duration.saturating_sub(start.elapsed());
-        let sleep_duration = if remaining < every { remaining } else { every };
-        out.update_progress(|p| p.next_at = Some(std::time::Instant::now() + sleep_duration));
-        tokio::time::sleep(sleep_duration).await;
-    }
-
-    // Save final report if requested (last_summary always set when loop runs)
-    if let (Some(ref report_path), Some(summary)) = (args.report, last_summary.as_ref()) {
-        let venue_label = args.venue.clone();
-        let md = market_summary_to_markdown(summary, &venue_label, &args.pair);
-        std::fs::write(report_path, md)?;
-        out.note_saved("Report", report_path.display());
+    if let Some(summary) = last {
+        write_report(&args, &summary, out)?;
     }
     if let Some(ref csv_path) = args.csv {
         out.note_saved("Time-series CSV", csv_path.display());
     }
-
     Ok(())
 }
 
@@ -2016,13 +1927,13 @@ capabilities:
             ..Default::default()
         };
         let thresholds = args.health.resolve(&Config::default());
-        let summary = run_summary_once(&args, &factory, &thresholds, Some(1), &quiet())
+        let (summary, _) = summary_run(&args, &factory, &thresholds, Some(1), &quiet())
             .await
             .unwrap();
         assert!(summary.healthy, "{:?}", summary.checks);
 
         let strict = HealthThresholds::default();
-        let summary = run_summary_once(&args, &factory, &strict, None, &quiet())
+        let (summary, _) = summary_run(&args, &factory, &strict, None, &quiet())
             .await
             .unwrap();
         assert!(!summary.healthy);
@@ -2035,12 +1946,11 @@ capabilities:
         factory.mock_dex.token_data.as_mut().unwrap().pairs[0].liquidity_base = Some(10_000_000.0);
         let args = dex_args(SummaryFormat::Json);
         let thresholds = args.health.resolve(&Config::default());
-        let (o, cap) = Output::capture();
-        let summary = run_summary_once(&args, &factory, &thresholds, None, &o)
+        let (summary, report) = summary_run(&args, &factory, &thresholds, None, &quiet())
             .await
             .unwrap();
         assert!(summary.healthy, "{:?}", summary.checks);
-        let v: serde_json::Value = serde_json::from_str(&cap.out()).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&report).unwrap();
         assert_eq!(v["book_source"], "synthetic_amm");
         let statuses: Vec<&str> = v["checks"]
             .as_array()
@@ -2062,15 +1972,10 @@ capabilities:
         let factory = dex_factory(&[(50_000.0, 1_000.0)]);
         let args = dex_args(SummaryFormat::Text);
         let thresholds = args.health.resolve(&Config::default());
-        let (o, cap) = Output::capture();
-        run_summary_once(&args, &factory, &thresholds, None, &o)
+        let (_, report) = summary_run(&args, &factory, &thresholds, None, &quiet())
             .await
             .unwrap();
-        assert!(
-            cap.out().contains("pool reserves not reported"),
-            "{}",
-            cap.out()
-        );
+        assert!(report.contains("pool reserves not reported"), "{report}");
     }
 
     #[tokio::test]
@@ -2105,10 +2010,15 @@ capabilities:
 
         let body = std::fs::read_to_string(&csv).unwrap();
         let mut lines = body.lines();
-        assert_eq!(
-            lines.next(),
-            Some("timestamp,run,best_bid,best_ask,mid_price,spread,bid_depth,ask_depth,healthy")
+        // Today's columns stay first and in order; #58 appends the rest.
+        let header = lines.next().unwrap();
+        assert!(
+            header.starts_with(
+                "timestamp,run,best_bid,best_ask,mid_price,spread,bid_depth,ask_depth,healthy,"
+            ),
+            "{header}"
         );
+        assert!(header.contains("spread_pct") && header.ends_with("ask_top10_depth"), "{header}");
         // One run at t=0, one after the 1s sleep: the loop must not stop early.
         let rows: Vec<_> = lines.collect();
         assert_eq!(rows.len(), 2, "{body}");
@@ -2137,15 +2047,6 @@ capabilities:
         assert_eq!(p.next_at, None, "no next run after the last: {p:?}");
         assert!(captured.out().contains("every 1s for 2s"));
         assert!(captured.out().contains("Completed 3 run(s)"));
-    }
-
-    #[test]
-    fn test_repeat_total_counts_the_final_run_at_the_boundary() {
-        // 5s every 2s runs at 0, 2, 4 and then at 5 (the sleep is cut to
-        // the time left): four runs, not 5/2+1.
-        assert_eq!(repeat_total(5, 2), 4);
-        assert_eq!(repeat_total(2, 1), 3);
-        assert_eq!(repeat_total(1, 2), 2);
     }
 
     #[tokio::test]

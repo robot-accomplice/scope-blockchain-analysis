@@ -74,6 +74,7 @@ pub mod output;
 pub(crate) mod plain;
 pub mod progress;
 pub mod prompt;
+pub mod repeat;
 pub mod report;
 pub(crate) mod screen;
 pub mod setup;

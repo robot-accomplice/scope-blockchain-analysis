@@ -245,6 +245,50 @@ fn value_of(id: MetricId, s: &MarketSummary, healthy: bool) -> Option<f64> {
     }
 }
 
+/// The CSV columns every series file starts with, before the metrics.
+const CSV_LEAD: &str = "timestamp,run";
+
+/// What a CSV cell holds when the metric has no value.
+const CSV_NO_VALUE: &str = "-";
+
+/// The CSV header line for `columns` (see [`csv_columns`]), with its newline.
+pub fn csv_header(columns: &[&Metric]) -> String {
+    let mut line = CSV_LEAD.to_string();
+    for m in columns {
+        line.push(',');
+        line.push_str(m.csv_column);
+    }
+    line.push('\n');
+    line
+}
+
+/// One CSV row, with its newline. `sample` reads in the order of `metrics`
+/// (the table [`sample`] used); `columns` sets the cell order. A flag is
+/// `true` or `false`; a missing value is `-`.
+pub fn csv_row(
+    columns: &[&Metric],
+    metrics: &[Metric],
+    timestamp: &str,
+    run: u64,
+    sample: &Sample,
+) -> String {
+    let mut line = format!("{timestamp},{run}");
+    for column in columns {
+        let value = metrics
+            .iter()
+            .position(|m| m.id == column.id)
+            .and_then(|i| sample.values.get(i).copied().flatten());
+        line.push(',');
+        match (column.unit, value) {
+            (Unit::Flag, Some(v)) => line.push_str(if v != 0.0 { "true" } else { "false" }),
+            (_, Some(v)) => line.push_str(&v.to_string()),
+            (_, None) => line.push_str(CSV_NO_VALUE),
+        }
+    }
+    line.push('\n');
+    line
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -575,5 +619,37 @@ mod tests {
         assert!((s.spread.unwrap() - (ask - bid)).abs() < 1e-12);
         let mid = s.mid_price.unwrap();
         assert!((s.spread_pct.unwrap() - s.spread.unwrap() / mid * 100.0).abs() < 1e-12);
+    }
+
+    // The CSV writer must keep today's header and cells byte for byte, and
+    // only append the new columns.
+    #[test]
+    fn csv_keeps_the_old_columns_first_and_their_cell_format() {
+        let metrics = summary_metrics(&HealthThresholds::default());
+        let columns = csv_columns(&metrics).unwrap();
+        let header = csv_header(&columns);
+        assert!(
+            header.starts_with(
+                "timestamp,run,best_bid,best_ask,mid_price,spread,bid_depth,ask_depth,healthy,"
+            ),
+            "{header}"
+        );
+        assert!(header.ends_with("ask_top10_depth\n"), "{header}");
+        let mut values = vec![None; metrics.len()];
+        let at = |id| metrics.iter().position(|m| m.id == id).unwrap();
+        values[at(MetricId::BestBid)] = Some(0.9999);
+        values[at(MetricId::BidDepth)] = Some(1500.0);
+        values[at(MetricId::Healthy)] = Some(0.0);
+        let s = Sample {
+            values,
+            healthy: false,
+            failed_checks: vec![],
+        };
+        let row = csv_row(&columns, &metrics, "2026-10-13T00:00:00Z", 7, &s);
+        assert!(
+            row.starts_with("2026-10-13T00:00:00Z,7,0.9999,-,-,-,1500,-,false,"),
+            "{row}"
+        );
+        assert_eq!(row.matches(',').count(), header.matches(',').count());
     }
 }

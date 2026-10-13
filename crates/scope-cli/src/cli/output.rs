@@ -34,6 +34,8 @@
 //! note!(out, "Fetching balances..."); // status → stderr
 //! ```
 
+use scope::market::series::{Metric, Sample};
+use std::collections::VecDeque;
 use std::fmt;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -60,6 +62,36 @@ pub struct RunProgress {
 /// A progress record shared between a command and the screen.
 pub type ProgressHook = Arc<Mutex<RunProgress>>;
 
+/// One run of a repeating command, for a screen that charts it (#58).
+#[derive(Debug, Clone)]
+pub struct RunRecord {
+    /// The run number, from 1.
+    pub run: u64,
+    /// When the run ended.
+    pub at: chrono::DateTime<chrono::Utc>,
+    /// The run's key values, in the order of [`Series::metrics`].
+    pub sample: Sample,
+    /// The report the run printed in the CLI.
+    pub snapshot: String,
+}
+
+/// The runs a screen keeps, oldest first, and the metric table they read in.
+#[derive(Debug, Default)]
+pub struct Series {
+    /// The metric table of every run's sample.
+    pub metrics: Vec<Metric>,
+    /// The newest [`MAX_SERIES_RUNS`] runs.
+    pub runs: VecDeque<RunRecord>,
+    /// How many older runs the ring dropped.
+    pub dropped: u64,
+}
+
+/// The series shared between a repeating command and the screen.
+pub type SeriesHook = Arc<Mutex<Series>>;
+
+/// The most runs a series keeps. Older runs are dropped.
+pub const MAX_SERIES_RUNS: usize = 500;
+
 /// The output channels for one command run.
 ///
 /// Cloning is cheap: clones share the same writers.
@@ -69,6 +101,7 @@ pub struct Output {
     err: Sink,
     progress: bool,
     hook: Option<ProgressHook>,
+    series: Option<SeriesHook>,
     tui: bool,
 }
 
@@ -81,6 +114,7 @@ impl Output {
             err: Arc::new(Mutex::new(io::stderr())),
             progress: true,
             hook: None,
+            series: None,
             tui: false,
         }
     }
@@ -102,6 +136,7 @@ impl Output {
             err,
             progress: false,
             hook: None,
+            series: None,
             tui: false,
         };
         (output, captured)
@@ -131,6 +166,7 @@ impl Output {
             err: buf,
             progress: false,
             hook: Some(ProgressHook::default()),
+            series: Some(SeriesHook::default()),
             tui: true,
         };
         (output, captured)
@@ -173,6 +209,7 @@ impl Output {
             err: copy(&self.err, None),
             progress: self.progress,
             hook: None,
+            series: None,
             tui: true,
         };
         (output, captured)
@@ -189,6 +226,7 @@ impl Output {
             err: Arc::new(Mutex::new(err)),
             progress: false,
             hook: None,
+            series: None,
             tui: false,
         }
     }
@@ -208,6 +246,30 @@ impl Output {
     /// output has one; the plain CLI output does not.
     pub fn progress_hook(&self) -> Option<ProgressHook> {
         self.hook.clone()
+    }
+
+    /// The series of a repeating run, when the output has one: the TUI's
+    /// pane output has one; the plain CLI output does not.
+    pub fn series_hook(&self) -> Option<SeriesHook> {
+        self.series.clone()
+    }
+
+    /// Hands one run to the screen's series. Returns false when there is no
+    /// series (the CLI), so the caller prints the run instead.
+    pub fn record_run(&self, metrics: &[Metric], record: RunRecord) -> bool {
+        let Some(series) = &self.series else {
+            return false;
+        };
+        let mut series = lock(series);
+        if series.metrics.is_empty() {
+            series.metrics = metrics.to_vec();
+        }
+        series.runs.push_back(record);
+        while series.runs.len() > MAX_SERIES_RUNS {
+            series.runs.pop_front();
+            series.dropped += 1;
+        }
+        true
     }
 
     /// Changes the progress record. Does nothing when there is no hook.
