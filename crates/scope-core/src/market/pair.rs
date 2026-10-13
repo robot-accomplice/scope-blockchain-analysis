@@ -1,18 +1,23 @@
 //! Trading pairs: one parser and one display format for every surface.
 //!
 //! Users write a pair as `BASE_QUOTE`, `BASE/QUOTE`, `BASE-QUOTE`, a bare
-//! `BASE`, or `BASEQUOTE` when the quote is a stable or fiat currency in
-//! [`QUOTE_CURRENCIES`]. Venue responses use the same forms. [`Pair::parse`]
+//! `BASE`, or `BASEQUOTE` when the quote is a stablecoin
+//! or a fiat currency ([`FIAT_CURRENCIES`]). Venue responses use the same forms. [`Pair::parse`]
 //! reads all of them, and `Display` writes `BASE/QUOTE`.
 
+use crate::tokens::STABLECOIN_SYMBOLS;
 use std::fmt;
 
-/// Stable and fiat quote currencies that may end a concatenated symbol such
-/// as `OPUSDT`. A crypto quote (BTC, ETH, BNB) needs a separator, so `WETH`
-/// and `STETH` stay whole.
-pub const QUOTE_CURRENCIES: [&str; 9] = [
-    "USDT", "USDC", "USD", "BUSD", "FDUSD", "DAI", "EUR", "GBP", "TRY",
-];
+/// Fiat quote currencies. With the stablecoins
+/// ([`STABLECOIN_SYMBOLS`]) they are the quotes that may end a joined symbol
+/// such as `OPUSDT`. A crypto quote (BTC, ETH, BNB) needs a separator, so
+/// `WETH` and `STETH` stay whole.
+pub const FIAT_CURRENCIES: [&str; 4] = ["USD", "EUR", "GBP", "TRY"];
+
+/// The quotes that may end a joined symbol: the stablecoins, then fiat.
+fn quote_currencies() -> impl Iterator<Item = &'static str> {
+    STABLECOIN_SYMBOLS.into_iter().chain(FIAT_CURRENCIES)
+}
 
 /// The fewest base characters left after a quote suffix is split off, so
 /// `TUSD` and `XUSDT` stay whole.
@@ -92,9 +97,8 @@ fn split_on_separator(p: &str) -> Option<(&str, &str)> {
 /// on its own (`BUSD`, `FDUSD`) stays a base.
 fn split_on_quote_suffix(p: &str) -> Option<(&str, &str)> {
     let upper = p.to_ascii_uppercase();
-    let quote = QUOTE_CURRENCIES
-        .iter()
-        .filter(|quote| upper.ends_with(*quote))
+    let quote = quote_currencies()
+        .filter(|quote| upper.ends_with(quote))
         .max_by_key(|quote| quote.len())?;
     let base_len = p.len() - quote.len();
     (base_len >= MIN_BASE_LEN).then(|| p.split_at(base_len))
@@ -201,6 +205,22 @@ mod tests {
         assert_eq!(parts("FDUSD"), pair("FDUSD", None));
         assert_eq!(parts("TUSD"), pair("TUSD", None));
         assert_eq!(parts("XUSDT"), pair("XUSDT", None));
+    }
+
+    /// The quote list is the stablecoin list plus fiat, so every stablecoin
+    /// splits a joined symbol and every split stable quote counts as USD.
+    #[test]
+    fn every_stablecoin_is_a_quote_and_counts_as_usd() {
+        assert_eq!(parts("BTCTUSD"), pair("BTC", Some("TUSD")));
+        assert_eq!(parts("ETHUSDP"), pair("ETH", Some("USDP")));
+        for symbol in STABLECOIN_SYMBOLS {
+            let quote = Pair::parse(&format!("BTC{symbol}")).quote;
+            assert_eq!(quote.as_deref(), Some(symbol), "{symbol}");
+        }
+        // The monitor counts a ticker's volume as USD when its quote is a
+        // stablecoin: BTC/FDUSD does.
+        let quote = Pair::parse("BTC/FDUSD").quote.unwrap();
+        assert!(crate::tokens::is_stablecoin_symbol(&quote));
     }
 
     #[test]

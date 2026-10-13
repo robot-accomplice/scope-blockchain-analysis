@@ -33,9 +33,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-/// Symbols treated as USD stablecoins, in upper case.
-const STABLECOIN_SYMBOLS: [&str; 9] = [
-    "USDC", "USDT", "DAI", "BUSD", "TUSD", "USDP", "FRAX", "LUSD", "GUSD",
+/// Symbols treated as USD stablecoins, in upper case. Market pair parsing
+/// reads them as quote currencies too (`market::pair`).
+pub const STABLECOIN_SYMBOLS: [&str; 10] = [
+    "USDC", "USDT", "DAI", "BUSD", "TUSD", "USDP", "FRAX", "LUSD", "GUSD", "FDUSD",
 ];
 
 /// Whether `symbol` is a known USD stablecoin (case-insensitive). The one
