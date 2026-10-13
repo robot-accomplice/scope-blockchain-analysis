@@ -34,29 +34,58 @@
 
 ## Amendment (2026-10-13): theme is a system, not a TUI feature
 
-Jon: theme colors are controlled and housed centrally for every surface. Clean Code and Clean Architecture are the standard.
+Jon: theme colors are controlled and housed centrally. Clean Code and Clean Architecture are the standard.
+
+### Scope
+
+The theme covers the terminal surfaces: CLI output, the TUI and the monitor. The web UI (`scope-web`) is not in scope. It keeps its own CSS.
 
 ### Layers (dependency rule: inward only)
 
 | Layer | Module | Knows | Must not know |
 |---|---|---|---|
 | Domain (market, chains, compliance, health) | `scope::{market, chains, …}` | business data | any color, style or theme |
-| Presentation policy | `scope::display::theme` | semantic roles, their tones, the monitor schemes, the color-off decision | ratatui, `colored`, axum, CSS |
-| Adapters (outer) | `scope::display` text painter; `scope_cli::cli::theme` (ratatui); `scope-web` theme CSS | how to render a role on their medium | role choices (they only translate) |
+| Presentation policy | `scope::display::theme` | semantic roles, their tones, the monitor schemes, the color-off decision | ratatui, `colored`/`owo-colors` |
+| Adapters (outer) | `scope::display::theme::text` (SGR text painter); `scope_cli::cli::theme` (ratatui) | how to render a tone on their medium | role choices (they only translate) |
 
-Today the domain already holds no color (checked: no `colored` use outside `scope::display`).
+Today the domain already holds no color (checked: no color crate use outside `scope::display`).
+
+### Roles
+
+`tone(role)` is the single mapping. This table is its specification; the test `tones_match_the_design_table` pins it.
+
+| Role | ANSI tone | Used for |
+|---|---|---|
+| `Accent` | cyan | box rules, section and table headers (bold), low severity, TUI title and idle rule |
+| `Key` | bold magenta | key names in hints and help, prompt `:<chain>` |
+| `Ok` | green | passed checks, gains, `HEALTHY` (bold), `✓ Done` |
+| `Warn` | yellow | warnings (glyph bold), medium severity, running state |
+| `Err` | red | failed checks, losses, `UNHEALTHY` and critical (bold), high severity |
+| `Info` | blue | the `ℹ` glyph on notes |
+| `Secondary` | default fg + dim | labels, descriptions, notes, informational severity |
+| `Neutral` | default style | plain text |
+| `Selected` | reverse cyan | selected palette or menu row |
+| `Match` | reverse yellow | search matches |
+| `Link` | default fg + underline | URLs in link rows |
+
+The strong (bold) form of a role is `tone(role).strong()`. The text painter offers it as `paint_strong(role, …)`. It is used for verdicts and headings.
 
 ### `scope::display::theme`
-- `enum Role { Accent, Key, Ok, Warn, Err, Info, Secondary, Neutral, Selected, Match }`.
-- `struct Tone { color: Option<AnsiColor>, bold: bool, dim: bool, reverse: bool, web: &'static str }`, where `AnsiColor` is the 16 named colors, as a plain enum with no framework type.
-- `fn tone(role) -> Tone` is the single mapping. The table in this document is its specification.
-- Monitor schemes: `enum Scheme { GreenRed, BlueOrange, Monochrome }`, with `fn scheme_tone(scheme, Direction) -> Tone`. Schemes are data in the same module.
-- `fn color_enabled()` lives here or is re-exported here. No adapter decides color on its own.
+- `enum Role` as in the table above.
+- `struct Tone { color: Option<AnsiColor>, bold, dim, underline, reverse }`, where `AnsiColor` is the 16 named colors, as a plain enum with no framework type.
+- Monitor schemes: `Scheme` is the existing `scope::config::ColorScheme` (`GreenRed`, `BlueOrange`, `Monochrome`), so one enum names the schemes. `fn scheme_tone(scheme, Direction) -> Tone` with `Direction { Up, Down, Flat }`:
+
+| Scheme | Up | Down | Flat |
+|---|---|---|---|
+| `GreenRed` | green | red | default |
+| `BlueOrange` | blue | yellow (was RGB orange; not a named color) | default |
+| `Monochrome` | default | default | default |
+
+- `color_enabled()`, `color_enabled_stderr()`, `color_enabled_with()` and `set_color_override()` live here. `scope::display::terminal` re-exports them for existing callers. No adapter decides color on its own.
 
 ### Adapters (translate only)
-- **Text (CLI display):** `theme::paint(role, &str) -> String`. It replaces every `.cyan()` / `.green()` / `.dimmed()` call in `display/terminal.rs` and `cli/errors.rs`. Plain output stays byte-identical. Colored output keeps the same color per role, and a golden test pins it.
+- **Text (CLI display):** `theme::paint(role, &str) -> String` paints for stdout. `theme::Painter` paints for a given decision (`Painter::new(enabled)`, `Painter::stdout()`, `Painter::stderr()`), with `paint`, `paint_strong` and `paint_tone`. It replaces every `.cyan()` / `.green()` / `.dimmed()` call in `display/terminal.rs` and `cli/errors.rs`. Plain output stays byte-identical. Colored output keeps the same look per role, and golden tests pin it. One intended change: the section title moves from bold bright white to bold `Accent` (bright white breaks the no-white-text rule).
 - **ratatui (TUI and monitor):** `scope_cli::cli::theme::style(Role) -> Style` and `scheme_style(Scheme, Direction)`. They hold no color literals. Help text uses `paint`, so the hand-written ANSI constants go away.
-- **Web:** scope-web serves `/theme.css` built from `tone(role).web` as CSS variables (`--scope-accent`, …). `style.css` uses only `var(--scope-…)`.
 
 ### Guard
-One test scans every crate (and `scope-web/src/static/*.css`). It allows color literals (`Color::`, `.cyan()`-style calls, hex colors, raw SGR codes) only in `scope::display::theme` and the two adapter files. It reports `file:line`.
+One test scans every Rust crate. It allows color literals (`Color::`, `.cyan()`-style calls, raw SGR codes) only in `scope::display::theme` and the ratatui adapter file. It reports `file:line`. It does not scan `scope-web`.

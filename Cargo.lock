@@ -2499,7 +2499,6 @@ dependencies = [
  "dirs",
  "hex",
  "mockito",
- "owo-colors",
  "regex",
  "reqwest",
  "serde",

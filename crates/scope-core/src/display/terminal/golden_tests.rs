@@ -174,15 +174,17 @@ const PLAIN: &[(&str, &str)] = &[
     ),
 ];
 
-/// Colored bytes.
+/// Colored bytes. Seven entries changed in the theme refactor: six only in
+/// escape order (proved by `reordered_escapes_look_the_same`), and the section
+/// title color (`section_title_moves_from_bright_white_to_accent`).
 const COLORED: &[(&str, &str)] = &[
     (
         "section_header",
-        "\n\u{1b}[36m┌─\u{1b}[39m \u{1b}[97m\u{1b}[1mToken Health\u{1b}[0m\u{1b}[39m \u{1b}[36m────────────────────────\u{1b}[39m",
+        "\n\u{1b}[36m┌─\u{1b}[39m \u{1b}[36m\u{1b}[1mToken Health\u{1b}[0m\u{1b}[39m \u{1b}[36m────────────────────────\u{1b}[39m",
     ),
     (
         "subsection_header",
-        "\u{1b}[36m│\u{1b}[39m\n\u{1b}[36m├── \u{1b}[1mDEX\u{1b}[0m\u{1b}[39m",
+        "\u{1b}[36m│\u{1b}[39m\n\u{1b}[36m├── \u{1b}[39m\u{1b}[36m\u{1b}[1mDEX\u{1b}[0m\u{1b}[39m",
     ),
     (
         "kv_row",
@@ -214,7 +216,7 @@ const COLORED: &[(&str, &str)] = &[
     ),
     (
         "check_warn",
-        "\u{1b}[36m│\u{1b}[39m  \u{1b}[1m\u{1b}[33m!\u{1b}[39m\u{1b}[0m \u{1b}[33mBid depth is below the minimum on\u{1b}[39m\n\u{1b}[36m│\u{1b}[39m    \u{1b}[33mboth sides of the book\u{1b}[39m",
+        "\u{1b}[36m│\u{1b}[39m  \u{1b}[33m\u{1b}[1m!\u{1b}[0m\u{1b}[39m \u{1b}[33mBid depth is below the minimum on\u{1b}[39m\n\u{1b}[36m│\u{1b}[39m    \u{1b}[33mboth sides of the book\u{1b}[39m",
     ),
     (
         "check_na",
@@ -222,11 +224,11 @@ const COLORED: &[(&str, &str)] = &[
     ),
     (
         "status_healthy",
-        "\u{1b}[36m│\u{1b}[39m  \u{1b}[1m\u{1b}[32mHEALTHY\u{1b}[39m\u{1b}[0m",
+        "\u{1b}[36m│\u{1b}[39m  \u{1b}[32m\u{1b}[1mHEALTHY\u{1b}[0m\u{1b}[39m",
     ),
     (
         "status_unhealthy",
-        "\u{1b}[36m│\u{1b}[39m  \u{1b}[1m\u{1b}[31mUNHEALTHY\u{1b}[39m\u{1b}[0m",
+        "\u{1b}[36m│\u{1b}[39m  \u{1b}[31m\u{1b}[1mUNHEALTHY\u{1b}[0m\u{1b}[39m",
     ),
     (
         "section_footer",
@@ -258,7 +260,7 @@ const COLORED: &[(&str, &str)] = &[
     ),
     (
         "severity_critical",
-        "\u{1b}[1m\u{1b}[31mCritical\u{1b}[39m\u{1b}[0m",
+        "\u{1b}[31m\u{1b}[1mCritical\u{1b}[0m\u{1b}[39m",
     ),
     ("severity_high", "\u{1b}[31mHigh\u{1b}[39m"),
     ("severity_medium", "\u{1b}[33mMedium\u{1b}[39m"),
@@ -266,7 +268,7 @@ const COLORED: &[(&str, &str)] = &[
     ("severity_other", "\u{1b}[2mInfo\u{1b}[0m"),
     (
         "warning_row",
-        "\u{1b}[36m│\u{1b}[39m  \u{1b}[1m\u{1b}[33m⚠\u{1b}[39m\u{1b}[0m \u{1b}[33mBid depth is below the minimum on\u{1b}[39m\n\u{1b}[36m│\u{1b}[39m    \u{1b}[33mboth sides of the book\u{1b}[39m",
+        "\u{1b}[36m│\u{1b}[39m  \u{1b}[33m\u{1b}[1m⚠\u{1b}[0m\u{1b}[39m \u{1b}[33mBid depth is below the minimum on\u{1b}[39m\n\u{1b}[36m│\u{1b}[39m    \u{1b}[33mboth sides of the book\u{1b}[39m",
     ),
     (
         "info_row",
@@ -300,10 +302,16 @@ const COLORED: &[(&str, &str)] = &[
 fn assert_goldens(tty: bool, goldens: &[(&str, &str)]) {
     let rendered = render_at_golden_width(tty);
     assert_eq!(rendered.len(), goldens.len(), "golden list out of date");
-    for ((name, got), (golden_name, want)) in rendered.iter().zip(goldens) {
-        assert_eq!(name, golden_name, "golden order out of date");
-        assert_eq!(got, want, "{name} (tty={tty}) changed");
-    }
+    let changed: Vec<String> = rendered
+        .iter()
+        .zip(goldens)
+        .filter(|((name, got), (golden_name, want))| {
+            assert_eq!(name, golden_name, "golden order out of date");
+            got != want
+        })
+        .map(|((name, got), _)| format!("{name} (tty={tty}) is now {got:?}"))
+        .collect();
+    assert!(changed.is_empty(), "changed:\n{}", changed.join("\n"));
 }
 
 #[test]
@@ -314,4 +322,121 @@ fn plain_output_matches_goldens() {
 #[test]
 fn colored_output_matches_goldens() {
     assert_goldens(true, COLORED);
+}
+
+/// Colored bytes of the helpers whose escape order changed in the theme
+/// refactor, as they were before it. Kept to prove the new bytes look the
+/// same: see `reordered_escapes_look_the_same`.
+const COLORED_BEFORE_THEME: &[(&str, &str)] = &[
+    (
+        "section_header",
+        "\n\u{1b}[36m┌─\u{1b}[39m \u{1b}[97m\u{1b}[1mToken Health\u{1b}[0m\u{1b}[39m \u{1b}[36m────────────────────────\u{1b}[39m",
+    ),
+    (
+        "subsection_header",
+        "\u{1b}[36m│\u{1b}[39m\n\u{1b}[36m├── \u{1b}[1mDEX\u{1b}[0m\u{1b}[39m",
+    ),
+    (
+        "check_warn",
+        "\u{1b}[36m│\u{1b}[39m  \u{1b}[1m\u{1b}[33m!\u{1b}[39m\u{1b}[0m \u{1b}[33mBid depth is below the minimum on\u{1b}[39m\n\u{1b}[36m│\u{1b}[39m    \u{1b}[33mboth sides of the book\u{1b}[39m",
+    ),
+    (
+        "status_healthy",
+        "\u{1b}[36m│\u{1b}[39m  \u{1b}[1m\u{1b}[32mHEALTHY\u{1b}[39m\u{1b}[0m",
+    ),
+    (
+        "status_unhealthy",
+        "\u{1b}[36m│\u{1b}[39m  \u{1b}[1m\u{1b}[31mUNHEALTHY\u{1b}[39m\u{1b}[0m",
+    ),
+    (
+        "severity_critical",
+        "\u{1b}[1m\u{1b}[31mCritical\u{1b}[39m\u{1b}[0m",
+    ),
+    (
+        "warning_row",
+        "\u{1b}[36m│\u{1b}[39m  \u{1b}[1m\u{1b}[33m⚠\u{1b}[39m\u{1b}[0m \u{1b}[33mBid depth is below the minimum on\u{1b}[39m\n\u{1b}[36m│\u{1b}[39m    \u{1b}[33mboth sides of the book\u{1b}[39m",
+    ),
+];
+
+/// The look of one visible character: what a terminal shows for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct CellStyle {
+    foreground: Option<u8>,
+    bold: bool,
+    dim: bool,
+    underline: bool,
+    reverse: bool,
+}
+
+/// Interprets the SGR escapes in `s` the way a terminal does and returns
+/// each visible character with its look. Two strings with equal cells
+/// look the same, whatever order their escapes come in.
+fn cells(s: &str) -> Vec<(char, CellStyle)> {
+    let mut style = CellStyle::default();
+    let mut out = Vec::new();
+    let mut chars = s.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\x1b' {
+            out.push((ch, style));
+            continue;
+        }
+        assert_eq!(chars.next(), Some('['), "not an SGR escape in {s:?}");
+        let code: String = chars.by_ref().take_while(|c| *c != 'm').collect();
+        match code.parse::<u8>().expect("one SGR code per escape") {
+            0 => style = CellStyle::default(),
+            1 => style.bold = true,
+            2 => style.dim = true,
+            4 => style.underline = true,
+            7 => style.reverse = true,
+            39 => style.foreground = None,
+            fg @ (30..=37 | 90..=97) => style.foreground = Some(fg),
+            other => panic!("unexpected SGR code {other} in {s:?}"),
+        }
+    }
+    out
+}
+
+fn colored_golden(name: &str) -> &'static str {
+    COLORED
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, s)| *s)
+        .expect("a colored golden")
+}
+
+/// The theme painter always puts the color outside the effects; some
+/// helpers had the other order before. The order must not change what a
+/// terminal shows.
+#[test]
+fn reordered_escapes_look_the_same() {
+    for (name, before) in COLORED_BEFORE_THEME {
+        if *name == "section_header" {
+            continue;
+        }
+        assert_eq!(cells(before), cells(colored_golden(name)), "{name}");
+    }
+}
+
+/// The one intended change to colored output: the section title moves
+/// from bright white (unreadable on a light terminal) to bold accent,
+/// like every other heading. The rest of the header looks the same.
+#[test]
+fn section_title_moves_from_bright_white_to_accent() {
+    const BRIGHT_WHITE: u8 = 97;
+    const CYAN: u8 = 36;
+    let (_, before) = COLORED_BEFORE_THEME
+        .iter()
+        .find(|(n, _)| *n == "section_header")
+        .expect("the section header before the theme");
+    let recolored: Vec<_> = cells(before)
+        .into_iter()
+        .map(|(ch, mut style)| {
+            if style.foreground == Some(BRIGHT_WHITE) {
+                style.foreground = Some(CYAN);
+            }
+            (ch, style)
+        })
+        .collect();
+    assert_ne!(cells(before), recolored, "the title was bright white");
+    assert_eq!(recolored, cells(colored_golden("section_header")));
 }
