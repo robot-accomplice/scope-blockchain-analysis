@@ -1,0 +1,45 @@
+name: bounded scrolling with page, top and bottom keys
+tiers: [offline]
+steps:
+  - type: "help"
+  - key: Enter
+  - wait_for: { text: "Keys: Enter run", timeout: 10s }
+  - type: "help"
+  - key: Enter
+  - type: "help"
+  - key: Enter
+  - wait_for: { text: "scope:auto>" }
+  - key: PageUp
+  - key: PageUp
+  - key: PageUp
+  - key: PageUp
+  - key: PageUp
+  - key: PageUp
+  - key: PageUp
+  - key: PageUp
+  - key: PageUp
+  - key: PageUp
+  - key: PageUp
+  - key: PageUp
+  - key: PageUp
+  - key: PageUp
+  - key: PageUp
+  - key: PageUp
+  - key: PageUp
+  - key: PageUp
+  - key: PageUp
+  - key: PageUp
+  # The count stops at the top of the output and does not run on.
+  - wait_for: { text: "scrolled up \\d+ lines", timeout: 5s }
+  - key: PageDown
+  # One page down leaves the view scrolled: PageDown is not dead.
+  - wait_for: { text: "scrolled up \\d+ lines" }
+  - key: Ctrl-End
+  - wait_for: { text: "help · exit" }
+  - expect_screen: { not_contains: ["scrolled up"] }
+  - key: PageUp
+  - wait_for: { text: "scrolled up \\d+ lines" }
+  - key: End
+  - wait_for: { text: "help · exit" }
+  - key: Ctrl-D
+  - expect_exit: 0

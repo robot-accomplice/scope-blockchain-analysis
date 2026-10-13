@@ -131,8 +131,22 @@ pub fn plan(
         #[cfg(debug_assertions)]
         "__panic" => panic!("__panic: manual crash-log check"),
         "help" | "?" | ".help" => {
-            write_help(out)?;
-            return Ok(Plan::Done);
+            if rest.is_empty() {
+                write_help(out)?;
+                return Ok(Plan::Done);
+            }
+            // A session command has no clap help: show its own line.
+            let typed = words[1].to_lowercase();
+            let name = session_command_name(&typed);
+            if let Some((_, usage, what)) = SESSION_COMMANDS.iter().find(|(n, _, _)| *n == name) {
+                outln!(out, "  {:<34} {}", usage, what)?;
+                return Ok(Plan::Done);
+            }
+            // `help market summary` is `market summary --help`: the same
+            // text as `scope help market summary`.
+            let mut words: Vec<String> = words[1..].to_vec();
+            words.push("--help".to_string());
+            return parse_cli(words, ctx, config, out);
         }
         "ctx" | "context" | ".ctx" | ".context" => {
             out!(out, "{}", ctx)?;
@@ -596,6 +610,20 @@ pub(crate) const SESSION_COMMANDS: &[(&str, &str, &str)] = &[
     ("exit", "exit", "Leave the TUI (also Ctrl-D)"),
 ];
 
+/// The `SESSION_COMMANDS` name for a typed session command or its alias.
+fn session_command_name(word: &str) -> &str {
+    match word {
+        "quit" | "q" | ".exit" | ".quit" => "exit",
+        "context" | ".ctx" | ".context" => "ctx",
+        "reset" | ".clear" | ".reset" => "clear",
+        "?" | ".help" => "help",
+        "showtokens" => "+tokens",
+        "showtxs" | "txs" => "+txs",
+        "aliases" => "tokens",
+        other => other,
+    }
+}
+
 /// Writes the TUI help: the session commands, then every CLI command.
 fn write_help(out: &Output) -> io::Result<()> {
     outln!(out, "Session commands:")?;
@@ -621,7 +649,7 @@ fn write_help(out: &Output) -> io::Result<()> {
     )?;
     outln!(
         out,
-        "      Ctrl-Y copy last output · Shift-drag selects text"
+        "      Ctrl-Y copy last output · Ctrl-F or / search · Ctrl-R history search · Shift-drag selects text"
     )?;
     outln!(
         out,
@@ -843,6 +871,48 @@ mod tests {
         for word in ["+tokens", "address", "market", "compliance", "venues"] {
             assert!(cap.out().contains(word), "help is missing {}", word);
         }
+    }
+
+    #[test]
+    fn test_help_lists_the_search_keys() {
+        let (_, cap) = plan_line("help", &mut SessionContext::default());
+        for keys in ["Ctrl-F or / search", "Ctrl-R history search"] {
+            assert!(cap.out().contains(keys), "help is missing {}", keys);
+        }
+    }
+
+    #[test]
+    fn test_help_with_a_command_shows_that_commands_help() {
+        let (p, cap) = plan_line("help market summary", &mut SessionContext::default());
+        assert!(matches!(p, Plan::Done));
+        assert!(cap.out().contains("Usage:"), "{}", cap.out());
+        assert!(cap.out().contains("--venue"), "{}", cap.out());
+        assert!(!cap.out().contains("Session commands"), "{}", cap.out());
+    }
+
+    #[test]
+    fn test_help_with_a_session_command_shows_its_line() {
+        for (typed, usage) in [
+            ("help ctx", "ctx"),
+            ("help tokens", "tokens [list|recent|add|remove]"),
+            ("help clear", "clear"),
+            ("help save", "save <file> [--force]"),
+            ("help quit", "exit"),
+        ] {
+            let (p, cap) = plan_line(typed, &mut SessionContext::default());
+            assert!(matches!(p, Plan::Done));
+            assert!(cap.out().contains(usage), "{typed}: {}", cap.out());
+            assert!(cap.err().is_empty(), "{typed}: {}", cap.err());
+            assert!(!cap.out().contains("Usage:"), "{typed}");
+        }
+    }
+
+    #[test]
+    fn test_help_with_an_unknown_command_is_a_clap_error() {
+        let (p, cap) = plan_line("help nosuchcmd", &mut SessionContext::default());
+        assert!(matches!(p, Plan::Done));
+        assert!(cap.err().contains("nosuchcmd"), "{}", cap.err());
+        assert!(cap.out().is_empty(), "{}", cap.out());
     }
 
     // ---- tokens ----

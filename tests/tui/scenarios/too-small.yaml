@@ -1,0 +1,17 @@
+name: a terminal below 40x10 shows the too-small message and keeps the draft
+tiers: [offline]
+steps:
+  - wait_for: { text: "scope:auto>" }
+  - type: "draft"
+  # The message wraps on words at 30 columns.
+  - resize: { cols: 30, rows: 8 }
+  - wait_for: { text: "Terminal too small: need at" }
+  - wait_for: { text: "least 40×10" }
+  # Enter does nothing while it is too small.
+  - key: Enter
+  - resize: { cols: 120, rows: 36 }
+  - wait_for: { text: "│draft" }
+  - expect_screen: { contains: ["draft"], not_contains: ["Terminal too small"] }
+  - key: Ctrl-U
+  - key: Ctrl-D
+  - expect_exit: 0
