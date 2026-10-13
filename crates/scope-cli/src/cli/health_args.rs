@@ -18,7 +18,7 @@ pub struct HealthArgs {
     #[arg(long = "peg", value_name = "TARGET", help = with_default("Peg target (e.g., 1.0 for USD stablecoins).", health::DEFAULT_PEG_TARGET))]
     pub peg_target: Option<f64>,
 
-    #[arg(long, value_name = "RANGE", help = with_default("Peg range for outlier filtering (orders outside peg ± range×5 excluded). E.g., 0.001 = ±0.5% around peg.", health::DEFAULT_PEG_RANGE))]
+    #[arg(long, value_name = "RANGE", help = with_default(&peg_range_help(), health::DEFAULT_PEG_RANGE))]
     pub peg_range: Option<f64>,
 
     #[arg(long, value_name = "N", help = with_default("Minimum valid order book levels (price > 0, quantity > 0) per side.", health::DEFAULT_MIN_LEVELS))]
@@ -63,6 +63,18 @@ fn positive_pct(s: &str) -> Result<f64, String> {
     } else {
         Err(format!("must be a number greater than 0, got {s}"))
     }
+}
+
+/// Help for `--peg-range`, with the band width taken from the constants.
+fn peg_range_help() -> String {
+    let band_pct =
+        health::DEFAULT_PEG_RANGE * health::PEG_OUTLIER_FACTOR / health::DEFAULT_PEG_TARGET * 100.0;
+    format!(
+        "Peg range. The outlier band is peg ± range×{factor}: levels outside it are left out of depth and level counts (best prices still include them). E.g., {range} = ±{band_pct}% around a peg of {target}.",
+        factor = health::PEG_OUTLIER_FACTOR,
+        range = health::DEFAULT_PEG_RANGE,
+        target = health::DEFAULT_PEG_TARGET,
+    )
 }
 
 /// Help text with the built-in default, so `--help` names the value in force.

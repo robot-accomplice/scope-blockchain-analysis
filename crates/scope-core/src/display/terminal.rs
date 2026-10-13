@@ -389,10 +389,7 @@ fn format_price_peg_styled(price: f64, peg: &PegBands, tty: bool) -> String {
 /// The USD peg with the default range, for the tests.
 #[cfg(test)]
 fn usd_peg() -> PegBands {
-    PegBands {
-        target: 1.0,
-        range: crate::market::health::DEFAULT_PEG_RANGE,
-    }
+    crate::market::health::HealthThresholds::default().peg_bands()
 }
 
 /// Empty line with continuation bar.

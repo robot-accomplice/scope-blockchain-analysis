@@ -382,7 +382,7 @@ pub async fn run(
             ));
 
             // Stablecoin: auto-include market/peg via venue registry
-            let mut peg_verdict: Option<bool> = None;
+            let mut peg_status: Option<PegStatus> = None;
             if is_stablecoin_symbol(&analytics.token.symbol)
                 && let Ok(registry) = VenueRegistry::load()
             {
@@ -407,7 +407,7 @@ pub async fn run(
                         };
                         let summary =
                             MarketSummary::from_order_book(&book, &thresholds, volume_24h);
-                        peg_verdict = peg_healthy(summary.peg_status());
+                        peg_status = Some(summary.peg_status());
                         output.push_str(&peg_line(exchange.venue_name(), &pair, &summary));
                     }
                 }
@@ -418,7 +418,7 @@ pub async fn run(
             let meta = meta_analysis_token(
                 &risk_summary,
                 is_stablecoin_symbol(&analytics.token.symbol),
-                peg_verdict,
+                peg_status,
                 top_holder_pct,
                 analytics.liquidity_usd,
             );
@@ -507,32 +507,72 @@ fn format_tx_value(value_str: &str, chain: &str) -> (String, bool) {
     (formatted, high_value)
 }
 
+/// The words for one peg status, written once. The market line, the
+/// executive summary, the key takeaway and the recommendation all read it.
+struct PegWords {
+    /// Label on the market line.
+    label: &'static str,
+    /// Sentence for the executive summary, when there is something to say.
+    synthesis: Option<&'static str>,
+    /// Key takeaway that replaces the generic one, when the peg is a concern.
+    takeaway: Option<&'static str>,
+    /// Whether to recommend verifying the peg on other venues.
+    verify_elsewhere: bool,
+}
+
+fn peg_words(status: PegStatus) -> PegWords {
+    const DEVIATION_SYNTHESIS: &str =
+        "Stablecoin peg deviation detected — verify on multiple venues.";
+    const DEVIATION_TAKEAWAY: &str =
+        "Stablecoin deviating from peg — check additional venues before trading.";
+    match status {
+        PegStatus::OnPeg => PegWords {
+            label: "Peg healthy",
+            synthesis: Some("Stablecoin peg is healthy on observed venue."),
+            takeaway: None,
+            verify_elsewhere: false,
+        },
+        PegStatus::BookUnhealthy => PegWords {
+            label: "Peg on target, but market health checks fail",
+            synthesis: Some(
+                "Stablecoin peg is on target, but the market's health checks fail — verify on multiple venues.",
+            ),
+            takeaway: Some(
+                "Stablecoin market health checks fail — check additional venues before trading.",
+            ),
+            verify_elsewhere: true,
+        },
+        PegStatus::SlightDeviation => PegWords {
+            label: "Slight peg deviation",
+            synthesis: Some(DEVIATION_SYNTHESIS),
+            takeaway: Some(DEVIATION_TAKEAWAY),
+            verify_elsewhere: true,
+        },
+        PegStatus::Deviation => PegWords {
+            label: "Peg deviation",
+            synthesis: Some(DEVIATION_SYNTHESIS),
+            takeaway: Some(DEVIATION_TAKEAWAY),
+            verify_elsewhere: true,
+        },
+        PegStatus::NoPrice => PegWords {
+            label: "Peg unknown (no mid price: a side has no valid level)",
+            synthesis: None,
+            takeaway: None,
+            verify_elsewhere: true,
+        },
+    }
+}
+
 /// The peg line of the insights report. The verdict is the market
 /// summary's own ([`MarketSummary::peg_status`]); this only words it.
 fn peg_line(venue: &str, pair: &str, summary: &MarketSummary) -> String {
-    let label = match summary.peg_status() {
-        PegStatus::OnPeg => "Peg healthy",
-        PegStatus::BookUnhealthy => "Peg on target, but market health checks fail",
-        PegStatus::SlightDeviation => "Slight peg deviation",
-        PegStatus::Deviation => "Peg deviation",
-        PegStatus::NoPrice => "Peg unknown (no mid price: a side has no valid level)",
-    };
+    let label = peg_words(summary.peg_status()).label;
     let deviation = summary
         .mid_price
         .and_then(|mid| summary.peg_deviation_bps(mid))
         .map(|bps| format!(" (deviation: {bps:.1} bps)"))
         .unwrap_or_default();
     format!("- **Market ({venue} {pair}):** {label}{deviation}\n")
-}
-
-/// `Some(true)` only when the peg is on target and the market is healthy;
-/// `None` when there is no price to judge.
-fn peg_healthy(status: PegStatus) -> Option<bool> {
-    match status {
-        PegStatus::NoPrice => None,
-        PegStatus::OnPeg => Some(true),
-        PegStatus::BookUnhealthy | PegStatus::SlightDeviation | PegStatus::Deviation => Some(false),
-    }
 }
 
 /// Meta-analysis: synthesizes observations into an executive summary, key takeaway, and recommendations.
@@ -674,7 +714,7 @@ fn meta_analysis_tx(
 fn meta_analysis_token(
     risk_summary: &report::TokenRiskSummary,
     is_stablecoin: bool,
-    peg_healthy: Option<bool>,
+    peg: Option<PegStatus>,
     top_holder_pct: Option<f64>,
     liquidity_usd: f64,
 ) -> MetaAnalysis {
@@ -688,13 +728,9 @@ fn meta_analysis_token(
         synthesis_parts.push("Moderate risk — mixed signals.".to_string());
     }
 
-    if is_stablecoin && let Some(healthy) = peg_healthy {
-        if healthy {
-            synthesis_parts.push("Stablecoin peg is healthy on observed venue.".to_string());
-        } else {
-            synthesis_parts
-                .push("Stablecoin peg deviation detected — verify on multiple venues.".to_string());
-        }
+    let peg_words = peg.filter(|_| is_stablecoin).map(peg_words);
+    if let Some(sentence) = peg_words.as_ref().and_then(|w| w.synthesis) {
+        synthesis_parts.push(sentence.to_string());
     }
 
     if top_holder_pct.map(|p| p > 30.0).unwrap_or(false) {
@@ -719,8 +755,8 @@ fn meta_analysis_token(
                 .cloned()
                 .unwrap_or_else(|| "multiple factors".to_string())
         )
-    } else if is_stablecoin && peg_healthy == Some(false) {
-        "Stablecoin deviating from peg — check additional venues before trading.".to_string()
+    } else if let Some(takeaway) = peg_words.as_ref().and_then(|w| w.takeaway) {
+        takeaway.to_string()
     } else if !risk_summary.positives.is_empty() && risk_summary.concerns.is_empty() {
         "Favorable risk profile — standard diligence applies.".to_string()
     } else {
@@ -738,7 +774,7 @@ fn meta_analysis_token(
     if top_holder_pct.map(|p| p > 25.0).unwrap_or(false) {
         recommendations.push("Monitor top holder movements for distribution changes.".to_string());
     }
-    if is_stablecoin && peg_healthy != Some(true) {
+    if is_stablecoin && peg_words.as_ref().is_none_or(|w| w.verify_elsewhere) {
         recommendations.push("Verify peg across multiple DEX/CEX venues.".to_string());
     }
     if liquidity_usd < 100_000.0 && risk_summary.score <= 5 {
@@ -803,7 +839,6 @@ mod tests {
     fn test_peg_line_never_says_healthy_without_a_mid() {
         let summary = summary_with_peg(1.0, None);
         assert_eq!(summary.peg_status(), PegStatus::NoPrice);
-        assert_eq!(peg_healthy(summary.peg_status()), None);
         assert!(!peg_line("v", "X/USDT", &summary).contains("Peg healthy"));
     }
 
@@ -812,8 +847,32 @@ mod tests {
         let mut summary = summary_with_peg(1.0, Some(1.0));
         summary.healthy = false;
         assert_eq!(summary.peg_status(), PegStatus::BookUnhealthy);
-        assert_eq!(peg_healthy(summary.peg_status()), Some(false));
         assert!(!peg_line("v", "X/USDT", &summary).contains("Peg healthy"));
+    }
+
+    #[test]
+    fn test_book_unhealthy_is_worded_the_same_on_every_line() {
+        let mut summary = summary_with_peg(1.0, Some(1.0));
+        summary.healthy = false;
+        let status = summary.peg_status();
+        let line = peg_line("v", "X/USDT", &summary);
+        assert!(line.contains("market health checks fail"), "{line}");
+        let risk = report::TokenRiskSummary {
+            score: 3,
+            level: "Low",
+            emoji: "🟢",
+            concerns: vec![],
+            positives: vec![],
+        };
+        let meta = meta_analysis_token(&risk, true, Some(status), None, 5_000_000.0);
+        assert!(
+            meta.synthesis.contains("health checks fail"),
+            "{}",
+            meta.synthesis
+        );
+        assert!(!meta.synthesis.contains("deviation detected"));
+        assert!(meta.key_takeaway.contains("health checks fail"));
+        assert!(meta.recommendations.iter().any(|r| r.contains("peg")));
     }
 
     #[test]
@@ -825,6 +884,505 @@ mod tests {
         summary.peg_range = 0.001;
         assert_eq!(summary.peg_status(), PegStatus::SlightDeviation);
     }
+
+    use async_trait::async_trait;
+    use scope::chains::{
+        Balance as ChainBalance, ChainClient, ChainClientFactory, DexDataSource,
+        Token as ChainToken, TokenBalance as ChainTokenBalance, Transaction as ChainTransaction,
+    };
+
+    fn quiet() -> crate::cli::output::Output {
+        crate::cli::output::Output::capture().0
+    }
+
+    // ====================================================================
+    // Mock Chain Client for testing run() paths
+    // ====================================================================
+
+    struct MockChainClient;
+
+    #[async_trait]
+    impl ChainClient for MockChainClient {
+        fn chain_name(&self) -> &str {
+            "ethereum"
+        }
+        fn native_token_symbol(&self) -> &str {
+            "ETH"
+        }
+        async fn get_balance(&self, _address: &str) -> scope::error::Result<ChainBalance> {
+            Ok(ChainBalance {
+                raw: "1000000000000000000".to_string(),
+                formatted: "1.0 ETH".to_string(),
+                decimals: 18,
+                symbol: "ETH".to_string(),
+                usd_value: Some(2500.0),
+            })
+        }
+        async fn enrich_balance_usd(&self, balance: &mut ChainBalance) {
+            balance.usd_value = Some(2500.0);
+        }
+        async fn get_transaction(&self, _hash: &str) -> scope::error::Result<ChainTransaction> {
+            Ok(ChainTransaction {
+                hash: "0xabc123def456789012345678901234567890123456789012345678901234abcd"
+                    .to_string(),
+                block_number: Some(12345678),
+                timestamp: Some(1700000000),
+                from: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+                to: Some("0xdAC17F958D2ee523a2206206994597C13D831ec7".to_string()),
+                value: "1000000000000000000".to_string(),
+                gas_limit: 21000,
+                gas_used: Some(21000),
+                gas_price: "20000000000".to_string(),
+                nonce: 42,
+                input: "0xa9059cbb0000000000000000000000001234".to_string(),
+                status: Some(true),
+            })
+        }
+        async fn get_transactions(
+            &self,
+            _address: &str,
+            _limit: u32,
+        ) -> scope::error::Result<Vec<ChainTransaction>> {
+            Ok(vec![])
+        }
+        async fn get_block_number(&self) -> scope::error::Result<u64> {
+            Ok(12345678)
+        }
+        async fn get_token_balances(
+            &self,
+            _address: &str,
+        ) -> scope::error::Result<Vec<ChainTokenBalance>> {
+            Ok(vec![
+                ChainTokenBalance {
+                    token: ChainToken {
+                        contract_address: "0xdAC17F958D2ee523a2206206994597C13D831ec7".to_string(),
+                        symbol: "USDT".to_string(),
+                        name: "Tether USD".to_string(),
+                        decimals: 6,
+                    },
+                    balance: "1000000".to_string(),
+                    formatted_balance: "1.0".to_string(),
+                    usd_value: Some(1.0),
+                },
+                ChainTokenBalance {
+                    token: ChainToken {
+                        contract_address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+                        symbol: "USDC".to_string(),
+                        name: "USD Coin".to_string(),
+                        decimals: 6,
+                    },
+                    balance: "5000000".to_string(),
+                    formatted_balance: "5.0".to_string(),
+                    usd_value: Some(5.0),
+                },
+            ])
+        }
+        async fn get_code(&self, _address: &str) -> scope::error::Result<String> {
+            Ok("0x".to_string()) // EOA
+        }
+    }
+
+    struct MockFactory;
+
+    impl ChainClientFactory for MockFactory {
+        fn create_chain_client(&self, _chain: &str) -> scope::error::Result<Box<dyn ChainClient>> {
+            Ok(Box::new(MockChainClient))
+        }
+        fn create_dex_client(&self) -> Box<dyn DexDataSource> {
+            let http: std::sync::Arc<dyn scope::http::HttpClient> =
+                std::sync::Arc::new(scope::http::NativeHttpClient::new().unwrap());
+            scope::chains::DefaultClientFactory {
+                chains_config: Default::default(),
+                http,
+            }
+            .create_dex_client()
+        }
+    }
+
+    // Mock that returns a contract address
+    struct MockContractClient;
+
+    #[async_trait]
+    impl ChainClient for MockContractClient {
+        fn chain_name(&self) -> &str {
+            "ethereum"
+        }
+        fn native_token_symbol(&self) -> &str {
+            "ETH"
+        }
+        async fn get_balance(&self, _address: &str) -> scope::error::Result<ChainBalance> {
+            Ok(ChainBalance {
+                raw: "0".to_string(),
+                formatted: "0.0 ETH".to_string(),
+                decimals: 18,
+                symbol: "ETH".to_string(),
+                usd_value: Some(0.0),
+            })
+        }
+        async fn enrich_balance_usd(&self, _balance: &mut ChainBalance) {}
+        async fn get_transaction(&self, hash: &str) -> scope::error::Result<ChainTransaction> {
+            Ok(ChainTransaction {
+                hash: hash.to_string(),
+                block_number: Some(100),
+                timestamp: Some(1700000000),
+                from: "0xfrom".to_string(),
+                to: None, // contract creation
+                value: "0".to_string(),
+                gas_limit: 100000,
+                gas_used: Some(80000),
+                gas_price: "10000000000".to_string(),
+                nonce: 0,
+                input: "0x60806040".to_string(),
+                status: Some(false), // failed tx
+            })
+        }
+        async fn get_transactions(
+            &self,
+            _address: &str,
+            _limit: u32,
+        ) -> scope::error::Result<Vec<ChainTransaction>> {
+            Ok(vec![])
+        }
+        async fn get_block_number(&self) -> scope::error::Result<u64> {
+            Ok(100)
+        }
+        async fn get_token_balances(
+            &self,
+            _address: &str,
+        ) -> scope::error::Result<Vec<ChainTokenBalance>> {
+            Ok(vec![])
+        }
+        async fn get_code(&self, _address: &str) -> scope::error::Result<String> {
+            Ok("0x6080604052".to_string()) // contract
+        }
+    }
+
+    struct MockContractFactory;
+
+    impl ChainClientFactory for MockContractFactory {
+        fn create_chain_client(&self, _chain: &str) -> scope::error::Result<Box<dyn ChainClient>> {
+            Ok(Box::new(MockContractClient))
+        }
+        fn create_dex_client(&self) -> Box<dyn DexDataSource> {
+            let http: std::sync::Arc<dyn scope::http::HttpClient> =
+                std::sync::Arc::new(scope::http::NativeHttpClient::new().unwrap());
+            scope::chains::DefaultClientFactory {
+                chains_config: Default::default(),
+                http,
+            }
+            .create_dex_client()
+        }
+    }
+
+    // Mock DexDataSource for token tests
+    struct MockDexDataSource;
+
+    #[async_trait]
+    impl DexDataSource for MockDexDataSource {
+        async fn get_token_price(&self, _chain: &str, _address: &str) -> Option<f64> {
+            Some(1.0)
+        }
+
+        async fn get_native_token_price(&self, _chain: &str) -> Option<f64> {
+            Some(2500.0)
+        }
+
+        async fn get_token_data(
+            &self,
+            _chain: &str,
+            address: &str,
+        ) -> scope::error::Result<scope::chains::dex::DexTokenData> {
+            use scope::chains::{DexPair, PricePoint, VolumePoint};
+            Ok(scope::chains::dex::DexTokenData {
+                address: address.to_string(),
+                symbol: "TEST".to_string(),
+                name: "Test Token".to_string(),
+                price_usd: 1.5,
+                price_change_24h: 5.2,
+                price_change_6h: 2.1,
+                price_change_1h: 0.5,
+                price_change_5m: 0.1,
+                volume_24h: 1_000_000.0,
+                volume_6h: 250_000.0,
+                volume_1h: 50_000.0,
+                liquidity_usd: 500_000.0,
+                market_cap: Some(10_000_000.0),
+                fdv: Some(12_000_000.0),
+                pairs: vec![DexPair {
+                    dex_name: "Uniswap V3".to_string(),
+                    pair_address: "0xpair123".to_string(),
+                    base_token: "TEST".to_string(),
+                    quote_token: "USDC".to_string(),
+                    price_usd: 1.5,
+                    liquidity_usd: 500_000.0,
+                    liquidity_base: None,
+                    volume_24h: 1_000_000.0,
+                    price_change_24h: 5.2,
+                    buys_24h: 100,
+                    sells_24h: 80,
+                    buys_6h: 20,
+                    sells_6h: 15,
+                    buys_1h: 5,
+                    sells_1h: 3,
+                    pair_created_at: Some(1690000000),
+                    url: Some("https://dexscreener.com/ethereum/0xpair123".to_string()),
+                }],
+                price_history: vec![PricePoint {
+                    timestamp: 1690000000,
+                    price: 1.5,
+                }],
+                volume_history: vec![VolumePoint {
+                    timestamp: 1690000000,
+                    volume: 1_000_000.0,
+                }],
+                total_buys_24h: 100,
+                total_sells_24h: 80,
+                total_buys_6h: 20,
+                total_sells_6h: 15,
+                total_buys_1h: 5,
+                total_sells_1h: 3,
+                earliest_pair_created_at: Some(1690000000),
+                image_url: None,
+                websites: Vec::new(),
+                socials: Vec::new(),
+                dexscreener_url: Some("https://dexscreener.com/ethereum/test".to_string()),
+            })
+        }
+
+        async fn search_tokens(
+            &self,
+            _query: &str,
+            _chain: Option<&str>,
+        ) -> scope::error::Result<Vec<scope::chains::TokenSearchResult>> {
+            Ok(vec![scope::chains::TokenSearchResult {
+                address: "0xTEST1234567890123456789012345678901234567".to_string(),
+                symbol: "TEST".to_string(),
+                name: "Test Token".to_string(),
+                chain: "ethereum".to_string(),
+                price_usd: Some(1.5),
+                volume_24h: 1_000_000.0,
+                liquidity_usd: 500_000.0,
+                market_cap: Some(10_000_000.0),
+            }])
+        }
+    }
+
+    // Mock ChainClient that returns holders with high concentration
+    struct MockTokenChainClient;
+
+    #[async_trait]
+    impl ChainClient for MockTokenChainClient {
+        fn chain_name(&self) -> &str {
+            "ethereum"
+        }
+        fn native_token_symbol(&self) -> &str {
+            "ETH"
+        }
+        async fn get_balance(&self, _address: &str) -> scope::error::Result<ChainBalance> {
+            Ok(ChainBalance {
+                raw: "1000000000000000000".to_string(),
+                formatted: "1.0 ETH".to_string(),
+                decimals: 18,
+                symbol: "ETH".to_string(),
+                usd_value: Some(2500.0),
+            })
+        }
+        async fn enrich_balance_usd(&self, balance: &mut ChainBalance) {
+            balance.usd_value = Some(2500.0);
+        }
+        async fn get_transaction(&self, _hash: &str) -> scope::error::Result<ChainTransaction> {
+            Ok(ChainTransaction {
+                hash: "0xabc123".to_string(),
+                block_number: Some(12345678),
+                timestamp: Some(1700000000),
+                from: "0xfrom".to_string(),
+                to: Some("0xto".to_string()),
+                value: "0".to_string(),
+                gas_limit: 21000,
+                gas_used: Some(21000),
+                gas_price: "20000000000".to_string(),
+                nonce: 42,
+                input: "0x".to_string(),
+                status: Some(true),
+            })
+        }
+        async fn get_transactions(
+            &self,
+            _address: &str,
+            _limit: u32,
+        ) -> scope::error::Result<Vec<ChainTransaction>> {
+            Ok(vec![])
+        }
+        async fn get_block_number(&self) -> scope::error::Result<u64> {
+            Ok(12345678)
+        }
+        async fn get_token_balances(
+            &self,
+            _address: &str,
+        ) -> scope::error::Result<Vec<ChainTokenBalance>> {
+            Ok(vec![])
+        }
+        async fn get_code(&self, _address: &str) -> scope::error::Result<String> {
+            Ok("0x".to_string())
+        }
+        async fn get_token_holders(
+            &self,
+            _address: &str,
+            _limit: u32,
+        ) -> scope::error::Result<Vec<scope::chains::TokenHolder>> {
+            // Return holders with high concentration (>30%) to trigger warning
+            Ok(vec![
+                scope::chains::TokenHolder {
+                    address: "0x1111111111111111111111111111111111111111".to_string(),
+                    balance: "3500000000000000000000000".to_string(),
+                    formatted_balance: "3500000.0".to_string(),
+                    percentage: 35.0, // >30% triggers concentration warning
+                    rank: 1,
+                },
+                scope::chains::TokenHolder {
+                    address: "0x2222222222222222222222222222222222222222".to_string(),
+                    balance: "1500000000000000000000000".to_string(),
+                    formatted_balance: "1500000.0".to_string(),
+                    percentage: 15.0,
+                    rank: 2,
+                },
+                scope::chains::TokenHolder {
+                    address: "0x3333333333333333333333333333333333333333".to_string(),
+                    balance: "1000000000000000000000000".to_string(),
+                    formatted_balance: "1000000.0".to_string(),
+                    percentage: 10.0,
+                    rank: 3,
+                },
+            ])
+        }
+    }
+
+    // Factory for token tests with mocks
+    struct MockTokenFactory;
+
+    impl ChainClientFactory for MockTokenFactory {
+        fn create_chain_client(&self, _chain: &str) -> scope::error::Result<Box<dyn ChainClient>> {
+            Ok(Box::new(MockTokenChainClient))
+        }
+        fn create_dex_client(&self) -> Box<dyn DexDataSource> {
+            Box::new(MockDexDataSource)
+        }
+    }
+
+    // ====================================================================
+    // run() function tests with mocks
+    // ====================================================================
+
+    #[tokio::test]
+    async fn test_run_address_eoa() {
+        let config = Config::default();
+        let factory = MockFactory;
+        let args = InsightsArgs {
+            target: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: None,
+            decode: false,
+            trace: false,
+            health: Default::default(),
+        };
+        let result = run(args, &config, &factory, &quiet()).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_address_contract() {
+        let config = Config::default();
+        let factory = MockContractFactory;
+        let args = InsightsArgs {
+            target: "0xdAC17F958D2ee523a2206206994597C13D831ec7".to_string(),
+            chain: None,
+            decode: false,
+            trace: false,
+            health: Default::default(),
+        };
+        let result = run(args, &config, &factory, &quiet()).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_transaction() {
+        let config = Config::default();
+        let factory = MockFactory;
+        let args = InsightsArgs {
+            target: "0xabc123def456789012345678901234567890123456789012345678901234abcd"
+                .to_string(),
+            chain: None,
+            decode: false,
+            trace: false,
+            health: Default::default(),
+        };
+        let result = run(args, &config, &factory, &quiet()).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_transaction_failed() {
+        let config = Config::default();
+        let factory = MockContractFactory;
+        let args = InsightsArgs {
+            target: "0xabc123def456789012345678901234567890123456789012345678901234abcd"
+                .to_string(),
+            chain: Some("ethereum".to_string()),
+            decode: true,
+            trace: false,
+            health: Default::default(),
+        };
+        let result = run(args, &config, &factory, &quiet()).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_address_with_chain_override() {
+        let config = Config::default();
+        let factory = MockFactory;
+        let args = InsightsArgs {
+            target: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: Some("polygon".to_string()),
+            decode: false,
+            trace: false,
+            health: Default::default(),
+        };
+        let result = run(args, &config, &factory, &quiet()).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_insights_run_token() {
+        let config = Config::default();
+        let factory = MockTokenFactory;
+        let args = InsightsArgs {
+            target: "TEST".to_string(),
+            chain: Some("ethereum".to_string()),
+            decode: false,
+            trace: false,
+            health: Default::default(),
+        };
+        let result = run(args, &config, &factory, &quiet()).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_insights_run_token_with_concentration_warning() {
+        let config = Config::default();
+        let factory = MockTokenFactory;
+        let args = InsightsArgs {
+            target: "0xTEST1234567890123456789012345678901234567".to_string(),
+            chain: Some("ethereum".to_string()),
+            decode: false,
+            trace: false,
+            health: Default::default(),
+        };
+        let result = run(args, &config, &factory, &quiet()).await;
+        assert!(result.is_ok());
+    }
+
+    // ====================================================================
+    // Existing tests below
+    // ====================================================================
 
     #[test]
     fn test_infer_target_evm_address() {
@@ -1378,7 +1936,7 @@ mod tests {
             concerns: vec![],
             positives: vec!["Stable peg".to_string()],
         };
-        let meta = meta_analysis_token(&summary, true, Some(true), None, 5_000_000.0);
+        let meta = meta_analysis_token(&summary, true, Some(PegStatus::OnPeg), None, 5_000_000.0);
         assert!(meta.synthesis.contains("Stablecoin peg is healthy"));
     }
 
@@ -1391,7 +1949,7 @@ mod tests {
             concerns: vec![],
             positives: vec![],
         };
-        let meta = meta_analysis_token(&summary, true, Some(false), None, 500_000.0);
+        let meta = meta_analysis_token(&summary, true, Some(PegStatus::Deviation), None, 500_000.0);
         assert!(meta.synthesis.contains("peg deviation"));
         assert!(meta.key_takeaway.contains("deviating from peg"));
         assert!(meta.recommendations.iter().any(|r| r.contains("peg")));
@@ -1442,7 +2000,7 @@ mod tests {
             positives: vec![],
         };
         let meta = meta_analysis_token(&summary, true, None, None, 1_000_000.0);
-        // When peg_healthy is None, recommendation should still suggest verifying peg
+        // When there is no peg status, recommendation should still suggest verifying peg
         assert!(meta.recommendations.iter().any(|r| r.contains("peg")));
     }
 
@@ -1747,7 +2305,7 @@ mod tests {
             concerns: vec![],
             positives: vec!["Strong liquidity".to_string()],
         };
-        let meta = meta_analysis_token(&risk, true, Some(true), Some(5.0), 5_000_000.0);
+        let meta = meta_analysis_token(&risk, true, Some(PegStatus::OnPeg), Some(5.0), 5_000_000.0);
         assert!(meta.synthesis.contains("peg is healthy"));
         assert!(meta.synthesis.contains("Strong liquidity"));
     }
@@ -1761,7 +2319,13 @@ mod tests {
             concerns: vec!["Peg deviation".to_string()],
             positives: vec![],
         };
-        let meta = meta_analysis_token(&risk, true, Some(false), Some(40.0), 100_000.0);
+        let meta = meta_analysis_token(
+            &risk,
+            true,
+            Some(PegStatus::Deviation),
+            Some(40.0),
+            100_000.0,
+        );
         assert!(meta.synthesis.contains("peg deviation"));
         assert!(meta.synthesis.contains("Concentration risk"));
     }

@@ -348,8 +348,11 @@ fn parse_duration(s: &str) -> Result<u64> {
 
 /// Builds markdown report content for a market summary.
 fn market_summary_to_markdown(summary: &MarketSummary, venue: &str, pair: &str) -> String {
-    let bid_dev = summary.best_bid.and_then(|b| summary.peg_deviation_pct(b));
-    let ask_dev = summary.best_ask.and_then(|a| summary.peg_deviation_pct(a));
+    // A price with its peg deviation; no deviation is left out, not shown as 0.
+    let with_deviation = |price: f64| match summary.peg_deviation_pct(price) {
+        Some(pct) => format!("{price:.4} ({pct:+.3}%)"),
+        None => format!("{price:.4}"),
+    };
     let volume_row = summary
         .volume_24h
         .map(|v| format!("| Volume (24h) | {:.0} USDT |  \n", v))
@@ -403,11 +406,11 @@ fn market_summary_to_markdown(summary: &MarketSummary, venue: &str, pair: &str) 
         summary.source.label(),
         summary
             .best_bid
-            .map(|b| format!("{:.4} ({:+.3}%)", b, bid_dev.unwrap_or(0.0)))
+            .map(with_deviation)
             .unwrap_or_else(|| "-".to_string()),
         summary
             .best_ask
-            .map(|a| format!("{:.4} ({:+.3}%)", a, ask_dev.unwrap_or(0.0)))
+            .map(with_deviation)
             .unwrap_or_else(|| "-".to_string()),
         summary
             .mid_price
@@ -1343,6 +1346,30 @@ capabilities:
     }
 
     #[test]
+    fn test_markdown_leaves_out_the_peg_deviation_when_there_is_none() {
+        // A peg target of 0 has no deviation: no "(+0.000%)", the same as the text report.
+        use scope::market::{BookSource, OrderBook, OrderBookLevel};
+        let level = |price| OrderBookLevel {
+            price,
+            quantity: 100.0,
+        };
+        let book = OrderBook {
+            pair: "USDC/USDT".to_string(),
+            source: BookSource::Exchange,
+            bids: vec![level(0.9999)],
+            asks: vec![level(1.0001)],
+        };
+        let thresholds = HealthThresholds {
+            peg_target: 0.0,
+            ..HealthThresholds::default()
+        };
+        let summary = MarketSummary::from_order_book(&book, &thresholds, None);
+        let md = market_summary_to_markdown(&summary, "binance", "USDC");
+        assert!(md.contains("0.9999") && !md.contains("0.9999 ("), "{md}");
+        assert!(!md.contains("(+0.000%)"), "{md}");
+    }
+
+    #[test]
     fn test_market_summary_to_markdown_with_execution_estimates() {
         use scope::market::{ExecutionEstimate, ExecutionSide, HealthCheck, MarketSummary};
         let summary = MarketSummary {
@@ -2079,7 +2106,8 @@ capabilities:
         .await
         .unwrap();
         assert_eq!(volume, Some(777.0));
-        let depth: f64 = book.bids.iter().chain(&book.asks).map(|l| l.value()).sum();
+        let depth = book.total_depth(scope::market::BookSide::Bid)
+            + book.total_depth(scope::market::BookSide::Ask);
         assert!((depth - 50_000.0).abs() < 1.0, "depth {depth}");
     }
 

@@ -669,14 +669,12 @@ pub(crate) fn render_price_chart(f: &mut Frame, area: Rect, state: &MonitorState
     f.render_widget(chart, area);
 }
 
-pub(crate) use scope::tokens::is_stablecoin_price;
-
 /// Formats a price in USD with appropriate precision.
 /// Stablecoins get extra precision (6 decimals) to show micro-fluctuations.
 pub(crate) fn format_price_usd(price: f64) -> String {
     if price >= 1000.0 {
         format!("${:.2}", price)
-    } else if is_stablecoin_price(price) {
+    } else if scope::tokens::is_stablecoin_price(price) {
         // Stablecoins get 6 decimals to show micro-fluctuations
         format!("${:.6}", price)
     } else if price >= 1.0 {

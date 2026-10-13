@@ -162,34 +162,43 @@ impl OrderBook {
     }
 
     /// Estimate slippage for buying a given USDT notional by walking the ask
-    /// side. `None` when the book has no mid price (a side has no valid
-    /// level); `fillable` is false when the asks cannot fill the notional.
+    /// side. See [`Self::estimate_execution`].
     pub fn estimate_buy_execution(&self, notional_usdt: f64) -> Option<ExecutionEstimate> {
-        let mid = self.mid_price()?;
-        let (vwap, fillable) = walk_levels(&self.asks, notional_usdt, mid);
-        Some(ExecutionEstimate {
-            notional_usdt,
-            side: ExecutionSide::Buy,
-            vwap,
-            slippage_bps: (vwap - mid) / mid * 10_000.0,
-            fillable,
-        })
+        self.estimate_execution(ExecutionSide::Buy, notional_usdt)
     }
 
     /// Estimate slippage for selling (hitting bids) a given USDT notional.
-    /// `None` when the book has no mid price.
     pub fn estimate_sell_execution(&self, notional_usdt: f64) -> Option<ExecutionEstimate> {
+        self.estimate_execution(ExecutionSide::Sell, notional_usdt)
+    }
+
+    /// Slippage of filling `notional_usdt` against the opposite side, against
+    /// the mid. `None` when the book has no mid price (a side has no valid
+    /// level); `fillable` is false when the side cannot fill the notional.
+    pub fn estimate_execution(
+        &self,
+        side: ExecutionSide,
+        notional_usdt: f64,
+    ) -> Option<ExecutionEstimate> {
         let mid = self.mid_price()?;
-        let (vwap, fillable) = walk_levels(&self.bids, notional_usdt, mid);
+        let (levels, direction) = match side {
+            ExecutionSide::Buy => (&self.asks, 1.0),
+            ExecutionSide::Sell => (&self.bids, -1.0),
+        };
+        let (vwap, fillable) = walk_levels(levels, notional_usdt, mid);
         Some(ExecutionEstimate {
             notional_usdt,
-            side: ExecutionSide::Sell,
+            side,
             vwap,
-            slippage_bps: (mid - vwap) / mid * 10_000.0,
+            // Paying more than the mid (buy) or receiving less (sell) is positive.
+            slippage_bps: direction * (vwap - mid) / mid * BPS_PER_RATIO,
             fillable,
         })
     }
 }
+
+/// Basis points in a ratio of 1.
+const BPS_PER_RATIO: f64 = 10_000.0;
 
 /// Walks the valid levels (best first) until `notional` of quote value is
 /// taken. Returns the volume-weighted price (the mid when nothing fills) and

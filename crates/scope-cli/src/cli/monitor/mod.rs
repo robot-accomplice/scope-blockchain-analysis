@@ -729,6 +729,7 @@ mod tests {
     use super::input::*;
     use super::widgets::*;
     use super::*;
+    use scope::tokens::is_stablecoin_price;
 
     use crossterm::event::{KeyCode, KeyModifiers};
     use ratatui::layout::{Constraint, Direction, Layout, Rect};
