@@ -171,12 +171,13 @@ pub async fn run(
     // CLI run keeps the default Ctrl-C.
     tokio::spawn(cancel_prompts_on(signal_stream()?, &prompt::CANCEL));
     // The crash hook, then raw mode before the loads, so keys typed
-    // during startup are not read in cooked mode (issue #63). Nothing
-    // below can return an error before `session`, which restores the
-    // terminal.
+    // during startup are not read in cooked mode (issue #63). A failed
+    // `enter` has given the screen back already. Nothing after it can
+    // return an error before `session`, which restores the terminal.
     crash::install_panic_hook();
     let mut host = RealHost {
-        terminal: screen::enter(screen::Mouse::Off),
+        terminal: screen::enter(screen::Mouse::Off)
+            .map_err(|e| ScopeError::Other(format!("cannot take the terminal: {}", e)))?,
         events: None,
         signals,
         on_screen: true,
@@ -324,7 +325,9 @@ impl Host for RealHost {
         self.restore();
     }
     fn resume(&mut self) {
-        self.terminal = screen::enter(screen::Mouse::Off);
+        // `Host::resume` has no error path. A terminal that cannot be
+        // taken back panics; the crash hook writes the log.
+        self.terminal = screen::enter(screen::Mouse::Off).expect("failed to initialize terminal");
         self.on_screen = true;
     }
     /// Does nothing when the screen is already given back: leaving the

@@ -4,7 +4,7 @@ use crate::cli::screen;
 use crossterm::event::{Event, KeyCode, KeyModifiers};
 use scope::chains::ChainClient;
 use scope::chains::dex::DexDataSource;
-use scope::error::Result;
+use scope::error::{Result, ScopeError};
 use std::io;
 use std::time::{Duration, Instant};
 
@@ -57,7 +57,8 @@ impl MonitorApp {
         chain_client: Option<Box<dyn ChainClient>>,
         exchange_client: Option<scope::market::ExchangeClient>,
     ) -> Result<Self> {
-        let terminal = screen::enter(screen::Mouse::Capture);
+        let terminal = screen::enter(screen::Mouse::Capture)
+            .map_err(|e| ScopeError::Chain(format!("Failed to set up the terminal: {}", e)))?;
 
         let mut state = MonitorState::new(&initial_data, chain);
         state.apply_config(monitor_config);

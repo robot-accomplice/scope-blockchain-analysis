@@ -205,13 +205,6 @@ impl Output {
         }
     }
 
-    /// The data channel as a writer, for code that writes through
-    /// [`Write`] (the prompts, the setup wizard). What it writes takes the
-    /// same path as [`outln!`](crate::outln), so a TUI run keeps a copy.
-    pub fn data_writer(&self) -> DataWriter {
-        DataWriter(self.out.clone())
-    }
-
     /// Writes formatted data to the data channel. Use [`outln!`](crate::outln) / [`out!`](crate::out).
     ///
     /// # Errors
@@ -229,18 +222,6 @@ impl Output {
     /// Returns the writer's error.
     pub fn write_err(&self, args: fmt::Arguments<'_>) -> io::Result<()> {
         emit(&self.err, args)
-    }
-}
-
-/// The data channel of an [`Output`] as a writer. See [`Output::data_writer`].
-pub struct DataWriter(Sink);
-
-impl Write for DataWriter {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        lock(&self.0).write(buf)
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        lock(&self.0).flush()
     }
 }
 
@@ -336,7 +317,8 @@ impl Write for TeeSink {
 /// Drops text from the start of `buf` when it is longer than `limit`,
 /// down to about half of it, so a long run trims rarely. It cuts after a
 /// newline in the half it keeps; with no newline there, it keeps the end
-/// of the line. Returns true when it dropped text.
+/// of the line, cut where no character or escape sequence is split.
+/// Returns true when it dropped text.
 fn keep_tail(buf: &mut Vec<u8>, limit: usize) -> bool {
     if buf.len() <= limit {
         return false;
@@ -347,9 +329,39 @@ fn keep_tail(buf: &mut Vec<u8>, limit: usize) -> bool {
         .position(|&b| b == b'\n')
         .map(|i| cut + i + 1)
         .filter(|&start| start < buf.len())
-        .unwrap_or(cut);
+        .unwrap_or_else(|| whole_cut(buf, cut));
     buf.drain(..start);
     true
+}
+
+const ESC: u8 = 0x1b;
+
+/// The first index at or after `cut` that starts neither inside a CSI
+/// escape sequence (`ESC [ … final`) nor inside a UTF-8 character.
+fn whole_cut(buf: &[u8], cut: usize) -> usize {
+    let after_escape = buf[..cut]
+        .iter()
+        .rposition(|&b| b == ESC)
+        .and_then(|esc| csi_end(buf, esc))
+        .filter(|&end| end > cut)
+        .unwrap_or(cut);
+    let continuation = |b: u8| b & 0b1100_0000 == 0b1000_0000;
+    buf[after_escape..]
+        .iter()
+        .position(|&b| !continuation(b))
+        .map_or(buf.len(), |i| after_escape + i)
+}
+
+/// The index after the final byte of the CSI sequence that starts at
+/// `esc`, or `None` when it is not a complete CSI sequence.
+fn csi_end(buf: &[u8], esc: usize) -> Option<usize> {
+    if buf.get(esc + 1) != Some(&b'[') {
+        return None;
+    }
+    buf[esc + 2..]
+        .iter()
+        .position(|b| (0x40..=0x7e).contains(b))
+        .map(|i| esc + 2 + i + 1)
 }
 
 /// Locks a mutex, recovering the data if a panicking writer poisoned it.
@@ -420,23 +432,6 @@ pub(crate) mod tests {
         errln!(o, "Warning: {}", "partial data").unwrap();
         assert_eq!(cap.out(), "{\"ok\":true}\n");
         assert_eq!(cap.err(), "Warning: partial data\n");
-    }
-
-    #[test]
-    fn test_data_writer_writes_to_the_data_channel() {
-        // The setup wizard writes through a writer; a TUI run must keep
-        // its text like any other data.
-        let (o, cap) = Output::capture();
-        let mut w = o.data_writer();
-        write!(w, "Step 1: API Keys").unwrap();
-        w.flush().unwrap();
-        assert_eq!(cap.out(), "Step 1: API Keys");
-        assert_eq!(cap.err(), "");
-        let mut closed = Output::from_writers(ClosedPipe, Vec::new()).data_writer();
-        assert_eq!(
-            closed.write(b"x").unwrap_err().kind(),
-            io::ErrorKind::BrokenPipe
-        );
     }
 
     #[test]
@@ -554,6 +549,21 @@ pub(crate) mod tests {
         let kept = copy.out();
         assert!(!kept.is_empty() && kept.len() <= 100, "{}", kept.len());
         assert!(blob.ends_with(&kept), "the end of the line: {kept:?}");
+    }
+
+    #[test]
+    fn test_trim_of_one_line_splits_no_character_and_no_escape() {
+        // The cut lands in the middle of a two-byte character, then in
+        // the middle of a color sequence. Either would show as garbage.
+        let mut chars = "é".repeat(60).into_bytes(); // 120 bytes
+        assert!(keep_tail(&mut chars, 102)); // cuts at 120 - 51 = 69, inside an é
+        assert!(String::from_utf8(chars.clone()).is_ok(), "{chars:?}");
+        assert_eq!(chars.len(), 50);
+        let mut colored = b"x".repeat(60);
+        colored.extend_from_slice(b"\x1b[38;5;196mred");
+        // 74 bytes; limit 20 cuts at 64, inside the sequence at 60..71.
+        assert!(keep_tail(&mut colored, 20));
+        assert_eq!(colored, b"red");
     }
 
     #[test]

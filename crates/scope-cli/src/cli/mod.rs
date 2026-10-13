@@ -79,6 +79,7 @@ pub mod setup;
 pub(crate) mod textfit;
 pub mod theme;
 pub mod token_health;
+pub(crate) mod token_pick;
 pub mod tui;
 pub mod tx;
 pub mod venues;

@@ -67,6 +67,34 @@ pub enum Overlay {
     HistorySearch(HistorySearchState),
 }
 
+/// What Esc does in the current state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EscAction {
+    ClosePalette,
+    CloseMenu,
+    CloseSearch,
+    CloseHistorySearch,
+    /// Cancels the running command.
+    Cancel,
+    /// Idle with no overlay: clears the input line.
+    ClearLine,
+}
+
+impl EscAction {
+    /// The status bar words, or `None` when the bar says nothing (clearing
+    /// the line is not worth the room).
+    fn hint(self) -> Option<&'static str> {
+        match self {
+            Self::ClosePalette => Some("Esc closes palette"),
+            Self::CloseMenu => Some("Esc closes menu"),
+            Self::CloseSearch => Some("Esc closes search"),
+            Self::CloseHistorySearch => Some("Esc closes history search"),
+            Self::Cancel => Some("Esc cancels"),
+            Self::ClearLine => None,
+        }
+    }
+}
+
 /// What the status bar says when a search finds nothing.
 const NO_MATCH: &str = "no match";
 
@@ -328,6 +356,9 @@ impl TuiState {
             self.close_overlay();
             return Action::None;
         }
+        if key.code == KeyCode::Esc {
+            return self.press_esc();
+        }
         match self.overlay.take() {
             Some(Overlay::Search(st)) => {
                 self.search_key(st, key);
@@ -342,7 +373,6 @@ impl TuiState {
         if let Some(Overlay::Palette(p)) = &mut self.overlay {
             let count = p.matches().len();
             match key.code {
-                KeyCode::Esc => self.overlay = None,
                 KeyCode::Enter => {
                     let fill = p
                         .matches()
@@ -386,10 +416,6 @@ impl TuiState {
                     self.replace_word(start, &pick, true);
                     return Action::None;
                 }
-                KeyCode::Esc => {
-                    self.overlay = None;
-                    return Action::None;
-                }
                 _ => self.overlay = None,
             }
         }
@@ -412,12 +438,6 @@ impl TuiState {
                 } else if self.input.is_empty() {
                     return Action::Exit;
                 }
-            }
-            KeyCode::Esc => {
-                if self.running.is_some() {
-                    return Action::Cancel;
-                }
-                self.set_input(String::new());
             }
             KeyCode::Enter => {
                 // The screen shows no output now: the line stays.
@@ -692,10 +712,6 @@ impl TuiState {
             }
         };
         match key.code {
-            KeyCode::Esc => {
-                self.scroll.set(st.saved_scroll);
-                return;
-            }
             KeyCode::Char('f') if ctrl => st.editing = !st.editing,
             KeyCode::Enter if st.editing => st.editing = false,
             // In navigate mode Enter steps to the next older match, as `n`.
@@ -741,10 +757,6 @@ impl TuiState {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         match key.code {
-            KeyCode::Esc => {
-                self.set_input(st.draft);
-                return;
-            }
             // The match stays in the input. It does not run.
             KeyCode::Enter => return,
             KeyCode::Char('r') if ctrl => {
@@ -1589,19 +1601,33 @@ impl TuiState {
         lines
     }
 
-    /// What Esc does now, in the words of the status bar. An open overlay
-    /// takes Esc first; then a running command; idle with no overlay, Esc
-    /// only clears the line and the bar says nothing. The key handling
-    /// checks the same order.
-    fn esc_hint(&self) -> Option<&'static str> {
+    /// What Esc does now. An open overlay takes Esc first; then a running
+    /// command; idle with no overlay, Esc clears the line. The key handling
+    /// and the status bar both read it.
+    fn esc_action(&self) -> EscAction {
         match (&self.overlay, &self.running) {
-            (Some(Overlay::Palette(_)), _) => Some("Esc closes palette"),
-            (Some(Overlay::Menu(_)), _) => Some("Esc closes menu"),
-            (Some(Overlay::Search(_)), _) => Some("Esc closes search"),
-            (Some(Overlay::HistorySearch(_)), _) => Some("Esc closes history search"),
-            (None, Some(_)) => Some("Esc cancels"),
-            (None, None) => None,
+            (Some(Overlay::Palette(_)), _) => EscAction::ClosePalette,
+            (Some(Overlay::Menu(_)), _) => EscAction::CloseMenu,
+            (Some(Overlay::Search(_)), _) => EscAction::CloseSearch,
+            (Some(Overlay::HistorySearch(_)), _) => EscAction::CloseHistorySearch,
+            (None, Some(_)) => EscAction::Cancel,
+            (None, None) => EscAction::ClearLine,
         }
+    }
+
+    /// Esc: does what [`Self::esc_action`] says. Closing an overlay puts
+    /// back what it changed (the scroll for a search, the line for a
+    /// history search).
+    fn press_esc(&mut self) -> Action {
+        match self.esc_action() {
+            EscAction::ClosePalette
+            | EscAction::CloseMenu
+            | EscAction::CloseSearch
+            | EscAction::CloseHistorySearch => self.close_overlay(),
+            EscAction::Cancel => return Action::Cancel,
+            EscAction::ClearLine => self.set_input(String::new()),
+        }
+        Action::None
     }
 
     /// What the status bar says now, before it is fitted to a width. Tests
@@ -1642,7 +1668,8 @@ impl TuiState {
             part
         });
         let esc = self
-            .esc_hint()
+            .esc_action()
+            .hint()
             .map(|hint| Span::styled(hint, Style::new().add_modifier(Modifier::BOLD)));
         let (state, scrolled, command) = match (&self.running, esc) {
             (Some(run), esc) => {
@@ -2473,6 +2500,37 @@ mod tests {
         );
         assert!(matches!(s.handle_key(ctrl('y')), Action::None));
         assert!(s.scrollback_text().contains("nothing to copy yet"));
+    }
+
+    #[test]
+    fn test_an_outside_run_that_prompted_keeps_only_its_data_for_copy() {
+        // `crawl USDC` asks to pick a token and to save it. Ctrl-Y and save
+        // after it must get the report, not the list and the questions.
+        let mut s = state();
+        let (terminal, _screen) = Output::capture();
+        let (o, copy) = terminal.teed(1 << 20);
+        let pick = crate::cli::prompt::pick(
+            &mut std::io::Cursor::new(b"1\n".to_vec()),
+            &o,
+            "1  USDC\n",
+            "token",
+            1,
+        );
+        assert_eq!(pick.unwrap(), 0);
+        crate::cli::prompt::ask(
+            &mut std::io::Cursor::new(b"n\n".to_vec()),
+            &o,
+            "Save this token for future use? [y/N]: ",
+        )
+        .unwrap();
+        crate::outln!(o, "report").unwrap();
+        s.show_outside(&copy, &Ending::Finished(Ok(())));
+        assert_eq!(s.last_output.as_deref(), Some("report\n"));
+        let shown = s.scrollback_text();
+        assert!(
+            shown.contains("Select token (1-1)"),
+            "the user still sees it"
+        );
     }
 
     #[test]

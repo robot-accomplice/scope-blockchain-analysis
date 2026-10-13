@@ -6,13 +6,12 @@
 //! [`enter`] installs one panic hook that restores the terminal; later
 //! calls (a TUI resume, a second monitor run) install no more.
 //!
-//! No other module calls `ratatui::init` or `ratatui::restore`: each
-//! `ratatui::init` adds a panic hook, so a resume per suspend would stack
-//! them. A source guard in the tests keeps it so.
+//! No other module takes the screen or sets a restore hook. A guard test
+//! (`tests/one_screen_owner.rs`) keeps it so.
 
 use std::io::{self, Write};
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Whether the screen reports mouse events. Only the monitor uses them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -21,43 +20,88 @@ pub(crate) enum Mouse {
     Capture,
 }
 
-/// True while this module holds the screen. [`restore`] acts only then,
-/// so a second restore (a panic after a normal exit, `cleanup` then
-/// `Drop`) does not move the shell's cursor.
-static HELD: AtomicBool = AtomicBool::new(false);
+/// The state of the screen: whether it is held, and whether the restore
+/// hook is in. One process-wide value ([`SCREEN`]); tests make their own.
+struct Lifecycle {
+    /// True while the screen is held. Giving it back acts only then, so a
+    /// second restore (a panic after a normal exit, `cleanup` then `Drop`)
+    /// does not move the shell's cursor.
+    held: AtomicBool,
+    /// Set once the restore hook is in.
+    hook: OnceLock<()>,
+}
 
-/// How many restore hooks this module installed. The tests read it.
-static HOOK_INSTALLS: AtomicUsize = AtomicUsize::new(0);
+static SCREEN: Lifecycle = Lifecycle::new();
+
+impl Lifecycle {
+    const fn new() -> Self {
+        Self {
+            held: AtomicBool::new(false),
+            hook: OnceLock::new(),
+        }
+    }
+
+    /// Runs `install_hook` the first time only, turns raw mode on with
+    /// `raw_mode`, then writes the sequences that take the screen to `w`.
+    fn take(
+        &self,
+        w: &mut impl Write,
+        raw_mode: impl FnOnce() -> io::Result<()>,
+        mouse: Mouse,
+        install_hook: impl FnOnce(),
+    ) -> io::Result<()> {
+        self.hook.get_or_init(install_hook);
+        raw_mode()?;
+        self.held.store(true, Ordering::SeqCst);
+        crossterm::execute!(w, crossterm::terminal::EnterAlternateScreen)?;
+        paste_mode(w, true);
+        if mouse == Mouse::Capture {
+            crossterm::execute!(w, crossterm::event::EnableMouseCapture)?;
+        }
+        Ok(())
+    }
+
+    /// When the screen is held: writes the sequences that turn mouse
+    /// capture and bracketed paste off to `w`, then runs `leave` (raw mode
+    /// off, alternate screen off). Otherwise does nothing.
+    fn give_back(&self, w: &mut impl Write, leave: impl FnOnce()) {
+        if self.held.swap(false, Ordering::SeqCst) {
+            let _ = crossterm::execute!(w, crossterm::event::DisableMouseCapture);
+            paste_mode(w, false);
+            leave();
+        }
+    }
+}
 
 /// Takes the terminal and returns a ratatui terminal on stdout.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics when the terminal cannot be set up, as `ratatui::init` does.
-pub(crate) fn enter(mouse: Mouse) -> ratatui::DefaultTerminal {
-    take(
-        &mut io::stdout(),
-        crossterm::terminal::enable_raw_mode,
-        mouse,
-    )
-    .and_then(|()| ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(io::stdout())))
-    .expect("failed to initialize terminal")
+/// Returns the terminal error (no tty, mouse capture refused). The screen
+/// is given back first, so the caller does not have to.
+pub(crate) fn enter(mouse: Mouse) -> io::Result<ratatui::DefaultTerminal> {
+    SCREEN
+        .take(
+            &mut io::stdout(),
+            crossterm::terminal::enable_raw_mode,
+            mouse,
+            install_restore_hook,
+        )
+        .and_then(|()| {
+            ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(io::stdout()))
+        })
+        .inspect_err(|_| restore())
 }
 
 /// Gives the terminal back: mouse capture and bracketed paste off, raw
 /// mode off, alternate screen off, cursor shown. Does nothing when the
 /// screen is not held.
 pub(crate) fn restore() {
-    if HELD.swap(false, Ordering::SeqCst) {
-        let mut out = io::stdout();
-        let _ = crossterm::execute!(out, crossterm::event::DisableMouseCapture);
-        paste_mode(&mut out, false);
-        ratatui::restore();
-    }
+    SCREEN.give_back(&mut io::stdout(), ratatui::restore);
 }
 
 /// Bracketed paste on or off, as the escape bytes a terminal reads.
-pub(crate) fn paste_mode(w: &mut impl Write, on: bool) {
+fn paste_mode(w: &mut impl Write, on: bool) {
     let _ = if on {
         crossterm::execute!(w, crossterm::event::EnableBracketedPaste)
     } else {
@@ -65,41 +109,23 @@ pub(crate) fn paste_mode(w: &mut impl Write, on: bool) {
     };
 }
 
-/// Installs the restore hook once, turns raw mode on with `raw_mode`, then
-/// writes the sequences that take the screen to `w`.
-fn take(
-    w: &mut impl Write,
-    raw_mode: impl FnOnce() -> io::Result<()>,
-    mouse: Mouse,
-) -> io::Result<()> {
-    install_restore_hook();
-    raw_mode()?;
-    HELD.store(true, Ordering::SeqCst);
-    crossterm::execute!(w, crossterm::terminal::EnterAlternateScreen)?;
-    paste_mode(w, true);
-    if mouse == Mouse::Capture {
-        crossterm::execute!(w, crossterm::event::EnableMouseCapture)?;
-    }
-    Ok(())
-}
-
-/// Installs the panic hook that restores the terminal, then calls the
-/// previous hook. Only the first call has an effect.
+/// Sets the panic hook that restores the terminal, then calls the
+/// previous hook. [`Lifecycle::take`] runs it once.
 fn install_restore_hook() {
-    static INSTALLED: OnceLock<()> = OnceLock::new();
-    INSTALLED.get_or_init(|| {
-        HOOK_INSTALLS.fetch_add(1, Ordering::SeqCst);
-        let previous = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            restore();
-            previous(info);
-        }));
-    });
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore();
+        previous(info);
+    }));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    const ALT_SCREEN_AND_PASTE: &[u8] = b"\x1b[?1049h\x1b[?2004h";
+    const MOUSE_ON: &[u8] = b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1015h\x1b[?1006h";
 
     #[test]
     fn test_paste_mode_writes_the_enable_and_disable_sequences() {
@@ -115,81 +141,90 @@ mod tests {
     fn test_tui_resumes_and_monitor_runs_install_one_restore_hook() {
         // Each TUI resume and each monitor run takes the screen again. A
         // hook per take would restore the terminal once per take on a
-        // panic, and stack without end in a long TUI session.
+        // panic, and stack without end in a long TUI session. The test
+        // uses its own lifecycle and a counting installer: no real hook.
+        let screen = Lifecycle::new();
+        let installs = Cell::new(0);
         for mouse in [Mouse::Off, Mouse::Capture, Mouse::Off, Mouse::Capture] {
-            let mut screen = Vec::new();
-            take(&mut screen, || Ok(()), mouse).unwrap();
-            assert!(screen.starts_with(b"\x1b[?1049h\x1b[?2004h"), "{screen:?}");
+            let mut out = Vec::new();
+            screen
+                .take(
+                    &mut out,
+                    || Ok(()),
+                    mouse,
+                    || installs.set(installs.get() + 1),
+                )
+                .unwrap();
+            assert!(out.starts_with(ALT_SCREEN_AND_PASTE), "{out:?}");
             assert_eq!(
-                screen.ends_with(b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1015h\x1b[?1006h"),
+                out.ends_with(MOUSE_ON),
                 mouse == Mouse::Capture,
                 "mouse capture only for the monitor"
             );
+            screen.give_back(&mut Vec::new(), || {});
         }
-        assert_eq!(HOOK_INSTALLS.load(Ordering::SeqCst), 1);
-        // The tests do not hold the real screen.
-        HELD.store(false, Ordering::SeqCst);
+        assert_eq!(installs.get(), 1);
+    }
+
+    #[test]
+    fn test_give_back_acts_once_per_take() {
+        let screen = Lifecycle::new();
+        let leaves = Cell::new(0);
+        screen
+            .take(&mut Vec::new(), || Ok(()), Mouse::Capture, || {})
+            .unwrap();
+        let mut first = Vec::new();
+        screen.give_back(&mut first, || leaves.set(leaves.get() + 1));
+        assert!(
+            first.ends_with(b"\x1b[?2004l"),
+            "mouse and paste off: {first:?}"
+        );
+        let mut second = Vec::new();
+        screen.give_back(&mut second, || leaves.set(leaves.get() + 1));
+        assert!(second.is_empty(), "a second restore moves the cursor");
+        assert_eq!(leaves.get(), 1);
     }
 
     #[test]
     fn test_raw_mode_failure_takes_nothing() {
-        let mut screen = Vec::new();
-        let e = take(&mut screen, || Err(io::Error::other("no tty")), Mouse::Off).unwrap_err();
+        let screen = Lifecycle::new();
+        let mut out = Vec::new();
+        let e = screen
+            .take(
+                &mut out,
+                || Err(io::Error::other("no tty")),
+                Mouse::Off,
+                || {},
+            )
+            .unwrap_err();
         assert_eq!(e.to_string(), "no tty");
-        assert!(screen.is_empty());
+        assert!(out.is_empty());
+        assert!(!screen.held.load(Ordering::SeqCst));
     }
 
-    /// The non-test source of a file: everything before its test module.
-    fn code_of(file: &str) -> &str {
-        file.split("#[cfg(test)]\nmod tests").next().unwrap()
-    }
+    /// A terminal that refuses everything after raw mode is on.
+    struct Refusing;
 
-    fn rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let p = entry.unwrap().path();
-            if p.is_dir() {
-                rs_files(&p, out);
-            } else if p.extension().is_some_and(|e| e == "rs") {
-                out.push(p);
-            }
+    impl Write for Refusing {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("refused"))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
         }
     }
 
     #[test]
-    fn test_only_this_module_takes_or_gives_back_the_screen() {
-        let cli = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cli");
-        let mut files = Vec::new();
-        rs_files(&cli, &mut files);
-        let calls = [
-            "ratatui::init",
-            "ratatui::try_init",
-            "ratatui::restore",
-            "ratatui::try_restore",
-            "enable_raw_mode",
-            "disable_raw_mode",
-            "EnterAlternateScreen",
-            "LeaveAlternateScreen",
-            "EnableMouseCapture",
-            "DisableMouseCapture",
-            "panic::set_hook",
-        ];
-        let mut found = Vec::new();
-        for path in files {
-            let name = path
-                .strip_prefix(&cli)
-                .unwrap()
-                .to_string_lossy()
-                .into_owned();
-            if name == "screen.rs" || name == "tui/crash.rs" {
-                continue;
-            }
-            let src = std::fs::read_to_string(&path).unwrap();
-            for call in calls {
-                if code_of(&src).contains(call) {
-                    found.push(format!("{name}: {call}"));
-                }
-            }
-        }
-        assert!(found.is_empty(), "use cli::screen:\n{}", found.join("\n"));
+    fn test_a_failed_take_is_an_error_and_can_be_given_back() {
+        // The monitor returns this error to the user; `enter` gives the
+        // screen back before it does.
+        let screen = Lifecycle::new();
+        let e = screen
+            .take(&mut Refusing, || Ok(()), Mouse::Capture, || {})
+            .unwrap_err();
+        assert_eq!(e.to_string(), "refused");
+        let left = Cell::new(false);
+        screen.give_back(&mut Vec::new(), || left.set(true));
+        assert!(left.get(), "raw mode was on, so it is turned off");
     }
 }
