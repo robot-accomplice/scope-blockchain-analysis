@@ -95,22 +95,7 @@ pub async fn handle(
     };
 
     // Build combined JSON
-    let market_json = market_summary.map(|m| {
-        serde_json::json!({
-            "pair": m.pair,
-            "peg_target": m.peg_target,
-            "book_source": m.source,
-            "best_bid": m.best_bid,
-            "best_ask": m.best_ask,
-            "mid_price": m.mid_price,
-            "spread": m.spread,
-            "bid_depth": m.bid_depth,
-            "ask_depth": m.ask_depth,
-            "healthy": m.healthy,
-            "volume_24h": m.volume_24h,
-            "checks": &m.checks
-        })
-    });
+    let market_json = market_summary.map(|m| m.to_json());
 
     Json(serde_json::json!({
         "analytics": analytics,

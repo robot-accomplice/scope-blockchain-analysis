@@ -443,32 +443,11 @@ async fn run_summary_once(
             out!(out, "{}", summary.format_text(Some(&venue_label)))?;
         }
         SummaryFormat::Json => {
-            let json = serde_json::json!({
-                "run": run_num,
-                "venue": venue_label,
-                "pair": summary.pair,
-                "peg_target": summary.peg_target,
-                "best_bid": summary.best_bid,
-                "best_ask": summary.best_ask,
-                "mid_price": summary.mid_price,
-                "spread": summary.spread,
-                "volume_24h": summary.volume_24h,
-                "book_source": summary.source,
-                "execution_10k_buy": summary.execution_10k_buy.as_ref().map(|e| serde_json::json!({
-                    "fillable": e.fillable,
-                    "slippage_bps": e.slippage_bps
-                })),
-                "execution_10k_sell": summary.execution_10k_sell.as_ref().map(|e| serde_json::json!({
-                    "fillable": e.fillable,
-                    "slippage_bps": e.slippage_bps
-                })),
-                "ask_depth": summary.ask_depth,
-                "bid_depth": summary.bid_depth,
-                "ask_levels": summary.ask_levels(),
-                "bid_levels": summary.bid_levels(),
-                "healthy": summary.healthy,
-                "checks": &summary.checks,
-            });
+            let mut json = summary.to_json();
+            if let Some(obj) = json.as_object_mut() {
+                obj.insert("run".to_string(), serde_json::json!(run_num));
+                obj.insert("venue".to_string(), serde_json::json!(venue_label));
+            }
             outln!(out, "{}", serde_json::to_string_pretty(&json)?)?;
         }
     }

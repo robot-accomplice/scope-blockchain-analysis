@@ -230,20 +230,7 @@ fn token_health_to_json(
     analytics: &TokenAnalytics,
     market: Option<&MarketSummary>,
 ) -> Result<String> {
-    let market_json = market.map(|m| {
-        serde_json::json!({
-            "peg_target": m.peg_target,
-            "book_source": m.source,
-            "best_bid": m.best_bid,
-            "best_ask": m.best_ask,
-            "mid_price": m.mid_price,
-            "spread": m.spread,
-            "bid_depth": m.bid_depth,
-            "ask_depth": m.ask_depth,
-            "healthy": m.healthy,
-            "checks": &m.checks
-        })
-    });
+    let market_json = market.map(|m| m.to_json());
     let json = serde_json::json!({
         "analytics": analytics,
         "market": market_json

@@ -625,6 +625,53 @@ impl MarketSummary {
         }
     }
 
+    /// The one JSON shape for a summary. The web API and both CLI commands
+    /// send these keys; each call site adds only its own wrapper keys
+    /// (`run`, `venue`, `analytics`). `app.js` reads them, so the names are
+    /// pinned. `bids`/`asks` are capped at 20 levels; the level counts stay
+    /// exact.
+    pub fn to_json(&self) -> serde_json::Value {
+        let exec = |e: &ExecutionEstimate| {
+            serde_json::json!({
+                "notional_usdt": e.notional_usdt,
+                "vwap": e.vwap,
+                "slippage_bps": e.slippage_bps,
+                "fillable": e.fillable,
+            })
+        };
+        let levels = |ls: &[OrderBookLevel]| {
+            ls.iter()
+                .take(20)
+                .map(|l| {
+                    serde_json::json!({"price": l.price, "quantity": l.quantity, "value": l.value()})
+                })
+                .collect::<Vec<_>>()
+        };
+        serde_json::json!({
+            "pair": self.pair,
+            "book_source": self.source,
+            "peg_target": self.peg_target,
+            "best_bid": self.best_bid,
+            "best_ask": self.best_ask,
+            "mid_price": self.mid_price,
+            "spread": self.spread,
+            "volume_24h": self.volume_24h,
+            "bid_depth": self.bid_depth,
+            "ask_depth": self.ask_depth,
+            "bid_outliers": self.bid_outliers,
+            "ask_outliers": self.ask_outliers,
+            "bid_levels": self.bid_levels(),
+            "ask_levels": self.ask_levels(),
+            "healthy": self.healthy,
+            "slippage_warn_bps": SLIPPAGE_WARN_BPS,
+            "execution_10k_buy": self.execution_10k_buy.as_ref().map(exec),
+            "execution_10k_sell": self.execution_10k_sell.as_ref().map(exec),
+            "bids": levels(&self.bids),
+            "asks": levels(&self.asks),
+            "checks": &self.checks,
+        })
+    }
+
     /// A price as text, with its deviation from the peg when there is one.
     fn price_with_peg_deviation(&self, price: f64) -> String {
         use crate::display::terminal as t;
@@ -1100,6 +1147,64 @@ mod tests {
         assert_eq!(v, serde_json::json!({"status": "n/a", "message": "x"}));
         let v = serde_json::to_value(HealthCheck::Fail("y".into())).unwrap();
         assert_eq!(v, serde_json::json!({"status": "fail", "message": "y"}));
+    }
+
+    #[test]
+    fn test_to_json_shape_is_the_one_the_web_and_cli_share() {
+        // app.js reads these keys; the CLI JSON adds only `run` and `venue`.
+        let s = MarketSummary::from_order_book(
+            &healthy_book(),
+            &HealthThresholds::default(),
+            Some(50_000.0),
+        );
+        let v = s.to_json();
+        for key in [
+            "pair",
+            "book_source",
+            "peg_target",
+            "best_bid",
+            "best_ask",
+            "mid_price",
+            "spread",
+            "volume_24h",
+            "bid_depth",
+            "ask_depth",
+            "bid_outliers",
+            "ask_outliers",
+            "bid_levels",
+            "ask_levels",
+            "healthy",
+            "slippage_warn_bps",
+            "execution_10k_buy",
+            "execution_10k_sell",
+            "bids",
+            "asks",
+            "checks",
+        ] {
+            assert!(v.get(key).is_some(), "missing key {key}");
+        }
+        assert_eq!(v["pair"], "USDC/USDT");
+        assert_eq!(v["book_source"], "exchange");
+        assert_eq!(v["slippage_warn_bps"], SLIPPAGE_WARN_BPS);
+        assert_eq!(v["bid_levels"], 10);
+        let buy = &v["execution_10k_buy"];
+        for key in ["notional_usdt", "vwap", "slippage_bps", "fillable"] {
+            assert!(buy.get(key).is_some(), "missing exec key {key}");
+        }
+        let level = &v["bids"][0];
+        for key in ["price", "quantity", "value"] {
+            assert!(level.get(key).is_some(), "missing level key {key}");
+        }
+    }
+
+    #[test]
+    fn test_to_json_caps_levels_at_twenty_but_counts_all() {
+        let mut book = healthy_book();
+        book.bids = side(0.9999, -0.0001, &[400.0; 25]);
+        let s = summarize(&book);
+        let v = s.to_json();
+        assert_eq!(v["bids"].as_array().unwrap().len(), 20);
+        assert_eq!(v["bid_levels"], 25);
     }
 
     #[test]

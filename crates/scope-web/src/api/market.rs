@@ -37,52 +37,6 @@ fn default_venue() -> String {
     "binance".to_string()
 }
 
-/// Converts a MarketSummary to a JSON Value.
-fn summary_to_json(summary: &MarketSummary) -> serde_json::Value {
-    let exec_buy = summary.execution_10k_buy.as_ref().map(|e| {
-        serde_json::json!({
-            "notional_usdt": e.notional_usdt,
-            "vwap": e.vwap,
-            "slippage_bps": e.slippage_bps,
-            "fillable": e.fillable,
-        })
-    });
-    let exec_sell = summary.execution_10k_sell.as_ref().map(|e| {
-        serde_json::json!({
-            "notional_usdt": e.notional_usdt,
-            "vwap": e.vwap,
-            "slippage_bps": e.slippage_bps,
-            "fillable": e.fillable,
-        })
-    });
-
-    serde_json::json!({
-        "pair": summary.pair,
-        "book_source": summary.source,
-        "peg_target": summary.peg_target,
-        "best_bid": summary.best_bid,
-        "best_ask": summary.best_ask,
-        "mid_price": summary.mid_price,
-        "spread": summary.spread,
-        "volume_24h": summary.volume_24h,
-        "bid_depth": summary.bid_depth,
-        "ask_depth": summary.ask_depth,
-        "bid_outliers": summary.bid_outliers,
-        "ask_outliers": summary.ask_outliers,
-        "healthy": summary.healthy,
-        "slippage_warn_bps": scope::market::health::SLIPPAGE_WARN_BPS,
-        "execution_10k_buy": exec_buy,
-        "execution_10k_sell": exec_sell,
-        "bids": summary.bids.iter().take(20).map(|l| {
-            serde_json::json!({"price": l.price, "quantity": l.quantity, "value": l.value()})
-        }).collect::<Vec<_>>(),
-        "asks": summary.asks.iter().take(20).map(|l| {
-            serde_json::json!({"price": l.price, "quantity": l.quantity, "value": l.value()})
-        }).collect::<Vec<_>>(),
-        "checks": &summary.checks,
-    })
-}
-
 /// POST /api/market/summary — Peg and order book health. The pair and venue
 /// are read exactly as the CLI reads them (core `Pair` and `MarketVenue`).
 /// Errors map through `status_for`: an unknown venue or a chain mismatch is
@@ -92,7 +46,7 @@ pub async fn handle(
     Json(req): Json<MarketRequest>,
 ) -> impl IntoResponse {
     match market_summary(&state, &req).await {
-        Ok(summary) => Json(summary_to_json(&summary)).into_response(),
+        Ok(summary) => Json(summary.to_json()).into_response(),
         Err(e) => error_response(status_for(&e), e.to_string()),
     }
 }
@@ -430,7 +384,7 @@ mod tests {
     }
 
     #[test]
-    fn test_summary_to_json_with_execution_estimates() {
+    fn test_summary_json_with_execution_estimates() {
         use scope::market::OrderBookLevel;
 
         let book = scope::market::OrderBook {
@@ -460,7 +414,7 @@ mod tests {
         let thresholds = scope::market::HealthThresholds::default();
         let summary =
             scope::market::MarketSummary::from_order_book(&book, &thresholds, Some(50_000.0));
-        let json = summary_to_json(&summary);
+        let json = summary.to_json();
 
         assert_eq!(json["pair"], "USDC/USDT");
         assert!(json["best_bid"].as_f64().unwrap() > 0.0);
