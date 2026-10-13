@@ -31,3 +31,32 @@
 - **Hint line and help:** key names `KEY`, descriptions `SECONDARY`.
 - **Footers:** `✓ Done in` (`OK`; the `✓` is new), `✗ Failed in` (`ERR`, bold), `Cancelled after` (`WARN`).
 - **Command output:** table header rows bold `ACCENT` (the only change to command output).
+
+## Amendment (2026-10-13): theme is a system, not a TUI feature
+
+Jon: theme colors are controlled and housed centrally for every surface. Clean Code and Clean Architecture are the standard.
+
+### Layers (dependency rule: inward only)
+
+| Layer | Module | Knows | Must not know |
+|---|---|---|---|
+| Domain (market, chains, compliance, health) | `scope::{market, chains, …}` | business data | any color, style or theme |
+| Presentation policy | `scope::display::theme` | semantic roles, their tones, the monitor schemes, the color-off decision | ratatui, `colored`, axum, CSS |
+| Adapters (outer) | `scope::display` text painter; `scope_cli::cli::theme` (ratatui); `scope-web` theme CSS | how to render a role on their medium | role choices (they only translate) |
+
+Today the domain already holds no color (checked: no `colored` use outside `scope::display`).
+
+### `scope::display::theme`
+- `enum Role { Accent, Key, Ok, Warn, Err, Info, Secondary, Neutral, Selected, Match }`.
+- `struct Tone { color: Option<AnsiColor>, bold: bool, dim: bool, reverse: bool, web: &'static str }`, where `AnsiColor` is the 16 named colors, as a plain enum with no framework type.
+- `fn tone(role) -> Tone` is the single mapping. The table in this document is its specification.
+- Monitor schemes: `enum Scheme { GreenRed, BlueOrange, Monochrome }`, with `fn scheme_tone(scheme, Direction) -> Tone`. Schemes are data in the same module.
+- `fn color_enabled()` lives here or is re-exported here. No adapter decides color on its own.
+
+### Adapters (translate only)
+- **Text (CLI display):** `theme::paint(role, &str) -> String`. It replaces every `.cyan()` / `.green()` / `.dimmed()` call in `display/terminal.rs` and `cli/errors.rs`. Plain output stays byte-identical. Colored output keeps the same color per role, and a golden test pins it.
+- **ratatui (TUI and monitor):** `scope_cli::cli::theme::style(Role) -> Style` and `scheme_style(Scheme, Direction)`. They hold no color literals. Help text uses `paint`, so the hand-written ANSI constants go away.
+- **Web:** scope-web serves `/theme.css` built from `tone(role).web` as CSS variables (`--scope-accent`, …). `style.css` uses only `var(--scope-…)`.
+
+### Guard
+One test scans every crate (and `scope-web/src/static/*.css`). It allows color literals (`Color::`, `.cyan()`-style calls, hex colors, raw SGR codes) only in `scope::display::theme` and the two adapter files. It reports `file:line`.
