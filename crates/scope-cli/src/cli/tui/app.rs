@@ -1144,10 +1144,7 @@ impl TuiState {
                     Ok(cwd) => {
                         clip::save(&args, self.last_output.as_deref(), &cwd, home.as_deref())
                     }
-                    Err(e) => Err(SaveError::Failed(format!(
-                        "Could not read the current directory: {}",
-                        e
-                    ))),
+                    Err(e) => Err(SaveError::failed(e, "Could not read the current directory")),
                 }
             }
         };
@@ -1157,12 +1154,12 @@ impl TuiState {
                 self.log_action(line, started, "session", None);
             }
             Err(e) => {
-                self.push_note(e.message());
+                self.push_note(&e.message());
                 let outcome = match e {
                     SaveError::Refused(_) => "refused",
                     SaveError::Failed(_) => "error",
                 };
-                self.log_action(line, started, outcome, Some(e.message().to_string()));
+                self.log_action(line, started, outcome, Some(e.message()));
             }
         }
     }

@@ -37,6 +37,7 @@ pub mod types;
 
 // Data-driven venue system
 pub mod configurable_client;
+mod default_venue;
 pub mod descriptor;
 pub mod exchange;
 pub mod registry;
@@ -45,6 +46,7 @@ pub mod registry;
 mod orderbook;
 
 pub use configurable_client::ConfigurableExchangeClient;
+pub use default_venue::DEFAULT_VENUE;
 pub use descriptor::VenueDescriptor;
 pub use exchange::ExchangeClient;
 pub use orderbook::{

@@ -6,7 +6,7 @@
 
 mod common;
 
-use common::{Allowed, audit, cli_dir, rs_sources};
+use common::{Allowed, audit, product_sources};
 
 const WATCHED: &[&str] = &[
     "ratatui::init",
@@ -58,7 +58,7 @@ const ALLOWED: &[Allowed] = &[
 
 #[test]
 fn only_the_screen_module_takes_the_screen() {
-    let found = audit(&rs_sources(&cli_dir()), WATCHED, ALLOWED);
+    let found = audit(&product_sources(), WATCHED, ALLOWED);
     assert!(
         found.is_empty(),
         "take and give back the screen with cli::screen:\n{}",

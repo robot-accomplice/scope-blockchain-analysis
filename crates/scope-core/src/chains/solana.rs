@@ -426,11 +426,7 @@ impl SolanaClient {
             )));
         };
 
-        let short_mint = if mint_address.len() > 8 {
-            format!("{}...", &mint_address[..8])
-        } else {
-            mint_address.to_string()
-        };
+        let short_mint = crate::display::text::abbreviate(mint_address);
 
         Ok(Token {
             contract_address: mint_address.to_string(),
@@ -1721,8 +1717,7 @@ mod tests {
             token.contract_address,
             "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
         );
-        assert!(token.symbol.starts_with("EPjFWdd5"));
-        assert!(token.symbol.ends_with("..."));
+        assert_eq!(token.symbol, "EPjFWd…Dt1v");
         assert_eq!(token.name, "SPL Token");
     }
 
@@ -1751,7 +1746,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(token.decimals, 9);
-        assert_eq!(token.symbol, "EPjFWdd5..."); // Long mint -> first 8 + "..."
+        assert_eq!(token.symbol, "EPjFWd…Dt1v"); // the one abbreviation
     }
 
     #[tokio::test]

@@ -3,7 +3,8 @@
 use crate::cli::output::Output;
 use crate::{note, outln};
 use clap::{Args, Subcommand};
-use scope::compliance::datasource::{BlockchainDataClient, DataSources, analyze_patterns};
+use scope::compliance::datasource::{BlockchainDataClient, analyze_patterns};
+use scope::compliance::etherscan::ETHERSCAN_KEY_ENV;
 use scope::compliance::risk::RiskEngine;
 use scope::display::{OutputFormat, format_risk_report};
 
@@ -153,17 +154,9 @@ pub async fn handle_risk(args: RiskArgs, out: &Output) -> anyhow::Result<()> {
     handle_risk_with_client(args, None, out).await
 }
 
-/// The environment variable that holds the Etherscan API key.
-const ETHERSCAN_KEY_ENV: &str = "ETHERSCAN_API_KEY";
-
-/// `given`, or a client for the key in [`ETHERSCAN_KEY_ENV`] when there is
-/// one.
+/// `given`, or a client for the Etherscan key when it is set.
 fn etherscan_client(given: Option<BlockchainDataClient>) -> Option<BlockchainDataClient> {
-    given.or_else(|| {
-        std::env::var(ETHERSCAN_KEY_ENV)
-            .ok()
-            .map(|key| BlockchainDataClient::new(DataSources::new(key)))
-    })
+    given.or_else(BlockchainDataClient::from_env_opt)
 }
 
 /// The risk engine, with Etherscan data when there is a client. Tells the
@@ -173,17 +166,12 @@ fn risk_engine(
     spinner: Option<&crate::cli::progress::Spinner>,
     out: &Output,
 ) -> RiskEngine {
-    match client {
-        Some(c) => {
-            crate::cli::progress::notice(spinner, out, "Using Etherscan API for enhanced analysis");
-            RiskEngine::with_data_client(c.clone())
-        }
-        None => {
-            let hint = format!("Note: Set {ETHERSCAN_KEY_ENV} for enhanced analysis");
-            crate::cli::progress::notice(spinner, out, &hint);
-            RiskEngine::new()
-        }
-    }
+    let line = match client {
+        Some(_) => "Using Etherscan API for enhanced analysis".to_string(),
+        None => format!("Note: Set {ETHERSCAN_KEY_ENV} for enhanced analysis"),
+    };
+    crate::cli::progress::notice(spinner, out, &line);
+    RiskEngine::with_optional_client(client.cloned())
 }
 
 /// Handle risk assessment with an optional pre-built client (for testability).
@@ -271,9 +259,7 @@ pub async fn handle_trace_with_client(
                     )?;
                 }
             }
-            Err(e) => {
-                note!(out, "Error tracing transaction: {}", e);
-            }
+            Err(e) => return Err(e.context(format!("cannot trace transaction {}", args.tx_hash))),
         }
     } else {
         note!(out, "Set {ETHERSCAN_KEY_ENV} to enable transaction tracing");
@@ -327,12 +313,7 @@ pub async fn handle_analyze_with_client(
                 outln!(out, "Unusual hour transactions: {}", analysis.unusual_hours)?;
             }
             Err(e) => {
-                note!(
-                    out,
-                    "  ⚠ Could not fetch transactions ({})",
-                    crate::cli::errors::details_hint(out.is_tui())
-                );
-                tracing::debug!("Error fetching transactions: {}", e);
+                return Err(e.context(format!("cannot fetch transactions for {}", args.address)));
             }
         }
     } else {
@@ -850,7 +831,7 @@ mod tests {
     }
 
     fn make_mock_client(base_url: &str) -> BlockchainDataClient {
-        let sources = DataSources::new("test_api_key".to_string());
+        let sources = scope::compliance::datasource::DataSources::new("test_api_key".to_string());
         BlockchainDataClient::with_base_url(sources, base_url)
     }
 
@@ -944,8 +925,16 @@ mod tests {
             flag_suspicious: false,
             format: OutputFormat::Table,
         };
-        let result = handle_trace_with_client(args, Some(client), &quiet()).await;
-        assert!(result.is_ok()); // Handler catches error, prints to stderr
+        // A failed trace is the command's error, not a note: the exit
+        // code must say it failed.
+        let err = handle_trace_with_client(args, Some(client), &quiet())
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("cannot trace transaction 0xabc123"),
+            "{err:#}"
+        );
     }
 
     #[tokio::test]
@@ -999,7 +988,7 @@ mod tests {
             format: OutputFormat::Table,
         };
         let result = handle_analyze_with_client(args, Some(client), &quiet()).await;
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "{result:?}");
     }
 
     #[tokio::test]
@@ -1019,9 +1008,15 @@ mod tests {
             range: "7d".to_string(),
             format: OutputFormat::Table,
         };
-        // Error path in analyze
-        let result = handle_analyze_with_client(args, Some(client), &quiet()).await;
-        assert!(result.is_ok());
+        // A failed fetch is the command's error, not a note.
+        let err = handle_analyze_with_client(args, Some(client), &quiet())
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("cannot fetch transactions for 0x742d"),
+            "{err:#}"
+        );
     }
 
     #[tokio::test]

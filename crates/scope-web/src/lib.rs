@@ -29,6 +29,8 @@ use axum::Router;
 use axum::response::IntoResponse;
 use scope::chains::DefaultClientFactory;
 use scope::config::Config;
+use scope_cli::cli::output::Output;
+use scope_cli::note;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
@@ -100,7 +102,7 @@ async fn serve_ui(uri: axum::http::Uri) -> impl axum::response::IntoResponse {
 /// Starts the web server on the given address.
 ///
 /// This is the main entry point called from the CLI `web` command handler.
-pub async fn start_server(addr: SocketAddr, config: Config) -> anyhow::Result<()> {
+pub async fn start_server(addr: SocketAddr, config: Config, out: &Output) -> anyhow::Result<()> {
     let built = scope::http::init(&config)?;
     for notice in &built.notices {
         tracing::warn!("{notice}");
@@ -114,7 +116,7 @@ pub async fn start_server(addr: SocketAddr, config: Config) -> anyhow::Result<()
     let app = build_router(state);
 
     tracing::info!("Scope web server listening on http://{}", addr);
-    eprintln!("Scope web server listening on http://{}", addr);
+    note!(out, "Scope web server listening on http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
@@ -137,37 +139,46 @@ pub fn log_file_path() -> std::path::PathBuf {
 }
 
 /// Stops a running daemon by reading its PID file and sending SIGTERM.
-pub fn stop_daemon() -> anyhow::Result<()> {
+/// Tells the user what happened, as notes on `out`.
+///
+/// # Errors
+///
+/// The PID file cannot be read or holds no PID.
+pub fn stop_daemon(out: &Output) -> scope::error::Result<()> {
     let pid_path = pid_file_path();
     if !pid_path.exists() {
-        eprintln!("No daemon PID file found at {}", pid_path.display());
-        eprintln!("Is the daemon running?");
+        note!(out, "No daemon PID file found at {}", pid_path.display());
+        note!(out, "Is the daemon running?");
         return Ok(());
     }
 
-    let pid_str = std::fs::read_to_string(&pid_path)?;
-    let pid: u32 = pid_str
-        .trim()
-        .parse()
-        .map_err(|e| anyhow::anyhow!("Invalid PID in {}: {}", pid_path.display(), e))?;
+    let pid_str = std::fs::read_to_string(&pid_path).map_err(|e| {
+        scope::error::ScopeError::io_context(e, format!("cannot read {}", pid_path.display()))
+    })?;
+    let pid: u32 = pid_str.trim().parse().map_err(|e| {
+        scope::error::ScopeError::Other(format!("Invalid PID in {}: {}", pid_path.display(), e))
+    })?;
 
-    eprintln!("Stopping Scope web daemon (PID {})...", pid);
+    note!(out, "Stopping Scope web daemon (PID {})...", pid);
 
     #[cfg(unix)]
     {
         // Send SIGTERM to the daemon process
         let result = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
         if result == 0 {
-            eprintln!("Daemon stopped.");
+            note!(out, "Daemon stopped.");
         } else {
-            eprintln!("Failed to stop daemon (process may have already exited).");
+            note!(
+                out,
+                "Failed to stop daemon (process may have already exited)."
+            );
         }
     }
 
     #[cfg(not(unix))]
     {
-        eprintln!("Daemon stop is only supported on Unix systems.");
-        eprintln!("Please manually terminate PID {}.", pid);
+        note!(out, "Daemon stop is only supported on Unix systems.");
+        note!(out, "Please manually terminate PID {}.", pid);
     }
 
     // Remove PID file
@@ -179,8 +190,12 @@ pub fn stop_daemon() -> anyhow::Result<()> {
 ///
 /// Spawns the current executable as a detached child process with
 /// stdout/stderr redirected to a log file, then writes the PID.
+///
+/// # Errors
+///
+/// The data directory, log file, PID file or child process cannot be made.
 #[cfg(unix)]
-pub fn start_daemon(addr: SocketAddr, config: Config) -> anyhow::Result<()> {
+pub fn start_daemon(addr: SocketAddr, config: Config, out: &Output) -> scope::error::Result<()> {
     use std::io::Write;
 
     let _ = config; // Config reloaded from disk in child
@@ -191,10 +206,10 @@ pub fn start_daemon(addr: SocketAddr, config: Config) -> anyhow::Result<()> {
     let pid_path = pid_file_path();
     let log_path = log_file_path();
 
-    eprintln!("Starting Scope web daemon...");
-    eprintln!("  URL:  http://{}", addr);
-    eprintln!("  PID:  {}", pid_path.display());
-    eprintln!("  Log:  {}", log_path.display());
+    note!(out, "Starting Scope web daemon...");
+    note!(out, "URL:  http://{}", addr);
+    note!(out, "PID:  {}", pid_path.display());
+    note!(out, "Log:  {}", log_path.display());
 
     // Redirect stdout/stderr to log file
     let log_file = std::fs::OpenOptions::new()
@@ -224,19 +239,20 @@ pub fn start_daemon(addr: SocketAddr, config: Config) -> anyhow::Result<()> {
     let mut f = std::fs::File::create(&pid_path)?;
     write!(f, "{}", pid)?;
 
-    eprintln!("Daemon started with PID {}", pid);
-    eprintln!("Stop with: scope web --stop");
+    note!(out, "Daemon started with PID {}", pid);
+    note!(out, "Stop with: scope web --stop");
 
     Ok(())
 }
 
 /// Fallback for non-Unix: run in foreground.
 #[cfg(not(unix))]
-pub fn start_daemon(addr: SocketAddr, config: Config) -> anyhow::Result<()> {
-    eprintln!("Daemon mode is only supported on Unix systems.");
-    eprintln!("Starting in foreground instead...");
+pub fn start_daemon(addr: SocketAddr, config: Config, out: &Output) -> scope::error::Result<()> {
+    note!(out, "Daemon mode is only supported on Unix systems.");
+    note!(out, "Starting in foreground instead...");
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(start_server(addr, config))
+    rt.block_on(start_server(addr, config, out))
+        .map_err(|e| scope::error::ScopeError::Other(e.to_string()))
 }
 
 /// Returns true if running as a daemon child process.
@@ -463,7 +479,8 @@ mod tests {
     #[test]
     fn test_stop_daemon_invoked_no_pid_file() {
         // Exercise stop_daemon when PID file does not exist (common in tests)
-        let result = stop_daemon();
+        let (out, _) = Output::capture();
+        let result = stop_daemon(&out);
         assert!(result.is_ok());
     }
 

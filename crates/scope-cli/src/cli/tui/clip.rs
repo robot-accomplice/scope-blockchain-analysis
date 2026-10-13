@@ -5,6 +5,7 @@
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
+use scope::error::ScopeError;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
@@ -18,20 +19,28 @@ pub const SAVE_USAGE: &str = "Usage: save <file> [--force]";
 pub const OSC52_MAX_PAYLOAD: usize = 100_000;
 
 /// Why `save` wrote nothing.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum SaveError {
     /// The request was refused: usage, path rules, nothing to save, or an
     /// existing file.
     Refused(String),
-    /// The OS failed the write.
-    Failed(String),
+    /// The OS failed the write. The error keeps its kind and its source
+    /// ([`ScopeError::io_context`]).
+    Failed(ScopeError),
 }
 
 impl SaveError {
+    /// An OS failure while `doing` (for example `Could not write x.txt`).
+    pub fn failed(e: std::io::Error, doing: impl std::fmt::Display) -> Self {
+        Self::Failed(ScopeError::io_context(e, doing))
+    }
+
     /// The text to show and to journal.
-    pub fn message(&self) -> &str {
+    pub fn message(&self) -> String {
         match self {
-            SaveError::Refused(m) | SaveError::Failed(m) => m,
+            SaveError::Refused(m) => m.clone(),
+            SaveError::Failed(ScopeError::IoError(e)) => e.to_string(),
+            SaveError::Failed(other) => other.to_string(),
         }
     }
 }
@@ -71,11 +80,11 @@ fn resolve(arg: &str, cwd: &Path, home: Option<&Path>) -> Result<PathBuf, SaveEr
     let parent = joined.parent().unwrap_or(&joined);
     let real = parent
         .canonicalize()
-        .map_err(|e| SaveError::Failed(format!("Could not write {}: {}", joined.display(), e)))?;
+        .map_err(|e| SaveError::failed(e, format!("Could not write {}", joined.display())))?;
     if !absolute {
         let root = cwd
             .canonicalize()
-            .map_err(|e| SaveError::Failed(format!("Could not read {}: {}", cwd.display(), e)))?;
+            .map_err(|e| SaveError::failed(e, format!("Could not read {}", cwd.display())))?;
         if !real.starts_with(&root) {
             return Err(SaveError::Refused(SAVE_ESCAPE.to_string()));
         }
@@ -150,7 +159,7 @@ pub fn save(
         _ => {}
     }
     write_file(&target, text, force)
-        .map_err(|e| SaveError::Failed(format!("Could not write {}: {}", target.display(), e)))?;
+        .map_err(|e| SaveError::failed(e, format!("Could not write {}", target.display())))?;
     let n = text.lines().count();
     Ok(format!(
         "saved {} line{} to {}",
@@ -258,11 +267,17 @@ mod tests {
         saved(&[abs.to_str().unwrap()], Some("t"), dir.path()).unwrap();
 
         let missing = elsewhere.path().join("no-dir").join("a.txt");
-        let Err(SaveError::Failed(note)) =
+        let Err(failed @ SaveError::Failed(_)) =
             saved(&[missing.to_str().unwrap()], Some("t"), dir.path())
         else {
             panic!("expected an OS failure");
         };
+        let SaveError::Failed(ScopeError::IoError(e)) = &failed else {
+            panic!("an I/O error");
+        };
+        assert_eq!(e.kind(), std::io::ErrorKind::NotFound, "the kind stays");
+        assert!(std::error::Error::source(e).is_some(), "the source stays");
+        let note = failed.message();
         assert!(note.starts_with("Could not write "), "{note}");
         assert!(note.contains("no-dir"), "{note}");
         assert!(matches!(

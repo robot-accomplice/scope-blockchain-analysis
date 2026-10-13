@@ -210,19 +210,10 @@ pub async fn run(
             }
 
             // Risk assessment (compliance engine)
-            let risk_assessment =
-                match scope::compliance::datasource::BlockchainDataClient::from_env_opt() {
-                    Some(data_client) => {
-                        scope::compliance::risk::RiskEngine::with_data_client(data_client)
-                            .assess_address(&args.target, chain)
-                            .await
-                            .ok()
-                    }
-                    None => scope::compliance::risk::RiskEngine::new()
-                        .assess_address(&args.target, chain)
-                        .await
-                        .ok(),
-                };
+            let risk_assessment = scope::compliance::risk::RiskEngine::from_env()
+                .assess_address(&args.target, chain)
+                .await
+                .ok();
 
             if let Some(ref risk) = risk_assessment {
                 output.push_str(&format!(
@@ -386,10 +377,14 @@ pub async fn run(
                 && let Ok(registry) = VenueRegistry::load()
             {
                 // Try binance first, fall back to any available CEX
-                let venue_id = if registry.contains("binance") {
-                    "binance"
+                let venue_id = if registry.contains(scope::market::DEFAULT_VENUE) {
+                    scope::market::DEFAULT_VENUE
                 } else {
-                    registry.list().first().copied().unwrap_or("binance")
+                    registry
+                        .list()
+                        .first()
+                        .copied()
+                        .unwrap_or(scope::market::DEFAULT_VENUE)
                 };
                 if let Ok(exchange) = registry.create_exchange_client(venue_id) {
                     let pair = exchange.format_pair(&analytics.token.symbol);

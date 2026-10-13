@@ -21,7 +21,7 @@ pub async fn handle(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Report which API keys are configured (without exposing values)
     let api_keys_status: serde_json::Value = serde_json::json!({
         "etherscan": config.chains.api_keys.contains_key("etherscan") ||
-            std::env::var("ETHERSCAN_API_KEY").is_ok(),
+            scope::compliance::etherscan::etherscan_key().is_some(),
         "polygonscan": config.chains.api_keys.contains_key("polygonscan"),
         "bscscan": config.chains.api_keys.contains_key("bscscan"),
         "solscan": config.chains.api_keys.contains_key("solscan"),

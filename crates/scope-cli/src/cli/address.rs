@@ -266,10 +266,7 @@ pub async fn run(
     // Dossier: fetch risk assessment (uses ETHERSCAN_API_KEY for Ethereum)
     let risk_assessment = if args.dossier {
         sp.set_message("Running risk assessment...");
-        let engine = match scope::compliance::datasource::BlockchainDataClient::from_env_opt() {
-            Some(client) => scope::compliance::risk::RiskEngine::with_data_client(client),
-            None => scope::compliance::risk::RiskEngine::new(),
-        };
+        let engine = scope::compliance::risk::RiskEngine::from_env();
         engine.assess_address(&args.address, &args.chain).await.ok()
     } else {
         None
@@ -358,7 +355,7 @@ pub async fn analyze_address(
             Err(e) => {
                 note!(
                     out,
-                    "  ⚠ Transaction history unavailable ({})",
+                    "⚠ Transaction history unavailable ({})",
                     crate::cli::errors::details_hint(out.is_tui())
                 );
                 tracing::debug!("Failed to fetch transactions: {}", e);
@@ -391,7 +388,7 @@ pub async fn analyze_address(
             Err(e) => {
                 note!(
                     out,
-                    "  ⚠ Token balances unavailable ({})",
+                    "⚠ Token balances unavailable ({})",
                     crate::cli::errors::details_hint(out.is_tui())
                 );
                 tracing::debug!("Failed to fetch token balances: {}", e);

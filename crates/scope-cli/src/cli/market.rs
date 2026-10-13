@@ -94,7 +94,7 @@ pub struct SummaryArgs {
 
     /// Market venue (e.g., binance, biconomy, mexc, okx, eth, solana).
     /// Use `scope venues list` to see all available venues.
-    #[arg(long, default_value = "binance", value_name = "VENUE")]
+    #[arg(long, default_value = scope::market::DEFAULT_VENUE, value_name = "VENUE")]
     pub venue: String,
 
     /// Chain for DEX venues (ethereum or solana). Ignored for CEX.
@@ -180,7 +180,7 @@ pub struct OhlcArgs {
     pub pair: String,
 
     /// Exchange venue (e.g., binance, mexc, bybit).
-    #[arg(long, default_value = "binance", value_name = "VENUE")]
+    #[arg(long, default_value = scope::market::DEFAULT_VENUE, value_name = "VENUE")]
     pub venue: String,
 
     /// Candle interval (e.g., 1m, 5m, 15m, 1h, 4h, 1d).
@@ -208,7 +208,7 @@ pub struct TradesArgs {
     pub pair: String,
 
     /// Exchange venue (e.g., binance, mexc, bybit).
-    #[arg(long, default_value = "binance", value_name = "VENUE")]
+    #[arg(long, default_value = scope::market::DEFAULT_VENUE, value_name = "VENUE")]
     pub venue: String,
 
     /// Maximum number of trades to fetch.
@@ -512,7 +512,7 @@ async fn run_summary_once(
 ) -> Result<MarketSummary> {
     if let Some(n) = run_num {
         let ts = chrono::Utc::now().format("%H:%M:%S");
-        note!(out, "  --- Run #{} at {} ---\n", n, ts);
+        note!(out, "--- Run #{} at {} ---\n", n, ts);
     }
 
     let (book, volume_24h) = fetch_book_and_volume(args, thresholds, factory, out).await?;

@@ -111,11 +111,7 @@ fn report_transactions(report: &AddressReport) -> String {
                 let ts = DateTime::<Utc>::from_timestamp(tx.timestamp as i64, 0)
                     .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
                     .unwrap_or_else(|| "-".to_string());
-                let hash_short = if tx.hash.len() > 10 {
-                    format!("{}...{}", &tx.hash[..6], &tx.hash[tx.hash.len() - 4..])
-                } else {
-                    tx.hash.clone()
-                };
+                let hash_short = scope::display::text::abbreviate(&tx.hash);
                 let to = tx.to.as_deref().unwrap_or("-");
                 let status = if tx.status { "✓" } else { "✗" };
                 s.push_str(&format!(

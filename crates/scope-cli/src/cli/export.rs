@@ -17,7 +17,7 @@
 //! ```
 
 use crate::cli::output::Output;
-use crate::{note, outln};
+use crate::note;
 use clap::Args;
 use scope::chains::{ChainClientFactory, infer_chain_from_address};
 use scope::config::{Config, OutputFormat};
@@ -217,12 +217,10 @@ async fn export_address_book(
             .as_secs(),
     };
 
-    outln!(
-        out,
-        "Exported {} address book addresses to {}",
-        report.record_count,
-        report.output_path
-    )?;
+    out.note_saved(
+        &format!("{} address book addresses", report.record_count),
+        &report.output_path,
+    );
 
     Ok(())
 }
@@ -250,12 +248,7 @@ async fn export_address(
         "Exporting address data"
     );
 
-    note!(
-        out,
-        "  Fetching transactions for {} on {}...",
-        address,
-        chain
-    );
+    note!(out, "Fetching transactions for {} on {}...", address, chain);
 
     // Fetch real transaction history
     let client = clients.create_chain_client(&chain)?;
@@ -364,12 +357,10 @@ async fn export_address(
             .as_secs(),
     };
 
-    outln!(
-        out,
-        "Exported {} transactions to {}",
-        report.record_count,
-        report.output_path
-    )?;
+    out.note_saved(
+        &format!("{} transactions", report.record_count),
+        &report.output_path,
+    );
 
     Ok(())
 }

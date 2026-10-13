@@ -157,11 +157,11 @@ impl HttpClient for ReplayHttpClient {
                 }
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent).map_err(|e| {
-                        ScopeError::Network(format!("cannot create {}: {e}", parent.display()))
+                        ScopeError::io_context(e, format!("cannot create {}", parent.display()))
                     })?;
                 }
                 std::fs::write(&path, text).map_err(|e| {
-                    ScopeError::Network(format!("cannot write {}: {e}", path.display()))
+                    ScopeError::io_context(e, format!("cannot write {}", path.display()))
                 })?;
                 written.insert(path);
                 Ok(resp)

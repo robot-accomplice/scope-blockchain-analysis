@@ -355,12 +355,11 @@ pub async fn fetch_analytics_for_input(
     let dex_client = clients.create_dex_client();
     let resolved =
         resolve_token_input(&args, &mut aliases, dex_client.as_ref(), spinner, out).await?;
-    if let Some(sp) = spinner {
-        sp.set_message(format!(
-            "Fetching analytics for {} on {}...",
-            resolved.address, resolved.chain
-        ));
-    }
+    let fetching = format!(
+        "Fetching analytics for {} on {}...",
+        resolved.address, resolved.chain
+    );
+    progress::status(spinner, out, &fetching);
     let mut analytics =
         fetch_token_analytics(&resolved.address, &resolved.chain, &args, clients).await?;
     if let Some((symbol, name)) = &resolved.alias_info
@@ -962,16 +961,7 @@ fn output_table_explorer_only(analytics: &TokenAnalytics, out: &Output) -> Resul
         outln!(out, "{}", t::table_header(&cols))?;
 
         for holder in analytics.holders.iter().take(10) {
-            // Truncate address for display
-            let addr_display = if holder.address.len() > 20 {
-                format!(
-                    "{}...{}",
-                    &holder.address[..10],
-                    &holder.address[holder.address.len() - 8..]
-                )
-            } else {
-                holder.address.clone()
-            };
+            let addr_display = scope::display::text::abbreviate(&holder.address);
 
             let rank_str = holder.rank.to_string();
             let percent_str = format!("{:.2}%", holder.percentage);
@@ -2174,8 +2164,8 @@ mod tests {
         // Table header should include Address column
         assert!(output.contains("Address"));
         // Abbreviated addresses should appear
-        assert!(output.contains("0xA0b869...06eB48"));
-        assert!(output.contains("0x2791Bc...a84174"));
+        assert!(output.contains("0xA0b8…eB48"));
+        assert!(output.contains("0x2791…4174"));
     }
 
     #[test]
@@ -2187,9 +2177,13 @@ mod tests {
 
         let selected = select_token_impl(&results, false, &mut reader, None, &out).unwrap();
         assert_eq!(selected.chain, "arbitrum");
-        // Long name should be truncated in output
+        // The long name is cut to 20 columns, ending in the one ellipsis.
         let output = cap.err();
-        assert!(output.contains("..."));
+        let row = output
+            .lines()
+            .find(|l| l.trim_start().starts_with("3 "))
+            .unwrap();
+        assert!(row.contains("Very Long Token Nam… "), "{row}");
     }
 
     #[test]

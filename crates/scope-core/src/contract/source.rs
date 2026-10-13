@@ -199,7 +199,7 @@ pub async fn fetch_contract_source(
         ))
     })?;
 
-    let api_key = std::env::var("ETHERSCAN_API_KEY").unwrap_or_default();
+    let api_key = crate::compliance::etherscan::etherscan_key().unwrap_or_default();
     let url = format!(
         "{}?chainid={}&module=contract&action=getsourcecode&address={}&apikey={}",
         ETHERSCAN_V2_API, chain_id, address, api_key

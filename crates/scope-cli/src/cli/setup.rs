@@ -633,7 +633,6 @@ fn run_setup_wizard_impl(
         note!(out);
         note!(out, "Saving configuration...");
         save_config_to_path(&new_config, config_path)?;
-        note!(out);
         out.note_saved("Configuration", config_path.display());
     } else {
         note!(out);

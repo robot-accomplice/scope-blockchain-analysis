@@ -447,11 +447,8 @@ fn run_init_impl(args: InitArgs, dest: std::path::PathBuf, out: &Output) -> Resu
     // Ensure directory exists
     if !dest.exists() {
         std::fs::create_dir_all(&dest).map_err(|e| {
-            scope::error::ScopeError::Chain(format!(
-                "Failed to create venues directory {}: {}",
-                dest.display(),
-                e
-            ))
+            let context = format!("Failed to create venues directory {}", dest.display());
+            scope::error::ScopeError::io_context(e, context)
         })?;
         outln!(out, "Created {}", dest.display())?;
     }
@@ -484,11 +481,10 @@ fn run_init_impl(args: InitArgs, dest: std::path::PathBuf, out: &Output) -> Resu
                 content = serialize_descriptor_yaml(desc),
             );
             std::fs::write(&target, yaml).map_err(|e| {
-                scope::error::ScopeError::Chain(format!(
-                    "Failed to write {}: {}",
-                    target.display(),
-                    e
-                ))
+                scope::error::ScopeError::io_context(
+                    e,
+                    format!("Failed to write {}", target.display()),
+                )
             })?;
             copied += 1;
             outln!(out, "  {}", check_pass(&filename))?;

@@ -57,6 +57,16 @@ pub(crate) fn ask(reader: &mut impl BufRead, out: &Output, question: &str) -> io
     })
 }
 
+/// [`ask`] on stdin (cancellable in the TUI). The `scope` binary's own
+/// prompts use it.
+///
+/// # Errors
+///
+/// Returns the write or read error.
+pub fn ask_stdin(out: &Output, question: &str) -> io::Result<String> {
+    ask(&mut stdin(), out, question)
+}
+
 /// Shows `list` (it ends with a newline), asks `Select <what> (1-<count>): `
 /// and returns the zero-based index of the answer.
 ///

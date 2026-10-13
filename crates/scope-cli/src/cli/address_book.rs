@@ -373,12 +373,8 @@ async fn run_summary(
 
                 // Show token balances
                 for token in &addr.tokens {
-                    let addr_short = if token.contract_address.len() >= 8 {
-                        &token.contract_address[..8]
-                    } else {
-                        &token.contract_address
-                    };
-                    let symbol = token.symbol.as_deref().unwrap_or(addr_short);
+                    let addr_short = scope::display::text::abbreviate(&token.contract_address);
+                    let symbol = token.symbol.as_deref().unwrap_or(&addr_short);
                     outln!(out, "    └─ {} {}", token.balance, symbol)?;
                 }
             }
@@ -484,7 +480,7 @@ async fn fetch_address_balance(
     let client = match clients.create_chain_client(chain) {
         Ok(c) => c,
         Err(e) => {
-            note!(out, "  ⚠ Unsupported chain: {}", chain);
+            note!(out, "⚠ Unsupported chain: {}", chain);
             tracing::debug!(error = %e, chain = %chain, "Failed to create chain client");
             return Ok(("Error".to_string(), vec![]));
         }
@@ -494,7 +490,7 @@ async fn fetch_address_balance(
     let native_balance = match client.get_balance(address).await {
         Ok(bal) => bal.formatted,
         Err(e) => {
-            note!(out, "  ⚠ Could not fetch balance for {}", address);
+            note!(out, "⚠ Could not fetch balance for {}", address);
             tracing::debug!(error = %e, address = %address, "Failed to fetch balance");
             "Error".to_string()
         }
@@ -512,7 +508,7 @@ async fn fetch_address_balance(
             })
             .collect(),
         Err(e) => {
-            note!(out, "  ⚠ Token balances unavailable");
+            note!(out, "⚠ Token balances unavailable");
             tracing::debug!(error = %e, "Could not fetch token balances");
             vec![]
         }

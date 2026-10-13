@@ -8,6 +8,25 @@ pub fn cli_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cli")
 }
 
+/// The `src` directory of the `scope` binary's crate (scope-web).
+pub fn web_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../scope-web/src")
+}
+
+/// Every product source the guards check: `src/cli` of this crate (names
+/// relative to it) and the `scope` binary's crate (names under `web/`).
+/// The TUI test harness crate is not a product: it is a developer tool
+/// that does not link the CLI and prints its own reports.
+pub fn product_sources() -> Vec<(String, String)> {
+    let mut all = rs_sources(&cli_dir());
+    all.extend(
+        rs_sources(&web_dir())
+            .into_iter()
+            .map(|(name, src)| (format!("web/{name}"), src)),
+    );
+    all
+}
+
 /// Every `.rs` file under `dir`, sorted, as `(path relative to dir with
 /// '/' separators, source)`.
 pub fn rs_sources(dir: &Path) -> Vec<(String, String)> {

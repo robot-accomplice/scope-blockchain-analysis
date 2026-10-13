@@ -9,12 +9,10 @@ use crate::cli::output::Output;
 use crate::cli::progress::{self, Spinner};
 use crate::cli::textfit::{cols, cut_with_ellipsis};
 use scope::chains::dex::TokenSearchResult;
+use scope::display::text::abbreviate;
 use scope::error::Result;
 use scope::market::{ExchangeClient, VenueRegistry};
 use std::io::BufRead;
-
-/// The venue a symbol is looked up on when DexScreener does not know it.
-const CEX_FALLBACK_VENUE: &str = "binance";
 
 /// The quote a fallback pair uses.
 const CEX_FALLBACK_QUOTE: &str = "USDT";
@@ -55,7 +53,7 @@ pub(crate) async fn cex_fallback(
     out: &Output,
 ) -> Option<TokenSearchResult> {
     let registry = VenueRegistry::load().ok()?;
-    let client = ExchangeClient::from_descriptor(registry.get(CEX_FALLBACK_VENUE)?);
+    let client = ExchangeClient::from_descriptor(registry.get(scope::market::DEFAULT_VENUE)?);
     let symbol = symbol.to_uppercase();
     let pair = client.format_pair(&format!("{symbol}{CEX_FALLBACK_QUOTE}"));
     let ticker = client.fetch_ticker(&pair).await.ok()?;
@@ -95,68 +93,77 @@ pub(crate) fn selected_line(token: &TokenSearchResult) -> String {
     )
 }
 
+/// How a column lines up its cells.
+#[derive(Clone, Copy)]
+enum Align {
+    Left,
+    Right,
+}
+
+/// The table columns: header, width in display columns, alignment.
+const COLUMNS: [(&str, usize, Align); 7] = [
+    ("#", 3, Align::Right),
+    ("Symbol", 8, Align::Right),
+    ("Name", 22, Align::Left),
+    ("Address", 16, Align::Left),
+    ("Chain", 12, Align::Left),
+    ("Price", 12, Align::Right),
+    ("Liquidity", 12, Align::Right),
+];
+
+/// The blank between two columns.
+const GAP: &str = "  ";
+
+/// The width of the rule under the header: the columns and the gaps.
+const RULE_COLS: usize = {
+    let mut total = GAP.len() * (COLUMNS.len() - 1);
+    let mut i = 0;
+    while i < COLUMNS.len() {
+        total += COLUMNS[i].1;
+        i += 1;
+    }
+    total
+};
+
 /// The header, a rule and one row per result, each line ending in a
 /// newline.
 fn table(results: &[TokenSearchResult]) -> String {
     let mut list = format!("\nFound {} matching tokens:\n\n", results.len());
-    list.push_str(&row(
-        "#",
-        "Symbol",
-        &pad_end("Name"),
-        "Address",
-        "Chain",
-        "Price",
-        "Liquidity",
-    ));
-    list.push_str(&format!("{}\n", "─".repeat(98)));
+    list.push_str(&row(COLUMNS.map(|(header, _, _)| header.to_string())));
+    list.push_str(&format!("{}\n", "─".repeat(RULE_COLS)));
     for (i, token) in results.iter().enumerate() {
         let price = token
             .price_usd
             .map(|p| format!("${:.6}", p))
             .unwrap_or_else(|| "N/A".to_string());
-        list.push_str(&row(
-            &(i + 1).to_string(),
-            &token.symbol,
-            &pad_end(&cut_with_ellipsis(&token.name, NAME_COLS)),
-            &abbreviate_address(&token.address),
-            &token.chain,
-            &price,
-            &scope::display::format_large_number(token.liquidity_usd),
-        ));
+        list.push_str(&row([
+            (i + 1).to_string(),
+            token.symbol.clone(),
+            cut_with_ellipsis(&token.name, NAME_COLS),
+            abbreviate(&token.address),
+            token.chain.clone(),
+            price,
+            scope::display::format_large_number(token.liquidity_usd),
+        ]));
     }
     list
 }
 
-/// One table row. `name` comes padded ([`pad_end`]).
-fn row(
-    n: &str,
-    symbol: &str,
-    name: &str,
-    addr: &str,
-    chain: &str,
-    price: &str,
-    liq: &str,
-) -> String {
-    format!("{n:>3}  {symbol:>8}  {name}  {addr:<16}  {chain:<12}  {price:>12}  {liq:>12}\n")
-}
-
-/// The width of the name column, in display columns.
-const NAME_FIELD_COLS: usize = 22;
-
-/// `name` followed by spaces up to [`NAME_FIELD_COLS`] display columns.
-/// `format!` pads by characters, which is wrong for wide characters.
-fn pad_end(name: &str) -> String {
-    let fill = NAME_FIELD_COLS.saturating_sub(cols(name));
-    format!("{name}{}", " ".repeat(fill))
-}
-
-/// Abbreviates a blockchain address for display (e.g. "0x1234...abcd").
-pub(crate) fn abbreviate_address(addr: &str) -> String {
-    if addr.len() > 16 {
-        format!("{}...{}", &addr[..8], &addr[addr.len() - 6..])
-    } else {
-        addr.to_string()
-    }
+/// One table row: each cell padded to its column by display width
+/// (`format!` pads by characters, which is wrong for wide characters).
+fn row(cells: [String; 7]) -> String {
+    let padded: Vec<String> = cells
+        .iter()
+        .zip(COLUMNS)
+        .map(|(cell, (_, width, align))| {
+            let fill = " ".repeat(width.saturating_sub(cols(cell)));
+            match align {
+                Align::Left => format!("{cell}{fill}"),
+                Align::Right => format!("{fill}{cell}"),
+            }
+        })
+        .collect();
+    format!("{}\n", padded.join(GAP).trim_end())
 }
 
 #[cfg(test)]
@@ -200,7 +207,7 @@ mod tests {
             shown.starts_with("\nFound 2 matching tokens:\n\n"),
             "{shown}"
         );
-        assert!(shown.contains("0xA0b869...06eB48") && shown.contains("A Very Long Token N…"));
+        assert!(shown.contains("0xA0b8…eB48") && shown.contains("A Very Long Token N…"));
         assert!(
             shown.ends_with("\nSelect token (1-2): Selected: XYZ (A Very Long Token Name Indeed) on ethereum - $1.000000 at 0x1234abcd\n"),
             "{shown}"
@@ -241,38 +248,5 @@ mod tests {
             selected_line(&t),
             "Selected: USDC (USD Coin) on ethereum - $1.000000"
         );
-    }
-
-    #[test]
-    fn test_abbreviate_address() {
-        assert_eq!(
-            abbreviate_address("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"),
-            "0xA0b869...06eB48"
-        );
-        // Short address is not abbreviated
-        assert_eq!(abbreviate_address("0x1234abcd"), "0x1234abcd");
-    }
-
-    #[test]
-    fn test_abbreviate_address_boundary_16_chars() {
-        // Exactly 16 chars - not abbreviated (len > 16 is false)
-        let addr = "0x1234567890abcd";
-        assert_eq!(abbreviate_address(addr), addr);
-    }
-
-    #[test]
-    fn test_abbreviate_address_boundary_17_chars() {
-        // 17 chars - should be abbreviated (8 + "..." + 6)
-        let addr = "0x1234567890abcdef1";
-        let result = abbreviate_address(addr);
-        assert!(result.contains("..."));
-        assert_eq!(&result[..8], "0x123456");
-        // Last 6 chars of original "0x1234567890abcdef1" are "bcdef1"
-        assert_eq!(&result[result.len() - 6..], "bcdef1");
-    }
-
-    #[test]
-    fn test_abbreviate_address_empty() {
-        assert_eq!(abbreviate_address(""), "");
     }
 }

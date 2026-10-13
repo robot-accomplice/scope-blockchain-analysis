@@ -5,8 +5,8 @@ use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
-/// Marks text that was cut.
-pub const ELLIPSIS: &str = "…";
+/// Marks text that was cut: the one ellipsis, from core.
+pub use scope::display::text::ELLIPSIS;
 
 /// The display width of `text`, in columns.
 pub fn cols(text: &str) -> usize {

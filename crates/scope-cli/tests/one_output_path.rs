@@ -8,10 +8,11 @@
 
 mod common;
 
-use common::{Allowed, audit, cli_dir, rs_sources};
+use common::{Allowed, audit, cli_dir, product_sources};
 
 /// Calls that write to the process streams past `Output`.
 const DIRECT: &[&str] = &[
+    "io::stdin()",
     "println!",
     "print!",
     "eprintln!",
@@ -80,6 +81,27 @@ const ALLOWED: &[Allowed] = &[
         "sends the OSC 52 copy sequence; it is not output",
     ),
     allow(
+        "prompt.rs",
+        "stdin",
+        "io::stdin()",
+        1,
+        "the prompt input off unix, where no cancellable reader exists",
+    ),
+    allow(
+        "web/main.rs",
+        "main",
+        "io::stdin()",
+        1,
+        "asks whether stdin is a terminal before the TUI starts; reads nothing",
+    ),
+    allow(
+        "web/main.rs",
+        "main",
+        "stdout()",
+        1,
+        "asks whether stdout is a terminal before the TUI starts; writes nothing",
+    ),
+    allow(
         "tui/crash.rs",
         "install_panic_hook",
         "stderr()",
@@ -90,7 +112,7 @@ const ALLOWED: &[Allowed] = &[
 
 #[test]
 fn command_code_writes_only_through_output() {
-    let found = audit(&rs_sources(&cli_dir()), DIRECT, ALLOWED);
+    let found = audit(&product_sources(), DIRECT, ALLOWED);
     assert!(
         found.is_empty(),
         "write command output with outln!/errln!/note! (prompts: prompt::ask), or change \
@@ -140,6 +162,7 @@ const STATUS_WORDS: &[&str] = &[
     "Assessing",
     "Checking",
     "Completed",
+    "Exported",
     "Exporting",
     "Fetching",
     "Flagging",
@@ -161,13 +184,15 @@ const STATUS_WORDS: &[&str] = &[
     "⚠",
 ];
 
-/// Phrases that mark a status line wherever they are in the text.
-const STATUS_ANYWHERE: &[&str] = &["saved to", "exported to"];
+/// Words that, followed later by the word "to", mark a "saved to" line wherever
+/// they are in the text ("Saved 3 rows to", "Exported … to").
+const SAVED_WORDS: &[&str] = &["saved", "exported"];
 
-/// The first argument after the output in the `outln!(` call whose `(` is
-/// just before `from` (char index into `masked`): its start, when it is a
-/// string literal. The scan follows brackets on the masked text, so a
-/// comma inside the output expression or inside a literal is not the one.
+/// The start of the first argument after the output, in the macro call
+/// whose `(` is just before `from` (char index into `masked`), when it is
+/// a string literal (`"…"` or `r#"…"#`): the index after its opening
+/// quote. The scan follows brackets on the masked text, so a comma inside
+/// the output expression or inside a literal is not the one.
 fn literal_argument(masked: &[char], from: usize) -> Option<usize> {
     let mut depth = 0usize;
     for (i, &c) in masked.iter().enumerate().skip(from) {
@@ -176,12 +201,16 @@ fn literal_argument(masked: &[char], from: usize) -> Option<usize> {
             ')' | ']' | '}' if depth == 0 => return None,
             ')' | ']' | '}' => depth -= 1,
             ',' if depth == 0 => {
-                let start = i
-                    + 1
-                    + masked[i + 1..]
-                        .iter()
-                        .take_while(|c| c.is_whitespace())
-                        .count();
+                let mut start = i + 1;
+                while masked.get(start).is_some_and(|c| c.is_whitespace()) {
+                    start += 1;
+                }
+                if masked.get(start) == Some(&'r') {
+                    start += 1;
+                    while masked.get(start) == Some(&'#') {
+                        start += 1;
+                    }
+                }
                 return (masked.get(start) == Some(&'"')).then_some(start + 1);
             }
             _ => {}
@@ -190,9 +219,9 @@ fn literal_argument(masked: &[char], from: usize) -> Option<usize> {
     None
 }
 
-/// `file:line` for each `outln!` whose text is a status line: it starts
-/// with a status word (after blanks and `\n` escapes) or says "saved to".
-fn status_on_data(file: &str, src: &str) -> Vec<String> {
+/// `(line, text)` of the literal argument of each `name` call (for
+/// example `outln!(`) in the non-test code of `src`.
+fn literal_args(src: &str, name: &str) -> Vec<(usize, String)> {
     let lines = common::lex(src);
     let join = |f: fn(&common::Line) -> &str| -> Vec<char> {
         lines
@@ -207,26 +236,49 @@ fn status_on_data(file: &str, src: &str) -> Vec<String> {
     let masked = join(|l| &l.masked);
     let masked_text: String = masked.iter().collect();
     let mut found = Vec::new();
-    for (byte_at, _) in masked_text.match_indices("outln!(") {
+    for (byte_at, _) in masked_text.match_indices(name) {
         let call = masked_text[..byte_at].chars().count();
         if call > 0 && (masked[call - 1].is_alphanumeric() || masked[call - 1] == '_') {
             continue;
         }
-        let Some(start) = literal_argument(&masked, call + "outln!(".len()) else {
+        let Some(start) = literal_argument(&masked, call + name.chars().count()) else {
             continue;
         };
         let end = start + masked[start..].iter().position(|&c| c == '"').unwrap_or(0);
-        let literal: String = code[start..end].iter().collect();
-        let words = skip_blanks(&literal);
-        if STATUS_WORDS.iter().any(|w| words.starts_with(w))
-            || STATUS_ANYWHERE
-                .iter()
-                .any(|p| literal.to_lowercase().contains(p))
-        {
-            let line = masked[..call].iter().filter(|&&c| c == '\n').count() + 1;
-            found.push(format!("{file}:{line}"));
+        let line = masked[..call].iter().filter(|&&c| c == '\n').count() + 1;
+        found.push((line, code[start..end].iter().collect()));
+    }
+    found
+}
+
+/// True when `literal` reads as a status line: it starts with a status
+/// word (after blanks and `\n` escapes), or says "saved … to".
+fn is_status(literal: &str) -> bool {
+    let lower = literal.to_lowercase();
+    STATUS_WORDS
+        .iter()
+        .any(|w| skip_blanks(literal).starts_with(w))
+        || SAVED_WORDS.iter().any(|w| {
+            lower.find(w).is_some_and(|at| {
+                lower[at..]
+                    .match_indices(" to")
+                    .any(|(i, _)| !lower[at + i + 3..].starts_with(char::is_alphabetic))
+            })
+        })
+}
+
+/// `file:line` for each data write (`outln!`, `out!`) whose text is a
+/// status line.
+fn status_on_data(file: &str, src: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for name in ["outln!(", "out!("] {
+        for (line, literal) in literal_args(src, name) {
+            if is_status(&literal) {
+                found.push(format!("{file}:{line}"));
+            }
         }
     }
+    found.sort_by_key(|f| f.split(':').nth(1).and_then(|n| n.parse::<usize>().ok()));
     found
 }
 
@@ -244,7 +296,7 @@ fn skip_blanks(mut text: &str) -> &str {
 #[test]
 fn status_lines_are_notes_not_data() {
     let mut found = Vec::new();
-    for (file, src) in rs_sources(&cli_dir()) {
+    for (file, src) in product_sources() {
         found.extend(status_on_data(&file, &src));
     }
     assert!(
@@ -272,11 +324,17 @@ fn status_scanner_flags_status_lines_on_the_data_channel() {
         r#"outln!(out, "{}", "Using")?;"#,              // 13 spare: the text is "{}"
         r#"let s = "outln!(out, \"Saved\")";"#,         // 14 spare: inside a string
         r#"youtln!(out, "Saved")?;"#,                   // 15 spare: another name
+        r##"outln!(out, r#"Exported {} rows to {}"#, n, p)?;"##, // 16 flag: raw string
+        r#"out!(out, "Fetching ")?;"#,                  // 17 flag: out!
+        r#"outln!(out, "Saved 3 rows into {}", p)?;"#,  // 18 flag: Saved
+        r#"outln!(out, "{} exported, see below", n)?;"#, // 19 spare: no " to "
     ]
     .join("\n");
     assert_eq!(
         status_on_data("x.rs", &src),
-        vec!["x.rs:1", "x.rs:2", "x.rs:3", "x.rs:8", "x.rs:12"]
+        vec![
+            "x.rs:1", "x.rs:2", "x.rs:3", "x.rs:8", "x.rs:12", "x.rs:16", "x.rs:17", "x.rs:18"
+        ]
     );
 }
 
@@ -294,13 +352,18 @@ const REPORTERS: &[(&str, &str, &str)] = &[
         "the TUI's answer to a mistyped session command",
     ),
     ("prompt.rs", "err!(", "a prompt's question"),
+    (
+        "output.rs",
+        "write_err(",
+        "the errln!/err! macros call it; the module defines the policy",
+    ),
 ];
 
 /// `file:line: call` for each `errln!(`/`err!(` outside [`REPORTERS`].
 fn unreported(file: &str, src: &str) -> Vec<String> {
     let mut found = Vec::new();
     for (n, line) in common::masked_lines(src) {
-        for call in ["errln!(", "err!("] {
+        for call in ["errln!(", "err!(", "write_err("] {
             let allowed = REPORTERS.iter().any(|(f, c, _)| *f == file && *c == call);
             if !allowed && common::calls(&line, call) > 0 {
                 found.push(format!("{file}:{n}: {call}"));
@@ -313,7 +376,7 @@ fn unreported(file: &str, src: &str) -> Vec<String> {
 #[test]
 fn only_error_reports_and_prompts_bypass_note() {
     let mut found = Vec::new();
-    for (file, src) in rs_sources(&cli_dir()) {
+    for (file, src) in product_sources() {
         found.extend(unreported(&file, &src));
     }
     assert!(
@@ -337,5 +400,59 @@ fn reporter_scan_flags_other_files_only() {
         unreported("market.rs", src),
         vec!["market.rs:1: errln!(", "market.rs:1: err!("]
     );
+    assert_eq!(
+        unreported("x.rs", "out.write_err(format_args!(\"x\"))?;"),
+        vec!["x.rs:1: write_err("]
+    );
     assert!(unreported("errors.rs", r#"errln!(out, "x")?;"#).is_empty());
+}
+
+#[test]
+fn the_policy_doc_names_the_same_reporters() {
+    // One source: the table in cli/output.rs says which files report past
+    // note!; this guard must allow exactly those.
+    let doc = std::fs::read_to_string(cli_dir().join("output.rs")).unwrap();
+    let mut named: Vec<&str> = doc
+        .lines()
+        .filter(|l| l.starts_with("//! |"))
+        .flat_map(|l| l.split('`'))
+        .filter(|w| w.ends_with(".rs"))
+        .collect();
+    named.sort();
+    named.dedup();
+    let mut allowed: Vec<&str> = REPORTERS.iter().map(|(f, _, _)| *f).collect();
+    allowed.sort();
+    allowed.dedup();
+    assert_eq!(named, allowed);
+}
+
+/// `file:line` for each standalone note that starts with blanks. A note
+/// stands at the left edge; only the setup wizard indents lines under its
+/// own headings.
+fn indented_notes(file: &str, src: &str) -> Vec<String> {
+    if file == "setup.rs" {
+        return Vec::new();
+    }
+    literal_args(src, "note!(")
+        .into_iter()
+        .filter(|(_, literal)| literal.starts_with(' '))
+        .map(|(line, _)| format!("{file}:{line}"))
+        .collect()
+}
+
+#[test]
+fn notes_start_at_the_left_edge() {
+    let mut found = Vec::new();
+    for (file, src) in product_sources() {
+        found.extend(indented_notes(&file, &src));
+    }
+    assert!(
+        found.is_empty(),
+        "drop the leading blanks:\n{}",
+        found.join("\n")
+    );
+    assert_eq!(
+        indented_notes("x.rs", r#"note!(out, "  ⚠ x"); note!(out, "ok");"#),
+        vec!["x.rs:1"]
+    );
 }

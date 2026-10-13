@@ -285,8 +285,8 @@ pub async fn run(
         }
     };
 
-    note!(out, "  Starting live monitor for {}...", token_input);
-    note!(out, "  Fetching initial data...");
+    note!(out, "Starting live monitor for {}...", token_input);
+    note!(out, "Fetching initial data...");
 
     // Create exchange client if a venue is configured (from MonitorConfig or CLI)
     let venue = config.monitor.venue.as_deref();
@@ -419,7 +419,7 @@ pub(crate) async fn fetch_initial_data(
             let pair = ex.format_pair(token_input);
             note!(
                 out,
-                "  DexScreener lookup failed ({}); using the {} ticker {} instead",
+                "DexScreener lookup failed ({}); using the {} ticker {} instead",
                 dex_err,
                 venue_id,
                 pair
@@ -457,7 +457,7 @@ async fn exchange_token_data(
         .to_string();
     note!(
         out,
-        "  Exchange-only mode: {} @ ${:.6}",
+        "Exchange-only mode: {} @ ${:.6}",
         pair,
         ticker.last_price.unwrap_or(0.0)
     );
@@ -2443,7 +2443,7 @@ mod tests {
         let output = cap.err();
         assert!(output.contains("Found 3 matching tokens"));
         assert!(output.contains("USDC"));
-        assert!(output.contains("0xA0b869...06eB48"));
+        assert!(output.contains("0xA0b8…eB48"));
         assert!(output.contains("Selected:"));
     }
 
@@ -2475,9 +2475,9 @@ mod tests {
         // Table header should include Address column
         assert!(output.contains("Address"));
         // All three abbreviated addresses should appear
-        assert!(output.contains("0xA0b869...06eB48"));
-        assert!(output.contains("0x2791Bc...a84174"));
-        assert!(output.contains("0x123456...345678"));
+        assert!(output.contains("0xA0b8…eB48"));
+        assert!(output.contains("0x2791…4174"));
+        assert!(output.contains("0x1234…5678"));
     }
 
     #[test]

@@ -27,22 +27,32 @@ impl DataSources {
     }
 }
 
-/// Transaction data from Etherscan
-#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+/// Transaction data from Etherscan. Etherscan names its fields in
+/// camelCase (`blockNumber`, `timeStamp`, …); a field it leaves out (some
+/// endpoints omit a few) is empty.
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
+#[serde(default)]
 pub struct EtherscanTransaction {
+    #[serde(rename(deserialize = "blockNumber"))]
     pub block_number: String,
+    #[serde(rename(deserialize = "timeStamp"))]
     pub timestamp: String,
     pub hash: String,
     pub from: String,
     pub to: String,
     pub value: String,
     pub gas: String,
+    #[serde(rename(deserialize = "gasPrice"))]
     pub gas_price: String,
+    #[serde(rename(deserialize = "isError"))]
     pub is_error: String,
     pub txreceipt_status: String,
     pub input: String,
+    #[serde(rename(deserialize = "contractAddress"))]
     pub contract_address: String,
+    #[serde(rename(deserialize = "cumulativeGasUsed"))]
     pub cumulative_gas_used: String,
+    #[serde(rename(deserialize = "gasUsed"))]
     pub gas_used: String,
     pub confirmations: String,
 }
@@ -91,13 +101,10 @@ impl BlockchainDataClient {
         }
     }
 
-    /// Create client from ETHERSCAN_API_KEY env var if set.
-    /// Returns None if the key is not set (use RiskEngine::new() for basic scoring).
+    /// A client for the key in [`super::etherscan::ETHERSCAN_KEY_ENV`], or
+    /// `None` when it is not set (then use `RiskEngine::new()`).
     pub fn from_env_opt() -> Option<Self> {
-        std::env::var("ETHERSCAN_API_KEY").ok().map(|key| {
-            let sources = DataSources::new(key);
-            Self::new(sources)
-        })
+        super::etherscan::etherscan_key().map(|key| Self::new(DataSources::new(key)))
     }
 
     /// Fetch transaction history for an address
@@ -331,6 +338,20 @@ pub struct PatternAnalysis {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_an_etherscan_txlist_entry_parses() {
+        // The live API names fields in camelCase. The struct used snake
+        // case, so every real response failed to parse.
+        let json = r#"{"blockNumber":"18000000","timeStamp":"1700000000","hash":"0xabc",
+            "from":"0x1","to":"0x2","value":"1","gasPrice":"5","isError":"0",
+            "gasUsed":"21000","input":"0x"}"#;
+        let tx: EtherscanTransaction = serde_json::from_str(json).unwrap();
+        assert_eq!(tx.block_number, "18000000");
+        assert_eq!(tx.timestamp, "1700000000");
+        assert_eq!(tx.gas_used, "21000");
+        assert_eq!(tx.contract_address, "", "a left-out field is empty");
+    }
 
     #[test]
     fn test_pattern_analysis_velocity() {

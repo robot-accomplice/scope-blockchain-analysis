@@ -58,20 +58,24 @@ use anyhow::Result;
 use clap::Parser;
 use scope::Config;
 use scope::config::OutputFormat;
+use scope::error::ScopeError;
 use scope_cli::cli::errors::display_error;
 use scope_cli::cli::output::Output;
+use scope_cli::cli::prompt;
 use scope_cli::cli::{Cli, Commands};
-use scope_cli::errln;
-use std::io::{self, IsTerminal, Write};
+use scope_cli::note;
+use std::io::{self, IsTerminal};
 use tracing_subscriber::EnvFilter;
 
 /// ASCII art banner featuring a Portia jumping spider.
 /// Loaded from `assets/banner.txt` at compile time.
 const BANNER: &str = include_str!("../assets/banner.txt");
 
-/// Prints the startup banner to stderr.
-fn print_banner() {
-    eprintln!("{}", BANNER);
+/// Reports `message` as a failed command and exits with `code`.
+fn fail(out: &Output, message: String, code: i32) -> ! {
+    // With stderr gone there is no channel left; the code still tells.
+    let _ = display_error(&ScopeError::Other(message), out);
+    std::process::exit(code);
 }
 
 /// Application entry point.
@@ -82,6 +86,7 @@ fn print_banner() {
 async fn main() -> Result<()> {
     // Parse CLI arguments
     let cli = Cli::parse();
+    let out = Output::stdio();
 
     // Initialize logging based on verbosity
     init_logging(cli.verbose);
@@ -99,14 +104,13 @@ async fn main() -> Result<()> {
             io::stdout().is_terminal(),
             term.as_deref(),
         ) {
-            eprintln!("{message}");
-            std::process::exit(2);
+            fail(&out, message, 2);
         }
     }
 
     // Show banner in verbose mode
     if cli.verbose > 0 {
-        print_banner();
+        note!(out, "{}", BANNER);
     }
 
     tracing::debug!("Scope v{} starting", scope::VERSION);
@@ -116,7 +120,10 @@ async fn main() -> Result<()> {
 
     // Load configuration
     let mut config = Config::load(cli.config.as_deref()).unwrap_or_else(|e| {
-        eprintln!("  ⚠ Could not load config, using defaults (use -v for details)");
+        note!(
+            out,
+            "⚠ Could not load config, using defaults (use -v for details)"
+        );
         tracing::debug!("Failed to load config: {}", e);
         Config::default()
     });
@@ -131,13 +138,13 @@ async fn main() -> Result<()> {
         let addr: std::net::SocketAddr = format!("{}:{}", web_args.bind, web_args.port)
             .parse()
             .unwrap_or_else(|_| {
-                eprintln!("Invalid bind address: {}:{}", web_args.bind, web_args.port);
-                std::process::exit(1);
+                let message = format!("Invalid bind address: {}:{}", web_args.bind, web_args.port);
+                fail(&out, message, 1)
             });
 
         if web_args.stop {
-            if let Err(e) = scope_web::stop_daemon() {
-                eprintln!("Error: {}", e);
+            if let Err(e) = scope_web::stop_daemon(&out) {
+                let _ = display_error(&e, &out);
                 std::process::exit(1);
             }
             return Ok(());
@@ -145,40 +152,40 @@ async fn main() -> Result<()> {
 
         // If running as daemon child, skip daemon forking
         if scope_web::is_daemon_child() || !web_args.daemon {
-            return scope_web::start_server(addr, config)
+            return scope_web::start_server(addr, config, &out)
                 .await
                 .map_err(|e| anyhow::anyhow!(e));
         }
 
         // Fork daemon
-        if let Err(e) = scope_web::start_daemon(addr, config) {
-            eprintln!("Error: {}", e);
+        if let Err(e) = scope_web::start_daemon(addr, config, &out) {
+            let _ = display_error(&e, &out);
             std::process::exit(1);
         }
         return Ok(());
     }
 
     // Check if config file exists and prompt for setup if needed
-    if !is_setup_command && !config_file_exists(&cli) && prompt_for_setup() {
+    if !is_setup_command && !config_file_exists(&cli) && prompt_for_setup(&out) {
         // Run setup wizard
         let setup_args = scope_cli::cli::setup::SetupArgs {
             status: false,
             key: None,
             reset: false,
         };
-        if let Err(e) = scope_cli::cli::setup::run(setup_args, &config, &Output::stdio()).await {
-            eprintln!("Setup failed: {}", e);
+        if let Err(e) = scope_cli::cli::setup::run(setup_args, &config, &out).await {
+            let _ = display_error(&e, &out);
         }
         // Reload config after setup
         let mut config = Config::load(cli.config.as_deref()).unwrap_or_default();
         if cli.ai {
             config.output.format = OutputFormat::Markdown;
         }
-        return dispatch(cli.command, &config).await;
+        return dispatch(cli.command, &config, &out).await;
     }
 
     // Dispatch the command through the unified handler
-    dispatch(cli.command, &config).await
+    dispatch(cli.command, &config, &out).await
 }
 
 /// Checks if a configuration file exists.
@@ -190,20 +197,19 @@ fn config_file_exists(cli: &Cli) -> bool {
 }
 
 /// Prompts the user to run setup.
-fn prompt_for_setup() -> bool {
-    eprintln!();
-    eprintln!("Welcome to Scope Blockchain Analysis!");
-    eprintln!();
-    eprintln!("No configuration file found. Would you like to run the setup wizard");
-    eprintln!("to configure API keys and preferences?");
-    eprintln!();
-    eprint!("Run setup now? [Y/n]: ");
-    io::stderr().flush().ok();
-
-    let mut input = String::new();
-    if io::stdin().read_line(&mut input).is_err() {
+fn prompt_for_setup(out: &Output) -> bool {
+    note!(out);
+    note!(out, "Welcome to Scope Blockchain Analysis!");
+    note!(out);
+    note!(
+        out,
+        "No configuration file found. Would you like to run the setup wizard"
+    );
+    note!(out, "to configure API keys and preferences?");
+    note!(out);
+    let Ok(input) = prompt::ask_stdin(out, "Run setup now? [Y/n]: ") else {
         return false;
-    }
+    };
 
     let response = input.trim().to_lowercase();
     // Default to yes if user just presses Enter
@@ -215,14 +221,13 @@ fn prompt_for_setup() -> bool {
 /// Prints the version line for non-interactive commands, and on failure
 /// prints the error with remediation hints and exits with status 1. Exits
 /// with the TUI's code when a signal ended it.
-async fn dispatch(command: Commands, config: &Config) -> Result<()> {
-    let out = Output::stdio();
+async fn dispatch(command: Commands, config: &Config, out: &Output) -> Result<()> {
     // Print version on stderr for non-interactive commands
     if !command.is_interactive() {
-        errln!(out, "Scope v{}", scope::VERSION)?;
+        note!(out, "Scope v{}", scope::VERSION);
     }
 
-    match scope_cli::cli::dispatch::dispatch(command, config, &out).await {
+    match scope_cli::cli::dispatch::dispatch(command, config, out).await {
         Ok(0) => Ok(()),
         // The TUI ended on a signal (128+N); it already restored the
         // terminal and saved.
@@ -231,7 +236,7 @@ async fn dispatch(command: Commands, config: &Config) -> Result<()> {
             tracing::debug!("Command failed: {}", e);
             // If stderr itself fails there is no channel left to report on;
             // the non-zero exit status still tells the caller that it failed.
-            let _ = display_error(&e, &out);
+            let _ = display_error(&e, out);
             std::process::exit(1);
         }
     }

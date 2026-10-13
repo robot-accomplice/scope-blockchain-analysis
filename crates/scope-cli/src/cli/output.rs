@@ -10,9 +10,10 @@
 //! | What | Macro | Channel | A failed write |
 //! |---|---|---|---|
 //! | Data (the command's result) | `outln!`, `out!` | out | is the command's error |
-//! | Error reports ([`crate::cli::errors`], a TUI session command's error) | `errln!` | err | is the command's error |
-//! | A prompt's question ([`crate::cli::prompt`]) | `err!` | err | is the prompt's error |
-//! | Everything else: status, notices, warnings, "saved to" | [`note!`](crate::note) | err | is dropped |
+//! | Error reports, only in `errors.rs` and `tui/exec.rs` (a TUI session command's error) | `errln!` | err | is the command's error |
+//! | A prompt's question, only in `prompt.rs` | `err!` | err | is the prompt's error |
+//! | The macros above, defined in `output.rs` | `write_err` | err | is returned |
+//! | Everything else: status, notices, warnings, "saved to" | [`note!`](crate::note), [`Output::note_saved`] | err | is dropped |
 //!
 //! Data goes to `out`, so piped JSON and CSV stay clean. A note ("Fetching
 //! …", "Selected: …", "⚠ … unavailable") is best effort: when it cannot be
@@ -20,8 +21,9 @@
 //! it does not change the exit code. Library code in `scope` (core) has the
 //! same kind of best-effort line: `scope::diag::notice`.
 //!
-//! A guard test (`tests/one_output_path.rs`) keeps `errln!` and `err!` in
-//! the files above and status words off `outln!`.
+//! The guard tests (`tests/one_output_path.rs`) keep `errln!`, `err!` and
+//! `write_err` in the files this table names (they read the table), and
+//! status text off `outln!` and `out!`.
 //!
 //! ```rust,ignore
 //! use scope_cli::cli::output::Output;
@@ -243,7 +245,7 @@ impl Output {
 
     /// The one "saved to" line: `<what> saved to: <where>`, as a note.
     pub fn note_saved(&self, what: &str, path: impl fmt::Display) {
-        crate::note!(self, "\n{what} saved to: {path}");
+        crate::note!(self, "{what} saved to: {path}");
     }
 }
 
@@ -469,7 +471,7 @@ pub(crate) mod tests {
     fn test_note_saved_is_one_line_on_the_diagnostic_channel() {
         let (o, cap) = Output::capture();
         o.note_saved("Report", "r.md");
-        assert_eq!(cap.err(), "\nReport saved to: r.md\n");
+        assert_eq!(cap.err(), "Report saved to: r.md\n");
         assert_eq!(cap.out(), "");
     }
 

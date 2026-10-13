@@ -84,17 +84,10 @@ async fn run_batch(
     let mut reports = Vec::new();
     let mut risk_assessments: Vec<Option<scope::compliance::risk::RiskAssessment>> = Vec::new();
 
-    let engine = match scope::compliance::datasource::BlockchainDataClient::from_env_opt() {
-        Some(client) => scope::compliance::risk::RiskEngine::with_data_client(client),
-        None => scope::compliance::risk::RiskEngine::new(),
-    };
+    let engine = scope::compliance::risk::RiskEngine::from_env();
 
     for (address, chain) in &targets {
-        let short_addr = if address.len() > 12 {
-            format!("{}...{}", &address[..6], &address[address.len() - 4..])
-        } else {
-            address.clone()
-        };
+        let short_addr = scope::display::text::abbreviate(address);
         prog.inc(&short_addr);
 
         let addr_args = AddressArgs {

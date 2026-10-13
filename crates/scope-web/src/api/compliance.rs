@@ -5,7 +5,6 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use scope::compliance::datasource::{BlockchainDataClient, DataSources};
 use scope::compliance::risk::RiskEngine;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -50,13 +49,7 @@ pub async fn handle_risk(
     let chain = resolved.chain.unwrap_or(req.chain);
 
     // Build risk engine (with Etherscan key if available)
-    let engine = if let Ok(key) = std::env::var("ETHERSCAN_API_KEY") {
-        let sources = DataSources::new(key);
-        let client = BlockchainDataClient::new(sources);
-        RiskEngine::with_data_client(client)
-    } else {
-        RiskEngine::new()
-    };
+    let engine = RiskEngine::from_env();
 
     match engine.assess_address(&address, &chain).await {
         Ok(assessment) => Json(serde_json::json!({

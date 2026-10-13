@@ -230,11 +230,7 @@ fn signal_stream() -> Result<BoxStream<'static, Signal>> {
     let mut streams = Vec::with_capacity(kinds.len());
     for (kind, sig) in kinds {
         let mut handler = signal(kind).map_err(|e| {
-            ScopeError::Other(format!(
-                "cannot install the SIG{} handler: {}",
-                sig.name(),
-                e
-            ))
+            ScopeError::io_context(e, format!("cannot install the SIG{} handler", sig.name()))
         })?;
         streams.push(futures::stream::poll_fn(move |cx| {
             handler.poll_recv(cx).map(|got| got.map(|()| sig))

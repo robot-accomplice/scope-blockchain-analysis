@@ -22,9 +22,25 @@ const C1_LEAD: u8 = 0xc2;
 /// U+009B (CSI) and U+009C (ST), second UTF-8 byte.
 const C1_CSI: u8 = 0x9b;
 const C1_ST: u8 = 0x9c;
-/// The 8-bit string openers, second UTF-8 byte: DCS U+0090, SOS U+0098,
-/// OSC U+009D, PM U+009E, APC U+009F.
-const C1_STRINGS: [u8; 5] = [0x90, 0x98, 0x9d, 0x9e, 0x9f];
+/// The string sequences: the 7-bit opener (`ESC` and this byte) and the
+/// second UTF-8 byte of the 8-bit opener. DCS, SOS, OSC, PM, APC.
+const STRING_OPENERS: [(u8, u8); 5] = [
+    (b'P', 0x90),
+    (b'X', 0x98),
+    (b']', 0x9d),
+    (b'^', 0x9e),
+    (b'_', 0x9f),
+];
+
+/// True when `byte` after `ESC` opens a string sequence.
+fn opens_string_7bit(byte: u8) -> bool {
+    STRING_OPENERS.iter().any(|&(seven, _)| seven == byte)
+}
+
+/// True when `byte` after the C1 lead byte opens a string sequence.
+fn opens_string_8bit(byte: u8) -> bool {
+    STRING_OPENERS.iter().any(|&(_, eight)| eight == byte)
+}
 
 /// When an escape sequence starts at `at` in `bytes`, the index just after
 /// it; otherwise `None`. The result is always a UTF-8 character boundary
@@ -32,10 +48,10 @@ const C1_STRINGS: [u8; 5] = [0x90, 0x98, 0x9d, 0x9e, 0x9f];
 pub(crate) fn escape_end(bytes: &[u8], at: usize) -> Option<usize> {
     match (bytes.get(at)?, bytes.get(at + 1)) {
         (&C1_LEAD, Some(&C1_CSI)) => Some(csi_end(bytes, at + 2)),
-        (&C1_LEAD, Some(b)) if C1_STRINGS.contains(b) => Some(string_end(bytes, at + 2)),
+        (&C1_LEAD, Some(&b)) if opens_string_8bit(b) => Some(string_end(bytes, at + 2)),
         (&ESC, None) => Some(at + 1),
         (&ESC, Some(b'[')) => Some(csi_end(bytes, at + 2)),
-        (&ESC, Some(b']' | b'P' | b'X' | b'^' | b'_')) => Some(string_end(bytes, at + 2)),
+        (&ESC, Some(&b)) if opens_string_7bit(b) => Some(string_end(bytes, at + 2)),
         (&ESC, Some(0x20..=0x2f)) => Some(intermediates_end(bytes, at + 1)),
         (&ESC, Some(&next)) => Some(at + 1 + char_len(next).min(bytes.len() - at - 1)),
         _ => None,

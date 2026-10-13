@@ -78,7 +78,7 @@ pub struct TokenHealthArgs {
     /// Market venue for order book data (e.g., binance, mexc, okx, eth, solana).
     /// CEX venues use the venue registry; "eth"/"solana" use DEX liquidity.
     /// Run `scope venues list` to see available venues.
-    #[arg(long, default_value = "binance")]
+    #[arg(long, default_value = scope::market::DEFAULT_VENUE)]
     pub venue: String,
 
     /// Output format.

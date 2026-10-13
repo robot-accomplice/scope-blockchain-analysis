@@ -1087,11 +1087,7 @@ impl EthereumClient {
                 }
 
                 // Return with address-based placeholder
-                let short_addr = format!(
-                    "{}...{}",
-                    &token_address[..6],
-                    &token_address[token_address.len() - 4..]
-                );
+                let short_addr = crate::display::text::abbreviate(token_address);
                 return Ok(Token {
                     contract_address: token_address.to_string(),
                     symbol: short_addr.clone(),
