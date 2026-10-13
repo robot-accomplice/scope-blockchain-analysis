@@ -147,7 +147,7 @@ scope crawl 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --chain ethereum
 scope monitor USDC                                          # defaults to ethereum
 scope mon PEPE --chain ethereum --layout chart-focus        # short alias with options
 scope monitor USDC --layout exchange                        # exchange-style: order book + chart + trades
-scope monitor USDC --venue binance                           # real exchange OHLC instead of synthetic candles
+scope monitor USDC --venue binance                           # real exchange OHLC, order book and trades
 
 # Exchange venues
 scope venues list                                           # show all available venues

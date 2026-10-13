@@ -71,7 +71,9 @@ pub use configurable_client::ConfigurableExchangeClient;
 pub use default_venue::DEFAULT_VENUE;
 pub use descriptor::VenueDescriptor;
 pub use exchange::ExchangeClient;
-pub use fetch::{DexAnalyticsSource, fetch_book_and_volume, fetch_summary, fetch_token_summary};
+pub use fetch::{
+    DexAnalyticsSource, fetch_book_and_volume, fetch_summary, fetch_token_summary, most_liquid,
+};
 pub use orderbook::{
     BookSide, BookSource, Candle, ExecutionEstimate, ExecutionSide, HealthCheck, HealthOverrides,
     HealthThresholds, MarketSnapshot, MarketSummary, OhlcClient, OrderBook, OrderBookClient,

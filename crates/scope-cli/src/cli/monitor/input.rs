@@ -331,6 +331,8 @@ impl<B: ratatui::backend::Backend> MonitorApp<B> {
             }
         }
 
+        self.fetch_venue_book_and_trades().await;
+
         // Periodically fetch holder count via chain client (~every 12th refresh ≈ 60s at 5s rate)
         self.state.holder_fetch_counter += 1;
         if self.state.holder_fetch_counter.is_multiple_of(12)
@@ -351,6 +353,29 @@ impl<B: ratatui::backend::Backend> MonitorApp<B> {
 }
 
 impl<B: ratatui::backend::Backend> MonitorApp<B> {
+    /// With a venue, its real order book and recent trades replace the ones
+    /// built from DEX data (#78). A failed fetch keeps the last real data
+    /// and shows the error.
+    async fn fetch_venue_book_and_trades(&mut self) {
+        let (Some(ex), Some(pair)) = (&self.exchange_client, self.state.venue_pair.clone()) else {
+            return;
+        };
+        let venue = ex.venue_id().to_string();
+        if ex.has_order_book() {
+            match ex.fetch_order_book(&pair).await {
+                Ok(book) => self.state.set_venue_book(&venue, book),
+                Err(e) => self.state.error_message = Some(format!("{venue} order book: {e}")),
+            }
+        }
+        if ex.has_trade_history() {
+            let limit = super::state::MAX_RECENT_TRADES as u32;
+            match ex.fetch_recent_trades(&pair, limit).await {
+                Ok(trades) => self.state.set_venue_trades(&venue, trades),
+                Err(e) => self.state.error_message = Some(format!("{venue} trades: {e}")),
+            }
+        }
+    }
+
     /// Venue-only refresh: prices the token from the venue ticker.
     async fn fetch_venue_ticker(&mut self) {
         let (Some(ex), Some(pair)) = (&self.exchange_client, self.state.venue_pair.clone()) else {

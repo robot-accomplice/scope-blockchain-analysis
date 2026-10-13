@@ -1495,37 +1495,39 @@ pub(crate) fn render_order_book_panel(f: &mut Frame, area: Rect, state: &Monitor
     f.render_widget(paragraph, area);
 }
 
-/// The order book title names where the book comes from. The monitor
-/// never fetches a venue book: it is built from DEX pairs, or absent in
-/// venue-only mode.
+/// The order book title names where the book comes from: the venue, or
+/// the synthetic source the core reports. Venue-only mode without a venue
+/// book has none.
 pub(crate) fn order_book_title(state: &MonitorState) -> String {
-    if state.venue_only {
-        return format!(" ◈ Order Book {VENUE_ONLY_NOTE} ");
-    }
-    match &state.order_book {
-        Some(book) => {
-            let ask_depth = book.total_depth(BookSide::Ask);
-            let bid_depth = book.total_depth(BookSide::Bid);
-            format!(
-                " ◈ Order Book {SYNTHETIC_NOTE} │ {} │ Ask {} │ Bid {} ",
-                book.pair,
-                format_number(ask_depth),
-                format_number(bid_depth),
-            )
+    let Some(book) = &state.order_book else {
+        if state.venue_only {
+            return format!(" ◈ Order Book {VENUE_ONLY_NOTE} ");
         }
-        None => format!(" ◈ Order Book {SYNTHETIC_NOTE} │ no data "),
-    }
+        return format!(" ◈ Order Book {SYNTHETIC_NOTE} │ no data ");
+    };
+    let source = match &state.book_venue {
+        Some(venue) => format!("({venue})"),
+        None => format!("({})", book.source.label()),
+    };
+    format!(
+        " ◈ Order Book {source} │ {} │ Ask {} │ Bid {} ",
+        book.pair,
+        format_number(book.total_depth(BookSide::Ask)),
+        format_number(book.total_depth(BookSide::Bid)),
+    )
 }
 
 /// The recent trades title names where the trades come from, as
 /// [`order_book_title`] does.
 pub(crate) fn trades_title(state: &MonitorState) -> String {
-    if state.venue_only {
-        return format!(" ◈ Recent Trades {VENUE_ONLY_NOTE} ");
-    }
+    let source = match &state.trades_venue {
+        Some(venue) => format!("({venue})"),
+        None if state.venue_only => return format!(" ◈ Recent Trades {VENUE_ONLY_NOTE} "),
+        None => SYNTHETIC_NOTE.to_string(),
+    };
     match state.recent_trades.len() {
-        0 => format!(" ◈ Recent Trades {SYNTHETIC_NOTE} │ no data "),
-        n => format!(" ◈ Recent Trades {SYNTHETIC_NOTE} │ {n} "),
+        0 => format!(" ◈ Recent Trades {source} │ no data "),
+        n => format!(" ◈ Recent Trades {source} │ {n} "),
     }
 }
 

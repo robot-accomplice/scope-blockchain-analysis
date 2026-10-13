@@ -13,6 +13,8 @@ pub struct RunCtx {
     pub fixtures_root: PathBuf,
     pub snapshots_root: PathBuf,
     pub scenario_id: String,
+    /// Record the live replies as this scenario's fixtures (`just tui-record`).
+    pub record: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -66,7 +68,17 @@ fn absolutize(p: &Path) -> Result<PathBuf> {
 /// The env the child sees. The child's cwd is its temp HOME, so paths must be absolute.
 fn child_env(tier: Tier, ctx: &RunCtx) -> Result<Vec<(String, String)>> {
     let mut env = vec![];
-    if tier == Tier::Offline {
+    if ctx.record {
+        // The live APIs answer; each reply is written as a fixture.
+        env.push(("SCOPE_HTTP_MODE".to_string(), "record".to_string()));
+        env.push((
+            "SCOPE_HTTP_FIXTURES".to_string(),
+            absolutize(&ctx.fixtures_root)?
+                .join(&ctx.scenario_id)
+                .display()
+                .to_string(),
+        ));
+    } else if tier == Tier::Offline {
         env.push(("SCOPE_HTTP_MODE".to_string(), "replay".to_string()));
         env.push((
             "SCOPE_HTTP_FIXTURES".to_string(),
@@ -374,12 +386,32 @@ mod tests {
     }
 
     #[test]
+    fn test_record_mode_writes_the_scenario_fixtures_from_the_live_apis() {
+        let c = RunCtx {
+            binary: "scope".into(),
+            fixtures_root: "tests/tui/fixtures".into(),
+            snapshots_root: "tests/tui/snapshots".into(),
+            scenario_id: "demo".into(),
+            record: true,
+        };
+        let env = child_env(Tier::Offline, &c).unwrap();
+        let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        assert_eq!(get("SCOPE_HTTP_MODE").as_deref(), Some("record"));
+        assert!(
+            get("SCOPE_HTTP_FIXTURES")
+                .unwrap()
+                .ends_with("tests/tui/fixtures/demo")
+        );
+    }
+
+    #[test]
     fn test_child_fixtures_env_is_absolute_for_a_relative_root() {
         let c = RunCtx {
             binary: "scope".into(),
             fixtures_root: "tests/tui/fixtures".into(),
             snapshots_root: "tests/tui/snapshots".into(),
             scenario_id: "demo".into(),
+            record: false,
         };
         let env = child_env(Tier::Offline, &c).unwrap();
         let fx = &env
@@ -409,6 +441,7 @@ mod tests {
             fixtures_root: d.path().join("fx"),
             snapshots_root: d.path().join("snap"),
             scenario_id: "t".into(),
+            record: false,
         };
         (c, d)
     }

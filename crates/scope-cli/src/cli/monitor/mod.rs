@@ -335,6 +335,7 @@ pub async fn run(
     )?;
 
     app.state.auto_layout = !layout_pinned;
+    app.state.thresholds = config.market.health.clone();
 
     // In exchange-only mode, use the exact pair that priced the token, and
     // refresh from the venue alone.
@@ -4650,59 +4651,6 @@ refresh_seconds: 5
     }
 
     #[test]
-    fn test_generate_synthetic_order_book() {
-        let pairs = vec![scope::chains::DexPair {
-            dex_name: "Uniswap V3".to_string(),
-            pair_address: "0xabc".to_string(),
-            base_token: "DAI".to_string(),
-            quote_token: "USDT".to_string(),
-            price_usd: 1.0,
-            volume_24h: 50_000.0,
-            liquidity_usd: 200_000.0,
-            liquidity_base: None,
-            price_change_24h: 0.1,
-            buys_24h: 100,
-            sells_24h: 90,
-            buys_6h: 30,
-            sells_6h: 25,
-            buys_1h: 10,
-            sells_1h: 8,
-            pair_created_at: None,
-            url: None,
-        }];
-        let book = MonitorState::generate_synthetic_order_book(&pairs, "DAI", 1.0, 200_000.0);
-        assert!(book.is_some());
-        let book = book.unwrap();
-        assert_eq!(book.pair, "DAI/USDT");
-        assert!(!book.asks.is_empty());
-        assert!(!book.bids.is_empty());
-        // Asks should be ascending
-        for w in book.asks.windows(2) {
-            assert!(w[0].price <= w[1].price);
-        }
-        // Bids should be descending
-        for w in book.bids.windows(2) {
-            assert!(w[0].price >= w[1].price);
-        }
-    }
-
-    #[test]
-    fn test_generate_synthetic_order_book_zero_price() {
-        let book = MonitorState::generate_synthetic_order_book(&[], "TEST", 0.0, 100_000.0);
-        assert!(book.is_none());
-    }
-
-    #[test]
-    fn test_generate_synthetic_order_book_zero_liquidity() {
-        let book = MonitorState::generate_synthetic_order_book(&[], "TEST", 1.0, 0.0);
-        assert!(book.is_none());
-    }
-
-    // ========================================================================
-    // Coverage gap: Auto-pause with custom timeout
-    // ========================================================================
-
-    #[test]
     fn test_auto_pause_custom_timeout() {
         let token_data = create_test_token_data();
         let mut state = MonitorState::new(&token_data, "ethereum");
@@ -6485,12 +6433,7 @@ refresh_seconds: 5
             pair_created_at: None,
             url: None,
         }];
-        state.order_book = MonitorState::generate_synthetic_order_book(
-            &state.dex_pairs,
-            &state.symbol,
-            state.current_price,
-            state.liquidity_usd,
-        );
+        state.order_book = state.dex_book(&state.dex_pairs, &state.symbol);
         state.recent_trades.push_back(Trade {
             price: 1.0,
             quantity: 500.0,
@@ -6542,54 +6485,6 @@ refresh_seconds: 5
             make_dex_pair("sushiswap", "TEST", "WETH", 1.01, 200_000.0, 150_000.0),
         ];
         data
-    }
-
-    #[test]
-    fn test_generate_synthetic_order_book_with_pairs() {
-        let data = create_test_token_data_with_pairs();
-        let book = MonitorState::generate_synthetic_order_book(
-            &data.pairs,
-            &data.symbol,
-            data.price_usd,
-            data.liquidity_usd,
-        );
-        assert!(book.is_some());
-        let book = book.unwrap();
-        assert!(!book.bids.is_empty());
-        assert!(!book.asks.is_empty());
-        assert!(book.bids[0].price < data.price_usd);
-        assert!(book.asks[0].price > data.price_usd);
-    }
-
-    #[test]
-    fn test_generate_synthetic_order_book_empty_pairs() {
-        let book = MonitorState::generate_synthetic_order_book(&[], "TEST", 1.0, 500_000.0);
-        // Empty pairs with positive price/liquidity still generates a book
-        assert!(book.is_some());
-    }
-
-    #[test]
-    fn test_generate_synthetic_order_book_zero_mid_price() {
-        let pairs = vec![make_dex_pair("uniswap", "TEST", "USDC", 0.0, 100.0, 100.0)];
-        let book = MonitorState::generate_synthetic_order_book(&pairs, "TEST", 0.0, 100.0);
-        assert!(book.is_none());
-    }
-
-    #[test]
-    fn test_generate_synthetic_order_book_high_liquidity() {
-        let pairs = vec![make_dex_pair(
-            "uniswap",
-            "WETH",
-            "USDC",
-            3500.0,
-            50_000_000.0,
-            5_000_000.0,
-        )];
-        let book = MonitorState::generate_synthetic_order_book(&pairs, "WETH", 3500.0, 5_000_000.0);
-        assert!(book.is_some());
-        let book = book.unwrap();
-        assert!(book.bids.len() > 5);
-        assert!(book.asks.len() > 5);
     }
 
     #[test]
@@ -6769,12 +6664,109 @@ refresh_seconds: 5
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
 
+    // H1: the monitor's DEX book is the core book of the most liquid pool,
+    // with the source the core reports, so the AMM spread guard applies and
+    // the monitor agrees with `market summary`.
+    #[test]
+    fn test_update_builds_the_core_dex_book() {
+        let data = create_test_token_data_with_pairs();
+        let mut state = MonitorState::new(&data, "ethereum");
+        state.update(&data);
+        let best = scope::market::most_liquid(&data.pairs).unwrap();
+        let expected = scope::market::order_book_from_analytics(
+            "ethereum",
+            best,
+            &data.symbol,
+            &state.thresholds,
+        );
+        let book = state.order_book.as_ref().unwrap();
+        assert_eq!(book.pair, expected.pair);
+        assert_eq!(book.source, expected.source);
+        assert_ne!(book.source, scope::market::BookSource::Exchange);
+        assert_eq!(book.bids.len(), expected.bids.len());
+        assert_eq!(book.asks.len(), expected.asks.len());
+    }
+
+    #[test]
+    fn test_a_venue_book_and_trades_survive_dex_refreshes() {
+        let data = create_test_token_data_with_pairs();
+        let mut state = MonitorState::new(&data, "ethereum");
+        let book = scope::market::OrderBook {
+            pair: "TEST/USDT".into(),
+            source: scope::market::BookSource::Exchange,
+            bids: vec![scope::market::OrderBookLevel {
+                price: 0.99,
+                quantity: 5.0,
+            }],
+            asks: vec![scope::market::OrderBookLevel {
+                price: 1.01,
+                quantity: 7.0,
+            }],
+        };
+        state.set_venue_book("binance", book.clone());
+        let trade = |ts| Trade {
+            price: 1.0,
+            quantity: 1.0,
+            quote_quantity: None,
+            timestamp_ms: ts,
+            side: TradeSide::Buy,
+            id: None,
+        };
+        state.set_venue_trades("binance", vec![trade(3), trade(1), trade(2)]);
+        state.update(&data);
+        state.update(&data);
+        assert_eq!(state.order_book.as_ref().unwrap().pair, book.pair);
+        assert_eq!(state.recent_trades.len(), 3, "no synthetic trade added");
+        let times: Vec<u64> = state.recent_trades.iter().map(|t| t.timestamp_ms).collect();
+        assert_eq!(times, vec![1, 2, 3], "oldest first");
+        assert!(order_book_title(&state).contains("Order Book (binance)"));
+        assert!(trades_title(&state).contains("Recent Trades (binance)"));
+    }
+
+    // #78 acceptance: with a venue, the Order Book panel shows the venue's
+    // real bids and asks, and both titles name the venue.
+    #[tokio::test]
+    async fn test_a_venue_fills_the_book_and_trades_panels_with_real_data() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/api/v3/depth")
+            .match_query(mockito::Matcher::Any)
+            .with_body(r#"{"bids":[["0.9991","1234"]],"asks":[["1.0009","4321"]]}"#)
+            .create_async()
+            .await;
+        server
+            .mock("GET", "/api/v3/trades")
+            .match_query(mockito::Matcher::Any)
+            .with_body(r#"[{"id":1,"price":"1.0001","qty":"50","quoteQty":"50","time":1700000000000,"isBuyerMaker":false}]"#)
+            .create_async()
+            .await;
+        let dex = MockDexDataSource::new(create_test_token_data());
+        let mut app = create_test_app(Box::new(dex), None);
+        app.exchange_client = Some(scope::market::testing::venue_at("binance", &server.url()));
+        app.state.venue_pair = Some("USDCUSDT".into());
+        app.fetch_data().await;
+        let book = app.state.order_book.as_ref().unwrap();
+        assert_eq!(book.source, scope::market::BookSource::Exchange);
+        assert_eq!(book.bids[0].price, 0.9991);
+        assert_eq!(book.asks[0].quantity, 4321.0);
+        assert_eq!(app.state.recent_trades.len(), 1);
+        assert!(order_book_title(&app.state).contains("(binance)"));
+        assert!(trades_title(&app.state).contains("(binance)"));
+        app.state.layout = LayoutPreset::Exchange;
+        app.state.auto_layout = false;
+        let text = ui_text(&mut app.state, 220, 50);
+        assert!(text.contains("Order Book (binance)"), "{text}");
+        assert!(text.contains("Recent Trades (binance)"), "{text}");
+    }
+
     #[test]
     fn test_panel_titles_name_their_source() {
         let data = create_test_token_data_with_pairs();
         let mut state = MonitorState::new(&data, "ethereum");
         state.update(&data);
-        assert!(order_book_title(&state).contains("(synthetic, from DEX pairs)"));
+        // The book is the core DEX book; its title names the core's source.
+        let label = state.order_book.as_ref().unwrap().source.label();
+        assert!(order_book_title(&state).contains(&format!("({label})")));
         assert!(trades_title(&state).contains("(synthetic, from DEX pairs)"));
 
         let state = venue_only_state();

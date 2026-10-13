@@ -97,7 +97,7 @@ fn dex_book_and_volume(
 }
 
 /// The pool with the most USD liquidity: the deepest book, not the first.
-fn most_liquid(pairs: &[DexPair]) -> Option<&DexPair> {
+pub fn most_liquid(pairs: &[DexPair]) -> Option<&DexPair> {
     pairs
         .iter()
         .max_by(|a, b| a.liquidity_usd.total_cmp(&b.liquidity_usd))
