@@ -14,9 +14,18 @@ use std::fmt;
 /// `WETH` and `STETH` stay whole.
 pub const FIAT_CURRENCIES: [&str; 4] = ["USD", "EUR", "GBP", "TRY"];
 
-/// The quotes that may end a joined symbol: the stablecoins, then fiat.
+/// Stablecoins that end in a fiat code and are no venue's quote currency.
+/// The longest-suffix rule would read `SOLUSD` as SO/LUSD, so a joined symbol
+/// never ends in one of these. `TUSD` is a quote (Binance `BTCTUSD`).
+const NOT_JOINED_QUOTES: [&str; 2] = ["LUSD", "GUSD"];
+
+/// The quotes that may end a joined symbol: the stablecoins (less
+/// [`NOT_JOINED_QUOTES`]), then fiat.
 fn quote_currencies() -> impl Iterator<Item = &'static str> {
-    STABLECOIN_SYMBOLS.into_iter().chain(FIAT_CURRENCIES)
+    STABLECOIN_SYMBOLS
+        .into_iter()
+        .filter(|s| !NOT_JOINED_QUOTES.contains(s))
+        .chain(FIAT_CURRENCIES)
 }
 
 /// The fewest base characters left after a quote suffix is split off, so
@@ -213,7 +222,10 @@ mod tests {
     fn every_stablecoin_is_a_quote_and_counts_as_usd() {
         assert_eq!(parts("BTCTUSD"), pair("BTC", Some("TUSD")));
         assert_eq!(parts("ETHUSDP"), pair("ETH", Some("USDP")));
-        for symbol in STABLECOIN_SYMBOLS {
+        for symbol in STABLECOIN_SYMBOLS
+            .into_iter()
+            .filter(|s| !NOT_JOINED_QUOTES.contains(s))
+        {
             let quote = Pair::parse(&format!("BTC{symbol}")).quote;
             assert_eq!(quote.as_deref(), Some(symbol), "{symbol}");
         }
@@ -221,6 +233,20 @@ mod tests {
         // stablecoin: BTC/FDUSD does.
         let quote = Pair::parse("BTC/FDUSD").quote.unwrap();
         assert!(crate::tokens::is_stablecoin_symbol(&quote));
+    }
+
+    /// `SOLUSD` is SOL/USD on Kraken, not SO/LUSD. LUSD and GUSD end in a
+    /// fiat code and are no venue's quote, so a joined symbol splits on the
+    /// fiat code. Separated, they are still quotes.
+    #[test]
+    fn a_joined_symbol_never_ends_in_a_non_quote_stablecoin() {
+        assert_eq!(parts("SOLUSD"), pair("SOL", Some("USD")));
+        assert_eq!(parts("DOGUSD"), pair("DOG", Some("USD")));
+        assert_eq!(parts("BTCLUSD"), pair("BTCL", Some("USD")));
+        assert_eq!(parts("SOL/LUSD"), pair("SOL", Some("LUSD")));
+        for symbol in NOT_JOINED_QUOTES {
+            assert!(crate::tokens::is_stablecoin_symbol(symbol), "{symbol}");
+        }
     }
 
     #[test]
