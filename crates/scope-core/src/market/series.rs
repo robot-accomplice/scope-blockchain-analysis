@@ -16,9 +16,25 @@ use super::health::HealthThresholds;
 use super::health::MarketSummary;
 use super::types::HealthCheck;
 
-/// Identifies one key value of a market summary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MetricId {
+/// Declares [`MetricId`] and [`MetricId::ALL`] from one list of variants, so
+/// the list of all ids cannot fall out of step with the enum.
+macro_rules! metric_ids {
+    ($($(#[$doc:meta])* $name:ident),+ $(,)?) => {
+        /// Identifies one key value of a market summary.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum MetricId {
+            $($(#[$doc])* $name),+
+        }
+
+        impl MetricId {
+            /// Every id, in table order. `describe` matches over each
+            /// variant, so a new variant also needs a table entry.
+            pub const ALL: &'static [MetricId] = &[$(MetricId::$name),+];
+        }
+    };
+}
+
+metric_ids! {
     BestBid,
     BestAsk,
     Mid,
@@ -36,27 +52,6 @@ pub enum MetricId {
     AskTop10,
     /// `1.0` when [`Sample::healthy`] is true, else `0.0`.
     Healthy,
-}
-
-impl MetricId {
-    /// Every id, in table order. `describe` matches over each variant, so a
-    /// new variant fails to compile until it has a table entry; the tests
-    /// check that this list holds every variant.
-    pub const ALL: [MetricId; 13] = [
-        MetricId::BestBid,
-        MetricId::BestAsk,
-        MetricId::Mid,
-        MetricId::PegDeviationPct,
-        MetricId::Spread,
-        MetricId::SpreadPct,
-        MetricId::BidDepth,
-        MetricId::AskDepth,
-        MetricId::BidTop3,
-        MetricId::AskTop3,
-        MetricId::BidTop10,
-        MetricId::AskTop10,
-        MetricId::Healthy,
-    ];
 }
 
 /// The limit a metric is judged against.
@@ -314,34 +309,20 @@ mod tests {
         sample.values[at]
     }
 
-    /// Exhaustive on purpose: a new `MetricId` fails to compile here until it
-    /// is given the next ordinal, which then fails the test below unless the
-    /// variant is also added to `MetricId::ALL`.
-    fn ordinal(id: MetricId) -> usize {
-        match id {
-            MetricId::BestBid => 0,
-            MetricId::BestAsk => 1,
-            MetricId::Mid => 2,
-            MetricId::PegDeviationPct => 3,
-            MetricId::Spread => 4,
-            MetricId::SpreadPct => 5,
-            MetricId::BidDepth => 6,
-            MetricId::AskDepth => 7,
-            MetricId::BidTop3 => 8,
-            MetricId::AskTop3 => 9,
-            MetricId::BidTop10 => 10,
-            MetricId::AskTop10 => 11,
-            MetricId::Healthy => 12,
-        }
-    }
-
     #[test]
-    fn every_metric_id_is_in_the_table_once() {
+    fn every_metric_id_has_one_table_entry_and_one_csv_column() {
         let metrics = summary_metrics(&HealthThresholds::default());
-        let ordinals: Vec<usize> = metrics.iter().map(|m| ordinal(m.id)).collect();
-        assert_eq!(ordinals, (0..ordinals.len()).collect::<Vec<_>>());
-        let highest = MetricId::ALL.iter().map(|id| ordinal(*id)).max().unwrap();
-        assert_eq!(metrics.len(), highest + 1, "ALL lacks a variant");
+        let ids: Vec<MetricId> = metrics.iter().map(|m| m.id).collect();
+        assert_eq!(ids, MetricId::ALL);
+        assert_eq!(ids.len(), 13, "update this count when a metric is added");
+        for (i, m) in metrics.iter().enumerate() {
+            assert!(!ids[..i].contains(&m.id), "{:?} appears twice", m.id);
+            assert!(
+                !m.label.is_empty() && !m.csv_column.is_empty(),
+                "{:?}",
+                m.id
+            );
+        }
     }
 
     #[test]
@@ -555,24 +536,49 @@ mod tests {
     }
 
     #[test]
-    fn zero_mid_and_zero_peg_do_not_divide_by_zero() {
+    fn zero_peg_target_gives_no_deviation() {
         let metrics = summary_metrics(&HealthThresholds::default());
-        let mut zero_mid = healthy_summary();
-        zero_mid.mid_price = Some(0.0);
-        let one = sample(&zero_mid, &metrics);
-        assert_eq!(
-            value(&one, &metrics, MetricId::PegDeviationPct),
-            Some(-100.0)
-        );
-        assert!(
-            value(&one, &metrics, MetricId::SpreadPct)
-                .unwrap()
-                .is_finite()
-        );
-
         let mut zero_peg = healthy_summary();
         zero_peg.peg_target = 0.0;
         let one = sample(&zero_peg, &metrics);
         assert_eq!(value(&one, &metrics, MetricId::PegDeviationPct), None);
+        assert!(value(&one, &metrics, MetricId::Mid).is_some());
+    }
+
+    #[test]
+    fn a_zero_priced_level_is_not_a_best_price() {
+        let mut bids = side(0.9999, -0.0001, &[400.0; 3]);
+        bids.insert(
+            0,
+            OrderBookLevel {
+                price: 0.0,
+                quantity: 50.0,
+            },
+        );
+        let s = summarize(&book(bids, side(1.0001, 0.0001, &[400.0; 3])));
+        let metrics = summary_metrics(&HealthThresholds::default());
+        let one = sample(&s, &metrics);
+        assert_eq!(value(&one, &metrics, MetricId::BestBid), Some(0.9999));
+        let pct = value(&one, &metrics, MetricId::SpreadPct).unwrap();
+        assert!(pct.is_finite() && pct > 0.0, "{pct}");
+    }
+
+    #[test]
+    fn summary_prices_are_the_order_books_with_a_zero_quantity_top_level() {
+        let mut bids = side(1.0, -0.0001, &[400.0; 10]);
+        bids[0].quantity = 0.0;
+        let mut asks = side(1.0001, 0.0001, &[400.0; 10]);
+        asks[0].quantity = 0.0;
+        let b = book(bids, asks);
+        let s = summarize(&b);
+        assert_eq!(s.best_bid, b.best_bid());
+        assert_eq!(s.best_ask, b.best_ask());
+        assert_eq!(s.mid_price, b.mid_price());
+        assert_eq!(s.spread, b.spread());
+        assert_eq!(s.spread_pct, b.spread_pct());
+        let (bid, ask) = (s.best_bid.unwrap(), s.best_ask.unwrap());
+        assert!((s.spread.unwrap() - (ask - bid)).abs() < 1e-12);
+        let mid = s.mid_price.unwrap();
+        assert!((s.spread_pct.unwrap() - s.spread.unwrap() / mid * 100.0).abs() < 1e-12);
     }
 }

@@ -1381,6 +1381,15 @@ pub(crate) fn render_metrics_panel(f: &mut Frame, area: Rect, state: &MonitorSta
 /// Renders the order book panel for the Exchange layout.
 ///
 /// Shows asks (descending), spread, bids (descending) with depth bars.
+/// The panel's spread row. Spread and percent come from `OrderBook`, the same
+/// source as `market summary` and the web API.
+pub(crate) fn spread_line(book: &scope::market::OrderBook) -> String {
+    book.spread()
+        .zip(book.spread_pct())
+        .map(|(s, pct)| format!("  Spread: {:.6} ({:.3}%)", s, pct))
+        .unwrap_or_else(|| "  Spread: --".to_string())
+}
+
 pub(crate) fn render_order_book_panel(f: &mut Frame, area: Rect, state: &MonitorState) {
     let pal = state.palette();
 
@@ -1446,15 +1455,7 @@ pub(crate) fn render_order_book_panel(f: &mut Frame, area: Rect, state: &Monitor
     }
 
     // --- Spread line ---
-    let spread = book
-        .best_ask()
-        .zip(book.best_bid())
-        .map(|(ask, bid)| {
-            let s = ask - bid;
-            let pct = if bid > 0.0 { (s / bid) * 100.0 } else { 0.0 };
-            format!("  Spread: {:.6} ({:.3}%)", s, pct)
-        })
-        .unwrap_or_else(|| "  Spread: --".to_string());
+    let spread = spread_line(book);
     lines.push(Line::from(Span::styled(
         spread,
         Style::new().fg(Color::Yellow).bold(),

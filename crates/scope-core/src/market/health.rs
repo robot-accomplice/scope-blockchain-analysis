@@ -143,16 +143,11 @@ impl HealthThresholds {
     }
 }
 
-/// A level is valid when it has a positive price and quantity.
-fn is_valid_level(level: &OrderBookLevel) -> bool {
-    level.price > 0.0 && level.quantity > 0.0
-}
-
 /// Sum of quote value over the first `n` valid levels (book order = best first).
 fn top_n_depth(levels: &[OrderBookLevel], n: usize) -> f64 {
     levels
         .iter()
-        .filter(|l| is_valid_level(l))
+        .filter(|l| l.is_valid())
         .take(n)
         .map(OrderBookLevel::value)
         .sum()
@@ -180,20 +175,6 @@ impl TopDepth {
     }
 }
 
-/// Spread between the best valid bid and the best valid ask, as
-/// `(absolute, percent of that pair's mid)`. `None` for a synthetic AMM book
-/// (its real spread is the pool fee, which is not reported) and when a side
-/// has no valid level.
-fn best_valid_spread(book: &OrderBook) -> Option<(f64, f64)> {
-    if book.source == BookSource::SyntheticAmm {
-        return None;
-    }
-    let bid = book.bids.iter().find(|l| is_valid_level(l))?.price;
-    let ask = book.asks.iter().find(|l| is_valid_level(l))?.price;
-    let mid = (ask + bid) / 2.0;
-    Some((ask - bid, (ask - bid) / mid * 100.0))
-}
-
 /// Quote depth of valid levels within ±`window_pct`% of `mid`, both sides.
 ///
 /// The second value is `true` when a side's last fetched level is still
@@ -202,7 +183,7 @@ fn best_valid_spread(book: &OrderBook) -> Option<(f64, f64)> {
 fn depth_within(book: &OrderBook, mid: f64, window_pct: f64) -> (f64, bool) {
     let lo = mid * (1.0 - window_pct / 100.0);
     let hi = mid * (1.0 + window_pct / 100.0);
-    let in_window = |l: &&OrderBookLevel| is_valid_level(l) && l.price >= lo && l.price <= hi;
+    let in_window = |l: &&OrderBookLevel| l.is_valid() && l.price >= lo && l.price <= hi;
     let depth = book
         .bids
         .iter()
@@ -214,7 +195,7 @@ fn depth_within(book: &OrderBook, mid: f64, window_pct: f64) -> (f64, bool) {
         levels
             .iter()
             .rev()
-            .find(|l| is_valid_level(l))
+            .find(|l| l.is_valid())
             .is_some_and(|l| l.price >= lo && l.price <= hi)
     };
     (depth, ends_inside(&book.bids) || ends_inside(&book.asks))
@@ -266,11 +247,11 @@ pub struct MarketSummary {
     pub source: BookSource,
     /// Peg target.
     pub peg_target: f64,
-    /// Best bid (raw, no outlier filtering).
+    /// Best valid bid (no outlier filtering).
     pub best_bid: Option<f64>,
-    /// Best ask.
+    /// Best valid ask.
     pub best_ask: Option<f64>,
-    /// Mid price.
+    /// Mid of the best valid bid and ask.
     pub mid_price: Option<f64>,
     /// Absolute spread between the best valid bid and ask. `None` for a
     /// synthetic AMM book or when a side has no valid level.
@@ -361,21 +342,20 @@ impl MarketSummary {
             checks.push(HealthCheck::Pass(format!("Bid/Ask ratio: {:.2}x", ratio)));
         }
 
-        let valid_bids = book.bids.iter().filter(|l| is_valid_level(l)).count();
-        let valid_asks = book.asks.iter().filter(|l| is_valid_level(l)).count();
+        let valid_bids = book.bids.iter().filter(|l| l.is_valid()).count();
+        let valid_asks = book.asks.iter().filter(|l| l.is_valid()).count();
         // A synthetic AMM book has no real level count or spread (#37).
         let amm = book.source == BookSource::SyntheticAmm;
-        let spread = best_valid_spread(book);
         let top_depth = TopDepth::from_book(book);
 
         // Spread between best valid bid and best valid ask
-        match (amm, spread) {
+        match (amm, book.spread_pct()) {
             (true, _) => checks.push(HealthCheck::NotApplicable(
                 "Spread: n/a (synthetic AMM book; the real spread is the pool fee, \
                  which the data source does not report)"
                     .to_string(),
             )),
-            (false, Some((_, spread_pct))) => {
+            (false, Some(spread_pct)) => {
                 let msg = format!(
                     "Spread: {:.3}% (max {:.1}%)",
                     spread_pct, thresholds.max_spread_pct
@@ -489,8 +469,8 @@ impl MarketSummary {
             best_bid: book.best_bid(),
             best_ask: book.best_ask(),
             mid_price: book.mid_price(),
-            spread: spread.map(|(abs, _)| abs),
-            spread_pct: spread.map(|(_, pct)| pct),
+            spread: book.spread(),
+            spread_pct: book.spread_pct(),
             top_depth,
             volume_24h,
             execution_10k_buy,

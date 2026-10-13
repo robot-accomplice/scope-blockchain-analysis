@@ -6426,6 +6426,29 @@ refresh_seconds: 5
     // ========================================================================
 
     #[test]
+    fn test_spread_line_matches_the_market_summary_for_the_same_book() {
+        use scope::market::{
+            BookSource, HealthThresholds, MarketSummary, OrderBook, OrderBookLevel,
+        };
+        let level = |price, quantity| OrderBookLevel { price, quantity };
+        // Zero-quantity top levels are not real orders.
+        let book = OrderBook {
+            pair: "X/USDT".to_string(),
+            source: BookSource::Exchange,
+            bids: vec![level(1.0, 0.0), level(0.999, 500.0)],
+            asks: vec![level(1.0001, 0.0), level(1.001, 500.0)],
+        };
+        let summary = MarketSummary::from_order_book(&book, &HealthThresholds::default(), None);
+        let expected = format!(
+            "  Spread: {:.6} ({:.3}%)",
+            summary.spread.unwrap(),
+            summary.spread_pct.unwrap()
+        );
+        assert_eq!(widgets::spread_line(&book), expected);
+        assert_eq!(expected, "  Spread: 0.002000 (0.200%)");
+    }
+
+    #[test]
     fn test_render_order_book_panel_no_data() {
         let mut terminal = create_test_terminal();
         let mut state = create_populated_state();

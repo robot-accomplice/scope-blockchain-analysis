@@ -17,6 +17,13 @@ pub struct OrderBookLevel {
 }
 
 impl OrderBookLevel {
+    /// A level is valid when it has a positive price and quantity. Every
+    /// price, spread and level count reads only valid levels.
+    #[inline]
+    pub fn is_valid(&self) -> bool {
+        self.price > 0.0 && self.quantity > 0.0
+    }
+
     /// Value in quote asset (price × quantity, e.g., USDT).
     #[inline]
     pub fn value(&self) -> f64 {
@@ -65,17 +72,17 @@ pub struct OrderBook {
 }
 
 impl OrderBook {
-    /// Best bid price, or None if empty.
+    /// Best valid bid price, or None when no bid is valid.
     pub fn best_bid(&self) -> Option<f64> {
-        self.bids.first().map(|l| l.price)
+        self.bids.iter().find(|l| l.is_valid()).map(|l| l.price)
     }
 
-    /// Best ask price, or None if empty.
+    /// Best valid ask price, or None when no ask is valid.
     pub fn best_ask(&self) -> Option<f64> {
-        self.asks.first().map(|l| l.price)
+        self.asks.iter().find(|l| l.is_valid()).map(|l| l.price)
     }
 
-    /// Mid price between best bid and ask.
+    /// Mid price between the best valid bid and ask.
     pub fn mid_price(&self) -> Option<f64> {
         match (self.best_bid(), self.best_ask()) {
             (Some(bid), Some(ask)) => Some((bid + ask) / 2.0),
@@ -83,12 +90,23 @@ impl OrderBook {
         }
     }
 
-    /// Spread (ask - bid).
+    /// Spread (ask - bid) of the best valid levels. `None` for a synthetic
+    /// AMM book: its real spread is the pool fee, which is not reported.
     pub fn spread(&self) -> Option<f64> {
+        if self.source == BookSource::SyntheticAmm {
+            return None;
+        }
         match (self.best_bid(), self.best_ask()) {
             (Some(bid), Some(ask)) => Some(ask - bid),
             _ => None,
         }
+    }
+
+    /// The spread in percent of the mid of the same two levels.
+    pub fn spread_pct(&self) -> Option<f64> {
+        self.spread()
+            .zip(self.mid_price())
+            .map(|(spread, mid)| spread / mid * 100.0)
     }
 
     /// Total bid depth in quote terms (sum of price × quantity).
@@ -712,7 +730,8 @@ mod tests {
 
     #[test]
     fn test_estimate_buy_zero_filled_qty() {
-        // All ask levels have price 0 -> filled_qty stays 0 -> vwap = mid
+        // The only ask level is invalid, so there is no mid price to estimate
+        // from (the same as an empty ask side).
         let book = OrderBook {
             pair: "X/Y".to_string(),
             source: crate::market::types::BookSource::Exchange,
@@ -725,16 +744,12 @@ mod tests {
                 quantity: 0.0,
             }],
         };
-        let est = book.estimate_buy_execution(50.0);
-        // Can still return Some if mid exists
-        assert!(est.is_some());
-        let est = est.unwrap();
-        assert!(!est.fillable);
+        assert!(book.estimate_buy_execution(50.0).is_none());
     }
 
     #[test]
     fn test_estimate_sell_zero_filled_qty() {
-        // All bid levels have price 0 and value 0
+        // The only bid level is invalid, so there is no mid price.
         let book = OrderBook {
             pair: "X/Y".to_string(),
             source: crate::market::types::BookSource::Exchange,
@@ -747,9 +762,41 @@ mod tests {
                 quantity: 100.0,
             }],
         };
-        let est = book.estimate_sell_execution(50.0);
-        assert!(est.is_some());
-        let est = est.unwrap();
-        assert!(!est.fillable);
+        assert!(book.estimate_sell_execution(50.0).is_none());
+    }
+
+    fn level(price: f64, quantity: f64) -> OrderBookLevel {
+        OrderBookLevel { price, quantity }
+    }
+
+    #[test]
+    fn test_prices_use_the_best_valid_level() {
+        // The top level of each side has zero quantity: not a real order.
+        let book = OrderBook {
+            pair: "X/Y".to_string(),
+            source: BookSource::Exchange,
+            bids: vec![level(1.0, 0.0), level(0.9990, 10.0)],
+            asks: vec![level(1.0001, 0.0), level(1.0010, 10.0)],
+        };
+        assert_eq!(book.best_bid(), Some(0.9990));
+        assert_eq!(book.best_ask(), Some(1.0010));
+        let mid = book.mid_price().unwrap();
+        assert!((mid - 1.0).abs() < 1e-12);
+        let spread = book.spread().unwrap();
+        assert!((spread - (1.0010 - 0.9990)).abs() < 1e-12);
+        assert!((book.spread_pct().unwrap() - spread / mid * 100.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_synthetic_amm_book_has_prices_but_no_spread() {
+        let book = OrderBook {
+            pair: "X/Y".to_string(),
+            source: BookSource::SyntheticAmm,
+            bids: vec![level(0.999, 10.0)],
+            asks: vec![level(1.001, 10.0)],
+        };
+        assert!(book.mid_price().is_some());
+        assert_eq!(book.spread(), None);
+        assert_eq!(book.spread_pct(), None);
     }
 }

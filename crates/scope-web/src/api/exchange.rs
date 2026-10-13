@@ -57,23 +57,7 @@ pub async fn handle(Json(req): Json<SnapshotRequest>) -> impl IntoResponse {
     let pair = exchange.format_pair(&req.pair);
     let snapshot = exchange.fetch_market_snapshot(&pair).await;
 
-    let order_book_json = snapshot.order_book.as_ref().map(|book| {
-        serde_json::json!({
-            "pair": book.pair,
-            "best_bid": book.best_bid(),
-            "best_ask": book.best_ask(),
-            "mid_price": book.mid_price(),
-            "spread": book.spread(),
-            "bid_depth": book.bid_depth(),
-            "ask_depth": book.ask_depth(),
-            "bids": book.bids.iter().map(|l| {
-                serde_json::json!({"price": l.price, "quantity": l.quantity, "value": l.value()})
-            }).collect::<Vec<_>>(),
-            "asks": book.asks.iter().map(|l| {
-                serde_json::json!({"price": l.price, "quantity": l.quantity, "value": l.value()})
-            }).collect::<Vec<_>>(),
-        })
-    });
+    let order_book_json = snapshot.order_book.as_ref().map(order_book_json);
 
     let ticker_json = snapshot.ticker.as_ref().map(|t| {
         serde_json::json!({
@@ -278,10 +262,49 @@ pub async fn handle_ohlc(Json(req): Json<OhlcRequest>) -> impl IntoResponse {
     }
 }
 
+/// JSON view of an order book. Prices and spread come from `OrderBook`, the
+/// same source as `/api/market`.
+fn order_book_json(book: &scope::market::OrderBook) -> serde_json::Value {
+    serde_json::json!({
+        "pair": book.pair,
+        "best_bid": book.best_bid(),
+        "best_ask": book.best_ask(),
+        "mid_price": book.mid_price(),
+        "spread": book.spread(),
+        "bid_depth": book.bid_depth(),
+        "ask_depth": book.ask_depth(),
+        "bids": book.bids.iter().map(|l| {
+            serde_json::json!({"price": l.price, "quantity": l.quantity, "value": l.value()})
+        }).collect::<Vec<_>>(),
+        "asks": book.asks.iter().map(|l| {
+            serde_json::json!({"price": l.price, "quantity": l.quantity, "value": l.value()})
+        }).collect::<Vec<_>>(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::http::StatusCode;
+    use scope::market::{BookSource, HealthThresholds, MarketSummary, OrderBook, OrderBookLevel};
+
+    #[test]
+    fn test_order_book_json_spread_matches_the_market_summary() {
+        // The top level of each side has zero quantity: not a real order.
+        let level = |price, quantity| OrderBookLevel { price, quantity };
+        let book = OrderBook {
+            pair: "X/USDT".to_string(),
+            source: BookSource::Exchange,
+            bids: vec![level(1.0, 0.0), level(0.999, 500.0)],
+            asks: vec![level(1.0001, 0.0), level(1.001, 500.0)],
+        };
+        let summary = MarketSummary::from_order_book(&book, &HealthThresholds::default(), None);
+        let json = order_book_json(&book);
+        assert_eq!(json["spread"].as_f64(), summary.spread);
+        assert_eq!(json["best_bid"].as_f64(), summary.best_bid);
+        assert_eq!(json["mid_price"].as_f64(), summary.mid_price);
+        assert!(json["spread"].as_f64().unwrap() > 0.0019);
+    }
 
     #[test]
     fn test_snapshot_request_empty_pair() {

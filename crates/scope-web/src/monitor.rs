@@ -361,6 +361,37 @@ mod tests {
     }
 
     #[test]
+    fn test_attach_exchange_data_spread_matches_the_market_summary() {
+        use scope::market::{
+            BookSource, HealthThresholds, MarketSummary, OrderBook, OrderBookLevel,
+        };
+        let level = |price, quantity| OrderBookLevel { price, quantity };
+        // Zero-quantity top levels are not real orders.
+        let book = OrderBook {
+            pair: "X/USDT".to_string(),
+            source: BookSource::Exchange,
+            bids: vec![level(1.0, 0.0), level(0.999, 500.0)],
+            asks: vec![level(1.0001, 0.0), level(1.001, 500.0)],
+        };
+        let summary = MarketSummary::from_order_book(&book, &HealthThresholds::default(), None);
+        let snapshot = scope::market::MarketSnapshot {
+            order_book: Some(book),
+            ticker: None,
+            recent_trades: None,
+        };
+        let mut frame = serde_json::json!({"type": "update"});
+        attach_exchange_data(&mut frame, &snapshot);
+        assert_eq!(
+            frame["exchange_order_book"]["spread"].as_f64(),
+            summary.spread
+        );
+        assert_eq!(
+            frame["exchange_order_book"]["mid_price"].as_f64(),
+            summary.mid_price
+        );
+    }
+
+    #[test]
     fn test_attach_exchange_data_with_sell_trade() {
         let snapshot = MarketSnapshot {
             order_book: None,
