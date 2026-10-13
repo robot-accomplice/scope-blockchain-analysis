@@ -149,7 +149,7 @@ fn is_valid_level(level: &OrderBookLevel) -> bool {
 }
 
 /// Sum of quote value over the first `n` valid levels (book order = best first).
-fn top_n_depth(levels: &[OrderBookLevel], n: usize) -> f64 {
+pub(super) fn top_n_depth(levels: &[OrderBookLevel], n: usize) -> f64 {
     levels
         .iter()
         .filter(|l| is_valid_level(l))

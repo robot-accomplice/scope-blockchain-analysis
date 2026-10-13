@@ -32,6 +32,7 @@
 // Submodules (split from the original monolithic orderbook.rs)
 pub mod analytics;
 pub mod health;
+pub mod series;
 pub mod traits;
 pub mod types;
 
