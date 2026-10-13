@@ -524,7 +524,7 @@ fn format_tx_value(value_str: &str, chain: &str) -> (String, bool) {
 }
 
 /// Common stablecoin symbols for auto-including market/peg analysis.
-fn is_stablecoin(symbol: &str) -> bool {
+pub(crate) fn is_stablecoin(symbol: &str) -> bool {
     matches!(
         symbol.to_uppercase().as_str(),
         "USDC" | "USDT" | "DAI" | "BUSD" | "TUSD" | "USDP" | "FRAX" | "LUSD" | "GUSD"

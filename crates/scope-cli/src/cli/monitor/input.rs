@@ -364,11 +364,17 @@ impl<B: ratatui::backend::Backend> MonitorApp<B> {
     /// Venue-only refresh: prices the token from the venue ticker.
     async fn fetch_venue_ticker(&mut self) {
         let (Some(ex), Some(pair)) = (&self.exchange_client, self.state.venue_pair.clone()) else {
+            // Venue-only mode is set only with a venue and a pair. Say so
+            // rather than freeze the price without a word.
+            self.state.error_message =
+                Some("Venue-only mode has no venue or pair to refresh from".to_string());
+            self.state.last_update = Instant::now(); // Prevent rapid retries
             return;
         };
         match ex.fetch_ticker(&pair).await {
             Ok(ticker) => {
                 let data = super::build_exchange_token_data(&self.state.symbol, &pair, &ticker);
+                self.state.set_venue_ticker(&ticker);
                 self.state.update(&data);
             }
             Err(e) => {

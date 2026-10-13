@@ -80,6 +80,7 @@ Each capability is optional. Omit a capability if the exchange doesn't support i
 | `low_24h` | string | JSON field for 24h low. |
 | `volume_24h` | string | JSON field for 24h base volume. |
 | `quote_volume_24h` | string | JSON field for 24h quote volume. |
+| `price_change_pct_24h` | string | JSON field for the 24h price change in percent (0.5 = +0.5%, not a fraction). |
 | `best_bid` | string | JSON field for best bid price. |
 | `best_ask` | string | JSON field for best ask price. |
 

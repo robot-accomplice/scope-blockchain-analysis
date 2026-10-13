@@ -624,8 +624,10 @@ impl Default for ExportConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct MonitorConfig {
-    /// Layout preset to use on startup.
-    pub layout: LayoutPreset,
+    /// Layout preset to use on startup. When set, the monitor keeps it and
+    /// does not pick a layout from the terminal size. `None` = auto-layout.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layout: Option<LayoutPreset>,
     /// Refresh interval in seconds.
     pub refresh_seconds: u64,
     /// Widget visibility toggles.
@@ -648,7 +650,7 @@ pub struct MonitorConfig {
 impl Default for MonitorConfig {
     fn default() -> Self {
         Self {
-            layout: LayoutPreset::Dashboard,
+            layout: None,
             refresh_seconds: DEFAULT_MONITOR_REFRESH_SECS,
             widgets: WidgetVisibility::default(),
             scale: ScaleMode::Linear,

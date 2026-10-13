@@ -1630,7 +1630,6 @@ fn spinner_glyph(elapsed: std::time::Duration, color: bool) -> &'static str {
     }
 }
 
-/// Marks text that was cut or dropped.
 /// Columns around a command in the bar: ` · ` before it, a backtick on
 /// each side.
 const COMMAND_FRAME_COLS: usize = 5;

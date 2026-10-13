@@ -104,6 +104,8 @@ pub struct ResponseMapping {
     pub low_24h: Option<String>,
     pub volume_24h: Option<String>,
     pub quote_volume_24h: Option<String>,
+    /// 24h price change in percent (not a fraction).
+    pub price_change_pct_24h: Option<String>,
     pub best_bid: Option<String>,
     pub best_ask: Option<String>,
 

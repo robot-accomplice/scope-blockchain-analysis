@@ -11,6 +11,13 @@ steps:
   - expect_screen:
       contains: ["BINANCE USDCUSDT", "Quit"]
       not_contains: ["API Error", "no fixture", "ETHEREUM"]
+  # L switches to the dashboard, which has the activity log. A refresh logs
+  # "Updated: $…"; after it, the screen still has no DexScreener miss.
+  - type: "l"
+  - wait_for: { text: "Updated: \\$", timeout: 20s }
+  - expect_screen:
+      contains: ["BINANCE USDCUSDT"]
+      not_contains: ["API Error", "no fixture", "Venue error"]
   # Below 60x16 the monitor draws only the size message, and q still quits.
   - resize: { cols: 50, rows: 12 }
   - wait_for: { text: "Terminal too small: need at least 60×16" }

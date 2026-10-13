@@ -505,6 +505,10 @@ impl TickerClient for ConfigurableExchangeClient {
                 .quote_volume_24h
                 .as_ref()
                 .and_then(|f| self.extract_f64(&data, f)),
+            price_change_pct_24h: r
+                .price_change_pct_24h
+                .as_ref()
+                .and_then(|f| self.extract_f64(&data, f)),
             best_bid: r.best_bid.as_ref().and_then(|f| self.extract_f64(&data, f)),
             best_ask: r.best_ask.as_ref().and_then(|f| self.extract_f64(&data, f)),
         })
@@ -2768,6 +2772,30 @@ mod tests {
                 .get("binance")
                 .unwrap()
                 .clone()
+        }
+
+        /// The monitor shows the venue's 24h change. Binance gives it in
+        /// percent as `priceChangePercent`; a venue that does not map it
+        /// gives `None`, never a made-up 0.
+        #[tokio::test]
+        async fn test_ticker_carries_the_24h_change_when_the_venue_gives_it() {
+            let body = r#"{"symbol":"USDCUSDT","lastPrice":"1.0011","priceChangePercent":"-0.250","volume":"10","quoteVolume":"10.01"}"#;
+            let spy = Arc::new(Spy {
+                seen: Mutex::new(vec![]),
+                status: 200,
+                body: body.to_string(),
+            });
+            let client = ConfigurableExchangeClient::with_http(binance_like(), spy.clone());
+            let ticker = client.fetch_ticker("USDCUSDT").await.unwrap();
+            assert_eq!(ticker.price_change_pct_24h, Some(-0.25));
+
+            let mut desc = binance_like();
+            if let Some(t) = desc.capabilities.ticker.as_mut() {
+                t.response.price_change_pct_24h = None;
+            }
+            let client = ConfigurableExchangeClient::with_http(desc, spy);
+            let ticker = client.fetch_ticker("USDCUSDT").await.unwrap();
+            assert_eq!(ticker.price_change_pct_24h, None);
         }
 
         #[tokio::test]

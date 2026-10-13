@@ -314,6 +314,8 @@ pub struct Ticker {
     pub volume_24h: Option<f64>,
     /// 24h quote volume.
     pub quote_volume_24h: Option<f64>,
+    /// 24h price change in percent (0.5 = +0.5%), when the venue gives it.
+    pub price_change_pct_24h: Option<f64>,
     /// Best bid (if included in ticker).
     pub best_bid: Option<f64>,
     /// Best ask (if included in ticker).
@@ -377,6 +379,7 @@ mod tests {
             low_24h: None,
             volume_24h: base,
             quote_volume_24h: quote,
+            price_change_pct_24h: None,
             best_bid: None,
             best_ask: None,
         }
@@ -540,6 +543,7 @@ mod tests {
             low_24h: Some(41_000.0),
             volume_24h: Some(50_000.0),
             quote_volume_24h: Some(2_100_000_000.0),
+            price_change_pct_24h: None,
             best_bid: Some(41_999.0),
             best_ask: Some(42_001.0),
         };
@@ -557,6 +561,7 @@ mod tests {
             low_24h: None,
             volume_24h: None,
             quote_volume_24h: None,
+            price_change_pct_24h: None,
             best_bid: None,
             best_ask: None,
         };
@@ -586,6 +591,7 @@ mod tests {
                 low_24h: None,
                 volume_24h: None,
                 quote_volume_24h: None,
+                price_change_pct_24h: None,
                 best_bid: None,
                 best_ask: None,
             }),

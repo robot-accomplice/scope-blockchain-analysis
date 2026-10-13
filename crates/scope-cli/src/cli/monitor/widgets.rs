@@ -382,32 +382,25 @@ pub(crate) fn ui(f: &mut Frame, state: &mut MonitorState) {
 /// Renders the header with token info and time period tabs.
 pub(crate) fn render_header(f: &mut Frame, area: Rect, state: &MonitorState) {
     let pal = state.palette();
-    let price_color = if state.price_change_24h >= 0.0 {
-        pal.up
-    } else {
-        pal.down
+    let (price_color, trend_arrow, change_str) = match state.change_24h() {
+        Some(change) => {
+            let color = if change >= 0.0 { pal.up } else { pal.down };
+            // Use Unicode arrows for trend indication
+            let arrow = if change > 0.5 {
+                "▲"
+            } else if change < -0.5 {
+                "▼"
+            } else if change >= 0.0 {
+                "△"
+            } else {
+                "▽"
+            };
+            let sign = if change >= 0.0 { "+" } else { "" };
+            (color, arrow, format!("{}{:.2}%", sign, change))
+        }
+        // No direction is known: no arrow, no up/down color.
+        None => (pal.neutral, "", format!("24h {NOT_AVAILABLE}")),
     };
-
-    // Use Unicode arrows for trend indication
-    let trend_arrow = if state.price_change_24h > 0.5 {
-        "▲"
-    } else if state.price_change_24h < -0.5 {
-        "▼"
-    } else if state.price_change_24h >= 0.0 {
-        "△"
-    } else {
-        "▽"
-    };
-
-    let change_str = format!(
-        "{}{:.2}%",
-        if state.price_change_24h >= 0.0 {
-            "+"
-        } else {
-            ""
-        },
-        state.price_change_24h
-    );
 
     let title = header_title(state, area.width);
 
@@ -460,16 +453,12 @@ pub(crate) fn render_header(f: &mut Frame, area: Rect, state: &MonitorState) {
 /// The header title: token, its source (chain, or venue and pair in
 /// venue-only mode), and the last error cut with `…` to fit `width`.
 fn header_title(state: &MonitorState, width: u16) -> Line<'static> {
-    let source = if state.venue_only {
-        format!(
-            "{} {}",
-            state.venue.as_deref().unwrap_or("venue").to_uppercase(),
-            state.venue_pair.as_deref().unwrap_or(&state.symbol),
-        )
-    } else {
-        state.chain.to_uppercase()
-    };
-    let base = format!(" ◈ {} ({}) │ {} ", state.symbol, state.name, source);
+    let base = format!(
+        " ◈ {} ({}) │ {} ",
+        state.symbol,
+        state.name,
+        state.source_label()
+    );
     let mut spans = vec![Span::raw(base.clone())];
     if let Some(err) = &state.error_message {
         // Inside the borders, after the base and "│ " ... " ".
@@ -1247,7 +1236,9 @@ pub(crate) fn render_metrics_panel(f: &mut Frame, area: Rect, state: &MonitorSta
         }
     };
 
-    let trend_color = if state.price_change_5m >= 0.0 {
+    let trend_color = if !state.short_changes_known() {
+        pal.neutral
+    } else if state.price_change_5m >= 0.0 {
         pal.up
     } else {
         pal.down
@@ -1266,12 +1257,16 @@ pub(crate) fn render_metrics_panel(f: &mut Frame, area: Rect, state: &MonitorSta
     f.render_widget(sparkline, chunks[0]);
 
     // --- Table: key metrics ---
-    let change_5m_str = if state.price_change_5m.abs() < 0.0001 {
+    let change_5m_str = if !state.short_changes_known() {
+        NOT_AVAILABLE.to_string()
+    } else if state.price_change_5m.abs() < 0.0001 {
         "0.00%".to_string()
     } else {
         format!("{:+.4}%", state.price_change_5m)
     };
-    let change_5m_color = if state.price_change_5m > 0.0 {
+    let change_5m_color = if !state.short_changes_known() {
+        pal.neutral
+    } else if state.price_change_5m > 0.0 {
         pal.up
     } else if state.price_change_5m < 0.0 {
         pal.down
@@ -1294,15 +1289,10 @@ pub(crate) fn render_metrics_panel(f: &mut Frame, area: Rect, state: &MonitorSta
         pal.highlight
     };
 
-    let change_24h_str = format!(
-        "{}{:.2}%",
-        if state.price_change_24h >= 0.0 {
-            "+"
-        } else {
-            ""
-        },
-        state.price_change_24h
-    );
+    let change_24h_str = state
+        .change_24h()
+        .map(|c| format!("{}{:.2}%", if c >= 0.0 { "+" } else { "" }, c))
+        .unwrap_or_else(|| NOT_AVAILABLE.to_string());
 
     let market_cap_str = state
         .market_cap
@@ -1341,7 +1331,12 @@ pub(crate) fn render_metrics_panel(f: &mut Frame, area: Rect, state: &MonitorSta
         ]),
         Row::new(vec![
             Span::styled("Vol 24h", SECONDARY),
-            Span::raw(scope::display::format_usd(state.volume_24h)),
+            Span::raw(
+                state
+                    .volume_usd()
+                    .map(scope::display::format_usd)
+                    .unwrap_or_else(|| NOT_AVAILABLE.to_string()),
+            ),
         ]),
         Row::new(vec![
             Span::styled("Mkt Cap", SECONDARY),
@@ -1711,10 +1706,10 @@ pub(crate) fn render_market_info_panel(f: &mut Frame, area: Rect, state: &Monito
         let mut info_lines: Vec<Line> = Vec::new();
 
         // Price summary
-        let price_color = if state.price_change_24h >= 0.0 {
-            pal.up
-        } else {
-            pal.down
+        let price_color = match state.change_24h() {
+            Some(c) if c >= 0.0 => pal.up,
+            Some(_) => pal.down,
+            None => pal.neutral,
         };
         info_lines.push(Line::from(vec![
             Span::styled(" Price  ", SECONDARY),
@@ -1722,19 +1717,24 @@ pub(crate) fn render_market_info_panel(f: &mut Frame, area: Rect, state: &Monito
         ]));
 
         // Multi-timeframe changes
+        let short = |v: f64| state.short_changes_known().then_some(v);
         let changes = [
-            ("5m", state.price_change_5m),
-            ("1h", state.price_change_1h),
-            ("6h", state.price_change_6h),
-            ("24h", state.price_change_24h),
+            ("5m", short(state.price_change_5m)),
+            ("1h", short(state.price_change_1h)),
+            ("6h", short(state.price_change_6h)),
+            ("24h", state.change_24h()),
         ];
         let change_spans: Vec<Span> = changes
             .iter()
             .flat_map(|(label, val)| {
-                let color = if *val >= 0.0 { pal.up } else { pal.down };
+                let (text, color) = match val {
+                    Some(v) if *v >= 0.0 => (format!("{:+.2}%", v), pal.up),
+                    Some(v) => (format!("{:+.2}%", v), pal.down),
+                    None => (NOT_AVAILABLE.to_string(), pal.neutral),
+                };
                 vec![
                     Span::styled(format!(" {}: ", label), SECONDARY),
-                    Span::styled(format!("{:+.2}%", val), Style::new().fg(color)),
+                    Span::styled(text, Style::new().fg(color)),
                 ]
             })
             .collect();
@@ -1746,7 +1746,10 @@ pub(crate) fn render_market_info_panel(f: &mut Frame, area: Rect, state: &Monito
         info_lines.push(Line::from(vec![
             Span::styled(" Vol 24h ", SECONDARY),
             Span::styled(
-                format!("${}", format_number(state.volume_24h)),
+                state
+                    .volume_usd()
+                    .map(|v| format!("${}", format_number(v)))
+                    .unwrap_or_else(|| NOT_AVAILABLE.to_string()),
                 Style::new().fg(pal.neutral),
             ),
         ]));
