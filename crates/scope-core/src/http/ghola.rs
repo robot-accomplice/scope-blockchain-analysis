@@ -19,7 +19,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-const SIDECAR_ADDR: &str = "127.0.0.1:18789";
+pub(crate) const SIDECAR_ADDR: &str = "127.0.0.1:18789";
 const SIDECAR_URL: &str = "http://127.0.0.1:18789";
 const SPAWN_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -160,7 +160,7 @@ pub fn ghola_in_path() -> bool {
         .unwrap_or(false)
 }
 
-fn is_bridge_running() -> bool {
+pub(crate) fn is_bridge_running() -> bool {
     SIDECAR_ADDR
         .parse()
         .ok()
