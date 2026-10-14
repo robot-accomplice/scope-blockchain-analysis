@@ -40,7 +40,9 @@ require_branch() {
     current="$(git rev-parse --abbrev-ref HEAD)"
     [ "$current" = "$branch" ] || die "Run this on '$branch' (you are on '$current')."
     [ -z "$(git status --porcelain)" ] || die "The working tree is not clean."
-    git fetch --quiet origin "$branch" --tags
+    # Only the branch: a local tag that differs from origin's must not stop
+    # the release (require_tag_absent asks origin for tags itself).
+    git fetch --quiet origin "$branch" || die "Cannot fetch origin/$branch."
     [ "$(git rev-parse HEAD)" = "$(git rev-parse "origin/$branch")" ] \
         || die "'$branch' does not match 'origin/$branch'. Pull or push first."
 }
