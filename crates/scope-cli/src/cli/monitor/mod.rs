@@ -1479,6 +1479,58 @@ mod tests {
         assert!(state.error_message.is_none());
     }
 
+    // Tests run in parallel. Another test that saves and removes the same
+    // token's cache must not touch this test's file (CI failed when it did).
+    #[test]
+    fn test_parallel_tests_do_not_share_a_cache_file() {
+        let token_data = create_test_token_data();
+        let state = MonitorState::new(&token_data, "ethereum");
+        state.save_cache();
+        let mine = MonitorState::cache_path(&token_data.address, "ethereum");
+        let other = std::thread::spawn(move || {
+            let state = MonitorState::new(&create_test_token_data(), "ethereum");
+            state.save_cache();
+            let path = MonitorState::cache_path(&state.token_address, "ethereum");
+            let _ = std::fs::remove_file(&path);
+            path
+        })
+        .join()
+        .unwrap();
+        assert_ne!(mine, other);
+        assert!(mine.exists(), "the other test removed this test's cache");
+        assert!(MonitorState::load_cache(&token_data.address, "ethereum").is_some());
+        let _ = std::fs::remove_file(mine);
+    }
+
+    // A restart resumes from the cache: recent real points come back, and
+    // points older than 24h are dropped. (Before tests got their own cache
+    // directory, this path ran only by chance, on another test's file.)
+    #[test]
+    fn test_a_new_monitor_resumes_from_its_cache() {
+        let token_data = create_test_token_data();
+        let mut state = MonitorState::new(&token_data, "ethereum");
+        let now = chrono::Utc::now().timestamp() as f64;
+        state.price_history.clear();
+        state.volume_history.clear();
+        for (age, value) in [(MAX_DATA_AGE_SECS + 60.0, 0.5), (120.0, 1.01), (60.0, 1.02)] {
+            let point = DataPoint {
+                timestamp: now - age,
+                value,
+                is_real: true,
+            };
+            state.price_history.push_back(point);
+            state.volume_history.push_back(point);
+        }
+        state.save_cache();
+
+        let resumed = MonitorState::new(&token_data, "ethereum");
+        let prices: Vec<f64> = resumed.price_history.iter().map(|p| p.value).collect();
+        assert_eq!(prices, vec![1.01, 1.02], "the 24h-old point is dropped");
+        assert_eq!(resumed.volume_history.len(), 2);
+        assert_eq!(resumed.real_data_count, 2);
+        let _ = std::fs::remove_file(MonitorState::cache_path(&token_data.address, "ethereum"));
+    }
+
     #[test]
     fn test_cache_roundtrip_save_load() {
         let token_data = create_test_token_data();
