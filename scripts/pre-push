@@ -20,7 +20,9 @@ while read -r _local_ref local_sha _remote_ref remote_sha; do
     if [ "$remote_sha" = "$ZERO" ]; then
         range="$local_sha --not --remotes"
     else
-        range="$remote_sha..$local_sha"
+        # Commits already on a remote (for example a GitHub merge commit
+        # brought in from develop) are not new here.
+        range="$remote_sha..$local_sha --not --remotes"
     fi
     # shellcheck disable=SC2086 # range holds several arguments on purpose
     bad="$(git log --format='%h %ae %ce' $range | awk -v e="$REQUIRED_EMAIL" '$2 != e || $3 != e')"
