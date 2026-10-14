@@ -61,12 +61,15 @@ impl VenueRegistry {
     /// User venues with the same `id` as a built-in override the built-in,
     /// allowing users to customize endpoints without recompiling.
     pub fn load() -> Result<Self> {
-        let mut registry = Self::default();
+        Self::load_from(&Self::user_venues_dir())
+    }
 
-        // Load user venues from ~/.config/scope/venues/
-        let user_dir = Self::user_venues_dir();
+    /// The built-in venues, plus the user venues in `user_dir`. A file that
+    /// cannot be read or parsed is skipped with a warning.
+    pub fn load_from(user_dir: &std::path::Path) -> Result<Self> {
+        let mut registry = Self::default();
         if user_dir.is_dir()
-            && let Ok(entries) = std::fs::read_dir(&user_dir)
+            && let Ok(entries) = std::fs::read_dir(user_dir)
         {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -136,7 +139,7 @@ impl VenueRegistry {
 
     /// Path to the user venues directory (`~/.config/scope/venues/`).
     pub fn user_venues_dir() -> PathBuf {
-        dirs::home_dir()
+        crate::paths::home_dir()
             .map(|h| h.join(".config").join("scope").join("venues"))
             .unwrap_or_else(|| PathBuf::from(".config").join("scope").join("venues"))
     }
@@ -231,6 +234,29 @@ fn strsim_distance(a: &str, b: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_user_venue_overrides_built_in_and_bad_files_are_skipped() {
+        // A user venue with a built-in id replaces the built-in (custom
+        // endpoints without a rebuild); a broken file does not stop the load.
+        let dir = tempfile::tempdir().unwrap();
+        let binance = include_str!("../../venues/binance.yaml")
+            .replace("name: Binance Spot", "name: My Binance");
+        std::fs::write(dir.path().join("binance.yaml"), binance).unwrap();
+        std::fs::write(dir.path().join("broken.yml"), "id: [unclosed").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "not a venue").unwrap();
+
+        let registry = VenueRegistry::load_from(dir.path()).unwrap();
+        assert_eq!(registry.len(), VenueRegistry::default().len());
+        assert_eq!(registry.get("binance").unwrap().name, "My Binance");
+    }
+
+    #[test]
+    fn test_missing_user_dir_gives_the_built_ins() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = VenueRegistry::load_from(&dir.path().join("none")).unwrap();
+        assert_eq!(registry.len(), VenueRegistry::default().len());
+    }
 
     #[test]
     fn test_registry_default_loads_built_in() {

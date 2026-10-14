@@ -384,17 +384,20 @@ mod tests {
             rpc_endpoints: std::collections::HashMap::new(),
         };
 
-        let old_home = std::env::var_os("HOME");
-        unsafe { std::env::set_var("HOME", &fake_home) };
+        // Test builds resolve the home through scope::paths, which reads
+        // SCOPE_TEST_HOME (never the real HOME).
+        let var = scope::paths::TEST_HOME_VAR;
+        let old_home = std::env::var_os(var);
+        unsafe { std::env::set_var(var, &fake_home) };
 
         let response = handle_save(State(state), axum::Json(req))
             .await
             .into_response();
 
         if let Some(h) = old_home {
-            unsafe { std::env::set_var("HOME", h) };
+            unsafe { std::env::set_var(var, h) };
         } else {
-            unsafe { std::env::remove_var("HOME") };
+            unsafe { std::env::remove_var(var) };
         }
 
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);

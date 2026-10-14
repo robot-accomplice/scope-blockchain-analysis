@@ -1239,7 +1239,7 @@ impl TuiState {
             ))),
             Some(args) => {
                 let args: Vec<&str> = args.iter().map(String::as_str).collect();
-                let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+                let home = scope::paths::home_dir();
                 match std::env::current_dir() {
                     Ok(cwd) => {
                         // `save x.csv` after a repeating run writes its series.
