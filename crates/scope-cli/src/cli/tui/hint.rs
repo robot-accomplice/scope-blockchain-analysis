@@ -63,7 +63,57 @@ pub fn hint(line: &str) -> Option<Hint> {
         .render_usage()
         .to_string();
     let text = usage.trim_start_matches("Usage:").trim().to_string();
-    let typed = words[rest..].iter().filter(|w| !w.starts_with('-')).count();
+
+    // Walk the words after the command (#66): a flag's value is not a
+    // positional, an unknown flag gets its own hint, and a flag that still
+    // waits for its value names it.
+    let ends_in_space = line.ends_with(char::is_whitespace);
+    let mut typed = 0;
+    let mut pending: Option<&clap::Arg> = None;
+    for (i, w) in words[rest..].iter().enumerate() {
+        let last = rest + i + 1 == words.len();
+        if pending.take().is_some() {
+            continue;
+        }
+        if *w == "--" || !w.starts_with('-') || w.len() == 1 {
+            typed += 1;
+            continue;
+        }
+        let (flag, has_value) = match w.split_once('=') {
+            Some((f, _)) => (f, true),
+            None => (*w, false),
+        };
+        let arg = cmd.get_arguments().find(|a| {
+            flag.strip_prefix("--")
+                .is_some_and(|l| a.get_long() == Some(l))
+                || flag
+                    .strip_prefix('-')
+                    .and_then(|s| s.chars().next())
+                    .is_some_and(|c| !flag.starts_with("--") && a.get_short() == Some(c))
+        });
+        let Some(arg) = arg else {
+            // A flag still being typed is not unknown yet.
+            if last && !ends_in_space {
+                continue;
+            }
+            return Some(Hint {
+                text: format!(
+                    "unknown flag `{flag}`; see `{} --help`",
+                    path[1..].join(" ")
+                ),
+                next: None,
+            });
+        };
+        if arg.get_action().takes_values() && !has_value {
+            pending = Some(arg);
+        }
+    }
+    if let Some(arg) = pending {
+        return Some(Hint {
+            text,
+            next: Some(value_hint(arg)),
+        });
+    }
     let next = cmd.get_positionals().nth(typed).map(|a| {
         let name = a
             .get_value_names()
@@ -74,6 +124,29 @@ pub fn hint(line: &str) -> Option<Hint> {
     });
     Some(Hint { text, next })
 }
+/// Most allowed values a hint lists.
+const MAX_LISTED_VALUES: usize = 6;
+
+/// `<NAME>` for a flag's value, and its allowed values when clap knows them.
+fn value_hint(arg: &clap::Arg) -> String {
+    let name = arg
+        .get_value_names()
+        .and_then(|v| v.first())
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| arg.get_id().to_string().to_uppercase());
+    let values: Vec<String> = arg
+        .get_possible_values()
+        .iter()
+        .filter(|v| !v.is_hide_set())
+        .map(|v| v.get_name().to_string())
+        .collect();
+    match values.len() {
+        0 => format!("<{name}>"),
+        n if n <= MAX_LISTED_VALUES => format!("<{name}>: {}", values.join(" | ")),
+        _ => format!("<{name}>: {} | …", values[..MAX_LISTED_VALUES].join(" | ")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,5 +179,29 @@ mod tests {
     fn test_empty_line_has_no_hint() {
         assert!(hint("").is_none());
         assert!(hint("   ").is_none());
+    }
+
+    // #66: a flag that waits for its value names it, with its values.
+    #[test]
+    fn test_a_flag_waiting_for_its_value_names_it() {
+        let h = hint("market summary USDC --venue ").unwrap();
+        assert_eq!(h.next.as_deref(), Some("<VENUE>"), "{h:?}");
+        let h = hint("market summary USDC --format ").unwrap();
+        assert!(h.next.as_deref().unwrap().contains("json"), "{h:?}");
+    }
+
+    #[test]
+    fn test_a_flag_value_is_not_a_positional() {
+        // `--chain ethereum` before the address: the address is still next.
+        let h = hint("address --chain ethereum ").unwrap();
+        assert_eq!(h.next.as_deref(), Some("<ADDRESS>"), "{h:?}");
+    }
+
+    #[test]
+    fn test_an_unknown_flag_is_named() {
+        let h = hint("address 0x1 --nosuch ").unwrap();
+        assert!(h.text.contains("unknown flag `--nosuch`"), "{}", h.text);
+        // While it is still being typed, it is not unknown yet.
+        assert!(!hint("address 0x1 --ch").unwrap().text.contains("unknown"));
     }
 }

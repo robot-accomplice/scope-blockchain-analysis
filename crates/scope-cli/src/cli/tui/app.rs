@@ -199,6 +199,13 @@ pub enum Action {
     Copy(String),
 }
 
+/// Marks the selected palette row.
+const PALETTE_MARKER: &str = "> ";
+
+/// The palette's key legend (#66): Enter fills the line, as an entry may
+/// still need its arguments; a second Enter runs it.
+const PALETTE_LEGEND: &str = "↑↓ select · Enter puts it on the line (Enter again runs) · Esc close";
+
 /// A command that runs in the output pane now.
 pub struct Running {
     /// The line the user typed.
@@ -1605,18 +1612,26 @@ impl TuiState {
                 width,
                 height,
             };
-            let rows = height.saturating_sub(3) as usize;
+            // Borders, the query line and the legend take four rows.
+            let rows = height.saturating_sub(4) as usize;
             let matches = p.matches();
             let first = p.selected.saturating_sub(rows.saturating_sub(1));
             let mut lines = vec![Line::from(format!("> {}", p.query))];
             for (n, &i) in matches.iter().enumerate().skip(first).take(rows) {
                 let it = &p.items[i];
-                let style = if n == p.selected { SELECTED } else { ACCENT };
+                // The marker shows the selection with color off too (#66).
+                let (marker, style) = if n == p.selected {
+                    (PALETTE_MARKER, SELECTED)
+                } else {
+                    ("  ", ACCENT)
+                };
                 lines.push(Line::from(vec![
+                    Span::styled(marker, KEY),
                     Span::styled(format!("{:<28}", it.label), style),
                     Span::styled(format!(" {}", it.description), SECONDARY),
                 ]));
             }
+            lines.push(Line::styled(PALETTE_LEGEND, SECONDARY));
             f.render_widget(ratatui::widgets::Clear, rect);
             f.render_widget(
                 Paragraph::new(lines).block(Block::bordered().title(" Commands (Ctrl-K) ")),

@@ -30,6 +30,29 @@ pub enum Route {
     Refuse(&'static str),
 }
 
+/// The commands the TUI does not run, by name, and what to do instead.
+/// `route` and the TUI help both read this list (#66).
+pub(crate) const TUI_REFUSED: &[(&str, &str)] = &[
+    ("interactive", "you are already in the TUI"),
+    (
+        "web",
+        "the web server runs in the foreground; start it from a shell with `scope web`",
+    ),
+    (
+        "completions",
+        "it prints a script for your shell; run `scope completions <shell>` in a shell",
+    ),
+];
+
+/// The refusal reason for the command `name`, from [`TUI_REFUSED`].
+fn refused(name: &str) -> Route {
+    let reason = TUI_REFUSED
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map_or("it does not run in the TUI", |(_, why)| why);
+    Route::Refuse(reason)
+}
+
 /// Decides where a command runs.
 ///
 /// The match has no wildcard arm on purpose: a new CLI command does not
@@ -47,8 +70,7 @@ pub fn route(command: &Commands) -> Route {
         | Commands::Compliance(_)
         | Commands::AddressBook(_)
         | Commands::Export(_)
-        | Commands::Report(_)
-        | Commands::Completions(_) => Route::Pane,
+        | Commands::Report(_) => Route::Pane,
         // A name or symbol search asks the user to pick a token and offers
         // to save an alias. An address or --yes never prompts.
         Commands::Crawl(args) => {
@@ -68,10 +90,9 @@ pub fn route(command: &Commands) -> Route {
         }
         // The live dashboard draws its own screen (until phase 6 of #47).
         Commands::Monitor(_) => Route::Suspend,
-        Commands::Interactive(_) => Route::Refuse("you are already in the TUI"),
-        Commands::Web(_) => Route::Refuse(
-            "the web server runs in the foreground; start it from a shell with `scope web`",
-        ),
+        Commands::Interactive(_) => refused("interactive"),
+        Commands::Web(_) => refused("web"),
+        Commands::Completions(_) => refused("completions"),
     }
 }
 
@@ -671,8 +692,25 @@ pub(crate) fn session_command_name(word: &str) -> String {
 /// Writes the TUI help: the session commands, then every CLI command.
 fn write_help(out: &Output) -> io::Result<()> {
     outln!(out, "Session commands:")?;
-    for (_, usage, what) in SESSION_COMMANDS {
-        outln!(out, "  {:<34} {}", usage, what)?;
+    for (name, usage, what) in SESSION_COMMANDS {
+        // Name the other words for the command too (#66: `quit`, `q`).
+        let aliases: Vec<&str> = SESSION_ALIASES
+            .iter()
+            .filter(|(_, n)| n == name)
+            .map(|(alias, _)| *alias)
+            .filter(|alias| !alias.starts_with('.'))
+            .collect();
+        if aliases.is_empty() {
+            outln!(out, "  {:<34} {}", usage, what)?;
+        } else {
+            outln!(
+                out,
+                "  {:<34} {} (also: {})",
+                usage,
+                what,
+                aliases.join(", ")
+            )?;
+        }
     }
     outln!(out)?;
     outln!(
@@ -680,7 +718,8 @@ fn write_help(out: &Output) -> io::Result<()> {
         "CLI commands (same flags as on the command line; add --help for details):"
     )?;
     for sub in Cli::command().get_subcommands() {
-        if sub.is_hide_set() {
+        let refused = TUI_REFUSED.iter().any(|(n, _)| *n == sub.get_name());
+        if sub.is_hide_set() || refused {
             continue;
         }
         let about = sub.get_about().map(|a| a.to_string()).unwrap_or_default();
@@ -764,9 +803,9 @@ mod tests {
     #[test]
     fn test_every_cli_command_parses_and_has_a_tui_route() {
         // Every CLI subcommand must reach a handler from the TUI, except
-        // the two that cannot run inside it. A new command fails here (and
-        // in `route`, at compile time) until it has a TUI path.
-        let refused = ["interactive", "web"];
+        // the ones TUI_REFUSED lists. A new command fails here (and in
+        // `route`, at compile time) until it has a TUI path.
+        let refused: Vec<&str> = TUI_REFUSED.iter().map(|(n, _)| *n).collect();
         for sub in Cli::command().get_subcommands() {
             let name = sub.get_name();
             let (o, cap) = Output::capture();

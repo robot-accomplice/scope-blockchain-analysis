@@ -251,6 +251,12 @@ fn welcome(state: &mut TuiState, no_banner: bool) {
         state.push_ansi(BANNER);
     }
     state.push_note("Type `help` for commands. `exit` or Ctrl-D leaves.");
+    // First steps (#66): a few commands to try, and the two keys that find
+    // the rest.
+    state.push_note(
+        "Try: `market summary USDC --venue binance` · `venues list` · `insights <address>`",
+    );
+    state.push_note("Tab completes a command or flag; Ctrl-K opens the command palette.");
 }
 
 /// Serializes tests that redirect the process-global diagnostics sink
