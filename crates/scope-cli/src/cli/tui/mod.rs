@@ -399,6 +399,10 @@ impl Outside {
 
 type PaneFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + 'a>>;
 
+/// After `setup` in the TUI: the session keeps the config it read at start.
+const SETUP_RESTART_NOTE: &str =
+    "Settings are saved. Leave the TUI (exit) and start it again to use them.";
+
 async fn event_loop<H: Host>(
     host: &mut H,
     state: &mut TuiState,
@@ -518,6 +522,10 @@ async fn event_loop<H: Host>(
                                 }
                                 host.resume()?;
                                 idle_diag.replace(scope::diag::redirect(idle_buf.clone()));
+                                if argv.get(1).is_some_and(|c| c == "setup") {
+                                    // The clients hold the config read at start.
+                                    state.push_note(SETUP_RESTART_NOTE);
+                                }
                             }
                             Route::Refuse(reason) => {
                                 // exec::plan writes refusals and never
@@ -1199,6 +1207,21 @@ mod tests {
         // The pane of the 100-column test screen has no side borders.
         let draws = widths_at(&host, "draw");
         assert_eq!(draws.last(), Some(&Some(100)), "set again after Ctrl-Z");
+    }
+
+    #[tokio::test]
+    async fn test_setup_in_the_tui_says_to_restart_and_other_commands_do_not() {
+        // The session's clients keep the config read at start: after
+        // `setup`, the user must restart to use a new key (a stale key
+        // gave "Invalid API Key" right after a successful setup).
+        let _lock = DIAG_LOCK.lock().await;
+        let (res, state, _, _) = drive(script(&["setup --key nosuchkey"])).await;
+        res.unwrap();
+        assert!(state.scrollback_text().contains(SETUP_RESTART_NOTE));
+
+        let (res, state, _, _) = drive(script(&["crawl USDC"])).await;
+        res.unwrap();
+        assert!(!state.scrollback_text().contains(SETUP_RESTART_NOTE));
     }
 
     #[tokio::test]

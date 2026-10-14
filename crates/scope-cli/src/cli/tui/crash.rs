@@ -85,7 +85,7 @@ pub(crate) fn install_panic_hook() {
         std::panic::set_hook(Box::new(move |info| {
             screen::restore();
             let tail = Journal::in_data_dir().tail(JOURNAL_TAIL_LINES);
-            let dir = dirs::data_dir().map(|d| d.join("scope"));
+            let dir = scope::paths::data_dir().map(|d| d.join("scope"));
             let notice = crash_notice(dir.as_deref(), &info.to_string(), &tail);
             // `writeln!`, not `eprintln!`: a closed stderr must not panic
             // inside the hook, which would skip the previous hook.

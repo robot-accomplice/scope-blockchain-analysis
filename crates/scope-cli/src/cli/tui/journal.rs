@@ -53,7 +53,7 @@ pub struct Event<'a> {
 impl Journal {
     /// The journal in the scope data directory.
     pub fn in_data_dir() -> Self {
-        let dir = dirs::data_dir().map(|d| d.join("scope"));
+        let dir = scope::paths::data_dir().map(|d| d.join("scope"));
         Self {
             history: dir.as_ref().map(|d| d.join("history.txt")),
             events: dir.map(|d| d.join("tui-events.jsonl")),
