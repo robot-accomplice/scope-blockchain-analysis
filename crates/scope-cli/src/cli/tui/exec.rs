@@ -714,6 +714,13 @@ fn write_help(out: &Output) -> io::Result<()> {
         out,
         "      {}",
         what("Copy needs a terminal that allows OSC 52; save <file> works everywhere")
+    )?;
+    outln!(
+        out,
+        "      {}",
+        what(
+            "A command with --every shows one live view: the latest report and its trends. After it ends, any key leaves the view; save <file>.csv writes the series."
+        )
     )
 }
 

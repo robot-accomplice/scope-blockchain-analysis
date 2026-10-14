@@ -9,9 +9,10 @@ use super::clip::{self, SaveError};
 use super::exec::{self, Invocation, Plan, Route};
 use super::fit;
 use super::journal::{Event, Journal};
+use super::repeat_view::{self, Ended, RepeatView};
 use super::vocab::Vocab;
 use crate::cli::interactive::SessionContext;
-use crate::cli::output::{Captured, Output};
+use crate::cli::output::{Captured, Output, SeriesHook};
 use crate::cli::textfit::{ELLIPSIS, cols, cut_with_ellipsis, draw_note_alone};
 use crate::cli::theme::{ACCENT, ERR, INFO, KEY, MATCH, OK, PaneState, SECONDARY, SELECTED, WARN};
 use ansi_to_tui::IntoText;
@@ -212,6 +213,8 @@ pub struct Running {
     pub captured: Captured,
     /// The writer the handler got; the error display writes to it too.
     out: Output,
+    /// The runs of a repeating command (#58), drawn as the repeating view.
+    series: Option<SeriesHook>,
     /// Routes library warnings into this command's output while it runs.
     _diag: scope::diag::RedirectGuard,
 }
@@ -277,6 +280,10 @@ pub struct TuiState {
     /// The plain output of the last pane command that succeeded. Ctrl-Y
     /// copies it and `save` writes it.
     last_output: Option<String>,
+    /// A finished repeating view, kept on screen until the next key (#58).
+    repeat_view: Option<RepeatView>,
+    /// The series of the last repeating command, for `save x.csv`.
+    last_series: Option<SeriesHook>,
     /// The event log.
     journal: Journal,
     /// Completion values from the user's stores.
@@ -313,6 +320,8 @@ impl TuiState {
             pane_width: Cell::new(0),
             busy_hint: false,
             last_output: None,
+            repeat_view: None,
+            last_series: None,
             journal,
             vocab,
             overlay: None,
@@ -337,6 +346,13 @@ impl TuiState {
         // every mode and keeps the draft and any overlay.
         if ctrl && key.code == KeyCode::Char('z') {
             return Action::Suspend;
+        }
+        // A finished repeating view stays until the next key. That key
+        // leaves it and then does its normal job, so typing goes on.
+        if self.running.is_none()
+            && let Some(view) = self.repeat_view.take()
+        {
+            self.leave_repeat_view(view);
         }
         // Ctrl-C closes the palette and keeps its normal meaning (cancel a
         // running command, clear the line), so a command can always be
@@ -1142,7 +1158,14 @@ impl TuiState {
                 let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
                 match std::env::current_dir() {
                     Ok(cwd) => {
-                        clip::save(&args, self.last_output.as_deref(), &cwd, home.as_deref())
+                        // `save x.csv` after a repeating run writes its series.
+                        let csv = args
+                            .iter()
+                            .any(|a| a.to_ascii_lowercase().ends_with(".csv"))
+                            .then(|| self.last_series.as_ref().and_then(repeat_view::series_csv))
+                            .flatten();
+                        let text = csv.as_deref().or(self.last_output.as_deref());
+                        clip::save(&args, text, &cwd, home.as_deref())
                     }
                     Err(e) => Err(SaveError::failed(e, "Could not read the current directory")),
                 }
@@ -1202,12 +1225,14 @@ impl TuiState {
         let (out, captured) = Output::capture_merged();
         let diag = scope::diag::redirect(captured.out_sink());
         self.failed = false;
+        self.last_series = None;
         self.running = Some(Running {
             input: input.to_string(),
             argv: inv.argv.clone(),
             started: Instant::now(),
             started_at: Utc::now().to_rfc3339(),
             captured,
+            series: out.series_hook(),
             out: out.clone(),
             _diag: diag,
         });
@@ -1233,20 +1258,38 @@ impl TuiState {
                 self.push_note(&format!("Output error: {}", write_err));
             }
         }
-        self.keep_copy(&run.captured, &ending);
-        self.push_ansi(&run.captured.out());
         let secs = run.started.elapsed().as_secs_f64();
-        match &ending {
-            Ending::Cancelled => {
-                self.push_styled_note(&format!("Cancelled after {:.1}s.", secs), WARN)
-            }
+        let (footer, style) = match &ending {
+            Ending::Cancelled => (format!("Cancelled after {:.1}s.", secs), WARN),
             Ending::Finished(Err(_)) => {
                 self.failed = true;
-                let style = ERR.add_modifier(Modifier::BOLD);
-                self.push_styled_note(&format!("✗ Failed in {:.1}s.", secs), style);
+                (
+                    format!("✗ Failed in {:.1}s.", secs),
+                    ERR.add_modifier(Modifier::BOLD),
+                )
             }
-            Ending::Finished(Ok(())) => {
-                self.push_styled_note(&format!("✓ Done in {:.1}s.", secs), OK)
+            Ending::Finished(Ok(())) => (format!("✓ Done in {:.1}s.", secs), OK),
+        };
+        match run.series.filter(repeat_view::has_runs) {
+            // A repeating run keeps its view, with the footer, until the next
+            // key. Ctrl-Y and save take its final snapshot and its series.
+            Some(series) => {
+                self.last_output =
+                    repeat_view::final_snapshot(&series).map(|t| crate::cli::ansi::strip(&t));
+                self.last_series = Some(series.clone());
+                self.repeat_view = Some(RepeatView {
+                    series,
+                    ended: Some(Ended {
+                        text: footer,
+                        style,
+                    }),
+                    pending: run.captured.out(),
+                });
+            }
+            None => {
+                self.keep_copy(&run.captured, &ending);
+                self.push_ansi(&run.captured.out());
+                self.push_styled_note(&footer, style);
             }
         }
         self.log(Event {
@@ -1258,6 +1301,34 @@ impl TuiState {
             outcome: outcome.into(),
             error,
         });
+    }
+
+    /// Leaves a finished repeating view: the scrollback gets one copy of
+    /// the final snapshot, then the command's notes, the run summary and
+    /// the footer, so the closing lines stay in view together.
+    fn leave_repeat_view(&mut self, view: RepeatView) {
+        if let Some(snapshot) = repeat_view::final_snapshot(&view.series) {
+            self.push_ansi(&snapshot);
+        }
+        self.push_ansi(&view.pending);
+        self.push_note(&repeat_view::summary(&view.series));
+        if let Some(ended) = view.ended {
+            self.push_styled_note(&ended.text, ended.style);
+        }
+    }
+
+    /// The repeating view to draw now: the running command's, once it has
+    /// a run, or the finished one waiting for a key.
+    fn active_view(&self) -> Option<RepeatView> {
+        if let Some(run) = &self.running {
+            let series = run.series.as_ref().filter(|s| repeat_view::has_runs(s))?;
+            return Some(RepeatView {
+                series: series.clone(),
+                ended: None,
+                pending: String::new(),
+            });
+        }
+        self.repeat_view.clone()
     }
 
     /// Keeps the data of a successful run for Ctrl-Y and `save`. The copy
@@ -1396,57 +1467,71 @@ impl TuiState {
             .title(Line::styled(format!(" {} ", state.word()), state.style()).right_aligned());
         let inner = block.inner(pane);
         self.pane_width.set(inner.width);
-        // Fit the lines to the inner width here, not with ratatui wrap: a
-        // wrapped row keeps its gutter and a rule is cut. Every line then
-        // is one row, so the newest line sits on the last inner row.
-        let width = inner.width as usize;
         // The matches are found once per draw; the status bar uses them too.
         let view = self.search_view(&live_out);
-        // While a search is open, matched rows get a marker and reverse
-        // video, and `starts` holds the first fitted row of each entry.
-        let in_pane_search = matches!(self.overlay, Some(Overlay::Search(_)));
-        let (rows, starts) = match (&view, in_pane_search) {
-            (Some(v), true) => {
-                let entries: Vec<_> = self.scrollback.iter().chain(&live_out).cloned().collect();
-                marked_rows(&entries, liveness.clone(), &v.matches, v.current, width)
-            }
-            _ => {
-                let mut lines = self.scrollback.clone();
-                lines.extend(live_out.iter().cloned());
-                lines.extend(liveness.iter().cloned());
-                (fit::fit(lines, width), Vec::new())
-            }
-        };
-        let para = Paragraph::new(Text::from(rows));
-        let total = para.line_count(inner.width);
-        let max_top = total.saturating_sub(inner.height as usize);
-        self.last_max_top.set(max_top);
-        self.last_pane_height.set(inner.height as usize);
-        if let (Some(v), true) = (&view, in_pane_search) {
-            let before = self.search_width.replace(width);
-            let height = inner.height as usize;
-            if self.reveal.replace(false) {
-                self.reveal_match(&starts, v.current, height, max_top);
-            } else if before == 0 && self.scroll.get() > 0 {
-                // The search just opened: the gutter changes the wrapping.
-                // Keep the entry at the top of the view where it was.
-                let lines: Vec<_> = self.scrollback.iter().chain(&live_out).cloned().collect();
-                let old = entry_starts(&lines, width);
-                let total =
-                    old.last().copied().unwrap_or(0) + fit::fit(liveness.clone(), width).len();
-                let old_max = total.saturating_sub(height);
-                let old_top = old_max - self.scroll.get().min(old_max);
-                let entry = old.partition_point(|&s| s <= old_top).saturating_sub(1);
-                let top = starts.get(entry).copied().unwrap_or(max_top).min(max_top);
-                self.scroll.set(max_top - top);
-            } else if before != width {
-                self.reveal_match(&starts, v.current, height, max_top);
-            }
+        if let Some(repeating) = self.active_view() {
+            // A repeating run draws its view, not one report per run.
+            let status = if self.running.is_some() {
+                liveness
+            } else {
+                Vec::new()
+            };
+            f.render_widget(block, pane);
+            repeat_view::draw(f, inner, &repeating, status);
+            self.last_max_top.set(0);
+            self.last_pane_height.set(inner.height as usize);
         } else {
-            self.search_width.set(0);
+            // Fit the lines to the inner width here, not with ratatui wrap: a
+            // wrapped row keeps its gutter and a rule is cut. Every line then
+            // is one row, so the newest line sits on the last inner row.
+            let width = inner.width as usize;
+            // While a search is open, matched rows get a marker and reverse
+            // video, and `starts` holds the first fitted row of each entry.
+            let in_pane_search = matches!(self.overlay, Some(Overlay::Search(_)));
+            let (rows, starts) = match (&view, in_pane_search) {
+                (Some(v), true) => {
+                    let entries: Vec<_> =
+                        self.scrollback.iter().chain(&live_out).cloned().collect();
+                    marked_rows(&entries, liveness.clone(), &v.matches, v.current, width)
+                }
+                _ => {
+                    let mut lines = self.scrollback.clone();
+                    lines.extend(live_out.iter().cloned());
+                    lines.extend(liveness.iter().cloned());
+                    (fit::fit(lines, width), Vec::new())
+                }
+            };
+            let para = Paragraph::new(Text::from(rows));
+            let total = para.line_count(inner.width);
+            let max_top = total.saturating_sub(inner.height as usize);
+            self.last_max_top.set(max_top);
+            self.last_pane_height.set(inner.height as usize);
+            if let (Some(v), true) = (&view, in_pane_search) {
+                let before = self.search_width.replace(width);
+                let height = inner.height as usize;
+                if self.reveal.replace(false) {
+                    self.reveal_match(&starts, v.current, height, max_top);
+                } else if before == 0 && self.scroll.get() > 0 {
+                    // The search just opened: the gutter changes the wrapping.
+                    // Keep the entry at the top of the view where it was.
+                    let lines: Vec<_> = self.scrollback.iter().chain(&live_out).cloned().collect();
+                    let old = entry_starts(&lines, width);
+                    let total =
+                        old.last().copied().unwrap_or(0) + fit::fit(liveness.clone(), width).len();
+                    let old_max = total.saturating_sub(height);
+                    let old_top = old_max - self.scroll.get().min(old_max);
+                    let entry = old.partition_point(|&s| s <= old_top).saturating_sub(1);
+                    let top = starts.get(entry).copied().unwrap_or(max_top).min(max_top);
+                    self.scroll.set(max_top - top);
+                } else if before != width {
+                    self.reveal_match(&starts, v.current, height, max_top);
+                }
+            } else {
+                self.search_width.set(0);
+            }
+            let top = max_top.saturating_sub(self.scroll.get().min(max_top));
+            f.render_widget(para.block(block).scroll((top as u16, 0)), pane);
         }
-        let top = max_top.saturating_sub(self.scroll.get().min(max_top));
-        f.render_widget(para.block(block).scroll((top as u16, 0)), pane);
 
         // Input line with the prompt in the border title.
         let block = Block::bordered().title(self.prompt());
@@ -2128,6 +2213,85 @@ mod tests {
         assert_eq!(s.handle_key(key(KeyCode::Enter)), Action::None);
         assert_eq!(s.input, "market summary ");
         assert!(s.overlay.is_none());
+    }
+
+    /// Starts a pane command and hands it `n` repeat runs, as
+    /// `repeat::run` does in the TUI. Run `fail` is unhealthy.
+    fn repeating(s: &mut TuiState, n: u64, fail: u64) {
+        let inv = Invocation {
+            command: venues_list(),
+            route: Route::Pane,
+            ai: false,
+            argv: vec![],
+        };
+        let out = s.start("market summary USDC --every 1s", &inv);
+        let metrics =
+            scope::market::series::summary_metrics(&scope::market::HealthThresholds::default());
+        for run in 1..=n {
+            out.record_run(
+                &metrics,
+                crate::cli::output::RunRecord {
+                    run,
+                    at: Utc::now(),
+                    sample: scope::market::series::Sample {
+                        values: vec![Some(1.0); metrics.len()],
+                        healthy: run != fail,
+                        failed_checks: vec![format!("spread {run}%")],
+                    },
+                    snapshot: format!("SNAPSHOT {run}\n"),
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn test_a_repeat_run_draws_the_view_not_one_report_per_run() {
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let mut s = state();
+        repeating(&mut s, 3, 2);
+        let text = screen(&s, 120, 36);
+        assert!(text.contains("SNAPSHOT 3"), "{text}");
+        assert!(!text.contains("SNAPSHOT 1"), "{text}");
+        assert!(text.contains("Trends · run 3"), "{text}");
+        assert!(text.contains("run 2: spread 2%"), "{text}");
+        s.finish(Ending::Cancelled);
+    }
+
+    #[test]
+    fn test_the_view_stays_after_esc_and_the_next_key_leaves_it_once() {
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let mut s = state();
+        repeating(&mut s, 3, 0);
+        assert_eq!(s.handle_key(key(KeyCode::Esc)), Action::Cancel);
+        s.finish(Ending::Cancelled);
+        let text = screen(&s, 120, 36);
+        assert!(text.contains("Cancelled after"), "{text}");
+        assert!(text.contains(repeat_view::LEAVE_HINT), "{text}");
+        assert!(!s.scrollback_text().contains("SNAPSHOT"), "not yet pushed");
+        // The next key leaves the view and still types: nothing is lost.
+        assert_eq!(s.handle_key(key(KeyCode::Char('x'))), Action::None);
+        assert_eq!(s.input, "x");
+        let back = s.scrollback_text();
+        assert_eq!(back.matches("SNAPSHOT 3").count(), 1, "{back}");
+        assert!(!back.contains("SNAPSHOT 1"), "{back}");
+        assert!(back.contains("3 runs · none failed"), "{back}");
+        assert!(back.contains("Cancelled after"), "{back}");
+        assert!(!screen(&s, 120, 36).contains("Trends"), "the view is gone");
+    }
+
+    #[test]
+    fn test_copy_and_save_take_the_final_snapshot_and_the_series() {
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let mut s = state();
+        repeating(&mut s, 2, 0);
+        s.finish(Ending::Finished(Ok(())));
+        assert_eq!(s.last_output.as_deref(), Some("SNAPSHOT 2\n"));
+        let csv = s
+            .last_series
+            .as_ref()
+            .and_then(repeat_view::series_csv)
+            .unwrap();
+        assert_eq!(csv.lines().count(), 3, "header and two runs: {csv}");
     }
 
     #[test]

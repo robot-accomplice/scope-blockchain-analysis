@@ -62,3 +62,9 @@ Only `market summary` takes `--every`. Its loop is inline in `cli/market.rs::run
 
 ## 5. Out of scope
 Commands other than `market summary` do not take `--every` today. When one gains it, it declares its metrics in `series` and uses `repeat::run`. No other change is needed.
+
+## 6. Implementation notes (2026-10-14)
+- The key that leaves a finished view also does its normal job. A user who types the next command at once loses no character, and Ctrl-D still exits.
+- On leaving, the scrollback gets the final snapshot first, then the command's notes (`Completed N run(s)`, saved files), the summary (`N runs · K failed (run R)`) and the footer. The closing lines then stay in view together.
+- Below 80 columns the trends sit under the snapshot. Charts are added only while two rows still fit, so they never overlap.
+- The ring keeps 500 runs; the summary counts all runs and says `in the last 500` when older runs were dropped.

@@ -37,6 +37,7 @@ pub mod fit;
 pub mod hint;
 pub mod journal;
 pub mod palette;
+pub(crate) mod repeat_view;
 pub mod vocab;
 
 use app::{Action, Ending, TuiState, run_invocation};
