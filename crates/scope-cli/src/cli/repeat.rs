@@ -93,6 +93,8 @@ where
 
     let tui = out.series_hook().is_some();
     let start = Clock::now();
+    let end = start + schedule.duration;
+    let mut slot = start;
     let mut run: u64 = 1;
     loop {
         out.update_progress(|p| {
@@ -132,10 +134,13 @@ where
             return Ok(Some(last));
         }
         run += 1;
-        let remaining = schedule.duration.saturating_sub(start.elapsed());
-        let pause = remaining.min(schedule.every);
+        // Runs start on a fixed grid, so the time a run takes does not push
+        // the later ones back. A run that overruns its slot moves the grid
+        // instead of starting a burst of catch-up runs.
+        slot = (slot + schedule.every).max(Clock::now()).min(end);
+        let pause = slot.saturating_duration_since(Clock::now());
         out.update_progress(|p| p.next_at = Some(Instant::now() + pause));
-        tokio::time::sleep(pause).await;
+        tokio::time::sleep_until(slot).await;
     }
 }
 
@@ -276,6 +281,48 @@ mod tests {
         assert_eq!(format!("{}\n", lines[0]), series::csv_header(&columns));
         assert_eq!(lines.len(), 3, "{body}");
         assert_eq!(lines[2].split(',').nth(1), Some("2"));
+    }
+
+    /// Runs `schedule` with a step whose run `n` takes `cost(n)`, and
+    /// returns each run's start time in milliseconds from the start.
+    async fn start_times(schedule: Schedule, cost: impl Fn(u64) -> Duration) -> Vec<u128> {
+        let m = metrics();
+        let (out, _cap) = Output::capture_merged();
+        let start = Clock::now();
+        let starts = std::sync::Mutex::new(Vec::new());
+        run(&schedule, &m, None, &out, |n| {
+            starts.lock().unwrap().push(start.elapsed().as_millis());
+            let o = output(n, &m);
+            let cost = cost(n);
+            async move {
+                tokio::time::sleep(cost).await;
+                Ok(o)
+            }
+        })
+        .await
+        .unwrap();
+        starts.into_inner().unwrap()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_run_time_does_not_push_later_runs_back() {
+        // A 0.75 s fetch every 30 s made "run 18 of 121" start at 523 s, and
+        // the hour ended near run 118. Runs must stay on the 30 s grid.
+        let schedule = Schedule::new(Duration::from_secs(30), Duration::from_secs(90)).unwrap();
+        let starts = start_times(schedule, |_| Duration::from_millis(750)).await;
+        assert_eq!(starts, vec![0, 30_000, 60_000, 90_000]);
+        assert_eq!(starts.len() as u64, schedule.total());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_an_overrun_moves_the_grid_without_a_burst() {
+        // A slow first run (3.5 s, every 1 s) starts the next one at once,
+        // and later runs keep the interval from there. A fixed grid would
+        // fire the missed slots back to back at 3.5 s, 3.6 s and 3.7 s.
+        let schedule = Schedule::new(Duration::from_secs(1), Duration::from_secs(6)).unwrap();
+        let cost = |n| Duration::from_millis(if n == 1 { 3_500 } else { 100 });
+        let starts = start_times(schedule, cost).await;
+        assert_eq!(starts, vec![0, 3_500, 4_500, 5_500, 6_000]);
     }
 
     #[test]
