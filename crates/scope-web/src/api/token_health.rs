@@ -3,9 +3,8 @@
 use crate::AppState;
 use axum::Json;
 use axum::extract::State;
-use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use scope::market::{HealthOverrides, MarketVenue, fetch_token_summary};
+use scope::market::{HealthOverrides, fetch_token_summary_by_name};
 use scope_cli::cli::crawl::{self, Period};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -16,26 +15,18 @@ pub struct TokenHealthRequest {
     /// Token symbol or contract address.
     pub token: String,
     /// Target chain (default: "ethereum").
-    #[serde(default = "default_chain")]
+    #[serde(default = "super::default_chain")]
     pub chain: String,
     /// Include market/order book data.
     #[serde(default)]
     pub with_market: bool,
-    /// Market venue: a CEX id ("binance") or a DEX ("ethereum", "solana").
-    #[serde(default = "default_venue")]
+    /// Market venue; see scope::market::VENUE_HELP.
+    #[serde(default = "super::default_venue")]
     pub market_venue: String,
     /// Health threshold overrides for `with_market` (top-level JSON keys).
     /// Unset keys use config `market.health`.
     #[serde(flatten)]
     pub health: HealthOverrides,
-}
-
-fn default_chain() -> String {
-    "ethereum".to_string()
-}
-
-fn default_venue() -> String {
-    "binance".to_string()
 }
 
 /// POST /api/token-health — Token health suite.
@@ -49,13 +40,7 @@ pub async fn handle(
     // Resolve address book shortcuts (@label or direct address match)
     let resolved = match super::resolve_address_book(&req.token, &state.config) {
         Ok(r) => r,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": e })),
-            )
-                .into_response();
-        }
+        Err(e) => return super::error_response(super::status_for(&e), e.to_string()),
     };
     let token = resolved.value;
     let chain = resolved.chain.unwrap_or(req.chain);
@@ -80,11 +65,7 @@ pub async fn handle(
     // is reported in `market_error`; the analytics still return.
     let market_result = if req.with_market {
         let thresholds = state.config.market.health.with_overrides(&req.health);
-        let market = match MarketVenue::from_name(&req.market_venue) {
-            Ok(venue) => fetch_token_summary(&venue, &analytics, &thresholds).await,
-            Err(e) => Err(e),
-        };
-        Some(market)
+        Some(fetch_token_summary_by_name(&req.market_venue, &analytics, &thresholds).await)
     } else {
         None
     };
@@ -139,8 +120,8 @@ mod tests {
 
     #[test]
     fn test_defaults() {
-        assert_eq!(default_chain(), "ethereum");
-        assert_eq!(default_venue(), "binance");
+        assert_eq!(super::super::default_chain(), "ethereum");
+        assert_eq!(super::super::default_venue(), "binance");
     }
 
     #[test]

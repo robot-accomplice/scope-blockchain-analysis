@@ -14,7 +14,7 @@ use scope::config::Config;
 use super::health_args::HealthArgs;
 use scope::display::report;
 use scope::error::{Result, ScopeError};
-use scope::market::{MarketSummary, MarketVenue, fetch_token_summary};
+use scope::market::{MarketSummary, fetch_token_summary_by_name};
 
 /// Arguments for the token-health command.
 #[derive(Debug, Args)]
@@ -68,7 +68,7 @@ pub struct TokenHealthArgs {
     pub token: String,
 
     /// Target blockchain network.
-    #[arg(short, long, default_value = "ethereum")]
+    #[arg(short, long, default_value = scope::chains::DEFAULT_CHAIN)]
     pub chain: String,
 
     /// Include order book / market summary (for stablecoins).
@@ -99,7 +99,7 @@ pub async fn run(
         crate::cli::address_book::resolve_address_book_input(&args.token, config)?
     {
         args.token = address;
-        if args.chain == "ethereum" {
+        if args.chain == scope::chains::DEFAULT_CHAIN {
             args.chain = chain;
         }
     }
@@ -127,10 +127,7 @@ pub async fn run(
     let market_summary = if args.with_market {
         sp.set_message("Fetching market data...");
         let thresholds = args.health.resolve(config);
-        let summary = match MarketVenue::from_name(&args.venue) {
-            Ok(venue) => fetch_token_summary(&venue, &analytics, &thresholds).await,
-            Err(e) => Err(e),
-        };
+        let summary = fetch_token_summary_by_name(&args.venue, &analytics, &thresholds).await;
         match summary {
             Ok(summary) => Some(summary),
             Err(e) => {
@@ -570,15 +567,20 @@ mod tests {
     async fn test_dex_venue_on_another_chain_is_an_error() {
         let analytics = make_test_analytics(true);
         let t = scope::market::HealthThresholds::default();
-        let err = fetch_token_summary(&MarketVenue::from_name("sol").unwrap(), &analytics, &t)
+        let err = fetch_token_summary_by_name("sol", &analytics, &t)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("reads chain solana"), "{err}");
         assert!(
-            fetch_token_summary(&MarketVenue::from_name("ETH").unwrap(), &analytics, &t)
+            fetch_token_summary_by_name("ETH", &analytics, &t)
                 .await
                 .is_ok()
         );
+        // An unknown name is the one unknown-venue error (a warning here).
+        let err = fetch_token_summary_by_name("polygon", &analytics, &t)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("Unknown venue"), "{err}");
     }
 
     #[test]

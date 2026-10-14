@@ -129,7 +129,7 @@ pub struct MonitorArgs {
     /// Target blockchain network.
     ///
     /// Determines which chain to query for token data.
-    #[arg(short, long, default_value = "ethereum")]
+    #[arg(short, long, default_value = scope::chains::DEFAULT_CHAIN)]
     pub chain: String,
 
     /// Layout preset for the TUI dashboard.
@@ -361,23 +361,17 @@ pub async fn run(
     result
 }
 
-/// Looks up the venue's exchange client. An unknown venue is an error
-/// that lists the known ones, not a silently dropped option.
+/// Looks up the venue's exchange client. An unknown venue is the one
+/// unknown-venue error (with a suggestion), not a silently dropped option.
 pub(crate) fn exchange_for_venue(
     venue: Option<&str>,
 ) -> Result<Option<scope::market::ExchangeClient>> {
     let Some(id) = venue else {
         return Ok(None);
     };
-    let registry = scope::market::VenueRegistry::load()?;
-    match registry.get(id) {
-        Some(desc) => Ok(Some(scope::market::ExchangeClient::from_descriptor(desc))),
-        None => Err(ScopeError::Other(format!(
-            "Unknown venue '{}'. Known venues: {}",
-            id,
-            registry.list().join(", ")
-        ))),
-    }
+    scope::market::VenueRegistry::load()?
+        .create_exchange_client(id)
+        .map(Some)
 }
 
 /// Gets the monitor's first data and, in exchange-only mode, the venue
@@ -3607,9 +3601,13 @@ capabilities:
 
     #[test]
     fn test_unknown_venue_is_an_error_not_ignored() {
-        // `--venue nosuch` used to drop the venue without a word.
-        let err = exchange_for_venue(Some("nosuch")).unwrap_err().to_string();
-        assert!(err.contains("nosuch") && err.contains("binance"), "{}", err);
+        // `--venue nosuch` used to drop the venue without a word; now it is
+        // the one unknown-venue error, with the registry's suggestion.
+        let err = exchange_for_venue(Some("binace")).err().unwrap();
+        assert!(matches!(err, ScopeError::InvalidInput(_)), "{err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("Unknown venue \"binace\""), "{msg}");
+        assert!(msg.contains("Did you mean \"binance\""), "{msg}");
         assert!(exchange_for_venue(None).unwrap().is_none());
         assert!(exchange_for_venue(Some("binance")).unwrap().is_some());
     }

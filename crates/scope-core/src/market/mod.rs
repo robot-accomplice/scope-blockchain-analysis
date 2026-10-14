@@ -72,7 +72,8 @@ pub use default_venue::DEFAULT_VENUE;
 pub use descriptor::VenueDescriptor;
 pub use exchange::ExchangeClient;
 pub use fetch::{
-    DexAnalyticsSource, fetch_book_and_volume, fetch_summary, fetch_token_summary, most_liquid,
+    DexAnalyticsSource, fetch_book_and_volume, fetch_summary, fetch_token_summary,
+    fetch_token_summary_by_name, most_liquid,
 };
 pub use orderbook::{
     BookSide, BookSource, Candle, ExecutionEstimate, ExecutionSide, HealthCheck, HealthOverrides,
@@ -80,6 +81,6 @@ pub use orderbook::{
     OrderBookLevel, Ticker, TickerClient, Trade, TradeHistoryClient, TradeSide,
     order_book_from_analytics,
 };
-pub use pair::Pair;
+pub use pair::{DEFAULT_PAIR, Pair};
 pub use registry::VenueRegistry;
 pub use venue::{DexVenue, MarketVenue, VENUE_HELP, VenueKind, VenueListing};

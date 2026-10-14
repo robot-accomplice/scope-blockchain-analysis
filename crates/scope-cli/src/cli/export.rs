@@ -55,7 +55,7 @@ pub struct ExportArgs {
     pub format: Option<OutputFormat>,
 
     /// Target blockchain network (for address export).
-    #[arg(short, long, default_value = "ethereum")]
+    #[arg(short, long, default_value = scope::chains::DEFAULT_CHAIN)]
     pub chain: String,
 
     /// Start date for transaction history (YYYY-MM-DD).

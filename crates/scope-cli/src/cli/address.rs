@@ -84,7 +84,7 @@ pub struct AddressArgs {
     ///
     /// EVM chains: ethereum, polygon, arbitrum, optimism, base, bsc
     /// Non-EVM chains: solana, tron
-    #[arg(short, long, default_value = "ethereum")]
+    #[arg(short, long, default_value = scope::chains::DEFAULT_CHAIN)]
     pub chain: String,
 
     /// Override output format for this command.
@@ -443,7 +443,7 @@ fn validate_address(address: &str, chain: &str) -> Result<()> {
             validate_tron_address(address)?;
         }
         _ => {
-            return Err(scope::error::ScopeError::Chain(format!(
+            return Err(scope::error::ScopeError::InvalidInput(format!(
                 "Unsupported chain: {}. Supported: ethereum, polygon, arbitrum, optimism, base, bsc, solana, tron",
                 chain
             )));

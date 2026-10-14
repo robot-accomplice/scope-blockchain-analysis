@@ -3,11 +3,12 @@
 use crate::AppState;
 use axum::Json;
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use scope::chains::DexClient;
 use serde::Deserialize;
 use std::sync::Arc;
+
+use super::{error_response, status_for};
 
 /// Query parameters for token discovery.
 #[derive(Debug, Deserialize)]
@@ -57,11 +58,7 @@ pub async fn handle(
             };
             Json(serde_json::json!(filtered)).into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => error_response(status_for(&e), e.to_string()),
     }
 }
 

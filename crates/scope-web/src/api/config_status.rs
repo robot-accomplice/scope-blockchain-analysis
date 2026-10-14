@@ -3,11 +3,13 @@
 use crate::AppState;
 use axum::Json;
 use axum::extract::State;
-use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use scope::config::Config;
+use scope::error::ScopeError;
 use serde::Deserialize;
 use std::sync::Arc;
+
+use super::{error_response, status_for};
 
 /// GET /api/config/status — Returns config status (which keys are set).
 pub async fn handle(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -93,11 +95,8 @@ pub async fn handle_save(
     let config_path = match Config::config_path() {
         Some(p) => p,
         None => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": "Cannot determine config path" })),
-            )
-                .into_response();
+            let e = ScopeError::Other("Cannot determine config path".to_string());
+            return error_response(status_for(&e), e.to_string());
         }
     };
 
@@ -105,21 +104,15 @@ pub async fn handle_save(
     if let Some(parent) = config_path.parent()
         && let Err(e) = std::fs::create_dir_all(parent)
     {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": format!("Failed to create config dir: {}", e) })),
-        )
-            .into_response();
+        let e = ScopeError::io_context(e, "Failed to create config dir");
+        return error_response(status_for(&e), e.to_string());
     }
 
     match serde_yaml::to_string(&config) {
         Ok(yaml) => {
             if let Err(e) = std::fs::write(&config_path, yaml) {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({ "error": format!("Failed to write config: {}", e) })),
-                )
-                    .into_response();
+                let e = ScopeError::io_context(e, "Failed to write config");
+                return error_response(status_for(&e), e.to_string());
             }
             Json(serde_json::json!({
                 "status": "saved",
@@ -127,11 +120,10 @@ pub async fn handle_save(
             }))
             .into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": format!("Failed to serialize config: {}", e) })),
-        )
-            .into_response(),
+        Err(e) => {
+            let e = ScopeError::Other(format!("Failed to serialize config: {}", e));
+            error_response(status_for(&e), e.to_string())
+        }
     }
 }
 

@@ -78,7 +78,7 @@ pub struct AddArgs {
     pub label: Option<String>,
 
     /// Blockchain network for this address.
-    #[arg(short, long, default_value = "ethereum")]
+    #[arg(short, long, default_value = scope::chains::DEFAULT_CHAIN)]
     pub chain: String,
 
     /// Tags for categorization.

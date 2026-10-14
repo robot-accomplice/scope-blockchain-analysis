@@ -331,7 +331,10 @@ impl EthereumClient {
                 return Self::for_aegis(rpc_url, http);
             }
             _ => {
-                return Err(ScopeError::Chain(format!("Unsupported chain: {}", chain)));
+                return Err(ScopeError::InvalidInput(format!(
+                    "Unsupported chain: {}",
+                    chain
+                )));
             }
         };
 

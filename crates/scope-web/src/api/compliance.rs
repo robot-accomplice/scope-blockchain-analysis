@@ -3,11 +3,12 @@
 use crate::AppState;
 use axum::Json;
 use axum::extract::State;
-use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use scope::compliance::risk::RiskEngine;
 use serde::Deserialize;
 use std::sync::Arc;
+
+use super::{error_response, status_for};
 
 /// Request body for compliance risk analysis.
 #[derive(Debug, Deserialize)]
@@ -15,15 +16,11 @@ pub struct ComplianceRiskRequest {
     /// Address to assess.
     pub address: String,
     /// Chain (default: "ethereum").
-    #[serde(default = "default_chain")]
+    #[serde(default = "super::default_chain")]
     pub chain: String,
     /// Include detailed breakdown.
     #[serde(default)]
     pub detailed: bool,
-}
-
-fn default_chain() -> String {
-    "ethereum".to_string()
 }
 
 /// POST /api/compliance/risk — Risk assessment for an address.
@@ -37,13 +34,7 @@ pub async fn handle_risk(
     // Resolve address book shortcuts (@label or direct address match)
     let resolved = match super::resolve_address_book(&req.address, &_state.config) {
         Ok(r) => r,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": e })),
-            )
-                .into_response();
-        }
+        Err(e) => return error_response(status_for(&e), e.to_string()),
     };
     let address = resolved.value;
     let chain = resolved.chain.unwrap_or(req.chain);
@@ -67,11 +58,10 @@ pub async fn handle_risk(
             }).collect::<Vec<_>>(),
         }))
         .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => {
+            let e = scope::error::ScopeError::Compliance(e.to_string());
+            error_response(status_for(&e), e.to_string())
+        }
     }
 }
 
@@ -105,7 +95,7 @@ mod tests {
 
     #[test]
     fn test_default_chain() {
-        assert_eq!(default_chain(), "ethereum");
+        assert_eq!(super::super::default_chain(), "ethereum");
     }
 
     #[test]

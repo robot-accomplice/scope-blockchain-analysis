@@ -96,7 +96,7 @@ pub enum MarketCommands {
   ..."
 )]
 pub struct SummaryArgs {
-    #[arg(default_value = "USDC", value_name = "SYMBOL", help = PAIR_HELP)]
+    #[arg(default_value = scope::market::DEFAULT_PAIR, value_name = "SYMBOL", help = PAIR_HELP)]
     pub pair: String,
 
     #[arg(long, default_value = scope::market::DEFAULT_VENUE, value_name = "VENUE", help = VENUE_HELP)]
@@ -181,7 +181,7 @@ pub enum SummaryFormat {
   ]"
 )]
 pub struct OhlcArgs {
-    #[arg(default_value = "USDC", value_name = "SYMBOL", help = PAIR_HELP)]
+    #[arg(default_value = scope::market::DEFAULT_PAIR, value_name = "SYMBOL", help = PAIR_HELP)]
     pub pair: String,
 
     /// Exchange venue (e.g., binance, mexc, bybit).
@@ -208,7 +208,7 @@ pub struct OhlcArgs {
   scope market trades DAI --venue binance --limit 20
   scope market trades ETH --venue okx --format json")]
 pub struct TradesArgs {
-    #[arg(default_value = "USDC", value_name = "SYMBOL", help = PAIR_HELP)]
+    #[arg(default_value = scope::market::DEFAULT_PAIR, value_name = "SYMBOL", help = PAIR_HELP)]
     pub pair: String,
 
     /// Exchange venue (e.g., binance, mexc, bybit).

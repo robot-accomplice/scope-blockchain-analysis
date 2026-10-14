@@ -140,7 +140,7 @@ pub struct CrawlArgs {
     ///
     /// If not specified, the chain will be inferred from the address format
     /// or all chains will be searched for token names.
-    #[arg(short, long, default_value = "ethereum")]
+    #[arg(short, long, default_value = scope::chains::DEFAULT_CHAIN)]
     pub chain: String,
 
     /// Time period for volume and price data.

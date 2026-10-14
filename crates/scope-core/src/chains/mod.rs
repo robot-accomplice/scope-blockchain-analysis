@@ -695,6 +695,9 @@ pub struct GasByFunction {
 // Chain Metadata
 // ============================================================================
 
+/// The chain a request falls back to when none is given.
+pub const DEFAULT_CHAIN: &str = "ethereum";
+
 /// Metadata for a blockchain network (symbol, decimals, explorer URLs).
 ///
 /// Used for normalized presentation across all chains.

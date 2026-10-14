@@ -3,10 +3,11 @@
 use crate::AppState;
 use axum::Json;
 use axum::extract::State;
-use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde::Deserialize;
 use std::sync::Arc;
+
+use super::{error_response, status_for};
 
 /// Request body for data export.
 #[derive(Debug, Deserialize)]
@@ -14,7 +15,7 @@ pub struct ExportRequest {
     /// Address to export data for.
     pub address: String,
     /// Chain (default: "ethereum").
-    #[serde(default = "default_chain")]
+    #[serde(default = "super::default_chain")]
     pub chain: String,
     /// Format: "json" or "csv".
     #[serde(default = "default_format")]
@@ -25,9 +26,6 @@ pub struct ExportRequest {
     pub end_date: Option<String>,
 }
 
-fn default_chain() -> String {
-    "ethereum".to_string()
-}
 fn default_format() -> String {
     "json".to_string()
 }
@@ -47,13 +45,7 @@ pub async fn handle(
     // Resolve address book shortcuts (@label or direct address match)
     let resolved = match super::resolve_address_book(&req.address, &state.config) {
         Ok(r) => r,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": e })),
-            )
-                .into_response();
-        }
+        Err(e) => return error_response(status_for(&e), e.to_string()),
     };
     let address = resolved.value;
     let chain = resolved.chain.unwrap_or(req.chain);
@@ -61,25 +53,13 @@ pub async fn handle(
     let client: Box<dyn scope::chains::ChainClient> =
         match state.factory.create_chain_client(&chain) {
             Ok(c) => c,
-            Err(e) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({ "error": e.to_string() })),
-                )
-                    .into_response();
-            }
+            Err(e) => return error_response(status_for(&e), e.to_string()),
         };
 
     // Fetch balance
     let mut balance = match client.get_balance(&address).await {
         Ok(b) => b,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response();
-        }
+        Err(e) => return error_response(status_for(&e), e.to_string()),
     };
     client.enrich_balance_usd(&mut balance).await;
 
@@ -140,7 +120,7 @@ mod tests {
 
     #[test]
     fn test_defaults() {
-        assert_eq!(default_chain(), "ethereum");
+        assert_eq!(super::super::default_chain(), "ethereum");
         assert_eq!(default_format(), "json");
     }
 
