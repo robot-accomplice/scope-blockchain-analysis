@@ -51,7 +51,10 @@ mod orderbook;
 pub use configurable_client::ConfigurableExchangeClient;
 pub use descriptor::VenueDescriptor;
 pub use exchange::ExchangeClient;
-pub use fetch::{DexAnalyticsSource, fetch_book_and_volume, fetch_summary, fetch_token_summary};
+pub use fetch::{
+    DexAnalyticsSource, fetch_book_and_volume, fetch_summary, fetch_token_summary,
+    fetch_token_summary_by_name,
+};
 pub use orderbook::{
     BookSide, BookSource, Candle, ExecutionEstimate, ExecutionSide, HealthCheck, HealthOverrides,
     HealthThresholds, MarketSnapshot, MarketSummary, OhlcClient, OrderBook, OrderBookClient,

@@ -79,6 +79,16 @@ pub async fn fetch_token_summary(
     fetch_summary(venue, &pair, thresholds, &KnownAnalytics(analytics)).await
 }
 
+/// [`fetch_token_summary`] for a venue name: resolves it with
+/// [`MarketVenue::from_name`] (the one unknown-venue error), then fetches.
+pub async fn fetch_token_summary_by_name(
+    venue: &str,
+    analytics: &TokenAnalytics,
+    thresholds: &HealthThresholds,
+) -> Result<MarketSummary> {
+    fetch_token_summary(&MarketVenue::from_name(venue)?, analytics, thresholds).await
+}
+
 fn dex_book_and_volume(
     venue: DexVenue,
     analytics: &TokenAnalytics,
@@ -233,6 +243,20 @@ mod tests {
         );
         // Not found, so the web answers 404 (see scope-web `status_for`).
         assert!(matches!(err, ScopeError::NotFound(_)), "{err:?}");
+    }
+
+    /// One call resolves and fetches: a DEX alias reads the analytics'
+    /// chain, and an unknown name is the one unknown-venue error.
+    #[tokio::test]
+    async fn fetch_token_summary_by_name_resolves_then_fetches() {
+        let a = analytics("ethereum", vec![dex_pair(1_000.0, 10.0)]);
+        let t = HealthThresholds::default();
+        assert!(fetch_token_summary_by_name("eth", &a, &t).await.is_ok());
+        let err = fetch_token_summary_by_name("polygon", &a, &t)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ScopeError::InvalidInput(_)), "{err:?}");
+        assert!(err.to_string().contains("Unknown venue"), "{err}");
     }
 
     /// One chain rule for every caller: analytics from another chain never

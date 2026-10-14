@@ -4,7 +4,7 @@ use crate::AppState;
 use axum::Json;
 use axum::extract::State;
 use axum::response::IntoResponse;
-use scope::market::{HealthOverrides, MarketVenue, fetch_token_summary};
+use scope::market::{HealthOverrides, fetch_token_summary_by_name};
 use scope_cli::cli::crawl::{self, Period};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -20,7 +20,7 @@ pub struct TokenHealthRequest {
     /// Include market/order book data.
     #[serde(default)]
     pub with_market: bool,
-    /// Market venue: a CEX id ("binance") or a DEX ("ethereum", "solana").
+    /// Market venue; see scope::market::VENUE_HELP.
     #[serde(default = "super::default_venue")]
     pub market_venue: String,
     /// Health threshold overrides for `with_market` (top-level JSON keys).
@@ -65,11 +65,7 @@ pub async fn handle(
     // is reported in `market_error`; the analytics still return.
     let market_result = if req.with_market {
         let thresholds = state.config.market.health.with_overrides(&req.health);
-        let market = match MarketVenue::from_name(&req.market_venue) {
-            Ok(venue) => fetch_token_summary(&venue, &analytics, &thresholds).await,
-            Err(e) => Err(e),
-        };
-        Some(market)
+        Some(fetch_token_summary_by_name(&req.market_venue, &analytics, &thresholds).await)
     } else {
         None
     };

@@ -39,6 +39,14 @@ fn default_refresh() -> u64 {
     5
 }
 
+/// The venue's exchange client, or the one unknown-venue error.
+fn exchange_client_for(venue: Option<&str>) -> scope::error::Result<Option<ExchangeClient>> {
+    let Some(id) = venue else {
+        return Ok(None);
+    };
+    VenueRegistry::load()?.create_exchange_client(id).map(Some)
+}
+
 /// WS /ws/monitor — WebSocket endpoint for live token monitoring.
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
@@ -60,12 +68,18 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, params: Moni
     let token_input = params.token.clone();
     let chain = params.chain.clone();
 
-    // Optionally create an exchange client for CEX data
-    let exchange_client: Option<ExchangeClient> = params.venue.as_ref().and_then(|venue_id| {
-        VenueRegistry::load()
-            .ok()
-            .and_then(|r| r.create_exchange_client(venue_id).ok())
-    });
+    // Optionally create an exchange client for CEX data. An unknown venue is
+    // the one unknown-venue error, reported on the socket (same frame shape
+    // as a DexTokenData error), not silently dropped.
+    let exchange_client: Option<ExchangeClient> = match exchange_client_for(params.venue.as_deref())
+    {
+        Ok(client) => client,
+        Err(e) => {
+            let msg = serde_json::json!({"type": "error", "message": e.to_string()});
+            let _ = socket.send(Message::Text(msg.to_string())).await;
+            return;
+        }
+    };
 
     let exchange_pair: Option<String> = exchange_client.as_ref().map(|ec| {
         let pair = match params.pair.as_deref() {
@@ -253,6 +267,26 @@ mod tests {
     #[test]
     fn test_default_refresh() {
         assert_eq!(default_refresh(), 5);
+    }
+
+    /// An unknown venue used to be silently dropped (no exchange data, no
+    /// word); now the one unknown-venue error reaches the client.
+    #[test]
+    fn test_exchange_client_for_unknown_venue_is_a_request_fault() {
+        let err = exchange_client_for(Some("nonexistent_venue_xyz"))
+            .err()
+            .unwrap();
+        assert!(
+            matches!(err, scope::error::ScopeError::InvalidInput(_)),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("Unknown venue"), "{err}");
+    }
+
+    #[test]
+    fn test_exchange_client_for_none_and_known_venue() {
+        assert!(exchange_client_for(None).unwrap().is_none());
+        assert!(exchange_client_for(Some("binance")).unwrap().is_some());
     }
 
     #[test]

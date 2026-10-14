@@ -17,7 +17,7 @@ pub struct MarketRequest {
     /// Pair or base symbol, read by `Pair::parse` ("DAI_USDC", "OPUSDT", "USDC"). Default: "USDC".
     #[serde(default = "super::default_pair")]
     pub pair: String,
-    /// Market venue: a CEX id ("binance") or a DEX ("ethereum", "solana").
+    /// Market venue; see scope::market::VENUE_HELP.
     #[serde(default = "super::default_venue")]
     pub market_venue: String,
     /// Chain check for a DEX venue: when set, it must name the venue's chain.
