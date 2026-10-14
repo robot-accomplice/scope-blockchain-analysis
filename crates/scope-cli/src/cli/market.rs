@@ -2018,7 +2018,10 @@ capabilities:
             ),
             "{header}"
         );
-        assert!(header.contains("spread_pct") && header.ends_with("ask_top10_depth"), "{header}");
+        assert!(
+            header.contains("spread_pct") && header.ends_with("ask_top10_depth"),
+            "{header}"
+        );
         // One run at t=0, one after the 1s sleep: the loop must not stop early.
         let rows: Vec<_> = lines.collect();
         assert_eq!(rows.len(), 2, "{body}");

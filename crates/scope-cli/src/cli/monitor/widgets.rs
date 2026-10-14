@@ -8,7 +8,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{
         Axis, Bar, BarChart, BarGroup, Block, Borders, Chart, Dataset, GraphType, List, ListItem,
-        Paragraph, Row, Sparkline, Table, Tabs, Wrap,
+        Paragraph, Row, Table, Tabs, Wrap,
         canvas::{Canvas, Line as CanvasLine, Rectangle},
     },
 };
@@ -1220,23 +1220,7 @@ pub(crate) fn render_metrics_panel(f: &mut Frame, area: Rect, state: &MonitorSta
         .constraints([Constraint::Length(3), Constraint::Min(0)])
         .split(area);
 
-    // --- Sparkline: recent price trend ---
-    let sparkline_data: Vec<u64> = {
-        // Take the last N price points and normalize to u64 for Sparkline
-        let points: Vec<f64> = state.price_history.iter().map(|dp| dp.value).collect();
-        if points.len() < 2 {
-            vec![0; chunks[0].width.saturating_sub(2) as usize]
-        } else {
-            let min_p = points.iter().cloned().fold(f64::MAX, f64::min);
-            let max_p = points.iter().cloned().fold(f64::MIN, f64::max);
-            let range = (max_p - min_p).max(0.0001);
-            points
-                .iter()
-                .map(|p| (((*p - min_p) / range) * 100.0) as u64)
-                .collect()
-        }
-    };
-
+    // --- Price trend: the shared chart component ---
     let trend_color = if !state.short_changes_known() {
         pal.neutral
     } else if state.price_change_5m >= 0.0 {
@@ -1244,18 +1228,21 @@ pub(crate) fn render_metrics_panel(f: &mut Frame, area: Rect, state: &MonitorSta
     } else {
         pal.down
     };
-
-    let sparkline = Sparkline::default()
-        .block(
-            Block::default()
-                .title(" ◉ Price Trend ")
-                .borders(Borders::ALL)
-                .border_style(Style::new().fg(pal.sparkline)),
-        )
-        .data(&sparkline_data)
-        .style(Style::new().fg(trend_color));
-
-    f.render_widget(sparkline, chunks[0]);
+    let block = Block::default()
+        .title(" ◉ Price Trend ")
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(pal.sparkline));
+    let inner = block.inner(chunks[0]);
+    f.render_widget(block, chunks[0]);
+    let prices: Vec<Option<f64>> = state
+        .price_history
+        .iter()
+        .map(|dp| Some(dp.value))
+        .collect();
+    f.render_widget(
+        crate::cli::charts::Sparkline::new(&prices, Style::new().fg(trend_color)),
+        inner,
+    );
 
     // --- Table: key metrics ---
     let change_5m_str = if !state.short_changes_known() {
