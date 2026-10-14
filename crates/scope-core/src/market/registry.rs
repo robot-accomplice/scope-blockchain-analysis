@@ -136,7 +136,7 @@ impl VenueRegistry {
 
     /// Path to the user venues directory (`~/.config/scope/venues/`).
     pub fn user_venues_dir() -> PathBuf {
-        dirs::home_dir()
+        crate::paths::home_dir()
             .map(|h| h.join(".config").join("scope").join("venues"))
             .unwrap_or_else(|| PathBuf::from(".config").join("scope").join("venues"))
     }

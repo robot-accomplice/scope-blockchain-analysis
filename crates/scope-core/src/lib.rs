@@ -259,6 +259,9 @@ pub mod http;
 /// configurable health checks for stablecoin markets.
 pub mod market;
 
+/// The user's directories, resolved in one place (sandboxed in tests).
+pub mod paths;
+
 /// Library version string.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
