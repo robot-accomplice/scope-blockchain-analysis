@@ -64,6 +64,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`just tui-record NAME`** records a harness scenario's API replies as fixtures.
 
 ### Fixed
+- `insights` printed token liquidity and volume as `$$500.00K`. They now print `$500.00K`. (#95)
+- rustls is now 0.23.46. This fixes RUSTSEC-2026-0346, 0347, 0348 and 0349. (#94)
 - 24h volume used the ticker's base volume as if it were USDT when a venue reported no quote volume. It is now converted with the mid price.
 - The monitor used a hard-coded DEX client for refreshes, which ignored the configured HTTP transport and Ghola. (#51)
 - Some requests did not use the configured HTTP transport. Every request now uses it. Ghola now also covers the exchange venues, the DEX client, and the contract and compliance requests. (#61)
