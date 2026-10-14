@@ -3,6 +3,7 @@
 //! Provides configurable health checks for stablecoin market monitoring:
 //! peg deviation, spread, bid/ask balance, level count, and depth thresholds.
 
+use crate::display::format_large_number;
 use std::ops::Bound;
 
 use super::types::{
@@ -763,7 +764,10 @@ impl MarketSummary {
             } else {
                 "Volume (24h, best pool)"
             };
-            out.push_str(&t::kv_row(label, &format!("{:.0} {q}", v)));
+            out.push_str(&t::kv_row(
+                label,
+                &format!("{} {q}", format_large_number(v)),
+            ));
             out.push('\n');
         }
 
@@ -790,16 +794,16 @@ impl MarketSummary {
         let base_symbol = self.pair.split('/').next().unwrap_or("BASE");
         let ask_label = if self.ask_outliers > 0 {
             format!(
-                "Ask Side — {} levels, {:.0} {q} (+{} outliers excl.)",
+                "Ask Side — {} levels, {} {q} (+{} outliers excl.)",
                 self.ask_levels(),
-                self.ask_depth,
+                format_large_number(self.ask_depth),
                 self.ask_outliers
             )
         } else {
             format!(
-                "Ask Side — {} levels, {:.0} {q}",
+                "Ask Side — {} levels, {} {q}",
                 self.ask_levels(),
-                self.ask_depth
+                format_large_number(self.ask_depth)
             )
         };
         out.push_str(&t::subsection_header(&ask_label));
@@ -823,16 +827,16 @@ impl MarketSummary {
         // Bid side
         let bid_label = if self.bid_outliers > 0 {
             format!(
-                "Bid Side — {} levels, {:.0} {q} (+{} outliers excl.)",
+                "Bid Side — {} levels, {} {q} (+{} outliers excl.)",
                 self.bid_levels(),
-                self.bid_depth,
+                format_large_number(self.bid_depth),
                 self.bid_outliers
             )
         } else {
             format!(
-                "Bid Side — {} levels, {:.0} {q}",
+                "Bid Side — {} levels, {} {q}",
                 self.bid_levels(),
-                self.bid_depth
+                format_large_number(self.bid_depth)
             )
         };
         out.push_str(&t::subsection_header(&bid_label));
@@ -1587,8 +1591,11 @@ mod tests {
         let summary =
             MarketSummary::from_order_book(&book, &HealthThresholds::default(), Some(50_000.0));
         let out = summary.format_text(Some("binance"));
-        assert!(out.contains("Volume (24h)"));
-        assert!(out.contains("50000"));
+        // Text output is read on screen: large figures are shortened (the
+        // markdown and JSON reports keep the full value).
+        let volume = out.lines().find(|l| l.contains("Volume (24h)")).unwrap();
+        assert!(volume.ends_with("50.00K USDT"), "{volume}");
+        assert!(out.contains("Ask Side — 2 levels, 2.00K USDT"), "{out}");
         assert!(out.contains("Spread"));
     }
 

@@ -76,7 +76,7 @@ pub enum MarketCommands {
   |  Best Ask           1.0001  (+0.010%)               |
   |  Mid Price          1.0000  (+0.000%)               |
   |  Spread             0.0002  (0.020%)                |
-  |  Volume (24h)       125000 USDT                     |
+  |  Volume (24h)       125.00K USDT                    |
   |                                                     |
   |-- Health Checks                                     |
   |  + No sells below peg                               |
