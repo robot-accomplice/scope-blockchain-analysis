@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-14
+
 ### Changed (breaking)
 - **The REPL is replaced by a full-screen TUI.** `scope tui`, `scope interactive` and `scope shell` open it. Every CLI command runs inside it with the same flags and output; the REPL ran 7 of 17 commands. The REPL session commands (`chain`, `format`, `limit`, `+tokens`, `+txs`, `trace`, `decode`, `tokens`, `ctx`, `clear`) stay. Your history and saved context carry over. The `rustyline` dependency is removed. (#50)
 - **Health checks can be `warn`.** JSON checks can have `"status": "warn"`: the value is outside its target but is not a failure, and it does not count against `healthy`. Consumers must handle `warn` (the web UI does).
@@ -342,7 +344,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Configuration system with YAML support
 - Support for ERC-20, SPL, and TRC-20 tokens
 
-[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.5.6...v0.6.0
 [0.5.6]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.5.5...v0.5.6
 [0.5.5]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.5.4...v0.5.5
