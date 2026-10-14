@@ -221,6 +221,11 @@ impl PegBands {
         Self { target, range }
     }
 
+    /// The peg target.
+    pub fn target(&self) -> f64 {
+        self.target
+    }
+
     /// Half-width of the outlier band.
     pub fn outlier_width(&self) -> f64 {
         self.range * PEG_OUTLIER_FACTOR
@@ -803,6 +808,7 @@ impl MarketSummary {
                 level.quantity,
                 base_symbol,
                 level.value(),
+                &q,
                 &self.peg_bands(),
             ));
             out.push('\n');
@@ -835,6 +841,7 @@ impl MarketSummary {
                 level.quantity,
                 base_symbol,
                 level.value(),
+                &q,
                 &self.peg_bands(),
             ));
             out.push('\n');

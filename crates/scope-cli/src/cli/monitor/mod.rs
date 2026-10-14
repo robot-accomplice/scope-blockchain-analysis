@@ -452,9 +452,9 @@ async fn exchange_token_data(
         .to_string();
     note!(
         out,
-        "Exchange-only mode: {} @ ${:.6}",
+        "Exchange-only mode: {} @ {}",
         pair,
-        ticker.last_price.unwrap_or(0.0)
+        scope::display::format::format_price_usd(ticker.last_price.unwrap_or(0.0))
     );
     let data = build_exchange_token_data(&base_symbol, pair, &ticker);
     Ok((data, ticker))
@@ -5990,7 +5990,7 @@ refresh_seconds: 5
         assert_eq!(address, "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
         assert_eq!(
             cap.err(),
-            "Selected: ZZQT (Zz Quiet Token) on ethereum - $1.500000 at 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48\n"
+            "Selected: ZZQT (Zz Quiet Token) on ethereum - $1.5000 at 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48\n"
         );
         assert_eq!(cap.out(), "", "what a search found is not data");
     }

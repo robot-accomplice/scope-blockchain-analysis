@@ -64,7 +64,7 @@ fn render_all(tty: bool) -> Vec<(&'static str, String)> {
         ),
         (
             "orderbook_level",
-            orderbook_level_styled(1.0001, 500.0, "DAI", 500.05, &usd_peg(), tty),
+            orderbook_level_styled(1.0001, 500.0, "DAI", 500.05, "USDT", &usd_peg(), tty),
         ),
         ("score_bar_high", score_bar_styled("Score", 85, 100, tty)),
         ("score_bar_mid", score_bar_styled("Score", 55, 100, tty)),
@@ -134,12 +134,12 @@ const PLAIN: &[(&str, &str)] = &[
     ("section_footer", "└───────────────────────────────────────"),
     ("separator", "├───────────────────────────────────────"),
     ("blank_row", "│"),
-    ("price_peg_near", "1.0001"),
-    ("price_peg_mid", "1.0030"),
-    ("price_peg_far", "0.9500"),
+    ("price_peg_near", "1.000100"),
+    ("price_peg_mid", "1.003000"),
+    ("price_peg_far", "0.950000"),
     (
         "orderbook_level",
-        "│    1.0001      500.00 DAI      500.05 USDT",
+        "│    1.000100      500.00 DAI      500.05 USDT",
     ),
     (
         "score_bar_high",
@@ -248,12 +248,12 @@ const COLORED: &[(&str, &str)] = &[
         "\u{1b}[36m├───────────────────────────────────────\u{1b}[39m",
     ),
     ("blank_row", "\u{1b}[36m│\u{1b}[39m"),
-    ("price_peg_near", "\u{1b}[32m1.0001\u{1b}[39m"),
-    ("price_peg_mid", "\u{1b}[33m1.0030\u{1b}[39m"),
-    ("price_peg_far", "\u{1b}[31m0.9500\u{1b}[39m"),
+    ("price_peg_near", "\u{1b}[32m1.000100\u{1b}[39m"),
+    ("price_peg_mid", "\u{1b}[33m1.003000\u{1b}[39m"),
+    ("price_peg_far", "\u{1b}[31m0.950000\u{1b}[39m"),
     (
         "orderbook_level",
-        "\u{1b}[36m│\u{1b}[39m    \u{1b}[32m1.0001\u{1b}[39m      500.00 \u{1b}[2mDAI\u{1b}[0m      500.05 USDT",
+        "\u{1b}[36m│\u{1b}[39m    \u{1b}[32m1.000100\u{1b}[39m      500.00 \u{1b}[2mDAI\u{1b}[0m      500.05 USDT",
     ),
     (
         "score_bar_high",

@@ -347,7 +347,10 @@ pub async fn run(
                 "- **Address:** `{}`\n",
                 analytics.token.contract_address
             ));
-            output.push_str(&format!("- **Price:** ${:.6}\n", analytics.price_usd));
+            output.push_str(&format!(
+                "- **Price:** {}\n",
+                scope::display::format::format_price_usd(analytics.price_usd)
+            ));
             output.push_str(&format!(
                 "- **Liquidity (24h):** ${}\n",
                 scope::display::format_usd(analytics.liquidity_usd)

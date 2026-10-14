@@ -383,7 +383,9 @@ fn format_price_peg_styled(price: f64, peg: &PegBands, tty: bool) -> String {
         PegBand::Slight => Role::Warn,
         PegBand::Off => Role::Err,
     };
-    Painter::new(tty).paint(role, &format!("{:.4}", price))
+    // Decimals come from the peg, so every price of one book lines up.
+    let decimals = crate::display::format::price_decimals(peg.target());
+    Painter::new(tty).paint(role, &format!("{price:.decimals$}"))
 }
 
 /// The USD peg with the default range, for the tests.
@@ -407,9 +409,10 @@ pub fn orderbook_level(
     quantity: f64,
     base: &str,
     value: f64,
+    quote: &str,
     peg: &PegBands,
 ) -> String {
-    orderbook_level_styled(price, quantity, base, value, peg, color_enabled())
+    orderbook_level_styled(price, quantity, base, value, quote, peg, color_enabled())
 }
 
 fn orderbook_level_styled(
@@ -417,12 +420,13 @@ fn orderbook_level_styled(
     quantity: f64,
     base: &str,
     value: f64,
+    quote: &str,
     peg: &PegBands,
     tty: bool,
 ) -> String {
     let p = Painter::new(tty);
     format!(
-        "{}    {}  {:>10.2} {}  {:>10.2} USDT",
+        "{}    {}  {:>10.2} {}  {:>10.2} {quote}",
         rail(p),
         format_price_peg_styled(price, peg, tty),
         quantity,
@@ -804,7 +808,7 @@ mod tests {
 
     #[test]
     fn test_orderbook_level() {
-        let row = orderbook_level(1.0001, 500.0, "DAI", 500.05, &usd_peg());
+        let row = orderbook_level(1.0001, 500.0, "DAI", 500.05, "USDT", &usd_peg());
         assert!(row.contains("DAI"));
         assert!(row.contains("USDT"));
     }
@@ -827,9 +831,9 @@ mod tests {
 
     #[test]
     fn test_orderbook_level_various_prices() {
-        let row_low = orderbook_level(0.9990, 100.0, "DAI", 99.90, &usd_peg());
-        let row_mid = orderbook_level(1.0000, 100.0, "DAI", 100.0, &usd_peg());
-        let row_high = orderbook_level(1.0015, 100.0, "DAI", 100.15, &usd_peg());
+        let row_low = orderbook_level(0.9990, 100.0, "DAI", 99.90, "USDT", &usd_peg());
+        let row_mid = orderbook_level(1.0000, 100.0, "DAI", 100.0, "USDT", &usd_peg());
+        let row_high = orderbook_level(1.0015, 100.0, "DAI", 100.15, "USDT", &usd_peg());
         assert!(row_low.contains("0.9990"));
         assert!(row_mid.contains("1.0000"));
         assert!(row_high.contains("1.0015"));
@@ -973,7 +977,7 @@ mod tests {
 
     #[test]
     fn test_orderbook_level_tty() {
-        let row = orderbook_level_styled(1.0001, 500.0, "DAI", 500.05, &usd_peg(), true);
+        let row = orderbook_level_styled(1.0001, 500.0, "DAI", 500.05, "USDT", &usd_peg(), true);
         assert!(row.contains("DAI"));
         assert!(row.contains("USDT"));
     }

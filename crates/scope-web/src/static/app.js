@@ -54,30 +54,33 @@ function showError(resultEl, msg) {
 }
 
 // ===== Formatting Helpers =====
+// Decimals for a price: the same rule as the CLI and the TUI
+// (scope::display::format::price_decimals). The stablecoin band is
+// scope::tokens STABLECOIN_PRICE_RANGE.
+function priceDigits(n) {
+  var a = Math.abs(n);
+  if (a >= 1000) return 2;
+  if (a >= 0.95 && a <= 1.05) return 6;
+  if (a >= 1) return 4;
+  if (a >= 0.01) return 6;
+  if (a >= 0.0001) return 8;
+  return 10;
+}
+
 function fmtPrice(n) {
   if (n == null) return '-';
-  if (n >= 1000) return '$' + n.toLocaleString(undefined, { maximumFractionDigits: 2 });
-  if (n >= 1) return '$' + n.toFixed(4);
-  if (n >= 0.01) return '$' + n.toFixed(6);
-  return '$' + n.toFixed(8);
+  return '$' + formatPrice(n);
 }
 
 function fmtUsd(n) {
   if (n == null) return '-';
-  if (n >= 1e9) return '$' + (n / 1e9).toFixed(2) + 'B';
-  if (n >= 1e6) return '$' + (n / 1e6).toFixed(2) + 'M';
-  if (n >= 1e3) return '$' + (n / 1e3).toFixed(2) + 'K';
-  return '$' + n.toFixed(2);
+  return '$' + fmtCompact(n);
 }
 
 // An amount in a pair's quote currency (depth is not always dollars).
 function fmtQuote(n, quote) {
   if (n == null) return '-';
-  var v = n >= 1e9 ? (n / 1e9).toFixed(2) + 'B'
-        : n >= 1e6 ? (n / 1e6).toFixed(2) + 'M'
-        : n >= 1e3 ? (n / 1e3).toFixed(2) + 'K'
-        : n.toFixed(2);
-  return v + ' ' + (quote || '');
+  return fmtCompact(n) + ' ' + (quote || '');
 }
 
 function fmtNum(n) {
@@ -109,10 +112,7 @@ function fmtTimestamp(ts) {
 
 function formatPrice(n) {
   if (n === null || n === undefined) return '-';
-  if (n >= 1000) return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
-  if (n >= 1) return n.toFixed(4);
-  if (n >= 0.01) return n.toFixed(6);
-  return n.toFixed(8);
+  return n.toFixed(priceDigits(n));
 }
 
 function fmtCompact(n) {

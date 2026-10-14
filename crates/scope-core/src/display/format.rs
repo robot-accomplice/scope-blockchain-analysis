@@ -12,6 +12,37 @@
 /// assert_eq!(format_usd(1_500.0), "$1.50K");
 /// assert_eq!(format_usd(15.50), "$15.50");
 /// ```
+/// Decimals for prices near `reference`: the one precision rule for
+/// every surface (M3). 2 from 1000, 6 near a USD peg (stablecoins), 4 from
+/// 1, 6 from 0.01, 8 from 0.0001, else 10. A list of prices (a book) takes
+/// its decimals from one reference, so its rows line up.
+pub fn price_decimals(reference: f64) -> usize {
+    let a = reference.abs();
+    if a >= 1000.0 {
+        2
+    } else if crate::tokens::is_stablecoin_price(a) {
+        6
+    } else if a >= 1.0 {
+        4
+    } else if a >= 0.01 {
+        6
+    } else if a >= 0.0001 {
+        8
+    } else {
+        10
+    }
+}
+
+/// A price at the decimals of its own size ([`price_decimals`]).
+pub fn format_price(price: f64) -> String {
+    format!("{price:.*}", price_decimals(price))
+}
+
+/// [`format_price`] in USD.
+pub fn format_price_usd(price: f64) -> String {
+    format!("${}", format_price(price))
+}
+
 pub fn format_usd(value: f64) -> String {
     format!("${}", format_large_number(value))
 }

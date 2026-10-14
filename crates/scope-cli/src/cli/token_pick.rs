@@ -93,11 +93,11 @@ pub(crate) fn selected_line(token: &TokenSearchResult) -> String {
         format!(" at {}", token.address)
     };
     format!(
-        "Selected: {} ({}) on {} - ${:.6}{}",
+        "Selected: {} ({}) on {} - {}{}",
         token.symbol,
         token.name,
         token.chain,
-        token.price_usd.unwrap_or(0.0),
+        scope::display::format::format_price_usd(token.price_usd.unwrap_or(0.0)),
         at
     )
 }

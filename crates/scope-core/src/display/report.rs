@@ -196,7 +196,10 @@ fn generate_executive_summary(analytics: &TokenAnalytics) -> String {
     summary.push_str("## Executive Summary\n\n");
     summary.push_str("| Metric | Value |\n");
     summary.push_str("|--------|-------|\n");
-    summary.push_str(&format!("| Price | ${:.6} |\n", analytics.price_usd));
+    summary.push_str(&format!(
+        "| Price | {} |\n",
+        crate::display::format::format_price_usd(analytics.price_usd)
+    ));
     summary.push_str(&format!(
         "| 24h Change | {:+.2}% |\n",
         analytics.price_change_24h
@@ -281,9 +284,18 @@ fn generate_price_analysis(analytics: &TokenAnalytics) -> String {
         section.push_str("\n### Price Range (Period)\n\n");
         section.push_str("| Stat | Value |\n");
         section.push_str("|------|-------|\n");
-        section.push_str(&format!("| High | ${:.6} |\n", max_price));
-        section.push_str(&format!("| Low | ${:.6} |\n", min_price));
-        section.push_str(&format!("| Average | ${:.6} |\n", avg_price));
+        section.push_str(&format!(
+            "| High | {} |\n",
+            crate::display::format::format_price_usd(max_price)
+        ));
+        section.push_str(&format!(
+            "| Low | {} |\n",
+            crate::display::format::format_price_usd(min_price)
+        ));
+        section.push_str(&format!(
+            "| Average | {} |\n",
+            crate::display::format::format_price_usd(avg_price)
+        ));
     }
 
     section

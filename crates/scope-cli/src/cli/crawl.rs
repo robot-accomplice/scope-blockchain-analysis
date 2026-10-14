@@ -788,7 +788,10 @@ fn output_table_with_dex(analytics: &TokenAnalytics, args: &CrawlArgs, out: &Out
     outln!(
         out,
         "{}",
-        t::kv_row("Price", &format!("${:.6}", analytics.price_usd))
+        t::kv_row(
+            "Price",
+            &scope::display::format::format_price_usd(analytics.price_usd)
+        )
     )?;
     outln!(
         out,

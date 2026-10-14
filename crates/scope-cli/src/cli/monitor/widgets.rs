@@ -21,6 +21,7 @@ use super::state::MonitorState;
 use crate::cli::textfit::{cols, cut_with_ellipsis, draw_note_alone};
 use crate::cli::theme::SECONDARY;
 pub(crate) use scope::display::format::format_large_number as format_number;
+pub(crate) use scope::display::format::format_price_usd;
 use scope::display::theme::Role;
 
 /// The smallest terminal the monitor draws in, in columns and rows.
@@ -669,25 +670,6 @@ pub(crate) fn render_price_chart(f: &mut Frame, area: Rect, state: &MonitorState
         );
 
     f.render_widget(chart, area);
-}
-
-/// Formats a price in USD with appropriate precision.
-/// Stablecoins get extra precision (6 decimals) to show micro-fluctuations.
-pub(crate) fn format_price_usd(price: f64) -> String {
-    if price >= 1000.0 {
-        format!("${:.2}", price)
-    } else if scope::tokens::is_stablecoin_price(price) {
-        // Stablecoins get 6 decimals to show micro-fluctuations
-        format!("${:.6}", price)
-    } else if price >= 1.0 {
-        format!("${:.4}", price)
-    } else if price >= 0.01 {
-        format!("${:.6}", price)
-    } else if price >= 0.0001 {
-        format!("${:.8}", price)
-    } else {
-        format!("${:.10}", price)
-    }
 }
 
 /// Renders a candlestick chart using OHLC data.
@@ -1705,7 +1687,7 @@ pub(crate) fn render_market_info_panel(f: &mut Frame, area: Rect, state: &Monito
         };
         info_lines.push(Line::from(vec![
             Span::styled(" Price  ", SECONDARY),
-            Span::styled(format!("${:.6}", state.current_price), Style::new().bold()),
+            Span::styled(format_price_usd(state.current_price), Style::new().bold()),
         ]));
 
         // Multi-timeframe changes

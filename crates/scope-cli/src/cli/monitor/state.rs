@@ -738,7 +738,10 @@ impl MonitorState {
             self.volume_avg = self.volume_avg * 0.9 + token_data.volume_24h * 0.1;
         }
 
-        self.log(format!("Updated: ${:.6}", token_data.price_usd));
+        self.log(format!(
+            "Updated: {}",
+            scope::display::format::format_price_usd(token_data.price_usd)
+        ));
 
         // Periodically save to cache (every 60 updates, ~5 minutes at 5s refresh)
         if self.real_data_count.is_multiple_of(60) {
@@ -755,7 +758,11 @@ impl MonitorState {
             && self.current_price < min
         {
             self.active_alerts.push(ActiveAlert {
-                message: format!("⚠ Price ${:.6} below min ${:.6}", self.current_price, min),
+                message: format!(
+                    "⚠ Price {} below min {}",
+                    scope::display::format::format_price_usd(self.current_price),
+                    scope::display::format::format_price_usd(min)
+                ),
                 triggered_at: Instant::now(),
             });
         }
@@ -765,7 +772,11 @@ impl MonitorState {
             && self.current_price > max
         {
             self.active_alerts.push(ActiveAlert {
-                message: format!("⚠ Price ${:.6} above max ${:.6}", self.current_price, max),
+                message: format!(
+                    "⚠ Price {} above max {}",
+                    scope::display::format::format_price_usd(self.current_price),
+                    scope::display::format::format_price_usd(max)
+                ),
                 triggered_at: Instant::now(),
             });
         }
