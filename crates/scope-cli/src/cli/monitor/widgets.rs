@@ -380,6 +380,10 @@ pub(crate) fn ui(f: &mut Frame, state: &mut MonitorState) {
 
     // Render footer
     render_footer(f, chunks[2], state);
+
+    if state.show_keys {
+        render_keys_overlay(f);
+    }
 }
 
 /// Renders the header with token info and time period tabs.
@@ -407,7 +411,12 @@ pub(crate) fn render_header(f: &mut Frame, area: Rect, state: &MonitorState) {
 
     let title = header_title(state, area.width);
 
-    let price_str = format_price_usd(state.current_price);
+    // A price shown beside an error is the last good one (#68).
+    let price_str = if state.error_message.is_some() {
+        format!("{} (stale)", format_price_usd(state.current_price))
+    } else {
+        format_price_usd(state.current_price)
+    };
 
     // Split header area: top row for token info, bottom row for tabs
     let header_chunks = Layout::default()
@@ -1839,6 +1848,58 @@ pub(crate) fn render_market_info_panel(f: &mut Frame, area: Rect, state: &Monito
 }
 
 /// Renders the footer with status and controls.
+/// Every monitor key, for the `?` overlay (#68).
+pub(crate) const MONITOR_KEYS: &[(&str, &str)] = &[
+    ("q, Esc, Ctrl-C", "quit"),
+    ("r", "refresh now"),
+    ("p, Space", "pause or resume"),
+    ("Shift-P", "auto-pause on input"),
+    ("e", "start or stop the CSV export"),
+    ("+ / -", "slower or faster refresh"),
+    ("1-6", "time period 1m, 5m, 15m, 1h, 4h, 1d"),
+    ("t, Tab", "next time period"),
+    ("c", "chart: line, candles, volume profile"),
+    ("s", "scale: linear or log"),
+    ("/", "color scheme"),
+    ("l / h", "next or previous layout"),
+    ("a", "automatic layout"),
+    ("w then 1-5", "show or hide a widget"),
+    ("j / k", "scroll the activity log"),
+    ("?", "this list (any key closes it)"),
+];
+
+/// The `?` overlay: every key and what it does.
+fn render_keys_overlay(f: &mut Frame) {
+    let area = f.area();
+    let width = 56.min(area.width.saturating_sub(4));
+    let height = (MONITOR_KEYS.len() as u16 + 2).min(area.height.saturating_sub(2));
+    let rect = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    let lines: Vec<Line> = MONITOR_KEYS
+        .iter()
+        .map(|(k, what)| {
+            Line::from(vec![
+                Span::styled(format!(" {k:<16}"), crate::cli::theme::KEY),
+                Span::styled((*what).to_string(), SECONDARY),
+            ])
+        })
+        .collect();
+    f.render_widget(ratatui::widgets::Clear, rect);
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .title(" Keys ")
+                .borders(Borders::ALL)
+                .border_style(crate::cli::theme::ACCENT),
+        ),
+        rect,
+    );
+}
+
 pub(crate) fn render_footer(f: &mut Frame, area: Rect, state: &MonitorState) {
     let footer = Paragraph::new(Line::from(footer_spans(state)))
         .block(Block::default().borders(Borders::ALL));
@@ -1874,8 +1935,9 @@ pub(crate) fn footer_spans(state: &MonitorState) -> Vec<Span<'static>> {
 
     let stats = Span::styled(
         format!(
-            "↻ {}s │ Δ {} │ {} pts │ {}",
+            "↻ {}s of {}s │ Δ {} │ {} pts │ {}",
             elapsed,
+            state.refresh_rate.as_secs(),
             price_change_str,
             synthetic_count + real_count,
             memory_str
@@ -1883,13 +1945,15 @@ pub(crate) fn footer_spans(state: &MonitorState) -> Vec<Span<'static>> {
         SECONDARY,
     );
 
-    let widget_hint = if state.widget_toggle_mode {
-        Span::styled("W:1-5?", crate::cli::theme::strong(Role::Warn))
-    } else {
-        Span::styled("W", crate::cli::theme::KEY)
+    // Keys in brackets read without color too (#68).
+    let key = |k: &'static str, word: String| {
+        [
+            Span::raw("["),
+            Span::styled(k, crate::cli::theme::KEY),
+            Span::raw(format!("]{word} ")),
+        ]
     };
-
-    let mut spans = vec![Span::styled("Q", crate::cli::theme::KEY), Span::raw("uit ")];
+    let mut spans: Vec<Span<'static>> = key("q", "uit".into()).to_vec();
     if state.paused {
         spans.push(Span::styled(
             "⏸ PAUSED ",
@@ -1907,27 +1971,26 @@ pub(crate) fn footer_spans(state: &MonitorState) -> Vec<Span<'static>> {
         spans.push(Span::styled("● REC ", crate::cli::theme::strong(Role::Err)));
     }
 
-    spans.extend([
-        Span::styled("R", crate::cli::theme::KEY),
-        Span::raw("efresh "),
-        Span::styled("P", crate::cli::theme::KEY),
-        Span::raw("ause "),
-        Span::styled("E", crate::cli::theme::KEY),
-        Span::raw("xport "),
-        Span::styled("L", crate::cli::theme::KEY),
-        Span::raw(format!(":{} ", state.layout.label())),
-        widget_hint,
-        Span::raw("idget "),
-        Span::styled("C", crate::cli::theme::KEY),
-        Span::raw(format!("hart:{} ", state.chart_mode.label())),
-        Span::styled("S", crate::cli::theme::KEY),
-        Span::raw(format!("cale:{} ", state.scale_mode.label())),
-        Span::styled("/", crate::cli::theme::KEY),
-        Span::raw(format!(":{} ", state.color_scheme.label())),
-        Span::styled("T", crate::cli::theme::KEY),
-        Span::raw("ime "),
-        Span::raw("║ "),
-        stats,
-    ]);
+    if state.widget_toggle_mode {
+        spans.push(Span::styled(
+            "widget 1-5? ",
+            crate::cli::theme::strong(Role::Warn),
+        ));
+    }
+    for part in [
+        key("r", "efresh".into()),
+        key("p", "ause".into()),
+        key("e", "xport".into()),
+        key("l", format!("ayout:{}", state.layout.label())),
+        key("w", "idgets".into()),
+        key("c", format!("hart:{}", state.chart_mode.label())),
+        key("s", format!("cale:{}", state.scale_mode.label())),
+        key("/", format!("colors:{}", state.color_scheme.label())),
+        key("t", "ime".into()),
+        key("?", "keys".into()),
+    ] {
+        spans.extend(part);
+    }
+    spans.extend([Span::raw("║ "), stats]);
     spans
 }

@@ -97,6 +97,9 @@ pub struct MonitorState {
     /// Refresh rate.
     pub refresh_rate: Duration,
 
+    /// The key overlay (`?`) is open (#68).
+    pub show_keys: bool,
+
     /// Whether monitoring is paused.
     pub paused: bool,
 
@@ -309,6 +312,7 @@ impl MonitorState {
             fdv: token_data.fdv,
             last_update: now,
             refresh_rate: Duration::from_secs(DEFAULT_REFRESH_SECS),
+            show_keys: false,
             paused: false,
             log_messages: VecDeque::with_capacity(10),
             log_list_state: ListState::default(),

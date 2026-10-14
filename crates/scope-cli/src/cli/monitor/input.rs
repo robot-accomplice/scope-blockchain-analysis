@@ -156,130 +156,11 @@ impl<B: ratatui::backend::Backend> MonitorApp<B> {
         Ok(())
     }
 
-    /// Handles a single key event, updating state accordingly.
-    /// Extracted from the event loop for testability.
+    /// Handles a single key event with [`handle_key_event_on_state`], the
+    /// one key handler (production and tests).
     pub(crate) fn handle_key_event(&mut self, key: crossterm::event::KeyEvent) {
-        // Track last input time for auto-pause
-        self.state.last_input_at = Instant::now();
-
-        // Widget toggle mode: waiting for digit 1-5
-        if self.state.widget_toggle_mode {
-            self.state.widget_toggle_mode = false;
-            if let KeyCode::Char(c @ '1'..='5') = key.code {
-                let idx = (c as u8 - b'0') as usize;
-                self.state.widgets.toggle_by_index(idx);
-                return;
-            }
-            // Any other key cancels the mode and falls through
-        }
-
-        match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => {
-                // Stop export before quitting if active
-                if self.state.export_active {
-                    self.state.stop_export();
-                }
-                self.should_exit = true;
-            }
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if self.state.export_active {
-                    self.state.stop_export();
-                }
-                self.should_exit = true;
-            }
-            KeyCode::Char('r') => {
-                self.state.force_refresh();
-            }
-            // Shift+P toggles auto-pause on input
-            KeyCode::Char('P') if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                self.state.auto_pause_on_input = !self.state.auto_pause_on_input;
-                self.state.log(format!(
-                    "Auto-pause: {}",
-                    if self.state.auto_pause_on_input {
-                        "ON"
-                    } else {
-                        "OFF"
-                    }
-                ));
-            }
-            KeyCode::Char('p') | KeyCode::Char(' ') => {
-                self.state.toggle_pause();
-            }
-            // Toggle CSV export
-            KeyCode::Char('e') => {
-                self.state.toggle_export();
-            }
-            // Increase refresh interval (slower)
-            KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Char(']') => {
-                self.state.slower_refresh();
-            }
-            // Decrease refresh interval (faster)
-            KeyCode::Char('-') | KeyCode::Char('_') | KeyCode::Char('[') => {
-                self.state.faster_refresh();
-            }
-            // Time period selection (1=1m, 2=5m, 3=15m, 4=1h, 5=4h, 6=1d)
-            KeyCode::Char('1') => {
-                self.state.set_time_period(TimePeriod::Min1);
-            }
-            KeyCode::Char('2') => {
-                self.state.set_time_period(TimePeriod::Min5);
-            }
-            KeyCode::Char('3') => {
-                self.state.set_time_period(TimePeriod::Min15);
-            }
-            KeyCode::Char('4') => {
-                self.state.set_time_period(TimePeriod::Hour1);
-            }
-            KeyCode::Char('5') => {
-                self.state.set_time_period(TimePeriod::Hour4);
-            }
-            KeyCode::Char('6') => {
-                self.state.set_time_period(TimePeriod::Day1);
-            }
-            KeyCode::Char('t') | KeyCode::Tab => {
-                self.state.cycle_time_period();
-            }
-            // Toggle chart mode (line/candlestick/volume-profile)
-            KeyCode::Char('c') => {
-                self.state.toggle_chart_mode();
-            }
-            // Toggle scale mode (linear/log)
-            KeyCode::Char('s') => {
-                self.state.scale_mode = self.state.scale_mode.toggle();
-                self.state
-                    .log(format!("Scale: {}", self.state.scale_mode.label()));
-            }
-            // Cycle color scheme
-            KeyCode::Char('/') => {
-                self.state.color_scheme = self.state.color_scheme.next();
-                self.state
-                    .log(format!("Colors: {}", self.state.color_scheme.label()));
-            }
-            // Scroll activity log
-            KeyCode::Char('j') | KeyCode::Down => {
-                self.state.scroll_log_down();
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.state.scroll_log_up();
-            }
-            // Layout cycling
-            KeyCode::Char('l') => {
-                self.state.layout = self.state.layout.next();
-                self.state.auto_layout = false;
-            }
-            KeyCode::Char('h') => {
-                self.state.layout = self.state.layout.prev();
-                self.state.auto_layout = false;
-            }
-            // Widget toggle mode
-            KeyCode::Char('w') => {
-                self.state.widget_toggle_mode = true;
-            }
-            // Re-enable auto layout
-            KeyCode::Char('a') => {
-                self.state.auto_layout = true;
-            }
-            _ => {}
+        if handle_key_event_on_state(key, &mut self.state) {
+            self.should_exit = true;
         }
     }
 
@@ -400,15 +281,24 @@ impl<B: ratatui::backend::Backend> MonitorApp<B> {
     }
 }
 
-/// Handles a key event by mutating state. Standalone version for testability.
-/// Returns true if the application should exit.
-#[cfg(test)]
+/// The one monitor key handler: mutates `state` and returns true when the
+/// monitor should exit. `?` shows the key overlay; with it open, any key
+/// closes it (#68).
 pub(crate) fn handle_key_event_on_state(
     key: crossterm::event::KeyEvent,
     state: &mut MonitorState,
 ) -> bool {
     // Track last input time for auto-pause
     state.last_input_at = Instant::now();
+
+    if state.show_keys {
+        state.show_keys = false;
+        return false;
+    }
+    if key.code == KeyCode::Char('?') {
+        state.show_keys = true;
+        return false;
+    }
 
     // Widget toggle mode: waiting for digit 1-5
     if state.widget_toggle_mode {
@@ -436,6 +326,8 @@ pub(crate) fn handle_key_event_on_state(
         }
         KeyCode::Char('r') => {
             state.force_refresh();
+            // The key says it was heard (#68).
+            state.log("Refresh requested".to_string());
         }
         // Shift+P toggles auto-pause
         KeyCode::Char('P') if key.modifiers.contains(KeyModifiers::SHIFT) => {

@@ -11,7 +11,7 @@ steps:
   - wait_for: { text: "Order Book \\(binance\\)", timeout: 20s }
   - wait_for: { text: "Recent Trades \\(binance\\)", timeout: 20s }
   - expect_screen:
-      contains: ["BINANCE USDCUSDT", "Quit"]
+      contains: ["BINANCE USDCUSDT", "\\[q\\]uit"]
       not_contains: ["API Error", "no fixture", "ETHEREUM", "synthetic", "not available"]
   # L switches to the dashboard, which has the activity log. A refresh logs
   # "Updated: $…"; after it, the screen still has no DexScreener miss.

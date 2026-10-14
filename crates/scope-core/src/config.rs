@@ -569,9 +569,9 @@ impl ColorScheme {
     /// Returns a short display label.
     pub fn label(&self) -> &'static str {
         match self {
-            ColorScheme::GreenRed => "G/R",
-            ColorScheme::BlueOrange => "B/O",
-            ColorScheme::Monochrome => "Mono",
+            ColorScheme::GreenRed => "green-red",
+            ColorScheme::BlueOrange => "blue-orange",
+            ColorScheme::Monochrome => "mono",
         }
     }
 }

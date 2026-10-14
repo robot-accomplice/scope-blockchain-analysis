@@ -3968,9 +3968,10 @@ refresh_seconds: 5
 
     #[test]
     fn test_color_scheme_label() {
-        assert_eq!(ColorScheme::GreenRed.label(), "G/R");
-        assert_eq!(ColorScheme::BlueOrange.label(), "B/O");
-        assert_eq!(ColorScheme::Monochrome.label(), "Mono");
+        // Words, not G/R (#68).
+        assert_eq!(ColorScheme::GreenRed.label(), "green-red");
+        assert_eq!(ColorScheme::BlueOrange.label(), "blue-orange");
+        assert_eq!(ColorScheme::Monochrome.label(), "mono");
     }
 
     #[test]
@@ -6584,7 +6585,7 @@ refresh_seconds: 5
         state.error_message = Some("API Error: boom".into());
         state.paused = true;
         let text = spans_text(&footer_spans(&state));
-        assert!(text.starts_with("Quit"), "{text}");
+        assert!(text.starts_with("[q]uit"), "{text}");
         assert!(text.contains("PAUSED"), "{text}");
         assert!(
             !text.contains("API Error"),
@@ -6596,7 +6597,7 @@ refresh_seconds: 5
             .draw(|f| render_footer(f, f.area(), &state))
             .unwrap();
         let row = format!("{}", terminal.backend());
-        assert!(row.contains("Quit") && row.contains("PAUSED"), "{row}");
+        assert!(row.contains("[q]uit") && row.contains("PAUSED"), "{row}");
     }
 
     #[test]
@@ -6828,13 +6829,52 @@ refresh_seconds: 5
 
     const MONITOR_TOO_SMALL: &str = "Terminal too small: need at least 60×16";
 
+    // #68: `?` shows every key; any key closes the list.
+    #[test]
+    fn test_question_mark_shows_the_keys_and_any_key_closes_them() {
+        let mut state = create_populated_state();
+        let k = |c| crossterm::event::KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+        assert!(!handle_key_event_on_state(k('?'), &mut state));
+        assert!(state.show_keys);
+        let text = ui_text(&mut state, 120, 40);
+        assert!(text.contains(" Keys "), "{text}");
+        assert!(text.contains("slower or faster refresh"), "{text}");
+        // The closing key does nothing else: q does not quit here.
+        assert!(!handle_key_event_on_state(k('q'), &mut state));
+        assert!(!state.show_keys);
+    }
+
+    #[test]
+    fn test_refresh_is_acknowledged_and_the_interval_is_shown() {
+        let mut state = create_populated_state();
+        let k = crossterm::event::KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE);
+        handle_key_event_on_state(k, &mut state);
+        assert!(
+            state
+                .log_messages
+                .iter()
+                .any(|m| m.contains("Refresh requested"))
+        );
+        let text = spans_text(&footer_spans(&state));
+        let every = state.refresh_rate.as_secs();
+        assert!(text.contains(&format!("of {every}s")), "{text}");
+    }
+
+    #[test]
+    fn test_a_price_beside_an_error_is_marked_stale() {
+        let mut state = create_populated_state();
+        state.error_message = Some("API Error: boom".into());
+        let text = ui_text(&mut state, 120, 40);
+        assert!(text.contains("(stale)"), "{text}");
+    }
+
     #[test]
     fn test_below_60x16_only_the_too_small_message_is_drawn() {
         let mut state = create_populated_state();
         state.layout = LayoutPreset::Exchange;
         let text = ui_text(&mut state, 50, 12);
         assert!(text.contains(MONITOR_TOO_SMALL), "{text}");
-        assert!(!text.contains("Quit"), "{text}");
+        assert!(!text.contains("[q]uit"), "{text}");
         // 30x8 wraps on words and keeps the state.
         let text = ui_text(&mut state, 30, 8);
         assert!(text.contains("Terminal too small: need at"), "{text}");
@@ -6843,7 +6883,7 @@ refresh_seconds: 5
         // At the minimum the monitor draws, with its Quit hint.
         let text = ui_text(&mut state, 60, 16);
         assert!(!text.contains("Terminal too small"), "{text}");
-        assert!(text.contains("Quit"), "{text}");
+        assert!(text.contains("[q]uit"), "{text}");
         assert!(ui_text(&mut state, 59, 16).contains("Terminal too small"));
         assert!(ui_text(&mut state, 60, 15).contains("Terminal too small"));
     }
@@ -7073,7 +7113,7 @@ refresh_seconds: 5
             .draw(|f| render_footer(f, f.area(), &state))
             .unwrap();
         let row = format!("{}", terminal.backend());
-        assert!(row.contains("Quit") && row.contains("PAUSED"), "{row}");
+        assert!(row.contains("[q]uit") && row.contains("PAUSED"), "{row}");
 
         state.auto_layout = false;
         for layout in [
@@ -7085,7 +7125,7 @@ refresh_seconds: 5
         ] {
             state.layout = layout;
             let text = ui_text(&mut state, 60, 16);
-            assert!(text.contains("Quit"), "{layout:?}: {text}");
+            assert!(text.contains("[q]uit"), "{layout:?}: {text}");
             assert_eq!(state.layout, layout);
         }
     }
