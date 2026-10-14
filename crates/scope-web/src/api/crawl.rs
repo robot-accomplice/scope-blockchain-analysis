@@ -3,11 +3,12 @@
 use crate::AppState;
 use axum::Json;
 use axum::extract::State;
-use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use scope_cli::cli::crawl::{self, Period};
 use serde::Deserialize;
 use std::sync::Arc;
+
+use super::{error_response, status_for};
 
 /// Request body for token crawl.
 #[derive(Debug, Deserialize)]
@@ -44,13 +45,7 @@ pub async fn handle(
     // Resolve address book shortcuts (@label or direct address match)
     let resolved = match super::resolve_address_book(&req.token, &state.config) {
         Ok(r) => r,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": e })),
-            )
-                .into_response();
-        }
+        Err(e) => return error_response(status_for(&e), e.to_string()),
     };
     let token = resolved.value;
     let chain = resolved.chain.unwrap_or(req.chain);
@@ -74,11 +69,7 @@ pub async fn handle(
     .await
     {
         Ok(analytics) => Json(serde_json::json!(analytics)).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => error_response(status_for(&e), e.to_string()),
     }
 }
 

@@ -3,7 +3,6 @@
 use crate::AppState;
 use axum::Json;
 use axum::extract::State;
-use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use scope::market::{HealthOverrides, MarketVenue, fetch_token_summary};
 use scope_cli::cli::crawl::{self, Period};
@@ -49,13 +48,7 @@ pub async fn handle(
     // Resolve address book shortcuts (@label or direct address match)
     let resolved = match super::resolve_address_book(&req.token, &state.config) {
         Ok(r) => r,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": e })),
-            )
-                .into_response();
-        }
+        Err(e) => return super::error_response(super::status_for(&e), e.to_string()),
     };
     let token = resolved.value;
     let chain = resolved.chain.unwrap_or(req.chain);

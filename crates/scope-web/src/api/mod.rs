@@ -68,12 +68,13 @@ pub struct ResolvedInput {
 ///
 /// # Errors
 ///
-/// Returns a user-facing error string when `@label` is used but the label
-/// doesn't exist in the address book — this should be returned as a 400.
+/// [`scope::error::ScopeError::InvalidInput`] when `@label` names no address
+/// book entry — a request fault, so handlers answer
+/// `error_response(status_for(&e), ...)` with 400.
 pub fn resolve_address_book(
     input: &str,
     config: &scope::config::Config,
-) -> Result<ResolvedInput, String> {
+) -> scope::error::Result<ResolvedInput> {
     match scope_cli::cli::address_book::resolve_address_book_input(input, config) {
         Ok(Some((address, chain))) => Ok(ResolvedInput {
             value: address,
@@ -83,7 +84,11 @@ pub fn resolve_address_book(
             value: input.to_string(),
             chain: None,
         }),
-        Err(e) => Err(e.to_string()),
+        // A misspelled @label is a bad request, not a missing resource.
+        Err(scope::error::ScopeError::NotFound(msg)) => {
+            Err(scope::error::ScopeError::InvalidInput(msg))
+        }
+        Err(e) => Err(scope::error::ScopeError::InvalidInput(e.to_string())),
     }
 }
 
@@ -186,7 +191,9 @@ mod tests {
         };
         let result = resolve_address_book("@nonexistent", &config);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("@nonexistent"));
+        let err = result.unwrap_err();
+        assert!(matches!(err, scope::error::ScopeError::InvalidInput(_)));
+        assert!(err.to_string().contains("@nonexistent"));
     }
 
     #[test]

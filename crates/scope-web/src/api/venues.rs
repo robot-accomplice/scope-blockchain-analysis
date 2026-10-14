@@ -4,20 +4,20 @@
 //! registry venues with their capabilities, then DEX venues (`kind: "dex"`).
 
 use axum::Json;
-use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use scope::market::{MarketVenue, VenueRegistry};
+
+use super::{error_response, status_for};
 
 /// GET /api/venues — List available exchange venues.
 pub async fn handle() -> impl IntoResponse {
     let registry = match VenueRegistry::load() {
         Ok(r) => r,
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": format!("Failed to load venue registry: {e}") })),
-            )
-                .into_response();
+            return error_response(
+                status_for(&e),
+                format!("Failed to load venue registry: {e}"),
+            );
         }
     };
 

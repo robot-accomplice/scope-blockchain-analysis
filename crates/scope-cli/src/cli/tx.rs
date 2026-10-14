@@ -360,7 +360,7 @@ fn validate_tx_hash(hash: &str, chain: &str) -> Result<()> {
             validate_tron_tx_hash(hash)?;
         }
         _ => {
-            return Err(ScopeError::Chain(format!(
+            return Err(ScopeError::InvalidInput(format!(
                 "Unsupported chain: {}. Supported: ethereum, polygon, arbitrum, optimism, base, bsc, solana, tron",
                 chain
             )));

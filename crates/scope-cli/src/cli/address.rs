@@ -448,7 +448,7 @@ fn validate_address(address: &str, chain: &str) -> Result<()> {
             validate_tron_address(address)?;
         }
         _ => {
-            return Err(scope::error::ScopeError::Chain(format!(
+            return Err(scope::error::ScopeError::InvalidInput(format!(
                 "Unsupported chain: {}. Supported: ethereum, polygon, arbitrum, optimism, base, bsc, solana, tron",
                 chain
             )));

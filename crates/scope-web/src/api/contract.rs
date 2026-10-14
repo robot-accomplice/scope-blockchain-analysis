@@ -5,11 +5,12 @@
 use crate::AppState;
 use axum::Json;
 use axum::extract::State;
-use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use scope::contract;
 use serde::Deserialize;
 use std::sync::Arc;
+
+use super::{error_response, status_for};
 
 /// Request body for contract analysis.
 #[derive(Debug, Deserialize)]
@@ -36,13 +37,7 @@ pub async fn handle(
     // Resolve address book shortcuts (@label or direct address match)
     let resolved = match super::resolve_address_book(&req.address, &state.config) {
         Ok(r) => r,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": e })),
-            )
-                .into_response();
-        }
+        Err(e) => return error_response(status_for(&e), e.to_string()),
     };
     let address = resolved.value;
     let chain = resolved.chain.unwrap_or(req.chain);
@@ -50,29 +45,15 @@ pub async fn handle(
     let client: Box<dyn scope::chains::ChainClient> =
         match state.factory.create_chain_client(&chain) {
             Ok(c) => c,
-            Err(e) => {
-                let err_msg = e.to_string();
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({ "error": err_msg })),
-                )
-                    .into_response();
-            }
+            Err(e) => return error_response(status_for(&e), e.to_string()),
         };
 
     let http_client = scope::http::transport();
 
     match contract::analyze_contract(&address, &chain, client.as_ref(), http_client.as_ref()).await
     {
-        Ok(analysis) => (StatusCode::OK, Json(serde_json::json!(analysis))).into_response(),
-        Err(e) => {
-            let err_msg = e.to_string();
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": err_msg })),
-            )
-                .into_response()
-        }
+        Ok(analysis) => Json(serde_json::json!(analysis)).into_response(),
+        Err(e) => error_response(status_for(&e), e.to_string()),
     }
 }
 
