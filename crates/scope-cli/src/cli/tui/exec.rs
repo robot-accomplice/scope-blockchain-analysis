@@ -124,20 +124,19 @@ pub fn plan(
     };
     let rest: Vec<&str> = words[1..].iter().map(String::as_str).collect();
 
-    match first.to_lowercase().as_str() {
-        "exit" | "quit" | "q" | ".exit" | ".quit" => return Ok(Plan::Exit),
+    match session_command_name(first).as_str() {
+        "exit" => return Ok(Plan::Exit),
         // Hidden debug command for the manual crash-log check. It is not in
         // SESSION_COMMANDS, so help, completion and the palette skip it.
         #[cfg(debug_assertions)]
         "__panic" => panic!("__panic: manual crash-log check"),
-        "help" | "?" | ".help" => {
+        "help" => {
             if rest.is_empty() {
                 write_help(out)?;
                 return Ok(Plan::Done);
             }
             // A session command has no clap help: show its own line.
-            let typed = words[1].to_lowercase();
-            let name = session_command_name(&typed);
+            let name = session_command_name(&words[1]);
             if let Some((_, usage, what)) = SESSION_COMMANDS.iter().find(|(n, _, _)| *n == name) {
                 outln!(out, "  {:<34} {}", usage, what)?;
                 return Ok(Plan::Done);
@@ -148,11 +147,11 @@ pub fn plan(
             words.push("--help".to_string());
             return parse_cli(words, ctx, config, out);
         }
-        "ctx" | "context" | ".ctx" | ".context" => {
+        "ctx" => {
             out!(out, "{}", ctx)?;
             return Ok(Plan::Done);
         }
-        "clear" | "reset" | ".clear" | ".reset" => {
+        "clear" => {
             *ctx = SessionContext::default();
             outln!(out, "Context reset to defaults.")?;
             return Ok(Plan::Done);
@@ -165,12 +164,12 @@ pub fn plan(
             set_format(ctx, rest.first().copied(), out)?;
             return Ok(Plan::Done);
         }
-        "+tokens" | "showtokens" => {
+        "+tokens" => {
             ctx.include_tokens = !ctx.include_tokens;
             outln!(out, "Include tokens: {}", on_off(ctx.include_tokens))?;
             return Ok(Plan::Done);
         }
-        "+txs" | "showtxs" | "txs" => {
+        "+txs" => {
             ctx.include_txs = !ctx.include_txs;
             outln!(out, "Include transactions: {}", on_off(ctx.include_txs))?;
             return Ok(Plan::Done);
@@ -189,7 +188,7 @@ pub fn plan(
             set_limit(ctx, rest.first().copied(), out)?;
             return Ok(Plan::Done);
         }
-        "tokens" | "aliases" => {
+        "tokens" => {
             tokens_command(&rest, &mut TokenAliases::load(), &TokenAliases::save, out)?;
             return Ok(Plan::Done);
         }
@@ -643,18 +642,35 @@ pub(crate) const SESSION_COMMANDS: &[(&str, &str, &str)] = &[
     ("exit", "exit", "Leave the TUI (also Ctrl-D)"),
 ];
 
-/// The `SESSION_COMMANDS` name for a typed session command or its alias.
-fn session_command_name(word: &str) -> &str {
-    match word {
-        "quit" | "q" | ".exit" | ".quit" => "exit",
-        "context" | ".ctx" | ".context" => "ctx",
-        "reset" | ".clear" | ".reset" => "clear",
-        "?" | ".help" => "help",
-        "showtokens" => "+tokens",
-        "showtxs" | "txs" => "+txs",
-        "aliases" => "tokens",
-        other => other,
-    }
+/// Other words for the session commands: `(alias, SESSION_COMMANDS name)`.
+/// The one list: dispatch, help and the exit check all read it.
+const SESSION_ALIASES: &[(&str, &str)] = &[
+    ("quit", "exit"),
+    ("q", "exit"),
+    (".exit", "exit"),
+    (".quit", "exit"),
+    ("context", "ctx"),
+    (".ctx", "ctx"),
+    (".context", "ctx"),
+    ("reset", "clear"),
+    (".clear", "clear"),
+    (".reset", "clear"),
+    ("?", "help"),
+    (".help", "help"),
+    ("showtokens", "+tokens"),
+    ("showtxs", "+txs"),
+    ("txs", "+txs"),
+    ("aliases", "tokens"),
+];
+
+/// The `SESSION_COMMANDS` name for a typed word (any case), or the word
+/// itself when it is not an alias.
+pub(crate) fn session_command_name(word: &str) -> String {
+    let word = word.to_lowercase();
+    SESSION_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == word)
+        .map_or(word, |(_, name)| (*name).to_string())
 }
 
 /// Writes the TUI help: the session commands, then every CLI command.

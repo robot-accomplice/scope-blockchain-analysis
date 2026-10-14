@@ -722,10 +722,15 @@ fn meta_analysis_token(
         synthesis_parts.push("Concentration risk: top holder holds significant share.".to_string());
     }
 
-    if liquidity_usd > 1_000_000.0 {
-        synthesis_parts.push("Strong liquidity depth.".to_string());
-    } else if liquidity_usd < 50_000.0 {
-        synthesis_parts.push("Limited liquidity — slippage risk for larger trades.".to_string());
+    // The liquidity classes of the report and compliance (token_risk).
+    use scope::compliance::token_risk::{LiquidityTier, liquidity_tier};
+    let tier = liquidity_tier(liquidity_usd);
+    match tier {
+        LiquidityTier::Good => synthesis_parts.push("Strong liquidity depth.".to_string()),
+        LiquidityTier::VeryLow | LiquidityTier::Low => {
+            synthesis_parts.push("Limited liquidity — slippage risk for larger trades.".to_string())
+        }
+        LiquidityTier::Moderate => {}
     }
 
     let synthesis = synthesis_parts.join(" ");
@@ -762,7 +767,7 @@ fn meta_analysis_token(
     if is_stablecoin && peg_words.as_ref().is_none_or(|w| w.verify_elsewhere) {
         recommendations.push("Verify peg across multiple DEX/CEX venues.".to_string());
     }
-    if liquidity_usd < 100_000.0 && risk_summary.score <= 5 {
+    if matches!(tier, LiquidityTier::VeryLow | LiquidityTier::Low) && risk_summary.score <= 5 {
         recommendations.push("Use limit orders or split trades to manage slippage.".to_string());
     }
 
@@ -1955,6 +1960,24 @@ mod tests {
             meta.recommendations
                 .iter()
                 .any(|r| r.contains("top holder"))
+        );
+    }
+
+    // M7: $75K is low liquidity in the report; the summary says so too.
+    #[test]
+    fn test_meta_analysis_names_low_liquidity_as_the_report_does() {
+        let summary = report::TokenRiskSummary {
+            score: 3,
+            level: "Low",
+            emoji: "🟢",
+            concerns: vec![],
+            positives: vec![],
+        };
+        let meta = meta_analysis_token(&summary, false, None, None, 75_000.0);
+        assert!(
+            meta.synthesis.contains("Limited liquidity"),
+            "{}",
+            meta.synthesis
         );
     }
 

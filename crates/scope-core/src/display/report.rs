@@ -522,41 +522,25 @@ fn generate_security_analysis(analytics: &TokenAnalytics) -> String {
     // Honeypot Risk Analysis (buy/sell ratio)
     let buys = analytics.total_buys_24h;
     let sells = analytics.total_sells_24h;
-    let (honeypot_status, honeypot_details) = if buys == 0 && sells == 0 {
-        ("⚪ UNKNOWN", "No transaction data available".to_string())
-    } else if sells == 0 && buys > 0 {
-        (
+    use crate::compliance::token_risk::{Honeypot, HoneypotLevel, honeypot};
+    let sign = honeypot(buys, sells);
+    let (honeypot_status, honeypot_details) = match (sign, sign.level()) {
+        (Honeypot::Unknown, _) => ("⚪ UNKNOWN", "No transaction data available".to_string()),
+        (Honeypot::NoSells { buys }, _) => (
             "🔴 HIGH",
             format!("{} buys / 0 sells - Possible honeypot!", buys),
-        )
-    } else {
-        let ratio = if sells > 0 {
-            buys as f64 / sells as f64
-        } else {
-            f64::INFINITY
-        };
-        if ratio > 10.0 {
+        ),
+        (Honeypot::Ratio(ratio), level) => {
+            let (status, words) = match level {
+                HoneypotLevel::High => ("🔴 HIGH", "Suspicious activity!"),
+                HoneypotLevel::Medium => ("🟠 MEDIUM", "Elevated risk"),
+                _ => ("🟢 LOW", "Normal activity"),
+            };
             (
-                "🔴 HIGH",
+                status,
                 format!(
-                    "{} buys / {} sells (ratio: {:.2}) - Suspicious activity!",
-                    buys, sells, ratio
-                ),
-            )
-        } else if ratio > 3.0 {
-            (
-                "🟠 MEDIUM",
-                format!(
-                    "{} buys / {} sells (ratio: {:.2}) - Elevated risk",
-                    buys, sells, ratio
-                ),
-            )
-        } else {
-            (
-                "🟢 LOW",
-                format!(
-                    "{} buys / {} sells (ratio: {:.2}) - Normal activity",
-                    buys, sells, ratio
+                    "{} buys / {} sells (ratio: {:.2}) - {}",
+                    buys, sells, ratio, words
                 ),
             )
         }
@@ -800,22 +784,22 @@ impl RiskFactors {
     /// Calculate risk factors from token analytics.
     fn from_analytics(analytics: &TokenAnalytics) -> Self {
         // Honeypot risk based on buy/sell ratio
-        let honeypot = if analytics.total_buys_24h == 0 && analytics.total_sells_24h == 0 {
-            5 // Unknown, moderate risk
-        } else if analytics.total_sells_24h == 0 && analytics.total_buys_24h > 0 {
-            10 // Maximum risk
-        } else {
-            let ratio = analytics.total_buys_24h as f64 / analytics.total_sells_24h.max(1) as f64;
-            if ratio > 10.0 {
-                9
-            } else if ratio > 5.0 {
-                7
-            } else if ratio > 3.0 {
-                5
-            } else if ratio > 2.0 {
-                3
-            } else {
-                1
+        use crate::compliance::token_risk::{Honeypot, honeypot};
+        let honeypot = match honeypot(analytics.total_buys_24h, analytics.total_sells_24h) {
+            Honeypot::Unknown => 5,         // Unknown, moderate risk
+            Honeypot::NoSells { .. } => 10, // Maximum risk
+            Honeypot::Ratio(ratio) => {
+                if ratio > 10.0 {
+                    9
+                } else if ratio > 5.0 {
+                    7
+                } else if ratio > 3.0 {
+                    5
+                } else if ratio > 2.0 {
+                    3
+                } else {
+                    1
+                }
             }
         };
 
@@ -1025,13 +1009,19 @@ fn generate_risk_indicators(analytics: &TokenAnalytics) -> String {
         positives.push("🟢 **Reasonable distribution** - No extreme concentration in top holders");
     }
 
-    // Liquidity risk
-    if analytics.liquidity_usd < 10_000.0 {
-        risks.push("🔴 **Very low liquidity** - High slippage risk for trades");
-    } else if analytics.liquidity_usd < 100_000.0 {
-        risks.push("🟠 **Low liquidity** - Moderate slippage risk for larger trades");
-    } else if analytics.liquidity_usd > 1_000_000.0 {
-        positives.push("🟢 **Good liquidity** - Sufficient depth for most trades");
+    // Liquidity risk (token_risk tiers)
+    use crate::compliance::token_risk::{LiquidityTier, liquidity_tier};
+    match liquidity_tier(analytics.liquidity_usd) {
+        LiquidityTier::VeryLow => {
+            risks.push("🔴 **Very low liquidity** - High slippage risk for trades")
+        }
+        LiquidityTier::Low => {
+            risks.push("🟠 **Low liquidity** - Moderate slippage risk for larger trades")
+        }
+        LiquidityTier::Good => {
+            positives.push("🟢 **Good liquidity** - Sufficient depth for most trades")
+        }
+        LiquidityTier::Moderate => {}
     }
 
     // Volume risk

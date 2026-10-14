@@ -885,12 +885,10 @@ impl TuiState {
 
     /// True when the line is an exit command (the same words `exec` takes).
     fn input_is_exit(&self) -> bool {
-        self.input.split_whitespace().next().is_some_and(|w| {
-            matches!(
-                w.to_lowercase().as_str(),
-                "exit" | "quit" | "q" | ".exit" | ".quit"
-            )
-        })
+        self.input
+            .split_whitespace()
+            .next()
+            .is_some_and(|w| exec::session_command_name(w) == "exit")
     }
 
     /// Says why exit waits. Does not repeat when the last line is the note.

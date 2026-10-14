@@ -6,6 +6,7 @@
 pub mod datasource;
 pub mod etherscan;
 pub mod risk;
+pub mod token_risk;
 
 use risk::{RiskAssessment, RiskEngine};
 
