@@ -1731,7 +1731,7 @@ pub(crate) fn render_market_info_panel(f: &mut Frame, area: Rect, state: &Monito
             Span::styled(
                 state
                     .volume_usd()
-                    .map(|v| format!("${}", format_number(v)))
+                    .map(scope::display::format_usd)
                     .unwrap_or_else(|| NOT_AVAILABLE.to_string()),
                 Style::new().fg(pal.neutral),
             ),
@@ -1739,7 +1739,7 @@ pub(crate) fn render_market_info_panel(f: &mut Frame, area: Rect, state: &Monito
         let liq = if state.venue_only {
             NOT_AVAILABLE.to_string()
         } else {
-            format!("${}", format_number(state.liquidity_usd))
+            scope::display::format_usd(state.liquidity_usd)
         };
         info_lines.push(Line::from(vec![
             Span::styled(" Liq     ", SECONDARY),
@@ -1750,17 +1750,14 @@ pub(crate) fn render_market_info_panel(f: &mut Frame, area: Rect, state: &Monito
         if let Some(mc) = state.market_cap {
             info_lines.push(Line::from(vec![
                 Span::styled(" MCap    ", SECONDARY),
-                Span::styled(
-                    format!("${}", format_number(mc)),
-                    Style::new().fg(pal.neutral),
-                ),
+                Span::styled(scope::display::format_usd(mc), Style::new().fg(pal.neutral)),
             ]));
         }
         if let Some(fdv) = state.fdv {
             info_lines.push(Line::from(vec![
                 Span::styled(" FDV     ", SECONDARY),
                 Span::styled(
-                    format!("${}", format_number(fdv)),
+                    scope::display::format_usd(fdv),
                     Style::new().fg(pal.neutral),
                 ),
             ]));

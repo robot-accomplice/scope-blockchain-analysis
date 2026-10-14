@@ -157,11 +157,11 @@ pub fn render_volume_chart(volume_history: &[VolumePoint], width: u32, height: u
     let total_volume: f64 = volume_history.iter().map(|v| v.volume).sum();
 
     // Format max volume for display
-    let max_vol_formatted = crate::display::format_large_number(max_volume);
-    let total_vol_formatted = crate::display::format_large_number(total_volume);
+    let max_vol_formatted = crate::display::format_usd(max_volume);
+    let total_vol_formatted = crate::display::format_usd(total_volume);
 
     output.push_str(&format!(
-        "Volume (max: ${}, total: ${})\n",
+        "Volume (max: {}, total: {})\n",
         max_vol_formatted, total_vol_formatted
     ));
 

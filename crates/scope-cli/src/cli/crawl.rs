@@ -804,10 +804,7 @@ fn output_table_with_dex(analytics: &TokenAnalytics, args: &CrawlArgs, out: &Out
         "{}",
         t::kv_row(
             "24h Volume",
-            &format!(
-                "${}",
-                scope::display::format_large_number(analytics.volume_24h)
-            )
+            &scope::display::format_usd(analytics.volume_24h)
         )
     )?;
     outln!(
@@ -815,10 +812,7 @@ fn output_table_with_dex(analytics: &TokenAnalytics, args: &CrawlArgs, out: &Out
         "{}",
         t::kv_row(
             "Liquidity",
-            &format!(
-                "${}",
-                scope::display::format_large_number(analytics.liquidity_usd)
-            )
+            &scope::display::format_usd(analytics.liquidity_usd)
         )
     )?;
 
@@ -826,10 +820,7 @@ fn output_table_with_dex(analytics: &TokenAnalytics, args: &CrawlArgs, out: &Out
         outln!(
             out,
             "{}",
-            t::kv_row(
-                "Market Cap",
-                &format!("${}", scope::display::format_large_number(mc))
-            )
+            t::kv_row("Market Cap", &scope::display::format_usd(mc))
         )?;
     }
 
@@ -837,10 +828,7 @@ fn output_table_with_dex(analytics: &TokenAnalytics, args: &CrawlArgs, out: &Out
         outln!(
             out,
             "{}",
-            t::kv_row(
-                "FDV",
-                &format!("${}", scope::display::format_large_number(fdv))
-            )
+            t::kv_row("FDV", &scope::display::format_usd(fdv))
         )?;
     }
 
@@ -851,12 +839,12 @@ fn output_table_with_dex(analytics: &TokenAnalytics, args: &CrawlArgs, out: &Out
 
         for (i, pair) in analytics.dex_pairs.iter().take(5).enumerate() {
             let pair_str = format!(
-                "{} {}/{} - ${} (${} liq)",
+                "{} {}/{} - {} ({} liq)",
                 pair.dex_name,
                 pair.base_token,
                 pair.quote_token,
-                scope::display::format_large_number(pair.volume_24h),
-                scope::display::format_large_number(pair.liquidity_usd)
+                scope::display::format_usd(pair.volume_24h),
+                scope::display::format_usd(pair.liquidity_usd)
             );
             outln!(out, "{}", t::numbered_row(i + 1, &pair_str))?;
         }
