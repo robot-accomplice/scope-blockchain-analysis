@@ -273,7 +273,14 @@ fn output_token_health_table(
         outln!(
             out,
             "{}",
-            t::kv_row("Peg Target", &format!("{:.4}", summary.peg_target))
+            t::kv_row(
+                "Peg Target",
+                &format!(
+                    "{:.d$}",
+                    summary.peg_target,
+                    d = scope::display::format::price_decimals(summary.peg_target)
+                ),
+            )
         )?;
         if let Some(b) = summary.best_bid {
             outln!(

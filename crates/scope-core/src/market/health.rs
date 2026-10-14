@@ -722,7 +722,12 @@ impl MarketSummary {
         }
         out.push_str(&t::kv_row("Book", self.source.label()));
         out.push('\n');
-        out.push_str(&t::kv_row("Peg Target", &format!("{:.4}", self.peg_target)));
+        // One precision for every price of this book (M3): the peg's.
+        let d = crate::display::format::price_decimals(self.peg_target);
+        out.push_str(&t::kv_row(
+            "Peg Target",
+            &format!("{:.d$}", self.peg_target),
+        ));
         out.push('\n');
 
         if let Some(bb) = self.best_bid {
@@ -738,10 +743,7 @@ impl MarketSummary {
             out.push('\n');
         }
         if let (Some(spread), Some(pct)) = (self.spread, self.spread_pct) {
-            out.push_str(&t::kv_row(
-                "Spread",
-                &format!("{:.4}  ({:.3}%)", spread, pct),
-            ));
+            out.push_str(&t::kv_row("Spread", &format!("{spread:.d$}  ({pct:.3}%)")));
             out.push('\n');
         }
 
@@ -875,15 +877,16 @@ impl MarketSummary {
     /// when there is something to show.
     pub fn format_markdown(&self, venue: Option<&str>) -> String {
         let q = quote_of(&self.pair);
+        let d = crate::display::format::price_decimals(self.peg_target);
         let with_deviation = |price: f64| match self.peg_deviation_pct(price) {
-            Some(pct) => format!("{price:.4} ({pct:+.3}%)"),
-            None => format!("{price:.4}"),
+            Some(pct) => format!("{price:.d$} ({pct:+.3}%)"),
+            None => format!("{price:.d$}"),
         };
         let bid_ask_or_dash =
             |price: Option<f64>| price.map(with_deviation).unwrap_or_else(|| "-".to_string());
         let price_or_dash = |price: Option<f64>| {
             price
-                .map(|p| format!("{p:.4}"))
+                .map(|p| format!("{p:.d$}"))
                 .unwrap_or_else(|| "-".to_string())
         };
         let exec_or_dash = |e: &Option<ExecutionEstimate>| {
@@ -903,7 +906,7 @@ impl MarketSummary {
             md.push_str(&format!("**Venue:** {v}  \n\n"));
         }
         md.push_str("| Metric | Value |\n|--------|-------|\n");
-        md.push_str(&format!("| Peg Target | {:.4} |\n", self.peg_target));
+        md.push_str(&format!("| Peg Target | {:.d$} |\n", self.peg_target));
         md.push_str(&format!("| Book | {} |\n", self.source.label()));
         md.push_str(&format!(
             "| Best Bid | {} |\n",
@@ -1319,11 +1322,12 @@ mod tests {
         );
         let md = s.format_markdown(Some("binance"));
         assert!(md.contains("**Venue:** binance"), "{md}");
-        assert!(md.contains("| Peg Target | 1.0000 |"), "{md}");
+        // One precision for the book: the peg's (6 decimals near a USD peg).
+        assert!(md.contains("| Peg Target | 1.000000 |"), "{md}");
         // Best prices carry their peg deviation; mid and spread do not.
-        assert!(md.contains("0.9999 (-0.010%)"), "{md}");
-        assert!(md.contains("1.0001 (+0.010%)"), "{md}");
-        assert!(md.contains("| Mid Price | 1.0000 |"), "{md}");
+        assert!(md.contains("0.999900 (-0.010%)"), "{md}");
+        assert!(md.contains("1.000100 (+0.010%)"), "{md}");
+        assert!(md.contains("| Mid Price | 1.000000 |"), "{md}");
         assert!(md.contains("| Volume (24h) | 50000 USDT |"), "{md}");
         assert!(md.contains("| Healthy | ✓ |"), "{md}");
         assert!(md.contains("**Health Checks:**"), "{md}");
