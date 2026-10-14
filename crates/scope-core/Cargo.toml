@@ -67,7 +67,6 @@ hex = "0.4"
 regex = "1"
 
 # Terminal coloring
-owo-colors = "4.2.3"
 
 # Terminal size detection (used by display/terminal.rs)
 crossterm = { version = "0.29" }

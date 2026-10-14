@@ -3,11 +3,12 @@
 use crate::AppState;
 use axum::Json;
 use axum::extract::State;
-use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use scope_cli::cli::address_book::{AddressBook, WatchedAddress};
 use serde::Deserialize;
 use std::sync::Arc;
+
+use super::{error_response, status_for};
 
 /// GET /api/address-book/list — List address book entries.
 pub async fn handle_list(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -17,11 +18,7 @@ pub async fn handle_list(State(state): State<Arc<AppState>>) -> impl IntoRespons
             "addresses": address_book.addresses,
         }))
         .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => error_response(status_for(&e), e.to_string()),
     }
 }
 
@@ -31,17 +28,13 @@ pub struct AddAddressBookRequest {
     /// Blockchain address.
     pub address: String,
     /// Chain (default: "ethereum").
-    #[serde(default = "default_chain")]
+    #[serde(default = "super::default_chain")]
     pub chain: String,
     /// Optional label.
     pub label: Option<String>,
     /// Optional tags.
     #[serde(default)]
     pub tags: Vec<String>,
-}
-
-fn default_chain() -> String {
-    "ethereum".to_string()
 }
 
 /// POST /api/address-book/add — Add an address to the address book.
@@ -52,13 +45,7 @@ pub async fn handle_add(
     let data_dir = state.config.data_dir();
     let mut address_book = match AddressBook::load(&data_dir) {
         Ok(ab) => ab,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response();
-        }
+        Err(e) => return error_response(status_for(&e), e.to_string()),
     };
 
     let watched = WatchedAddress {
@@ -73,11 +60,7 @@ pub async fn handle_add(
         Ok(_) => {
             let data_dir_buf = data_dir.to_path_buf();
             if let Err(e) = address_book.save(&data_dir_buf) {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({ "error": e.to_string() })),
-                )
-                    .into_response();
+                return error_response(status_for(&e), e.to_string());
             }
             Json(serde_json::json!({
                 "status": "added",
@@ -86,11 +69,7 @@ pub async fn handle_add(
             }))
             .into_response()
         }
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => error_response(status_for(&e), e.to_string()),
     }
 }
 
@@ -109,24 +88,14 @@ pub async fn handle_remove(
     let data_dir = state.config.data_dir();
     let mut address_book = match AddressBook::load(&data_dir) {
         Ok(ab) => ab,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response();
-        }
+        Err(e) => return error_response(status_for(&e), e.to_string()),
     };
 
     match address_book.remove_address(&req.address) {
         Ok(true) => {
             let data_dir_buf = data_dir.to_path_buf();
             if let Err(e) = address_book.save(&data_dir_buf) {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({ "error": e.to_string() })),
-                )
-                    .into_response();
+                return error_response(status_for(&e), e.to_string());
             }
             Json(serde_json::json!({
                 "status": "removed",
@@ -135,16 +104,14 @@ pub async fn handle_remove(
             }))
             .into_response()
         }
-        Ok(false) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": format!("Address '{}' not found in address book", req.address) })),
-        )
-            .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Ok(false) => {
+            let e = scope::error::ScopeError::NotFound(format!(
+                "Address '{}' not found in address book",
+                req.address
+            ));
+            error_response(status_for(&e), e.to_string())
+        }
+        Err(e) => error_response(status_for(&e), e.to_string()),
     }
 }
 
@@ -183,7 +150,7 @@ mod tests {
 
     #[test]
     fn test_default_chain() {
-        assert_eq!(default_chain(), "ethereum");
+        assert_eq!(super::super::default_chain(), "ethereum");
     }
 
     #[test]
@@ -224,7 +191,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let response = handle_list(State(state)).await.into_response();
         let status = response.status();
         assert!(status.is_success() || status.is_server_error());
@@ -245,7 +212,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = AddAddressBookRequest {
             address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
             chain: "ethereum".to_string(),
@@ -283,7 +250,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = RemoveAddressBookRequest {
             address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
         };
@@ -314,7 +281,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = RemoveAddressBookRequest {
             address: "0x000000000000000000000000000000000000dead".to_string(),
         };
@@ -343,7 +310,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let response = handle_list(State(state)).await.into_response();
         if response.status().is_success() {
             let body_bytes = body::to_bytes(response.into_body(), 1_000_000)
@@ -374,7 +341,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
 
         let addr = "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string();
         let req1 = AddAddressBookRequest {
@@ -433,7 +400,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let response = handle_list(State(state)).await.into_response();
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }

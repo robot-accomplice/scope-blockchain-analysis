@@ -3,6 +3,8 @@
 //! Defines order book levels, full order books, execution estimates, and
 //! the newer trade/ticker/snapshot types used by the exchange system.
 
+use std::ops::RangeBounds;
+
 // =============================================================================
 // Order Book
 // =============================================================================
@@ -17,6 +19,13 @@ pub struct OrderBookLevel {
 }
 
 impl OrderBookLevel {
+    /// A level is valid when it has a positive price and quantity. Every
+    /// price, spread and level count reads only valid levels.
+    #[inline]
+    pub fn is_valid(&self) -> bool {
+        self.price > 0.0 && self.quantity > 0.0
+    }
+
     /// Value in quote asset (price × quantity, e.g., USDT).
     #[inline]
     pub fn value(&self) -> f64 {
@@ -51,6 +60,13 @@ impl BookSource {
     }
 }
 
+/// One side of an order book.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BookSide {
+    Bid,
+    Ask,
+}
+
 /// Full order book snapshot with bids and asks.
 #[derive(Debug, Clone)]
 pub struct OrderBook {
@@ -65,17 +81,40 @@ pub struct OrderBook {
 }
 
 impl OrderBook {
-    /// Best bid price, or None if empty.
+    /// The one JSON view of a book (web API and web monitor). Prices,
+    /// spread and depths come from this book's own methods. `max_levels`
+    /// caps the levels listed per side; the depths count all levels.
+    pub fn to_json(&self, max_levels: Option<usize>) -> serde_json::Value {
+        let levels = |side: &[OrderBookLevel]| {
+            side.iter()
+                .take(max_levels.unwrap_or(usize::MAX))
+                .map(|l| serde_json::json!({"price": l.price, "quantity": l.quantity, "value": l.value()}))
+                .collect::<Vec<_>>()
+        };
+        serde_json::json!({
+            "pair": self.pair,
+            "best_bid": self.best_bid(),
+            "best_ask": self.best_ask(),
+            "mid_price": self.mid_price(),
+            "spread": self.spread(),
+            "total_bid_depth": self.total_depth(BookSide::Bid),
+            "total_ask_depth": self.total_depth(BookSide::Ask),
+            "bids": levels(&self.bids),
+            "asks": levels(&self.asks),
+        })
+    }
+
+    /// Best valid bid price, or None when no bid is valid.
     pub fn best_bid(&self) -> Option<f64> {
-        self.bids.first().map(|l| l.price)
+        self.bids.iter().find(|l| l.is_valid()).map(|l| l.price)
     }
 
-    /// Best ask price, or None if empty.
+    /// Best valid ask price, or None when no ask is valid.
     pub fn best_ask(&self) -> Option<f64> {
-        self.asks.first().map(|l| l.price)
+        self.asks.iter().find(|l| l.is_valid()).map(|l| l.price)
     }
 
-    /// Mid price between best bid and ask.
+    /// Mid price between the best valid bid and ask.
     pub fn mid_price(&self) -> Option<f64> {
         match (self.best_bid(), self.best_ask()) {
             (Some(bid), Some(ask)) => Some((bid + ask) / 2.0),
@@ -83,104 +122,135 @@ impl OrderBook {
         }
     }
 
-    /// Spread (ask - bid).
+    /// Spread (ask - bid) of the best valid levels. `None` for a synthetic
+    /// AMM book: its real spread is the pool fee, which is not reported.
     pub fn spread(&self) -> Option<f64> {
+        if self.source == BookSource::SyntheticAmm {
+            return None;
+        }
         match (self.best_bid(), self.best_ask()) {
             (Some(bid), Some(ask)) => Some(ask - bid),
             _ => None,
         }
     }
 
-    /// Total bid depth in quote terms (sum of price × quantity).
-    pub fn bid_depth(&self) -> f64 {
-        self.bids.iter().map(OrderBookLevel::value).sum()
+    /// The spread in percent of the mid of the same two levels.
+    pub fn spread_pct(&self) -> Option<f64> {
+        self.spread()
+            .zip(self.mid_price())
+            .map(|(spread, mid)| spread / mid * PERCENT_PER_RATIO)
     }
 
-    /// Total ask depth in quote terms.
-    pub fn ask_depth(&self) -> f64 {
-        self.asks.iter().map(OrderBookLevel::value).sum()
+    /// The levels of one side, best first.
+    pub fn levels(&self, side: BookSide) -> &[OrderBookLevel] {
+        match side {
+            BookSide::Bid => &self.bids,
+            BookSide::Ask => &self.asks,
+        }
     }
 
-    /// Estimate slippage for buying a given USDT notional by walking the ask side.
-    /// Returns (vwap, slippage_bps) if fillable, or None if insufficient liquidity.
+    /// The valid levels of one side whose price is in `band`, best first.
+    /// This is the one eligible-levels set: depth, level counts and the
+    /// peg checks all read it.
+    pub fn valid_levels_in_band(
+        &self,
+        side: BookSide,
+        band: impl RangeBounds<f64>,
+    ) -> impl Iterator<Item = &OrderBookLevel> {
+        self.levels(side)
+            .iter()
+            .filter(move |l| l.is_valid() && band.contains(&l.price))
+    }
+
+    /// Quote depth (sum of price × quantity) of the eligible levels of one
+    /// side in `band`. This is the one depth sum; every other depth is a call
+    /// to it with a band.
+    pub fn depth_in_band(&self, side: BookSide, band: impl RangeBounds<f64>) -> f64 {
+        self.valid_levels_in_band(side, band)
+            .map(OrderBookLevel::value)
+            .sum()
+    }
+
+    /// Quote depth of the whole side, at any price.
+    pub fn total_depth(&self, side: BookSide) -> f64 {
+        self.depth_in_band(side, ..)
+    }
+
+    /// Quote depth of the first `n` eligible levels of one side in `band`.
+    pub fn top_depth(&self, side: BookSide, band: impl RangeBounds<f64>, n: usize) -> f64 {
+        self.valid_levels_in_band(side, band)
+            .take(n)
+            .map(OrderBookLevel::value)
+            .sum()
+    }
+
+    /// Estimate slippage for buying a given USDT notional by walking the ask
+    /// side. See [`Self::estimate_execution`].
     pub fn estimate_buy_execution(&self, notional_usdt: f64) -> Option<ExecutionEstimate> {
-        let mid = self.mid_price()?;
-        if mid <= 0.0 {
-            return None;
-        }
-        let mut remaining = notional_usdt;
-        let mut filled_value = 0.0;
-        let mut filled_qty = 0.0;
-        for level in &self.asks {
-            let level_value = level.value();
-            if remaining <= 0.0 {
-                break;
-            }
-            let take_value = level_value.min(remaining);
-            let take_qty = if level.price > 0.0 {
-                take_value / level.price
-            } else {
-                0.0
-            };
-            filled_value += take_value;
-            filled_qty += take_qty;
-            remaining -= take_value;
-        }
-        let fillable = remaining <= 0.01;
-        let vwap = if filled_qty > 0.0 {
-            filled_value / filled_qty
-        } else {
-            mid
-        };
-        let slippage_bps = (vwap - mid) / mid * 10_000.0;
-        Some(ExecutionEstimate {
-            notional_usdt,
-            side: ExecutionSide::Buy,
-            vwap,
-            slippage_bps,
-            fillable,
-        })
+        self.estimate_execution(ExecutionSide::Buy, notional_usdt)
     }
 
     /// Estimate slippage for selling (hitting bids) a given USDT notional.
     pub fn estimate_sell_execution(&self, notional_usdt: f64) -> Option<ExecutionEstimate> {
+        self.estimate_execution(ExecutionSide::Sell, notional_usdt)
+    }
+
+    /// Slippage of filling `notional_usdt` against the opposite side, against
+    /// the mid. `None` when the book has no mid price (a side has no valid
+    /// level); `fillable` is false when the side cannot fill the notional.
+    pub fn estimate_execution(
+        &self,
+        side: ExecutionSide,
+        notional_usdt: f64,
+    ) -> Option<ExecutionEstimate> {
         let mid = self.mid_price()?;
-        if mid <= 0.0 {
-            return None;
-        }
-        let mut remaining = notional_usdt;
-        let mut filled_value = 0.0;
-        let mut filled_qty = 0.0;
-        for level in &self.bids {
-            if remaining <= 0.0 {
-                break;
-            }
-            let level_value = level.value();
-            let take_value = level_value.min(remaining);
-            let take_qty = if level.price > 0.0 {
-                take_value / level.price
-            } else {
-                0.0
-            };
-            filled_value += take_value;
-            filled_qty += take_qty;
-            remaining -= take_value;
-        }
-        let fillable = remaining <= 0.01;
-        let vwap = if filled_qty > 0.0 {
-            filled_value / filled_qty
-        } else {
-            mid
+        let (levels, direction) = match side {
+            ExecutionSide::Buy => (&self.asks, 1.0),
+            ExecutionSide::Sell => (&self.bids, -1.0),
         };
-        let slippage_bps = (mid - vwap) / mid * 10_000.0;
+        let (vwap, fillable) = walk_levels(levels, notional_usdt, mid);
         Some(ExecutionEstimate {
             notional_usdt,
-            side: ExecutionSide::Sell,
+            side,
             vwap,
-            slippage_bps,
+            // Paying more than the mid (buy) or receiving less (sell) is positive.
+            slippage_bps: direction * (vwap - mid) / mid * BPS_PER_RATIO,
             fillable,
         })
     }
+}
+
+/// Percent in a ratio of 1.
+pub const PERCENT_PER_RATIO: f64 = 100.0;
+
+/// Basis points in one percent.
+pub const BPS_PER_PERCENT: f64 = 100.0;
+
+/// Basis points in a ratio of 1.
+pub const BPS_PER_RATIO: f64 = BPS_PER_PERCENT * PERCENT_PER_RATIO;
+
+/// Walks the valid levels (best first) until `notional` of quote value is
+/// taken. Returns the volume-weighted price (the mid when nothing fills) and
+/// whether the notional was filled.
+fn walk_levels(levels: &[OrderBookLevel], notional: f64, mid: f64) -> (f64, bool) {
+    let mut remaining = notional;
+    let mut filled_value = 0.0;
+    let mut filled_qty = 0.0;
+    for level in levels.iter().filter(|l| l.is_valid()) {
+        if remaining <= 0.0 {
+            break;
+        }
+        let take_value = level.value().min(remaining);
+        filled_value += take_value;
+        filled_qty += take_value / level.price;
+        remaining -= take_value;
+    }
+    let vwap = if filled_qty > 0.0 {
+        filled_value / filled_qty
+    } else {
+        mid
+    };
+    (vwap, remaining <= 0.01)
 }
 
 /// Side of execution (buy = hit asks, sell = hit bids).
@@ -275,15 +345,17 @@ impl serde::Serialize for HealthCheck {
 // Trade & Ticker Types
 // =============================================================================
 
-/// Side of a trade.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Side of a trade. JSON writes `buy` or `sell`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum TradeSide {
     Buy,
     Sell,
 }
 
-/// A single trade from the recent trades endpoint.
-#[derive(Debug, Clone)]
+/// A single trade from the recent trades endpoint. Its JSON form is the one
+/// the CLI and the web send.
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Trade {
     /// Trade price in quote currency.
     pub price: f64,
@@ -299,8 +371,8 @@ pub struct Trade {
     pub id: Option<String>,
 }
 
-/// 24-hour ticker / market stats.
-#[derive(Debug, Clone)]
+/// 24-hour ticker / market stats. Its JSON form is the one the web sends.
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Ticker {
     /// Pair label (e.g., "BTC/USDT").
     pub pair: String,
@@ -331,6 +403,18 @@ impl Ticker {
         self.quote_volume_24h
             .or_else(|| Some(self.volume_24h? * mid?))
     }
+
+    /// 24h volume in USD: the quote volume at the last price, when the
+    /// quote is USD or a USD stablecoin; `None` for any other quote (M1).
+    pub fn usd_volume(&self) -> Option<f64> {
+        let quote = super::Pair::parse(&self.pair).quote?;
+        let usd = quote.eq_ignore_ascii_case("USD") || crate::tokens::is_stablecoin_symbol(&quote);
+        if usd {
+            self.quote_volume(self.last_price)
+        } else {
+            None
+        }
+    }
 }
 
 /// Aggregated market snapshot combining all available data for a pair.
@@ -345,8 +429,9 @@ pub struct MarketSnapshot {
 // OHLC / Candlestick
 // =============================================================================
 
-/// A single OHLC candlestick bar.
-#[derive(Debug, Clone, PartialEq)]
+/// A single OHLC candlestick bar. Its JSON form is the one the CLI and the
+/// web send.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Candle {
     /// Candle open time in milliseconds since epoch.
     pub open_time: u64,
@@ -424,8 +509,8 @@ mod tests {
         assert!(book.best_bid().is_none());
         assert!(book.best_ask().is_none());
         assert!(book.mid_price().is_none());
-        assert_eq!(book.bid_depth(), 0.0);
-        assert_eq!(book.ask_depth(), 0.0);
+        assert_eq!(book.total_depth(BookSide::Bid), 0.0);
+        assert_eq!(book.total_depth(BookSide::Ask), 0.0);
     }
 
     #[test]
@@ -458,8 +543,8 @@ mod tests {
         assert_eq!(book.best_ask(), Some(1.0001));
         assert_eq!(book.mid_price(), Some(0.99995));
         assert!((book.spread().unwrap() - 0.0003).abs() < 1e-10);
-        assert!((book.bid_depth() - 99.98 - 49.985).abs() < 0.01);
-        assert!((book.ask_depth() - 200.02 - 150.03).abs() < 0.01);
+        assert!((book.total_depth(BookSide::Bid) - 99.98 - 49.985).abs() < 0.01);
+        assert!((book.total_depth(BookSide::Ask) - 200.02 - 150.03).abs() < 0.01);
     }
 
     #[test]
@@ -712,7 +797,8 @@ mod tests {
 
     #[test]
     fn test_estimate_buy_zero_filled_qty() {
-        // All ask levels have price 0 -> filled_qty stays 0 -> vwap = mid
+        // The only ask level is invalid, so there is no mid price to estimate
+        // from (the same as an empty ask side).
         let book = OrderBook {
             pair: "X/Y".to_string(),
             source: crate::market::types::BookSource::Exchange,
@@ -725,16 +811,12 @@ mod tests {
                 quantity: 0.0,
             }],
         };
-        let est = book.estimate_buy_execution(50.0);
-        // Can still return Some if mid exists
-        assert!(est.is_some());
-        let est = est.unwrap();
-        assert!(!est.fillable);
+        assert!(book.estimate_buy_execution(50.0).is_none());
     }
 
     #[test]
     fn test_estimate_sell_zero_filled_qty() {
-        // All bid levels have price 0 and value 0
+        // The only bid level is invalid, so there is no mid price.
         let book = OrderBook {
             pair: "X/Y".to_string(),
             source: crate::market::types::BookSource::Exchange,
@@ -747,9 +829,91 @@ mod tests {
                 quantity: 100.0,
             }],
         };
-        let est = book.estimate_sell_execution(50.0);
-        assert!(est.is_some());
-        let est = est.unwrap();
+        assert!(book.estimate_sell_execution(50.0).is_none());
+    }
+
+    fn level(price: f64, quantity: f64) -> OrderBookLevel {
+        OrderBookLevel { price, quantity }
+    }
+
+    #[test]
+    fn test_prices_use_the_best_valid_level() {
+        // The top level of each side has zero quantity: not a real order.
+        let book = OrderBook {
+            pair: "X/Y".to_string(),
+            source: BookSource::Exchange,
+            bids: vec![level(1.0, 0.0), level(0.9990, 10.0)],
+            asks: vec![level(1.0001, 0.0), level(1.0010, 10.0)],
+        };
+        assert_eq!(book.best_bid(), Some(0.9990));
+        assert_eq!(book.best_ask(), Some(1.0010));
+        let mid = book.mid_price().unwrap();
+        assert!((mid - 1.0).abs() < 1e-12);
+        let spread = book.spread().unwrap();
+        assert!((spread - (1.0010 - 0.9990)).abs() < 1e-12);
+        assert!((book.spread_pct().unwrap() - spread / mid * 100.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_synthetic_amm_book_has_prices_but_no_spread() {
+        let book = OrderBook {
+            pair: "X/Y".to_string(),
+            source: BookSource::SyntheticAmm,
+            bids: vec![level(0.999, 10.0)],
+            asks: vec![level(1.001, 10.0)],
+        };
+        assert!(book.mid_price().is_some());
+        assert_eq!(book.spread(), None);
+        assert_eq!(book.spread_pct(), None);
+    }
+
+    #[test]
+    fn test_depth_in_band_counts_valid_levels_in_the_price_range() {
+        let book = OrderBook {
+            pair: "X/Y".to_string(),
+            source: BookSource::Exchange,
+            bids: vec![level(1.0, 0.0), level(0.99, 10.0), level(0.5, 10.0)],
+            asks: vec![level(1.01, 10.0), level(2.0, 10.0)],
+        };
+        // The zero-quantity level adds nothing; the 0.5 bid is out of band.
+        let in_band = book.depth_in_band(BookSide::Bid, 0.9..=1.1);
+        assert!((in_band - 9.9).abs() < 1e-12);
+        let whole = book.total_depth(BookSide::Bid);
+        assert!((whole - 14.9).abs() < 1e-12);
+        assert!((book.total_depth(BookSide::Ask) - 30.1).abs() < 1e-12);
+        assert!((book.top_depth(BookSide::Bid, .., 1) - 9.9).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_no_valid_level_on_a_side_gives_no_execution_estimate() {
+        // One rule for an empty side and a side of invalid levels: no mid,
+        // so no estimate.
+        let empty = OrderBook {
+            pair: "X/Y".to_string(),
+            source: BookSource::Exchange,
+            bids: vec![level(1.0, 10.0)],
+            asks: vec![],
+        };
+        let invalid = OrderBook {
+            asks: vec![level(1.001, 0.0)],
+            ..empty.clone()
+        };
+        for book in [empty, invalid] {
+            assert!(book.estimate_buy_execution(5.0).is_none());
+            assert!(book.estimate_sell_execution(5.0).is_none());
+        }
+    }
+
+    #[test]
+    fn test_execution_estimate_skips_invalid_levels_and_reports_unfillable() {
+        let book = OrderBook {
+            pair: "X/Y".to_string(),
+            source: BookSource::Exchange,
+            bids: vec![level(1.0, 100.0)],
+            asks: vec![level(1.0, 0.0), level(1.002, 10.0)],
+        };
+        let est = book.estimate_buy_execution(1000.0).unwrap();
         assert!(!est.fillable);
+        assert!((est.vwap - 1.002).abs() < 1e-12);
     }
 }

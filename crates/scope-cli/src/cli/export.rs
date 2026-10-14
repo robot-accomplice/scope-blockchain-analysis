@@ -17,7 +17,7 @@
 //! ```
 
 use crate::cli::output::Output;
-use crate::{errln, outln};
+use crate::note;
 use clap::Args;
 use scope::chains::{ChainClientFactory, infer_chain_from_address};
 use scope::config::{Config, OutputFormat};
@@ -55,7 +55,7 @@ pub struct ExportArgs {
     pub format: Option<OutputFormat>,
 
     /// Target blockchain network (for address export).
-    #[arg(short, long, default_value = "ethereum")]
+    #[arg(short, long, default_value = scope::chains::DEFAULT_CHAIN)]
     pub chain: String,
 
     /// Start date for transaction history (YYYY-MM-DD).
@@ -104,7 +104,7 @@ pub struct ExportReport {
 /// # Errors
 ///
 /// Returns [`ScopeError::Export`] if the export operation fails.
-/// Returns [`ScopeError::Io`] if file operations fail.
+/// Returns [`ScopeError::IoError`] if file operations fail.
 pub async fn run(
     mut args: ExportArgs,
     config: &Config,
@@ -131,7 +131,7 @@ pub async fn run(
         "Starting export"
     );
 
-    let sp = crate::cli::progress::Spinner::new("Exporting data...", out)?;
+    let sp = crate::cli::progress::Spinner::new("Exporting data...", out);
     let result = if args.address_book {
         export_address_book(&args, format, config, out).await
     } else if let Some(ref address) = args.address {
@@ -217,12 +217,10 @@ async fn export_address_book(
             .as_secs(),
     };
 
-    outln!(
-        out,
-        "Exported {} address book addresses to {}",
-        report.record_count,
-        report.output_path
-    )?;
+    out.note_saved(
+        &format!("{} address book addresses", report.record_count),
+        &report.output_path,
+    );
 
     Ok(())
 }
@@ -250,12 +248,7 @@ async fn export_address(
         "Exporting address data"
     );
 
-    errln!(
-        out,
-        "  Fetching transactions for {} on {}...",
-        address,
-        chain
-    )?;
+    note!(out, "Fetching transactions for {} on {}...", address, chain);
 
     // Fetch real transaction history
     let client = clients.create_chain_client(&chain)?;
@@ -364,12 +357,10 @@ async fn export_address(
             .as_secs(),
     };
 
-    outln!(
-        out,
-        "Exported {} transactions to {}",
-        report.record_count,
-        report.output_path
-    )?;
+    out.note_saved(
+        &format!("{} transactions", report.record_count),
+        &report.output_path,
+    );
 
     Ok(())
 }

@@ -147,7 +147,7 @@ scope crawl 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --chain ethereum
 scope monitor USDC                                          # defaults to ethereum
 scope mon PEPE --chain ethereum --layout chart-focus        # short alias with options
 scope monitor USDC --layout exchange                        # exchange-style: order book + chart + trades
-scope monitor USDC --venue binance                           # real exchange OHLC instead of synthetic candles
+scope monitor USDC --venue binance                           # real exchange OHLC, order book and trades
 
 # Exchange venues
 scope venues list                                           # show all available venues
@@ -759,8 +759,10 @@ scope:auto> compliance risk @cold-wallet
 | `trace`, `decode` | Toggle trace and decode for `tx` |
 | `limit [n]` | Show or set the transaction limit for `address` |
 | `tokens [list\|recent\|add\|remove]` | Manage saved token aliases |
-| `ctx` / `clear` | Show or reset the session context |
-| `help` / `exit` | Show help; leave the TUI (also Ctrl-D) |
+| `ctx` / `reset` | Show or reset the session context |
+| `clear` | Clear the output pane |
+| `save <file>` | Write the last output to a file (`save x.csv` after an `--every` run writes its series) |
+| `help [command]` / `exit` | Show help, or one command's help; leave the TUI (also `quit`, `q`, Ctrl-D) |
 
 A flag you type always wins over the context. `address` and `tx` with no target reuse the last one.
 
@@ -770,15 +772,21 @@ A flag you type always wins over the context. `address` and `tx` with no target 
 | --- | --- |
 | `Enter` | Run the line |
 | `Tab` | Complete the command, flag, value, `@label`, token alias, venue or chain. Several matches open a menu. |
-| `Ctrl-K` | Command palette: fuzzy search over every command and your history. `Enter` fills the line; it does not run it. |
-| `↑` / `↓` | History |
+| `Ctrl-K` | Command palette: fuzzy search over every command and your history. `Enter` fills the line; `Enter` again runs it. |
+| `↑` / `↓` | History. On an empty line, `↑` first brings back a line that `Esc` cleared. |
+| `Ctrl-A` / `Ctrl-E`, `Ctrl-B`, `Alt-B` / `Alt-F` | Start / end of line, one left, one word left / right |
+| `Ctrl-U` / `Ctrl-W` / `Alt-K` | Delete to the start, the word before, to the end |
+| `Ctrl-F` or `/` | Search the output; `Ctrl-R` searches the history |
+| `Ctrl-Y` | Copy the last output (needs a terminal that allows OSC 52; `save` works everywhere) |
 | `PgUp` / `PgDn` | Scroll the output |
-| `Esc` / `Ctrl-C` | Cancel the running command (for example a `--every` loop) |
+| `Esc` / `Ctrl-C` | Cancel the running command (for example a `--every` loop); idle, `Esc` clears the line |
 | `Ctrl-D` | Leave the TUI |
 
-The row under the input shows the usage of the command you type and the next argument it expects.
+The row under the input shows the usage of the command you type and the next argument it expects, the value a flag needs (with its allowed values), or an unknown flag. The pane keeps the last 5000 lines and says when it dropped older ones.
 
-**Commands that need the terminal.** `setup`, `crawl` with a name or symbol (it asks you to pick a token), and `monitor` run on the plain terminal. The TUI steps aside, runs the command, and returns when you press Enter.
+**Repeating view.** A command with `--every` (for example `market summary USDC --venue binance --every 30s --duration 1h`) shows one view that updates in place: the latest report beside its trends (a pass/fail strip with the last failure, and a chart per key value with its threshold line). Below 80 columns the trends sit under the report. `Esc` stops the run and the view stays; the next key leaves it with one copy of the final report and a summary such as `42 runs · 1 failed (run 16)`.
+
+**Commands that need the terminal.** `setup`, `crawl` with a name or symbol (it asks you to pick a token), and `monitor` run on the plain terminal. The TUI steps aside, runs the command, and comes back by itself when it ends; `Ctrl-C` cancels it. The scrollback shows its output and how long it took. `interactive`, `web` and `completions` do not run in the TUI.
 
 **Files.** The TUI keeps its history in `history.txt` and a log of every submitted line in `tui-events.jsonl` (input, parsed arguments, outcome, error, duration), both in the scope data directory.
 
@@ -803,7 +811,7 @@ Use `--venue binance` (or any CEX venue) to fetch real exchange OHLC data instea
 
 - **`--venue`** must name a known venue (`scope venues list`). An unknown venue is an error.
 - **When DexScreener fails** (unreachable, blocked, or the token is unknown there) and `--venue` is set, the monitor uses that venue's ticker for the token and tells you why.
-- **`--pair`** prices the token from the venue alone (exchange-only mode). Write the pair in any common form, `USDN_USDT`, `USDN/USDT`, `USDN-USDT` or `USDNUSDT`; scope converts it to the venue's own format.
+- **`--pair`** prices the token from the venue alone (exchange-only mode). Write the pair in any common form, `USDN_USDT`, `USDN/USDT`, `USDN-USDT` or `USDNUSDT` (the joined form only for a stable or fiat quote such as USDT, USDC, DAI, EUR); scope converts it to the venue's own format.
 - **`--export FILE`** starts CSV export to that file at launch. The `E` key starts an export in the directory set by `monitor.export.path` in `config.yaml` (default `./scope-exports/`). A file that cannot be written is an error, not a silent no-op.
 
 The monitor supports five layout presets that can be switched at runtime or configured in `config.yaml`:
@@ -831,26 +839,28 @@ The monitor automatically selects the best layout for your terminal size (respon
 - **CSV export**: Record live data with a single keypress (`E`), or from launch with `--export FILE`
 - **Auto-pause**: Optionally pause data fetching while interacting
 
-**Monitor keybindings:**
+**Monitor keybindings** (`?` shows this list in the monitor):
 
 | Key | Action |
 | --- | --- |
-| `Q` / `Esc` | Quit monitor |
-| `R` | Force refresh |
-| `P` / `Space` | Pause/resume |
+| `q` / `Esc` / `Ctrl-C` | Quit monitor |
+| `r` | Refresh now (the activity log confirms it) |
+| `p` / `Space` | Pause/resume |
 | `Shift+P` | Toggle auto-pause on input |
-| `E` | Toggle CSV export (REC indicator when active) |
-| `L` | Cycle layout forward (Dashboard -> Chart -> Feed -> Compact -> Exchange) |
-| `H` | Cycle layout backward |
-| `W` + `1-5` | Toggle widget visibility (1=price chart, 2=volume, 3=buy/sell, 4=metrics, 5=activity) |
-| `A` | Re-enable auto layout |
-| `C` | Cycle chart mode (Line / Candlestick / Volume Profile) |
-| `S` | Toggle log/linear scale |
-| `/` | Cycle color scheme (Green/Red, Blue/Orange, Monochrome) |
-| `T` / `Tab` | Cycle time period |
+| `e` | Toggle CSV export (REC indicator when active) |
+| `l` / `h` | Next / previous layout (Dashboard, Chart, Feed, Compact, Exchange) |
+| `w` + `1-5` | Toggle widget visibility (1=price chart, 2=volume, 3=buy/sell, 4=metrics, 5=activity) |
+| `a` | Re-enable auto layout |
+| `c` | Cycle chart mode (Line / Candlestick / Volume Profile) |
+| `s` | Toggle log/linear scale |
+| `/` | Cycle color scheme (green-red, blue-orange, mono) |
+| `t` / `Tab` | Cycle time period |
 | `1-6` | Select time period (1m, 5m, 15m, 1h, 4h, 1d) |
-| `J` / `K` | Scroll activity log |
-| `+` / `-` | Adjust refresh speed |
+| `j` / `k` | Scroll activity log |
+| `+` / `-` | Slower / faster refresh (the footer shows the interval: `↻ 3s of 5s`) |
+| `?` | Show every key; any key closes the list |
+
+With `--venue`, the Order Book and Recent Trades panels show the venue's real book and trades, and their titles name the venue. Without one, the book is the DEX pool's AMM book, the same as `market summary`, and the title names its source.
 
 ## Configuration
 

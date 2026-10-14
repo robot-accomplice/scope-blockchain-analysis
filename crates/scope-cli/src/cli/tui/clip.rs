@@ -5,6 +5,7 @@
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
+use scope::error::ScopeError;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
@@ -18,20 +19,28 @@ pub const SAVE_USAGE: &str = "Usage: save <file> [--force]";
 pub const OSC52_MAX_PAYLOAD: usize = 100_000;
 
 /// Why `save` wrote nothing.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum SaveError {
     /// The request was refused: usage, path rules, nothing to save, or an
     /// existing file.
     Refused(String),
-    /// The OS failed the write.
-    Failed(String),
+    /// The OS failed the write. The error keeps its kind and its source
+    /// ([`ScopeError::io_context`]).
+    Failed(ScopeError),
 }
 
 impl SaveError {
+    /// An OS failure while `doing` (for example `Could not write x.txt`).
+    pub fn failed(e: std::io::Error, doing: impl std::fmt::Display) -> Self {
+        Self::Failed(ScopeError::io_context(e, doing))
+    }
+
     /// The text to show and to journal.
-    pub fn message(&self) -> &str {
+    pub fn message(&self) -> String {
         match self {
-            SaveError::Refused(m) | SaveError::Failed(m) => m,
+            SaveError::Refused(m) => m.clone(),
+            SaveError::Failed(ScopeError::IoError(e)) => e.to_string(),
+            SaveError::Failed(other) => other.to_string(),
         }
     }
 }
@@ -44,60 +53,6 @@ pub fn osc52(text: &str) -> String {
 /// True when the OSC 52 payload for `text` stays within the cap.
 pub fn fits_osc52(text: &str) -> bool {
     text.len().div_ceil(3) * 4 <= OSC52_MAX_PAYLOAD
-}
-
-/// Consumes a string-type escape body: up to BEL or ST (`ESC \`), or to the
-/// end of the text when it is not terminated.
-fn skip_string(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
-    while let Some(n) = chars.next() {
-        if n == '\x07' || n == '\u{9c}' {
-            break;
-        }
-        if n == '\x1b' {
-            if chars.peek() == Some(&'\\') {
-                chars.next();
-            }
-            break;
-        }
-    }
-}
-
-/// Consumes CSI parameters up to the final byte, or to the end of the text.
-fn skip_csi(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
-    for n in chars.by_ref() {
-        if ('\x40'..='\x7e').contains(&n) {
-            break;
-        }
-    }
-}
-
-/// `text` without ANSI escape sequences: CSI (7-bit and U+009B), OSC, DCS,
-/// SOS, PM, APC, and other escapes. An unterminated sequence drops only
-/// itself.
-pub fn strip_ansi(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\u{9b}' => skip_csi(&mut chars),
-            '\x1b' => match chars.next() {
-                Some('[') => skip_csi(&mut chars),
-                Some(']' | 'P' | 'X' | '^' | '_') => skip_string(&mut chars),
-                // Intermediate bytes (ESC ( B): consume through the final byte.
-                Some('\x20'..='\x2f') => {
-                    for n in chars.by_ref() {
-                        if !('\x20'..='\x2f').contains(&n) {
-                            break;
-                        }
-                    }
-                }
-                // Any other two-byte escape, or the end of the text.
-                _ => {}
-            },
-            _ => out.push(c),
-        }
-    }
-    out
 }
 
 /// Where `save` writes `arg`: the checked canonical parent joined with the
@@ -125,11 +80,11 @@ fn resolve(arg: &str, cwd: &Path, home: Option<&Path>) -> Result<PathBuf, SaveEr
     let parent = joined.parent().unwrap_or(&joined);
     let real = parent
         .canonicalize()
-        .map_err(|e| SaveError::Failed(format!("Could not write {}: {}", joined.display(), e)))?;
+        .map_err(|e| SaveError::failed(e, format!("Could not write {}", joined.display())))?;
     if !absolute {
         let root = cwd
             .canonicalize()
-            .map_err(|e| SaveError::Failed(format!("Could not read {}: {}", cwd.display(), e)))?;
+            .map_err(|e| SaveError::failed(e, format!("Could not read {}", cwd.display())))?;
         if !real.starts_with(&root) {
             return Err(SaveError::Refused(SAVE_ESCAPE.to_string()));
         }
@@ -204,7 +159,7 @@ pub fn save(
         _ => {}
     }
     write_file(&target, text, force)
-        .map_err(|e| SaveError::Failed(format!("Could not write {}: {}", target.display(), e)))?;
+        .map_err(|e| SaveError::failed(e, format!("Could not write {}", target.display())))?;
     let n = text.lines().count();
     Ok(format!(
         "saved {} line{} to {}",
@@ -239,49 +194,6 @@ mod tests {
         let at_cap = "a".repeat(OSC52_MAX_PAYLOAD / 4 * 3);
         assert!(fits_osc52(&at_cap));
         assert!(!fits_osc52(&format!("{at_cap}a")));
-    }
-
-    #[test]
-    fn test_strip_ansi_removes_sgr() {
-        assert_eq!(strip_ansi("\x1b[1;36mA\x1b[0m b"), "A b");
-    }
-
-    #[test]
-    fn test_strip_ansi_removes_osc_with_either_terminator() {
-        assert_eq!(
-            strip_ansi("\x1b]8;;http://x\x1b\\link\x1b]8;;\x07!"),
-            "link!"
-        );
-    }
-
-    #[test]
-    fn test_strip_ansi_removes_dcs_sos_pm_apc_strings() {
-        for intro in ['P', 'X', '^', '_'] {
-            let text = format!("a\x1b{intro}payload\x1b\\b");
-            assert_eq!(strip_ansi(&text), "ab", "ESC {intro}");
-            let bel = format!("a\x1b{intro}payload\x07b");
-            assert_eq!(strip_ansi(&bel), "ab", "ESC {intro} with BEL");
-        }
-    }
-
-    #[test]
-    fn test_strip_ansi_consumes_intermediates_through_the_final_byte() {
-        assert_eq!(strip_ansi("a\x1b(Bb\x1b)0c"), "abc");
-        assert_eq!(strip_ansi("a\x1bXb"), "a", "ESC X opens a string");
-        assert_eq!(strip_ansi("a\x1b=b"), "ab", "plain two-byte escape");
-    }
-
-    #[test]
-    fn test_strip_ansi_removes_the_8_bit_csi() {
-        assert_eq!(strip_ansi("a\u{9b}1;31mb\u{9b}0mc"), "abc");
-    }
-
-    #[test]
-    fn test_strip_ansi_unterminated_sequence_drops_only_itself() {
-        assert_eq!(strip_ansi("keep\x1b[1;3"), "keep");
-        assert_eq!(strip_ansi("keep\x1b]0;title"), "keep");
-        assert_eq!(strip_ansi("keep\x1b"), "keep");
-        assert_eq!(strip_ansi("keep\x1b("), "keep");
     }
 
     #[test]
@@ -355,11 +267,17 @@ mod tests {
         saved(&[abs.to_str().unwrap()], Some("t"), dir.path()).unwrap();
 
         let missing = elsewhere.path().join("no-dir").join("a.txt");
-        let Err(SaveError::Failed(note)) =
+        let Err(failed @ SaveError::Failed(_)) =
             saved(&[missing.to_str().unwrap()], Some("t"), dir.path())
         else {
             panic!("expected an OS failure");
         };
+        let SaveError::Failed(ScopeError::IoError(e)) = &failed else {
+            panic!("an I/O error");
+        };
+        assert_eq!(e.kind(), std::io::ErrorKind::NotFound, "the kind stays");
+        assert!(std::error::Error::source(e).is_some(), "the source stays");
+        let note = failed.message();
         assert!(note.starts_with("Could not write "), "{note}");
         assert!(note.contains("no-dir"), "{note}");
         assert!(matches!(

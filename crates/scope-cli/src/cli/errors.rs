@@ -5,8 +5,7 @@
 
 use crate::cli::output::Output;
 use crate::errln;
-use owo_colors::OwoColorize;
-use scope::display::terminal::color_enabled_stderr;
+use scope::display::theme::{Painter, Role, color_enabled_stderr};
 use scope::error::ScopeError;
 
 /// Displays an error with a remediation hint when available.
@@ -23,21 +22,25 @@ fn display_error_styled(e: &ScopeError, tty: bool, out: &Output) -> std::io::Res
         other => format!("{}", other),
     };
 
-    if tty {
-        errln!(out, "\n  {} {}", "✗".red().bold(), msg.red())?;
-    } else {
-        errln!(out, "\n  ✗ {}", msg)?;
-    }
+    // A disabled painter returns the text unchanged.
+    let painter = Painter::new(tty);
+    errln!(
+        out,
+        "\n  {} {}",
+        painter.paint_strong(Role::Err, "✗"),
+        painter.paint(Role::Err, &msg)
+    )?;
 
     // The source chain names the real cause (for example a TLS failure
     // under "error sending request"). Show each link once.
     let causes = cause_chain(e, &msg);
     for cause in &causes {
-        if tty {
-            errln!(out, "    {} {}", "caused by:".dimmed(), cause)?;
-        } else {
-            errln!(out, "    caused by: {}", cause)?;
-        }
+        errln!(
+            out,
+            "    {} {}",
+            painter.paint(Role::Secondary, "caused by:"),
+            cause
+        )?;
     }
 
     let hint = if causes.iter().any(|c| is_non_tls_reply(c)) {
@@ -46,11 +49,7 @@ fn display_error_styled(e: &ScopeError, tty: bool, out: &Output) -> std::io::Res
         error_suggestion(e, out.is_tui())
     };
     if let Some(hint) = hint {
-        if tty {
-            errln!(out, "\n  {}", hint.dimmed())?;
-        } else {
-            errln!(out, "\n  {}", hint)?;
-        }
+        errln!(out, "\n  {}", painter.paint(Role::Secondary, hint))?;
     }
     errln!(out)?;
     Ok(())
@@ -80,6 +79,17 @@ fn cause_chain(e: &ScopeError, shown: &str) -> Vec<String> {
 /// data (rustls: InvalidContentType; OpenSSL: wrong version number).
 fn is_non_tls_reply(cause: &str) -> bool {
     cause.contains("InvalidContentType") || cause.contains("wrong version number")
+}
+
+/// Where to learn more about a partial failure, such as a section that
+/// could not be fetched. In the TUI (`tui`), where `-v` has no effect, it
+/// names the TUI's help.
+pub fn details_hint(tui: bool) -> &'static str {
+    if tui {
+        "run 'help <command>' for usage"
+    } else {
+        "use -v for details"
+    }
 }
 
 /// Next steps for a network failure inside the TUI, where `-v` has no effect.
@@ -188,6 +198,13 @@ mod tests {
     // ================================================================
     // display_error (delegates to non-TTY in CI)
     // ================================================================
+
+    #[test]
+    fn test_details_hint_names_no_cli_flag_in_the_tui() {
+        assert_eq!(details_hint(false), "use -v for details");
+        assert_eq!(details_hint(true), "run 'help <command>' for usage");
+        assert!(!details_hint(true).contains("-v"));
+    }
 
     #[test]
     fn test_display_error_goes_to_err_channel_with_hint() {

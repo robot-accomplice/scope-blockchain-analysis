@@ -383,17 +383,9 @@ impl DexClient {
 
     /// Maps chain names to DexScreener chain IDs.
     fn map_chain_to_dexscreener(chain: &str) -> String {
-        match chain.to_lowercase().as_str() {
-            "ethereum" | "eth" => "ethereum".to_string(),
-            "polygon" | "matic" => "polygon".to_string(),
-            "arbitrum" | "arb" => "arbitrum".to_string(),
-            "optimism" | "op" => "optimism".to_string(),
-            "base" => "base".to_string(),
-            "bsc" | "bnb" => "bsc".to_string(),
-            "solana" | "sol" => "solana".to_string(),
-            "avalanche" | "avax" => "avalanche".to_string(),
-            _ => chain.to_lowercase(),
-        }
+        super::registry::chain(chain)
+            .and_then(|c| c.dexscreener_id)
+            .map_or_else(|| chain.to_lowercase(), str::to_string)
     }
 
     /// Fetches the USD price of a token by its address.
@@ -420,17 +412,8 @@ impl DexClient {
     ///
     /// Uses well-known wrapped token addresses to determine the native token price.
     pub async fn get_native_token_price(&self, chain: &str) -> Option<f64> {
-        let (search_chain, token_address) = match chain.to_lowercase().as_str() {
-            "ethereum" | "eth" => ("ethereum", "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"), // WETH
-            "polygon" | "matic" => ("polygon", "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270"), // WMATIC
-            "arbitrum" | "arb" => ("arbitrum", "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"), // WETH on Arb
-            "optimism" | "op" => ("optimism", "0x4200000000000000000000000000000000000006"), // WETH on OP
-            "base" => ("base", "0x4200000000000000000000000000000000000006"), // WETH on Base
-            "bsc" | "bnb" => ("bsc", "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"), // WBNB
-            "solana" | "sol" => ("solana", "So11111111111111111111111111111111111111112"), // Wrapped SOL
-            "tron" | "trx" => return None, // Tron wrapped token varies; skip for now
-            _ => return None,
-        };
+        let c = super::registry::chain(chain)?;
+        let (search_chain, token_address) = (c.dexscreener_id?, c.wrapped_native?);
 
         self.get_token_price(search_chain, token_address).await
     }

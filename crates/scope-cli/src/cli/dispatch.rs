@@ -7,7 +7,7 @@
 
 use crate::cli::output::Output;
 use crate::cli::{Cli, Commands};
-use crate::{errln, out};
+use crate::{note, out};
 use clap::CommandFactory;
 use clap_complete::generate;
 use scope::Config;
@@ -79,7 +79,9 @@ pub async fn dispatch_with(
         Commands::Interactive(_) => Err(ScopeError::Other(
             "the TUI cannot start from here; start it with `scope tui`".into(),
         )),
-        Commands::Monitor(args) => crate::cli::monitor::run_direct(args, config, clients).await,
+        Commands::Monitor(args) => {
+            crate::cli::monitor::run_direct(args, config, clients, out).await
+        }
         Commands::Setup(args) => crate::cli::setup::run(args, config, out).await,
         Commands::Compliance(compliance_cmd) => {
             dispatch_compliance(compliance_cmd, config, out).await
@@ -92,7 +94,11 @@ pub async fn dispatch_with(
         Commands::Report(cmd) => crate::cli::report::run(cmd, config, clients, out).await,
         Commands::Discover(args) => crate::cli::discover::run(args, config.output.format, out)
             .await
-            .map_err(|e| ScopeError::Discovery(e.to_string())),
+            .map_err(|e| match e {
+                // An I/O error keeps its kind (a closed pipe exits quietly).
+                ScopeError::IoError(_) => e,
+                other => ScopeError::Discovery(other.to_string()),
+            }),
         Commands::Insights(args) => crate::cli::insights::run(args, config, clients, out).await,
         Commands::Contract(ref args) => crate::cli::contract::run(args, config, clients, out).await,
         Commands::Web(_) => Err(ScopeError::Other(
@@ -137,7 +143,20 @@ async fn dispatch_compliance(
             compliance::handle_compliance_report(args, out).await
         }
     };
-    result.map_err(|e| ScopeError::Compliance(e.to_string()))
+    result.map_err(|e| from_anyhow(e, ScopeError::Compliance))
+}
+
+/// A command error from an `anyhow` handler. An I/O error keeps its kind
+/// (a closed pipe stays a closed pipe) and a `ScopeError` stays itself;
+/// anything else is wrapped by `kind` with its message.
+fn from_anyhow(e: anyhow::Error, kind: fn(String) -> ScopeError) -> ScopeError {
+    match e.downcast::<std::io::Error>() {
+        Ok(io) => ScopeError::IoError(io),
+        Err(e) => match e.downcast::<ScopeError>() {
+            Ok(scope) => scope,
+            Err(e) => kind(e.to_string()),
+        },
+    }
 }
 
 /// Installs the process transport on the first call (see `scope::http::shared`)
@@ -145,12 +164,11 @@ async fn dispatch_compliance(
 ///
 /// # Errors
 ///
-/// Returns an error when the transport cannot be built, or when the output's
-/// error channel cannot be written.
-pub fn create_http_client(config: &Config, out: &Output) -> std::io::Result<Arc<dyn HttpClient>> {
-    let built = scope::http::init(config).map_err(|e| std::io::Error::other(e.to_string()))?;
+/// Returns the error when the transport cannot be built.
+pub fn create_http_client(config: &Config, out: &Output) -> Result<Arc<dyn HttpClient>> {
+    let built = scope::http::init(config)?;
     for notice in &built.notices {
-        errln!(out, "  {notice}")?;
+        note!(out, "{notice}");
     }
     Ok(built.client)
 }
@@ -161,6 +179,27 @@ pub fn create_http_client(config: &Config, out: &Output) -> std::io::Result<Arc<
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_anyhow_io_errors_keep_their_kind() {
+        // A closed pipe in `compliance … | head` must still read as a
+        // closed pipe, so the CLI exits quietly.
+        let pipe = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "closed");
+        let e = super::from_anyhow(pipe.into(), ScopeError::Compliance);
+        assert!(
+            matches!(&e, ScopeError::IoError(io) if io.kind() == std::io::ErrorKind::BrokenPipe)
+        );
+        let scope = super::from_anyhow(
+            ScopeError::NotFound("x".into()).into(),
+            ScopeError::Compliance,
+        );
+        assert!(matches!(scope, ScopeError::NotFound(_)));
+        let other = super::from_anyhow(anyhow::anyhow!("bad"), ScopeError::Compliance);
+        assert_eq!(
+            other.to_string(),
+            ScopeError::Compliance("bad".into()).to_string()
+        );
+    }
+
     use super::*;
     use clap::Parser;
     use scope::http::shared::Kind;

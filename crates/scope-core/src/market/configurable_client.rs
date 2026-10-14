@@ -11,6 +11,7 @@ use crate::market::orderbook::{
     Candle, OhlcClient, OrderBook, OrderBookClient, OrderBookLevel, Ticker, TickerClient, Trade,
     TradeHistoryClient, TradeSide,
 };
+use crate::market::pair::Pair;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
@@ -356,11 +357,11 @@ impl ConfigurableExchangeClient {
                 }
             };
 
-            if let (Some(price), Some(quantity)) = (price, quantity)
-                && price > 0.0
-                && quantity > 0.0
-            {
-                levels.push(OrderBookLevel { price, quantity });
+            if let (Some(price), Some(quantity)) = (price, quantity) {
+                let level = OrderBookLevel { price, quantity };
+                if level.is_valid() {
+                    levels.push(level);
+                }
             }
         }
 
@@ -442,7 +443,7 @@ impl OrderBookClient for ConfigurableExchangeClient {
         });
 
         // Build display pair name
-        let pair = format_display_pair(pair_symbol, &self.descriptor.symbol.template);
+        let pair = Pair::parse(pair_symbol).to_string();
 
         Ok(OrderBook {
             pair,
@@ -497,7 +498,7 @@ impl TickerClient for ConfigurableExchangeClient {
         };
 
         let r = &endpoint.response;
-        let pair = format_display_pair(pair_symbol, &self.descriptor.symbol.template);
+        let pair = Pair::parse(pair_symbol).to_string();
 
         Ok(Ticker {
             pair,
@@ -742,83 +743,49 @@ fn current_type(val: &Value) -> &'static str {
     }
 }
 
-/// Convert a raw pair symbol back to display format (e.g., "BTCUSDT" → "BTC/USDT").
-fn format_display_pair(raw: &str, template: &str) -> String {
-    // Try to reverse-engineer the separator from the template
-    let sep = if template.contains('_') {
-        "_"
-    } else if template.contains('-') {
-        "-"
-    } else {
-        ""
-    };
-
-    if !sep.is_empty() {
-        raw.replace(sep, "/")
-    } else {
-        // No separator: try to find where the quote starts
-        let upper = raw.to_uppercase();
-        for quote in &["USDT", "USD", "USDC", "BTC", "ETH", "EUR", "GBP"] {
-            if upper.ends_with(quote) {
-                let base_end = raw.len() - quote.len();
-                if base_end > 0 {
-                    return format!("{}/{}", &raw[..base_end], &raw[base_end..]);
-                }
-            }
-        }
-        raw.to_string()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_format_display_pair_underscore() {
-        assert_eq!(
-            format_display_pair("BTC_USDT", "{base}_{quote}"),
-            "BTC/USDT"
-        );
+        assert_eq!(Pair::parse("BTC_USDT").to_string(), "BTC/USDT");
     }
 
     #[test]
     fn test_format_display_pair_dash() {
-        assert_eq!(
-            format_display_pair("BTC-USDT", "{base}-{quote}"),
-            "BTC/USDT"
-        );
+        assert_eq!(Pair::parse("BTC-USDT").to_string(), "BTC/USDT");
     }
 
     #[test]
     fn test_format_display_pair_concatenated() {
-        assert_eq!(format_display_pair("BTCUSDT", "{base}{quote}"), "BTC/USDT");
-        assert_eq!(format_display_pair("ETHUSD", "{base}{quote}"), "ETH/USD");
+        assert_eq!(Pair::parse("BTCUSDT").to_string(), "BTC/USDT");
+        assert_eq!(Pair::parse("ETHUSD").to_string(), "ETH/USD");
     }
 
     #[test]
     fn test_format_display_pair_eur_concatenated() {
-        assert_eq!(format_display_pair("XBTEUR", "{base}{quote}"), "XBT/EUR");
+        assert_eq!(Pair::parse("XBTEUR").to_string(), "XBT/EUR");
     }
 
     #[test]
     fn test_format_display_pair_gbp_concatenated() {
-        assert_eq!(format_display_pair("XBTGBP", "{base}{quote}"), "XBT/GBP");
+        assert_eq!(Pair::parse("XBTGBP").to_string(), "XBT/GBP");
     }
 
     #[test]
     fn test_format_display_pair_usdc_concatenated() {
-        assert_eq!(format_display_pair("ETHUSDC", "{base}{quote}"), "ETH/USDC");
+        assert_eq!(Pair::parse("ETHUSDC").to_string(), "ETH/USDC");
     }
 
     #[test]
     fn test_format_display_pair_no_quote_match_returns_raw() {
-        assert_eq!(format_display_pair("XYZABC", "{base}{quote}"), "XYZABC");
+        assert_eq!(Pair::parse("XYZABC").to_string(), "XYZABC");
     }
 
     #[test]
     fn test_format_display_pair_base_zero_len_returns_raw() {
-        assert_eq!(format_display_pair("USDT", "{base}{quote}"), "USDT");
+        assert_eq!(Pair::parse("USDT").to_string(), "USDT");
     }
 
     #[test]
@@ -1005,7 +972,7 @@ mod tests {
 
     // -------------------------------------------------------------------------
     // Additional tests for coverage of descriptor(), format_pair(), current_type,
-    // extract_string(), navigate_field(), parse_levels(), parse_side(), format_display_pair
+    // extract_string(), navigate_field(), parse_levels(), parse_side(), venue pair display
     // -------------------------------------------------------------------------
 
     #[test]
@@ -1355,17 +1322,17 @@ mod tests {
 
     #[test]
     fn test_format_display_pair_unknown_quote() {
-        assert_eq!(format_display_pair("XYZABC", "{base}{quote}"), "XYZABC");
+        assert_eq!(Pair::parse("XYZABC").to_string(), "XYZABC");
     }
 
     #[test]
     fn test_format_display_pair_single_char() {
-        assert_eq!(format_display_pair("A", "{base}{quote}"), "A");
+        assert_eq!(Pair::parse("A").to_string(), "A");
     }
 
     #[test]
     fn test_format_display_pair_quote_only_no_split() {
-        assert_eq!(format_display_pair("USDT", "{base}{quote}"), "USDT");
+        assert_eq!(Pair::parse("USDT").to_string(), "USDT");
     }
 
     // -------------------------------------------------------------------------

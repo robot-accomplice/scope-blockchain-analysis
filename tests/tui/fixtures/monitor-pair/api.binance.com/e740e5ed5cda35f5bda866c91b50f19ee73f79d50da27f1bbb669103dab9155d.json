@@ -1,5 +1,5 @@
 {
-  "recorded": "2026-10-13T06:45:23.963090+00:00",
+  "recorded": "2026-10-13T17:25:52.019536+00:00",
   "request": {
     "method": "GET",
     "url": "https://api.binance.com/api/v3/ticker/24hr?symbol=USDCUSDT",
@@ -15,13 +15,13 @@
         "connection": "keep-alive",
         "content-security-policy": "default-src 'self'",
         "content-type": "application/json;charset=UTF-8",
-        "date": "Tue, 13 Oct 2026 06:45:23 GMT",
+        "date": "Tue, 13 Oct 2026 17:25:51 GMT",
         "expires": "0",
         "pragma": "no-cache",
         "server": "nginx",
         "strict-transport-security": "max-age=31536000; includeSubdomains",
-        "via": "1.1 697758bda0b45d16e2e49fca76e68a56.cloudfront.net (CloudFront)",
-        "x-amz-cf-id": "gnVccFAkYUpcKWVMQvrYPe1V4n-_L7irzikZlOz-B8QZ9GtYqC6Qbg==",
+        "via": "1.1 80052e7ae8fa75744b8843b1e83fe534.cloudfront.net (CloudFront)",
+        "x-amz-cf-id": "JPoWUh0E1NHC5_3tYmeRWdsdR79Y5fJhpegZSyyB3dCT21iXnwnIBw==",
         "x-amz-cf-pop": "MXP53-P8",
         "x-cache": "Miss from cloudfront",
         "x-content-security-policy": "default-src 'self'",
@@ -29,11 +29,11 @@
         "x-frame-options": "SAMEORIGIN",
         "x-mbx-used-weight": "2",
         "x-mbx-used-weight-1m": "2",
-        "x-mbx-uuid": "9e057fa9-1a92-4a8d-b402-602ed90c1619",
+        "x-mbx-uuid": "b17f39b4-d2ac-40a6-905e-dc553dc21959",
         "x-webkit-csp": "default-src 'self'",
         "x-xss-protection": "1; mode=block"
       },
-      "body": "{\"symbol\":\"USDCUSDT\",\"priceChange\":\"0.00006000\",\"priceChangePercent\":\"0.006\",\"weightedAvgPrice\":\"1.00104669\",\"prevClosePrice\":\"1.00108000\",\"lastPrice\":\"1.00114000\",\"lastQty\":\"33056.00000000\",\"bidPrice\":\"1.00114000\",\"bidQty\":\"4236081.00000000\",\"askPrice\":\"1.00115000\",\"askQty\":\"1618002.00000000\",\"openPrice\":\"1.00108000\",\"highPrice\":\"1.00130000\",\"lowPrice\":\"1.00070000\",\"volume\":\"4319405960.00000000\",\"quoteVolume\":\"4323927033.52266000\",\"openTime\":1791787523351,\"closeTime\":1791873923351,\"firstId\":502212866,\"lastId\":502961166,\"count\":748301}"
+      "body": "{\"symbol\":\"USDCUSDT\",\"priceChange\":\"-0.00006000\",\"priceChangePercent\":\"-0.006\",\"weightedAvgPrice\":\"1.00111040\",\"prevClosePrice\":\"1.00108000\",\"lastPrice\":\"1.00102000\",\"lastQty\":\"350.00000000\",\"bidPrice\":\"1.00101000\",\"bidQty\":\"3142453.00000000\",\"askPrice\":\"1.00102000\",\"askQty\":\"1634053.00000000\",\"openPrice\":\"1.00108000\",\"highPrice\":\"1.00130000\",\"lowPrice\":\"1.00080000\",\"volume\":\"4454198803.00000000\",\"quoteVolume\":\"4459144747.02011000\",\"openTime\":1791825951433,\"closeTime\":1791912351433,\"firstId\":502544077,\"lastId\":503294454,\"count\":750378}"
     },
     {
       "status": 200,
@@ -44,13 +44,13 @@
         "connection": "keep-alive",
         "content-security-policy": "default-src 'self'",
         "content-type": "application/json;charset=UTF-8",
-        "date": "Tue, 13 Oct 2026 06:45:29 GMT",
+        "date": "Tue, 13 Oct 2026 17:25:57 GMT",
         "expires": "0",
         "pragma": "no-cache",
         "server": "nginx",
         "strict-transport-security": "max-age=31536000; includeSubdomains",
-        "via": "1.1 697758bda0b45d16e2e49fca76e68a56.cloudfront.net (CloudFront)",
-        "x-amz-cf-id": "yZNjQsgkBhzlhlIRAIs8hcJdBzS8Mrz--eVElqgr3h4mZHdLS9Uh3Q==",
+        "via": "1.1 80052e7ae8fa75744b8843b1e83fe534.cloudfront.net (CloudFront)",
+        "x-amz-cf-id": "oTN0pvEsZRmn-FeNgjBtKxXu8gM4cKjqiquy9WzT0lp1LhhXQ0SepQ==",
         "x-amz-cf-pop": "MXP53-P8",
         "x-cache": "Miss from cloudfront",
         "x-content-security-policy": "default-src 'self'",
@@ -58,11 +58,11 @@
         "x-frame-options": "SAMEORIGIN",
         "x-mbx-used-weight": "4",
         "x-mbx-used-weight-1m": "4",
-        "x-mbx-uuid": "f8952b1b-8f5d-483b-b229-47df69d22a03",
+        "x-mbx-uuid": "e274d832-b4cb-4902-adc0-33d253dfa364",
         "x-webkit-csp": "default-src 'self'",
         "x-xss-protection": "1; mode=block"
       },
-      "body": "{\"symbol\":\"USDCUSDT\",\"priceChange\":\"0.00007000\",\"priceChangePercent\":\"0.007\",\"weightedAvgPrice\":\"1.00104674\",\"prevClosePrice\":\"1.00108000\",\"lastPrice\":\"1.00115000\",\"lastQty\":\"80473.00000000\",\"bidPrice\":\"1.00114000\",\"bidQty\":\"4156135.00000000\",\"askPrice\":\"1.00115000\",\"askQty\":\"1427026.00000000\",\"openPrice\":\"1.00108000\",\"highPrice\":\"1.00130000\",\"lowPrice\":\"1.00070000\",\"volume\":\"4321442377.00000000\",\"quoteVolume\":\"4325965791.75875000\",\"openTime\":1791787529371,\"closeTime\":1791873929371,\"firstId\":502212882,\"lastId\":502961246,\"count\":748365}"
+      "body": "{\"symbol\":\"USDCUSDT\",\"priceChange\":\"-0.00006000\",\"priceChangePercent\":\"-0.006\",\"weightedAvgPrice\":\"1.00111040\",\"prevClosePrice\":\"1.00109000\",\"lastPrice\":\"1.00102000\",\"lastQty\":\"18.00000000\",\"bidPrice\":\"1.00101000\",\"bidQty\":\"3113705.00000000\",\"askPrice\":\"1.00102000\",\"askQty\":\"1628834.00000000\",\"openPrice\":\"1.00108000\",\"highPrice\":\"1.00130000\",\"lowPrice\":\"1.00080000\",\"volume\":\"4454212355.00000000\",\"quoteVolume\":\"4459158310.04707000\",\"openTime\":1791825957395,\"closeTime\":1791912357395,\"firstId\":502544150,\"lastId\":503294480,\"count\":750331}"
     }
   ]
 }

@@ -3,23 +3,26 @@
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
+    style::Style,
     symbols,
     text::{Line, Span},
     widgets::{
         Axis, Bar, BarChart, BarGroup, Block, Borders, Chart, Dataset, GraphType, List, ListItem,
-        Paragraph, Row, Sparkline, Table, Tabs, Wrap,
+        Paragraph, Row, Table, Tabs, Wrap,
         canvas::{Canvas, Line as CanvasLine, Rectangle},
     },
 };
 use std::time::Instant;
 
-use scope::market::TradeSide;
+use scope::market::{BookSide, TradeSide};
 
 use super::config::{ChartMode, LayoutPreset, ScaleMode, WidgetVisibility};
 use super::state::MonitorState;
-use crate::cli::style::SECONDARY;
 use crate::cli::textfit::{cols, cut_with_ellipsis, draw_note_alone};
+use crate::cli::theme::SECONDARY;
+pub(crate) use scope::display::format::format_large_number as format_number;
+pub(crate) use scope::display::format::format_price_usd;
+use scope::display::theme::Role;
 
 /// The smallest terminal the monitor draws in, in columns and rows.
 pub(crate) const MIN_W: u16 = 60;
@@ -377,6 +380,10 @@ pub(crate) fn ui(f: &mut Frame, state: &mut MonitorState) {
 
     // Render footer
     render_footer(f, chunks[2], state);
+
+    if state.show_keys {
+        render_keys_overlay(f);
+    }
 }
 
 /// Renders the header with token info and time period tabs.
@@ -404,7 +411,12 @@ pub(crate) fn render_header(f: &mut Frame, area: Rect, state: &MonitorState) {
 
     let title = header_title(state, area.width);
 
-    let price_str = format_price_usd(state.current_price);
+    // A price shown beside an error is the last good one (#68).
+    let price_str = if state.error_message.is_some() {
+        format!("{} (stale)", format_price_usd(state.current_price))
+    } else {
+        format_price_usd(state.current_price)
+    };
 
     // Split header area: top row for token info, bottom row for tabs
     let header_chunks = Layout::default()
@@ -423,7 +435,7 @@ pub(crate) fn render_header(f: &mut Frame, area: Rect, state: &MonitorState) {
         Block::default()
             .title(title)
             .borders(Borders::ALL)
-            .border_style(Style::new().cyan()),
+            .border_style(crate::cli::theme::ACCENT),
     );
 
     f.render_widget(header, header_chunks[0]);
@@ -433,7 +445,7 @@ pub(crate) fn render_header(f: &mut Frame, area: Rect, state: &MonitorState) {
     let chart_label = state.chart_mode.label();
     let tabs = Tabs::new(tab_titles)
         .select(state.time_period.index())
-        .highlight_style(Style::new().cyan().bold())
+        .highlight_style(crate::cli::theme::strong(Role::Accent))
         .divider("│")
         .padding(" ", " ");
     let tabs_line = Layout::default()
@@ -444,7 +456,7 @@ pub(crate) fn render_header(f: &mut Frame, area: Rect, state: &MonitorState) {
     f.render_widget(
         Paragraph::new(Span::styled(
             format!("⊞ {}", chart_label),
-            Style::new().magenta(),
+            crate::cli::theme::ACCENT,
         )),
         tabs_line[1],
     );
@@ -464,7 +476,7 @@ fn header_title(state: &MonitorState, width: u16) -> Line<'static> {
         // Inside the borders, after the base and "│ " ... " ".
         let room = (width as usize).saturating_sub(2 + cols(&base) + 3);
         let err = cut_with_ellipsis(&format!("⚠ {}", err), room);
-        spans.push(Span::styled(format!("│ {} ", err), Style::new().red()));
+        spans.push(Span::styled(format!("│ {} ", err), crate::cli::theme::ERR));
     }
     Line::from(spans)
 }
@@ -605,7 +617,7 @@ pub(crate) fn render_price_chart(f: &mut Frame, area: Rect, state: &MonitorState
                 .name("◇Est")
                 .marker(symbols::Marker::Braille)
                 .graph_type(GraphType::Line)
-                .style(Style::new().cyan())
+                .style(crate::cli::theme::ACCENT)
                 .data(&synthetic_data),
         );
     }
@@ -667,30 +679,6 @@ pub(crate) fn render_price_chart(f: &mut Frame, area: Rect, state: &MonitorState
         );
 
     f.render_widget(chart, area);
-}
-
-/// Checks if a price indicates a stablecoin (pegged around $1.00).
-pub(crate) fn is_stablecoin_price(price: f64) -> bool {
-    (0.95..=1.05).contains(&price)
-}
-
-/// Formats a price in USD with appropriate precision.
-/// Stablecoins get extra precision (6 decimals) to show micro-fluctuations.
-pub(crate) fn format_price_usd(price: f64) -> String {
-    if price >= 1000.0 {
-        format!("${:.2}", price)
-    } else if is_stablecoin_price(price) {
-        // Stablecoins get 6 decimals to show micro-fluctuations
-        format!("${:.6}", price)
-    } else if price >= 1.0 {
-        format!("${:.4}", price)
-    } else if price >= 0.01 {
-        format!("${:.6}", price)
-    } else if price >= 0.0001 {
-        format!("${:.8}", price)
-    } else {
-        format!("${:.10}", price)
-    }
 }
 
 /// Renders a candlestick chart using OHLC data.
@@ -765,7 +753,7 @@ pub(crate) fn render_candlestick_chart(f: &mut Frame, area: Rect, state: &Monito
         ),
         Span::styled(format!("({}) ", change_str), Style::new().fg(trend_color)),
         Span::styled(format!("│{}│ ", state.time_period.label()), SECONDARY),
-        Span::styled("⊞Candles ", Style::new().magenta()),
+        Span::styled("⊞Candles ", crate::cli::theme::ACCENT),
     ]);
 
     // Apply scale transformation (log or linear)
@@ -846,7 +834,7 @@ pub(crate) fn render_volume_profile_chart(f: &mut Frame, area: Rect, state: &Mon
         let block = Block::default()
             .title(" ◨ Volume Profile (collecting data...) ")
             .borders(Borders::ALL)
-            .border_style(Style::new().fg(Color::DarkGray));
+            .border_style(crate::cli::theme::SECONDARY);
         f.render_widget(block, area);
         return;
     }
@@ -859,7 +847,7 @@ pub(crate) fn render_volume_profile_chart(f: &mut Frame, area: Rect, state: &Mon
         let block = Block::default()
             .title(" ◨ Volume Profile (no price range) ")
             .borders(Borders::ALL)
-            .border_style(Style::new().fg(Color::DarkGray));
+            .border_style(crate::cli::theme::SECONDARY);
         f.render_widget(block, area);
         return;
     }
@@ -1024,7 +1012,7 @@ pub(crate) fn render_volume_chart(f: &mut Frame, area: Rect, state: &MonitorStat
             Block::default()
                 .title(chart_title)
                 .borders(Borders::ALL)
-                .border_style(Style::new().blue()),
+                .border_style(crate::cli::theme::INFO),
         )
         .bar_width(bar_width)
         .bar_gap(1)
@@ -1113,7 +1101,7 @@ pub(crate) fn render_activity_feed(f: &mut Frame, area: Rect, state: &mut Monito
             Block::default()
                 .title(log_title)
                 .borders(Borders::ALL)
-                .border_style(Style::new().dark_gray()),
+                .border_style(crate::cli::theme::SECONDARY),
         )
         .highlight_style(Style::new().bold())
         .highlight_symbol("▸ ");
@@ -1139,23 +1127,28 @@ pub(crate) fn render_alert_overlay(f: &mut Frame, area: Rect, state: &MonitorSta
         })
         .unwrap_or(false);
 
-    let border_color = if is_flash_on {
-        Color::Red
+    let border_style = if is_flash_on {
+        crate::cli::theme::strong(Role::Err)
     } else {
-        Color::Yellow
+        crate::cli::theme::strong(Role::Warn)
     };
 
     let alert_lines: Vec<Line> = state
         .active_alerts
         .iter()
-        .map(|a| Line::from(Span::styled(&a.message, Style::new().fg(Color::Red).bold())))
+        .map(|a| {
+            Line::from(Span::styled(
+                &a.message,
+                crate::cli::theme::strong(Role::Err),
+            ))
+        })
         .collect();
 
     let alert_widget = Paragraph::new(alert_lines).block(
         Block::default()
             .title(" ⚠ ALERTS ")
             .borders(Borders::ALL)
-            .border_style(Style::new().fg(border_color).bold()),
+            .border_style(border_style),
     );
 
     f.render_widget(alert_widget, area);
@@ -1169,7 +1162,7 @@ pub(crate) fn render_liquidity_depth(f: &mut Frame, area: Rect, state: &MonitorS
         let block = Block::default()
             .title(" ◫ Liquidity Depth (no data) ")
             .borders(Borders::ALL)
-            .border_style(Style::new().fg(Color::DarkGray));
+            .border_style(crate::cli::theme::SECONDARY);
         f.render_widget(block, area);
         return;
     }
@@ -1204,7 +1197,7 @@ pub(crate) fn render_liquidity_depth(f: &mut Frame, area: Rect, state: &MonitorS
             state.liquidity_pairs.len()
         ))
         .borders(Borders::ALL)
-        .border_style(Style::new().fg(pal.border));
+        .border_style(crate::cli::theme::SECONDARY);
 
     let paragraph = Paragraph::new(lines).block(block);
     f.render_widget(paragraph, area);
@@ -1219,23 +1212,7 @@ pub(crate) fn render_metrics_panel(f: &mut Frame, area: Rect, state: &MonitorSta
         .constraints([Constraint::Length(3), Constraint::Min(0)])
         .split(area);
 
-    // --- Sparkline: recent price trend ---
-    let sparkline_data: Vec<u64> = {
-        // Take the last N price points and normalize to u64 for Sparkline
-        let points: Vec<f64> = state.price_history.iter().map(|dp| dp.value).collect();
-        if points.len() < 2 {
-            vec![0; chunks[0].width.saturating_sub(2) as usize]
-        } else {
-            let min_p = points.iter().cloned().fold(f64::MAX, f64::min);
-            let max_p = points.iter().cloned().fold(f64::MIN, f64::max);
-            let range = (max_p - min_p).max(0.0001);
-            points
-                .iter()
-                .map(|p| (((*p - min_p) / range) * 100.0) as u64)
-                .collect()
-        }
-    };
-
+    // --- Price trend: the shared chart component ---
     let trend_color = if !state.short_changes_known() {
         pal.neutral
     } else if state.price_change_5m >= 0.0 {
@@ -1243,18 +1220,21 @@ pub(crate) fn render_metrics_panel(f: &mut Frame, area: Rect, state: &MonitorSta
     } else {
         pal.down
     };
-
-    let sparkline = Sparkline::default()
-        .block(
-            Block::default()
-                .title(" ◉ Price Trend ")
-                .borders(Borders::ALL)
-                .border_style(Style::new().fg(pal.sparkline)),
-        )
-        .data(&sparkline_data)
-        .style(Style::new().fg(trend_color));
-
-    f.render_widget(sparkline, chunks[0]);
+    let block = Block::default()
+        .title(" ◉ Price Trend ")
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(pal.sparkline));
+    let inner = block.inner(chunks[0]);
+    f.render_widget(block, chunks[0]);
+    let prices: Vec<Option<f64>> = state
+        .price_history
+        .iter()
+        .map(|dp| Some(dp.value))
+        .collect();
+    f.render_widget(
+        crate::cli::charts::Sparkline::new(&prices, Style::new().fg(trend_color)),
+        inner,
+    );
 
     // --- Table: key metrics ---
     let change_5m_str = if !state.short_changes_known() {
@@ -1372,7 +1352,7 @@ pub(crate) fn render_metrics_panel(f: &mut Frame, area: Rect, state: &MonitorSta
         Block::default()
             .title(" ◉ Key Metrics ")
             .borders(Borders::ALL)
-            .border_style(Style::new().magenta()),
+            .border_style(crate::cli::theme::ACCENT),
     );
 
     f.render_widget(table, chunks[1]);
@@ -1381,6 +1361,15 @@ pub(crate) fn render_metrics_panel(f: &mut Frame, area: Rect, state: &MonitorSta
 /// Renders the order book panel for the Exchange layout.
 ///
 /// Shows asks (descending), spread, bids (descending) with depth bars.
+/// The panel's spread row. Spread and percent come from `OrderBook`, the same
+/// source as `market summary` and the web API.
+pub(crate) fn spread_line(book: &scope::market::OrderBook) -> String {
+    book.spread()
+        .zip(book.spread_pct())
+        .map(|(s, pct)| format!("  Spread: {:.6} ({:.3}%)", s, pct))
+        .unwrap_or_else(|| "  Spread: --".to_string())
+}
+
 pub(crate) fn render_order_book_panel(f: &mut Frame, area: Rect, state: &MonitorState) {
     let pal = state.palette();
 
@@ -1446,18 +1435,10 @@ pub(crate) fn render_order_book_panel(f: &mut Frame, area: Rect, state: &Monitor
     }
 
     // --- Spread line ---
-    let spread = book
-        .best_ask()
-        .zip(book.best_bid())
-        .map(|(ask, bid)| {
-            let s = ask - bid;
-            let pct = if bid > 0.0 { (s / bid) * 100.0 } else { 0.0 };
-            format!("  Spread: {:.6} ({:.3}%)", s, pct)
-        })
-        .unwrap_or_else(|| "  Spread: --".to_string());
+    let spread = spread_line(book);
     lines.push(Line::from(Span::styled(
         spread,
-        Style::new().fg(Color::Yellow).bold(),
+        crate::cli::theme::strong(Role::Warn),
     )));
 
     // --- Bid side ---
@@ -1487,43 +1468,45 @@ pub(crate) fn render_order_book_panel(f: &mut Frame, area: Rect, state: &Monitor
     let block = Block::default()
         .title(order_book_title(state))
         .borders(Borders::ALL)
-        .border_style(Style::new().fg(pal.border));
+        .border_style(crate::cli::theme::SECONDARY);
 
     let paragraph = Paragraph::new(lines).block(block);
     f.render_widget(paragraph, area);
 }
 
-/// The order book title names where the book comes from. The monitor
-/// never fetches a venue book: it is built from DEX pairs, or absent in
-/// venue-only mode.
+/// The order book title names where the book comes from: the venue, or
+/// the synthetic source the core reports. Venue-only mode without a venue
+/// book has none.
 pub(crate) fn order_book_title(state: &MonitorState) -> String {
-    if state.venue_only {
-        return format!(" ◈ Order Book {VENUE_ONLY_NOTE} ");
-    }
-    match &state.order_book {
-        Some(book) => {
-            let ask_depth: f64 = book.asks.iter().map(|l| l.value()).sum();
-            let bid_depth: f64 = book.bids.iter().map(|l| l.value()).sum();
-            format!(
-                " ◈ Order Book {SYNTHETIC_NOTE} │ {} │ Ask {} │ Bid {} ",
-                book.pair,
-                format_number(ask_depth),
-                format_number(bid_depth),
-            )
+    let Some(book) = &state.order_book else {
+        if state.venue_only {
+            return format!(" ◈ Order Book {VENUE_ONLY_NOTE} ");
         }
-        None => format!(" ◈ Order Book {SYNTHETIC_NOTE} │ no data "),
-    }
+        return format!(" ◈ Order Book {SYNTHETIC_NOTE} │ no data ");
+    };
+    let source = match &state.book_venue {
+        Some(venue) => format!("({venue})"),
+        None => format!("({})", book.source.label()),
+    };
+    format!(
+        " ◈ Order Book {source} │ {} │ Ask {} │ Bid {} ",
+        book.pair,
+        format_number(book.total_depth(BookSide::Ask)),
+        format_number(book.total_depth(BookSide::Bid)),
+    )
 }
 
 /// The recent trades title names where the trades come from, as
 /// [`order_book_title`] does.
 pub(crate) fn trades_title(state: &MonitorState) -> String {
-    if state.venue_only {
-        return format!(" ◈ Recent Trades {VENUE_ONLY_NOTE} ");
-    }
+    let source = match &state.trades_venue {
+        Some(venue) => format!("({venue})"),
+        None if state.venue_only => return format!(" ◈ Recent Trades {VENUE_ONLY_NOTE} "),
+        None => SYNTHETIC_NOTE.to_string(),
+    };
     match state.recent_trades.len() {
-        0 => format!(" ◈ Recent Trades {SYNTHETIC_NOTE} │ no data "),
-        n => format!(" ◈ Recent Trades {SYNTHETIC_NOTE} │ {n} "),
+        0 => format!(" ◈ Recent Trades {source} │ no data "),
+        n => format!(" ◈ Recent Trades {source} │ {n} "),
     }
 }
 
@@ -1533,7 +1516,7 @@ fn render_empty_panel(f: &mut Frame, area: Rect, title: String, venue_only: bool
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
-        .border_style(Style::new().fg(Color::DarkGray));
+        .border_style(crate::cli::theme::SECONDARY);
     let body = if venue_only {
         "Not available in venue-only mode."
     } else {
@@ -1635,7 +1618,7 @@ pub(crate) fn render_recent_trades_panel(f: &mut Frame, area: Rect, state: &Moni
     let block = Block::default()
         .title(trades_title(state))
         .borders(Borders::ALL)
-        .border_style(Style::new().fg(pal.border));
+        .border_style(crate::cli::theme::SECONDARY);
 
     let paragraph = Paragraph::new(lines).block(block);
     f.render_widget(paragraph, area);
@@ -1657,7 +1640,7 @@ pub(crate) fn render_market_info_panel(f: &mut Frame, area: Rect, state: &Monito
     // ── Left: Trading pairs table ──
     {
         let header = Row::new(vec!["DEX / Pair", "Volume 24h", "Liquidity", "Δ 24h"])
-            .style(Style::new().fg(Color::Cyan).bold())
+            .style(crate::cli::theme::strong(Role::Accent))
             .bottom_margin(0);
 
         let rows: Vec<Row> = state
@@ -1695,7 +1678,7 @@ pub(crate) fn render_market_info_panel(f: &mut Frame, area: Rect, state: &Monito
             Block::default()
                 .title(format!(" ◫ Trading Pairs ({}) ", state.dex_pairs.len()))
                 .borders(Borders::ALL)
-                .border_style(Style::new().fg(pal.border)),
+                .border_style(crate::cli::theme::SECONDARY),
         );
 
         f.render_widget(table, cols[0]);
@@ -1713,7 +1696,7 @@ pub(crate) fn render_market_info_panel(f: &mut Frame, area: Rect, state: &Monito
         };
         info_lines.push(Line::from(vec![
             Span::styled(" Price  ", SECONDARY),
-            Span::styled(format!("${:.6}", state.current_price), Style::new().bold()),
+            Span::styled(format_price_usd(state.current_price), Style::new().bold()),
         ]));
 
         // Multi-timeframe changes
@@ -1834,7 +1817,7 @@ pub(crate) fn render_market_info_panel(f: &mut Frame, area: Rect, state: &Monito
             for (platform, _url) in &state.socials {
                 link_spans.push(Span::styled(
                     format!("[{}] ", platform),
-                    Style::new().fg(Color::Cyan),
+                    crate::cli::theme::ACCENT,
                 ));
             }
             for url in &state.websites {
@@ -1847,7 +1830,7 @@ pub(crate) fn render_market_info_panel(f: &mut Frame, area: Rect, state: &Monito
                     .unwrap_or(url);
                 link_spans.push(Span::styled(
                     format!("[{}] ", domain),
-                    Style::new().fg(Color::Blue),
+                    crate::cli::theme::LINK,
                 ));
             }
             info_lines.push(Line::from(link_spans));
@@ -1865,6 +1848,58 @@ pub(crate) fn render_market_info_panel(f: &mut Frame, area: Rect, state: &Monito
 }
 
 /// Renders the footer with status and controls.
+/// Every monitor key, for the `?` overlay (#68).
+pub(crate) const MONITOR_KEYS: &[(&str, &str)] = &[
+    ("q, Esc, Ctrl-C", "quit"),
+    ("r", "refresh now"),
+    ("p, Space", "pause or resume"),
+    ("Shift-P", "auto-pause on input"),
+    ("e", "start or stop the CSV export"),
+    ("+ / -", "slower or faster refresh"),
+    ("1-6", "time period 1m, 5m, 15m, 1h, 4h, 1d"),
+    ("t, Tab", "next time period"),
+    ("c", "chart: line, candles, volume profile"),
+    ("s", "scale: linear or log"),
+    ("/", "color scheme"),
+    ("l / h", "next or previous layout"),
+    ("a", "automatic layout"),
+    ("w then 1-5", "show or hide a widget"),
+    ("j / k", "scroll the activity log"),
+    ("?", "this list (any key closes it)"),
+];
+
+/// The `?` overlay: every key and what it does.
+fn render_keys_overlay(f: &mut Frame) {
+    let area = f.area();
+    let width = 56.min(area.width.saturating_sub(4));
+    let height = (MONITOR_KEYS.len() as u16 + 2).min(area.height.saturating_sub(2));
+    let rect = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    let lines: Vec<Line> = MONITOR_KEYS
+        .iter()
+        .map(|(k, what)| {
+            Line::from(vec![
+                Span::styled(format!(" {k:<16}"), crate::cli::theme::KEY),
+                Span::styled((*what).to_string(), SECONDARY),
+            ])
+        })
+        .collect();
+    f.render_widget(ratatui::widgets::Clear, rect);
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .title(" Keys ")
+                .borders(Borders::ALL)
+                .border_style(crate::cli::theme::ACCENT),
+        ),
+        rect,
+    );
+}
+
 pub(crate) fn render_footer(f: &mut Frame, area: Rect, state: &MonitorState) {
     let footer = Paragraph::new(Line::from(footer_spans(state)))
         .block(Block::default().borders(Borders::ALL));
@@ -1900,8 +1935,9 @@ pub(crate) fn footer_spans(state: &MonitorState) -> Vec<Span<'static>> {
 
     let stats = Span::styled(
         format!(
-            "↻ {}s │ Δ {} │ {} pts │ {}",
+            "↻ {}s of {}s │ Δ {} │ {} pts │ {}",
             elapsed,
+            state.refresh_rate.as_secs(),
             price_change_str,
             synthetic_count + real_count,
             memory_str
@@ -1909,67 +1945,52 @@ pub(crate) fn footer_spans(state: &MonitorState) -> Vec<Span<'static>> {
         SECONDARY,
     );
 
-    let widget_hint = if state.widget_toggle_mode {
-        Span::styled("W:1-5?", Style::new().fg(Color::Yellow).bold())
-    } else {
-        Span::styled("W", Style::new().fg(Color::Cyan).bold())
+    // Keys in brackets read without color too (#68).
+    let key = |k: &'static str, word: String| {
+        [
+            Span::raw("["),
+            Span::styled(k, crate::cli::theme::KEY),
+            Span::raw(format!("]{word} ")),
+        ]
     };
-
-    let mut spans = vec![
-        Span::styled("Q", Style::new().red().bold()),
-        Span::raw("uit "),
-    ];
+    let mut spans: Vec<Span<'static>> = key("q", "uit".into()).to_vec();
     if state.paused {
         spans.push(Span::styled(
             "⏸ PAUSED ",
-            Style::new().fg(Color::Yellow).bold(),
+            crate::cli::theme::strong(Role::Warn),
         ));
     } else if state.is_auto_paused() {
         spans.push(Span::styled(
             "⏸ AUTO-PAUSED ",
-            Style::new().fg(Color::Cyan).bold(),
+            crate::cli::theme::strong(Role::Accent),
         ));
     }
 
     // REC indicator when CSV export is active
     if state.export_active {
-        spans.push(Span::styled("● REC ", Style::new().fg(Color::Red).bold()));
+        spans.push(Span::styled("● REC ", crate::cli::theme::strong(Role::Err)));
     }
 
-    spans.extend([
-        Span::styled("R", Style::new().fg(Color::Green).bold()),
-        Span::raw("efresh "),
-        Span::styled("P", Style::new().fg(Color::Yellow).bold()),
-        Span::raw("ause "),
-        Span::styled("E", Style::new().fg(Color::LightRed).bold()),
-        Span::raw("xport "),
-        Span::styled("L", Style::new().fg(Color::Cyan).bold()),
-        Span::raw(format!(":{} ", state.layout.label())),
-        widget_hint,
-        Span::raw("idget "),
-        Span::styled("C", Style::new().fg(Color::LightBlue).bold()),
-        Span::raw(format!("hart:{} ", state.chart_mode.label())),
-        Span::styled("S", Style::new().fg(Color::LightGreen).bold()),
-        Span::raw(format!("cale:{} ", state.scale_mode.label())),
-        Span::styled("/", Style::new().fg(Color::LightRed).bold()),
-        Span::raw(format!(":{} ", state.color_scheme.label())),
-        Span::styled("T", Style::new().fg(Color::Magenta).bold()),
-        Span::raw("ime "),
-        Span::raw("║ "),
-        stats,
-    ]);
+    if state.widget_toggle_mode {
+        spans.push(Span::styled(
+            "widget 1-5? ",
+            crate::cli::theme::strong(Role::Warn),
+        ));
+    }
+    for part in [
+        key("r", "efresh".into()),
+        key("p", "ause".into()),
+        key("e", "xport".into()),
+        key("l", format!("ayout:{}", state.layout.label())),
+        key("w", "idgets".into()),
+        key("c", format!("hart:{}", state.chart_mode.label())),
+        key("s", format!("cale:{}", state.scale_mode.label())),
+        key("/", format!("colors:{}", state.color_scheme.label())),
+        key("t", "ime".into()),
+        key("?", "keys".into()),
+    ] {
+        spans.extend(part);
+    }
+    spans.extend([Span::raw("║ "), stats]);
     spans
-}
-
-/// Formats a number with K/M/B suffixes.
-pub(crate) fn format_number(n: f64) -> String {
-    if n >= 1_000_000_000.0 {
-        format!("{:.2}B", n / 1_000_000_000.0)
-    } else if n >= 1_000_000.0 {
-        format!("{:.2}M", n / 1_000_000.0)
-    } else if n >= 1_000.0 {
-        format!("{:.2}K", n / 1_000.0)
-    } else {
-        format!("{:.2}", n)
-    }
 }

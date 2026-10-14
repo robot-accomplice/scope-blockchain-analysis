@@ -9,21 +9,22 @@ use super::clip::{self, SaveError};
 use super::exec::{self, Invocation, Plan, Route};
 use super::fit;
 use super::journal::{Event, Journal};
+use super::repeat_view::{self, Ended, RepeatView};
 use super::vocab::Vocab;
 use crate::cli::interactive::SessionContext;
-use crate::cli::output::{Captured, Output};
-use crate::cli::style::SECONDARY;
+use crate::cli::output::{Captured, Output, SeriesHook};
 use crate::cli::textfit::{ELLIPSIS, cols, cut_with_ellipsis, draw_note_alone};
+use crate::cli::theme::{ACCENT, ERR, INFO, KEY, MATCH, OK, PaneState, SECONDARY, SELECTED, WARN};
 use ansi_to_tui::IntoText;
 use chrono::Utc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use scope::config::Config;
-use scope::display::terminal::color_enabled;
+use scope::display::theme::color_enabled;
 use std::cell::Cell;
 use std::time::Instant;
 use unicode_width::UnicodeWidthStr;
@@ -67,8 +68,39 @@ pub enum Overlay {
     HistorySearch(HistorySearchState),
 }
 
+/// What Esc does in the current state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EscAction {
+    ClosePalette,
+    CloseMenu,
+    CloseSearch,
+    CloseHistorySearch,
+    /// Cancels the running command.
+    Cancel,
+    /// Idle with no overlay: clears the input line.
+    ClearLine,
+}
+
+impl EscAction {
+    /// The status bar words, or `None` when the bar says nothing (clearing
+    /// the line is not worth the room).
+    fn hint(self) -> Option<&'static str> {
+        match self {
+            Self::ClosePalette => Some("Esc closes palette"),
+            Self::CloseMenu => Some("Esc closes menu"),
+            Self::CloseSearch => Some("Esc closes search"),
+            Self::CloseHistorySearch => Some("Esc closes history search"),
+            Self::Cancel => Some("Esc cancels"),
+            Self::ClearLine => None,
+        }
+    }
+}
+
 /// What the status bar says when a search finds nothing.
 const NO_MATCH: &str = "no match";
+
+/// The glyph that starts a note line.
+const NOTE_GLYPH: &str = "ℹ";
 
 /// The gutter of a matched row: it marks the match without color.
 const MATCH_MARK: &str = "▶ ";
@@ -167,6 +199,18 @@ pub enum Action {
     Copy(String),
 }
 
+/// True when Alt is held (and Ctrl is not).
+fn alt_key(key: &KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::ALT) && !key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
+/// Marks the selected palette row.
+const PALETTE_MARKER: &str = "> ";
+
+/// The palette's key legend (#66): Enter fills the line, as an entry may
+/// still need its arguments; a second Enter runs it.
+const PALETTE_LEGEND: &str = "↑↓ select · Enter puts it on the line (Enter again runs) · Esc close";
+
 /// A command that runs in the output pane now.
 pub struct Running {
     /// The line the user typed.
@@ -181,6 +225,8 @@ pub struct Running {
     pub captured: Captured,
     /// The writer the handler got; the error display writes to it too.
     out: Output,
+    /// The runs of a repeating command (#58), drawn as the repeating view.
+    series: Option<SeriesHook>,
     /// Routes library warnings into this command's output while it runs.
     _diag: scope::diag::RedirectGuard,
 }
@@ -232,6 +278,9 @@ pub struct TuiState {
     pub ctx: SessionContext,
     /// The command that runs in the pane now.
     pub running: Option<Running>,
+    /// The last pane command failed and no command has started since. It
+    /// turns the pane rule red.
+    failed: bool,
     /// The first display column of the input line that is shown. It moves
     /// only when the cursor leaves the window (set while drawing).
     scroll_x: Cell<usize>,
@@ -240,9 +289,18 @@ pub struct TuiState {
     pane_width: Cell<u16>,
     /// Show the busy note in the hint row until the next key press.
     busy_hint: bool,
+    /// How many old lines the pane dropped (it keeps [`SCROLLBACK_LIMIT`]).
+    dropped_lines: usize,
+    /// The line that Esc, Ctrl-U or Alt-K last cleared. ↑ on an empty line
+    /// brings it back (#67).
+    cleared: Option<String>,
     /// The plain output of the last pane command that succeeded. Ctrl-Y
     /// copies it and `save` writes it.
     last_output: Option<String>,
+    /// A finished repeating view, kept on screen until the next key (#58).
+    repeat_view: Option<RepeatView>,
+    /// The series of the last repeating command, for `save x.csv`.
+    last_series: Option<SeriesHook>,
     /// The event log.
     journal: Journal,
     /// Completion values from the user's stores.
@@ -274,10 +332,15 @@ impl TuiState {
             last_pane_height: Cell::new(0),
             ctx,
             running: None,
+            failed: false,
             scroll_x: Cell::new(0),
             pane_width: Cell::new(0),
             busy_hint: false,
             last_output: None,
+            dropped_lines: 0,
+            cleared: None,
+            repeat_view: None,
+            last_series: None,
             journal,
             vocab,
             overlay: None,
@@ -303,6 +366,13 @@ impl TuiState {
         if ctrl && key.code == KeyCode::Char('z') {
             return Action::Suspend;
         }
+        // A finished repeating view stays until the next key. That key
+        // leaves it and then does its normal job, so typing goes on.
+        if self.running.is_none()
+            && let Some(view) = self.repeat_view.take()
+        {
+            self.leave_repeat_view(view);
+        }
         // Ctrl-C closes the palette and keeps its normal meaning (cancel a
         // running command, clear the line), so a command can always be
         // stopped with one key.
@@ -321,6 +391,9 @@ impl TuiState {
             self.close_overlay();
             return Action::None;
         }
+        if key.code == KeyCode::Esc {
+            return self.press_esc();
+        }
         match self.overlay.take() {
             Some(Overlay::Search(st)) => {
                 self.search_key(st, key);
@@ -335,7 +408,6 @@ impl TuiState {
         if let Some(Overlay::Palette(p)) = &mut self.overlay {
             let count = p.matches().len();
             match key.code {
-                KeyCode::Esc => self.overlay = None,
                 KeyCode::Enter => {
                     let fill = p
                         .matches()
@@ -379,10 +451,6 @@ impl TuiState {
                     self.replace_word(start, &pick, true);
                     return Action::None;
                 }
-                KeyCode::Esc => {
-                    self.overlay = None;
-                    return Action::None;
-                }
                 _ => self.overlay = None,
             }
         }
@@ -405,12 +473,6 @@ impl TuiState {
                 } else if self.input.is_empty() {
                     return Action::Exit;
                 }
-            }
-            KeyCode::Esc => {
-                if self.running.is_some() {
-                    return Action::Cancel;
-                }
-                self.set_input(String::new());
             }
             KeyCode::Enter => {
                 // The screen shows no output now: the line stays.
@@ -436,7 +498,14 @@ impl TuiState {
                 }
                 return Action::Submit(line);
             }
-            KeyCode::Tab => self.tab_complete(),
+            // Tab and Ctrl-K open overlays, which are not drawn while the
+            // terminal is too small.
+            KeyCode::Tab if !self.too_small.get() => self.tab_complete(),
+            KeyCode::Up if self.input.is_empty() && self.cleared.is_some() => {
+                if let Some(line) = self.cleared.take() {
+                    self.set_input(line);
+                }
+            }
             KeyCode::Up => self.history_prev(),
             KeyCode::Down => self.history_next(),
             KeyCode::PageUp => {
@@ -476,15 +545,29 @@ impl TuiState {
                 self.open_search()
             }
             KeyCode::Char('r') if ctrl && !self.too_small.get() => self.open_history_search(),
-            KeyCode::Char('k') if ctrl => {
+            KeyCode::Char('k') if ctrl && !self.too_small.get() => {
                 self.overlay = Some(Overlay::Palette(super::palette::PaletteState::new(
                     super::palette::items(&self.history),
                 )));
             }
             KeyCode::Char('a') if ctrl => self.cursor = 0,
+            // Readline moves (#67). Ctrl-F searches, Ctrl-Y copies and
+            // Ctrl-K opens the palette here, so Right moves forward and
+            // Alt-K deletes to the end of the line.
+            KeyCode::Char('b') if ctrl => self.cursor = self.cursor.saturating_sub(1),
+            KeyCode::Char('b') if alt_key(&key) => self.cursor = self.word_left(),
+            KeyCode::Char('f') if alt_key(&key) => self.cursor = self.word_right(),
+            KeyCode::Char('k') if alt_key(&key) => {
+                let kept: String = self.input.chars().take(self.cursor).collect();
+                let cut: String = self.input.chars().skip(self.cursor).collect();
+                self.keep_cleared(cut);
+                self.input = kept;
+            }
             KeyCode::Char('e') if ctrl => self.cursor = self.char_len(),
             KeyCode::Char('u') if ctrl => {
+                let cut: String = self.input.chars().take(self.cursor).collect();
                 let rest: String = self.input.chars().skip(self.cursor).collect();
+                self.keep_cleared(cut);
                 self.input = rest;
                 self.cursor = 0;
             }
@@ -683,10 +766,6 @@ impl TuiState {
             }
         };
         match key.code {
-            KeyCode::Esc => {
-                self.scroll.set(st.saved_scroll);
-                return;
-            }
             KeyCode::Char('f') if ctrl => st.editing = !st.editing,
             KeyCode::Enter if st.editing => st.editing = false,
             // In navigate mode Enter steps to the next older match, as `n`.
@@ -732,10 +811,6 @@ impl TuiState {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         match key.code {
-            KeyCode::Esc => {
-                self.set_input(st.draft);
-                return;
-            }
             // The match stays in the input. It does not run.
             KeyCode::Enter => return,
             KeyCode::Char('r') if ctrl => {
@@ -848,18 +923,16 @@ impl TuiState {
 
     /// True when the line is an exit command (the same words `exec` takes).
     fn input_is_exit(&self) -> bool {
-        self.input.split_whitespace().next().is_some_and(|w| {
-            matches!(
-                w.to_lowercase().as_str(),
-                "exit" | "quit" | "q" | ".exit" | ".quit"
-            )
-        })
+        self.input
+            .split_whitespace()
+            .next()
+            .is_some_and(|w| exec::session_command_name(w) == "exit")
     }
 
     /// Says why exit waits. Does not repeat when the last line is the note.
     fn push_busy_note(&mut self) {
         let last = self.scrollback.last().map(|l| l.to_string());
-        if last.as_deref() != Some(BUSY_NOTE) {
+        if last.as_deref() != Some(format!("{NOTE_GLYPH} {BUSY_NOTE}").as_str()) {
             self.push_note(BUSY_NOTE);
         }
     }
@@ -908,6 +981,39 @@ impl TuiState {
     fn remove_char(&mut self, char_idx: usize) {
         let at = self.byte_index(char_idx);
         self.input.remove(at);
+    }
+
+    /// Keeps a cleared piece of the line for ↑ to bring back (#67).
+    fn keep_cleared(&mut self, text: String) {
+        if !text.trim().is_empty() {
+            self.cleared = Some(text);
+        }
+    }
+
+    /// The start of the word left of the cursor (Alt-B).
+    fn word_left(&self) -> usize {
+        let chars: Vec<char> = self.input.chars().collect();
+        let mut at = self.cursor;
+        while at > 0 && chars[at - 1] == ' ' {
+            at -= 1;
+        }
+        while at > 0 && chars[at - 1] != ' ' {
+            at -= 1;
+        }
+        at
+    }
+
+    /// The end of the word right of the cursor (Alt-F).
+    fn word_right(&self) -> usize {
+        let chars: Vec<char> = self.input.chars().collect();
+        let mut at = self.cursor;
+        while at < chars.len() && chars[at] == ' ' {
+            at += 1;
+        }
+        while at < chars.len() && chars[at] != ' ' {
+            at += 1;
+        }
+        at
     }
 
     fn delete_word(&mut self) {
@@ -975,9 +1081,12 @@ impl TuiState {
         self.push_lines(lines);
     }
 
-    /// Appends a dim note line.
+    /// Appends a note line: the `ℹ` glyph, then the dim text.
     pub fn push_note(&mut self, note: &str) {
-        self.push_lines(vec![Line::styled(note.to_string(), SECONDARY)]);
+        self.push_lines(vec![Line::from(vec![
+            Span::styled(NOTE_GLYPH, INFO),
+            Span::styled(format!(" {note}"), SECONDARY),
+        ])]);
     }
 
     /// Appends a note line in `style`.
@@ -989,6 +1098,7 @@ impl TuiState {
         self.scrollback.extend(lines);
         let excess = self.scrollback.len().saturating_sub(SCROLLBACK_LIMIT);
         self.scrollback.drain(..excess);
+        self.dropped_lines += excess;
         // Entries moved up: the search keeps its match, or loses it when
         // that entry was dropped.
         if let Some(Overlay::Search(st)) = &mut self.overlay {
@@ -998,16 +1108,31 @@ impl TuiState {
 
     fn push_echo(&mut self, line: &str) {
         self.push_lines(vec![Line::from(vec![
-            Span::styled(
-                self.prompt(),
-                Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-            ),
+            Span::styled("scope", ACCENT),
+            Span::styled(format!(":{}", self.ctx.chain), KEY),
+            Span::raw("> "),
             Span::raw(line.to_string()),
         ])]);
     }
 
-    fn prompt(&self) -> String {
-        format!("scope:{}> ", self.ctx.chain)
+    /// The prompt: `scope` in the accent, the chain in the key color.
+    fn prompt(&self) -> Line<'static> {
+        Line::from(vec![
+            Span::styled("scope", ACCENT),
+            Span::styled(format!(":{}", self.ctx.chain), KEY),
+            Span::raw("> "),
+        ])
+    }
+
+    /// What the output pane shows: running, failed or idle.
+    fn pane_state(&self) -> PaneState {
+        if self.running.is_some() {
+            PaneState::Running
+        } else if self.failed {
+            PaneState::Failed
+        } else {
+            PaneState::Idle
+        }
     }
 
     /// The scrollback as plain text, one line per row. For tests and logs.
@@ -1028,6 +1153,26 @@ impl TuiState {
     /// CLI command comes back for the event loop to run.
     pub fn submit(&mut self, line: &str, config: &Config) -> Plan {
         self.push_echo(line);
+        // The failed rule is about the last thing the user did. Any line
+        // they enter (a pane command, a builtin, a command run outside the
+        // TUI) is that now.
+        if !line.trim().is_empty() {
+            self.failed = false;
+        }
+        // `clear` empties the pane, as in a shell (#67); `reset` resets the
+        // session context.
+        if line
+            .split_whitespace()
+            .next()
+            .map(exec::session_command_name)
+            .as_deref()
+            == Some("clear")
+        {
+            self.scrollback.clear();
+            self.dropped_lines = 0;
+            self.scroll.set(0);
+            return Plan::Done;
+        }
         if line
             .split_whitespace()
             .next()
@@ -1097,12 +1242,16 @@ impl TuiState {
                 let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
                 match std::env::current_dir() {
                     Ok(cwd) => {
-                        clip::save(&args, self.last_output.as_deref(), &cwd, home.as_deref())
+                        // `save x.csv` after a repeating run writes its series.
+                        let csv = args
+                            .iter()
+                            .any(|a| a.to_ascii_lowercase().ends_with(".csv"))
+                            .then(|| self.last_series.as_ref().and_then(repeat_view::series_csv))
+                            .flatten();
+                        let text = csv.as_deref().or(self.last_output.as_deref());
+                        clip::save(&args, text, &cwd, home.as_deref())
                     }
-                    Err(e) => Err(SaveError::Failed(format!(
-                        "Could not read the current directory: {}",
-                        e
-                    ))),
+                    Err(e) => Err(SaveError::failed(e, "Could not read the current directory")),
                 }
             }
         };
@@ -1112,12 +1261,12 @@ impl TuiState {
                 self.log_action(line, started, "session", None);
             }
             Err(e) => {
-                self.push_note(e.message());
+                self.push_note(&e.message());
                 let outcome = match e {
                     SaveError::Refused(_) => "refused",
                     SaveError::Failed(_) => "error",
                 };
-                self.log_action(line, started, outcome, Some(e.message().to_string()));
+                self.log_action(line, started, outcome, Some(e.message()));
             }
         }
     }
@@ -1159,12 +1308,15 @@ impl TuiState {
     pub fn start(&mut self, input: &str, inv: &Invocation) -> Output {
         let (out, captured) = Output::capture_merged();
         let diag = scope::diag::redirect(captured.out_sink());
+        self.failed = false;
+        self.last_series = None;
         self.running = Some(Running {
             input: input.to_string(),
             argv: inv.argv.clone(),
             started: Instant::now(),
             started_at: Utc::now().to_rfc3339(),
             captured,
+            series: out.series_hook(),
             out: out.clone(),
             _diag: diag,
         });
@@ -1174,12 +1326,12 @@ impl TuiState {
     /// Ends the pane command: moves its output into the scrollback, shows
     /// the error if it failed, and logs the event.
     pub fn finish(&mut self, ending: Ending) {
-        self.finish_with(ending, color_enabled());
+        self.finish_with(ending);
     }
 
-    /// `finish`, with the color choice given. The failure footer always
-    /// carries the `✗` glyph and its words; `color` only adds the red.
-    fn finish_with(&mut self, ending: Ending, color: bool) {
+    /// `finish`. Every footer carries its glyph or words, and its style
+    /// holds the color; a frame with color off strips it.
+    fn finish_with(&mut self, ending: Ending) {
         let Some(run) = self.running.take() else {
             return;
         };
@@ -1190,27 +1342,39 @@ impl TuiState {
                 self.push_note(&format!("Output error: {}", write_err));
             }
         }
-        let output = run.captured.out();
-        // The copy is the command's own data: no warnings, error text or
-        // footer. A success with no data clears it; a failed or cancelled
-        // run keeps the earlier copy.
-        if matches!(ending, Ending::Finished(Ok(()))) {
-            let data = clip::strip_ansi(&run.captured.data());
-            self.last_output = (!data.trim().is_empty()).then_some(data);
-        }
-        self.push_ansi(&output);
         let secs = run.started.elapsed().as_secs_f64();
-        match &ending {
-            Ending::Cancelled => self.push_note(&format!("Cancelled after {:.1}s.", secs)),
+        let (footer, style) = match &ending {
+            Ending::Cancelled => (format!("Cancelled after {:.1}s.", secs), WARN),
             Ending::Finished(Err(_)) => {
-                let style = if color {
-                    Style::new().fg(Color::Red)
-                } else {
-                    Style::new().add_modifier(Modifier::BOLD)
-                };
-                self.push_styled_note(&format!("✗ Failed in {:.1}s.", secs), style);
+                self.failed = true;
+                (
+                    format!("✗ Failed in {:.1}s.", secs),
+                    ERR.add_modifier(Modifier::BOLD),
+                )
             }
-            Ending::Finished(Ok(())) => self.push_note(&format!("Done in {:.1}s.", secs)),
+            Ending::Finished(Ok(())) => (format!("✓ Done in {:.1}s.", secs), OK),
+        };
+        match run.series.filter(repeat_view::has_runs) {
+            // A repeating run keeps its view, with the footer, until the next
+            // key. Ctrl-Y and save take its final snapshot and its series.
+            Some(series) => {
+                self.last_output =
+                    repeat_view::final_snapshot(&series).map(|t| crate::cli::ansi::strip(&t));
+                self.last_series = Some(series.clone());
+                self.repeat_view = Some(RepeatView {
+                    series,
+                    ended: Some(Ended {
+                        text: footer,
+                        style,
+                    }),
+                    pending: run.captured.out(),
+                });
+            }
+            None => {
+                self.keep_copy(&run.captured, &ending);
+                self.push_ansi(&run.captured.out());
+                self.push_styled_note(&footer, style);
+            }
         }
         self.log(Event {
             started: run.started_at,
@@ -1221,6 +1385,59 @@ impl TuiState {
             outcome: outcome.into(),
             error,
         });
+    }
+
+    /// Leaves a finished repeating view: the scrollback gets one copy of
+    /// the final snapshot, then the command's notes, the run summary and
+    /// the footer, so the closing lines stay in view together.
+    fn leave_repeat_view(&mut self, view: RepeatView) {
+        if let Some(snapshot) = repeat_view::final_snapshot(&view.series) {
+            self.push_ansi(&snapshot);
+        }
+        self.push_ansi(&view.pending);
+        self.push_note(&repeat_view::summary(&view.series));
+        if let Some(ended) = view.ended {
+            self.push_styled_note(&ended.text, ended.style);
+        }
+    }
+
+    /// The repeating view to draw now: the running command's, once it has
+    /// a run, or the finished one waiting for a key.
+    fn active_view(&self) -> Option<RepeatView> {
+        if let Some(run) = &self.running {
+            let series = run.series.as_ref().filter(|s| repeat_view::has_runs(s))?;
+            return Some(RepeatView {
+                series: series.clone(),
+                ended: None,
+                pending: String::new(),
+            });
+        }
+        self.repeat_view.clone()
+    }
+
+    /// Keeps the data of a successful run for Ctrl-Y and `save`. The copy
+    /// is the command's own data: no warnings, error text or footer. A
+    /// success with no data, or with only the end of its data kept, clears
+    /// it; a failed or cancelled run keeps the earlier copy.
+    fn keep_copy(&mut self, captured: &Captured, ending: &Ending) {
+        if matches!(ending, Ending::Finished(Ok(()))) {
+            let data = crate::cli::ansi::strip(&captured.data());
+            self.last_output = (!captured.trimmed() && !data.trim().is_empty()).then_some(data);
+        }
+    }
+
+    /// Shows the output of a command that ran outside the TUI (suspend
+    /// mode), and keeps its data as `finish` does for a pane command.
+    /// Call it before [`TuiState::record_suspended`], so the text comes
+    /// above the note.
+    pub fn show_outside(&mut self, copy: &Captured, ending: &Ending) {
+        if copy.trimmed() {
+            self.push_note(
+                "Its output was long: only the end is kept here, and Ctrl-Y and save do not have it.",
+            );
+        }
+        self.keep_copy(copy, ending);
+        self.push_ansi(&copy.out());
     }
 
     /// Records a command that ran outside the TUI (suspend mode), with a
@@ -1234,6 +1451,9 @@ impl TuiState {
         ending: &Ending,
     ) {
         let (outcome, error) = ending.outcome();
+        // As for a pane command: the rule shows the failure until the next
+        // line.
+        self.failed = matches!(ending, Ending::Finished(Err(_)));
         // The note says "failed"; the journal keeps "error".
         let word = if outcome == "error" {
             "failed"
@@ -1319,62 +1539,94 @@ impl TuiState {
             Some(run) => self.liveness_lines(run, color_enabled()),
             None => Vec::new(),
         };
+        // The rule and title show the state by color; the word says it too.
+        let state = self.pane_state();
         let block = Block::new()
             .borders(Borders::TOP | Borders::BOTTOM)
-            .title(format!(" scope v{} ", scope::VERSION));
+            .border_style(state.style())
+            .title(Line::styled(
+                format!(" scope v{} ", scope::VERSION),
+                state.style().add_modifier(Modifier::BOLD),
+            ))
+            .title(Line::styled(format!(" {} ", state.word()), state.style()).right_aligned());
         let inner = block.inner(pane);
         self.pane_width.set(inner.width);
-        // Fit the lines to the inner width here, not with ratatui wrap: a
-        // wrapped row keeps its gutter and a rule is cut. Every line then
-        // is one row, so the newest line sits on the last inner row.
-        let width = inner.width as usize;
         // The matches are found once per draw; the status bar uses them too.
         let view = self.search_view(&live_out);
-        // While a search is open, matched rows get a marker and reverse
-        // video, and `starts` holds the first fitted row of each entry.
-        let in_pane_search = matches!(self.overlay, Some(Overlay::Search(_)));
-        let (rows, starts) = match (&view, in_pane_search) {
-            (Some(v), true) => {
-                let entries: Vec<_> = self.scrollback.iter().chain(&live_out).cloned().collect();
-                marked_rows(&entries, liveness.clone(), &v.matches, v.current, width)
-            }
-            _ => {
-                let mut lines = self.scrollback.clone();
-                lines.extend(live_out.iter().cloned());
-                lines.extend(liveness.iter().cloned());
-                (fit::fit(lines, width), Vec::new())
-            }
-        };
-        let para = Paragraph::new(Text::from(rows));
-        let total = para.line_count(inner.width);
-        let max_top = total.saturating_sub(inner.height as usize);
-        self.last_max_top.set(max_top);
-        self.last_pane_height.set(inner.height as usize);
-        if let (Some(v), true) = (&view, in_pane_search) {
-            let before = self.search_width.replace(width);
-            let height = inner.height as usize;
-            if self.reveal.replace(false) {
-                self.reveal_match(&starts, v.current, height, max_top);
-            } else if before == 0 && self.scroll.get() > 0 {
-                // The search just opened: the gutter changes the wrapping.
-                // Keep the entry at the top of the view where it was.
-                let lines: Vec<_> = self.scrollback.iter().chain(&live_out).cloned().collect();
-                let old = entry_starts(&lines, width);
-                let total =
-                    old.last().copied().unwrap_or(0) + fit::fit(liveness.clone(), width).len();
-                let old_max = total.saturating_sub(height);
-                let old_top = old_max - self.scroll.get().min(old_max);
-                let entry = old.partition_point(|&s| s <= old_top).saturating_sub(1);
-                let top = starts.get(entry).copied().unwrap_or(max_top).min(max_top);
-                self.scroll.set(max_top - top);
-            } else if before != width {
-                self.reveal_match(&starts, v.current, height, max_top);
-            }
+        if let Some(repeating) = self.active_view() {
+            // A repeating run draws its view, not one report per run.
+            let status = if self.running.is_some() {
+                liveness
+            } else {
+                Vec::new()
+            };
+            f.render_widget(block, pane);
+            repeat_view::draw(f, inner, &repeating, status);
+            self.last_max_top.set(0);
+            self.last_pane_height.set(inner.height as usize);
         } else {
-            self.search_width.set(0);
+            // Fit the lines to the inner width here, not with ratatui wrap: a
+            // wrapped row keeps its gutter and a rule is cut. Every line then
+            // is one row, so the newest line sits on the last inner row.
+            let width = inner.width as usize;
+            // While a search is open, matched rows get a marker and reverse
+            // video, and `starts` holds the first fitted row of each entry.
+            let in_pane_search = matches!(self.overlay, Some(Overlay::Search(_)));
+            let (rows, starts) = match (&view, in_pane_search) {
+                (Some(v), true) => {
+                    let entries: Vec<_> =
+                        self.scrollback.iter().chain(&live_out).cloned().collect();
+                    marked_rows(&entries, liveness.clone(), &v.matches, v.current, width)
+                }
+                _ => {
+                    let mut lines = Vec::new();
+                    if self.dropped_lines > 0 {
+                        // Drawn only: the pane says it is not the whole session.
+                        lines.push(Line::styled(
+                            format!(
+                                "… {} older lines dropped (the pane keeps the last {SCROLLBACK_LIMIT})",
+                                self.dropped_lines
+                            ),
+                            SECONDARY,
+                        ));
+                    }
+                    lines.extend(self.scrollback.iter().cloned());
+                    lines.extend(live_out.iter().cloned());
+                    lines.extend(liveness.iter().cloned());
+                    (fit::fit(lines, width), Vec::new())
+                }
+            };
+            let para = Paragraph::new(Text::from(rows));
+            let total = para.line_count(inner.width);
+            let max_top = total.saturating_sub(inner.height as usize);
+            self.last_max_top.set(max_top);
+            self.last_pane_height.set(inner.height as usize);
+            if let (Some(v), true) = (&view, in_pane_search) {
+                let before = self.search_width.replace(width);
+                let height = inner.height as usize;
+                if self.reveal.replace(false) {
+                    self.reveal_match(&starts, v.current, height, max_top);
+                } else if before == 0 && self.scroll.get() > 0 {
+                    // The search just opened: the gutter changes the wrapping.
+                    // Keep the entry at the top of the view where it was.
+                    let lines: Vec<_> = self.scrollback.iter().chain(&live_out).cloned().collect();
+                    let old = entry_starts(&lines, width);
+                    let total =
+                        old.last().copied().unwrap_or(0) + fit::fit(liveness.clone(), width).len();
+                    let old_max = total.saturating_sub(height);
+                    let old_top = old_max - self.scroll.get().min(old_max);
+                    let entry = old.partition_point(|&s| s <= old_top).saturating_sub(1);
+                    let top = starts.get(entry).copied().unwrap_or(max_top).min(max_top);
+                    self.scroll.set(max_top - top);
+                } else if before != width {
+                    self.reveal_match(&starts, v.current, height, max_top);
+                }
+            } else {
+                self.search_width.set(0);
+            }
+            let top = max_top.saturating_sub(self.scroll.get().min(max_top));
+            f.render_widget(para.block(block).scroll((top as u16, 0)), pane);
         }
-        let top = max_top.saturating_sub(self.scroll.get().min(max_top));
-        f.render_widget(para.block(block).scroll((top as u16, 0)), pane);
 
         // Input line with the prompt in the border title.
         let block = Block::bordered().title(self.prompt());
@@ -1416,7 +1668,7 @@ impl TuiState {
                 .enumerate()
                 .map(|(i, c)| {
                     let style = if first + i == m.selected {
-                        Style::new().add_modifier(Modifier::REVERSED)
+                        SELECTED
                     } else {
                         Style::new()
                     };
@@ -1429,19 +1681,14 @@ impl TuiState {
 
         if self.busy_hint {
             f.render_widget(
-                Paragraph::new(Line::styled(
-                    format!(" {}", BUSY_NOTE),
-                    Style::new().fg(Color::Yellow),
-                )),
+                Paragraph::new(Line::styled(format!(" {}", BUSY_NOTE), WARN)),
                 hint_row,
             );
         } else if let Some(h) = super::hint::hint(&self.input) {
             let mut spans = vec![Span::styled(format!(" {}", h.text), SECONDARY)];
             if let Some(next) = h.next {
-                spans.push(Span::styled(
-                    format!("  next: {}", next),
-                    Style::new().fg(Color::Yellow),
-                ));
+                spans.push(Span::styled("  next: ", SECONDARY));
+                spans.push(Span::styled(next, KEY));
             }
             f.render_widget(Paragraph::new(Line::from(spans)), hint_row);
         }
@@ -1455,22 +1702,26 @@ impl TuiState {
                 width,
                 height,
             };
-            let rows = height.saturating_sub(3) as usize;
+            // Borders, the query line and the legend take four rows.
+            let rows = height.saturating_sub(4) as usize;
             let matches = p.matches();
             let first = p.selected.saturating_sub(rows.saturating_sub(1));
             let mut lines = vec![Line::from(format!("> {}", p.query))];
             for (n, &i) in matches.iter().enumerate().skip(first).take(rows) {
                 let it = &p.items[i];
-                let style = if n == p.selected {
-                    Style::new().add_modifier(Modifier::REVERSED)
+                // The marker shows the selection with color off too (#66).
+                let (marker, style) = if n == p.selected {
+                    (PALETTE_MARKER, SELECTED)
                 } else {
-                    Style::new()
+                    ("  ", ACCENT)
                 };
                 lines.push(Line::from(vec![
+                    Span::styled(marker, KEY),
                     Span::styled(format!("{:<28}", it.label), style),
                     Span::styled(format!(" {}", it.description), SECONDARY),
                 ]));
             }
+            lines.push(Line::styled(PALETTE_LEGEND, SECONDARY));
             f.render_widget(ratatui::widgets::Clear, rect);
             f.render_widget(
                 Paragraph::new(lines).block(Block::bordered().title(" Commands (Ctrl-K) ")),
@@ -1510,15 +1761,13 @@ impl TuiState {
     fn liveness_lines(&self, run: &Running, color: bool) -> Vec<Line<'static>> {
         let dim = SECONDARY;
         let elapsed = run.started.elapsed();
-        let mut lines = vec![Line::styled(
-            format!(
-                "{} running {}… {}s",
-                spinner_glyph(elapsed, color),
-                run.input,
-                elapsed.as_secs()
+        let mut lines = vec![Line::from(vec![
+            Span::styled(spinner_glyph(elapsed, color), WARN),
+            Span::styled(
+                format!(" running {}… {}s", run.input, elapsed.as_secs()),
+                dim,
             ),
-            dim,
-        )];
+        ])];
         if let Some(hook) = run.out.progress_hook() {
             // Copy the record out: the lock is not held while drawing.
             let p = hook.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -1537,6 +1786,39 @@ impl TuiState {
         lines
     }
 
+    /// What Esc does now. An open overlay takes Esc first; then a running
+    /// command; idle with no overlay, Esc clears the line. The key handling
+    /// and the status bar both read it.
+    fn esc_action(&self) -> EscAction {
+        match (&self.overlay, &self.running) {
+            (Some(Overlay::Palette(_)), _) => EscAction::ClosePalette,
+            (Some(Overlay::Menu(_)), _) => EscAction::CloseMenu,
+            (Some(Overlay::Search(_)), _) => EscAction::CloseSearch,
+            (Some(Overlay::HistorySearch(_)), _) => EscAction::CloseHistorySearch,
+            (None, Some(_)) => EscAction::Cancel,
+            (None, None) => EscAction::ClearLine,
+        }
+    }
+
+    /// Esc: does what [`Self::esc_action`] says. Closing an overlay puts
+    /// back what it changed (the scroll for a search, the line for a
+    /// history search).
+    fn press_esc(&mut self) -> Action {
+        match self.esc_action() {
+            EscAction::ClosePalette
+            | EscAction::CloseMenu
+            | EscAction::CloseSearch
+            | EscAction::CloseHistorySearch => self.close_overlay(),
+            EscAction::Cancel => return Action::Cancel,
+            EscAction::ClearLine => {
+                let line = std::mem::take(&mut self.input);
+                self.keep_cleared(line);
+                self.cursor = 0;
+            }
+        }
+        Action::None
+    }
+
     /// What the status bar says now, before it is fitted to a width. Tests
     /// use it; a draw calls `status_parts_with`.
     #[cfg(test)]
@@ -1548,40 +1830,56 @@ impl TuiState {
     /// As [`Self::status_parts`], with the search text a draw already built.
     fn status_parts_with(&self, search: Option<String>) -> StatusParts {
         let ctx = &self.ctx;
-        let limit = format!(
-            "limit {}{}{}",
-            ctx.limit,
-            if ctx.include_tokens {
-                " · +tokens"
-            } else {
-                ""
-            },
-            if ctx.include_txs { " · +txs" } else { "" },
-        );
+        let mut limit = labeled("limit", ctx.limit.to_string());
+        for (on, flag) in [(ctx.include_tokens, "+tokens"), (ctx.include_txs, "+txs")] {
+            if on {
+                limit.extend([sep(), Span::styled(flag, ACCENT)]);
+            }
+        }
         // Highest priority first: the fit drops from the end.
         let context = vec![
-            format!("chain {}", ctx.chain),
-            format!("format {:?}", ctx.format),
+            labeled("chain", ctx.chain.clone()),
+            labeled("format", format!("{:?}", ctx.format)),
             limit,
         ];
         // The view is clamped to the content when it draws; say so here too.
         let scrolled = self.scroll.get().min(self.last_max_top.get());
-        // PgDn does nothing while a search is open, so the bar does not say it.
-        let page_down = if search.is_some() { "" } else { " · PgDn" };
-        let scrolled =
-            (scrolled > 0).then(|| format!("scrolled up {} lines{}", scrolled, page_down));
-        let (state, scrolled, command) = match &self.running {
-            Some(run) => (
-                format!(
-                    "running {:.0}s · Esc cancels",
-                    run.started.elapsed().as_secs_f64()
-                ),
-                scrolled,
-                Some(run.input.clone()),
-            ),
+        let scrolled = (scrolled > 0).then(|| {
+            let mut part = vec![Span::styled(
+                format!("scrolled up {} lines", scrolled),
+                ACCENT,
+            )];
+            // PgDn does nothing while a search is open, so the bar does
+            // not say it.
+            if search.is_none() {
+                part.extend([sep(), Span::styled("PgDn", ACCENT)]);
+            }
+            part
+        });
+        let esc = self
+            .esc_action()
+            .hint()
+            .map(|hint| Span::styled(hint, Style::new().add_modifier(Modifier::BOLD)));
+        let (state, scrolled, command) = match (&self.running, esc) {
+            (Some(run), esc) => {
+                let mut state = vec![Span::styled(
+                    format!("running {:.0}s", run.started.elapsed().as_secs_f64()),
+                    WARN,
+                )];
+                state.extend(esc.into_iter().flat_map(|esc| [sep(), esc]));
+                (state, scrolled, Some(run.input.clone()))
+            }
+            // Idle with an overlay open: what Esc does is the state.
+            (None, Some(esc)) => (vec![esc], scrolled, None),
             // Idle: the scroll text is the state.
-            None => (
-                scrolled.unwrap_or_else(|| "help · exit".to_string()),
+            (None, None) => (
+                scrolled.unwrap_or_else(|| {
+                    vec![
+                        Span::styled("help", ACCENT),
+                        sep(),
+                        Span::styled("exit", ACCENT),
+                    ]
+                }),
                 None,
                 None,
             ),
@@ -1590,25 +1888,30 @@ impl TuiState {
             context,
             state,
             scrolled,
-            search,
+            search: search.map(|text| vec![Span::styled(text, ACCENT)]),
             command,
         }
     }
 }
 
-/// The parts of the status bar, in priority order.
+/// Styled text: each span carries the theme style of its part.
+type Spans = Vec<Span<'static>>;
+
+/// The parts of the status bar, in priority order. Each part is built
+/// with its styles, so a change of wording cannot change them.
 struct StatusParts {
-    /// Chain, format and limit. Dropped from the end when the bar is narrow.
-    context: Vec<String>,
-    /// `running Ns · Esc cancels`, `scrolled up N lines · PgDn` or
-    /// `help · exit`. Kept at every width.
-    state: String,
+    /// Chain, format and limit: each a dim label and an accent value.
+    /// Dropped from the end when the bar is narrow.
+    context: Vec<Spans>,
+    /// `running Ns · Esc cancels` (or what Esc does with an open overlay),
+    /// `scrolled up N lines · PgDn` or `help · exit`. Kept at every width.
+    state: Spans,
     /// `scrolled up N lines · PgDn` while a command runs. Idle, it is the
     /// state. Dropped after the context and before the command.
-    scrolled: Option<String>,
+    scrolled: Option<Spans>,
     /// `search: alpha 1/2` or `search: alpha no match` while a search is
     /// open. Kept before the command text; dropped only after it.
-    search: Option<String>,
+    search: Option<Spans>,
     /// The command that runs. The first of these parts to go once the
     /// context is gone.
     command: Option<String>,
@@ -1637,73 +1940,129 @@ const COMMAND_FRAME_COLS: usize = 5;
 /// The shortest cut command worth showing: one column and the `…`.
 const MIN_CUT_COMMAND_COLS: usize = 2;
 
+/// The status bar separator between parts.
+const STATUS_SEP: &str = " · ";
+
+/// The separator span: dim.
+fn sep() -> Span<'static> {
+    Span::styled(STATUS_SEP, SECONDARY)
+}
+
+/// A context part: the label dim, the value in the accent.
+fn labeled(label: &str, value: String) -> Spans {
+    vec![
+        Span::styled(format!("{label} "), SECONDARY),
+        Span::styled(value, ACCENT),
+    ]
+}
+
+/// The width of `spans` in display columns.
+fn spans_cols(spans: &[Span<'static>]) -> usize {
+    spans.iter().map(|sp| cols(&sp.content)).sum()
+}
+
+/// The parts joined in order, each run of `parts` after the first led by
+/// the separator.
+fn joined<'a>(parts: impl IntoIterator<Item = &'a Spans>) -> Spans {
+    let mut out = Spans::new();
+    for (i, part) in parts.into_iter().enumerate() {
+        if i > 0 {
+            out.push(sep());
+        }
+        out.extend(part.iter().cloned());
+    }
+    out
+}
+
+/// Cuts `spans` to `max` columns with a `…`, keeping each span's style.
+fn cut_spans(spans: Spans, max: usize) -> Spans {
+    let full: String = spans.iter().map(|sp| sp.content.as_ref()).collect();
+    let cut = cut_with_ellipsis(&full, max);
+    if cut == full {
+        return spans;
+    }
+    let ellipsis = cut.ends_with(ELLIPSIS);
+    // The cut is a prefix of the text, then the `…`.
+    let mut keep = cut.len() - if ellipsis { ELLIPSIS.len() } else { 0 };
+    let mut out = Spans::new();
+    for sp in spans {
+        if keep == 0 {
+            break;
+        }
+        let n = keep.min(sp.content.len());
+        out.push(Span::styled(sp.content[..n].to_string(), sp.style));
+        keep -= n;
+    }
+    if ellipsis {
+        out.push(Span::styled(ELLIPSIS, SECONDARY));
+    }
+    out
+}
+
 /// Fits the status bar to `width` display columns. Drops limit, then
 /// format, then chain, then the command text. The state text stays at
 /// every width, and a `…` shows that something was cut or dropped.
 fn fit_status(parts: &StatusParts, width: usize) -> Line<'static> {
-    let dim = SECONDARY;
-    let hot = Style::new().fg(Color::Yellow);
-    let bar = |left: String, right: String| {
-        Line::from(vec![Span::styled(left, dim), Span::styled(right, hot)])
-    };
     if width == 0 {
         return Line::default();
     }
-    let command = |c: &str| format!(" · `{}`", c);
-    let note = |text: &Option<String>| {
-        text.as_ref()
-            .map(|s| format!(" · {}", s))
+    let lead = || Span::raw(" ");
+    let more = || Span::styled(format!(" {ELLIPSIS}"), SECONDARY);
+    let command = |c: &str| vec![sep(), Span::styled(format!("`{c}`"), ACCENT)];
+    let note = |part: &Option<Spans>| {
+        part.as_ref()
+            .map(|p| joined([&Spans::new(), p]))
             .unwrap_or_default()
     };
     let scroll_note = note(&parts.scrolled);
     let search_note = note(&parts.search);
+    let fits = |line: &Spans| spans_cols(line) <= width;
     let total = parts.context.len();
     for kept in (0..=total).rev() {
-        let left = if kept == 0 {
-            " ".to_string()
-        } else {
-            format!(" {}  ", parts.context[..kept].join(" · "))
-        };
-        let mut right = format!("{}{}{}", parts.state, scroll_note, search_note);
+        let mut line = vec![lead()];
+        if kept > 0 {
+            line.extend(joined(&parts.context[..kept]));
+            line.push(Span::raw("  "));
+        }
+        line.extend(parts.state.iter().cloned());
+        line.extend(scroll_note.iter().cloned());
+        line.extend(search_note.iter().cloned());
         if let Some(c) = &parts.command {
-            right.push_str(&command(c));
+            line.extend(command(c));
         }
         if kept < total {
-            right.push_str(&format!(" {}", ELLIPSIS));
+            line.push(more());
         }
-        if cols(&left) + cols(&right) <= width {
-            return bar(left, right);
+        if fits(&line) {
+            return Line::from(line);
         }
     }
     // The whole context is gone. Cut the command text to what is left. The
     // search note stays until the command is gone.
-    for note in [format!("{scroll_note}{search_note}"), search_note.clone()] {
-        let used = 1 + cols(&parts.state) + cols(&note) + COMMAND_FRAME_COLS;
+    let both = [scroll_note.clone(), search_note.clone()].concat();
+    for note in [both, search_note.clone()] {
+        let used = 1 + spans_cols(&parts.state) + spans_cols(&note) + COMMAND_FRAME_COLS;
         if let Some(c) = &parts.command
             && width >= used + MIN_CUT_COMMAND_COLS
         {
             let cut = cut_with_ellipsis(c, width - used);
-            return bar(
-                " ".to_string(),
-                format!("{}{}{}", parts.state, note, command(&cut)),
-            );
+            let line = [vec![lead()], parts.state.clone(), note, command(&cut)].concat();
+            return Line::from(line);
         }
     }
     // The command is gone too. A `…` after the state shows it, if it fits.
+    let head = [vec![lead()], parts.state.clone()].concat();
     if parts.search.is_some() {
-        let text = format!(" {}{} {}", parts.state, search_note, ELLIPSIS);
-        if cols(&text) <= width {
-            return bar(String::new(), text);
+        let line = [head.clone(), search_note, vec![more()]].concat();
+        if fits(&line) {
+            return Line::from(line);
         }
     }
-    let text = format!(" {} {}", parts.state, ELLIPSIS);
-    if cols(&text) <= width {
-        return bar(String::new(), text);
+    let line = [head.clone(), vec![more()]].concat();
+    if fits(&line) {
+        return Line::from(line);
     }
-    bar(
-        String::new(),
-        cut_with_ellipsis(&format!(" {}", parts.state), width),
-    )
+    Line::from(cut_spans(head, width))
 }
 
 /// The first fitted row of each entry at `width`, and the row after the
@@ -1736,7 +2095,7 @@ fn marked_rows(
         let mark = if hit { MATCH_MARK } else { MATCH_BLANK };
         row.spans.insert(0, Span::raw(mark));
         if hit {
-            let mut style = Style::new().add_modifier(Modifier::REVERSED);
+            let mut style = MATCH;
             if now {
                 style = style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
             }
@@ -1787,6 +2146,7 @@ mod tests {
     use super::*;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -1962,6 +2322,141 @@ mod tests {
         assert!(s.overlay.is_none());
     }
 
+    /// Starts a pane command and hands it `n` repeat runs, as
+    /// `repeat::run` does in the TUI. Run `fail` is unhealthy.
+    fn repeating(s: &mut TuiState, n: u64, fail: u64) {
+        let inv = Invocation {
+            command: venues_list(),
+            route: Route::Pane,
+            ai: false,
+            argv: vec![],
+        };
+        let out = s.start("market summary USDC --every 1s", &inv);
+        let metrics =
+            scope::market::series::summary_metrics(&scope::market::HealthThresholds::default());
+        for run in 1..=n {
+            out.record_run(
+                &metrics,
+                crate::cli::output::RunRecord {
+                    run,
+                    at: Utc::now(),
+                    sample: scope::market::series::Sample {
+                        values: vec![Some(1.0); metrics.len()],
+                        healthy: run != fail,
+                        failed_checks: vec![format!("spread {run}%")],
+                    },
+                    snapshot: format!("SNAPSHOT {run}\n"),
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn test_a_repeat_run_draws_the_view_not_one_report_per_run() {
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let mut s = state();
+        repeating(&mut s, 3, 2);
+        let text = screen(&s, 120, 36);
+        assert!(text.contains("SNAPSHOT 3"), "{text}");
+        assert!(!text.contains("SNAPSHOT 1"), "{text}");
+        assert!(text.contains("Trends · run 3"), "{text}");
+        assert!(text.contains("run 2: spread 2%"), "{text}");
+        s.finish(Ending::Cancelled);
+    }
+
+    #[test]
+    fn test_the_view_stays_after_esc_and_the_next_key_leaves_it_once() {
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let mut s = state();
+        repeating(&mut s, 3, 0);
+        assert_eq!(s.handle_key(key(KeyCode::Esc)), Action::Cancel);
+        s.finish(Ending::Cancelled);
+        let text = screen(&s, 120, 36);
+        assert!(text.contains("Cancelled after"), "{text}");
+        assert!(text.contains(repeat_view::LEAVE_HINT), "{text}");
+        assert!(!s.scrollback_text().contains("SNAPSHOT"), "not yet pushed");
+        // The next key leaves the view and still types: nothing is lost.
+        assert_eq!(s.handle_key(key(KeyCode::Char('x'))), Action::None);
+        assert_eq!(s.input, "x");
+        let back = s.scrollback_text();
+        assert_eq!(back.matches("SNAPSHOT 3").count(), 1, "{back}");
+        assert!(!back.contains("SNAPSHOT 1"), "{back}");
+        assert!(back.contains("3 runs · none failed"), "{back}");
+        assert!(back.contains("Cancelled after"), "{back}");
+        assert!(!screen(&s, 120, 36).contains("Trends"), "the view is gone");
+    }
+
+    #[test]
+    fn test_copy_and_save_take_the_final_snapshot_and_the_series() {
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let mut s = state();
+        repeating(&mut s, 2, 0);
+        s.finish(Ending::Finished(Ok(())));
+        assert_eq!(s.last_output.as_deref(), Some("SNAPSHOT 2\n"));
+        let csv = s
+            .last_series
+            .as_ref()
+            .and_then(repeat_view::series_csv)
+            .unwrap();
+        assert_eq!(csv.lines().count(), 3, "header and two runs: {csv}");
+    }
+
+    fn alt(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT)
+    }
+
+    #[test]
+    fn test_readline_word_moves_and_kill_to_end() {
+        let mut s = state();
+        type_str(&mut s, "market summary USDC");
+        s.handle_key(alt('b'));
+        assert_eq!(s.cursor, 15, "Alt-B: start of USDC");
+        s.handle_key(alt('b'));
+        assert_eq!(s.cursor, 7, "Alt-B: start of summary");
+        s.handle_key(alt('f'));
+        assert_eq!(s.cursor, 14, "Alt-F: end of summary");
+        s.handle_key(ctrl('b'));
+        assert_eq!(s.cursor, 13, "Ctrl-B: one left");
+        s.handle_key(alt('k'));
+        assert_eq!(s.input, "market summar", "Alt-K: deletes to the end");
+    }
+
+    #[test]
+    fn test_up_brings_back_a_line_that_esc_cleared() {
+        let mut s = state();
+        type_str(&mut s, "market summary USDC --venue binance --every 30s");
+        s.handle_key(key(KeyCode::Esc));
+        assert_eq!(s.input, "");
+        s.handle_key(key(KeyCode::Up));
+        assert_eq!(s.input, "market summary USDC --venue binance --every 30s");
+    }
+
+    #[test]
+    fn test_clear_empties_the_pane_and_reset_resets_the_context() {
+        let mut s = state();
+        s.push_note("old output");
+        s.ctx.limit = 7;
+        s.submit("clear", &Config::default());
+        assert!(!s.scrollback_text().contains("old output"));
+        assert_eq!(s.ctx.limit, 7, "clear leaves the context");
+        s.submit("reset", &Config::default());
+        assert_eq!(s.ctx.limit, SessionContext::default().limit);
+    }
+
+    #[test]
+    fn test_the_pane_says_when_it_dropped_old_lines() {
+        let mut s = state();
+        let big: String = (0..SCROLLBACK_LIMIT + 7)
+            .map(|i| format!("l{i}\n"))
+            .collect();
+        s.push_ansi(&big);
+        assert!(s.dropped_lines > 0);
+        let rows = 200;
+        s.scroll.set(usize::MAX / 2);
+        let text = screen(&s, 100, rows);
+        assert!(text.contains("older lines dropped"), "{text}");
+    }
+
     #[test]
     fn test_ctrl_c_in_palette_still_cancels_a_running_command() {
         // Review I1: the palette must not swallow the cancel key.
@@ -2052,7 +2547,12 @@ mod tests {
         // Ctrl-C on an empty idle line explains how to leave.
         s.handle_key(ctrl('c'));
         assert!(s.scrollback_text().contains("Ctrl-D to leave"));
-        // History keys with no history do nothing.
+        // ↑ brings back the line Esc cleared (#67).
+        s.handle_key(key(KeyCode::Up));
+        assert_eq!(s.input, "bcde");
+        // History keys with no history (and nothing cleared) do nothing.
+        s.cleared = None;
+        s.set_input(String::new());
         s.handle_key(key(KeyCode::Up));
         s.handle_key(key(KeyCode::Down));
         assert_eq!(s.input, "");
@@ -2241,6 +2741,151 @@ mod tests {
         };
         let out = s.start(input, &inv);
         (s, out)
+    }
+
+    /// The status bar text of `s` at a wide width.
+    fn status_text(s: &TuiState) -> String {
+        let line = fit_status(&s.status_parts(), 160);
+        line.spans.iter().map(|sp| sp.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn test_esc_hint_says_what_esc_does_with_each_overlay_open() {
+        // While a command runs, Esc first closes an open overlay. The bar
+        // must name that, not promise a cancel that Esc does not do.
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        type Open = fn(&mut TuiState);
+        let opens: [(&str, Open); 4] = [
+            ("Esc closes palette", |s| {
+                s.handle_key(ctrl('k'));
+            }),
+            ("Esc closes menu", |s| {
+                type_str(s, "ad");
+                s.handle_key(key(KeyCode::Tab));
+            }),
+            ("Esc closes search", |s| {
+                s.handle_key(ctrl('f'));
+            }),
+            ("Esc closes history search", |s| {
+                s.handle_key(ctrl('r'));
+            }),
+        ];
+        for (hint, open) in opens {
+            let mut s = vocab_state();
+            let inv = Invocation {
+                command: venues_list(),
+                route: Route::Pane,
+                ai: false,
+                argv: vec![],
+            };
+            let _out = s.start("venues list", &inv);
+            screen(&s, 80, 24);
+            open(&mut s);
+            assert!(s.overlay.is_some(), "{hint}: no overlay");
+            let bar = status_text(&s);
+            assert!(bar.contains(hint), "{hint}: {bar:?}");
+            assert!(!bar.contains("Esc cancels"), "{hint}: {bar:?}");
+            // The bar tells the truth: Esc closes the overlay and the
+            // command keeps running.
+            assert_eq!(s.handle_key(key(KeyCode::Esc)), Action::None, "{hint}");
+            assert!(s.overlay.is_none(), "{hint}");
+            assert!(status_text(&s).contains("Esc cancels"), "{hint}");
+        }
+    }
+
+    #[test]
+    fn test_idle_esc_hint_shows_only_while_an_overlay_is_open() {
+        let mut s = state();
+        assert!(!status_text(&s).contains("Esc"), "{}", status_text(&s));
+        screen(&s, 80, 24);
+        s.handle_key(ctrl('k'));
+        assert!(status_text(&s).contains("Esc closes palette"));
+        s.handle_key(key(KeyCode::Esc));
+        assert!(status_text(&s).contains("help"), "{}", status_text(&s));
+    }
+
+    #[test]
+    fn test_trimmed_outside_output_is_not_kept_for_copy_or_save() {
+        // Only the end of a long outside run is kept. Ctrl-Y or save must
+        // not hand out that part as if it were the whole output.
+        let mut s = state();
+        let (o, done) = Output::capture_merged();
+        crate::outln!(o, "earlier data").unwrap();
+        s.show_outside(&done, &Ending::Finished(Ok(())));
+        assert_eq!(s.last_output.as_deref(), Some("earlier data\n"));
+        let (terminal, _screen) = Output::capture();
+        let (o, long) = terminal.teed(64);
+        for i in 0..100 {
+            crate::outln!(o, "row {i}").unwrap();
+        }
+        assert!(long.trimmed());
+        s.show_outside(&long, &Ending::Finished(Ok(())));
+        assert_eq!(s.last_output, None, "neither the part nor the old copy");
+        assert!(
+            s.scrollback_text()
+                .contains("only the end is kept here, and Ctrl-Y and save do not have it."),
+            "{}",
+            s.scrollback_text()
+        );
+        assert!(matches!(s.handle_key(ctrl('y')), Action::None));
+        assert!(s.scrollback_text().contains("nothing to copy yet"));
+    }
+
+    #[test]
+    fn test_an_outside_run_that_prompted_keeps_only_its_data_for_copy() {
+        // `crawl USDC` asks to pick a token and to save it. Ctrl-Y and save
+        // after it must get the report, not the list and the questions.
+        let mut s = state();
+        let (terminal, _screen) = Output::capture();
+        let (o, copy) = terminal.teed(1 << 20);
+        let pick = crate::cli::prompt::pick(
+            &mut std::io::Cursor::new(b"1\n".to_vec()),
+            &o,
+            "1  USDC\n",
+            "token",
+            1,
+        );
+        assert_eq!(pick.unwrap(), 0);
+        crate::cli::prompt::ask(
+            &mut std::io::Cursor::new(b"n\n".to_vec()),
+            &o,
+            "Save this token for future use? [y/N]: ",
+        )
+        .unwrap();
+        crate::outln!(o, "report").unwrap();
+        s.show_outside(&copy, &Ending::Finished(Ok(())));
+        assert_eq!(s.last_output.as_deref(), Some("report\n"));
+        let shown = s.scrollback_text();
+        assert!(
+            shown.contains("Select token (1-1)"),
+            "the user still sees it"
+        );
+    }
+
+    #[test]
+    fn test_a_failed_outside_command_sets_the_failed_pane_state() {
+        // Same as a pane command: the rule says the last command failed.
+        let mut s = state();
+        let err = Ending::Finished(Err(scope::error::ScopeError::Chain("boom".into())));
+        s.record_suspended(
+            "crawl USDC",
+            &[],
+            std::time::Duration::from_secs(1),
+            String::new(),
+            &err,
+        );
+        assert_eq!(s.pane_state(), PaneState::Failed);
+        for ok in [Ending::Finished(Ok(())), Ending::Cancelled] {
+            s.submit("crawl USDC", &Config::default());
+            s.record_suspended(
+                "crawl USDC",
+                &[],
+                std::time::Duration::from_secs(1),
+                String::new(),
+                &ok,
+            );
+            assert_eq!(s.pane_state(), PaneState::Idle);
+        }
     }
 
     #[test]
@@ -2460,13 +3105,18 @@ mod tests {
         assert!(matches!(s.handle_key(key(KeyCode::Enter)), Action::None));
         assert!(s.overlay.is_none(), "the overlay is closed");
         assert_eq!(s.input, "dra", "the palette did not fill the input");
-        // Another key closes an open overlay and does not edit.
+        // Another key closes an overlay opened before the shrink, and
+        // does not edit.
+        screen(&s, 80, 24);
         s.handle_key(ctrl('k'));
+        screen(&s, 30, 8);
         s.handle_key(key(KeyCode::Char('x')));
         assert!(s.overlay.is_none());
         assert_eq!(s.input, "dra");
         // Esc closes it too.
+        screen(&s, 80, 24);
         s.handle_key(ctrl('k'));
+        screen(&s, 30, 8);
         s.handle_key(key(KeyCode::Esc));
         assert!(s.overlay.is_none());
         assert_eq!(s.input, "dra");
@@ -2505,18 +3155,19 @@ mod tests {
     fn test_fit_status_never_panics_and_never_exceeds_the_width() {
         // Width math runs on every redraw: width 0 and tiny widths must
         // give a line, and no line may be wider than the bar.
+        let text = |t: &str| vec![Span::styled(t.to_string(), ACCENT)];
         let mut parts = StatusParts {
             context: vec![
-                "chain auto".into(),
-                "format Table".into(),
-                "limit 100".into(),
+                labeled("chain", "auto".into()),
+                labeled("format", "Table".into()),
+                labeled("limit", "100".into()),
             ],
-            state: "running 12s · Esc cancels".into(),
-            scrolled: Some("scrolled up 7 lines · PgDn".into()),
+            state: text("running 12s · Esc cancels"),
+            scrolled: Some(text("scrolled up 7 lines · PgDn")),
             search: None,
             command: Some("market summary ✓✓ --every 2s".into()),
         };
-        for search in [None, Some("search: alpha ✓ 1/2".to_string())] {
+        for search in [None, Some(text("search: alpha ✓ 1/2"))] {
             parts.search = search;
             for w in 0..=130 {
                 let line = fit_status(&parts, w);
@@ -2545,7 +3196,6 @@ mod tests {
             run: 2,
             total: Some(4),
             next_at: Some(Instant::now() + Duration::from_secs(3)),
-            banner: None,
         };
         let text = screen(&s, 80, 12);
         assert!(text.contains("run 2 of 4 · next in 3s"), "{text}");
@@ -2595,7 +3245,6 @@ mod tests {
             run: 2,
             total: Some(4),
             next_at: Some(Instant::now() + Duration::from_secs(3)),
-            banner: Some("Running market summary every 2s".into()),
         };
         let drawn = screen(&s, 80, 12);
         assert!(drawn.contains("run 2 of 4"), "{drawn}");
@@ -3241,7 +3890,7 @@ mod tests {
         s.push_note("hello");
         let text = screen(&s, 40, 12);
         let row = text.lines().find(|l| l.contains("hello")).unwrap();
-        assert!(row.starts_with("hello"), "{row:?}");
+        assert!(row.starts_with("ℹ hello"), "{row:?}");
     }
 
     fn last_line(s: &TuiState) -> &Line<'static> {
@@ -3254,11 +3903,12 @@ mod tests {
         run_pane(&mut s, "x\n", Ending::Finished(Ok(())));
         let text = last_line(&s).to_string();
         assert!(
-            regex::Regex::new(r"^Done in \d+\.\ds\.$")
+            regex::Regex::new(r"^✓ Done in \d+\.\ds\.$")
                 .unwrap()
                 .is_match(&text),
             "{text}"
         );
+        assert_eq!(last_line(&s).style, OK);
     }
 
     #[test]
@@ -3266,7 +3916,7 @@ mod tests {
         let mut s = state();
         let err = Ending::Finished(Err(scope::error::ScopeError::Chain("boom".into())));
         s.start("x", &pane_invocation());
-        s.finish_with(err, true);
+        s.finish_with(err);
         let line = last_line(&s);
         let text = line.to_string();
         assert!(
@@ -3275,20 +3925,7 @@ mod tests {
                 .is_match(&text),
             "{text}"
         );
-        assert_eq!(line.style.fg, Some(Color::Red));
-    }
-
-    #[test]
-    fn test_failed_footer_keeps_glyph_and_words_without_color() {
-        let mut s = state();
-        s.start("x", &pane_invocation());
-        s.finish_with(
-            Ending::Finished(Err(scope::error::ScopeError::Chain("boom".into()))),
-            false,
-        );
-        let line = last_line(&s);
-        assert!(line.to_string().starts_with("✗ Failed in "));
-        assert_eq!(line.style.fg, None, "no color when color is off");
+        assert_eq!(line.style, ERR.add_modifier(Modifier::BOLD));
     }
 
     #[test]
@@ -3302,6 +3939,7 @@ mod tests {
                 .is_match(&text),
             "{text}"
         );
+        assert_eq!(last_line(&s).style, WARN);
     }
 
     fn pane_invocation() -> Invocation {
@@ -3629,9 +4267,10 @@ mod tests {
             wide.contains("search: alpha 1/5") && wide.contains("market summary"),
             "{wide}"
         );
-        for w in 26..140 {
+        // Below 32 columns the state itself is cut.
+        for w in 32..140 {
             let row = status_row(&s, w);
-            assert!(row.contains("Esc cancels"), "{w}: {row:?}");
+            assert!(row.contains("Esc closes search"), "{w}: {row:?}");
             if row.contains("market") {
                 assert!(
                     row.contains("search:"),
@@ -3868,5 +4507,318 @@ mod tests {
         s.handle_key(key(KeyCode::Esc));
         open_search(&mut s, "31m");
         assert!(status_row(&s, 80).contains("no match"));
+    }
+
+    // ---- Color theme: the mapping from state to style ----
+
+    fn buffer(s: &TuiState, w: u16, h: u16) -> ratatui::buffer::Buffer {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| s.render(f)).unwrap();
+        term.backend().buffer().clone()
+    }
+
+    fn row_text(buf: &ratatui::buffer::Buffer, y: u16) -> String {
+        (0..buf.area.width)
+            .map(|x| buf[(x, y)].symbol().to_string())
+            .collect()
+    }
+
+    /// The foreground of a rule cell in the top row of the pane.
+    fn rule_fg(buf: &ratatui::buffer::Buffer) -> Color {
+        let x = (0..buf.area.width)
+            .find(|&x| buf[(x, 0)].symbol() == "─")
+            .expect("a rule cell");
+        buf[(x, 0)].fg
+    }
+
+    fn failed_state() -> TuiState {
+        let mut s = state();
+        s.start("x", &pane_invocation());
+        s.finish(Ending::Finished(Err(scope::error::ScopeError::Chain(
+            "boom".into(),
+        ))));
+        s
+    }
+
+    #[test]
+    fn test_pane_rule_is_accent_idle_warn_running_and_err_after_a_failure() {
+        // The rule color is the one signal of state a glance can read.
+        let idle = state();
+        assert_eq!(rule_fg(&buffer(&idle, 60, 14)), Color::Cyan);
+        let (running, _out) = running_state("venues list");
+        assert_eq!(rule_fg(&buffer(&running, 60, 14)), Color::Yellow);
+        let failed = failed_state();
+        assert_eq!(rule_fg(&buffer(&failed, 60, 14)), Color::Red);
+    }
+
+    #[test]
+    fn test_failed_rule_lasts_until_the_next_command_starts() {
+        let mut s = failed_state();
+        assert_eq!(s.pane_state(), PaneState::Failed);
+        s.start("venues list", &pane_invocation());
+        assert_eq!(s.pane_state(), PaneState::Running);
+        s.finish(Ending::Finished(Ok(())));
+        assert_eq!(s.pane_state(), PaneState::Idle);
+    }
+
+    #[test]
+    fn test_cancelled_run_leaves_the_rule_idle() {
+        let mut s = state();
+        run_pane(&mut s, "x\n", Ending::Cancelled);
+        assert_eq!(s.pane_state(), PaneState::Idle);
+    }
+
+    #[test]
+    fn test_state_word_is_at_the_right_end_of_the_top_rule_and_title_stays_left() {
+        let buf = buffer(&state(), 60, 14);
+        let top = row_text(&buf, 0);
+        let title = format!(" scope v{} ", scope::VERSION);
+        assert!(top.starts_with(&title), "{top:?}");
+        assert!(top.trim_end().ends_with(" idle"), "{top:?}");
+        assert!(buf[(1, 0)].modifier.contains(Modifier::BOLD), "title bold");
+        assert_eq!(buf[(1, 0)].fg, Color::Cyan);
+    }
+
+    #[test]
+    fn test_prompt_spans_scope_accent_chain_key_rest_default() {
+        let mut s = state();
+        s.ctx.chain = "base".into();
+        let prompt = s.prompt();
+        assert_eq!(prompt.to_string(), "scope:base> ");
+        assert_eq!(prompt.spans[0].style, ACCENT);
+        assert_eq!(prompt.spans[1].style, KEY);
+        assert_eq!(prompt.spans[2].style, Style::new());
+        s.push_echo("venues list");
+        let echo = last_line(&s);
+        assert_eq!(echo.spans[0].style, ACCENT);
+        assert_eq!(echo.spans[1].style, KEY);
+        assert_eq!(echo.spans[3].content, "venues list");
+        assert_eq!(echo.spans[3].style, Style::new());
+    }
+
+    #[test]
+    fn test_notes_carry_an_info_glyph_and_dim_text() {
+        let mut s = state();
+        s.push_note("hello");
+        let note = last_line(&s);
+        assert_eq!(note.to_string(), "ℹ hello");
+        assert_eq!(note.spans[0].style, INFO);
+        assert_eq!(note.spans[1].style, SECONDARY);
+    }
+
+    #[test]
+    fn test_selected_palette_row_is_reversed_cyan() {
+        let mut s = state();
+        s.handle_key(ctrl_k());
+        let buf = buffer(&s, 100, 24);
+        let selected = buf.content.iter().any(|c| {
+            c.fg == Color::Cyan && c.modifier.contains(Modifier::REVERSED) && c.symbol() != " "
+        });
+        assert!(selected, "a reversed cyan palette row");
+        // The rows that are not selected show their names in the accent.
+        let names = buf
+            .content
+            .iter()
+            .any(|c| c.fg == Color::Cyan && !c.modifier.contains(Modifier::REVERSED));
+        assert!(names);
+    }
+
+    #[test]
+    fn test_search_match_is_reversed_yellow() {
+        let mut s = alpha_state();
+        open_search(&mut s, "alpha");
+        let buf = buffer(&s, 80, 20);
+        let hits = buf
+            .content
+            .iter()
+            .filter(|c| c.fg == Color::Yellow && c.modifier.contains(Modifier::REVERSED))
+            .count();
+        assert!(hits >= 2 * "alpha".len(), "{hits} matched cells");
+    }
+
+    #[test]
+    fn test_status_values_are_accent_and_labels_secondary() {
+        let line = fit_status(&state().status_parts(), 100);
+        let find = |text: &str| {
+            line.spans
+                .iter()
+                .find(|sp| sp.content.contains(text))
+                .unwrap_or_else(|| panic!("no span with {text:?}"))
+        };
+        assert_eq!(find("chain").style, SECONDARY);
+        assert_eq!(find("auto").style, ACCENT);
+        assert_eq!(find("format").style, SECONDARY);
+        assert_eq!(find("help").style, ACCENT);
+    }
+
+    #[test]
+    fn test_running_status_is_warn_and_esc_cancels_is_bold() {
+        let (s, _out) = running_state("venues list");
+        let line = fit_status(&s.status_parts(), 120);
+        let find = |text: &str| {
+            line.spans
+                .iter()
+                .find(|sp| sp.content.contains(text))
+                .unwrap_or_else(|| panic!("no span with {text:?}"))
+        };
+        assert_eq!(find("running").style, WARN);
+        assert_eq!(
+            find("Esc cancels").style,
+            Style::new().add_modifier(Modifier::BOLD)
+        );
+        assert_eq!(find("`venues list`").style, ACCENT);
+    }
+
+    #[test]
+    fn test_hint_next_argument_is_a_key_and_busy_note_is_warn() {
+        let mut s = state();
+        type_str(&mut s, "address");
+        let buf = buffer(&s, 100, 14);
+        let hint_row = 14 - 2;
+        let next = (0..100u16)
+            .rfind(|&x| buf[(x, hint_row)].symbol() == "<")
+            .unwrap();
+        assert_eq!(buf[(next, hint_row)].fg, Color::Magenta);
+        assert!(buf[(next, hint_row)].modifier.contains(Modifier::BOLD));
+        let (mut busy, _out) = running_state("venues list");
+        busy.busy_hint = true;
+        let buf = buffer(&busy, 100, 14);
+        let x = (0..100u16)
+            .find(|&x| buf[(x, hint_row)].symbol() == "A")
+            .unwrap();
+        assert_eq!(buf[(x, hint_row)].fg, Color::Yellow);
+    }
+
+    #[test]
+    fn test_with_color_off_every_state_still_differs_by_text() {
+        // `finish_frame` strips color in the real loop; strip it the same way.
+        let strip = |s: &TuiState| {
+            let mut buf = buffer(s, 60, 14);
+            crate::cli::plain::strip_color(&mut buf);
+            assert!(buf.content.iter().all(|c| c.fg == Color::Reset));
+            buf
+        };
+        let idle = row_text(&strip(&state()), 0);
+        let (running, _out) = running_state("venues list");
+        let running = row_text(&strip(&running), 0);
+        let failed = row_text(&strip(&failed_state()), 0);
+        assert!(idle.trim_end().ends_with(" idle"), "{idle:?}");
+        assert!(running.trim_end().ends_with(" running"), "{running:?}");
+        assert!(failed.trim_end().ends_with(" failed"), "{failed:?}");
+        // The footers keep their glyphs and words.
+        let mut s = state();
+        run_pane(&mut s, "x\n", Ending::Finished(Ok(())));
+        assert!(last_line(&s).to_string().starts_with("✓ Done in "));
+        let failed = failed_state();
+        assert!(last_line(&failed).to_string().starts_with("✗ Failed in "));
+        // Bold is a modifier, so the failed footer stays bold without color.
+        assert!(
+            last_line(&failed)
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
+        let buf = strip(&failed);
+        assert!(
+            buf.content
+                .iter()
+                .any(|c| c.symbol() == "✗" && c.modifier.contains(Modifier::BOLD))
+        );
+    }
+
+    #[test]
+    fn test_ctrl_k_and_tab_open_no_overlay_while_the_terminal_is_too_small() {
+        // A hidden overlay would take the next keys unseen.
+        let mut s = state();
+        type_str(&mut s, "m");
+        screen(&s, 80, 24);
+        s.handle_key(key(KeyCode::Tab));
+        assert!(
+            matches!(s.overlay, Some(Overlay::Menu(_))),
+            "Tab offers a menu at a normal size"
+        );
+        s.handle_key(key(KeyCode::Esc));
+        screen(&s, 30, 8);
+        s.handle_key(key(KeyCode::Tab));
+        assert!(s.overlay.is_none());
+        assert_eq!(s.input, "m", "Tab did not complete unseen");
+        s.handle_key(ctrl('k'));
+        assert!(s.overlay.is_none());
+    }
+
+    #[test]
+    fn test_status_styles_come_from_the_parts_not_from_their_text() {
+        // A search for text that looks like a state word keeps the style
+        // of the search note: styles must not depend on the wording.
+        let mut s = alpha_state();
+        s.push_ansi("x · running\n");
+        open_search(&mut s, "x · running");
+        let line = fit_status(&s.status_parts(), 120);
+        let at = |text: &str| {
+            line.spans
+                .iter()
+                .position(|sp| sp.content.contains(text))
+                .unwrap_or_else(|| panic!("no {text:?} in {line:?}"))
+        };
+        for sp in &line.spans[at("search:")..=at("1/1")] {
+            assert_eq!(sp.style, ACCENT, "{sp:?} in {line:?}");
+        }
+        // Each part keeps its role: label dim, value accent, the
+        // separator dim.
+        let (run, _out) = running_state("venues list");
+        let line = fit_status(&run.status_parts(), 120);
+        let style_of = |text: &str| {
+            line.spans
+                .iter()
+                .find(|sp| sp.content == text)
+                .unwrap_or_else(|| panic!("no span {text:?} in {line:?}"))
+                .style
+        };
+        assert_eq!(
+            style_of("Esc cancels"),
+            Style::new().add_modifier(Modifier::BOLD)
+        );
+        assert_eq!(style_of(STATUS_SEP), SECONDARY);
+        assert_eq!(style_of("`venues list`"), ACCENT);
+    }
+
+    #[test]
+    fn test_help_shows_key_names_in_the_key_style() {
+        let mut s = state();
+        assert!(matches!(s.submit("help", &Config::default()), Plan::Done));
+        let span = s
+            .scrollback
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .find(|sp| sp.content == "Ctrl-K")
+            .expect("help names Ctrl-K");
+        assert_eq!(span.style.fg, Some(Color::Magenta));
+        assert!(span.style.add_modifier.contains(Modifier::BOLD));
+        // Each help span follows an ANSI reset, so it is the theme style
+        // over a reset style.
+        assert_eq!(span.style, Style::reset().patch(KEY));
+        let what = s
+            .scrollback
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .find(|sp| sp.content == "palette")
+            .expect("help says what Ctrl-K does");
+        assert_eq!(what.style, Style::reset().patch(SECONDARY));
+    }
+
+    #[test]
+    fn test_any_accepted_line_clears_the_failed_state() {
+        // The red rule says the last thing the user did failed. A builtin
+        // or an outside command after the failure is the last thing now.
+        for line in ["ctx", "format json", "setup"] {
+            let mut s = failed_state();
+            assert_eq!(s.pane_state(), PaneState::Failed);
+            s.submit(line, &Config::default());
+            assert_eq!(s.pane_state(), PaneState::Idle, "{line}");
+        }
+        // An empty line is not a new action.
+        let mut s = failed_state();
+        s.submit("  ", &Config::default());
+        assert_eq!(s.pane_state(), PaneState::Failed);
     }
 }

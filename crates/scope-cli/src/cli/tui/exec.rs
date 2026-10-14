@@ -30,6 +30,29 @@ pub enum Route {
     Refuse(&'static str),
 }
 
+/// The commands the TUI does not run, by name, and what to do instead.
+/// `route` and the TUI help both read this list (#66).
+pub(crate) const TUI_REFUSED: &[(&str, &str)] = &[
+    ("interactive", "you are already in the TUI"),
+    (
+        "web",
+        "the web server runs in the foreground; start it from a shell with `scope web`",
+    ),
+    (
+        "completions",
+        "it prints a script for your shell; run `scope completions <shell>` in a shell",
+    ),
+];
+
+/// The refusal reason for the command `name`, from [`TUI_REFUSED`].
+fn refused(name: &str) -> Route {
+    let reason = TUI_REFUSED
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map_or("it does not run in the TUI", |(_, why)| why);
+    Route::Refuse(reason)
+}
+
 /// Decides where a command runs.
 ///
 /// The match has no wildcard arm on purpose: a new CLI command does not
@@ -47,8 +70,7 @@ pub fn route(command: &Commands) -> Route {
         | Commands::Compliance(_)
         | Commands::AddressBook(_)
         | Commands::Export(_)
-        | Commands::Report(_)
-        | Commands::Completions(_) => Route::Pane,
+        | Commands::Report(_) => Route::Pane,
         // A name or symbol search asks the user to pick a token and offers
         // to save an alias. An address or --yes never prompts.
         Commands::Crawl(args) => {
@@ -68,10 +90,9 @@ pub fn route(command: &Commands) -> Route {
         }
         // The live dashboard draws its own screen (until phase 6 of #47).
         Commands::Monitor(_) => Route::Suspend,
-        Commands::Interactive(_) => Route::Refuse("you are already in the TUI"),
-        Commands::Web(_) => Route::Refuse(
-            "the web server runs in the foreground; start it from a shell with `scope web`",
-        ),
+        Commands::Interactive(_) => refused("interactive"),
+        Commands::Web(_) => refused("web"),
+        Commands::Completions(_) => refused("completions"),
     }
 }
 
@@ -124,20 +145,19 @@ pub fn plan(
     };
     let rest: Vec<&str> = words[1..].iter().map(String::as_str).collect();
 
-    match first.to_lowercase().as_str() {
-        "exit" | "quit" | "q" | ".exit" | ".quit" => return Ok(Plan::Exit),
+    match session_command_name(first).as_str() {
+        "exit" => return Ok(Plan::Exit),
         // Hidden debug command for the manual crash-log check. It is not in
         // SESSION_COMMANDS, so help, completion and the palette skip it.
         #[cfg(debug_assertions)]
         "__panic" => panic!("__panic: manual crash-log check"),
-        "help" | "?" | ".help" => {
+        "help" => {
             if rest.is_empty() {
                 write_help(out)?;
                 return Ok(Plan::Done);
             }
             // A session command has no clap help: show its own line.
-            let typed = words[1].to_lowercase();
-            let name = session_command_name(&typed);
+            let name = session_command_name(&words[1]);
             if let Some((_, usage, what)) = SESSION_COMMANDS.iter().find(|(n, _, _)| *n == name) {
                 outln!(out, "  {:<34} {}", usage, what)?;
                 return Ok(Plan::Done);
@@ -148,11 +168,11 @@ pub fn plan(
             words.push("--help".to_string());
             return parse_cli(words, ctx, config, out);
         }
-        "ctx" | "context" | ".ctx" | ".context" => {
+        "ctx" => {
             out!(out, "{}", ctx)?;
             return Ok(Plan::Done);
         }
-        "clear" | "reset" | ".clear" | ".reset" => {
+        "reset" => {
             *ctx = SessionContext::default();
             outln!(out, "Context reset to defaults.")?;
             return Ok(Plan::Done);
@@ -165,12 +185,12 @@ pub fn plan(
             set_format(ctx, rest.first().copied(), out)?;
             return Ok(Plan::Done);
         }
-        "+tokens" | "showtokens" => {
+        "+tokens" => {
             ctx.include_tokens = !ctx.include_tokens;
             outln!(out, "Include tokens: {}", on_off(ctx.include_tokens))?;
             return Ok(Plan::Done);
         }
-        "+txs" | "showtxs" | "txs" => {
+        "+txs" => {
             ctx.include_txs = !ctx.include_txs;
             outln!(out, "Include transactions: {}", on_off(ctx.include_txs))?;
             return Ok(Plan::Done);
@@ -189,7 +209,7 @@ pub fn plan(
             set_limit(ctx, rest.first().copied(), out)?;
             return Ok(Plan::Done);
         }
-        "tokens" | "aliases" => {
+        "tokens" => {
             tokens_command(&rest, &mut TokenAliases::load(), &TokenAliases::save, out)?;
             return Ok(Plan::Done);
         }
@@ -434,11 +454,6 @@ fn on_off(b: bool) -> &'static str {
     if b { "on" } else { "off" }
 }
 
-/// Chains the `chain` session command accepts.
-pub(crate) const CHAINS: &[&str] = &[
-    "ethereum", "polygon", "arbitrum", "optimism", "base", "bsc", "aegis", "solana", "tron",
-];
-
 fn set_chain(ctx: &mut SessionContext, arg: Option<&str>, out: &Output) -> io::Result<()> {
     match arg.map(str::to_lowercase) {
         None if ctx.is_auto_chain() => outln!(out, "Current chain: auto (inferred from input)"),
@@ -447,7 +462,7 @@ fn set_chain(ctx: &mut SessionContext, arg: Option<&str>, out: &Output) -> io::R
             ctx.chain = "auto".into();
             outln!(out, "Chain set to auto — will infer from each input")
         }
-        Some(c) if CHAINS.contains(&c.as_str()) => {
+        Some(c) if scope::chains::registry::client_chain_ids().contains(&c.as_str()) => {
             outln!(out, "Chain pinned to: {}", c)?;
             ctx.chain = c;
             Ok(())
@@ -456,7 +471,7 @@ fn set_chain(ctx: &mut SessionContext, arg: Option<&str>, out: &Output) -> io::R
             out,
             "Unknown chain: {}. Valid chains: auto, {}",
             c,
-            CHAINS.join(", ")
+            scope::chains::registry::client_chain_list()
         ),
     }
 }
@@ -638,30 +653,64 @@ pub(crate) const SESSION_COMMANDS: &[(&str, &str, &str)] = &[
         "Write the last output to a file",
     ),
     ("ctx", "ctx", "Show the session context"),
-    ("clear", "clear", "Reset the session context"),
+    ("clear", "clear", "Clear the output pane"),
+    ("reset", "reset", "Reset the session context"),
     ("help", "help", "Show this help"),
     ("exit", "exit", "Leave the TUI (also Ctrl-D)"),
 ];
 
-/// The `SESSION_COMMANDS` name for a typed session command or its alias.
-fn session_command_name(word: &str) -> &str {
-    match word {
-        "quit" | "q" | ".exit" | ".quit" => "exit",
-        "context" | ".ctx" | ".context" => "ctx",
-        "reset" | ".clear" | ".reset" => "clear",
-        "?" | ".help" => "help",
-        "showtokens" => "+tokens",
-        "showtxs" | "txs" => "+txs",
-        "aliases" => "tokens",
-        other => other,
-    }
+/// Other words for the session commands: `(alias, SESSION_COMMANDS name)`.
+/// The one list: dispatch, help and the exit check all read it.
+const SESSION_ALIASES: &[(&str, &str)] = &[
+    ("quit", "exit"),
+    ("q", "exit"),
+    (".exit", "exit"),
+    (".quit", "exit"),
+    ("context", "ctx"),
+    (".ctx", "ctx"),
+    (".context", "ctx"),
+    (".clear", "clear"),
+    (".reset", "reset"),
+    ("?", "help"),
+    (".help", "help"),
+    ("showtokens", "+tokens"),
+    ("showtxs", "+txs"),
+    ("txs", "+txs"),
+    ("aliases", "tokens"),
+];
+
+/// The `SESSION_COMMANDS` name for a typed word (any case), or the word
+/// itself when it is not an alias.
+pub(crate) fn session_command_name(word: &str) -> String {
+    let word = word.to_lowercase();
+    SESSION_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == word)
+        .map_or(word, |(_, name)| (*name).to_string())
 }
 
 /// Writes the TUI help: the session commands, then every CLI command.
 fn write_help(out: &Output) -> io::Result<()> {
     outln!(out, "Session commands:")?;
-    for (_, usage, what) in SESSION_COMMANDS {
-        outln!(out, "  {:<34} {}", usage, what)?;
+    for (name, usage, what) in SESSION_COMMANDS {
+        // Name the other words for the command too (#66: `quit`, `q`).
+        let aliases: Vec<&str> = SESSION_ALIASES
+            .iter()
+            .filter(|(_, n)| n == name)
+            .map(|(alias, _)| *alias)
+            .filter(|alias| !alias.starts_with('.'))
+            .collect();
+        if aliases.is_empty() {
+            outln!(out, "  {:<34} {}", usage, what)?;
+        } else {
+            outln!(
+                out,
+                "  {:<34} {} (also: {})",
+                usage,
+                what,
+                aliases.join(", ")
+            )?;
+        }
     }
     outln!(out)?;
     outln!(
@@ -669,24 +718,59 @@ fn write_help(out: &Output) -> io::Result<()> {
         "CLI commands (same flags as on the command line; add --help for details):"
     )?;
     for sub in Cli::command().get_subcommands() {
-        if sub.is_hide_set() {
+        let refused = TUI_REFUSED.iter().any(|(n, _)| *n == sub.get_name());
+        if sub.is_hide_set() || refused {
             continue;
         }
         let about = sub.get_about().map(|a| a.to_string()).unwrap_or_default();
         outln!(out, "  {:<34} {}", sub.get_name(), about)?;
     }
     outln!(out)?;
+    // Key names in the key color, what they do dim. The ANSI becomes styles
+    // in the pane; the copy and the log strip it.
+    let painter = scope::display::theme::Painter::new(true);
+    let key = |k: &str| painter.paint(scope::display::theme::Role::Key, k);
+    let what = |w: &str| painter.paint(scope::display::theme::Role::Secondary, w);
     outln!(
         out,
-        "Keys: Enter run · Tab complete · Ctrl-K palette · ↑/↓ history · PgUp/PgDn scroll · Esc or Ctrl-C cancel"
+        "Keys: {} {} · {} {} · {} {} · {} {} · {} {} · {} {}",
+        key("Enter"),
+        what("run"),
+        key("Tab"),
+        what("complete"),
+        key("Ctrl-K"),
+        what("palette"),
+        key("↑/↓"),
+        what("history"),
+        key("PgUp/PgDn"),
+        what("scroll"),
+        format_args!("{} or {}", key("Esc"), key("Ctrl-C")),
+        what("cancel"),
     )?;
     outln!(
         out,
-        "      Ctrl-Y copy last output · Ctrl-F or / search · Ctrl-R history search · Shift-drag selects text"
+        "      {} {} · {} or {} {} · {} {} · {} {}",
+        key("Ctrl-Y"),
+        what("copy last output"),
+        key("Ctrl-F"),
+        key("/"),
+        what("search"),
+        key("Ctrl-R"),
+        what("history search"),
+        key("Shift-drag"),
+        what("selects text"),
     )?;
     outln!(
         out,
-        "      Copy needs a terminal that allows OSC 52; save <file> works everywhere"
+        "      {}",
+        what("Copy needs a terminal that allows OSC 52; save <file> works everywhere")
+    )?;
+    outln!(
+        out,
+        "      {}",
+        what(
+            "A command with --every shows one live view: the latest report and its trends. After it ends, any key leaves the view; save <file>.csv writes the series."
+        )
     )
 }
 
@@ -719,9 +803,9 @@ mod tests {
     #[test]
     fn test_every_cli_command_parses_and_has_a_tui_route() {
         // Every CLI subcommand must reach a handler from the TUI, except
-        // the two that cannot run inside it. A new command fails here (and
-        // in `route`, at compile time) until it has a TUI path.
-        let refused = ["interactive", "web"];
+        // the ones TUI_REFUSED lists. A new command fails here (and in
+        // `route`, at compile time) until it has a TUI path.
+        let refused: Vec<&str> = TUI_REFUSED.iter().map(|(n, _)| *n).collect();
         for sub in Cli::command().get_subcommands() {
             let name = sub.get_name();
             let (o, cap) = Output::capture();
@@ -846,7 +930,7 @@ mod tests {
         let (_, cap) = plan_line("limit 0", &mut ctx);
         assert_eq!(ctx.limit, 25);
         assert!(cap.err().contains("Invalid limit"));
-        plan_line("clear", &mut ctx);
+        plan_line("reset", &mut ctx);
         assert_eq!(ctx.limit, SessionContext::default().limit);
         assert!(!ctx.include_tokens);
     }
@@ -917,8 +1001,9 @@ mod tests {
     #[test]
     fn test_help_lists_the_search_keys() {
         let (_, cap) = plan_line("help", &mut SessionContext::default());
+        let help = crate::cli::ansi::strip(&cap.out());
         for keys in ["Ctrl-F or / search", "Ctrl-R history search"] {
-            assert!(cap.out().contains(keys), "help is missing {}", keys);
+            assert!(help.contains(keys), "help is missing {}", keys);
         }
     }
 
@@ -936,7 +1021,8 @@ mod tests {
         for (typed, usage) in [
             ("help ctx", "ctx"),
             ("help tokens", "tokens [list|recent|add|remove]"),
-            ("help clear", "clear"),
+            ("help clear", "Clear the output pane"),
+            ("help reset", "Reset the session context"),
             ("help save", "save <file> [--force]"),
             ("help quit", "exit"),
         ] {
@@ -965,7 +1051,9 @@ mod tests {
         let save = |_: &TokenAliases| {
             saves.set(saves.get() + 1);
             if fail_save {
-                Err(scope::error::ScopeError::Io("disk full".into()))
+                Err(scope::error::ScopeError::IoError(std::io::Error::other(
+                    "disk full",
+                )))
             } else {
                 Ok(())
             }

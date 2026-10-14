@@ -1,12 +1,10 @@
 //! MonitorApp struct and event handling for the monitor TUI.
 
-use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
-    execute,
-};
+use crate::cli::screen;
+use crossterm::event::{Event, KeyCode, KeyModifiers};
 use scope::chains::ChainClient;
 use scope::chains::dex::DexDataSource;
-use scope::error::{Result, ScopeError};
+use scope::error::Result;
 use std::io;
 use std::time::{Duration, Instant};
 
@@ -59,18 +57,14 @@ impl MonitorApp {
         chain_client: Option<Box<dyn ChainClient>>,
         exchange_client: Option<scope::market::ExchangeClient>,
     ) -> Result<Self> {
-        // Setup terminal using ratatui's simplified init
-        let terminal = ratatui::init();
-        // Enable mouse capture (not handled by ratatui::init)
-        execute!(io::stdout(), EnableMouseCapture)
-            .map_err(|e| ScopeError::Chain(format!("Failed to enable mouse capture: {}", e)))?;
+        let terminal = screen::enter(screen::Mouse::Capture)?;
 
         let mut state = MonitorState::new(&initial_data, chain);
         state.apply_config(monitor_config);
 
         // If we have an exchange client, set up the venue pair for OHLC queries
         if let Some(ref ex) = exchange_client {
-            let pair = ex.format_pair(&initial_data.symbol);
+            let pair = ex.venue_symbol(&scope::market::Pair::parse(&initial_data.symbol));
             state.venue_pair = Some(pair);
             state.venue = Some(ex.venue_id().to_string());
         }
@@ -142,8 +136,7 @@ impl MonitorApp {
 impl<B: ratatui::backend::Backend> Drop for MonitorApp<B> {
     fn drop(&mut self) {
         if self.owns_terminal {
-            let _ = execute!(io::stdout(), DisableMouseCapture);
-            ratatui::restore();
+            screen::restore();
         }
     }
 }
@@ -158,138 +151,16 @@ impl<B: ratatui::backend::Backend> MonitorApp<B> {
         self.state.save_cache();
 
         if self.owns_terminal {
-            // Disable mouse capture (not handled by ratatui::restore)
-            let _ = execute!(io::stdout(), DisableMouseCapture);
-            // Restore terminal using ratatui's simplified cleanup
-            ratatui::restore();
+            screen::restore();
         }
         Ok(())
     }
 
-    /// Handles a single key event, updating state accordingly.
-    /// Extracted from the event loop for testability.
+    /// Handles a single key event with [`handle_key_event_on_state`], the
+    /// one key handler (production and tests).
     pub(crate) fn handle_key_event(&mut self, key: crossterm::event::KeyEvent) {
-        // Track last input time for auto-pause
-        self.state.last_input_at = Instant::now();
-
-        // Widget toggle mode: waiting for digit 1-5
-        if self.state.widget_toggle_mode {
-            self.state.widget_toggle_mode = false;
-            if let KeyCode::Char(c @ '1'..='5') = key.code {
-                let idx = (c as u8 - b'0') as usize;
-                self.state.widgets.toggle_by_index(idx);
-                return;
-            }
-            // Any other key cancels the mode and falls through
-        }
-
-        match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => {
-                // Stop export before quitting if active
-                if self.state.export_active {
-                    self.state.stop_export();
-                }
-                self.should_exit = true;
-            }
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if self.state.export_active {
-                    self.state.stop_export();
-                }
-                self.should_exit = true;
-            }
-            KeyCode::Char('r') => {
-                self.state.force_refresh();
-            }
-            // Shift+P toggles auto-pause on input
-            KeyCode::Char('P') if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                self.state.auto_pause_on_input = !self.state.auto_pause_on_input;
-                self.state.log(format!(
-                    "Auto-pause: {}",
-                    if self.state.auto_pause_on_input {
-                        "ON"
-                    } else {
-                        "OFF"
-                    }
-                ));
-            }
-            KeyCode::Char('p') | KeyCode::Char(' ') => {
-                self.state.toggle_pause();
-            }
-            // Toggle CSV export
-            KeyCode::Char('e') => {
-                self.state.toggle_export();
-            }
-            // Increase refresh interval (slower)
-            KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Char(']') => {
-                self.state.slower_refresh();
-            }
-            // Decrease refresh interval (faster)
-            KeyCode::Char('-') | KeyCode::Char('_') | KeyCode::Char('[') => {
-                self.state.faster_refresh();
-            }
-            // Time period selection (1=1m, 2=5m, 3=15m, 4=1h, 5=4h, 6=1d)
-            KeyCode::Char('1') => {
-                self.state.set_time_period(TimePeriod::Min1);
-            }
-            KeyCode::Char('2') => {
-                self.state.set_time_period(TimePeriod::Min5);
-            }
-            KeyCode::Char('3') => {
-                self.state.set_time_period(TimePeriod::Min15);
-            }
-            KeyCode::Char('4') => {
-                self.state.set_time_period(TimePeriod::Hour1);
-            }
-            KeyCode::Char('5') => {
-                self.state.set_time_period(TimePeriod::Hour4);
-            }
-            KeyCode::Char('6') => {
-                self.state.set_time_period(TimePeriod::Day1);
-            }
-            KeyCode::Char('t') | KeyCode::Tab => {
-                self.state.cycle_time_period();
-            }
-            // Toggle chart mode (line/candlestick/volume-profile)
-            KeyCode::Char('c') => {
-                self.state.toggle_chart_mode();
-            }
-            // Toggle scale mode (linear/log)
-            KeyCode::Char('s') => {
-                self.state.scale_mode = self.state.scale_mode.toggle();
-                self.state
-                    .log(format!("Scale: {}", self.state.scale_mode.label()));
-            }
-            // Cycle color scheme
-            KeyCode::Char('/') => {
-                self.state.color_scheme = self.state.color_scheme.next();
-                self.state
-                    .log(format!("Colors: {}", self.state.color_scheme.label()));
-            }
-            // Scroll activity log
-            KeyCode::Char('j') | KeyCode::Down => {
-                self.state.scroll_log_down();
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.state.scroll_log_up();
-            }
-            // Layout cycling
-            KeyCode::Char('l') => {
-                self.state.layout = self.state.layout.next();
-                self.state.auto_layout = false;
-            }
-            KeyCode::Char('h') => {
-                self.state.layout = self.state.layout.prev();
-                self.state.auto_layout = false;
-            }
-            // Widget toggle mode
-            KeyCode::Char('w') => {
-                self.state.widget_toggle_mode = true;
-            }
-            // Re-enable auto layout
-            KeyCode::Char('a') => {
-                self.state.auto_layout = true;
-            }
-            _ => {}
+        if handle_key_event_on_state(key, &mut self.state) {
+            self.should_exit = true;
         }
     }
 
@@ -341,6 +212,8 @@ impl<B: ratatui::backend::Backend> MonitorApp<B> {
             }
         }
 
+        self.fetch_venue_book_and_trades().await;
+
         // Periodically fetch holder count via chain client (~every 12th refresh ≈ 60s at 5s rate)
         self.state.holder_fetch_counter += 1;
         if self.state.holder_fetch_counter.is_multiple_of(12)
@@ -361,6 +234,29 @@ impl<B: ratatui::backend::Backend> MonitorApp<B> {
 }
 
 impl<B: ratatui::backend::Backend> MonitorApp<B> {
+    /// With a venue, its real order book and recent trades replace the ones
+    /// built from DEX data (#78). A failed fetch keeps the last real data
+    /// and shows the error.
+    async fn fetch_venue_book_and_trades(&mut self) {
+        let (Some(ex), Some(pair)) = (&self.exchange_client, self.state.venue_pair.clone()) else {
+            return;
+        };
+        let venue = ex.venue_id().to_string();
+        if ex.has_order_book() {
+            match ex.fetch_order_book(&pair).await {
+                Ok(book) => self.state.set_venue_book(&venue, book),
+                Err(e) => self.state.error_message = Some(format!("{venue} order book: {e}")),
+            }
+        }
+        if ex.has_trade_history() {
+            let limit = super::state::MAX_RECENT_TRADES as u32;
+            match ex.fetch_recent_trades(&pair, limit).await {
+                Ok(trades) => self.state.set_venue_trades(&venue, trades),
+                Err(e) => self.state.error_message = Some(format!("{venue} trades: {e}")),
+            }
+        }
+    }
+
     /// Venue-only refresh: prices the token from the venue ticker.
     async fn fetch_venue_ticker(&mut self) {
         let (Some(ex), Some(pair)) = (&self.exchange_client, self.state.venue_pair.clone()) else {
@@ -385,15 +281,24 @@ impl<B: ratatui::backend::Backend> MonitorApp<B> {
     }
 }
 
-/// Handles a key event by mutating state. Standalone version for testability.
-/// Returns true if the application should exit.
-#[cfg(test)]
+/// The one monitor key handler: mutates `state` and returns true when the
+/// monitor should exit. `?` shows the key overlay; with it open, any key
+/// closes it (#68).
 pub(crate) fn handle_key_event_on_state(
     key: crossterm::event::KeyEvent,
     state: &mut MonitorState,
 ) -> bool {
     // Track last input time for auto-pause
     state.last_input_at = Instant::now();
+
+    if state.show_keys {
+        state.show_keys = false;
+        return false;
+    }
+    if key.code == KeyCode::Char('?') {
+        state.show_keys = true;
+        return false;
+    }
 
     // Widget toggle mode: waiting for digit 1-5
     if state.widget_toggle_mode {
@@ -421,6 +326,8 @@ pub(crate) fn handle_key_event_on_state(
         }
         KeyCode::Char('r') => {
             state.force_refresh();
+            // The key says it was heard (#68).
+            state.log("Refresh requested".to_string());
         }
         // Shift+P toggles auto-pause
         KeyCode::Char('P') if key.modifiers.contains(KeyModifiers::SHIFT) => {

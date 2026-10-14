@@ -133,15 +133,7 @@ fn sha2_256(data: &[u8]) -> [u8; 32] {
 
 /// Map chain name to Etherscan V2 chain ID parameter.
 fn chain_to_etherscan_id(chain: &str) -> Option<&'static str> {
-    match chain.to_lowercase().as_str() {
-        "ethereum" | "eth" => Some("1"),
-        "polygon" | "matic" => Some("137"),
-        "arbitrum" | "arb" => Some("42161"),
-        "optimism" | "op" => Some("10"),
-        "base" => Some("8453"),
-        "bsc" | "bnb" => Some("56"),
-        _ => None,
-    }
+    crate::chains::registry::chain(chain)?.evm_chain_id
 }
 
 /// Etherscan getsourcecode response structures.
@@ -199,7 +191,7 @@ pub async fn fetch_contract_source(
         ))
     })?;
 
-    let api_key = std::env::var("ETHERSCAN_API_KEY").unwrap_or_default();
+    let api_key = crate::compliance::etherscan::etherscan_key().unwrap_or_default();
     let url = format!(
         "{}?chainid={}&module=contract&action=getsourcecode&address={}&apikey={}",
         ETHERSCAN_V2_API, chain_id, address, api_key

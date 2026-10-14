@@ -143,7 +143,7 @@ impl AddressBook {
             .iter()
             .any(|a| a.address.to_lowercase() == watched.address.to_lowercase())
         {
-            return Err(ScopeError::Chain(format!(
+            return Err(ScopeError::InvalidInput(format!(
                 "Address already in address book: {}",
                 watched.address
             )));

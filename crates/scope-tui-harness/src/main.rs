@@ -37,6 +37,10 @@ enum Cmd {
         scenarios: PathBuf,
         #[arg(long, default_value = "target/debug/scope")]
         binary: PathBuf,
+        /// Run the named offline scenarios against the live APIs and write
+        /// their replies as fixtures.
+        #[arg(long, requires = "names")]
+        record: bool,
         /// Scenario names (file stems). All when empty.
         names: Vec<String>,
     },
@@ -50,6 +54,7 @@ fn main() -> Result<()> {
         scenarios,
         binary,
         names,
+        record,
     } = Cli::parse().cmd;
     let tier = match tier {
         TierArg::Offline => Tier::Offline,
@@ -122,6 +127,7 @@ fn main() -> Result<()> {
                                 fixtures_root: "tests/tui/fixtures".into(),
                                 snapshots_root: "tests/tui/snapshots".into(),
                                 scenario_id: id.clone(),
+                                record,
                             };
                             let t = Instant::now();
                             match run_scenario(&s, tier, &ctx) {

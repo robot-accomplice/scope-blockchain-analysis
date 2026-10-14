@@ -1,66 +1,24 @@
 //! # Terminal Display Helpers
 //!
 //! Styled output utilities for rich, user-friendly terminal presentation.
-//! Uses `owo-colors` for color and `unicode` box-drawing characters for structure.
+//! Text is painted by semantic role through [`super::theme`], with
+//! `unicode` box-drawing characters for structure.
 //! All helpers respect non-TTY contexts (piped output) by falling back to plain text.
 //! Long text is automatically word-wrapped to the detected terminal width.
 
-use owo_colors::OwoColorize;
-use std::io::IsTerminal;
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use super::theme::{Painter, Role};
+use crate::market::health::{PegBand, PegBands};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use unicode_width::UnicodeWidthStr;
 
 // ============================================================================
 // Terminal detection
 // ============================================================================
 
-/// Override set by `--no-color`: 0 = none, 1 = off, 2 = on.
-static COLOR_OVERRIDE: AtomicU8 = AtomicU8::new(0);
-
-/// Forces color off (`Some(false)`) or on (`Some(true)`) for the whole
-/// process, or removes the override (`None`). `--no-color` uses it.
-pub fn set_color_override(value: Option<bool>) {
-    let code = match value {
-        None => 0,
-        Some(false) => 1,
-        Some(true) => 2,
-    };
-    COLOR_OVERRIDE.store(code, Ordering::Relaxed);
-}
-
-/// Decides whether to emit color for one stream. Pure: the caller passes
-/// the environment and whether the stream is a terminal.
-///
-/// Color is off when `NO_COLOR` is set and not empty (see no-color.org),
-/// when `TERM` is `dumb`, or when the stream is not a terminal.
-pub fn color_enabled_with(env: &dyn Fn(&str) -> Option<String>, stream_is_tty: bool) -> bool {
-    if env("NO_COLOR").is_some_and(|v| !v.is_empty()) {
-        return false;
-    }
-    if env("TERM").as_deref() == Some("dumb") {
-        return false;
-    }
-    stream_is_tty
-}
-
-/// Applies the process override, then the environment rules.
-fn color_enabled_for(stream_is_tty: bool) -> bool {
-    match COLOR_OVERRIDE.load(Ordering::Relaxed) {
-        1 => false,
-        2 => true,
-        _ => color_enabled_with(&|k| std::env::var(k).ok(), stream_is_tty),
-    }
-}
-
-/// Returns `true` when output to stdout may use color.
-pub fn color_enabled() -> bool {
-    color_enabled_for(std::io::stdout().is_terminal())
-}
-
-/// Returns `true` when output to stderr may use color.
-pub fn color_enabled_stderr() -> bool {
-    color_enabled_for(std::io::stderr().is_terminal())
-}
+/// The color decision lives in the theme; these paths stay for callers.
+pub use super::theme::{
+    color_enabled, color_enabled_stderr, color_enabled_with, set_color_override,
+};
 
 /// Width override in columns: 0 = none. The TUI sets it to the width of
 /// its output pane, so command output fits the pane.
@@ -187,6 +145,34 @@ fn content_width_for(prefix_width: usize) -> usize {
 // Color-aware helpers
 // ============================================================================
 
+/// The visible columns of a marked row's prefix: `"│  ✓ "`.
+const MARK_PREFIX_COLS: usize = 5;
+
+/// The visible width of a key or label column.
+const LABEL_COLS: usize = 18;
+
+/// The vertical rule that opens every row inside a section.
+fn rail(p: Painter) -> String {
+    p.paint(Role::Accent, "│")
+}
+
+/// A key or label padded to [`LABEL_COLS`], in the secondary tone. The
+/// padding sits inside the paint, so colored and plain rows align alike.
+fn label(p: Painter, text: &str) -> String {
+    p.paint(Role::Secondary, &format!("{:<LABEL_COLS$}", text))
+}
+
+/// A row that starts with a glyph (`✓`, `✗`, `!`, `–`, `⚠`, `ℹ`), its
+/// text wrapped under the glyph in `text_role`.
+fn marked_row(p: Painter, glyph: String, text_role: Role, msg: &str) -> String {
+    let wrapped = wrap_lines(msg, content_width_for(MARK_PREFIX_COLS));
+    let mut out = format!("{}  {} {}", rail(p), glyph, p.paint(text_role, &wrapped[0]));
+    for line in &wrapped[1..] {
+        out.push_str(&format!("\n{}    {}", rail(p), p.paint(text_role, line)));
+    }
+    out
+}
+
 /// Section header with colored title and box-drawing underline.
 ///
 /// ```text
@@ -202,19 +188,16 @@ fn section_header_styled(title: &str, tty: bool) -> String {
 
 /// `section_header_styled` with the width cap given.
 fn section_header_at(title: &str, tty: bool, cap: Option<usize>) -> String {
+    let p = Painter::new(tty);
     // "┌─ " + title + " " come before the rule.
     let prefix = title.width() + 4;
     let pad = rule_at(RULE_WIDTH.saturating_sub(prefix), prefix, cap);
-    if tty {
-        format!(
-            "\n{} {} {}",
-            "┌─".cyan(),
-            title.bold().bright_white(),
-            pad.cyan()
-        )
-    } else {
-        format!("\n┌─ {} {}", title, pad)
-    }
+    format!(
+        "\n{} {} {}",
+        p.paint(Role::Accent, "┌─"),
+        p.paint_strong(Role::Accent, title),
+        p.paint(Role::Accent, &pad)
+    )
 }
 
 /// Sub-section header (lighter weight).
@@ -228,11 +211,13 @@ pub fn subsection_header(title: &str) -> String {
 }
 
 fn subsection_header_styled(title: &str, tty: bool) -> String {
-    if tty {
-        format!("{}\n{}", "│".cyan(), format!("├── {}", title.bold()).cyan())
-    } else {
-        format!("│\n├── {}", title)
-    }
+    let p = Painter::new(tty);
+    format!(
+        "{}\n{}{}",
+        rail(p),
+        p.paint(Role::Accent, "├── "),
+        p.paint_strong(Role::Accent, title)
+    )
 }
 
 /// A key-value row inside a section, with aligned values.
@@ -245,25 +230,16 @@ pub fn kv_row(key: &str, value: &str) -> String {
 }
 
 fn kv_row_styled(key: &str, value: &str, tty: bool) -> String {
+    let p = Painter::new(tty);
     // Prefix: "│  " (3) + key pad (18) = 21 visible columns before value starts
-    let prefix_cols = 21;
+    let prefix_cols = 3 + LABEL_COLS;
     let avail = terminal_width().saturating_sub(prefix_cols);
     let wrapped = wrap_lines(value, avail);
 
-    let mut out = if tty {
-        format!("{}  {:<18}{}", "│".cyan(), key.dimmed(), wrapped[0])
-    } else {
-        format!("│  {:<18}{}", key, wrapped[0])
-    };
-
+    let mut out = format!("{}  {}{}", rail(p), label(p, key), wrapped[0]);
     // Continuation lines align under the value column
-    let cont_prefix = format!("│  {:<18}", "");
     for line in &wrapped[1..] {
-        if tty {
-            out.push_str(&format!("\n{}  {:<18}{}", "│".cyan(), "", line));
-        } else {
-            out.push_str(&format!("\n{}{}", cont_prefix, line));
-        }
+        out.push_str(&format!("\n{}  {:<LABEL_COLS$}{}", rail(p), "", line));
     }
     out
 }
@@ -274,18 +250,15 @@ pub fn kv_row_delta(key: &str, value: f64, formatted: &str) -> String {
 }
 
 fn kv_row_delta_styled(key: &str, value: f64, formatted: &str, tty: bool) -> String {
-    if tty {
-        let colored_val = if value > 0.0 {
-            format!("{}", formatted.green())
-        } else if value < 0.0 {
-            format!("{}", formatted.red())
-        } else {
-            format!("{}", formatted.dimmed())
-        };
-        format!("{}  {:<18}{}", "│".cyan(), key.dimmed(), colored_val)
+    let p = Painter::new(tty);
+    let role = if value > 0.0 {
+        Role::Ok
+    } else if value < 0.0 {
+        Role::Err
     } else {
-        format!("│  {:<18}{}", key, formatted)
-    }
+        Role::Secondary
+    };
+    format!("{}  {}{}", rail(p), label(p, key), p.paint(role, formatted))
 }
 
 /// Health check pass line.
@@ -298,24 +271,8 @@ pub fn check_pass(msg: &str) -> String {
 }
 
 fn check_pass_styled(msg: &str, tty: bool) -> String {
-    // Prefix: "│  ✓ " = 5 visible columns
-    let avail = content_width_for(5);
-    let wrapped = wrap_lines(msg, avail);
-
-    let mut out = if tty {
-        format!("{}  {} {}", "│".cyan(), "✓".green(), wrapped[0])
-    } else {
-        format!("│  ✓ {}", wrapped[0])
-    };
-
-    for line in &wrapped[1..] {
-        if tty {
-            out.push_str(&format!("\n{}    {}", "│".cyan(), line));
-        } else {
-            out.push_str(&format!("\n│    {}", line));
-        }
-    }
-    out
+    let p = Painter::new(tty);
+    marked_row(p, p.paint(Role::Ok, "✓"), Role::Neutral, msg)
 }
 
 /// Health check fail line.
@@ -328,24 +285,8 @@ pub fn check_fail(msg: &str) -> String {
 }
 
 fn check_fail_styled(msg: &str, tty: bool) -> String {
-    // Prefix: "│  ✗ " = 5 visible columns
-    let avail = content_width_for(5);
-    let wrapped = wrap_lines(msg, avail);
-
-    let mut out = if tty {
-        format!("{}  {} {}", "│".cyan(), "✗".red(), wrapped[0])
-    } else {
-        format!("│  ✗ {}", wrapped[0])
-    };
-
-    for line in &wrapped[1..] {
-        if tty {
-            out.push_str(&format!("\n{}    {}", "│".cyan(), line));
-        } else {
-            out.push_str(&format!("\n│    {}", line));
-        }
-    }
-    out
+    let p = Painter::new(tty);
+    marked_row(p, p.paint(Role::Err, "✗"), Role::Neutral, msg)
 }
 
 /// Formats a check that does not apply (dim dash, message in grey).
@@ -358,24 +299,8 @@ pub fn check_na(msg: &str) -> String {
 }
 
 fn check_na_styled(msg: &str, tty: bool) -> String {
-    // Prefix: "│  – " = 5 visible columns
-    let avail = content_width_for(5);
-    let wrapped = wrap_lines(msg, avail);
-
-    let mut out = if tty {
-        format!("{}  {} {}", "│".cyan(), "–".dimmed(), wrapped[0].dimmed())
-    } else {
-        format!("│  – {}", wrapped[0])
-    };
-
-    for line in &wrapped[1..] {
-        if tty {
-            out.push_str(&format!("\n{}    {}", "│".cyan(), line.dimmed()));
-        } else {
-            out.push_str(&format!("\n│    {}", line));
-        }
-    }
-    out
+    let p = Painter::new(tty);
+    marked_row(p, p.paint(Role::Secondary, "–"), Role::Secondary, msg)
 }
 
 /// A check row for a warning: outside its target, but not a failure.
@@ -388,29 +313,8 @@ pub fn check_warn(msg: &str) -> String {
 }
 
 fn check_warn_styled(msg: &str, tty: bool) -> String {
-    // Prefix: "│  ! " = 5 visible columns
-    let avail = content_width_for(5);
-    let wrapped = wrap_lines(msg, avail);
-
-    let mut out = if tty {
-        format!(
-            "{}  {} {}",
-            "│".cyan(),
-            "!".yellow().bold(),
-            wrapped[0].yellow()
-        )
-    } else {
-        format!("│  ! {}", wrapped[0])
-    };
-
-    for line in &wrapped[1..] {
-        if tty {
-            out.push_str(&format!("\n{}    {}", "│".cyan(), line.yellow()));
-        } else {
-            out.push_str(&format!("\n│    {}", line));
-        }
-    }
-    out
+    let p = Painter::new(tty);
+    marked_row(p, p.paint_strong(Role::Warn, "!"), Role::Warn, msg)
 }
 
 /// Overall status line (healthy / unhealthy).
@@ -419,17 +323,13 @@ pub fn status_line(healthy: bool) -> String {
 }
 
 fn status_line_styled(healthy: bool, tty: bool) -> String {
-    if tty {
-        if healthy {
-            format!("{}  {}", "│".cyan(), "HEALTHY".green().bold())
-        } else {
-            format!("{}  {}", "│".cyan(), "UNHEALTHY".red().bold())
-        }
-    } else if healthy {
-        "│  HEALTHY".to_string()
+    let p = Painter::new(tty);
+    let verdict = if healthy {
+        p.paint_strong(Role::Ok, "HEALTHY")
     } else {
-        "│  UNHEALTHY".to_string()
-    }
+        p.paint_strong(Role::Err, "UNHEALTHY")
+    };
+    format!("{}  {}", rail(p), verdict)
 }
 
 /// Section footer (closing box line).
@@ -448,11 +348,7 @@ fn section_footer_styled(tty: bool) -> String {
 /// `section_footer_styled` with the width cap given.
 fn section_footer_at(tty: bool, cap: Option<usize>) -> String {
     let line = rule_at(RULE_WIDTH, 1, cap);
-    if tty {
-        format!("{}", format!("└{}", line).cyan())
-    } else {
-        format!("└{}", line)
-    }
+    Painter::new(tty).paint(Role::Accent, &format!("└{}", line))
 }
 
 /// A separator row inside a section.
@@ -471,32 +367,31 @@ fn separator_styled(tty: bool) -> String {
 /// `separator_styled` with the width cap given.
 fn separator_at(tty: bool, cap: Option<usize>) -> String {
     let line = rule_at(RULE_WIDTH, 1, cap);
-    if tty {
-        format!("{}", format!("├{}", line).cyan())
-    } else {
-        format!("├{}", line)
-    }
+    Painter::new(tty).paint(Role::Accent, &format!("├{}", line))
 }
 
-/// Format a price with color for peg deviation.
-/// Green if within 0.1% of target, yellow if within 0.5%, red otherwise.
-pub fn format_price_peg(price: f64, target: f64) -> String {
-    format_price_peg_styled(price, target, color_enabled())
+/// Format a price with color for peg deviation. The bands come from the
+/// health thresholds: green on the peg, yellow inside the outlier band, red
+/// outside it.
+pub fn format_price_peg(price: f64, peg: &PegBands) -> String {
+    format_price_peg_styled(price, peg, color_enabled())
 }
 
-fn format_price_peg_styled(price: f64, target: f64, tty: bool) -> String {
-    let deviation = ((price - target) / target).abs();
-    let text = format!("{:.4}", price);
-    if !tty {
-        return text;
-    }
-    if deviation < 0.001 {
-        format!("{}", text.green())
-    } else if deviation < 0.005 {
-        format!("{}", text.yellow())
-    } else {
-        format!("{}", text.red())
-    }
+fn format_price_peg_styled(price: f64, peg: &PegBands, tty: bool) -> String {
+    let role = match peg.classify(price) {
+        PegBand::OnPeg => Role::Ok,
+        PegBand::Slight => Role::Warn,
+        PegBand::Off => Role::Err,
+    };
+    // Decimals come from the peg, so every price of one book lines up.
+    let decimals = crate::display::format::price_decimals(peg.target());
+    Painter::new(tty).paint(role, &format!("{price:.decimals$}"))
+}
+
+/// The USD peg with the default range, for the tests.
+#[cfg(test)]
+fn usd_peg() -> PegBands {
+    crate::market::health::HealthThresholds::default().peg_bands()
 }
 
 /// Empty line with continuation bar.
@@ -505,16 +400,19 @@ pub fn blank_row() -> String {
 }
 
 fn blank_row_styled(tty: bool) -> String {
-    if tty {
-        format!("{}", "│".cyan())
-    } else {
-        "│".to_string()
-    }
+    rail(Painter::new(tty))
 }
 
 /// An order book level row with price coloring relative to peg.
-pub fn orderbook_level(price: f64, quantity: f64, base: &str, value: f64, peg: f64) -> String {
-    orderbook_level_styled(price, quantity, base, value, peg, color_enabled())
+pub fn orderbook_level(
+    price: f64,
+    quantity: f64,
+    base: &str,
+    value: f64,
+    quote: &str,
+    peg: &PegBands,
+) -> String {
+    orderbook_level_styled(price, quantity, base, value, quote, peg, color_enabled())
 }
 
 fn orderbook_level_styled(
@@ -522,25 +420,19 @@ fn orderbook_level_styled(
     quantity: f64,
     base: &str,
     value: f64,
-    peg: f64,
+    quote: &str,
+    peg: &PegBands,
     tty: bool,
 ) -> String {
-    let price_str = format_price_peg_styled(price, peg, tty);
-    if tty {
-        format!(
-            "{}    {}  {:>10.2} {}  {:>10.2} USDT",
-            "│".cyan(),
-            price_str,
-            quantity,
-            base.dimmed(),
-            value
-        )
-    } else {
-        format!(
-            "│    {:.4}  {:>10.2} {}  {:>10.2} USDT",
-            price, quantity, base, value
-        )
-    }
+    let p = Painter::new(tty);
+    format!(
+        "{}    {}  {:>10.2} {}  {:>10.2} {quote}",
+        rail(p),
+        format_price_peg_styled(price, peg, tty),
+        quantity,
+        p.paint(Role::Secondary, base),
+        value
+    )
 }
 
 // ============================================================================
@@ -556,7 +448,8 @@ pub fn score_bar(label: &str, score: u32, max: u32) -> String {
     score_bar_styled(label, score, max, color_enabled())
 }
 
-fn score_bar_styled(label: &str, score: u32, max: u32, tty: bool) -> String {
+fn score_bar_styled(label_text: &str, score: u32, max: u32, tty: bool) -> String {
+    let p = Painter::new(tty);
     let width = 20usize;
     let filled = ((score as f64 / max as f64) * width as f64).round() as usize;
     let filled = filled.min(width);
@@ -568,18 +461,19 @@ fn score_bar_styled(label: &str, score: u32, max: u32, tty: bool) -> String {
         score,
         max
     );
-    if tty {
-        let colored_bar = if score >= 80 {
-            format!("{}", bar.green())
-        } else if score >= 50 {
-            format!("{}", bar.yellow())
-        } else {
-            format!("{}", bar.red())
-        };
-        format!("{}  {:<18}{}", "│".cyan(), label.dimmed(), colored_bar)
+    let role = if score >= 80 {
+        Role::Ok
+    } else if score >= 50 {
+        Role::Warn
     } else {
-        format!("│  {:<18}{}", label, bar)
-    }
+        Role::Err
+    };
+    format!(
+        "{}  {}{}",
+        rail(p),
+        label(p, label_text),
+        p.paint(role, &bar)
+    )
 }
 
 /// Severity label with color coding.
@@ -591,15 +485,13 @@ pub fn severity_label(severity: &str) -> String {
 }
 
 fn severity_label_styled(severity: &str, tty: bool) -> String {
-    if !tty {
-        return severity.to_string();
-    }
+    let p = Painter::new(tty);
     match severity.to_lowercase().as_str() {
-        "critical" => format!("{}", severity.red().bold()),
-        "high" => format!("{}", severity.red()),
-        "medium" => format!("{}", severity.yellow()),
-        "low" => format!("{}", severity.cyan()),
-        _ => format!("{}", severity.dimmed()),
+        "critical" => p.paint_strong(Role::Err, severity),
+        "high" => p.paint(Role::Err, severity),
+        "medium" => p.paint(Role::Warn, severity),
+        "low" => p.paint(Role::Accent, severity),
+        _ => p.paint(Role::Secondary, severity),
     }
 }
 
@@ -613,29 +505,8 @@ pub fn warning_row(msg: &str) -> String {
 }
 
 fn warning_row_styled(msg: &str, tty: bool) -> String {
-    // Prefix: "│  ⚠ " = 5 visible columns
-    let avail = content_width_for(5);
-    let wrapped = wrap_lines(msg, avail);
-
-    let mut out = if tty {
-        format!(
-            "{}  {} {}",
-            "│".cyan(),
-            "⚠".yellow().bold(),
-            wrapped[0].yellow()
-        )
-    } else {
-        format!("│  ⚠ {}", wrapped[0])
-    };
-
-    for line in &wrapped[1..] {
-        if tty {
-            out.push_str(&format!("\n{}    {}", "│".cyan(), line.yellow()));
-        } else {
-            out.push_str(&format!("\n│    {}", line));
-        }
-    }
-    out
+    let p = Painter::new(tty);
+    marked_row(p, p.paint_strong(Role::Warn, "⚠"), Role::Warn, msg)
 }
 
 /// An informational note row inside a section box.
@@ -648,24 +519,8 @@ pub fn info_row(msg: &str) -> String {
 }
 
 fn info_row_styled(msg: &str, tty: bool) -> String {
-    // Prefix: "│  ℹ " = 5 visible columns
-    let avail = content_width_for(5);
-    let wrapped = wrap_lines(msg, avail);
-
-    let mut out = if tty {
-        format!("{}  {} {}", "│".cyan(), "ℹ".blue(), wrapped[0].dimmed())
-    } else {
-        format!("│  ℹ {}", wrapped[0])
-    };
-
-    for line in &wrapped[1..] {
-        if tty {
-            out.push_str(&format!("\n{}    {}", "│".cyan(), line.dimmed()));
-        } else {
-            out.push_str(&format!("\n│    {}", line));
-        }
-    }
-    out
+    let p = Painter::new(tty);
+    marked_row(p, p.paint(Role::Info, "ℹ"), Role::Secondary, msg)
 }
 
 /// A link row inside a section box.
@@ -677,12 +532,14 @@ pub fn link_row(label: &str, url: &str) -> String {
     link_row_styled(label, url, color_enabled())
 }
 
-fn link_row_styled(label: &str, url: &str, tty: bool) -> String {
-    if tty {
-        format!("{}  {:<18}{}", "│".cyan(), label.dimmed(), url.underline())
-    } else {
-        format!("│  {:<18}{}", label, url)
-    }
+fn link_row_styled(label_text: &str, url: &str, tty: bool) -> String {
+    let p = Painter::new(tty);
+    format!(
+        "{}  {}{}",
+        rail(p),
+        label(p, label_text),
+        p.paint(Role::Link, url)
+    )
 }
 
 /// An indented detail line inside a section (for sub-items like vulnerability descriptions).
@@ -695,22 +552,21 @@ pub fn detail_row(msg: &str) -> String {
 }
 
 fn detail_row_styled(msg: &str, tty: bool) -> String {
+    let p = Painter::new(tty);
     // Prefix: "│      " = 7 visible columns
     let avail = content_width_for(7);
     let wrapped = wrap_lines(msg, avail);
 
-    let mut out = if tty {
-        format!("{}      {}", "│".cyan(), wrapped[0].dimmed())
-    } else {
-        format!("│      {}", wrapped[0])
-    };
-
-    for line in &wrapped[1..] {
-        if tty {
-            out.push_str(&format!("\n{}      {}", "│".cyan(), line.dimmed()));
-        } else {
-            out.push_str(&format!("\n│      {}", line));
+    let mut out = String::new();
+    for (i, line) in wrapped.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
         }
+        out.push_str(&format!(
+            "{}      {}",
+            rail(p),
+            p.paint(Role::Secondary, line)
+        ));
     }
     out
 }
@@ -725,22 +581,19 @@ pub fn bullet_row(msg: &str) -> String {
 }
 
 fn bullet_row_styled(msg: &str, tty: bool) -> String {
+    let p = Painter::new(tty);
     // Prefix: "│    • " = 7 visible columns
     let avail = content_width_for(7);
     let wrapped = wrap_lines(msg, avail);
 
-    let mut out = if tty {
-        format!("{}    {} {}", "│".cyan(), "•".dimmed(), wrapped[0])
-    } else {
-        format!("│    • {}", wrapped[0])
-    };
-
+    let mut out = format!(
+        "{}    {} {}",
+        rail(p),
+        p.paint(Role::Secondary, "•"),
+        wrapped[0]
+    );
     for line in &wrapped[1..] {
-        if tty {
-            out.push_str(&format!("\n{}      {}", "│".cyan(), line));
-        } else {
-            out.push_str(&format!("\n│      {}", line));
-        }
+        out.push_str(&format!("\n{}      {}", rail(p), line));
     }
     out
 }
@@ -775,6 +628,7 @@ fn table_header_styled(cols: &[Col], tty: bool) -> String {
 
 /// `table_header_styled` with the width cap given.
 fn table_header_at(cols: &[Col], tty: bool, cap: Option<usize>) -> String {
+    let p = Painter::new(tty);
     let mut header = String::new();
     for col in cols {
         if col.align == '>' {
@@ -787,17 +641,13 @@ fn table_header_at(cols: &[Col], tty: bool, cap: Option<usize>) -> String {
     let rule_len = cols.iter().map(|c| c.width + 2).sum::<usize>();
     let line = rule_at(rule_len, 3, cap);
 
-    if tty {
-        format!(
-            "{}    {}\n{}  {}",
-            "│".cyan(),
-            header.dimmed(),
-            "│".cyan(),
-            line.cyan()
-        )
-    } else {
-        format!("│    {}\n│  {}", header, line)
-    }
+    format!(
+        "{}    {}\n{}  {}",
+        rail(p),
+        p.paint_strong(Role::Accent, &header),
+        rail(p),
+        p.paint(Role::Accent, &line)
+    )
 }
 
 /// Format a table data row inside a section box.
@@ -822,12 +672,7 @@ fn table_row_styled(cols: &[Col], values: &[&str], tty: bool) -> String {
         }
     }
     let row = row.trim_end().to_string();
-
-    if tty {
-        format!("{}    {}", "│".cyan(), row)
-    } else {
-        format!("│    {}", row)
-    }
+    format!("{}    {}", rail(Painter::new(tty)), row)
 }
 
 /// Format an enumerated list item inside a section box.
@@ -840,25 +685,22 @@ pub fn numbered_row(index: usize, msg: &str) -> String {
 }
 
 fn numbered_row_styled(index: usize, msg: &str, tty: bool) -> String {
+    let p = Painter::new(tty);
     // Prefix: "│  N. " = ~6 visible columns (varies with digit count)
     let prefix_len = 4 + format!("{}.", index).len();
     let avail = terminal_width().saturating_sub(prefix_len);
     let wrapped = wrap_lines(msg, avail);
 
     let num = format!("{}.", index);
-    let mut out = if tty {
-        format!("{}  {} {}", "│".cyan(), num.dimmed(), wrapped[0])
-    } else {
-        format!("│  {} {}", num, wrapped[0])
-    };
-
+    let mut out = format!(
+        "{}  {} {}",
+        rail(p),
+        p.paint(Role::Secondary, &num),
+        wrapped[0]
+    );
     let cont_pad = " ".repeat(num.len() + 1);
     for line in &wrapped[1..] {
-        if tty {
-            out.push_str(&format!("\n{}  {}{}", "│".cyan(), cont_pad, line));
-        } else {
-            out.push_str(&format!("\n│  {}{}", cont_pad, line));
-        }
+        out.push_str(&format!("\n{}  {}{}", rail(p), cont_pad, line));
     }
     out
 }
@@ -868,32 +710,11 @@ fn numbered_row_styled(index: usize, msg: &str, tty: bool) -> String {
 // ============================================================================
 
 #[cfg(test)]
+mod golden_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_color_enabled_rules() {
-        let env = |m: &'static [(&'static str, &'static str)]| {
-            move |k: &str| m.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string())
-        };
-        assert!(color_enabled_with(&env(&[]), true));
-        assert!(!color_enabled_with(&env(&[("NO_COLOR", "1")]), true));
-        // no-color.org: only a non-empty NO_COLOR disables color.
-        assert!(color_enabled_with(&env(&[("NO_COLOR", "")]), true));
-        assert!(!color_enabled_with(&env(&[("TERM", "dumb")]), true));
-        assert!(!color_enabled_with(&env(&[]), false));
-    }
-
-    #[test]
-    fn test_color_override_beats_a_tty_and_none_restores() {
-        // The override is process-global. Never set Some(true): parallel
-        // tests run the plain wrappers, which expect uncolored output.
-        set_color_override(Some(false));
-        assert!(!color_enabled_for(true));
-        set_color_override(None);
-        let plain = color_enabled_with(&|k| std::env::var(k).ok(), true);
-        assert_eq!(color_enabled_for(true), plain);
-    }
 
     #[test]
     fn test_section_header_contains_title() {
@@ -969,13 +790,13 @@ mod tests {
 
     #[test]
     fn test_format_price_peg_near() {
-        let s = format_price_peg(1.0001, 1.0);
+        let s = format_price_peg(1.0001, &usd_peg());
         assert!(s.contains("1.0001"));
     }
 
     #[test]
     fn test_format_price_peg_far() {
-        let s = format_price_peg(0.95, 1.0);
+        let s = format_price_peg(0.95, &usd_peg());
         assert!(s.contains("0.9500"));
     }
 
@@ -987,7 +808,7 @@ mod tests {
 
     #[test]
     fn test_orderbook_level() {
-        let row = orderbook_level(1.0001, 500.0, "DAI", 500.05, 1.0);
+        let row = orderbook_level(1.0001, 500.0, "DAI", 500.05, "USDT", &usd_peg());
         assert!(row.contains("DAI"));
         assert!(row.contains("USDT"));
     }
@@ -1004,15 +825,15 @@ mod tests {
     #[test]
     fn test_format_price_peg_moderate_deviation() {
         // 0.2% deviation: price 1.002, target 1.0 -> in non-TTY returns plain price string
-        let s = format_price_peg(1.002, 1.0);
+        let s = format_price_peg(1.002, &usd_peg());
         assert!(s.contains("1.0020"));
     }
 
     #[test]
     fn test_orderbook_level_various_prices() {
-        let row_low = orderbook_level(0.9990, 100.0, "DAI", 99.90, 1.0);
-        let row_mid = orderbook_level(1.0000, 100.0, "DAI", 100.0, 1.0);
-        let row_high = orderbook_level(1.0015, 100.0, "DAI", 100.15, 1.0);
+        let row_low = orderbook_level(0.9990, 100.0, "DAI", 99.90, "USDT", &usd_peg());
+        let row_mid = orderbook_level(1.0000, 100.0, "DAI", 100.0, "USDT", &usd_peg());
+        let row_high = orderbook_level(1.0015, 100.0, "DAI", 100.15, "USDT", &usd_peg());
         assert!(row_low.contains("0.9990"));
         assert!(row_mid.contains("1.0000"));
         assert!(row_high.contains("1.0015"));
@@ -1132,19 +953,19 @@ mod tests {
 
     #[test]
     fn test_format_price_peg_tty_near() {
-        let s = format_price_peg_styled(1.0001, 1.0, true);
+        let s = format_price_peg_styled(1.0001, &usd_peg(), true);
         assert!(s.contains("1.0001"));
     }
 
     #[test]
     fn test_format_price_peg_tty_moderate() {
-        let s = format_price_peg_styled(1.003, 1.0, true);
+        let s = format_price_peg_styled(1.003, &usd_peg(), true);
         assert!(s.contains("1.0030"));
     }
 
     #[test]
     fn test_format_price_peg_tty_far() {
-        let s = format_price_peg_styled(0.95, 1.0, true);
+        let s = format_price_peg_styled(0.95, &usd_peg(), true);
         assert!(s.contains("0.9500"));
     }
 
@@ -1156,7 +977,7 @@ mod tests {
 
     #[test]
     fn test_orderbook_level_tty() {
-        let row = orderbook_level_styled(1.0001, 500.0, "DAI", 500.05, 1.0, true);
+        let row = orderbook_level_styled(1.0001, 500.0, "DAI", 500.05, "USDT", &usd_peg(), true);
         assert!(row.contains("DAI"));
         assert!(row.contains("USDT"));
     }
@@ -1642,6 +1463,10 @@ mod tests {
         let header = table_header_styled(cols, true);
         assert!(header.contains("Price"));
         assert!(header.contains("│"));
+        // The header text is bold cyan: cyan, then bold, then the label.
+        assert!(header.contains("\x1b[36m\x1b[1m"), "{header:?}");
+        let plain = table_header_styled(cols, false);
+        assert!(!plain.contains('\x1b'), "plain output has no escapes");
     }
 
     #[test]

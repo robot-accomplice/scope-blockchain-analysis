@@ -10,11 +10,16 @@
 //! single-level estimate is kept and marked as such.
 
 use super::health::{DEFAULT_AMM_STEP_PCT, HealthThresholds, TOP10_LEVELS};
-use super::types::{BookSource, OrderBook, OrderBookLevel};
+use super::pair::Pair;
+use super::types::{BookSource, OrderBook, OrderBookLevel, PERCENT_PER_RATIO};
 
 /// The most levels per side of a synthetic AMM book. It bounds the work for
 /// a very small step or a very wide band.
 pub const MAX_AMM_LEVELS: usize = 1000;
+
+/// Quote of a synthetic DEX book. Its prices are the pool's USD price
+/// (`DexPair::price_usd`), whatever token the pool pairs with.
+pub const DEX_BOOK_QUOTE: &str = "USD";
 
 /// Spread of the single-level estimate around the price (±0.1%).
 const ESTIMATE_HALF_SPREAD: f64 = 0.001;
@@ -29,7 +34,11 @@ pub fn order_book_from_analytics(
     symbol: &str,
     thresholds: &HealthThresholds,
 ) -> OrderBook {
-    let label = format!("{}/USDT", symbol);
+    let label = Pair {
+        base: symbol.to_string(),
+        quote: Some(DEX_BOOK_QUOTE.to_string()),
+    }
+    .to_string();
     match pair.liquidity_base {
         Some(x0) if x0.is_finite() && x0 > 0.0 && pair.price_usd > 0.0 => {
             amm_book(label, pair.price_usd, x0, thresholds)
@@ -42,7 +51,7 @@ pub fn order_book_from_analytics(
 /// levels the top-10 depth check reads.
 fn amm_levels_per_side(step: f64, t: &HealthThresholds) -> usize {
     let band = if t.peg_target > 0.0 {
-        t.peg_range * 5.0 / t.peg_target
+        t.peg_bands().outlier_width() / t.peg_target
     } else {
         0.0
     };
@@ -60,7 +69,7 @@ fn amm_book(label: String, p0: f64, x0: f64, t: &HealthThresholds) -> OrderBook 
     } else {
         DEFAULT_AMM_STEP_PCT
     };
-    let step = step_pct / 100.0;
+    let step = step_pct / PERCENT_PER_RATIO;
     let n = amm_levels_per_side(step, t);
     let base_at = |p: f64| x0 * (p0 / p).sqrt();
 
@@ -253,7 +262,8 @@ mod tests {
         let pair = make_pair(1.0, 100_000.0);
         let book =
             order_book_from_analytics("ethereum", &pair, "USDC", &HealthThresholds::default());
-        assert_eq!(book.pair, "USDC/USDT");
+        // Prices are USD, so the label says USD, not the pool quote (WETH).
+        assert_eq!(book.pair, "USDC/USD");
         assert_eq!(book.bids.len(), 1);
         assert_eq!(book.asks.len(), 1);
         assert!(book.bids[0].price > 0.0);

@@ -1,10 +1,12 @@
 //! # Crash log
 //!
-//! A panic in the TUI must not leave the terminal in raw mode on the
-//! alternate screen. The panic hook gives the terminal back, writes a crash
-//! log, tells the user where it is, and then calls the previous hook.
+//! A panic in the TUI writes a crash log and tells the user where it is.
+//! The hook first gives the terminal back (`screen::restore`, which does
+//! nothing when the screen is already back), so the notice is readable,
+//! then calls the previous hook.
 
 use super::journal::Journal;
+use crate::cli::screen;
 use regex::Regex;
 use scope::http::replay::SECRET_PARAMS;
 use std::backtrace::Backtrace;
@@ -15,32 +17,6 @@ use std::sync::OnceLock;
 
 /// How many journal lines the crash log keeps.
 const JOURNAL_TAIL_LINES: usize = 20;
-
-/// Bracketed paste on or off, as the escape bytes a terminal reads.
-pub(crate) fn paste_mode(w: &mut impl Write, on: bool) {
-    let _ = if on {
-        crossterm::execute!(w, crossterm::event::EnableBracketedPaste)
-    } else {
-        crossterm::execute!(w, crossterm::event::DisableBracketedPaste)
-    };
-}
-
-/// Takes the terminal: raw mode on, alternate screen on, bracketed paste
-/// on. Every init site calls this one function (startup, resume, a
-/// re-init after a stop), so paste mode is never missed.
-pub(crate) fn enter_terminal() -> ratatui::DefaultTerminal {
-    let terminal = ratatui::init();
-    paste_mode(&mut io::stdout(), true);
-    terminal
-}
-
-/// Gives the terminal back: bracketed paste off, raw mode off, alternate
-/// screen off, cursor shown. Every restore site calls this one function.
-/// Calling it twice is harmless.
-pub(crate) fn restore_terminal() {
-    paste_mode(&mut io::stdout(), false);
-    ratatui::restore();
-}
 
 const REDACTED: &str = "<redacted>";
 
@@ -101,14 +77,13 @@ fn crash_notice(dir: Option<&Path>, info_text: &str, journal_tail: &[String]) ->
     }
 }
 
-/// Installs the crash-log panic hook. Only the first call has an effect,
-/// so a resume that re-initializes the terminal does not stack hooks.
+/// Installs the crash-log panic hook. Only the first call has an effect.
 pub(crate) fn install_panic_hook() {
     static INSTALLED: OnceLock<()> = OnceLock::new();
     INSTALLED.get_or_init(|| {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            restore_terminal();
+            screen::restore();
             let tail = Journal::in_data_dir().tail(JOURNAL_TAIL_LINES);
             let dir = dirs::data_dir().map(|d| d.join("scope"));
             let notice = crash_notice(dir.as_deref(), &info.to_string(), &tail);
@@ -122,16 +97,6 @@ pub(crate) fn install_panic_hook() {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn test_paste_mode_writes_the_enable_and_disable_sequences() {
-        let mut on = Vec::new();
-        super::paste_mode(&mut on, true);
-        assert_eq!(on, b"\x1b[?2004h");
-        let mut off = Vec::new();
-        super::paste_mode(&mut off, false);
-        assert_eq!(off, b"\x1b[?2004l");
-    }
-
     use super::*;
 
     #[test]

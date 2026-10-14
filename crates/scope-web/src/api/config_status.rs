@@ -3,11 +3,13 @@
 use crate::AppState;
 use axum::Json;
 use axum::extract::State;
-use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use scope::config::Config;
+use scope::error::ScopeError;
 use serde::Deserialize;
 use std::sync::Arc;
+
+use super::{error_response, status_for};
 
 /// GET /api/config/status — Returns config status (which keys are set).
 pub async fn handle(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -21,7 +23,7 @@ pub async fn handle(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Report which API keys are configured (without exposing values)
     let api_keys_status: serde_json::Value = serde_json::json!({
         "etherscan": config.chains.api_keys.contains_key("etherscan") ||
-            std::env::var("ETHERSCAN_API_KEY").is_ok(),
+            scope::compliance::etherscan::etherscan_key().is_some(),
         "polygonscan": config.chains.api_keys.contains_key("polygonscan"),
         "bscscan": config.chains.api_keys.contains_key("bscscan"),
         "solscan": config.chains.api_keys.contains_key("solscan"),
@@ -42,6 +44,9 @@ pub async fn handle(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "color_enabled": config.output.color,
         "api_keys": api_keys_status,
         "rpc_endpoints": rpc_status,
+        // Resolved market defaults; the web market panel fills its peg field
+        // from here and sends a peg only when the user changes it.
+        "market": { "peg_target": config.market.health.peg_target },
         "version": scope::VERSION,
     }))
     .into_response()
@@ -90,11 +95,8 @@ pub async fn handle_save(
     let config_path = match Config::config_path() {
         Some(p) => p,
         None => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": "Cannot determine config path" })),
-            )
-                .into_response();
+            let e = ScopeError::Other("Cannot determine config path".to_string());
+            return error_response(status_for(&e), e.to_string());
         }
     };
 
@@ -102,21 +104,15 @@ pub async fn handle_save(
     if let Some(parent) = config_path.parent()
         && let Err(e) = std::fs::create_dir_all(parent)
     {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": format!("Failed to create config dir: {}", e) })),
-        )
-            .into_response();
+        let e = ScopeError::io_context(e, "Failed to create config dir");
+        return error_response(status_for(&e), e.to_string());
     }
 
     match serde_yaml::to_string(&config) {
         Ok(yaml) => {
             if let Err(e) = std::fs::write(&config_path, yaml) {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({ "error": format!("Failed to write config: {}", e) })),
-                )
-                    .into_response();
+                let e = ScopeError::io_context(e, "Failed to write config");
+                return error_response(status_for(&e), e.to_string());
             }
             Json(serde_json::json!({
                 "status": "saved",
@@ -124,11 +120,10 @@ pub async fn handle_save(
             }))
             .into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": format!("Failed to serialize config: {}", e) })),
-        )
-            .into_response(),
+        Err(e) => {
+            let e = ScopeError::Other(format!("Failed to serialize config: {}", e));
+            error_response(status_for(&e), e.to_string())
+        }
     }
 }
 
@@ -144,6 +139,27 @@ mod tests {
     // a time. `tokio::sync::Mutex` (not `std::sync`) is used deliberately so it
     // can be held across `.await` without tripping `clippy::await_holding_lock`.
     static HOME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// H6: the web market panel fills its peg field from here, so the
+    /// resolved config value, not 1.0, is what the user sees.
+    #[tokio::test]
+    async fn test_status_reports_the_configured_peg_target() {
+        let mut config = Config::default();
+        config.market.health.peg_target = 0.92;
+        let http: Arc<dyn scope::http::HttpClient> =
+            Arc::new(scope::http::NativeHttpClient::new().unwrap());
+        let factory = scope::chains::DefaultClientFactory {
+            chains_config: config.chains.clone(),
+            http,
+        };
+        let state = Arc::new(AppState::new(config, factory));
+        let response = handle(State(state)).await.into_response();
+        let body = axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["market"]["peg_target"], 0.92);
+    }
 
     #[test]
     fn test_deserialize_save_config_full() {
@@ -217,7 +233,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let response = handle(State(state)).await.into_response();
         assert_eq!(response.status(), axum::http::StatusCode::OK);
 
@@ -246,7 +262,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = SaveConfigRequest {
             api_keys: std::collections::HashMap::new(),
             rpc_endpoints: std::collections::HashMap::new(),
@@ -290,7 +306,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
 
         let req = SaveConfigRequest {
             api_keys: std::collections::HashMap::new(),
@@ -361,7 +377,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
 
         let req = SaveConfigRequest {
             api_keys: std::collections::HashMap::new(),
@@ -411,7 +427,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
 
         let mut api_keys = std::collections::HashMap::new();
         api_keys.insert("etherscan".to_string(), "test_key_abc".to_string());

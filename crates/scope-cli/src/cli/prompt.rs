@@ -7,12 +7,20 @@
 //! terminal. Ctrl-C there must cancel the command and return to the TUI. A
 //! blocking `read_line` cannot be stopped, and a read on another thread
 //! would stay behind and take the TUI's next keys. So the reader waits for
-//! input in short steps and checks [`CANCEL`] between them. It reads one
+//! input in short steps and checks `CANCEL` between them. It reads one
 //! byte at a time, so it never takes bytes after the newline.
 //!
-//! Outside the TUI nothing sets [`CANCEL`], and the reader acts as
+//! Outside the TUI nothing sets `CANCEL`, and the reader acts as
 //! `read_line` does.
+//!
+//! Every prompt goes through `ask` (or `pick`, for a numbered list).
+//! It pauses the progress bars, so a spinner never draws over a question.
+//! A question, a list to pick from and the text around a prompt are not
+//! data: they go to the diagnostic channel of the [`Output`]. So piped
+//! data stays clean, and a TUI run keeps only data for Ctrl-Y and `save`.
 
+use crate::cli::output::Output;
+use scope::error::ScopeError;
 use std::io::{self, BufRead};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -29,6 +37,62 @@ const POLL_INTERVAL_MS: libc::c_int = 100;
 /// The error a cancelled read returns.
 fn cancelled() -> io::Error {
     io::Error::new(io::ErrorKind::Interrupted, "cancelled")
+}
+
+/// Writes `question` to the diagnostic channel of `out` and reads one
+/// line of answer from `reader`. Every progress bar is paused from before
+/// the question is written until the answer is read, so no bar draws over
+/// it. The question may span lines. The channel is stderr on the CLI,
+/// which Rust does not buffer, so the question shows before the read.
+///
+/// # Errors
+///
+/// Returns the write or read error.
+pub(crate) fn ask(reader: &mut impl BufRead, out: &Output, question: &str) -> io::Result<String> {
+    crate::cli::progress::paused(|| {
+        crate::err!(out, "{question}")?;
+        let mut answer = String::new();
+        reader.read_line(&mut answer)?;
+        Ok(answer)
+    })
+}
+
+/// `ask` on stdin (cancellable in the TUI). The `scope` binary's own
+/// prompts use it.
+///
+/// # Errors
+///
+/// Returns the write or read error.
+pub fn ask_stdin(out: &Output, question: &str) -> io::Result<String> {
+    ask(&mut stdin(), out, question)
+}
+
+/// Shows `list` (it ends with a newline), asks `Select <what> (1-<count>): `
+/// and returns the zero-based index of the answer.
+///
+/// # Errors
+///
+/// The write or read error; `Api` when the answer is not a number
+/// from 1 to `count`.
+pub(crate) fn pick(
+    reader: &mut impl BufRead,
+    out: &Output,
+    list: &str,
+    what: &str,
+    count: usize,
+) -> scope::error::Result<usize> {
+    let question = format!("{list}\nSelect {what} (1-{count}): ");
+    let answer = ask(reader, out, &question)?;
+    let n: usize = answer
+        .trim()
+        .parse()
+        .map_err(|_| ScopeError::Api("Invalid selection".to_string()))?;
+    if !(1..=count).contains(&n) {
+        return Err(ScopeError::Api(format!(
+            "Selection must be between 1 and {count}"
+        )));
+    }
+    Ok(n - 1)
 }
 
 /// The input for a prompt: stdin, cancellable with [`CANCEL`].
@@ -182,6 +246,132 @@ impl BufRead for PromptInput<'_> {
         })?;
         buf.push_str(&text);
         Ok(text.len())
+    }
+}
+
+#[cfg(test)]
+mod ask_tests {
+    use super::*;
+    use crate::cli::progress::testing::{REGISTRY_LOCK, Screen, drawing_spinner};
+    use std::io::Write;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Duration;
+
+    /// An answer that takes a while to type. It notes how many draws the
+    /// screen had when the answer came.
+    struct SlowAnswer<'a> {
+        screen: &'a Screen,
+        draws_at_answer: Option<usize>,
+    }
+
+    impl io::Read for SlowAnswer<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.draws_at_answer.is_some() {
+                return Ok(0);
+            }
+            std::thread::sleep(Duration::from_millis(40));
+            self.draws_at_answer = Some(self.screen.ops().len());
+            buf[..2].copy_from_slice(b"y\n");
+            Ok(2)
+        }
+    }
+
+    /// A diagnostic channel that notes how many draws the screen had when
+    /// the question was written.
+    struct Question {
+        screen: Screen,
+        draws_at_question: Arc<AtomicUsize>,
+    }
+
+    impl Write for Question {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.draws_at_question
+                .store(self.screen.ops().len(), Ordering::SeqCst);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_ask_keeps_a_ticking_spinner_off_the_question() {
+        // crawl by symbol: the "Searching..." spinner drew over "Save this
+        // token for future use? [y/N]" until the answer came.
+        let _lock = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let screen = Screen::default();
+        let sp = drawing_spinner("Searching...", &Output::capture().0, &screen);
+        std::thread::sleep(Duration::from_millis(30));
+        let mut answer = SlowAnswer {
+            screen: &screen,
+            draws_at_answer: None,
+        };
+        let mut reader = io::BufReader::new(&mut answer);
+        let draws_at_question = Arc::new(AtomicUsize::new(0));
+        let out = Output::from_writers(
+            Vec::new(),
+            Question {
+                screen: screen.clone(),
+                draws_at_question: draws_at_question.clone(),
+            },
+        );
+        let got = ask(&mut reader, &out, "Save? [y/N]: ").unwrap();
+        drop(reader);
+        assert_eq!(got, "y\n");
+        assert_eq!(
+            answer.draws_at_answer,
+            Some(draws_at_question.load(Ordering::SeqCst)),
+            "the spinner drew between the question and the answer"
+        );
+        sp.finish_and_clear();
+    }
+
+    #[test]
+    fn test_a_prompt_never_reaches_the_data_channel() {
+        // `scope crawl USDC > out.json`: the question must show on the
+        // terminal and stay out of the file.
+        let (out, cap) = Output::capture();
+        let got = ask(&mut io::Cursor::new(b"y\n".to_vec()), &out, "Save? [y/N]: ").unwrap();
+        assert_eq!(got, "y\n");
+        assert_eq!(cap.out(), "");
+        assert_eq!(cap.err(), "Save? [y/N]: ");
+    }
+
+    #[test]
+    fn test_ask_returns_the_write_error() {
+        let out = Output::from_writers(Vec::new(), crate::cli::output::tests::ClosedPipe);
+        let e = ask(&mut io::Cursor::new(b"y\n".to_vec()), &out, "q? ").unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::BrokenPipe);
+    }
+
+    #[test]
+    fn test_pick_returns_the_index_and_rejects_bad_answers() {
+        let pick_with = |answer: &str| {
+            let (out, cap) = Output::capture();
+            let got = pick(
+                &mut io::Cursor::new(answer.as_bytes().to_vec()),
+                &out,
+                "1 a\n2 b\n",
+                "token",
+                2,
+            );
+            assert_eq!(cap.err(), "1 a\n2 b\n\nSelect token (1-2): ");
+            assert_eq!(cap.out(), "", "the list is not data");
+            got.map_err(|e| e.to_string())
+        };
+        assert_eq!(pick_with("2\n"), Ok(1));
+        assert!(pick_with("x\n").unwrap_err().contains("Invalid selection"));
+        assert!(
+            pick_with("3\n")
+                .unwrap_err()
+                .contains("Selection must be between 1 and 2")
+        );
+        assert!(
+            pick_with("0\n")
+                .unwrap_err()
+                .contains("Selection must be between 1 and 2")
+        );
     }
 }
 

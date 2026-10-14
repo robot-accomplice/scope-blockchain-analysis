@@ -78,7 +78,7 @@ pub async fn run_with_client(
             }
         ),
         out,
-    )?;
+    );
 
     let tokens = match args.source {
         DiscoverSource::Profiles => client.get_token_profiles().await?,
@@ -139,7 +139,7 @@ pub async fn run_with_client(
                 let row_text = format!(
                     "{} | {} | {}",
                     t.chain_id,
-                    truncate_address(&t.token_address),
+                    scope::display::text::abbreviate(&t.token_address),
                     desc
                 );
                 outln!(out, "{}", t::numbered_row(i + 1, &row_text))?;
@@ -169,14 +169,6 @@ pub async fn run_with_client(
     }
 
     Ok(())
-}
-
-fn truncate_address(addr: &str) -> String {
-    if addr.len() > 20 {
-        format!("{}...{}", &addr[..10], &addr[addr.len() - 8..])
-    } else {
-        addr.to_string()
-    }
 }
 
 #[cfg(test)]
@@ -335,16 +327,5 @@ mod tests {
         };
         let result = run_with_client(args, OutputFormat::Table, &client, &quiet()).await;
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_truncate_address_short() {
-        assert_eq!(truncate_address("0x1234"), "0x1234");
-    }
-
-    #[test]
-    fn test_truncate_address_long() {
-        let addr = "0x1234567890123456789012345678901234567890";
-        assert_eq!(truncate_address(addr), "0x12345678...34567890");
     }
 }

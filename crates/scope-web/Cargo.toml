@@ -69,6 +69,8 @@ futures = "0.3"
 libc = "0.2"
 
 [dev-dependencies]
+scope = { path = "../scope-core", package = "scope-bca-core", version = "0.6.0", features = ["test-support"] }
+mockito = "1.2"
 tower = { version = "0.5", features = ["util"] }
 tokio-test = "0.4"
 tempfile = "3.10"

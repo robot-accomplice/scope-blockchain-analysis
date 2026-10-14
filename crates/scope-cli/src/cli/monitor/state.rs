@@ -3,7 +3,9 @@
 use ratatui::widgets::ListState;
 use scope::chains::DexPair;
 use scope::chains::dex::DexTokenData;
-use scope::market::{OrderBook, OrderBookLevel, Trade, TradeSide};
+use scope::market::{
+    HealthThresholds, OrderBook, Trade, TradeSide, most_liquid, order_book_from_analytics,
+};
 use std::collections::VecDeque;
 use std::fs;
 use std::io::{BufWriter, Write as _};
@@ -23,6 +25,9 @@ use super::config::{
     MAX_REFRESH_SECS, MIN_REFRESH_SECS, MonitorConfig, OhlcCandle, ScaleMode, TimePeriod,
     WidgetVisibility,
 };
+
+/// Recent trades the monitor keeps, synthetic or from the venue.
+pub(crate) const MAX_RECENT_TRADES: usize = 200;
 
 /// State for the live token monitor.
 pub struct MonitorState {
@@ -92,6 +97,9 @@ pub struct MonitorState {
     /// Refresh rate.
     pub refresh_rate: Duration,
 
+    /// The key overlay (`?`) is open (#68).
+    pub show_keys: bool,
+
     /// Whether monitoring is paused.
     pub paused: bool,
 
@@ -127,6 +135,18 @@ pub struct MonitorState {
 
     /// Recent trades (synthetic from DEX pair data or real from exchange API).
     pub recent_trades: VecDeque<Trade>,
+
+    /// Health thresholds for the book built from DEX pairs: config
+    /// `market.health`, as `market summary` uses.
+    pub thresholds: HealthThresholds,
+
+    /// The venue whose real order book `order_book` holds (#78). `None`
+    /// while the book is built from DEX pairs.
+    pub book_venue: Option<String>,
+
+    /// The venue whose real trades `recent_trades` holds. `None` while the
+    /// trades are synthetic.
+    pub trades_venue: Option<String>,
 
     /// Raw DEX pair data for the exchange view.
     pub dex_pairs: Vec<DexPair>,
@@ -292,6 +312,7 @@ impl MonitorState {
             fdv: token_data.fdv,
             last_update: now,
             refresh_rate: Duration::from_secs(DEFAULT_REFRESH_SECS),
+            show_keys: false,
             paused: false,
             log_messages: VecDeque::with_capacity(10),
             log_list_state: ListState::default(),
@@ -304,6 +325,9 @@ impl MonitorState {
             liquidity_pairs: Vec::new(),
             order_book: None,
             recent_trades: VecDeque::new(),
+            thresholds: HealthThresholds::default(),
+            book_venue: None,
+            trades_venue: None,
             dex_pairs: token_data.pairs.clone(),
             websites: token_data.websites.clone(),
             socials: token_data
@@ -363,7 +387,7 @@ impl MonitorState {
     pub fn set_venue_ticker(&mut self, ticker: &scope::market::Ticker) {
         self.venue_only = true;
         self.change_24h_known = ticker.price_change_pct_24h.is_some();
-        self.volume_known = super::ticker_usd_volume(ticker).is_some();
+        self.volume_known = ticker.usd_volume().is_some();
         if !self.volume_known {
             // Synthetic volume built from a placeholder is not data.
             self.volume_history.clear();
@@ -555,83 +579,28 @@ impl MonitorState {
         history
     }
 
-    /// Generates a multi-level synthetic order book from DEX pair data.
-    ///
-    /// Aggregates liquidity across all pairs and distributes it into
-    /// realistic bid/ask levels around the current mid price. Levels are
-    /// spaced logarithmically so near-mid levels are denser.
-    pub(crate) fn generate_synthetic_order_book(
-        pairs: &[DexPair],
-        symbol: &str,
-        price: f64,
-        total_liquidity: f64,
-    ) -> Option<OrderBook> {
-        if price <= 0.0 || total_liquidity <= 0.0 {
-            return None;
-        }
+    /// The book built from DEX pairs: the core AMM book of the most liquid
+    /// pool, with the source it reports (H1). `None` without a priced pool.
+    pub(crate) fn dex_book(&self, pairs: &[DexPair], symbol: &str) -> Option<OrderBook> {
+        most_liquid(pairs)
+            .filter(|p| p.price_usd > 0.0)
+            .map(|p| order_book_from_analytics(&self.chain, p, symbol, &self.thresholds))
+    }
 
-        // Spread is tighter for more liquid markets
-        let base_spread_bps = if total_liquidity > 1_000_000.0 {
-            5.0 // 0.05%
-        } else if total_liquidity > 100_000.0 {
-            15.0 // 0.15%
-        } else {
-            50.0 // 0.50%
-        };
+    /// Shows the venue's real order book (#78). DEX refreshes no longer
+    /// replace it.
+    pub fn set_venue_book(&mut self, venue: &str, book: OrderBook) {
+        self.book_venue = Some(venue.to_string());
+        self.order_book = Some(book);
+    }
 
-        let half_spread = price * base_spread_bps / 10_000.0;
-        let half_liq = total_liquidity / 2.0;
-        let num_levels: usize = 15;
-
-        // Generate ask levels (ascending from mid + half_spread)
-        let mut asks = Vec::with_capacity(num_levels);
-        for i in 0..num_levels {
-            // Exponential spacing: tighter near the mid, wider further out
-            let offset_pct = (1.0 + i as f64 * 0.3).powf(1.4) * 0.001;
-            let ask_price = price + half_spread + price * offset_pct;
-            // Liquidity decreases further from mid (exponential decay)
-            let weight = (-1.5 * i as f64 / num_levels as f64).exp();
-            let level_liq = half_liq * weight / num_levels as f64 * 2.5;
-            let quantity = level_liq / ask_price;
-            if quantity > 0.0 {
-                asks.push(OrderBookLevel {
-                    price: ask_price,
-                    quantity,
-                });
-            }
-        }
-
-        // Generate bid levels (descending from mid - half_spread)
-        let mut bids = Vec::with_capacity(num_levels);
-        for i in 0..num_levels {
-            let offset_pct = (1.0 + i as f64 * 0.3).powf(1.4) * 0.001;
-            let bid_price = price - half_spread - price * offset_pct;
-            if bid_price <= 0.0 {
-                break;
-            }
-            let weight = (-1.5 * i as f64 / num_levels as f64).exp();
-            let level_liq = half_liq * weight / num_levels as f64 * 2.5;
-            let quantity = level_liq / bid_price;
-            if quantity > 0.0 {
-                bids.push(OrderBookLevel {
-                    price: bid_price,
-                    quantity,
-                });
-            }
-        }
-
-        // Find best quote token from pairs for the pair label
-        let quote = pairs
-            .first()
-            .map(|p| p.quote_token.as_str())
-            .unwrap_or("USD");
-
-        Some(OrderBook {
-            pair: format!("{}/{}", symbol, quote),
-            source: scope::market::BookSource::Exchange,
-            bids,
-            asks,
-        })
+    /// Shows the venue's real recent trades, oldest first, in place of the
+    /// synthetic ones.
+    pub fn set_venue_trades(&mut self, venue: &str, mut trades: Vec<Trade>) {
+        trades.sort_by_key(|t| t.timestamp_ms);
+        let keep = trades.len().saturating_sub(MAX_RECENT_TRADES);
+        self.trades_venue = Some(venue.to_string());
+        self.recent_trades = trades.into_iter().skip(keep).collect();
     }
 
     /// Updates the state with new token data.
@@ -704,15 +673,13 @@ impl MonitorState {
 
         // Update DEX pairs and generate synthetic order book
         self.dex_pairs = token_data.pairs.clone();
-        self.order_book = Self::generate_synthetic_order_book(
-            &token_data.pairs,
-            &token_data.symbol,
-            token_data.price_usd,
-            token_data.liquidity_usd,
-        );
+        if self.book_venue.is_none() {
+            self.order_book = self.dex_book(&token_data.pairs, &token_data.symbol);
+        }
 
-        // Generate synthetic trade from price movement
-        if token_data.price_usd > 0.0 {
+        // Generate a synthetic trade from price movement, unless the venue's
+        // real trades are shown.
+        if self.trades_venue.is_none() && token_data.price_usd > 0.0 {
             let side = if price_changed && token_data.price_usd > self.current_price {
                 TradeSide::Buy
             } else if price_changed {
@@ -743,8 +710,7 @@ impl MonitorState {
                 side,
                 id: None,
             });
-            // Keep at most 200 trades
-            while self.recent_trades.len() > 200 {
+            while self.recent_trades.len() > MAX_RECENT_TRADES {
                 self.recent_trades.pop_front();
             }
         }
@@ -776,7 +742,10 @@ impl MonitorState {
             self.volume_avg = self.volume_avg * 0.9 + token_data.volume_24h * 0.1;
         }
 
-        self.log(format!("Updated: ${:.6}", token_data.price_usd));
+        self.log(format!(
+            "Updated: {}",
+            scope::display::format::format_price_usd(token_data.price_usd)
+        ));
 
         // Periodically save to cache (every 60 updates, ~5 minutes at 5s refresh)
         if self.real_data_count.is_multiple_of(60) {
@@ -793,7 +762,11 @@ impl MonitorState {
             && self.current_price < min
         {
             self.active_alerts.push(ActiveAlert {
-                message: format!("⚠ Price ${:.6} below min ${:.6}", self.current_price, min),
+                message: format!(
+                    "⚠ Price {} below min {}",
+                    scope::display::format::format_price_usd(self.current_price),
+                    scope::display::format::format_price_usd(min)
+                ),
                 triggered_at: Instant::now(),
             });
         }
@@ -803,7 +776,11 @@ impl MonitorState {
             && self.current_price > max
         {
             self.active_alerts.push(ActiveAlert {
-                message: format!("⚠ Price ${:.6} above max ${:.6}", self.current_price, max),
+                message: format!(
+                    "⚠ Price {} above max {}",
+                    scope::display::format::format_price_usd(self.current_price),
+                    scope::display::format::format_price_usd(max)
+                ),
                 triggered_at: Instant::now(),
             });
         }

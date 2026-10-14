@@ -7,9 +7,9 @@ use crate::AppState;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::response::IntoResponse;
+use scope::chains::DexDataSource;
 use scope::chains::dex::DexTokenData;
-use scope::chains::{ChainClientFactory, DexDataSource};
-use scope::market::{ExchangeClient, TradeSide, VenueRegistry};
+use scope::market::{ExchangeClient, Pair, VenueRegistry};
 use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,7 +20,7 @@ pub struct MonitorQuery {
     /// Token address or symbol to monitor.
     pub token: String,
     /// Chain (default: "ethereum").
-    #[serde(default = "default_chain")]
+    #[serde(default = "crate::api::default_chain")]
     pub chain: String,
     /// Refresh interval in seconds (default: 5).
     #[serde(default = "default_refresh")]
@@ -29,17 +29,22 @@ pub struct MonitorQuery {
     /// (order book, ticker, recent trades) is included in each update frame.
     #[serde(default)]
     pub venue: Option<String>,
-    /// Base pair for exchange data (default: same as token).
+    /// Pair for exchange data, read like the CLI pair (default: the token
+    /// symbol with the venue's default quote).
     #[serde(default)]
     pub pair: Option<String>,
 }
 
-fn default_chain() -> String {
-    "ethereum".to_string()
-}
-
 fn default_refresh() -> u64 {
     5
+}
+
+/// The venue's exchange client, or the one unknown-venue error.
+fn exchange_client_for(venue: Option<&str>) -> scope::error::Result<Option<ExchangeClient>> {
+    let Some(id) = venue else {
+        return Ok(None);
+    };
+    VenueRegistry::load()?.create_exchange_client(id).map(Some)
 }
 
 /// WS /ws/monitor — WebSocket endpoint for live token monitoring.
@@ -63,16 +68,25 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, params: Moni
     let token_input = params.token.clone();
     let chain = params.chain.clone();
 
-    // Optionally create an exchange client for CEX data
-    let exchange_client: Option<ExchangeClient> = params.venue.as_ref().and_then(|venue_id| {
-        VenueRegistry::load()
-            .ok()
-            .and_then(|r| r.create_exchange_client(venue_id).ok())
-    });
+    // Optionally create an exchange client for CEX data. An unknown venue is
+    // the one unknown-venue error, reported on the socket (same frame shape
+    // as a DexTokenData error), not silently dropped.
+    let exchange_client: Option<ExchangeClient> = match exchange_client_for(params.venue.as_deref())
+    {
+        Ok(client) => client,
+        Err(e) => {
+            let msg = serde_json::json!({"type": "error", "message": e.to_string()});
+            let _ = socket.send(Message::Text(msg.to_string())).await;
+            return;
+        }
+    };
 
     let exchange_pair: Option<String> = exchange_client.as_ref().map(|ec| {
-        let base = params.pair.as_deref().unwrap_or(&token_input);
-        ec.format_pair(base)
+        let pair = match params.pair.as_deref() {
+            Some(pair) => Pair::parse(pair),
+            None => Pair::base_only(&token_input),
+        };
+        ec.venue_symbol(&pair)
     });
 
     // Send initial connection message
@@ -99,7 +113,10 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, params: Moni
 
         // Optionally fetch exchange snapshot in parallel
         let exchange_snapshot = if let (Some(ec), Some(pair)) = (&exchange_client, &exchange_pair) {
-            Some(ec.fetch_market_snapshot(pair).await)
+            Some(
+                ec.fetch_market_snapshot(pair, scope::market::exchange::DEFAULT_SNAPSHOT_TRADES)
+                    .await,
+            )
         } else {
             None
         };
@@ -186,73 +203,58 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, params: Moni
     }
 }
 
-/// Attach exchange snapshot data (order book, ticker, trades) to a JSON frame.
+/// Levels and trades a monitor frame lists, at most.
+const FRAME_ITEMS: usize = 20;
+
+/// Attach exchange snapshot data (order book, ticker, trades) to a JSON
+/// frame, in the one JSON form of each (`OrderBook::to_json`, `Ticker` and
+/// `Trade` serialization).
 fn attach_exchange_data(frame: &mut serde_json::Value, snap: &scope::market::MarketSnapshot) {
     if let Some(book) = &snap.order_book {
-        frame["exchange_order_book"] = serde_json::json!({
-            "pair": book.pair,
-            "best_bid": book.best_bid(),
-            "best_ask": book.best_ask(),
-            "mid_price": book.mid_price(),
-            "spread": book.spread(),
-            "bid_depth": book.bid_depth(),
-            "ask_depth": book.ask_depth(),
-            "bids": book.bids.iter().take(20).map(|l| {
-                serde_json::json!({"price": l.price, "quantity": l.quantity})
-            }).collect::<Vec<_>>(),
-            "asks": book.asks.iter().take(20).map(|l| {
-                serde_json::json!({"price": l.price, "quantity": l.quantity})
-            }).collect::<Vec<_>>(),
-        });
+        frame["exchange_order_book"] = book.to_json(Some(FRAME_ITEMS));
     }
-
     if let Some(ticker) = &snap.ticker {
-        frame["exchange_ticker"] = serde_json::json!({
-            "pair": ticker.pair,
-            "last_price": ticker.last_price,
-            "high_24h": ticker.high_24h,
-            "low_24h": ticker.low_24h,
-            "volume_24h": ticker.volume_24h,
-            "quote_volume_24h": ticker.quote_volume_24h,
-            "best_bid": ticker.best_bid,
-            "best_ask": ticker.best_ask,
-        });
+        frame["exchange_ticker"] = serde_json::json!(ticker);
     }
-
     if let Some(trades) = &snap.recent_trades {
-        frame["exchange_trades"] = serde_json::json!(
-            trades
-                .iter()
-                .take(20)
-                .map(|t| {
-                    serde_json::json!({
-                        "price": t.price,
-                        "quantity": t.quantity,
-                        "timestamp_ms": t.timestamp_ms,
-                        "side": match t.side {
-                            TradeSide::Buy => "buy",
-                            TradeSide::Sell => "sell",
-                        },
-                    })
-                })
-                .collect::<Vec<_>>()
-        );
+        let recent: Vec<_> = trades.iter().take(FRAME_ITEMS).collect();
+        frame["exchange_trades"] = serde_json::json!(recent);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use scope::market::{MarketSnapshot, OrderBook, OrderBookLevel, Ticker, Trade};
+    use scope::market::{MarketSnapshot, OrderBook, OrderBookLevel, Ticker, Trade, TradeSide};
 
     #[test]
     fn test_default_chain() {
-        assert_eq!(default_chain(), "ethereum");
+        assert_eq!(crate::api::default_chain(), "ethereum");
     }
 
     #[test]
     fn test_default_refresh() {
         assert_eq!(default_refresh(), 5);
+    }
+
+    /// An unknown venue used to be silently dropped (no exchange data, no
+    /// word); now the one unknown-venue error reaches the client.
+    #[test]
+    fn test_exchange_client_for_unknown_venue_is_a_request_fault() {
+        let err = exchange_client_for(Some("nonexistent_venue_xyz"))
+            .err()
+            .unwrap();
+        assert!(
+            matches!(err, scope::error::ScopeError::InvalidInput(_)),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("Unknown venue"), "{err}");
+    }
+
+    #[test]
+    fn test_exchange_client_for_none_and_known_venue() {
+        assert!(exchange_client_for(None).unwrap().is_none());
+        assert!(exchange_client_for(Some("binance")).unwrap().is_some());
     }
 
     #[test]
@@ -358,6 +360,37 @@ mod tests {
         assert!(frame.get("exchange_order_book").is_none());
         assert!(frame.get("exchange_ticker").is_none());
         assert!(frame.get("exchange_trades").is_none());
+    }
+
+    #[test]
+    fn test_attach_exchange_data_spread_matches_the_market_summary() {
+        use scope::market::{
+            BookSource, HealthThresholds, MarketSummary, OrderBook, OrderBookLevel,
+        };
+        let level = |price, quantity| OrderBookLevel { price, quantity };
+        // Zero-quantity top levels are not real orders.
+        let book = OrderBook {
+            pair: "X/USDT".to_string(),
+            source: BookSource::Exchange,
+            bids: vec![level(1.0, 0.0), level(0.999, 500.0)],
+            asks: vec![level(1.0001, 0.0), level(1.001, 500.0)],
+        };
+        let summary = MarketSummary::from_order_book(&book, &HealthThresholds::default(), None);
+        let snapshot = scope::market::MarketSnapshot {
+            order_book: Some(book),
+            ticker: None,
+            recent_trades: None,
+        };
+        let mut frame = serde_json::json!({"type": "update"});
+        attach_exchange_data(&mut frame, &snapshot);
+        assert_eq!(
+            frame["exchange_order_book"]["spread"].as_f64(),
+            summary.spread
+        );
+        assert_eq!(
+            frame["exchange_order_book"]["mid_price"].as_f64(),
+            summary.mid_price
+        );
     }
 
     #[test]

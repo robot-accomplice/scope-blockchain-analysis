@@ -3,9 +3,8 @@
 use crate::AppState;
 use axum::Json;
 use axum::extract::State;
-use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use scope::market::{HealthOverrides, MarketSummary, VenueRegistry, order_book_from_analytics};
+use scope::market::{HealthOverrides, fetch_token_summary_by_name};
 use scope_cli::cli::crawl::{self, Period};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -16,26 +15,18 @@ pub struct TokenHealthRequest {
     /// Token symbol or contract address.
     pub token: String,
     /// Target chain (default: "ethereum").
-    #[serde(default = "default_chain")]
+    #[serde(default = "super::default_chain")]
     pub chain: String,
     /// Include market/order book data.
     #[serde(default)]
     pub with_market: bool,
-    /// Market venue: "binance", "biconomy", "eth", "solana".
-    #[serde(default = "default_venue")]
+    /// Market venue; see scope::market::VENUE_HELP.
+    #[serde(default = "super::default_venue")]
     pub market_venue: String,
     /// Health threshold overrides for `with_market` (top-level JSON keys).
     /// Unset keys use config `market.health`.
     #[serde(flatten)]
     pub health: HealthOverrides,
-}
-
-fn default_chain() -> String {
-    "ethereum".to_string()
-}
-
-fn default_venue() -> String {
-    "binance".to_string()
 }
 
 /// POST /api/token-health — Token health suite.
@@ -49,13 +40,7 @@ pub async fn handle(
     // Resolve address book shortcuts (@label or direct address match)
     let resolved = match super::resolve_address_book(&req.token, &state.config) {
         Ok(r) => r,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": e })),
-            )
-                .into_response();
-        }
+        Err(e) => return super::error_response(super::status_for(&e), e.to_string()),
     };
     let token = resolved.value;
     let chain = resolved.chain.unwrap_or(req.chain);
@@ -66,131 +51,45 @@ pub async fn handle(
         &chain,
         Period::Hour24,
         10,
-        &state.factory,
+        state.factory.as_ref(),
         None,
         &scope_cli::cli::output::Output::stdio(),
     )
     .await
     {
         Ok(a) => a,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response();
-        }
+        Err(e) => return super::error_response(super::status_for(&e), e.to_string()),
     };
 
-    // Optionally fetch market data
-    let venue_id = &req.market_venue;
-    let market_summary = if req.with_market {
+    // Optionally fetch market data. A market error leaves `market` null and
+    // is reported in `market_error`; the analytics still return.
+    let market_result = if req.with_market {
         let thresholds = state.config.market.health.with_overrides(&req.health);
-
-        if !is_dex_venue(venue_id) {
-            // CEX venue — use venue registry
-            if let Ok(registry) = VenueRegistry::load()
-                && let Ok(exchange) = registry.create_exchange_client(venue_id)
-            {
-                let pair = exchange.format_pair(&analytics.token.symbol);
-                match exchange.fetch_order_book(&pair).await {
-                    Ok(book) => {
-                        let volume_24h = if exchange.has_ticker() {
-                            exchange
-                                .fetch_ticker(&pair)
-                                .await
-                                .ok()
-                                .and_then(|t| t.quote_volume(book.mid_price()))
-                        } else {
-                            None
-                        };
-                        Some(MarketSummary::from_order_book(
-                            &book,
-                            &thresholds,
-                            volume_24h,
-                        ))
-                    }
-                    Err(_) => None,
-                }
-            } else {
-                None
-            }
-        } else {
-            // DEX venue
-            let venue_chain = dex_venue_to_chain(venue_id);
-            if analytics.chain.eq_ignore_ascii_case(venue_chain) && !analytics.dex_pairs.is_empty()
-            {
-                let best_pair = analytics
-                    .dex_pairs
-                    .iter()
-                    .max_by(|a, b| {
-                        a.liquidity_usd
-                            .partial_cmp(&b.liquidity_usd)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    })
-                    .unwrap();
-                let book = order_book_from_analytics(
-                    &analytics.chain,
-                    best_pair,
-                    &analytics.token.symbol,
-                    &thresholds,
-                );
-                let volume_24h = Some(best_pair.volume_24h);
-                Some(MarketSummary::from_order_book(
-                    &book,
-                    &thresholds,
-                    volume_24h,
-                ))
-            } else {
-                None
-            }
-        }
+        Some(fetch_token_summary_by_name(&req.market_venue, &analytics, &thresholds).await)
     } else {
         None
     };
+    let (market_summary, market_error) = match market_result {
+        Some(Ok(summary)) => (Some(summary), None),
+        Some(Err(e)) => (None, Some(e.to_string())),
+        None => (None, None),
+    };
 
     // Build combined JSON
-    let market_json = market_summary.map(|m| {
-        serde_json::json!({
-            "pair": m.pair,
-            "peg_target": m.peg_target,
-            "book_source": m.source,
-            "best_bid": m.best_bid,
-            "best_ask": m.best_ask,
-            "mid_price": m.mid_price,
-            "spread": m.spread,
-            "bid_depth": m.bid_depth,
-            "ask_depth": m.ask_depth,
-            "healthy": m.healthy,
-            "volume_24h": m.volume_24h,
-            "checks": &m.checks
-        })
-    });
+    let market_json = market_summary.map(|m| m.to_json());
 
     Json(serde_json::json!({
         "analytics": analytics,
         "market": market_json,
+        "market_error": market_error,
     }))
     .into_response()
-}
-
-/// Whether the venue string refers to a DEX venue.
-fn is_dex_venue(venue: &str) -> bool {
-    matches!(venue.to_lowercase().as_str(), "ethereum" | "eth" | "solana")
-}
-
-/// Resolve DEX venue name to a canonical chain name.
-fn dex_venue_to_chain(venue: &str) -> &str {
-    match venue.to_lowercase().as_str() {
-        "ethereum" | "eth" => "ethereum",
-        "solana" => "solana",
-        _ => "ethereum",
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use scope::market::DexVenue;
 
     #[test]
     fn test_deserialize_full() {
@@ -221,8 +120,8 @@ mod tests {
 
     #[test]
     fn test_defaults() {
-        assert_eq!(default_chain(), "ethereum");
-        assert_eq!(default_venue(), "binance");
+        assert_eq!(super::super::default_chain(), "ethereum");
+        assert_eq!(super::super::default_venue(), "binance");
     }
 
     #[test]
@@ -257,7 +156,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = TokenHealthRequest {
             token: "USDC".to_string(),
             chain: "ethereum".to_string(),
@@ -285,7 +184,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = TokenHealthRequest {
             token: "USDC".to_string(),
             chain: "ethereum".to_string(),
@@ -313,7 +212,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = TokenHealthRequest {
             token: "USDC".to_string(),
             chain: "ethereum".to_string(),
@@ -329,26 +228,41 @@ mod tests {
 
     #[test]
     fn test_is_dex_venue() {
-        assert!(is_dex_venue("ethereum"));
-        assert!(is_dex_venue("eth"));
-        assert!(is_dex_venue("Ethereum"));
-        assert!(is_dex_venue("ETH"));
-        assert!(is_dex_venue("solana"));
-        assert!(is_dex_venue("Solana"));
-        assert!(!is_dex_venue("binance"));
-        assert!(!is_dex_venue("mexc"));
-        assert!(!is_dex_venue("okx"));
-        assert!(!is_dex_venue(""));
+        assert!(DexVenue::parse("ethereum").is_some());
+        assert!(DexVenue::parse("eth").is_some());
+        assert!(DexVenue::parse("Ethereum").is_some());
+        assert!(DexVenue::parse("ETH").is_some());
+        assert!(DexVenue::parse("solana").is_some());
+        assert!(DexVenue::parse("Solana").is_some());
+        assert!(DexVenue::parse("binance").is_none());
+        assert!(DexVenue::parse("mexc").is_none());
+        assert!(DexVenue::parse("okx").is_none());
+        assert!(DexVenue::parse("").is_none());
     }
 
     #[test]
     fn test_dex_venue_to_chain() {
-        assert_eq!(dex_venue_to_chain("ethereum"), "ethereum");
-        assert_eq!(dex_venue_to_chain("eth"), "ethereum");
-        assert_eq!(dex_venue_to_chain("Ethereum"), "ethereum");
-        assert_eq!(dex_venue_to_chain("solana"), "solana");
-        assert_eq!(dex_venue_to_chain("Solana"), "solana");
-        assert_eq!(dex_venue_to_chain("unknown"), "ethereum"); // default
+        assert_eq!(
+            DexVenue::parse("ethereum").map(DexVenue::chain),
+            Some("ethereum")
+        );
+        assert_eq!(
+            DexVenue::parse("eth").map(DexVenue::chain),
+            Some("ethereum")
+        );
+        assert_eq!(
+            DexVenue::parse("Ethereum").map(DexVenue::chain),
+            Some("ethereum")
+        );
+        assert_eq!(
+            DexVenue::parse("solana").map(DexVenue::chain),
+            Some("solana")
+        );
+        assert_eq!(
+            DexVenue::parse("Solana").map(DexVenue::chain),
+            Some("solana")
+        );
+        assert_eq!(DexVenue::parse("unknown"), None); // no silent ethereum
     }
 
     #[tokio::test]
@@ -366,7 +280,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = TokenHealthRequest {
             token: "INVALID_TOKEN_XYZ_NONEXISTENT".to_string(),
             chain: "ethereum".to_string(),
@@ -376,8 +290,14 @@ mod tests {
         };
         let response = handle(State(state), axum::Json(req)).await.into_response();
         let status = response.status();
-        // May succeed (empty analytics) or 500 (fetch error)
-        assert!(status.is_success() || status.is_server_error());
+        // Empty analytics (200), not found (404, via `status_for`), or a
+        // network failure offline (500).
+        assert!(
+            status.is_success()
+                || status == axum::http::StatusCode::NOT_FOUND
+                || status.is_server_error(),
+            "{status}"
+        );
     }
 
     #[test]
@@ -420,7 +340,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = TokenHealthRequest {
             token: "USDC".to_string(),
             chain: "ethereum".to_string(),
@@ -461,7 +381,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = TokenHealthRequest {
             token: "@nonexistent".to_string(),
             chain: "ethereum".to_string(),

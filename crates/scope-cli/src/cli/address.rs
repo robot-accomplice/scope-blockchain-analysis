@@ -18,7 +18,7 @@
 //! ```
 
 use crate::cli::output::Output;
-use crate::{errln, outln};
+use crate::{note, outln};
 use clap::Args;
 use scope::chains::{
     ChainClient, ChainClientFactory, validate_solana_address, validate_tron_address,
@@ -80,11 +80,7 @@ pub struct AddressArgs {
     #[arg(value_name = "ADDRESS")]
     pub address: String,
 
-    /// Target blockchain network.
-    ///
-    /// EVM chains: ethereum, polygon, arbitrum, optimism, base, bsc
-    /// Non-EVM chains: solana, tron
-    #[arg(short, long, default_value = "ethereum")]
+    #[arg(short, long, default_value = scope::chains::DEFAULT_CHAIN, help = scope::chains::registry::chain_help())]
     pub chain: String,
 
     /// Override output format for this command.
@@ -257,10 +253,8 @@ pub async fn run(
         analysis_args.include_tokens = true;
     }
 
-    let sp = crate::cli::progress::Spinner::new(
-        &format!("Analyzing address on {}...", args.chain),
-        out,
-    )?;
+    let sp =
+        crate::cli::progress::Spinner::new(&format!("Analyzing address on {}...", args.chain), out);
 
     let client = clients.create_chain_client(&args.chain)?;
     let report = analyze_address(&analysis_args, client.as_ref(), out).await?;
@@ -268,10 +262,7 @@ pub async fn run(
     // Dossier: fetch risk assessment (uses ETHERSCAN_API_KEY for Ethereum)
     let risk_assessment = if args.dossier {
         sp.set_message("Running risk assessment...");
-        let engine = match scope::compliance::datasource::BlockchainDataClient::from_env_opt() {
-            Some(client) => scope::compliance::risk::RiskEngine::with_data_client(client),
-            None => scope::compliance::risk::RiskEngine::new(),
-        };
+        let engine = scope::compliance::risk::RiskEngine::from_env();
         engine.assess_address(&args.address, &args.chain).await.ok()
     } else {
         None
@@ -318,7 +309,7 @@ pub async fn run(
             crate::cli::address_report::generate_address_report(&report)
         };
         crate::cli::address_report::save_address_report(&markdown_report, report_path)?;
-        outln!(out, "\nReport saved to: {}", report_path.display())?;
+        out.note_saved("Report", report_path.display());
     }
 
     Ok(())
@@ -358,10 +349,11 @@ pub async fn analyze_address(
                     .collect(),
             ),
             Err(e) => {
-                errln!(
+                note!(
                     out,
-                    "  ⚠ Transaction history unavailable (use -v for details)"
-                )?;
+                    "⚠ Transaction history unavailable ({})",
+                    crate::cli::errors::details_hint(out.is_tui())
+                );
                 tracing::debug!("Failed to fetch transactions: {}", e);
                 Some(vec![])
             }
@@ -390,7 +382,11 @@ pub async fn analyze_address(
                     .collect(),
             ),
             Err(e) => {
-                errln!(out, "  ⚠ Token balances unavailable (use -v for details)")?;
+                note!(
+                    out,
+                    "⚠ Token balances unavailable ({})",
+                    crate::cli::errors::details_hint(out.is_tui())
+                );
                 tracing::debug!("Failed to fetch token balances: {}", e);
                 Some(vec![])
             }
@@ -411,9 +407,10 @@ pub async fn analyze_address(
 
 /// Validates an address format for the given chain.
 fn validate_address(address: &str, chain: &str) -> Result<()> {
-    match chain {
+    // The chain registry decides the address and hash format (L2).
+    match scope::chains::registry::chain(chain).map(|c| c.kind) {
         // EVM-compatible chains use 0x-prefixed 40-char hex addresses
-        "ethereum" | "polygon" | "arbitrum" | "optimism" | "base" | "bsc" | "aegis" => {
+        Some(scope::chains::registry::ChainKind::Evm) => {
             if !address.starts_with("0x") {
                 return Err(scope::error::ScopeError::InvalidAddress(format!(
                     "Address must start with '0x': {}",
@@ -435,17 +432,18 @@ fn validate_address(address: &str, chain: &str) -> Result<()> {
             }
         }
         // Solana uses base58-encoded 32-byte addresses
-        "solana" => {
+        Some(scope::chains::registry::ChainKind::Solana) => {
             validate_solana_address(address)?;
         }
         // Tron uses T-prefixed base58check addresses
-        "tron" => {
+        Some(scope::chains::registry::ChainKind::Tron) => {
             validate_tron_address(address)?;
         }
         _ => {
-            return Err(scope::error::ScopeError::Chain(format!(
-                "Unsupported chain: {}. Supported: ethereum, polygon, arbitrum, optimism, base, bsc, solana, tron",
-                chain
+            return Err(scope::error::ScopeError::InvalidInput(format!(
+                "Unsupported chain: {}. Supported: {}",
+                chain,
+                scope::chains::registry::client_chain_list()
             )));
         }
     }
@@ -1205,6 +1203,43 @@ mod tests {
                 .map(|v| v.is_empty())
                 .unwrap_or(false)
         );
+    }
+
+    #[tokio::test]
+    async fn test_unavailable_notes_name_tui_steps_in_the_tui() {
+        // `-v` does nothing in the TUI; the note must not send users there.
+        let mut args = AddressArgs {
+            address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            chain: "ethereum".to_string(),
+            format: None,
+            include_txs: true,
+            include_tokens: false,
+            limit: 10,
+            report: None,
+            dossier: false,
+        };
+        let (tui, tui_text) = crate::cli::output::Output::capture_merged();
+        let (cli, cli_text) = crate::cli::output::Output::capture();
+        for out in [&tui, &cli] {
+            analyze_address(&args, &FailTxMockClient, out)
+                .await
+                .unwrap();
+        }
+        args.include_txs = false;
+        args.include_tokens = true;
+        for out in [&tui, &cli] {
+            analyze_address(&args, &FailTokenBalancesMockClient, out)
+                .await
+                .unwrap();
+        }
+        let tui_text = tui_text.out();
+        assert!(!tui_text.contains("-v"), "{tui_text}");
+        assert_eq!(
+            tui_text.matches("(run 'help <command>' for usage)").count(),
+            2,
+            "{tui_text}"
+        );
+        assert_eq!(cli_text.err().matches("(use -v for details)").count(), 2);
     }
 
     #[tokio::test]

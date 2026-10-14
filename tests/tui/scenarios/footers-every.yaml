@@ -4,6 +4,8 @@ steps:
   - type: "market summary USDC --venue nosuch --every 5s --duration 1m"
   - key: Enter
   - wait_for: { text: "Failed in", timeout: 20s }
-  - expect_screen: { contains: ["Run #1", "✗ Failed in"], not_contains: ["Done in"] }
+  # No run finished, so there is no repeating view: the error and the
+  # footer go to the scrollback at once.
+  - expect_screen: { contains: ["Unknown venue", "✗ Failed in"], not_contains: ["Done in", "Trends"] }
   - key: Ctrl-D
   - expect_exit: 0

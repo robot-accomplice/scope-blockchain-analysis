@@ -17,7 +17,7 @@ fn make_state(config: Config) -> Arc<AppState> {
         chains_config: config.chains.clone(),
         http,
     };
-    Arc::new(AppState { config, factory })
+    Arc::new(AppState::new(config, factory))
 }
 
 // ============================================================================

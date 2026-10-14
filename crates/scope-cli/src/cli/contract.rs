@@ -80,11 +80,12 @@ pub struct ContractArgs {
     #[arg(value_name = "ADDRESS")]
     pub address: String,
 
-    /// Target blockchain network.
-    ///
-    /// EVM chains with Etherscan-compatible APIs:
-    /// ethereum, polygon, arbitrum, optimism, base, bsc
-    #[arg(long, short, default_value = "ethereum")]
+    #[arg(
+        long,
+        short,
+        default_value = scope::chains::DEFAULT_CHAIN,
+        help = format!("Target blockchain network (Etherscan-compatible API): {}", scope::chains::registry::explorer_api_chain_list())
+    )]
     pub chain: String,
 
     /// Output raw JSON instead of formatted report.
@@ -101,7 +102,7 @@ pub async fn run(
     clients: &dyn ChainClientFactory,
     out: &Output,
 ) -> Result<()> {
-    let spinner = crate::cli::progress::Spinner::new("Analyzing contract...", out)?;
+    let spinner = crate::cli::progress::Spinner::new("Analyzing contract...", out);
 
     let client = clients.create_chain_client(&args.chain)?;
     let http_client = scope::http::transport();

@@ -536,8 +536,10 @@ pub fn detect_rugpull_indicators(
             }
         }
 
-        // No sells (honeypot indicator)
-        if ta.total_sells_24h == 0 && ta.total_buys_24h > 10 {
+        // No sells (honeypot indicator): the one rule in token_risk.
+        if let super::token_risk::Honeypot::NoSells { .. } =
+            super::token_risk::honeypot(ta.total_buys_24h, ta.total_sells_24h)
+        {
             score += 4.0;
             evidence.push(format!(
                 "No sells in 24h with {} buys (potential honeypot)",
@@ -545,8 +547,10 @@ pub fn detect_rugpull_indicators(
             ));
         }
 
-        // Low liquidity
-        if ta.liquidity_usd < 10_000.0 && ta.liquidity_usd > 0.0 {
+        // Very low liquidity, none included (token_risk tiers).
+        if super::token_risk::liquidity_tier(ta.liquidity_usd)
+            == super::token_risk::LiquidityTier::VeryLow
+        {
             score += 2.0;
             evidence.push(format!("Very low liquidity: ${:.0}", ta.liquidity_usd));
         }
@@ -1734,6 +1738,23 @@ mod tests {
         let factors = detect_rugpull_indicators(Some(&ca), None);
         let f = &factors[0];
         assert!(f.evidence.iter().any(|e| e.contains("not verified")));
+    }
+
+    // M7: the audit cases. 5 buys and 0 sells is a honeypot sign, and no
+    // liquidity is very low, in compliance as in the crawl report.
+    #[test]
+    fn test_token_rules_match_the_report_on_the_audit_cases() {
+        let ta = make_ta(None, None, 5, 0, 0.0);
+        let f = detect_rugpull_indicators(None, Some(&ta));
+        let evidence: Vec<&String> = f.iter().flat_map(|x| &x.evidence).collect();
+        assert!(
+            evidence.iter().any(|e| e.contains("potential honeypot")),
+            "{evidence:?}"
+        );
+        assert!(
+            evidence.iter().any(|e| e.contains("Very low liquidity")),
+            "{evidence:?}"
+        );
     }
 
     fn make_ta(

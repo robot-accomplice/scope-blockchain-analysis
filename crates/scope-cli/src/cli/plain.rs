@@ -5,17 +5,17 @@
 //! pass over the finished frame removes them. Bold, reverse and the other
 //! modifiers stay, so glyphs and words still carry the meaning.
 
+use crate::cli::theme::DEFAULT_COLOR;
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
-use ratatui::style::Color;
-use scope::display::terminal::color_enabled;
+use scope::display::theme::color_enabled;
 
 /// Removes every foreground, background and underline color from `buf`.
 pub(crate) fn strip_color(buf: &mut Buffer) {
     for cell in &mut buf.content {
-        cell.fg = Color::Reset;
-        cell.bg = Color::Reset;
-        cell.underline_color = Color::Reset;
+        cell.fg = DEFAULT_COLOR;
+        cell.bg = DEFAULT_COLOR;
+        cell.underline_color = DEFAULT_COLOR;
     }
 }
 
@@ -30,7 +30,7 @@ pub(crate) fn finish_frame(f: &mut Frame) {
 mod tests {
     use super::*;
     use ratatui::layout::Rect;
-    use ratatui::style::{Modifier, Style};
+    use ratatui::style::{Color, Modifier, Style};
 
     #[test]
     fn test_strip_color_keeps_modifiers_and_text() {

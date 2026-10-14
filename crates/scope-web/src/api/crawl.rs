@@ -3,11 +3,12 @@
 use crate::AppState;
 use axum::Json;
 use axum::extract::State;
-use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use scope_cli::cli::crawl::{self, Period};
 use serde::Deserialize;
 use std::sync::Arc;
+
+use super::{error_response, status_for};
 
 /// Request body for token crawl.
 #[derive(Debug, Deserialize)]
@@ -15,7 +16,7 @@ pub struct CrawlRequest {
     /// Token address or symbol.
     pub token: String,
     /// Target chain (default: "ethereum").
-    #[serde(default = "default_chain")]
+    #[serde(default = "super::default_chain")]
     pub chain: String,
     /// Time period: "1h", "24h", "7d", "30d".
     #[serde(default)]
@@ -23,10 +24,6 @@ pub struct CrawlRequest {
     /// Max holders to include.
     #[serde(default = "default_holders_limit")]
     pub holders_limit: u32,
-}
-
-fn default_chain() -> String {
-    "ethereum".to_string()
 }
 
 fn default_holders_limit() -> u32 {
@@ -44,13 +41,7 @@ pub async fn handle(
     // Resolve address book shortcuts (@label or direct address match)
     let resolved = match super::resolve_address_book(&req.token, &state.config) {
         Ok(r) => r,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": e })),
-            )
-                .into_response();
-        }
+        Err(e) => return error_response(status_for(&e), e.to_string()),
     };
     let token = resolved.value;
     let chain = resolved.chain.unwrap_or(req.chain);
@@ -67,18 +58,14 @@ pub async fn handle(
         &chain,
         period,
         req.holders_limit,
-        &state.factory,
+        state.factory.as_ref(),
         None,
         &scope_cli::cli::output::Output::stdio(),
     )
     .await
     {
         Ok(analytics) => Json(serde_json::json!(analytics)).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => error_response(status_for(&e), e.to_string()),
     }
 }
 
@@ -115,7 +102,7 @@ mod tests {
 
     #[test]
     fn test_defaults() {
-        assert_eq!(default_chain(), "ethereum");
+        assert_eq!(super::super::default_chain(), "ethereum");
         assert_eq!(default_holders_limit(), 10);
     }
 
@@ -164,7 +151,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = CrawlRequest {
             token: "USDC".to_string(),
             chain: "ethereum".to_string(),
@@ -198,7 +185,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = CrawlRequest {
             token: "@no-such-token".to_string(),
             chain: "ethereum".to_string(),

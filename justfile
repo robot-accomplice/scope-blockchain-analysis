@@ -305,3 +305,9 @@ tui-test *ARGS:
     cargo build --bin scope
     cargo test -p scope-tui-harness -- --ignored
     cargo run -q -p scope-tui-harness -- run --tier offline {{ARGS}}
+
+# Record one offline scenario's API replies from the live APIs into tests/tui/fixtures/<NAME>/ (review the diff)
+tui-record NAME:
+    cargo build --bin scope
+    rm -rf tests/tui/fixtures/{{NAME}}
+    cargo run -q -p scope-tui-harness -- run --record {{NAME}}

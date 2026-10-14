@@ -10,7 +10,7 @@ use scope::display::terminal::{
     check_fail, check_pass, kv_row, section_footer, section_header, separator,
 };
 use scope::error::Result;
-use scope::market::{VenueDescriptor, VenueRegistry};
+use scope::market::{MarketVenue, VenueDescriptor, VenueRegistry};
 
 /// Venue management subcommands.
 ///
@@ -30,8 +30,8 @@ use scope::market::{VenueDescriptor, VenueRegistry};
 pub enum VenuesCommands {
     /// List all available exchange venues and their capabilities.
     ///
-    /// Shows built-in and user-defined venues with their supported
-    /// API capabilities (order_book, ticker, trades).
+    /// Shows built-in and user-defined CEX venues with their supported
+    /// API capabilities (order_book, ticker, trades), then the DEX venues.
     ///
     /// # Examples
     ///
@@ -164,11 +164,13 @@ fn run_list(args: ListArgs, out: &Output) -> Result<()> {
     match args.format {
         ListFormat::Table => {
             outln!(out, "{}", section_header("Available Venues"))?;
-            for id in registry.list() {
-                if let Some(desc) = registry.get(id) {
-                    let caps = desc.capability_names().join(", ");
-                    outln!(out, "{}", kv_row(id, &caps))?;
-                }
+            for listing in MarketVenue::listings(&registry) {
+                let caps = listing.capabilities.join(", ");
+                let detail = match listing.chain {
+                    Some(chain) => format!("{caps} (DEX on {chain})"),
+                    None => caps,
+                };
+                outln!(out, "{}", kv_row(&listing.id, &detail))?;
             }
             outln!(out, "{}", separator())?;
             let user_dir = VenueRegistry::user_venues_dir();
@@ -194,23 +196,11 @@ fn run_list(args: ListArgs, out: &Output) -> Result<()> {
             outln!(out, "{}", section_footer())?;
         }
         ListFormat::Json => {
-            let venues: Vec<serde_json::Value> = registry
-                .list()
-                .iter()
-                .filter_map(|id| {
-                    registry.get(id).map(|desc| {
-                        serde_json::json!({
-                            "id": desc.id,
-                            "name": desc.name,
-                            "base_url": desc.base_url,
-                            "capabilities": desc.capability_names(),
-                        })
-                    })
-                })
-                .collect();
+            // The same list the web serves at /api/venues.
+            let venues = MarketVenue::listings(&registry);
             let output = serde_json::json!({
+                "total": venues.len(),
                 "venues": venues,
-                "total": registry.len(),
                 "user_venues_dir": VenueRegistry::user_venues_dir().display().to_string(),
             });
             outln!(out, "{}", serde_json::to_string_pretty(&output).unwrap())?;
@@ -462,11 +452,8 @@ fn run_init_impl(args: InitArgs, dest: std::path::PathBuf, out: &Output) -> Resu
     // Ensure directory exists
     if !dest.exists() {
         std::fs::create_dir_all(&dest).map_err(|e| {
-            scope::error::ScopeError::Chain(format!(
-                "Failed to create venues directory {}: {}",
-                dest.display(),
-                e
-            ))
+            let context = format!("Failed to create venues directory {}", dest.display());
+            scope::error::ScopeError::io_context(e, context)
         })?;
         outln!(out, "Created {}", dest.display())?;
     }
@@ -499,11 +486,10 @@ fn run_init_impl(args: InitArgs, dest: std::path::PathBuf, out: &Output) -> Resu
                 content = serialize_descriptor_yaml(desc),
             );
             std::fs::write(&target, yaml).map_err(|e| {
-                scope::error::ScopeError::Chain(format!(
-                    "Failed to write {}: {}",
-                    target.display(),
-                    e
-                ))
+                scope::error::ScopeError::io_context(
+                    e,
+                    format!("Failed to write {}", target.display()),
+                )
             })?;
             copied += 1;
             outln!(out, "  {}", check_pass(&filename))?;
@@ -693,7 +679,7 @@ fn run_validate(args: ValidateArgs, out: &Output) -> Result<()> {
     }
 
     let content = std::fs::read_to_string(path).map_err(|e| {
-        scope::error::ScopeError::Chain(format!("Failed to read {}: {}", path.display(), e))
+        scope::error::ScopeError::io_context(e, format!("Failed to read {}", path.display()))
     })?;
 
     outln!(out, "{}", section_header("Venue Validation"))?;
@@ -815,6 +801,14 @@ mod tests {
         assert_eq!(
             v["total"].as_u64().unwrap() as usize,
             v["venues"].as_array().unwrap().len()
+        );
+        // DEX venues are listed too, marked by kind.
+        assert!(
+            v["venues"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|venue| venue["kind"] == "dex")
         );
     }
 

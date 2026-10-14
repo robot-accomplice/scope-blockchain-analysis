@@ -1,16 +1,18 @@
-name: monitor --pair runs from the venue alone and honors --layout
+name: monitor --pair runs from the venue alone, shows the venue's book and trades, and honors --layout
 tiers: [offline]
 # Wide enough for the full Order Book title in the exchange layout.
 terminal: { cols: 220, rows: 50 }
 steps:
   # Venue-only mode never calls DexScreener. A DexScreener request would be
   # a replay miss ("no fixture"), and its error would show in the header.
+  # The venue's own order book and trades fill their panels (#78).
   - type: "monitor USDC --venue binance --pair USDC_USDT --layout exchange"
   - key: Enter
-  - wait_for: { text: "Order Book \\(not available in venue-only mode\\)", timeout: 20s }
+  - wait_for: { text: "Order Book \\(binance\\)", timeout: 20s }
+  - wait_for: { text: "Recent Trades \\(binance\\)", timeout: 20s }
   - expect_screen:
-      contains: ["BINANCE USDCUSDT", "Quit"]
-      not_contains: ["API Error", "no fixture", "ETHEREUM"]
+      contains: ["BINANCE USDCUSDT", "\\[q\\]uit"]
+      not_contains: ["API Error", "no fixture", "ETHEREUM", "synthetic", "not available"]
   # L switches to the dashboard, which has the activity log. A refresh logs
   # "Updated: $…"; after it, the screen still has no DexScreener miss.
   - type: "l"

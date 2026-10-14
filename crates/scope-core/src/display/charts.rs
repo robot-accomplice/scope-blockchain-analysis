@@ -226,7 +226,7 @@ pub fn render_holder_distribution(holders: &[TokenHolder]) -> String {
 
     for holder in holders.iter().take(10) {
         // Truncate address for display (terminal only)
-        let addr_display = truncate_address(&holder.address);
+        let addr_display = super::text::abbreviate(&holder.address);
 
         // Calculate bar width based on percentage
         let bar_width = ((holder.percentage / 100.0) * max_bar_width as f64).round() as usize;
@@ -297,15 +297,6 @@ pub fn render_analytics_dashboard(
     }
 
     output
-}
-
-/// Truncates an address for terminal display.
-fn truncate_address(address: &str) -> String {
-    if address.len() <= 13 {
-        address.to_string()
-    } else {
-        format!("{}...{}", &address[..6], &address[address.len() - 4..])
-    }
 }
 
 // ============================================================================
@@ -398,17 +389,6 @@ mod tests {
         assert!(result.contains("25.00%"));
         assert!(result.contains("12.50%"));
         assert!(result.contains("█")); // Has bar characters
-    }
-
-    #[test]
-    fn test_truncate_address() {
-        let addr = "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2";
-        let truncated = truncate_address(addr);
-        assert_eq!(truncated, "0x742d...b3c2");
-
-        // Short addresses stay the same
-        let short = "0x123";
-        assert_eq!(truncate_address(short), "0x123");
     }
 
     #[test]
