@@ -17,6 +17,14 @@ pub const DEFAULT_PEG_TARGET: f64 = 1.0;
 pub const DEFAULT_PEG_RANGE: f64 = 0.001;
 /// Default minimum valid levels per side.
 pub const DEFAULT_MIN_LEVELS: usize = 10;
+/// The quote currency of a book's pair label (`USDC/USDT` → `USDT`). Depths,
+/// volumes and sizes are amounts in it, so labels name it (M2).
+pub(crate) fn quote_of(pair: &str) -> String {
+    crate::market::Pair::parse(pair)
+        .quote
+        .unwrap_or_else(|| "quote".to_string())
+}
+
 /// Default minimum in-band depth per side (quote, e.g. USDT).
 pub const DEFAULT_MIN_DEPTH: f64 = 3000.0;
 /// Default bid/ask ratio floor.
@@ -294,6 +302,7 @@ fn depth_volume_check(
     thresholds: &HealthThresholds,
     volume_24h: Option<f64>,
 ) -> HealthCheck {
+    let q = quote_of(&book.pair);
     let w = thresholds.depth_window_pct;
     let (lo, hi) = (
         thresholds.min_depth_volume_pct,
@@ -308,7 +317,7 @@ fn depth_volume_check(
     let pct = depth / volume * PERCENT_PER_RATIO;
     let at_least = if truncated { "≥" } else { "" };
     let msg = format!(
-        "Depth/volume: {at_least}{pct:.1}% ({at_least}{depth:.0} / {volume:.0} USDT within ±{w}%; target {lo}–{hi}%)"
+        "Depth/volume: {at_least}{pct:.1}% ({at_least}{depth:.0} / {volume:.0} {q} within ±{w}%; target {lo}–{hi}%)"
     );
     if pct > hi {
         // A lower bound above the ceiling is still above it.
@@ -425,6 +434,7 @@ impl MarketSummary {
         thresholds: &HealthThresholds,
         volume_24h: Option<f64>,
     ) -> Self {
+        let q = quote_of(&book.pair);
         let peg_target = thresholds.peg_target;
         let bands = thresholds.peg_bands();
 
@@ -461,7 +471,7 @@ impl MarketSummary {
         } else {
             let usdt = below_peg.iter().map(|a| a.value()).sum::<f64>();
             checks.push(HealthCheck::Fail(format!(
-                "{} sell(s) below peg ({:.0} USDT)",
+                "{} sell(s) below peg ({:.0} {q})",
                 below_peg.len(),
                 usdt
             )));
@@ -528,12 +538,12 @@ impl MarketSummary {
         // Bid depth
         if bid_depth < thresholds.min_depth {
             checks.push(HealthCheck::Fail(format!(
-                "Bid depth: {:.0} USDT < {:.0} USDT minimum",
+                "Bid depth: {:.0} {q} < {:.0} {q} minimum",
                 bid_depth, thresholds.min_depth
             )));
         } else {
             checks.push(HealthCheck::Pass(format!(
-                "Bid depth: {:.0} USDT (min {:.0})",
+                "Bid depth: {:.0} {q} (min {:.0})",
                 bid_depth, thresholds.min_depth
             )));
         }
@@ -561,12 +571,12 @@ impl MarketSummary {
         // Ask depth
         if ask_depth < thresholds.min_depth {
             checks.push(HealthCheck::Fail(format!(
-                "Ask depth: {:.0} USDT < {:.0} USDT minimum",
+                "Ask depth: {:.0} {q} < {:.0} {q} minimum",
                 ask_depth, thresholds.min_depth
             )));
         } else {
             checks.push(HealthCheck::Pass(format!(
-                "Ask depth: {:.0} USDT (min {:.0})",
+                "Ask depth: {:.0} {q} (min {:.0})",
                 ask_depth, thresholds.min_depth
             )));
         }
@@ -582,11 +592,11 @@ impl MarketSummary {
             ] {
                 if depth < min {
                     checks.push(HealthCheck::Fail(format!(
-                        "{side} top-{n} depth: {depth:.0} USDT < {min:.0} USDT minimum"
+                        "{side} top-{n} depth: {depth:.0} {q} < {min:.0} {q} minimum"
                     )));
                 } else {
                     checks.push(HealthCheck::Pass(format!(
-                        "{side} top-{n} depth: {depth:.0} USDT (min {min:.0})"
+                        "{side} top-{n} depth: {depth:.0} {q} (min {min:.0})"
                     )));
                 }
             }
@@ -649,6 +659,7 @@ impl MarketSummary {
         };
         serde_json::json!({
             "pair": self.pair,
+            "quote": quote_of(&self.pair),
             "book_source": self.source,
             "peg_target": self.peg_target,
             "best_bid": self.best_bid,
@@ -685,6 +696,7 @@ impl MarketSummary {
     /// Format as human-readable text report.
     /// When `venue_or_chain` is provided, it is displayed in the header (e.g. binance, ethereum).
     pub fn format_text(&self, venue_or_chain: Option<&str>) -> String {
+        let q = quote_of(&self.pair);
         use crate::display::terminal as t;
 
         let mut out = String::new();
@@ -737,7 +749,14 @@ impl MarketSummary {
         }
 
         if let Some(v) = self.volume_24h {
-            out.push_str(&t::kv_row("Volume (24h)", &format!("{:.0} USDT", v)));
+            // A synthetic DEX book's volume is its best pool's, not the
+            // token's total over all pools (M1).
+            let label = if self.source == BookSource::Exchange {
+                "Volume (24h)"
+            } else {
+                "Volume (24h, best pool)"
+            };
+            out.push_str(&t::kv_row(label, &format!("{:.0} {q}", v)));
             out.push('\n');
         }
 
@@ -764,14 +783,14 @@ impl MarketSummary {
         let base_symbol = self.pair.split('/').next().unwrap_or("BASE");
         let ask_label = if self.ask_outliers > 0 {
             format!(
-                "Ask Side — {} levels, {:.0} USDT (+{} outliers excl.)",
+                "Ask Side — {} levels, {:.0} {q} (+{} outliers excl.)",
                 self.ask_levels(),
                 self.ask_depth,
                 self.ask_outliers
             )
         } else {
             format!(
-                "Ask Side — {} levels, {:.0} USDT",
+                "Ask Side — {} levels, {:.0} {q}",
                 self.ask_levels(),
                 self.ask_depth
             )
@@ -796,14 +815,14 @@ impl MarketSummary {
         // Bid side
         let bid_label = if self.bid_outliers > 0 {
             format!(
-                "Bid Side — {} levels, {:.0} USDT (+{} outliers excl.)",
+                "Bid Side — {} levels, {:.0} {q} (+{} outliers excl.)",
                 self.bid_levels(),
                 self.bid_depth,
                 self.bid_outliers
             )
         } else {
             format!(
-                "Bid Side — {} levels, {:.0} USDT",
+                "Bid Side — {} levels, {:.0} {q}",
                 self.bid_levels(),
                 self.bid_depth
             )
@@ -848,6 +867,7 @@ impl MarketSummary {
     /// prices show as `-`; the venue line and the checks section appear only
     /// when there is something to show.
     pub fn format_markdown(&self, venue: Option<&str>) -> String {
+        let q = quote_of(&self.pair);
         let with_deviation = |price: f64| match self.peg_deviation_pct(price) {
             Some(pct) => format!("{price:.4} ({pct:+.3}%)"),
             None => format!("{price:.4}"),
@@ -892,7 +912,7 @@ impl MarketSummary {
         ));
         md.push_str(&format!("| Spread | {} |\n", price_or_dash(self.spread)));
         if let Some(v) = self.volume_24h {
-            md.push_str(&format!("| Volume (24h) | {v:.0} USDT |\n"));
+            md.push_str(&format!("| Volume (24h) | {v:.0} {q} |\n"));
         }
         md.push_str(&format!(
             "| 10k Buy Slippage | {} |\n",

@@ -383,7 +383,7 @@ impl MonitorState {
     pub fn set_venue_ticker(&mut self, ticker: &scope::market::Ticker) {
         self.venue_only = true;
         self.change_24h_known = ticker.price_change_pct_24h.is_some();
-        self.volume_known = super::ticker_usd_volume(ticker).is_some();
+        self.volume_known = ticker.usd_volume().is_some();
         if !self.volume_known {
             // Synthetic volume built from a placeholder is not data.
             self.volume_history.clear();

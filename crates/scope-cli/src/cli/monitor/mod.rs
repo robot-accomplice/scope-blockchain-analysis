@@ -460,19 +460,6 @@ async fn exchange_token_data(
     Ok((data, ticker))
 }
 
-/// The ticker's 24h volume in USD, or `None` when it is not known in USD.
-/// Quote volume (or base volume times the last price) is in the quote
-/// currency, so it counts as USD only when the quote is USD or a USD stable.
-pub(crate) fn ticker_usd_volume(ticker: &scope::market::Ticker) -> Option<f64> {
-    let (_, quote) = ticker.pair.split_once('/')?;
-    let usd = quote.eq_ignore_ascii_case("USD") || scope::tokens::is_stablecoin_symbol(quote);
-    if usd {
-        ticker.quote_volume(ticker.last_price)
-    } else {
-        None
-    }
-}
-
 /// Builds a minimal [`DexTokenData`] from an exchange ticker.
 ///
 /// Used in exchange-only mode (--pair) when DexScreener is not available
@@ -493,7 +480,7 @@ fn build_exchange_token_data(
         price_change_6h: 0.0,
         price_change_1h: 0.0,
         price_change_5m: 0.0,
-        volume_24h: ticker_usd_volume(ticker).unwrap_or(0.0),
+        volume_24h: ticker.usd_volume().unwrap_or(0.0),
         volume_6h: 0.0,
         volume_1h: 0.0,
         liquidity_usd: 0.0,
@@ -7005,7 +6992,7 @@ refresh_seconds: 5
     #[test]
     fn test_venue_volume_is_usd_only_for_a_usd_quote() {
         let usd = |pair: &str, base: Option<f64>, quote: Option<f64>| {
-            ticker_usd_volume(&venue_ticker(pair, 2.0, base, quote, None))
+            venue_ticker(pair, 2.0, base, quote, None).usd_volume()
         };
         // The quote volume is in the quote currency.
         assert_eq!(usd("ETH/USDT", Some(5.0), Some(10.5)), Some(10.5));
@@ -7014,7 +7001,8 @@ refresh_seconds: 5
         assert_eq!(usd("ETH/USD", None, Some(7.0)), Some(7.0));
         // Not USD: unknown, never the raw figure.
         assert_eq!(usd("ETH/BTC", Some(5.0), Some(0.2)), None);
-        assert_eq!(usd("ETHUSDT", Some(5.0), Some(10.5)), None);
+        // A joined symbol reads with the one pair parser: ETHUSDT is a USDT pair.
+        assert_eq!(usd("ETHUSDT", Some(5.0), Some(10.5)), Some(10.5));
         assert_eq!(usd("ETH/USDT", None, None), None);
 
         // A non-USD figure never feeds the spike average or alerts.

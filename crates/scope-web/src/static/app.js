@@ -70,6 +70,16 @@ function fmtUsd(n) {
   return '$' + n.toFixed(2);
 }
 
+// An amount in a pair's quote currency (depth is not always dollars).
+function fmtQuote(n, quote) {
+  if (n == null) return '-';
+  var v = n >= 1e9 ? (n / 1e9).toFixed(2) + 'B'
+        : n >= 1e6 ? (n / 1e6).toFixed(2) + 'M'
+        : n >= 1e3 ? (n / 1e3).toFixed(2) + 'K'
+        : n.toFixed(2);
+  return v + ' ' + (quote || '');
+}
+
 function fmtNum(n) {
   if (n == null) return '-';
   if (typeof n === 'string') return n;
@@ -751,8 +761,8 @@ function renderMarketSummary(resultEl, data) {
   grid.appendChild(metricCard('Mid Price', formatPrice(data.mid_price)));
   grid.appendChild(metricCard('Spread', formatPrice(data.spread)));
   if (data.volume_24h != null) grid.appendChild(metricCard('Volume (24h)', fmtUsd(data.volume_24h)));
-  grid.appendChild(metricCard('Bid Depth', fmtUsd(data.bid_depth)));
-  grid.appendChild(metricCard('Ask Depth', fmtUsd(data.ask_depth)));
+  grid.appendChild(metricCard('Bid Depth', fmtQuote(data.bid_depth, data.quote)));
+  grid.appendChild(metricCard('Ask Depth', fmtQuote(data.ask_depth, data.quote)));
   if (data.book_source) grid.appendChild(metricCard('Book', BOOK_SOURCE_LABEL[data.book_source] || data.book_source));
   view.appendChild(grid);
 
@@ -862,8 +872,8 @@ function renderTokenHealth(resultEl, data) {
     mGrid.appendChild(metricCard('Bid', formatPrice(m.best_bid)));
     mGrid.appendChild(metricCard('Ask', formatPrice(m.best_ask)));
     mGrid.appendChild(metricCard('Spread', formatPrice(m.spread)));
-    mGrid.appendChild(metricCard('Bid Depth', fmtUsd(m.bid_depth)));
-    mGrid.appendChild(metricCard('Ask Depth', fmtUsd(m.ask_depth)));
+    mGrid.appendChild(metricCard('Bid Depth', fmtQuote(m.bid_depth, m.quote)));
+    mGrid.appendChild(metricCard('Ask Depth', fmtQuote(m.ask_depth, m.quote)));
     view.appendChild(mGrid);
 
     if (m.checks && m.checks.length > 0) {

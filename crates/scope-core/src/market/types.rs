@@ -403,6 +403,18 @@ impl Ticker {
         self.quote_volume_24h
             .or_else(|| Some(self.volume_24h? * mid?))
     }
+
+    /// 24h volume in USD: the quote volume at the last price, when the
+    /// quote is USD or a USD stablecoin; `None` for any other quote (M1).
+    pub fn usd_volume(&self) -> Option<f64> {
+        let quote = super::Pair::parse(&self.pair).quote?;
+        let usd = quote.eq_ignore_ascii_case("USD") || crate::tokens::is_stablecoin_symbol(&quote);
+        if usd {
+            self.quote_volume(self.last_price)
+        } else {
+            None
+        }
+    }
 }
 
 /// Aggregated market snapshot combining all available data for a pair.
