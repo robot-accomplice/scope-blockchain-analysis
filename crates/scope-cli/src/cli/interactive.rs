@@ -304,6 +304,24 @@ mod tests {
     }
 
     #[test]
+    fn test_session_save_and_load_use_the_test_sandbox() {
+        // save() and load() resolve through scope::paths, which test builds
+        // sandbox: this writes no user file (an old test that called save()
+        // pinned a user's real TUI session to solana).
+        let path = SessionContext::context_path().unwrap();
+        assert!(path.starts_with(std::env::temp_dir()), "{}", path.display());
+        let ctx = SessionContext {
+            chain: "base".into(),
+            limit: 7,
+            ..Default::default()
+        };
+        ctx.save().unwrap();
+        let back = SessionContext::load();
+        assert_eq!(back.chain, "base");
+        assert_eq!(back.limit, 7);
+    }
+
+    #[test]
     fn test_session_context_load_from_missing_or_corrupt_is_default() {
         let dir = tempfile::tempdir().unwrap();
         assert!(SessionContext::load_from(&dir.path().join("none.yaml")).is_auto_chain());
