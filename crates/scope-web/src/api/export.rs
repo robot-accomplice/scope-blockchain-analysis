@@ -15,7 +15,7 @@ pub struct ExportRequest {
     /// Address to export data for.
     pub address: String,
     /// Chain (default: "ethereum").
-    #[serde(default = "default_chain")]
+    #[serde(default = "super::default_chain")]
     pub chain: String,
     /// Format: "json" or "csv".
     #[serde(default = "default_format")]
@@ -26,9 +26,6 @@ pub struct ExportRequest {
     pub end_date: Option<String>,
 }
 
-fn default_chain() -> String {
-    "ethereum".to_string()
-}
 fn default_format() -> String {
     "json".to_string()
 }
@@ -123,7 +120,7 @@ mod tests {
 
     #[test]
     fn test_defaults() {
-        assert_eq!(default_chain(), "ethereum");
+        assert_eq!(super::super::default_chain(), "ethereum");
         assert_eq!(default_format(), "json");
     }
 

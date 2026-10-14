@@ -15,26 +15,18 @@ pub struct TokenHealthRequest {
     /// Token symbol or contract address.
     pub token: String,
     /// Target chain (default: "ethereum").
-    #[serde(default = "default_chain")]
+    #[serde(default = "super::default_chain")]
     pub chain: String,
     /// Include market/order book data.
     #[serde(default)]
     pub with_market: bool,
     /// Market venue: a CEX id ("binance") or a DEX ("ethereum", "solana").
-    #[serde(default = "default_venue")]
+    #[serde(default = "super::default_venue")]
     pub market_venue: String,
     /// Health threshold overrides for `with_market` (top-level JSON keys).
     /// Unset keys use config `market.health`.
     #[serde(flatten)]
     pub health: HealthOverrides,
-}
-
-fn default_chain() -> String {
-    "ethereum".to_string()
-}
-
-fn default_venue() -> String {
-    "binance".to_string()
 }
 
 /// POST /api/token-health — Token health suite.
@@ -132,8 +124,8 @@ mod tests {
 
     #[test]
     fn test_defaults() {
-        assert_eq!(default_chain(), "ethereum");
-        assert_eq!(default_venue(), "binance");
+        assert_eq!(super::super::default_chain(), "ethereum");
+        assert_eq!(super::super::default_venue(), "binance");
     }
 
     #[test]

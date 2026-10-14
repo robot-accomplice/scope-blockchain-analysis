@@ -84,7 +84,7 @@ pub struct ContractArgs {
     ///
     /// EVM chains with Etherscan-compatible APIs:
     /// ethereum, polygon, arbitrum, optimism, base, bsc
-    #[arg(long, short, default_value = "ethereum")]
+    #[arg(long, short, default_value = scope::chains::DEFAULT_CHAIN)]
     pub chain: String,
 
     /// Output raw JSON instead of formatted report.

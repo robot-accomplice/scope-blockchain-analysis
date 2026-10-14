@@ -96,7 +96,7 @@ pub fn infer_target(input: &str, chain_override: Option<&str>) -> InferredTarget
 
     // Address (format implies chain)
     if TokenAliases::is_address(trimmed) {
-        let chain = infer_chain_from_address(trimmed).unwrap_or("ethereum");
+        let chain = infer_chain_from_address(trimmed).unwrap_or(scope::chains::DEFAULT_CHAIN);
         return InferredTarget::Address {
             chain: chain.to_string(),
         };
@@ -104,7 +104,7 @@ pub fn infer_target(input: &str, chain_override: Option<&str>) -> InferredTarget
 
     // Default: token (symbol or name)
     InferredTarget::Token {
-        chain: "ethereum".to_string(),
+        chain: scope::chains::DEFAULT_CHAIN.to_string(),
     }
 }
 
@@ -386,11 +386,15 @@ pub async fn run(
             if is_stablecoin_symbol(&analytics.token.symbol)
                 && let Ok(registry) = VenueRegistry::load()
             {
-                // Try binance first, fall back to any available CEX
-                let venue_id = if registry.contains("binance") {
-                    "binance"
+                // Try the default venue first, fall back to any available CEX
+                let venue_id = if registry.contains(scope::market::DEFAULT_VENUE) {
+                    scope::market::DEFAULT_VENUE
                 } else {
-                    registry.list().first().copied().unwrap_or("binance")
+                    registry
+                        .list()
+                        .first()
+                        .copied()
+                        .unwrap_or(scope::market::DEFAULT_VENUE)
                 };
                 let thresholds = args.health.resolve(config);
                 if let (Some(desc), Ok(venue)) = (

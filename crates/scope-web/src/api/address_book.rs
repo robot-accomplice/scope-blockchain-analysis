@@ -28,17 +28,13 @@ pub struct AddAddressBookRequest {
     /// Blockchain address.
     pub address: String,
     /// Chain (default: "ethereum").
-    #[serde(default = "default_chain")]
+    #[serde(default = "super::default_chain")]
     pub chain: String,
     /// Optional label.
     pub label: Option<String>,
     /// Optional tags.
     #[serde(default)]
     pub tags: Vec<String>,
-}
-
-fn default_chain() -> String {
-    "ethereum".to_string()
 }
 
 /// POST /api/address-book/add — Add an address to the address book.
@@ -154,7 +150,7 @@ mod tests {
 
     #[test]
     fn test_default_chain() {
-        assert_eq!(default_chain(), "ethereum");
+        assert_eq!(super::super::default_chain(), "ethereum");
     }
 
     #[test]

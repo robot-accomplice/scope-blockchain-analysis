@@ -16,7 +16,7 @@ pub struct TxRequest {
     /// Transaction hash.
     pub hash: String,
     /// Target chain (default: "ethereum").
-    #[serde(default = "default_chain")]
+    #[serde(default = "super::default_chain")]
     pub chain: String,
     /// Decode input data.
     #[serde(default)]
@@ -24,10 +24,6 @@ pub struct TxRequest {
     /// Include internal transaction trace.
     #[serde(default)]
     pub trace: bool,
-}
-
-fn default_chain() -> String {
-    "ethereum".to_string()
 }
 
 /// POST /api/tx — Analyze a transaction.
@@ -88,7 +84,7 @@ mod tests {
 
     #[test]
     fn test_defaults() {
-        assert_eq!(default_chain(), "ethereum");
+        assert_eq!(super::super::default_chain(), "ethereum");
     }
 
     #[test]

@@ -47,6 +47,21 @@ pub(crate) fn error_response(
     (status, axum::Json(body)).into_response()
 }
 
+/// Serde default for a request's chain field.
+pub(crate) fn default_chain() -> String {
+    scope::chains::DEFAULT_CHAIN.to_string()
+}
+
+/// Serde default for a request's market venue field.
+pub(crate) fn default_venue() -> String {
+    scope::market::DEFAULT_VENUE.to_string()
+}
+
+/// Serde default for a market request's pair field.
+pub(crate) fn default_pair() -> String {
+    scope::market::DEFAULT_PAIR.to_string()
+}
+
 /// Result of resolving a user input through the address book.
 ///
 /// When the input matches an address book entry (either via `@label`

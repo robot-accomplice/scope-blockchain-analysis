@@ -15,10 +15,10 @@ use std::sync::Arc;
 #[derive(Debug, Deserialize)]
 pub struct MarketRequest {
     /// Pair or base symbol, read by `Pair::parse` ("DAI_USDC", "OPUSDT", "USDC"). Default: "USDC".
-    #[serde(default = "default_pair")]
+    #[serde(default = "super::default_pair")]
     pub pair: String,
     /// Market venue: a CEX id ("binance") or a DEX ("ethereum", "solana").
-    #[serde(default = "default_venue")]
+    #[serde(default = "super::default_venue")]
     pub market_venue: String,
     /// Chain check for a DEX venue: when set, it must name the venue's chain.
     /// The venue already names its chain. Ignored for CEX venues.
@@ -28,13 +28,6 @@ pub struct MarketRequest {
     /// `min_levels`, `max_spread_pct`). Unset keys use config `market.health`.
     #[serde(flatten)]
     pub health: HealthOverrides,
-}
-
-fn default_pair() -> String {
-    "USDC".to_string()
-}
-fn default_venue() -> String {
-    "binance".to_string()
 }
 
 /// POST /api/market/summary — Peg and order book health. The pair and venue
@@ -107,8 +100,8 @@ mod tests {
 
     #[test]
     fn test_all_defaults() {
-        assert_eq!(default_pair(), "USDC");
-        assert_eq!(default_venue(), "binance");
+        assert_eq!(super::super::default_pair(), "USDC");
+        assert_eq!(super::super::default_venue(), "binance");
     }
 
     #[test]

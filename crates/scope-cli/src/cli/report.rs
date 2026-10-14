@@ -40,7 +40,7 @@ pub struct BatchArgs {
     pub output: std::path::PathBuf,
 
     /// Default chain for addresses (when not specified per-address).
-    #[arg(short, long, default_value = "ethereum")]
+    #[arg(short, long, default_value = scope::chains::DEFAULT_CHAIN)]
     pub chain: String,
 
     /// Include risk assessment per address (uses ETHERSCAN_API_KEY for Ethereum).

@@ -16,7 +16,7 @@ pub struct CrawlRequest {
     /// Token address or symbol.
     pub token: String,
     /// Target chain (default: "ethereum").
-    #[serde(default = "default_chain")]
+    #[serde(default = "super::default_chain")]
     pub chain: String,
     /// Time period: "1h", "24h", "7d", "30d".
     #[serde(default)]
@@ -24,10 +24,6 @@ pub struct CrawlRequest {
     /// Max holders to include.
     #[serde(default = "default_holders_limit")]
     pub holders_limit: u32,
-}
-
-fn default_chain() -> String {
-    "ethereum".to_string()
 }
 
 fn default_holders_limit() -> u32 {
@@ -106,7 +102,7 @@ mod tests {
 
     #[test]
     fn test_defaults() {
-        assert_eq!(default_chain(), "ethereum");
+        assert_eq!(super::super::default_chain(), "ethereum");
         assert_eq!(default_holders_limit(), 10);
     }
 

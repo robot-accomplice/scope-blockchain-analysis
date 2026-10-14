@@ -17,15 +17,11 @@ pub struct ComplianceRiskRequest {
     /// Address to assess.
     pub address: String,
     /// Chain (default: "ethereum").
-    #[serde(default = "default_chain")]
+    #[serde(default = "super::default_chain")]
     pub chain: String,
     /// Include detailed breakdown.
     #[serde(default)]
     pub detailed: bool,
-}
-
-fn default_chain() -> String {
-    "ethereum".to_string()
 }
 
 /// POST /api/compliance/risk — Risk assessment for an address.
@@ -106,7 +102,7 @@ mod tests {
 
     #[test]
     fn test_default_chain() {
-        assert_eq!(default_chain(), "ethereum");
+        assert_eq!(super::super::default_chain(), "ethereum");
     }
 
     #[test]

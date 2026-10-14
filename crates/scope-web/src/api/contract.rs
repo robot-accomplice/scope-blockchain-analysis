@@ -18,12 +18,8 @@ pub struct ContractRequest {
     /// Contract address to analyze.
     pub address: String,
     /// Chain (default: ethereum).
-    #[serde(default = "default_chain")]
+    #[serde(default = "super::default_chain")]
     pub chain: String,
-}
-
-fn default_chain() -> String {
-    "ethereum".to_string()
 }
 
 /// Handle contract analysis request.
@@ -84,7 +80,7 @@ mod tests {
 
     #[test]
     fn test_contract_default_chain() {
-        assert_eq!(default_chain(), "ethereum");
+        assert_eq!(super::super::default_chain(), "ethereum");
     }
 
     #[test]

@@ -20,7 +20,7 @@ pub struct MonitorQuery {
     /// Token address or symbol to monitor.
     pub token: String,
     /// Chain (default: "ethereum").
-    #[serde(default = "default_chain")]
+    #[serde(default = "crate::api::default_chain")]
     pub chain: String,
     /// Refresh interval in seconds (default: 5).
     #[serde(default = "default_refresh")]
@@ -33,10 +33,6 @@ pub struct MonitorQuery {
     /// symbol with the venue's default quote).
     #[serde(default)]
     pub pair: Option<String>,
-}
-
-fn default_chain() -> String {
-    "ethereum".to_string()
 }
 
 fn default_refresh() -> u64 {
@@ -251,7 +247,7 @@ mod tests {
 
     #[test]
     fn test_default_chain() {
-        assert_eq!(default_chain(), "ethereum");
+        assert_eq!(crate::api::default_chain(), "ethereum");
     }
 
     #[test]

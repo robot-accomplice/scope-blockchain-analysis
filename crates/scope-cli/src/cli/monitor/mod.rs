@@ -127,7 +127,7 @@ pub struct MonitorArgs {
     /// Target blockchain network.
     ///
     /// Determines which chain to query for token data.
-    #[arg(short, long, default_value = "ethereum")]
+    #[arg(short, long, default_value = scope::chains::DEFAULT_CHAIN)]
     pub chain: String,
 
     /// Layout preset for the TUI dashboard.

@@ -14,6 +14,9 @@ use std::fmt;
 /// `WETH` and `STETH` stay whole.
 pub const FIAT_CURRENCIES: [&str; 4] = ["USD", "EUR", "GBP", "TRY"];
 
+/// The pair a market request falls back to when none is given.
+pub const DEFAULT_PAIR: &str = "USDC";
+
 /// Stablecoins that end in a fiat code and are no venue's quote currency.
 /// The longest-suffix rule would read `SOLUSD` as SO/LUSD, so a joined symbol
 /// never ends in one of these. `TUSD` is a quote (Binance `BTCTUSD`).

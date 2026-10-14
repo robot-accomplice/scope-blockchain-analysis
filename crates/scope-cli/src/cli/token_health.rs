@@ -68,14 +68,14 @@ pub struct TokenHealthArgs {
     pub token: String,
 
     /// Target blockchain network.
-    #[arg(short, long, default_value = "ethereum")]
+    #[arg(short, long, default_value = scope::chains::DEFAULT_CHAIN)]
     pub chain: String,
 
     /// Include order book / market summary (for stablecoins).
     #[arg(long)]
     pub with_market: bool,
 
-    #[arg(long, default_value = "binance", help = scope::market::VENUE_HELP)]
+    #[arg(long, default_value = scope::market::DEFAULT_VENUE, help = scope::market::VENUE_HELP)]
     pub venue: String,
 
     /// Output format.
@@ -99,7 +99,7 @@ pub async fn run(
         crate::cli::address_book::resolve_address_book_input(&args.token, config)?
     {
         args.token = address;
-        if args.chain == "ethereum" {
+        if args.chain == scope::chains::DEFAULT_CHAIN {
             args.chain = chain;
         }
     }

@@ -16,7 +16,7 @@ pub struct AddressRequest {
     /// Blockchain address to analyze.
     pub address: String,
     /// Target chain (default: "ethereum").
-    #[serde(default = "default_chain")]
+    #[serde(default = "super::default_chain")]
     pub chain: String,
     /// Include transaction history.
     #[serde(default)]
@@ -30,10 +30,6 @@ pub struct AddressRequest {
     /// Generate dossier (address + risk).
     #[serde(default)]
     pub dossier: bool,
-}
-
-fn default_chain() -> String {
-    "ethereum".to_string()
 }
 
 fn default_limit() -> u32 {
@@ -125,7 +121,7 @@ mod tests {
 
     #[test]
     fn test_defaults() {
-        assert_eq!(default_chain(), "ethereum");
+        assert_eq!(super::super::default_chain(), "ethereum");
         assert_eq!(default_limit(), 100);
     }
 

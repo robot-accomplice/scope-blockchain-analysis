@@ -84,7 +84,7 @@ pub struct AddressArgs {
     ///
     /// EVM chains: ethereum, polygon, arbitrum, optimism, base, bsc
     /// Non-EVM chains: solana, tron
-    #[arg(short, long, default_value = "ethereum")]
+    #[arg(short, long, default_value = scope::chains::DEFAULT_CHAIN)]
     pub chain: String,
 
     /// Override output format for this command.

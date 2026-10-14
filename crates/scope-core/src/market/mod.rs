@@ -58,6 +58,6 @@ pub use orderbook::{
     OrderBookLevel, Ticker, TickerClient, Trade, TradeHistoryClient, TradeSide,
     order_book_from_analytics,
 };
-pub use pair::Pair;
+pub use pair::{DEFAULT_PAIR, Pair};
 pub use registry::VenueRegistry;
-pub use venue::{DexVenue, MarketVenue, VENUE_HELP, VenueKind, VenueListing};
+pub use venue::{DEFAULT_VENUE, DexVenue, MarketVenue, VENUE_HELP, VenueKind, VenueListing};

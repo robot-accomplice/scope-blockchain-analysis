@@ -94,10 +94,10 @@ pub enum MarketCommands {
   ..."
 )]
 pub struct SummaryArgs {
-    #[arg(default_value = "USDC", value_name = "SYMBOL", help = PAIR_HELP)]
+    #[arg(default_value = scope::market::DEFAULT_PAIR, value_name = "SYMBOL", help = PAIR_HELP)]
     pub pair: String,
 
-    #[arg(long, default_value = "binance", value_name = "VENUE", help = VENUE_HELP)]
+    #[arg(long, default_value = scope::market::DEFAULT_VENUE, value_name = "VENUE", help = VENUE_HELP)]
     pub venue: String,
 
     /// Chain for a DEX venue. The venue already names its chain, so this is
@@ -179,11 +179,11 @@ pub enum SummaryFormat {
   ]"
 )]
 pub struct OhlcArgs {
-    #[arg(default_value = "USDC", value_name = "SYMBOL", help = PAIR_HELP)]
+    #[arg(default_value = scope::market::DEFAULT_PAIR, value_name = "SYMBOL", help = PAIR_HELP)]
     pub pair: String,
 
     /// Exchange venue (e.g., binance, mexc, bybit).
-    #[arg(long, default_value = "binance", value_name = "VENUE")]
+    #[arg(long, default_value = scope::market::DEFAULT_VENUE, value_name = "VENUE")]
     pub venue: String,
 
     /// Candle interval (e.g., 1m, 5m, 15m, 1h, 4h, 1d).
@@ -206,11 +206,11 @@ pub struct OhlcArgs {
   scope market trades DAI --venue binance --limit 20
   scope market trades ETH --venue okx --format json")]
 pub struct TradesArgs {
-    #[arg(default_value = "USDC", value_name = "SYMBOL", help = PAIR_HELP)]
+    #[arg(default_value = scope::market::DEFAULT_PAIR, value_name = "SYMBOL", help = PAIR_HELP)]
     pub pair: String,
 
     /// Exchange venue (e.g., binance, mexc, bybit).
-    #[arg(long, default_value = "binance", value_name = "VENUE")]
+    #[arg(long, default_value = scope::market::DEFAULT_VENUE, value_name = "VENUE")]
     pub venue: String,
 
     /// Maximum number of trades to fetch.

@@ -13,6 +13,9 @@ use serde::Serialize;
 pub const VENUE_HELP: &str = "Market venue: a CEX id (run `scope venues list`), or a DEX: \
     ethereum (eth) or solana (sol), whose book is built from the token's most liquid pool.";
 
+/// The venue a market request falls back to when none is given.
+pub const DEFAULT_VENUE: &str = "binance";
+
 /// A DEX venue. Its book is synthesized from the most liquid pool of the
 /// token on one chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
