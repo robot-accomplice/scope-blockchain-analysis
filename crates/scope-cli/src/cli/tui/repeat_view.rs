@@ -128,22 +128,8 @@ fn format_value(metric: &Metric, value: Option<f64>) -> String {
     match metric.unit {
         Unit::Price => format!("{v:.6}"),
         Unit::Percent => format!("{v:.3}%"),
-        Unit::Quote => compact(v),
+        Unit::Quote => scope::display::format::format_large_number(v),
         Unit::Flag => if v != 0.0 { "pass" } else { "fail" }.to_string(),
-    }
-}
-
-/// A quote amount in K, M or B, as the monitor shows amounts.
-fn compact(v: f64) -> String {
-    let a = v.abs();
-    if a >= 1e9 {
-        format!("{:.2}B", v / 1e9)
-    } else if a >= 1e6 {
-        format!("{:.2}M", v / 1e6)
-    } else if a >= 1e3 {
-        format!("{:.2}K", v / 1e3)
-    } else {
-        format!("{v:.2}")
     }
 }
 

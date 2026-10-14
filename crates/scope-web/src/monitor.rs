@@ -9,7 +9,7 @@ use axum::extract::{Query, State};
 use axum::response::IntoResponse;
 use scope::chains::DexDataSource;
 use scope::chains::dex::DexTokenData;
-use scope::market::{ExchangeClient, Pair, TradeSide, VenueRegistry};
+use scope::market::{ExchangeClient, Pair, VenueRegistry};
 use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Duration;
@@ -203,64 +203,29 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, params: Moni
     }
 }
 
-/// Attach exchange snapshot data (order book, ticker, trades) to a JSON frame.
+/// Levels and trades a monitor frame lists, at most.
+const FRAME_ITEMS: usize = 20;
+
+/// Attach exchange snapshot data (order book, ticker, trades) to a JSON
+/// frame, in the one JSON form of each (`OrderBook::to_json`, `Ticker` and
+/// `Trade` serialization).
 fn attach_exchange_data(frame: &mut serde_json::Value, snap: &scope::market::MarketSnapshot) {
     if let Some(book) = &snap.order_book {
-        frame["exchange_order_book"] = serde_json::json!({
-            "pair": book.pair,
-            "best_bid": book.best_bid(),
-            "best_ask": book.best_ask(),
-            "mid_price": book.mid_price(),
-            "spread": book.spread(),
-            "total_bid_depth": book.total_depth(scope::market::BookSide::Bid),
-            "total_ask_depth": book.total_depth(scope::market::BookSide::Ask),
-            "bids": book.bids.iter().take(20).map(|l| {
-                serde_json::json!({"price": l.price, "quantity": l.quantity})
-            }).collect::<Vec<_>>(),
-            "asks": book.asks.iter().take(20).map(|l| {
-                serde_json::json!({"price": l.price, "quantity": l.quantity})
-            }).collect::<Vec<_>>(),
-        });
+        frame["exchange_order_book"] = book.to_json(Some(FRAME_ITEMS));
     }
-
     if let Some(ticker) = &snap.ticker {
-        frame["exchange_ticker"] = serde_json::json!({
-            "pair": ticker.pair,
-            "last_price": ticker.last_price,
-            "high_24h": ticker.high_24h,
-            "low_24h": ticker.low_24h,
-            "volume_24h": ticker.volume_24h,
-            "quote_volume_24h": ticker.quote_volume_24h,
-            "best_bid": ticker.best_bid,
-            "best_ask": ticker.best_ask,
-        });
+        frame["exchange_ticker"] = serde_json::json!(ticker);
     }
-
     if let Some(trades) = &snap.recent_trades {
-        frame["exchange_trades"] = serde_json::json!(
-            trades
-                .iter()
-                .take(20)
-                .map(|t| {
-                    serde_json::json!({
-                        "price": t.price,
-                        "quantity": t.quantity,
-                        "timestamp_ms": t.timestamp_ms,
-                        "side": match t.side {
-                            TradeSide::Buy => "buy",
-                            TradeSide::Sell => "sell",
-                        },
-                    })
-                })
-                .collect::<Vec<_>>()
-        );
+        let recent: Vec<_> = trades.iter().take(FRAME_ITEMS).collect();
+        frame["exchange_trades"] = serde_json::json!(recent);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use scope::market::{MarketSnapshot, OrderBook, OrderBookLevel, Ticker, Trade};
+    use scope::market::{MarketSnapshot, OrderBook, OrderBookLevel, Ticker, Trade, TradeSide};
 
     #[test]
     fn test_default_chain() {

@@ -81,6 +81,29 @@ pub struct OrderBook {
 }
 
 impl OrderBook {
+    /// The one JSON view of a book (web API and web monitor). Prices,
+    /// spread and depths come from this book's own methods. `max_levels`
+    /// caps the levels listed per side; the depths count all levels.
+    pub fn to_json(&self, max_levels: Option<usize>) -> serde_json::Value {
+        let levels = |side: &[OrderBookLevel]| {
+            side.iter()
+                .take(max_levels.unwrap_or(usize::MAX))
+                .map(|l| serde_json::json!({"price": l.price, "quantity": l.quantity, "value": l.value()}))
+                .collect::<Vec<_>>()
+        };
+        serde_json::json!({
+            "pair": self.pair,
+            "best_bid": self.best_bid(),
+            "best_ask": self.best_ask(),
+            "mid_price": self.mid_price(),
+            "spread": self.spread(),
+            "total_bid_depth": self.total_depth(BookSide::Bid),
+            "total_ask_depth": self.total_depth(BookSide::Ask),
+            "bids": levels(&self.bids),
+            "asks": levels(&self.asks),
+        })
+    }
+
     /// Best valid bid price, or None when no bid is valid.
     pub fn best_bid(&self) -> Option<f64> {
         self.bids.iter().find(|l| l.is_valid()).map(|l| l.price)
@@ -348,8 +371,8 @@ pub struct Trade {
     pub id: Option<String>,
 }
 
-/// 24-hour ticker / market stats.
-#[derive(Debug, Clone)]
+/// 24-hour ticker / market stats. Its JSON form is the one the web sends.
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Ticker {
     /// Pair label (e.g., "BTC/USDT").
     pub pair: String,

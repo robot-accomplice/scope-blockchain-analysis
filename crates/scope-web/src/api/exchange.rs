@@ -51,20 +51,9 @@ async fn snapshot_response(exchange: &ExchangeClient, req: SnapshotRequest) -> R
         .fetch_market_snapshot(&pair, req.trades_limit)
         .await;
 
-    let order_book_json = snapshot.order_book.as_ref().map(order_book_json);
+    let order_book_json = snapshot.order_book.as_ref().map(|b| b.to_json(None));
 
-    let ticker_json = snapshot.ticker.as_ref().map(|t| {
-        serde_json::json!({
-            "pair": t.pair,
-            "last_price": t.last_price,
-            "high_24h": t.high_24h,
-            "low_24h": t.low_24h,
-            "volume_24h": t.volume_24h,
-            "quote_volume_24h": t.quote_volume_24h,
-            "best_bid": t.best_bid,
-            "best_ask": t.best_ask,
-        })
-    });
+    let ticker_json = snapshot.ticker.as_ref();
 
     let trades_json = snapshot.recent_trades.as_ref();
 
@@ -169,26 +158,6 @@ async fn ohlc_response(exchange: &ExchangeClient, req: OhlcRequest) -> Response 
     }
 }
 
-/// JSON view of an order book. Prices and spread come from `OrderBook`, the
-/// same source as `/api/market`.
-fn order_book_json(book: &scope::market::OrderBook) -> serde_json::Value {
-    serde_json::json!({
-        "pair": book.pair,
-        "best_bid": book.best_bid(),
-        "best_ask": book.best_ask(),
-        "mid_price": book.mid_price(),
-        "spread": book.spread(),
-        "total_bid_depth": book.total_depth(scope::market::BookSide::Bid),
-        "total_ask_depth": book.total_depth(scope::market::BookSide::Ask),
-        "bids": book.bids.iter().map(|l| {
-            serde_json::json!({"price": l.price, "quantity": l.quantity, "value": l.value()})
-        }).collect::<Vec<_>>(),
-        "asks": book.asks.iter().map(|l| {
-            serde_json::json!({"price": l.price, "quantity": l.quantity, "value": l.value()})
-        }).collect::<Vec<_>>(),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,7 +175,7 @@ mod tests {
             asks: vec![level(1.0001, 0.0), level(1.001, 500.0)],
         };
         let summary = MarketSummary::from_order_book(&book, &HealthThresholds::default(), None);
-        let json = order_book_json(&book);
+        let json = book.to_json(None);
         assert_eq!(json["spread"].as_f64(), summary.spread);
         assert_eq!(json["best_bid"].as_f64(), summary.best_bid);
         assert_eq!(json["mid_price"].as_f64(), summary.mid_price);

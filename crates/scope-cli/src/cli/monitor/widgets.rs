@@ -20,6 +20,7 @@ use super::config::{ChartMode, LayoutPreset, ScaleMode, WidgetVisibility};
 use super::state::MonitorState;
 use crate::cli::textfit::{cols, cut_with_ellipsis, draw_note_alone};
 use crate::cli::theme::SECONDARY;
+pub(crate) use scope::display::format::format_large_number as format_number;
 use scope::display::theme::Role;
 
 /// The smallest terminal the monitor draws in, in columns and rows.
@@ -1947,17 +1948,4 @@ pub(crate) fn footer_spans(state: &MonitorState) -> Vec<Span<'static>> {
         stats,
     ]);
     spans
-}
-
-/// Formats a number with K/M/B suffixes.
-pub(crate) fn format_number(n: f64) -> String {
-    if n >= 1_000_000_000.0 {
-        format!("{:.2}B", n / 1_000_000_000.0)
-    } else if n >= 1_000_000.0 {
-        format!("{:.2}M", n / 1_000_000.0)
-    } else if n >= 1_000.0 {
-        format!("{:.2}K", n / 1_000.0)
-    } else {
-        format!("{:.2}", n)
-    }
 }

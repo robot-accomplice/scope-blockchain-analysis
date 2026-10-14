@@ -234,7 +234,7 @@ fn generate_executive_summary(analytics: &TokenAnalytics) -> String {
 
     summary.push_str(&format!(
         "| Total Holders | {} |\n",
-        format_number(analytics.total_holders as f64)
+        crate::display::format::format_large_number(analytics.total_holders as f64)
     ));
 
     if let Some(ref supply) = analytics.total_supply {
@@ -1130,17 +1130,6 @@ pub fn save_report(report: &str, path: impl AsRef<Path>) -> Result<()> {
     })
 }
 
-/// Formats a number with commas.
-fn format_number(value: f64) -> String {
-    if value >= 1_000_000.0 {
-        format!("{:.2}M", value / 1_000_000.0)
-    } else if value >= 1_000.0 {
-        format!("{:.0}K", value / 1_000.0)
-    } else {
-        format!("{:.0}", value)
-    }
-}
-
 /// Capitalizes the first letter of a string.
 fn capitalize(s: &str) -> String {
     let mut chars = s.chars();
@@ -1863,14 +1852,6 @@ mod tests {
     }
 
     #[test]
-    fn test_format_number_edge_cases() {
-        assert_eq!(format_number(0.0), "0");
-        assert_eq!(format_number(500.0), "500");
-        assert_eq!(format_number(1500.0), "2K");
-        assert_eq!(format_number(1_500_000.0), "1.50M");
-    }
-
-    #[test]
     fn test_capitalize_edge_cases() {
         assert_eq!(capitalize("a"), "A");
         assert_eq!(capitalize("ABC"), "ABC");
@@ -2533,13 +2514,6 @@ mod tests {
         let factors = RiskFactors::from_analytics(&analytics);
         // 1 social = moderate social presence
         assert!(factors.social <= 5);
-    }
-
-    #[test]
-    fn test_format_number_large_values() {
-        assert_eq!(format_number(1_500_000_000.0), "1500.00M");
-        assert_eq!(format_number(500_000.0), "500K");
-        assert_eq!(format_number(42.0), "42");
     }
 
     #[test]
