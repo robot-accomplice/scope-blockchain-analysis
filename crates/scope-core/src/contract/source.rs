@@ -133,15 +133,7 @@ fn sha2_256(data: &[u8]) -> [u8; 32] {
 
 /// Map chain name to Etherscan V2 chain ID parameter.
 fn chain_to_etherscan_id(chain: &str) -> Option<&'static str> {
-    match chain.to_lowercase().as_str() {
-        "ethereum" | "eth" => Some("1"),
-        "polygon" | "matic" => Some("137"),
-        "arbitrum" | "arb" => Some("42161"),
-        "optimism" | "op" => Some("10"),
-        "base" => Some("8453"),
-        "bsc" | "bnb" => Some("56"),
-        _ => None,
-    }
+    crate::chains::registry::chain(chain)?.evm_chain_id
 }
 
 /// Etherscan getsourcecode response structures.

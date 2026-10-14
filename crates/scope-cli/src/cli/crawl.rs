@@ -607,10 +607,7 @@ async fn fetch_analytics_from_explorer(
     clients: &dyn ChainClientFactory,
 ) -> Result<TokenAnalytics> {
     // EVM chains, Solana (token info via RPC), and Tron support block explorer data
-    let has_explorer = matches!(
-        chain,
-        "ethereum" | "polygon" | "arbitrum" | "optimism" | "base" | "bsc" | "solana" | "tron"
-    );
+    let has_explorer = scope::chains::registry::has_explorer(chain);
 
     if !has_explorer {
         return Err(ScopeError::NotFound(format!(
@@ -716,8 +713,8 @@ async fn fetch_holders(
     clients: &dyn ChainClientFactory,
 ) -> Result<Vec<TokenHolder>> {
     // EVM chains and Tron support holder data; Solana uses default (empty) until Solscan Pro
-    match chain {
-        "ethereum" | "polygon" | "arbitrum" | "optimism" | "base" | "bsc" | "solana" | "tron" => {
+    match scope::chains::registry::has_explorer(chain) {
+        true => {
             let client = clients.create_chain_client(chain)?;
             match client.get_token_holders(token_address, limit).await {
                 Ok(holders) => Ok(holders),
@@ -727,7 +724,7 @@ async fn fetch_holders(
                 }
             }
         }
-        _ => {
+        false => {
             tracing::info!("Holder data not available for chain: {}", chain);
             Ok(Vec::new())
         }

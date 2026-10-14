@@ -40,11 +40,7 @@ pub struct TxArgs {
     #[arg(value_name = "HASH")]
     pub hash: String,
 
-    /// Target blockchain network.
-    ///
-    /// EVM chains: ethereum, polygon, arbitrum, optimism, base, bsc
-    /// Non-EVM chains: solana, tron
-    #[arg(short, long, default_value = scope::chains::DEFAULT_CHAIN)]
+    #[arg(short, long, default_value = scope::chains::DEFAULT_CHAIN, help = scope::chains::registry::chain_help())]
     pub chain: String,
 
     /// Override output format for this command.
@@ -329,9 +325,10 @@ pub async fn fetch_transaction_report(
 
 /// Validates a transaction hash format for the given chain.
 fn validate_tx_hash(hash: &str, chain: &str) -> Result<()> {
-    match chain {
+    // The chain registry decides the address and hash format (L2).
+    match scope::chains::registry::chain(chain).map(|c| c.kind) {
         // EVM-compatible chains use 0x-prefixed 64-char hex hashes
-        "ethereum" | "polygon" | "arbitrum" | "optimism" | "base" | "bsc" | "aegis" => {
+        Some(scope::chains::registry::ChainKind::Evm) => {
             if !hash.starts_with("0x") {
                 return Err(ScopeError::InvalidHash(format!(
                     "Transaction hash must start with '0x': {}",
@@ -352,17 +349,18 @@ fn validate_tx_hash(hash: &str, chain: &str) -> Result<()> {
             }
         }
         // Solana uses base58-encoded 64-byte signatures
-        "solana" => {
+        Some(scope::chains::registry::ChainKind::Solana) => {
             validate_solana_signature(hash)?;
         }
         // Tron uses 64-char hex hashes (no 0x prefix)
-        "tron" => {
+        Some(scope::chains::registry::ChainKind::Tron) => {
             validate_tron_tx_hash(hash)?;
         }
         _ => {
             return Err(ScopeError::InvalidInput(format!(
-                "Unsupported chain: {}. Supported: ethereum, polygon, arbitrum, optimism, base, bsc, solana, tron",
-                chain
+                "Unsupported chain: {}. Supported: {}",
+                chain,
+                scope::chains::registry::client_chain_list()
             )));
         }
     }

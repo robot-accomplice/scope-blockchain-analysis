@@ -319,24 +319,17 @@ impl EthereumClient {
         config: &ChainsConfig,
         http: Arc<dyn HttpClient>,
     ) -> Result<Self> {
-        let (base_url, chain_id, api_key_name, symbol) = match chain {
-            "ethereum" => (ETHERSCAN_V2_API, "1", "etherscan", "ETH"),
-            "polygon" => (ETHERSCAN_V2_API, "137", "polygonscan", "MATIC"),
-            "arbitrum" => (ETHERSCAN_V2_API, "42161", "arbiscan", "ETH"),
-            "optimism" => (ETHERSCAN_V2_API, "10", "optimism", "ETH"),
-            "base" => (ETHERSCAN_V2_API, "8453", "basescan", "ETH"),
-            "bsc" => (ETHERSCAN_V2_API, "56", "bscscan", "BNB"),
-            "aegis" => {
-                let rpc_url = config.aegis_rpc.as_deref().unwrap_or(DEFAULT_AEGIS_RPC);
-                return Self::for_aegis(rpc_url, http);
-            }
-            _ => {
-                return Err(ScopeError::InvalidInput(format!(
-                    "Unsupported chain: {}",
-                    chain
-                )));
-            }
+        // The chain registry names every EVM chain, its aliases included.
+        let unsupported = || ScopeError::InvalidInput(format!("Unsupported chain: {chain}"));
+        let c = super::registry::chain(chain)
+            .filter(|c| c.kind == super::registry::ChainKind::Evm)
+            .ok_or_else(unsupported)?;
+        let (Some(chain_id), Some(api_key_name)) = (c.evm_chain_id, c.api_key_name) else {
+            // An EVM chain without an Etherscan id is a JSON-RPC node.
+            let rpc_url = config.aegis_rpc.as_deref().unwrap_or(DEFAULT_AEGIS_RPC);
+            return Self::for_aegis(rpc_url, http);
         };
+        let (base_url, symbol, chain) = (ETHERSCAN_V2_API, c.native_symbol, c.id);
 
         let rpc_fallback_url = if chain == "bsc" {
             Some(

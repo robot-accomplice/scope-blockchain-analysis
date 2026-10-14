@@ -5,7 +5,6 @@
 //! TUI starts. A store that fails to load gives an empty list, so completion
 //! of commands and flags keeps working.
 
-use super::exec::CHAINS;
 use scope::config::Config;
 use scope::domain::address_book::AddressBook;
 use scope::market::{MarketVenue, VenueRegistry};
@@ -46,7 +45,10 @@ impl Vocab {
             labels,
             aliases,
             venues,
-            chains: CHAINS.iter().map(|c| c.to_string()).collect(),
+            chains: scope::chains::registry::client_chain_ids()
+                .iter()
+                .map(|c| c.to_string())
+                .collect(),
         }
     }
 }

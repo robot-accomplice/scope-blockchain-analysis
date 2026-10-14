@@ -480,12 +480,8 @@ fn format_tx_value(value_str: &str, chain: &str) -> (String, bool) {
     } else {
         value_str.parse().unwrap_or(0)
     };
-    let decimals = match chain.to_lowercase().as_str() {
-        "ethereum" | "polygon" | "arbitrum" | "optimism" | "base" | "bsc" | "aegis" => 18,
-        "solana" => 9,
-        "tron" => 6,
-        _ => 18,
-    };
+    let decimals =
+        scope::chains::registry::chain(chain).map_or(18, |c| i32::from(c.native_decimals));
     let divisor = 10_f64.powi(decimals);
     let human = wei as f64 / divisor;
     let symbol = native_symbol(chain);

@@ -132,15 +132,11 @@ pub async fn gather_external_info(
 
 /// Build a block explorer URL for the contract.
 fn build_explorer_url(address: &str, chain: &str) -> String {
-    match chain.to_lowercase().as_str() {
-        "ethereum" | "eth" => format!("https://etherscan.io/address/{}", address),
-        "polygon" | "matic" => format!("https://polygonscan.com/address/{}", address),
-        "arbitrum" | "arb" => format!("https://arbiscan.io/address/{}", address),
-        "optimism" | "op" => format!("https://optimistic.etherscan.io/address/{}", address),
-        "base" => format!("https://basescan.org/address/{}", address),
-        "bsc" | "bnb" => format!("https://bscscan.com/address/{}", address),
-        _ => format!("https://etherscan.io/address/{}", address),
-    }
+    // A chain with no explorer falls back to Etherscan, as before.
+    let base = crate::chains::registry::chain(chain)
+        .and_then(|c| c.explorer_address_base)
+        .unwrap_or("https://etherscan.io/address");
+    format!("{base}/{address}")
 }
 
 /// Extract GitHub repository URL from contract source code or metadata.
@@ -196,14 +192,8 @@ async fn check_sourcify(
     chain: &str,
     http_client: &dyn crate::http::HttpClient,
 ) -> Result<bool> {
-    let chain_id = match chain.to_lowercase().as_str() {
-        "ethereum" | "eth" => "1",
-        "polygon" | "matic" => "137",
-        "arbitrum" | "arb" => "42161",
-        "optimism" | "op" => "10",
-        "base" => "8453",
-        "bsc" | "bnb" => "56",
-        _ => return Ok(false),
+    let Some(chain_id) = crate::chains::registry::chain(chain).and_then(|c| c.evm_chain_id) else {
+        return Ok(false);
     };
 
     let url = format!(

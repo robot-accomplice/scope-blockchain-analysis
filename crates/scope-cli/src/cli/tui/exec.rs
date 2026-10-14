@@ -433,11 +433,6 @@ fn on_off(b: bool) -> &'static str {
     if b { "on" } else { "off" }
 }
 
-/// Chains the `chain` session command accepts.
-pub(crate) const CHAINS: &[&str] = &[
-    "ethereum", "polygon", "arbitrum", "optimism", "base", "bsc", "aegis", "solana", "tron",
-];
-
 fn set_chain(ctx: &mut SessionContext, arg: Option<&str>, out: &Output) -> io::Result<()> {
     match arg.map(str::to_lowercase) {
         None if ctx.is_auto_chain() => outln!(out, "Current chain: auto (inferred from input)"),
@@ -446,7 +441,7 @@ fn set_chain(ctx: &mut SessionContext, arg: Option<&str>, out: &Output) -> io::R
             ctx.chain = "auto".into();
             outln!(out, "Chain set to auto — will infer from each input")
         }
-        Some(c) if CHAINS.contains(&c.as_str()) => {
+        Some(c) if scope::chains::registry::client_chain_ids().contains(&c.as_str()) => {
             outln!(out, "Chain pinned to: {}", c)?;
             ctx.chain = c;
             Ok(())
@@ -455,7 +450,7 @@ fn set_chain(ctx: &mut SessionContext, arg: Option<&str>, out: &Output) -> io::R
             out,
             "Unknown chain: {}. Valid chains: auto, {}",
             c,
-            CHAINS.join(", ")
+            scope::chains::registry::client_chain_list()
         ),
     }
 }

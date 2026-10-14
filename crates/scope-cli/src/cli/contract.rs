@@ -80,11 +80,12 @@ pub struct ContractArgs {
     #[arg(value_name = "ADDRESS")]
     pub address: String,
 
-    /// Target blockchain network.
-    ///
-    /// EVM chains with Etherscan-compatible APIs:
-    /// ethereum, polygon, arbitrum, optimism, base, bsc
-    #[arg(long, short, default_value = scope::chains::DEFAULT_CHAIN)]
+    #[arg(
+        long,
+        short,
+        default_value = scope::chains::DEFAULT_CHAIN,
+        help = format!("Target blockchain network (Etherscan-compatible API): {}", scope::chains::registry::explorer_api_chain_list())
+    )]
     pub chain: String,
 
     /// Output raw JSON instead of formatted report.
