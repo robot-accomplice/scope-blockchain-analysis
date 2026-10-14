@@ -83,7 +83,7 @@ where
     let columns = series::csv_columns(metrics).map_err(|e| ScopeError::Other(e.to_string()))?;
     if let Some(path) = csv {
         std::fs::write(path, series::csv_header(&columns))
-            .map_err(|e| ScopeError::io_context(e, &format!("cannot write {}", path.display())))?;
+            .map_err(|e| ScopeError::io_context(e, format!("cannot write {}", path.display())))?;
     }
     out.update_progress(|p| {
         p.run = 0;
@@ -144,9 +144,9 @@ fn append(path: &Path, row: &str) -> Result<()> {
     let mut file = std::fs::OpenOptions::new()
         .append(true)
         .open(path)
-        .map_err(|e| ScopeError::io_context(e, &context()))?;
+        .map_err(|e| ScopeError::io_context(e, context()))?;
     file.write_all(row.as_bytes())
-        .map_err(|e| ScopeError::io_context(e, &context()))
+        .map_err(|e| ScopeError::io_context(e, context()))
 }
 
 #[cfg(test)]
