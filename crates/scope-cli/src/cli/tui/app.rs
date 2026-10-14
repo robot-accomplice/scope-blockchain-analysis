@@ -199,6 +199,11 @@ pub enum Action {
     Copy(String),
 }
 
+/// True when Alt is held (and Ctrl is not).
+fn alt_key(key: &KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::ALT) && !key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
 /// Marks the selected palette row.
 const PALETTE_MARKER: &str = "> ";
 
@@ -284,6 +289,11 @@ pub struct TuiState {
     pane_width: Cell<u16>,
     /// Show the busy note in the hint row until the next key press.
     busy_hint: bool,
+    /// How many old lines the pane dropped (it keeps [`SCROLLBACK_LIMIT`]).
+    dropped_lines: usize,
+    /// The line that Esc, Ctrl-U or Alt-K last cleared. ↑ on an empty line
+    /// brings it back (#67).
+    cleared: Option<String>,
     /// The plain output of the last pane command that succeeded. Ctrl-Y
     /// copies it and `save` writes it.
     last_output: Option<String>,
@@ -327,6 +337,8 @@ impl TuiState {
             pane_width: Cell::new(0),
             busy_hint: false,
             last_output: None,
+            dropped_lines: 0,
+            cleared: None,
             repeat_view: None,
             last_series: None,
             journal,
@@ -489,6 +501,11 @@ impl TuiState {
             // Tab and Ctrl-K open overlays, which are not drawn while the
             // terminal is too small.
             KeyCode::Tab if !self.too_small.get() => self.tab_complete(),
+            KeyCode::Up if self.input.is_empty() && self.cleared.is_some() => {
+                if let Some(line) = self.cleared.take() {
+                    self.set_input(line);
+                }
+            }
             KeyCode::Up => self.history_prev(),
             KeyCode::Down => self.history_next(),
             KeyCode::PageUp => {
@@ -534,9 +551,23 @@ impl TuiState {
                 )));
             }
             KeyCode::Char('a') if ctrl => self.cursor = 0,
+            // Readline moves (#67). Ctrl-F searches, Ctrl-Y copies and
+            // Ctrl-K opens the palette here, so Right moves forward and
+            // Alt-K deletes to the end of the line.
+            KeyCode::Char('b') if ctrl => self.cursor = self.cursor.saturating_sub(1),
+            KeyCode::Char('b') if alt_key(&key) => self.cursor = self.word_left(),
+            KeyCode::Char('f') if alt_key(&key) => self.cursor = self.word_right(),
+            KeyCode::Char('k') if alt_key(&key) => {
+                let kept: String = self.input.chars().take(self.cursor).collect();
+                let cut: String = self.input.chars().skip(self.cursor).collect();
+                self.keep_cleared(cut);
+                self.input = kept;
+            }
             KeyCode::Char('e') if ctrl => self.cursor = self.char_len(),
             KeyCode::Char('u') if ctrl => {
+                let cut: String = self.input.chars().take(self.cursor).collect();
                 let rest: String = self.input.chars().skip(self.cursor).collect();
+                self.keep_cleared(cut);
                 self.input = rest;
                 self.cursor = 0;
             }
@@ -952,6 +983,39 @@ impl TuiState {
         self.input.remove(at);
     }
 
+    /// Keeps a cleared piece of the line for ↑ to bring back (#67).
+    fn keep_cleared(&mut self, text: String) {
+        if !text.trim().is_empty() {
+            self.cleared = Some(text);
+        }
+    }
+
+    /// The start of the word left of the cursor (Alt-B).
+    fn word_left(&self) -> usize {
+        let chars: Vec<char> = self.input.chars().collect();
+        let mut at = self.cursor;
+        while at > 0 && chars[at - 1] == ' ' {
+            at -= 1;
+        }
+        while at > 0 && chars[at - 1] != ' ' {
+            at -= 1;
+        }
+        at
+    }
+
+    /// The end of the word right of the cursor (Alt-F).
+    fn word_right(&self) -> usize {
+        let chars: Vec<char> = self.input.chars().collect();
+        let mut at = self.cursor;
+        while at < chars.len() && chars[at] == ' ' {
+            at += 1;
+        }
+        while at < chars.len() && chars[at] != ' ' {
+            at += 1;
+        }
+        at
+    }
+
     fn delete_word(&mut self) {
         let chars: Vec<char> = self.input.chars().collect();
         let mut start = self.cursor;
@@ -1034,6 +1098,7 @@ impl TuiState {
         self.scrollback.extend(lines);
         let excess = self.scrollback.len().saturating_sub(SCROLLBACK_LIMIT);
         self.scrollback.drain(..excess);
+        self.dropped_lines += excess;
         // Entries moved up: the search keeps its match, or loses it when
         // that entry was dropped.
         if let Some(Overlay::Search(st)) = &mut self.overlay {
@@ -1093,6 +1158,20 @@ impl TuiState {
         // TUI) is that now.
         if !line.trim().is_empty() {
             self.failed = false;
+        }
+        // `clear` empties the pane, as in a shell (#67); `reset` resets the
+        // session context.
+        if line
+            .split_whitespace()
+            .next()
+            .map(exec::session_command_name)
+            .as_deref()
+            == Some("clear")
+        {
+            self.scrollback.clear();
+            self.dropped_lines = 0;
+            self.scroll.set(0);
+            return Plan::Done;
         }
         if line
             .split_whitespace()
@@ -1500,7 +1579,18 @@ impl TuiState {
                     marked_rows(&entries, liveness.clone(), &v.matches, v.current, width)
                 }
                 _ => {
-                    let mut lines = self.scrollback.clone();
+                    let mut lines = Vec::new();
+                    if self.dropped_lines > 0 {
+                        // Drawn only: the pane says it is not the whole session.
+                        lines.push(Line::styled(
+                            format!(
+                                "… {} older lines dropped (the pane keeps the last {SCROLLBACK_LIMIT})",
+                                self.dropped_lines
+                            ),
+                            SECONDARY,
+                        ));
+                    }
+                    lines.extend(self.scrollback.iter().cloned());
                     lines.extend(live_out.iter().cloned());
                     lines.extend(liveness.iter().cloned());
                     (fit::fit(lines, width), Vec::new())
@@ -1720,7 +1810,11 @@ impl TuiState {
             | EscAction::CloseSearch
             | EscAction::CloseHistorySearch => self.close_overlay(),
             EscAction::Cancel => return Action::Cancel,
-            EscAction::ClearLine => self.set_input(String::new()),
+            EscAction::ClearLine => {
+                let line = std::mem::take(&mut self.input);
+                self.keep_cleared(line);
+                self.cursor = 0;
+            }
         }
         Action::None
     }
@@ -2307,6 +2401,62 @@ mod tests {
         assert_eq!(csv.lines().count(), 3, "header and two runs: {csv}");
     }
 
+    fn alt(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT)
+    }
+
+    #[test]
+    fn test_readline_word_moves_and_kill_to_end() {
+        let mut s = state();
+        type_str(&mut s, "market summary USDC");
+        s.handle_key(alt('b'));
+        assert_eq!(s.cursor, 15, "Alt-B: start of USDC");
+        s.handle_key(alt('b'));
+        assert_eq!(s.cursor, 7, "Alt-B: start of summary");
+        s.handle_key(alt('f'));
+        assert_eq!(s.cursor, 14, "Alt-F: end of summary");
+        s.handle_key(ctrl('b'));
+        assert_eq!(s.cursor, 13, "Ctrl-B: one left");
+        s.handle_key(alt('k'));
+        assert_eq!(s.input, "market summar", "Alt-K: deletes to the end");
+    }
+
+    #[test]
+    fn test_up_brings_back_a_line_that_esc_cleared() {
+        let mut s = state();
+        type_str(&mut s, "market summary USDC --venue binance --every 30s");
+        s.handle_key(key(KeyCode::Esc));
+        assert_eq!(s.input, "");
+        s.handle_key(key(KeyCode::Up));
+        assert_eq!(s.input, "market summary USDC --venue binance --every 30s");
+    }
+
+    #[test]
+    fn test_clear_empties_the_pane_and_reset_resets_the_context() {
+        let mut s = state();
+        s.push_note("old output");
+        s.ctx.limit = 7;
+        s.submit("clear", &Config::default());
+        assert!(!s.scrollback_text().contains("old output"));
+        assert_eq!(s.ctx.limit, 7, "clear leaves the context");
+        s.submit("reset", &Config::default());
+        assert_eq!(s.ctx.limit, SessionContext::default().limit);
+    }
+
+    #[test]
+    fn test_the_pane_says_when_it_dropped_old_lines() {
+        let mut s = state();
+        let big: String = (0..SCROLLBACK_LIMIT + 7)
+            .map(|i| format!("l{i}\n"))
+            .collect();
+        s.push_ansi(&big);
+        assert!(s.dropped_lines > 0);
+        let rows = 200;
+        s.scroll.set(usize::MAX / 2);
+        let text = screen(&s, 100, rows);
+        assert!(text.contains("older lines dropped"), "{text}");
+    }
+
     #[test]
     fn test_ctrl_c_in_palette_still_cancels_a_running_command() {
         // Review I1: the palette must not swallow the cancel key.
@@ -2397,7 +2547,12 @@ mod tests {
         // Ctrl-C on an empty idle line explains how to leave.
         s.handle_key(ctrl('c'));
         assert!(s.scrollback_text().contains("Ctrl-D to leave"));
-        // History keys with no history do nothing.
+        // ↑ brings back the line Esc cleared (#67).
+        s.handle_key(key(KeyCode::Up));
+        assert_eq!(s.input, "bcde");
+        // History keys with no history (and nothing cleared) do nothing.
+        s.cleared = None;
+        s.set_input(String::new());
         s.handle_key(key(KeyCode::Up));
         s.handle_key(key(KeyCode::Down));
         assert_eq!(s.input, "");

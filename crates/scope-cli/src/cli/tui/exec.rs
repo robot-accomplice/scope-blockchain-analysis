@@ -172,7 +172,7 @@ pub fn plan(
             out!(out, "{}", ctx)?;
             return Ok(Plan::Done);
         }
-        "clear" => {
+        "reset" => {
             *ctx = SessionContext::default();
             outln!(out, "Context reset to defaults.")?;
             return Ok(Plan::Done);
@@ -653,7 +653,8 @@ pub(crate) const SESSION_COMMANDS: &[(&str, &str, &str)] = &[
         "Write the last output to a file",
     ),
     ("ctx", "ctx", "Show the session context"),
-    ("clear", "clear", "Reset the session context"),
+    ("clear", "clear", "Clear the output pane"),
+    ("reset", "reset", "Reset the session context"),
     ("help", "help", "Show this help"),
     ("exit", "exit", "Leave the TUI (also Ctrl-D)"),
 ];
@@ -668,9 +669,8 @@ const SESSION_ALIASES: &[(&str, &str)] = &[
     ("context", "ctx"),
     (".ctx", "ctx"),
     (".context", "ctx"),
-    ("reset", "clear"),
     (".clear", "clear"),
-    (".reset", "clear"),
+    (".reset", "reset"),
     ("?", "help"),
     (".help", "help"),
     ("showtokens", "+tokens"),
@@ -930,7 +930,7 @@ mod tests {
         let (_, cap) = plan_line("limit 0", &mut ctx);
         assert_eq!(ctx.limit, 25);
         assert!(cap.err().contains("Invalid limit"));
-        plan_line("clear", &mut ctx);
+        plan_line("reset", &mut ctx);
         assert_eq!(ctx.limit, SessionContext::default().limit);
         assert!(!ctx.include_tokens);
     }
@@ -1021,7 +1021,8 @@ mod tests {
         for (typed, usage) in [
             ("help ctx", "ctx"),
             ("help tokens", "tokens [list|recent|add|remove]"),
-            ("help clear", "clear"),
+            ("help clear", "Clear the output pane"),
+            ("help reset", "Reset the session context"),
             ("help save", "save <file> [--force]"),
             ("help quit", "exit"),
         ] {
