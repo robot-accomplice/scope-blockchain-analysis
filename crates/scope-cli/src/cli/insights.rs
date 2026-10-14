@@ -352,11 +352,11 @@ pub async fn run(
                 scope::display::format::format_price_usd(analytics.price_usd)
             ));
             output.push_str(&format!(
-                "- **Liquidity (24h):** ${}\n",
+                "- **Liquidity (24h):** {}\n",
                 scope::display::format_usd(analytics.liquidity_usd)
             ));
             output.push_str(&format!(
-                "- **Volume (24h):** ${}\n",
+                "- **Volume (24h):** {}\n",
                 scope::display::format_usd(analytics.volume_24h)
             ));
 
@@ -1350,8 +1350,13 @@ mod tests {
             trace: false,
             health: Default::default(),
         };
-        let result = run(args, &config, &factory, &quiet()).await;
-        assert!(result.is_ok());
+        let (out, cap) = crate::cli::output::Output::capture();
+        run(args, &config, &factory, &out).await.unwrap();
+        // format_usd adds the "$" itself; a "$" in the format string printed "$$500.00K".
+        let text = cap.out();
+        assert!(text.contains("**Liquidity (24h):** $500.00K"), "{}", text);
+        assert!(text.contains("**Volume (24h):** $1.00M"), "{}", text);
+        assert!(!text.contains("$$"), "{}", text);
     }
 
     #[tokio::test]

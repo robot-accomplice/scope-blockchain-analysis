@@ -229,10 +229,7 @@ fn output_token_health_table(
         "{}",
         t::kv_row(
             "24h Volume",
-            &format!(
-                "${}",
-                scope::display::format_large_number(analytics.volume_24h)
-            )
+            &scope::display::format_usd(analytics.volume_24h)
         )
     )?;
     outln!(
@@ -240,20 +237,14 @@ fn output_token_health_table(
         "{}",
         t::kv_row(
             "Liquidity",
-            &format!(
-                "${}",
-                scope::display::format_large_number(analytics.liquidity_usd)
-            )
+            &scope::display::format_usd(analytics.liquidity_usd)
         )
     )?;
     if let Some(mc) = analytics.market_cap {
         outln!(
             out,
             "{}",
-            t::kv_row(
-                "Market Cap",
-                &format!("${}", scope::display::format_large_number(mc))
-            )
+            t::kv_row("Market Cap", &scope::display::format_usd(mc))
         )?;
     }
     if let Some(top10) = analytics.top_10_concentration {
