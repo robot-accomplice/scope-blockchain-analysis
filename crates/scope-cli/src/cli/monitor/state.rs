@@ -247,6 +247,26 @@ pub(crate) fn source_label(chain: &str, venue: Option<(&str, &str)>) -> String {
     }
 }
 
+/// Where the monitor keeps its price cache: the system temp directory.
+#[cfg(not(test))]
+fn cache_dir() -> PathBuf {
+    std::env::temp_dir()
+}
+
+/// In tests, a directory for each process and test thread: tests run in
+/// parallel and must not save, read or remove each other's cache file (a
+/// shared file failed `test_cache_roundtrip_save_load` on CI).
+#[cfg(test)]
+fn cache_dir() -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "scope-monitor-test-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = fs::create_dir_all(&dir);
+    dir
+}
+
 impl MonitorState {
     /// Creates a new monitor state from initial token data.
     /// Attempts to load cached data from disk first.
@@ -433,7 +453,7 @@ impl MonitorState {
 
     /// Returns the path to the cache file for a token.
     pub(crate) fn cache_path(token_address: &str, chain: &str) -> PathBuf {
-        let mut path = std::env::temp_dir();
+        let mut path = cache_dir();
         // Create a safe filename from address (first 16 chars) and chain
         let safe_addr = token_address
             .chars()
