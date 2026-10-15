@@ -126,7 +126,7 @@ impl fmt::Display for SessionContext {
 impl SessionContext {
     /// Returns the path to the session context file.
     fn context_path() -> Option<PathBuf> {
-        scope::paths::data_dir().map(|p| p.join("scope").join("session.yaml"))
+        Some(scope::paths::state_dir().join("session.yaml"))
     }
 
     /// Loads session context from file, or returns default if not found.

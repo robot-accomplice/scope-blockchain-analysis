@@ -90,7 +90,7 @@ pub struct TokenAliases {
 impl TokenAliases {
     /// Returns the path to the token aliases file.
     pub fn aliases_path() -> Option<PathBuf> {
-        crate::paths::data_dir().map(|p| p.join("scope").join("tokens.yaml"))
+        Some(crate::paths::data_dir().join("tokens.yaml"))
     }
 
     /// Loads token aliases from disk.

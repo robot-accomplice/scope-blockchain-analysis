@@ -141,12 +141,12 @@ pub async fn start_server(addr: SocketAddr, config: Config, out: &Output) -> any
 
 /// Returns the path to the PID file for the daemon.
 pub fn pid_file_path() -> std::path::PathBuf {
-    Config::default_data_dir().join("scope-web.pid")
+    scope::paths::state_dir().join("scope-web.pid")
 }
 
 /// Returns the path to the log file for the daemon.
 pub fn log_file_path() -> std::path::PathBuf {
-    Config::default_data_dir().join("scope-web.log")
+    scope::paths::state_dir().join("scope-web.log")
 }
 
 /// Stops a running daemon by reading its PID file and sending SIGTERM.
