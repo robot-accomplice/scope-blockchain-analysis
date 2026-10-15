@@ -119,9 +119,9 @@ use crate::note;
 pub struct MonitorArgs {
     /// Token address or symbol to monitor.
     ///
-    /// Can be a contract address (0x...) or a token symbol/name.
-    /// If a name/symbol is provided, matching tokens will be searched
-    /// and you can select from the results.
+    /// Can be a contract address (0x...) or a token symbol on `--chain`.
+    /// A symbol that names more than one token there lists them so you
+    /// can choose (only exact symbols match).
     /// Use @label to resolve from the address book (e.g., @dai-token).
     pub token: String,
 
@@ -413,6 +413,11 @@ pub(crate) async fn fetch_initial_data(
 
     match (dex, venue) {
         (Ok(data), _) => Ok((data, None)),
+        // An ambiguity or a mismatch is the user's to settle, not a
+        // lookup failure to route around.
+        (Err(e @ (ScopeError::AmbiguousToken { .. } | ScopeError::TokenMismatch { .. })), _) => {
+            Err(e)
+        }
         (Err(dex_err), Some((venue_id, ex))) => {
             let pair = crate::cli::market::venue_pair(ex, token_input);
             note!(
@@ -517,8 +522,11 @@ async fn resolve_token_address(
     out: &Output,
 ) -> Result<String> {
     use crate::cli::resolve::{DexCandidates, ResolveContext, VenueKind, picker_for, resolve};
+    // The monitor fetches its data on `chain`, so only that chain's
+    // tokens are candidates (an all-chains pick was fetched on the wrong
+    // chain).
     let ctx = ResolveContext {
-        chain: (chain != "ethereum").then(|| chain.to_string()),
+        chain: Some(chain.to_string()),
         venue: VenueKind::Dex,
         token_flag: None,
         yes: false,
@@ -3317,6 +3325,85 @@ capabilities:
             server,
             scope::market::ExchangeClient::from_descriptor(&desc),
         )
+    }
+
+    /// A DEX source whose search finds USDN on ethereum and on bsc.
+    #[derive(Clone)]
+    struct TwoChainDex;
+
+    #[async_trait::async_trait]
+    impl DexDataSource for TwoChainDex {
+        async fn get_token_price(&self, _: &str, _: &str) -> Option<f64> {
+            None
+        }
+        async fn get_native_token_price(&self, _: &str) -> Option<f64> {
+            None
+        }
+        async fn get_token_data(&self, _: &str, _: &str) -> Result<DexTokenData> {
+            Err(ScopeError::NotFound("no data in this fake".into()))
+        }
+        async fn search_tokens(
+            &self,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<Vec<scope::chains::TokenSearchResult>> {
+            let usdn = |chain: &str, address: &str| scope::chains::TokenSearchResult {
+                address: address.into(),
+                symbol: "USDN".into(),
+                name: "USDN".into(),
+                chain: chain.into(),
+                price_usd: Some(1.0),
+                volume_24h: 0.0,
+                liquidity_usd: 1.0,
+                market_cap: None,
+            };
+            Ok(vec![usdn("ethereum", "0xA"), usdn("bsc", "0xB")])
+        }
+    }
+
+    #[tokio::test]
+    async fn test_monitor_resolves_on_its_own_chain() {
+        // Review C2: a bsc token was offered for (and fetched on) ethereum.
+        let address = resolve_token_address(
+            "USDN",
+            "ethereum",
+            &TwoChainDex,
+            false,
+            &Output::capture().0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(address, "0xA");
+    }
+
+    #[tokio::test]
+    async fn test_an_ambiguous_symbol_does_not_fall_back_to_the_venue() {
+        // Review I1: an ambiguity is a choice for the user, not a lookup
+        // failure to route around.
+        let (_server, ex) = mock_venue(200).await;
+        let mut dex = scope::chains::mocks::MockDexSource::new();
+        let usdn = |address: &str| scope::chains::TokenSearchResult {
+            address: address.into(),
+            symbol: "USDN".into(),
+            name: "USDN".into(),
+            chain: "bsc".into(),
+            price_usd: Some(1.0),
+            volume_24h: 0.0,
+            liquidity_usd: 1.0,
+            market_cap: None,
+        };
+        dex.search_results = vec![usdn("0xA"), usdn("0xB")];
+        let err = fetch_initial_data(
+            "USDN",
+            None,
+            "bsc",
+            &dex,
+            Some(("mockvenue", &ex)),
+            &Output::capture().0,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ScopeError::AmbiguousToken { .. }), "{err}");
     }
 
     #[tokio::test]

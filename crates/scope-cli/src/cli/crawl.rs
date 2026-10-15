@@ -127,11 +127,11 @@ impl Period {
   Report saved to usdc.md"
 )]
 pub struct CrawlArgs {
-    /// Token address or name/symbol to analyze.
+    /// Token address or symbol to analyze.
     ///
-    /// Can be a contract address (0x...) or a token symbol/name.
-    /// If a name is provided, matching tokens will be searched and
-    /// you can select from the results.
+    /// Can be a contract address (0x...) or a token symbol. A symbol that
+    /// names more than one token lists them so you can choose (only exact
+    /// symbols match).
     /// Use @label to resolve from the address book (e.g., @usdc-token).
     pub token: String,
 

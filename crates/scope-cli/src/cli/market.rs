@@ -109,7 +109,8 @@ pub struct SummaryArgs {
     #[arg(long, default_value = scope::market::DEFAULT_VENUE, value_name = "VENUE", help = VENUE_HELP)]
     pub venue: String,
 
-    /// The base token's contract: the venue's symbol must be this token.
+    /// The base token's contract: use it and skip the lookup and the
+    /// venue check.
     #[arg(long = "token", value_name = "CONTRACT")]
     pub token_contract: Option<String>,
 
@@ -200,7 +201,8 @@ pub struct OhlcArgs {
     #[arg(long, default_value = scope::market::DEFAULT_VENUE, value_name = "VENUE")]
     pub venue: String,
 
-    /// The base token's contract: the venue's symbol must be this token.
+    /// The base token's contract: use it and skip the lookup and the
+    /// venue check.
     #[arg(long = "token", value_name = "CONTRACT")]
     pub token_contract: Option<String>,
 
@@ -231,7 +233,8 @@ pub struct TradesArgs {
     #[arg(long, default_value = scope::market::DEFAULT_VENUE, value_name = "VENUE")]
     pub venue: String,
 
-    /// The base token's contract: the venue's symbol must be this token.
+    /// The base token's contract: use it and skip the lookup and the
+    /// venue check.
     #[arg(long = "token", value_name = "CONTRACT")]
     pub token_contract: Option<String>,
 
@@ -285,13 +288,25 @@ pub struct CrawlDexSource<'a> {
     pub factory: &'a dyn ChainClientFactory,
     /// Where the crawl reports progress and warnings.
     pub out: &'a Output,
+    /// The base token's contract, when it is already resolved: the lookup
+    /// then uses it and does not search.
+    pub token: Option<String>,
 }
 
 #[async_trait::async_trait]
 impl DexAnalyticsSource for CrawlDexSource<'_> {
     async fn token_analytics(&self, token: &str, chain: &str) -> Result<TokenAnalytics> {
+        // Without a resolved contract, resolve on this venue's chain: the
+        // crawl rule (`ethereum` means every chain) must not apply here.
+        let input = match &self.token {
+            Some(contract) => contract.clone(),
+            None => {
+                let dex = self.factory.create_dex_client();
+                resolve_dex_token(token, chain, None, dex.as_ref(), false, self.out).await?
+            }
+        };
         crawl::fetch_analytics_for_input(
-            token,
+            &input,
             chain,
             Period::Hour24,
             10,
@@ -364,7 +379,11 @@ async fn fetch_book_and_volume(
     if let Some(chain) = &args.chain {
         venue.require_chain(chain)?;
     }
-    let dex = CrawlDexSource { factory, out };
+    let dex = CrawlDexSource {
+        factory,
+        out,
+        token: args.token_contract.clone(),
+    };
     scope::market::fetch_book_and_volume(&venue, &Pair::parse(&args.pair), thresholds, &dex).await
 }
 
@@ -393,6 +412,62 @@ pub(crate) async fn check_cex_token(
     resolve(base, &ctx, &source, picker.as_ref(), store, out)
         .await
         .map(|_| ())
+}
+
+/// The base token's contract for a summary, resolved once per command: on
+/// a DEX venue through the resolver on the venue's own chain (`--token`
+/// wins); on a CEX venue `None`, after [`check_cex_token`].
+async fn resolve_market_token(
+    args: &SummaryArgs,
+    factory: &dyn ChainClientFactory,
+    out: &Output,
+) -> Result<Option<String>> {
+    let json = matches!(args.format, SummaryFormat::Json);
+    let base = Pair::parse(&args.pair).base;
+    match MarketVenue::from_name(&args.venue)? {
+        MarketVenue::Dex(dex) => {
+            let client = factory.create_dex_client();
+            let flag = args.token_contract.clone();
+            resolve_dex_token(&base, dex.chain(), flag, client.as_ref(), json, out)
+                .await
+                .map(Some)
+        }
+        MarketVenue::Cex(client) => {
+            let mut aliases = scope::tokens::TokenAliases::load();
+            let (chain, flag) = (args.chain.clone(), args.token_contract.clone());
+            check_cex_token(&client, &base, chain, flag, &mut aliases, json, out)
+                .await
+                .map(|()| None)
+        }
+    }
+}
+
+/// `symbol` on the DEX `chain`, through the resolver: the chain is
+/// explicit, so a search never offers a token from another chain.
+pub(crate) async fn resolve_dex_token(
+    symbol: &str,
+    chain: &str,
+    token_flag: Option<String>,
+    dex: &dyn scope::chains::DexDataSource,
+    json: bool,
+    out: &Output,
+) -> Result<String> {
+    let ctx = ResolveContext {
+        chain: Some(chain.to_string()),
+        venue: VenueKind::Dex,
+        token_flag,
+        yes: false,
+        save: false,
+    };
+    let source = crate::cli::resolve::DexCandidates {
+        dex,
+        out,
+        fallback: false,
+    };
+    let picker = picker_for(out, json);
+    let mut aliases = scope::tokens::TokenAliases::load();
+    let r = resolve(symbol, &ctx, &source, picker.as_ref(), &mut aliases, out).await?;
+    Ok(r.address.unwrap_or_else(|| symbol.to_string()))
 }
 
 /// [`check_cex_token`] for a command's venue name and pair, once per
@@ -499,20 +574,17 @@ async fn run_summary(
     out: &Output,
 ) -> Result<()> {
     let thresholds = args.health.resolve(config);
-    let json = matches!(args.format, SummaryFormat::Json);
-    check_venue_token(
-        &args.venue,
-        &args.pair,
-        args.chain.clone(),
-        args.token_contract.clone(),
-        json,
-        out,
-    )
-    .await?;
+    // Bad flags fail before any lookup.
+    let schedule = summary_schedule(&args)?;
+    let mut args = args;
+    // Once per command, so an --every run asks at most once.
+    if let Some(contract) = resolve_market_token(&args, factory, out).await? {
+        args.token_contract = Some(contract);
+    }
     // Once per command: the coin list does not change between runs.
     let tokens = token_addresses(&args, out).await;
 
-    let Some(schedule) = summary_schedule(&args)? else {
+    let Some(schedule) = schedule else {
         let (summary, report) =
             summary_run(&args, factory, &thresholds, &tokens, None, out).await?;
         out!(out, "{report}")?;
@@ -558,12 +630,13 @@ async fn run_summary(
 
 /// Execute the `scope market ohlc` command.
 async fn run_ohlc(args: OhlcArgs, out: &Output) -> Result<()> {
+    let json = matches!(args.format, OhlcFormat::Json);
     check_venue_token(
         &args.venue,
         &args.pair,
         None,
         args.token_contract.clone(),
-        false,
+        json,
         out,
     )
     .await?;
@@ -663,12 +736,13 @@ async fn run_ohlc_with(client: &ExchangeClient, args: OhlcArgs, out: &Output) ->
 
 /// Execute the `scope market trades` command.
 async fn run_trades(args: TradesArgs, out: &Output) -> Result<()> {
+    let json = matches!(args.format, OhlcFormat::Json);
     check_venue_token(
         &args.venue,
         &args.pair,
         None,
         args.token_contract.clone(),
-        false,
+        json,
         out,
     )
     .await?;
@@ -2100,6 +2174,47 @@ capabilities:
             report: None,
             csv: None,
         }
+    }
+
+    fn two_chain_usdn(factory: &mut scope::chains::mocks::MockClientFactory) {
+        let usdn = |chain: &str, address: &str| scope::chains::dex::TokenSearchResult {
+            address: address.into(),
+            symbol: "USDN".into(),
+            name: "USDN".into(),
+            chain: chain.into(),
+            price_usd: Some(1.0),
+            volume_24h: 0.0,
+            liquidity_usd: 1.0,
+            market_cap: None,
+        };
+        factory.mock_dex.search_results = vec![usdn("bsc", "0xB"), usdn("ethereum", "0xA")];
+    }
+
+    #[tokio::test]
+    async fn test_a_dex_venue_resolves_on_its_own_chain() {
+        // Review C2: the `eth` venue must not offer, or report, a bsc token.
+        let mut factory = dex_factory(&[(50_000.0, 777.0)]);
+        two_chain_usdn(&mut factory);
+        let mut args = dex_args(SummaryFormat::Text);
+        args.pair = "USDN".into();
+        let token = resolve_market_token(&args, &factory, &quiet())
+            .await
+            .unwrap();
+        assert_eq!(token.as_deref(), Some("0xA"));
+    }
+
+    #[tokio::test]
+    async fn test_a_dex_venue_takes_the_token_flag_without_a_search() {
+        // Review C1: --token on a DEX venue was ignored.
+        let mut factory = dex_factory(&[(50_000.0, 777.0)]);
+        two_chain_usdn(&mut factory);
+        let mut args = dex_args(SummaryFormat::Text);
+        args.pair = "USDN".into();
+        args.token_contract = Some("0xT".into());
+        let token = resolve_market_token(&args, &factory, &quiet())
+            .await
+            .unwrap();
+        assert_eq!(token.as_deref(), Some("0xT"));
     }
 
     #[tokio::test]

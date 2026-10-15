@@ -54,7 +54,11 @@ pub enum Source {
     Address,
     Binding,
     Single,
-    Picked { saved: bool },
+    Picked {
+        saved: bool,
+    },
+    /// A CEX venue that does not list contracts: the symbol is used as is.
+    Unchecked,
 }
 
 /// The token a command uses.
@@ -73,6 +77,11 @@ pub trait CandidateSource: Send + Sync {
     async fn candidates(&self, symbol: &str, chain: Option<&str>) -> Result<Vec<Candidate>>;
     /// What was searched, for a "not found" error.
     fn searched(&self, chain: Option<&str>) -> String;
+    /// False for a CEX venue without a coin list: its symbols cannot be
+    /// checked against contracts.
+    fn lists_contracts(&self) -> bool {
+        true
+    }
 }
 
 /// Asks the user to choose.
@@ -87,6 +96,8 @@ pub trait Picker: Send + Sync {
 /// The saved bindings.
 pub trait BindingStore: Send {
     fn get(&self, symbol: &str, chain: Option<&str>) -> Option<TokenInfo>;
+    /// Every saved binding for `symbol`, on any chain.
+    fn all(&self, symbol: &str) -> Vec<TokenInfo>;
     fn save(&mut self, candidate: &Candidate, venue: Option<&str>) -> Result<()>;
 }
 
@@ -155,6 +166,10 @@ pub struct DexCandidates<'a> {
 impl CandidateSource for DexCandidates<'_> {
     async fn candidates(&self, symbol: &str, chain: Option<&str>) -> Result<Vec<Candidate>> {
         let mut found = self.dex.search_tokens(symbol, chain).await?;
+        // A set chain is a guarantee: never offer a token from another one.
+        if let Some(chain) = chain {
+            found.retain(|r| chain_for_network(&r.chain) == chain_for_network(chain));
+        }
         if found.is_empty()
             && self.fallback
             && let Some(f) = crate::cli::token_pick::cex_fallback(
@@ -208,11 +223,24 @@ impl CandidateSource for VenueCandidates<'_> {
     fn searched(&self, _chain: Option<&str>) -> String {
         format!("the {} coin list", self.client.venue_id())
     }
+
+    fn lists_contracts(&self) -> bool {
+        self.client.lists_assets()
+    }
 }
 
 impl BindingStore for TokenAliases {
     fn get(&self, symbol: &str, chain: Option<&str>) -> Option<TokenInfo> {
         TokenAliases::get(self, symbol, chain).cloned()
+    }
+
+    fn all(&self, symbol: &str) -> Vec<TokenInfo> {
+        let mut chains = self.get_chains_for_alias(symbol);
+        chains.sort_unstable();
+        chains
+            .into_iter()
+            .filter_map(|c| TokenAliases::get(self, symbol, Some(c)).cloned())
+            .collect()
     }
 
     fn save(&mut self, c: &Candidate, venue: Option<&str>) -> Result<()> {
@@ -330,40 +358,53 @@ async fn steps(
     if TokenAliases::is_address(input.trim()) {
         return Ok(direct(input.trim(), Source::Address));
     }
-    // 3. a saved binding, checked against a CEX venue's coin list
-    if let Some(saved) = store.get(&symbol, ctx.chain.as_deref()) {
-        if let VenueKind::Cex(venue) = &ctx.venue {
-            match source.candidates(&symbol, None).await {
-                Ok(listed) => {
-                    *seen = listed.clone();
-                    let on_chain = listed
-                        .iter()
-                        .find(|c| chain_for_network(&c.chain) == saved.chain);
-                    if let Some(c) = on_chain
-                        && let Some(venue_contract) = &c.address
-                        && !same_contract(venue_contract, &saved.address)
-                    {
-                        return Err(ScopeError::TokenMismatch {
-                            symbol,
-                            chain: saved.chain,
-                            saved: saved.address,
-                            venue_contract: venue_contract.clone(),
-                            venue: venue.clone(),
-                        });
-                    }
+    // 3. a saved binding, checked against a CEX venue's coin list. With
+    // no chain and bindings on several chains, they are the choice.
+    let saved = match ctx.chain.as_deref() {
+        None => {
+            let all = store.all(&symbol);
+            if all.len() > 1 {
+                let options: Vec<Candidate> = all.iter().map(binding_candidate).collect();
+                *seen = options.clone();
+                if ctx.yes {
+                    return Err(ScopeError::AmbiguousToken {
+                        input: input.to_string(),
+                        candidates: options.iter().map(candidate_line).collect(),
+                    });
                 }
-                Err(e) => note!(
-                    out,
-                    "{symbol}: {venue} could not be checked ({e}); using your saved token."
-                ),
+                Some(all[picker.pick(input, &options).await?].clone())
+            } else {
+                all.into_iter().next()
             }
         }
+        Some(chain) => store.get(&symbol, Some(chain)),
+    };
+    if let Some(saved) = saved {
+        if let VenueKind::Cex(venue) = &ctx.venue {
+            check_binding(&symbol, &saved, venue, source, out, seen).await?;
+        }
+        note!(
+            out,
+            "Using your saved {symbol}: {} {}",
+            saved.chain,
+            saved.address
+        );
         return Ok(Resolved {
             symbol,
             name: saved.name,
             chain: saved.chain,
             address: Some(saved.address),
             source: Source::Binding,
+        });
+    }
+    // A venue without a coin list: nothing to choose from or check.
+    if !source.lists_contracts() {
+        return Ok(Resolved {
+            symbol: symbol.clone(),
+            name: symbol,
+            chain: ctx.chain.clone().unwrap_or_default(),
+            address: None,
+            source: Source::Unchecked,
         });
     }
     // 4. the candidates: exact symbols, or the exact contract when the
@@ -390,6 +431,9 @@ async fn steps(
         }
         1 => {
             note!(out, "Using {}", candidate_line(&candidates[0]));
+            if ctx.save {
+                save_choice(store, &candidates[0], &ctx.venue, &symbol, out);
+            }
             return Ok(resolved_from(&candidates[0], Source::Single));
         }
         _ if ctx.yes => {
@@ -409,16 +453,112 @@ async fn steps(
                 "Save so {symbol} always means {contract} on {chain}? [y/N]: "
             ))
             .await?;
-    if save {
-        let mut binding = chosen.clone();
-        binding.chain = chain.clone();
-        let venue = match &ctx.venue {
-            VenueKind::Cex(v) => Some(v.as_str()),
-            VenueKind::Dex => None,
-        };
-        store.save(&binding, venue)?;
+    let saved = save && save_choice(store, chosen, &ctx.venue, &symbol, out);
+    Ok(resolved_from(chosen, Source::Picked { saved }))
+}
+
+/// Saves `chosen` under its scope chain name. A failure is a note: the
+/// token is already chosen, so the command goes on.
+fn save_choice(
+    store: &mut dyn BindingStore,
+    chosen: &Candidate,
+    venue: &VenueKind,
+    symbol: &str,
+    out: &Output,
+) -> bool {
+    let mut binding = chosen.clone();
+    binding.chain = chain_for_network(&chosen.chain);
+    let venue = match venue {
+        VenueKind::Cex(v) => Some(v.as_str()),
+        VenueKind::Dex => None,
+    };
+    match store.save(&binding, venue) {
+        Ok(()) => {
+            note!(
+                out,
+                "Saved: {symbol} means {} on {}.",
+                binding.address.as_deref().unwrap_or("its native coin"),
+                binding.chain
+            );
+            true
+        }
+        Err(e) => {
+            note!(out, "{symbol}: your choice was not saved ({e}).");
+            false
+        }
     }
-    Ok(resolved_from(chosen, Source::Picked { saved: save }))
+}
+
+/// A saved binding as a candidate, for a choice between bindings.
+fn binding_candidate(t: &TokenInfo) -> Candidate {
+    Candidate {
+        symbol: t.symbol.clone(),
+        name: t.name.clone(),
+        chain: t.chain.clone(),
+        address: Some(t.address.clone()),
+        price_usd: None,
+        liquidity_usd: None,
+    }
+}
+
+/// Checks `saved` against a CEX venue's coin list: a different contract,
+/// or the symbol listed only on other networks, stops. A venue without a
+/// list, or a failed fetch, gives a note.
+async fn check_binding(
+    symbol: &str,
+    saved: &TokenInfo,
+    venue: &str,
+    source: &dyn CandidateSource,
+    out: &Output,
+    seen: &mut Vec<Candidate>,
+) -> Result<()> {
+    if !source.lists_contracts() {
+        note!(
+            out,
+            "{symbol}: {venue} does not list contracts, so your saved token cannot be checked."
+        );
+        return Ok(());
+    }
+    let listed = match source.candidates(symbol, None).await {
+        Ok(listed) => listed,
+        Err(e) => {
+            note!(
+                out,
+                "{symbol}: {venue} could not be checked ({e}); using your saved token."
+            );
+            return Ok(());
+        }
+    };
+    *seen = listed.clone();
+    if listed.is_empty() {
+        return Ok(());
+    }
+    let mismatch = |venue_contract: String| ScopeError::TokenMismatch {
+        symbol: symbol.to_string(),
+        chain: saved.chain.clone(),
+        saved: saved.address.clone(),
+        venue_contract,
+        venue: venue.to_string(),
+    };
+    match listed
+        .iter()
+        .find(|c| chain_for_network(&c.chain) == saved.chain)
+    {
+        Some(c) => match &c.address {
+            Some(contract) if !same_contract(contract, &saved.address) => {
+                Err(mismatch(contract.clone()))
+            }
+            _ => Ok(()),
+        },
+        None => {
+            let networks: Vec<&str> = listed.iter().map(|c| c.chain.as_str()).collect();
+            Err(mismatch(format!(
+                "no {symbol} on {} (it lists {})",
+                saved.chain,
+                networks.join(", ")
+            )))
+        }
+    }
 }
 
 fn resolved_from(c: &Candidate, source: Source) -> Resolved {
@@ -462,6 +602,7 @@ fn write_log(
                 Source::Binding => "binding",
                 Source::Single => "single",
                 Source::Picked { .. } => "picked",
+                Source::Unchecked => "unchecked",
             });
             line["saved"] = serde_json::json!(matches!(r.source, Source::Picked { saved: true }));
         }
@@ -548,6 +689,13 @@ mod tests {
                 .iter()
                 .find(|t| t.symbol.eq_ignore_ascii_case(s) && chain.is_none_or(|ch| t.chain == ch))
                 .cloned()
+        }
+        fn all(&self, s: &str) -> Vec<TokenInfo> {
+            self.0
+                .iter()
+                .filter(|t| t.symbol.eq_ignore_ascii_case(s))
+                .cloned()
+                .collect()
         }
         fn save(&mut self, c: &Candidate, venue: Option<&str>) -> Result<()> {
             self.0
@@ -974,6 +1122,165 @@ mod tests {
             (got.address.as_str(), got.venue.as_deref()),
             ("0xB", Some("weex"))
         );
+    }
+
+    #[tokio::test]
+    async fn test_save_flag_saves_a_single_candidate_too() {
+        // Review I2: --save must save even when there was nothing to pick.
+        let mut store = Store::default();
+        let mut cx = ctx(VenueKind::Dex);
+        cx.save = true;
+        resolve(
+            "USDN",
+            &cx,
+            &Fake(Ok(vec![c("ethereum", "0xA")])),
+            &Scripted::new(None, false),
+            &mut store,
+            &out(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(store.0.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_bindings_on_several_chains_are_a_choice_without_a_chain() {
+        // Review I3: no chain set, USDN saved on bsc and solana: ask, never
+        // pick one by map order.
+        let mut store = Store(vec![
+            binding("bsc", "0xB", None),
+            binding("solana", "So1", None),
+        ]);
+        let mut cx = ctx(VenueKind::Dex);
+        cx.chain = None;
+        let picker = Scripted::new(Some(1), true);
+        let r = resolve("USDN", &cx, &Fake(Ok(vec![])), &picker, &mut store, &out())
+            .await
+            .unwrap();
+        assert_eq!(r.address.as_deref(), Some("So1"));
+        assert!(
+            picker.asked().iter().any(|a| a.starts_with("pick USDN 2")),
+            "{:?}",
+            picker.asked()
+        );
+        assert_eq!(store.0.len(), 2, "no new binding: both are saved already");
+    }
+
+    #[tokio::test]
+    async fn test_a_binding_hit_says_which_token() {
+        let (o, cap) = Output::capture();
+        let mut store = Store(vec![binding("ethereum", "0xSAVED", None)]);
+        resolve(
+            "USDN",
+            &ctx(VenueKind::Dex),
+            &Fake(Ok(vec![])),
+            &Scripted::new(None, false),
+            &mut store,
+            &o,
+        )
+        .await
+        .unwrap();
+        assert!(cap.err().contains("0xSAVED"), "{}", cap.err());
+    }
+
+    #[tokio::test]
+    async fn test_a_venue_without_the_bindings_chain_stops() {
+        // Review I4: the venue lists USDN, but not on the saved chain.
+        let mut store = Store(vec![binding("ethereum", "0xAAA", None)]);
+        let venue = Fake(Ok(vec![c("TRC20", "TXYZ")]));
+        let err = resolve(
+            "USDN",
+            &ctx(cex()),
+            &venue,
+            &Scripted::new(None, false),
+            &mut store,
+            &out(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ScopeError::TokenMismatch { .. }), "{err}");
+        assert!(err.to_string().contains("TRC20"), "{err}");
+    }
+
+    /// A CEX venue that does not list contracts (no `assets`).
+    struct Unlisted;
+    #[async_trait::async_trait]
+    impl CandidateSource for Unlisted {
+        async fn candidates(&self, _s: &str, _c: Option<&str>) -> Result<Vec<Candidate>> {
+            Ok(vec![])
+        }
+        fn searched(&self, _c: Option<&str>) -> String {
+            "nothing".into()
+        }
+        fn lists_contracts(&self) -> bool {
+            false
+        }
+    }
+
+    #[tokio::test]
+    async fn test_a_venue_that_lists_no_contracts_is_not_checked_and_says_so() {
+        // Review I5: no false "Using … native" line; a binding gets the
+        // spec's "cannot be checked" note.
+        let (o, cap) = Output::capture();
+        let r = resolve(
+            "USDC",
+            &ctx(cex()),
+            &Unlisted,
+            &Scripted::new(None, false),
+            &mut Store::default(),
+            &o,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(r.source, Source::Unchecked));
+        assert!(!cap.err().contains("native"), "{}", cap.err());
+        let (o, cap) = Output::capture();
+        let mut store = Store(vec![binding("ethereum", "0xAAA", None)]);
+        resolve(
+            "USDN",
+            &ctx(cex()),
+            &Unlisted,
+            &Scripted::new(None, false),
+            &mut store,
+            &o,
+        )
+        .await
+        .unwrap();
+        assert!(cap.err().contains("cannot be checked"), "{}", cap.err());
+    }
+
+    /// A store whose save always fails.
+    struct ReadOnly;
+    impl BindingStore for ReadOnly {
+        fn get(&self, _s: &str, _c: Option<&str>) -> Option<TokenInfo> {
+            None
+        }
+        fn all(&self, _s: &str) -> Vec<TokenInfo> {
+            Vec::new()
+        }
+        fn save(&mut self, _c: &Candidate, _v: Option<&str>) -> Result<()> {
+            Err(ScopeError::Other("read-only".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_a_failed_save_warns_and_keeps_the_choice() {
+        // Review I7: the token was chosen; a save failure must not fail
+        // the command.
+        let (o, cap) = Output::capture();
+        let r = resolve(
+            "USDN",
+            &ctx(VenueKind::Dex),
+            &Fake(Ok(vec![c("ethereum", "0xA"), c("bsc", "0xB")])),
+            &Scripted::new(Some(0), true),
+            &mut ReadOnly,
+            &o,
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.address.as_deref(), Some("0xA"));
+        assert!(matches!(r.source, Source::Picked { saved: false }));
+        assert!(cap.err().contains("not saved"), "{}", cap.err());
     }
 
     #[tokio::test]

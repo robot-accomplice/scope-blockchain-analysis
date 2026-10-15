@@ -692,8 +692,8 @@ scope crawl USDC --report report.md
 # Disable ASCII charts, output as JSON
 scope crawl USDC --no-charts --format json
 
-# Skip interactive prompts (use first match)
-scope crawl USDC --yes
+# Choose the token by contract (no question); --yes only skips the save question
+scope crawl USDC --token 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --yes
 
 # Save the selected token as an alias for future use
 scope crawl USDC --save
