@@ -39,6 +39,8 @@ Path code is in six files: `config.rs`, `market/registry.rs`, `tokens.rs`, `cli/
     history.txt
     tui-events.jsonl
     migration.jsonl
+    scope-web.pid      written by `scope web` while it runs; not migrated
+    scope-web.log      the `scope web` daemon log; not migrated
 ```
 
 ## 4. Resolution rules
