@@ -41,6 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - New modules: `market::pair`, `market::venue`, `market::series`, `market::fetch`, `chains::registry`, `compliance::token_risk`, `display::theme`, `display::text`.
 
 ### Added
+- `market summary` shows the pair's token contracts under the header when the venue descriptor has the new `assets` capability (the venue's coin list). JSON output gets a `tokens` array. (#101)
 - **TUI learnability.** `Tab` completes commands, flags, enum values, `@labels`, token aliases, venues and chains. A row under the input shows the command's usage and the next argument. `Ctrl-K` opens a fuzzy command palette. `Esc` or `Ctrl-C` cancels a running command, including `--every` loops. (#50, #53)
 - **TUI event log.** Each submitted line is recorded in `tui-events.jsonl` in the scope data directory: input, parsed arguments, route, outcome, error and duration. (#50)
 - **`market.health.amm_step_pct`** (default 0.1): the price step of the synthetic AMM book, as a config key, the `--amm-step-pct` flag and a web request field. (#52)
@@ -64,6 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`just tui-record NAME`** records a harness scenario's API replies as fixtures.
 
 ### Fixed
+- Compliance risk reports no longer score factors that have no data. Such factors are listed as not assessed, and the level is `Incomplete`. Compliance now uses the Etherscan key from the config and the Etherscan V2 API. (#100)
 - Running the test suite overwrote the user's real config (API keys and RPC URLs), address book and token aliases. Tests now use a sandbox in the temp directory. `setup` now starts from the config file and keeps every section. (#98)
 - Repeat runs drifted: each run waited a full interval after the last one ended, so a 1-hour run every 30 s made fewer runs than it showed. Runs now keep their schedule. The text report also shortens the 24h volume and the side totals. (#97)
 - `insights` printed token liquidity and volume as `$$500.00K`. They now print `$500.00K`. (#95)
