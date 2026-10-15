@@ -66,6 +66,7 @@ Each capability is optional. Omit a capability if the exchange doesn't support i
 | `order_book` | Level-2 order book / depth endpoint |
 | `ticker` | 24h ticker / market stats endpoint |
 | `trades` | Recent trades endpoint |
+| `assets` | Coin list with each asset's networks and token contracts. `market summary` shows the pair's token contracts under the header. |
 
 ---
 
@@ -137,6 +138,26 @@ Used when an endpoint returns data for all pairs and you need to filter.
 |-------|------|-------------|
 | `field` | string | Response field to match against. |
 | `value` | string | Expected value (supports `{pair}` placeholder). |
+
+---
+
+## `response` Object — Asset Fields
+
+The `assets` endpoint returns a list of coins, and each coin has a list of networks. Every field has a default, so `response: {}` is enough for a Binance-shaped list (`[{"coin": ..., "networkList": [{"network": ..., "contractAddress": ...}]}]`).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `items_key` | string | — | JSON key containing the coin array. Omit if the root is the array. |
+| `asset` | string | `coin` | Field with the asset symbol in each coin. |
+| `networks_key` | string | `networkList` | Key of the network array in each coin. |
+| `network` | string | `network` | Field with the network name in each network. |
+| `contract` | string | `contractAddress` | Field with the token contract. A value shorter than 20 characters (for example `btc`) is a native coin, not a contract. |
+
+```yaml
+  assets:
+    path: /api/v3/coins
+    response: {}
+```
 
 ---
 

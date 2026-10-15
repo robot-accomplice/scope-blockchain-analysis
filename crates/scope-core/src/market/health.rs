@@ -702,6 +702,16 @@ impl MarketSummary {
     /// Format as human-readable text report.
     /// When `venue_or_chain` is provided, it is displayed in the header (e.g. binance, ethereum).
     pub fn format_text(&self, venue_or_chain: Option<&str>) -> String {
+        self.format_text_with_tokens(venue_or_chain, &[])
+    }
+
+    /// [`Self::format_text`], with a line under the header for each of the
+    /// pair's tokens: its network and contract on the venue.
+    pub fn format_text_with_tokens(
+        &self,
+        venue_or_chain: Option<&str>,
+        tokens: &[super::assets::TokenAddress],
+    ) -> String {
         let q = quote_of(&self.pair);
         use crate::display::terminal as t;
 
@@ -713,6 +723,15 @@ impl MarketSummary {
         };
         out.push_str(&t::section_header(&title));
         out.push('\n');
+        for token in tokens {
+            let mut value = token.contract.clone().unwrap_or("native coin".into());
+            if token.other_networks > 0 {
+                value.push_str(&format!(" (+{} networks)", token.other_networks));
+            }
+            let label = format!("{} ({})", token.symbol, token.network);
+            out.push_str(&t::kv_row(&label, &value));
+            out.push('\n');
+        }
 
         // Metrics subsection
         out.push_str(&t::subsection_header("Metrics"));
@@ -1560,6 +1579,56 @@ mod tests {
             .iter()
             .any(|c| matches!(c, HealthCheck::Fail(m) if m.contains("sell")));
         assert!(has_fail);
+    }
+
+    #[test]
+    fn test_token_lines_sit_under_the_header() {
+        // The reader must see which tokens the venue's symbols are.
+        let book = OrderBook {
+            pair: "USDN/USDT".to_string(),
+            source: BookSource::Exchange,
+            bids: vec![OrderBookLevel {
+                price: 0.9999,
+                quantity: 1000.0,
+            }],
+            asks: vec![OrderBookLevel {
+                price: 1.0001,
+                quantity: 1000.0,
+            }],
+        };
+        let summary = MarketSummary::from_order_book(&book, &HealthThresholds::default(), None);
+        let tokens = [
+            super::super::assets::TokenAddress {
+                symbol: "USDN".into(),
+                network: "ETH".into(),
+                contract: Some("0xeC747DAf41A4Ca4ebE72356592F8301924132907".into()),
+                other_networks: 0,
+            },
+            super::super::assets::TokenAddress {
+                symbol: "USDT".into(),
+                network: "ETH".into(),
+                contract: Some("0xdAC17F958D2ee523a2206206994597C13D831ec7".into()),
+                other_networks: 7,
+            },
+        ];
+        let out = summary.format_text_with_tokens(Some("weex"), &tokens);
+        // Under the header and above the metrics, one unwrapped line each
+        // with the full address.
+        let at = |needle: &str| {
+            out.lines()
+                .position(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("no {needle:?} in {out}"))
+        };
+        let header = at("USDN/USDT (weex)");
+        let base = at("USDN (ETH)        0xeC747DAf41A4Ca4ebE72356592F8301924132907");
+        let quote =
+            at("USDT (ETH)        0xdAC17F958D2ee523a2206206994597C13D831ec7 (+7 networks)");
+        assert_eq!((base, quote), (header + 1, header + 2), "{out}");
+        assert!(at("Metrics") > quote, "{out}");
+        assert_eq!(
+            summary.format_text(Some("weex")),
+            summary.format_text_with_tokens(Some("weex"), &[])
+        );
     }
 
     #[test]
