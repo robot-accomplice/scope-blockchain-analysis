@@ -60,7 +60,13 @@ Path code is in six files: `config.rs`, `market/registry.rs`, `tokens.rs`, `cli/
 | `data_dir()` | `<root>/data` |
 | `state_dir()` | `<root>/state` |
 
-The current functions `home_dir()`, `config_dir()` and `data_dir()` become private to `scope::paths`. Only the migration (section 6) uses them, to find the old files. The `clippy.toml` ban on `dirs::*` stays.
+The current functions change as follows. The `clippy.toml` ban on `dirs::*` stays.
+
+| Now | After |
+|---|---|
+| `home_dir()` | `user_home()`: the user's home folder (sandboxed in tests). The TUI `save ~/file` command uses it to expand `~`. |
+| `config_dir()` | `legacy_config_dir()`, private: only the migration (section 6) uses it. |
+| `data_dir()` | `legacy_data_dir()`, private: only the migration uses it. The name `data_dir()` now means `<root>/data`. |
 
 The six files in section 2 call the new functions. No caller builds a path with `.config`, `scope` or a platform folder after this change. The harness gets the layout from one function and does not copy the rule.
 
