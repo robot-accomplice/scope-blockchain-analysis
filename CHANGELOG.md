@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-14
+
 ### Changed (breaking)
 - **The REPL is replaced by a full-screen TUI.** `scope tui`, `scope interactive` and `scope shell` open it. Every CLI command runs inside it with the same flags and output; the REPL ran 7 of 17 commands. The REPL session commands (`chain`, `format`, `limit`, `+tokens`, `+txs`, `trace`, `decode`, `tokens`, `ctx`, `clear`) stay. Your history and saved context carry over. The `rustyline` dependency is removed. (#50)
 - **Health checks can be `warn`.** JSON checks can have `"status": "warn"`: the value is outside its target but is not a failure, and it does not count against `healthy`. Consumers must handle `warn` (the web UI does).
@@ -39,6 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - New modules: `market::pair`, `market::venue`, `market::series`, `market::fetch`, `chains::registry`, `compliance::token_risk`, `display::theme`, `display::text`.
 
 ### Added
+- `market summary` shows the pair's token contracts under the header when the venue descriptor has the new `assets` capability (the venue's coin list). JSON output gets a `tokens` array. (#101)
 - **TUI learnability.** `Tab` completes commands, flags, enum values, `@labels`, token aliases, venues and chains. A row under the input shows the command's usage and the next argument. `Ctrl-K` opens a fuzzy command palette. `Esc` or `Ctrl-C` cancels a running command, including `--every` loops. (#50, #53)
 - **TUI event log.** Each submitted line is recorded in `tui-events.jsonl` in the scope data directory: input, parsed arguments, route, outcome, error and duration. (#50)
 - **`market.health.amm_step_pct`** (default 0.1): the price step of the synthetic AMM book, as a config key, the `--amm-step-pct` flag and a web request field. (#52)
@@ -62,6 +65,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`just tui-record NAME`** records a harness scenario's API replies as fixtures.
 
 ### Fixed
+- Compliance risk reports no longer score factors that have no data. Such factors are listed as not assessed, and the level is `Incomplete`. Compliance now uses the Etherscan key from the config and the Etherscan V2 API. (#100)
+- Running the test suite overwrote the user's real config (API keys and RPC URLs), address book and token aliases. Tests now use a sandbox in the temp directory. `setup` now starts from the config file and keeps every section. (#98)
+- Repeat runs drifted: each run waited a full interval after the last one ended, so a 1-hour run every 30 s made fewer runs than it showed. Runs now keep their schedule. The text report also shortens the 24h volume and the side totals. (#97)
+- `insights` printed token liquidity and volume as `$$500.00K`. They now print `$500.00K`. (#95)
+- rustls is now 0.23.46. This fixes RUSTSEC-2026-0346, 0347, 0348 and 0349. (#94)
 - 24h volume used the ticker's base volume as if it were USDT when a venue reported no quote volume. It is now converted with the mid price.
 - The monitor used a hard-coded DEX client for refreshes, which ignored the configured HTTP transport and Ghola. (#51)
 - Some requests did not use the configured HTTP transport. Every request now uses it. Ghola now also covers the exchange venues, the DEX client, and the contract and compliance requests. (#61)
@@ -342,7 +350,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Configuration system with YAML support
 - Support for ERC-20, SPL, and TRC-20 tokens
 
-[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.5.6...v0.6.0
 [0.5.6]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.5.5...v0.5.6
 [0.5.5]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.5.4...v0.5.5
