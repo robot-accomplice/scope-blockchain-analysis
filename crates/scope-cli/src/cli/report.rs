@@ -436,6 +436,7 @@ mod tests {
                 evidence: vec!["Known address".to_string()],
             }],
             recommendations: vec!["Continue monitoring".to_string()],
+            not_assessed: Vec::new(),
             assessed_at: chrono::Utc::now(),
         };
         let risks = vec![Some(risk)];

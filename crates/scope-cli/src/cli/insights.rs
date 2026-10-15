@@ -217,12 +217,23 @@ pub async fn run(
                 .ok();
 
             if let Some(ref risk) = risk_assessment {
-                output.push_str(&format!(
-                    "\n- **Risk:** {} {:.1}/10 ({:?})\n",
-                    risk.risk_level.emoji(),
-                    risk.overall_score,
-                    risk.risk_level
-                ));
+                if risk.not_assessed.is_empty() {
+                    output.push_str(&format!(
+                        "\n- **Risk:** {} {:.1}/10 ({:?})\n",
+                        risk.risk_level.emoji(),
+                        risk.overall_score,
+                        risk.risk_level
+                    ));
+                } else {
+                    // A partial score is not a verdict: say what is missing.
+                    output.push_str(&format!(
+                        "\n- **Risk:** {} not assessed in full. No data for:\n",
+                        risk.risk_level.emoji()
+                    ));
+                    for reason in &risk.not_assessed {
+                        output.push_str(&format!("  - {}\n", reason));
+                    }
+                }
             }
 
             // Meta analysis
@@ -597,6 +608,11 @@ fn meta_analysis_address(
         synthesis_parts.push("Concentrated in a single token.".to_string());
     }
 
+    // An incomplete assessment gives no score to read.
+    let (risk_score, risk_level) = match risk_level {
+        Some(scope::compliance::risk::RiskLevel::Incomplete) => (None, None),
+        _ => (risk_score, risk_level),
+    };
     if let (Some(score), Some(level)) = (risk_score, risk_level) {
         if score >= 7.0 {
             synthesis_parts.push(format!("Elevated risk ({:?}).", level));

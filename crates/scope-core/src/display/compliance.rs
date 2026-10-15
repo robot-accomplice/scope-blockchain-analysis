@@ -130,6 +130,17 @@ fn format_risk_table(assessment: &RiskAssessment, detailed: bool) -> String {
         }
     }
 
+    if !assessment.not_assessed.is_empty() {
+        output.push_str(&t::subsection_header(
+            "Not Assessed (no data; not in the score)",
+        ));
+        output.push('\n');
+        for reason in &assessment.not_assessed {
+            output.push_str(&t::bullet_row(reason));
+            output.push('\n');
+        }
+    }
+
     // Recommendations
     if !assessment.recommendations.is_empty() {
         output.push_str(&t::subsection_header("Recommendations"));
@@ -203,6 +214,14 @@ fn format_risk_markdown(assessment: &RiskAssessment, detailed: bool) -> String {
         }
     }
 
+    if !assessment.not_assessed.is_empty() {
+        md.push_str("## Not Assessed\n\nThese factors had no data. They are not in the score.\n\n");
+        for reason in &assessment.not_assessed {
+            md.push_str(&format!("- {}\n", reason));
+        }
+        md.push('\n');
+    }
+
     if !assessment.recommendations.is_empty() {
         md.push_str("## Recommendations\n\n");
         for rec in &assessment.recommendations {
@@ -247,6 +266,7 @@ mod tests {
                     evidence: vec!["Evidence 2".to_string()],
                 },
             ],
+            not_assessed: Vec::new(),
             assessed_at: Utc::now(),
             recommendations: vec!["Monitor closely".to_string()],
         }
