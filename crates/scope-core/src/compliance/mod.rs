@@ -174,7 +174,8 @@ mod tests {
             "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2"
         );
         assert_eq!(assessment.chain, "ethereum");
-        assert!(!assessment.factors.is_empty());
+        // No data client: nothing is scored, and every factor is listed.
+        assert_eq!(assessment.factors.len() + assessment.not_assessed.len(), 4);
     }
 
     #[test]

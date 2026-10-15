@@ -101,8 +101,8 @@ impl BlockchainDataClient {
         }
     }
 
-    /// A client for the key in [`super::etherscan::ETHERSCAN_KEY_ENV`], or
-    /// `None` when it is not set (then use `RiskEngine::new()`).
+    /// A client for [`super::etherscan::etherscan_key`], or
+    /// `None` when there is no key (then use `RiskEngine::new()`).
     pub fn from_env_opt() -> Option<Self> {
         super::etherscan::etherscan_key().map(|key| Self::new(DataSources::new(key)))
     }
@@ -128,7 +128,7 @@ impl BlockchainDataClient {
         address: &str,
     ) -> anyhow::Result<Vec<EtherscanTransaction>> {
         let url = format!(
-            "{}/api?module=account&action=txlist&address={}&startblock=0&endblock=99999999&sort=asc&apikey={}",
+            "{}/v2/api?chainid=1&module=account&action=txlist&address={}&startblock=0&endblock=99999999&sort=asc&apikey={}",
             self.base_url,
             address,
             self.sources.etherscan_key()
@@ -156,7 +156,7 @@ impl BlockchainDataClient {
         address: &str,
     ) -> anyhow::Result<Vec<EtherscanTransaction>> {
         let url = format!(
-            "{}/api?module=account&action=txlistinternal&address={}&startblock=0&endblock=99999999&sort=asc&apikey={}",
+            "{}/v2/api?chainid=1&module=account&action=txlistinternal&address={}&startblock=0&endblock=99999999&sort=asc&apikey={}",
             self.base_url,
             address,
             self.sources.etherscan_key()
@@ -180,7 +180,7 @@ impl BlockchainDataClient {
         address: &str,
     ) -> anyhow::Result<Vec<EtherscanTransaction>> {
         let url = format!(
-            "{}/api?module=account&action=tokentx&address={}&startblock=0&endblock=99999999&sort=asc&apikey={}",
+            "{}/v2/api?chainid=1&module=account&action=tokentx&address={}&startblock=0&endblock=99999999&sort=asc&apikey={}",
             self.base_url,
             address,
             self.sources.etherscan_key()
@@ -211,7 +211,7 @@ impl BlockchainDataClient {
 
         // Get the transaction
         let url = format!(
-            "{}/api?module=proxy&action=eth_getTransactionByHash&txhash={}&apikey={}",
+            "{}/v2/api?chainid=1&module=proxy&action=eth_getTransactionByHash&txhash={}&apikey={}",
             self.base_url,
             tx_hash,
             self.sources.etherscan_key()
@@ -710,6 +710,33 @@ mod tests {
             r#"{{"status":"1","message":"OK","result":{}}}"#,
             result_json
         )
+    }
+
+    #[tokio::test]
+    async fn test_requests_use_the_etherscan_v2_api_for_mainnet() {
+        // Etherscan rejects the V1 path ("deprecated V1 endpoint"), which
+        // left every compliance factor without data.
+        let mut server = mockito::Server::new_async().await;
+        let body = mock_etherscan_tx_response(&[create_test_tx("1700000000", "1.0")]);
+        let _mock = server
+            .mock("GET", "/v2/api")
+            .match_query(mockito::Matcher::UrlEncoded("chainid".into(), "1".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&body)
+            .create_async()
+            .await;
+
+        let sources = DataSources::new("test_key".to_string());
+        let client = BlockchainDataClient::with_base_url(sources, &server.url());
+        assert_eq!(
+            client
+                .get_transactions("0xabc", "ethereum")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]
