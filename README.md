@@ -784,7 +784,7 @@ A flag you type always wins over the context. `address` and `tx` with no target 
 
 The row under the input shows the usage of the command you type and the next argument it expects, the value a flag needs (with its allowed values), or an unknown flag. The pane keeps the last 5000 lines and says when it dropped older ones.
 
-**Repeating view.** A command with `--every` (for example `market summary USDC --venue binance --every 30s --duration 1h`) shows one view that updates in place: the latest report beside its trends (a pass/fail strip with the last failure, and a chart per key value with its threshold line). Below 80 columns the trends sit under the report. `Esc` stops the run and the view stays; the next key leaves it with one copy of the final report and a summary such as `42 runs · 1 failed (run 16)`.
+**Repeating view.** A command with `--every` (for example `market summary USDC --venue binance --every 30s --duration 1h`) shows one view that updates in place: the latest report beside its trends (a pass/fail strip with the last failure, and a chart per key value with its threshold line). Below 80 columns the trends sit under the report. `--duration forever` (or `inf`) runs until you press `Esc`; without `--duration`, a run lasts 1 hour. `Esc` stops the run and the view stays; the next key leaves it with one copy of the final report and a summary such as `42 runs · 1 failed (run 16)`.
 
 **Commands that need the terminal.** `setup`, `crawl` with a name or symbol (it asks you to pick a token), and `monitor` run on the plain terminal. The TUI steps aside, runs the command, and comes back by itself when it ends; `Ctrl-C` cancels it. The scrollback shows its output and how long it took. `interactive`, `web` and `completions` do not run in the TUI.
 

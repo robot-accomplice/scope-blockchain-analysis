@@ -32,6 +32,9 @@ const PAIR_HELP: &str = "Pair or base symbol. BASE_QUOTE, BASE/QUOTE and BASE-QU
 /// Default interval between summary runs when in repeat mode (60 seconds).
 pub const DEFAULT_EVERY_SECS: u64 = 60;
 
+/// `--duration` values that run until the user cancels.
+const UNTIL_CANCELLED: [&str; 2] = ["forever", "inf"];
+
 /// Default total duration when in repeat mode (1 hour).
 pub const DEFAULT_DURATION_SECS: u64 = 3600;
 
@@ -121,7 +124,8 @@ pub struct SummaryArgs {
     #[arg(long, value_name = "INTERVAL")]
     pub every: Option<String>,
 
-    /// Run for this total duration (e.g., 10m, 1h, 24h).
+    /// Run for this total duration (e.g., 10m, 1h, 24h), or `forever`
+    /// (also `inf`) to run until Esc or Ctrl-C.
     /// Default when in repeat mode: 1h.
     #[arg(long, value_name = "DURATION")]
     pub duration: Option<String>,
@@ -415,9 +419,17 @@ fn summary_schedule(args: &SummaryArgs) -> Result<Option<Schedule>> {
             .transpose()
             .map(|v| v.unwrap_or(default))
     };
-    let every = secs(&args.every, DEFAULT_EVERY_SECS)?;
+    let every = Duration::from_secs(secs(&args.every, DEFAULT_EVERY_SECS)?);
+    if args.duration.as_deref().is_some_and(is_until_cancelled) {
+        return Schedule::until_cancelled(every).map(Some);
+    }
     let duration = secs(&args.duration, DEFAULT_DURATION_SECS)?;
-    Schedule::new(Duration::from_secs(every), Duration::from_secs(duration)).map(Some)
+    Schedule::new(every, Duration::from_secs(duration)).map(Some)
+}
+
+/// `--duration forever` or `inf`: run until cancelled (#96).
+fn is_until_cancelled(s: &str) -> bool {
+    UNTIL_CANCELLED.contains(&s.trim().to_ascii_lowercase().as_str())
 }
 
 async fn run_summary(
@@ -439,9 +451,12 @@ async fn run_summary(
 
     note!(
         out,
-        "Running market summary every {}s for {}s (Ctrl+C to stop early)\n",
+        "Running market summary every {}s {} (Ctrl+C to stop)\n",
         schedule.every.as_secs(),
-        schedule.duration.as_secs()
+        match schedule.duration {
+            Some(d) => format!("for {}s", d.as_secs()),
+            None => "until cancelled".to_string(),
+        }
     );
     let metrics = series::summary_metrics(&thresholds);
     let last = repeat::run(&schedule, &metrics, args.csv.as_deref(), out, |n| {
@@ -765,8 +780,37 @@ capabilities:
     }
 
     #[test]
+    fn test_duration_forever_has_no_end_and_the_default_stays_one_hour() {
+        // #96: `--duration forever` (or `inf`) runs until cancelled; leaving
+        // the flag out keeps the 1 h default so scripts do not change.
+        let args = |duration: Option<&str>| SummaryArgs {
+            pair: "USDC".to_string(),
+            venue: "binance".to_string(),
+            chain: None,
+            health: HealthArgs::default(),
+            format: SummaryFormat::Text,
+            every: Some("30s".to_string()),
+            duration: duration.map(str::to_string),
+            report: None,
+            csv: None,
+        };
+        for word in ["forever", "inf", "FOREVER"] {
+            let s = summary_schedule(&args(Some(word))).unwrap().unwrap();
+            assert_eq!(s.duration, None, "{word}");
+        }
+        let s = summary_schedule(&args(None)).unwrap().unwrap();
+        assert_eq!(s.duration, Some(Duration::from_secs(DEFAULT_DURATION_SECS)));
+        let s = summary_schedule(&args(Some("10m"))).unwrap().unwrap();
+        assert_eq!(s.duration, Some(Duration::from_secs(600)));
+    }
+
+    #[test]
     fn test_parse_duration_seconds() {
         assert_eq!(parse_duration("30s").unwrap(), 30);
+        assert!(
+            parse_duration("forever").is_err(),
+            "not a span; --duration only"
+        );
         assert_eq!(parse_duration("1").unwrap(), 1);
         assert_eq!(parse_duration("60sec").unwrap(), 60);
     }
