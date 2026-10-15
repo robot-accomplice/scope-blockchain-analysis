@@ -73,6 +73,10 @@ pub struct TokenInfo {
     /// When this alias was last used.
     #[serde(default)]
     pub last_used: Option<i64>,
+
+    /// The venue whose coin list this binding was checked against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub venue: Option<String>,
 }
 
 /// Collection of token aliases.
@@ -127,6 +131,19 @@ impl TokenAliases {
     /// * `address` - The token contract address
     /// * `name` - The full token name
     pub fn add(&mut self, alias: &str, chain: &str, address: &str, name: &str) {
+        self.add_binding(alias, chain, address, name, None);
+    }
+
+    /// Adds or updates a binding, with the venue that it was checked
+    /// against.
+    pub fn add_binding(
+        &mut self,
+        alias: &str,
+        chain: &str,
+        address: &str,
+        name: &str,
+        venue: Option<&str>,
+    ) {
         let alias_key = alias.to_uppercase();
         let chain_key = chain.to_lowercase();
 
@@ -136,6 +153,7 @@ impl TokenAliases {
             name: name.to_string(),
             chain: chain_key.clone(),
             last_used: Some(chrono::Utc::now().timestamp()),
+            venue: venue.map(str::to_string),
         };
 
         // Add to aliases map
@@ -467,6 +485,18 @@ mod tests {
         let info = aliases.get("USDC", Some("ethereum")).unwrap();
         assert_eq!(info.symbol, "USDC");
         assert_eq!(info.chain, "ethereum");
+    }
+
+    #[test]
+    fn test_a_binding_keeps_its_venue_and_old_files_load() {
+        let mut aliases = TokenAliases::default();
+        aliases.add_binding("USDN", "ethereum", "0xeC74", "USDN", Some("weex"));
+        let info = aliases.get("usdn", Some("ethereum")).unwrap();
+        assert_eq!(info.venue.as_deref(), Some("weex"));
+        // A tokens.yaml written before this change has no `venue`.
+        let old = "aliases:\n  USDN:\n    ethereum:\n      address: '0x1'\n      symbol: USDN\n      name: USDN\n      chain: ethereum\n";
+        let loaded: TokenAliases = serde_yaml::from_str(old).unwrap();
+        assert_eq!(loaded.get("USDN", Some("ethereum")).unwrap().venue, None);
     }
 
     #[test]
