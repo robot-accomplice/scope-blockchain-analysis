@@ -411,6 +411,27 @@ mod tests {
         sp.finish("Done");
     }
 
+    /// How long a test waits for a ticking bar to draw. Generous: a loaded
+    /// machine can hold the tick thread back for a long time.
+    const DRAW_DEADLINE: Duration = Duration::from_secs(2);
+
+    /// Waits until one of `screen`'s ops from index `from` on contains
+    /// `text`, or [`DRAW_DEADLINE`] passes. A draw is several ops and the
+    /// tick thread can be part-way through one, so look at every op since
+    /// `from`, never only the last few.
+    fn drew_since(screen: &Screen, from: usize, text: &str) -> bool {
+        let deadline = std::time::Instant::now() + DRAW_DEADLINE;
+        loop {
+            if screen.ops()[from..].iter().any(|op| op.contains(text)) {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
     #[test]
     fn test_paused_stops_every_drawing_bar_while_it_runs() {
         // A prompt shown while a spinner ticks is drawn over: the spinner
@@ -418,22 +439,24 @@ mod tests {
         let _lock = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let screen = Screen::default();
         let sp = drawing_spinner("Searching...", &quiet(), &screen);
-        std::thread::sleep(Duration::from_millis(30));
-        let drawn_during = paused(|| {
+        assert!(
+            drew_since(&screen, 0, "Searching..."),
+            "it draws before the pause: {:?}",
+            screen.ops()
+        );
+        let (drawn_during, drawn_at_end) = paused(|| {
             let at_start = screen.ops();
             let last = |op: &str| at_start.iter().rposition(|o| o.starts_with(op));
             assert!(last("clear") > last("str"), "the line is cleared");
             std::thread::sleep(Duration::from_millis(40));
-            screen.ops().len() - at_start.len()
+            let at_end = screen.ops().len();
+            (at_end - at_start.len(), at_end)
         });
         assert_eq!(drawn_during, 0, "the spinner drew while paused");
-        std::thread::sleep(Duration::from_millis(30));
-        let after = screen.ops();
         assert!(
-            after[after.len() - 4..]
-                .iter()
-                .any(|op| op.contains("Searching...")),
-            "it draws again after: {after:?}"
+            drew_since(&screen, drawn_at_end, "Searching..."),
+            "it draws again after: {:?}",
+            screen.ops()
         );
         sp.finish_and_clear();
     }
