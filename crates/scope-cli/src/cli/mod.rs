@@ -77,6 +77,7 @@ pub mod progress;
 pub mod prompt;
 pub mod repeat;
 pub mod report;
+pub mod resolve;
 pub(crate) mod screen;
 pub mod setup;
 pub(crate) mod textfit;
