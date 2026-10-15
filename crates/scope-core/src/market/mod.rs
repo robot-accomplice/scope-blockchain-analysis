@@ -31,6 +31,7 @@
 
 // Submodules (split from the original monolithic orderbook.rs)
 pub mod analytics;
+pub mod assets;
 pub mod fetch;
 pub mod health;
 pub mod pair;

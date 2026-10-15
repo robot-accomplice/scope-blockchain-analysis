@@ -16,6 +16,7 @@ use super::health_args::HealthArgs;
 use crate::cli::repeat::{self, RunOutput, Schedule};
 use scope::display::terminal as t;
 use scope::error::{Result, ScopeError};
+use scope::market::assets::TokenAddress;
 use scope::market::series;
 use scope::market::{
     DexAnalyticsSource, ExchangeClient, HealthThresholds, MarketSummary, MarketVenue, OrderBook,
@@ -348,23 +349,44 @@ async fn fetch_book_and_volume(
     scope::market::fetch_book_and_volume(&venue, &Pair::parse(&args.pair), thresholds, &dex).await
 }
 
+/// The pair's tokens on the venue (network and contract), when the venue
+/// lists its assets. A failed lookup is noted and gives no lines: the
+/// summary itself does not depend on it.
+async fn token_addresses(args: &SummaryArgs, out: &Output) -> Vec<TokenAddress> {
+    let Ok(MarketVenue::Cex(client)) = MarketVenue::from_name(&args.venue) else {
+        return Vec::new();
+    };
+    match client.fetch_token_addresses(&Pair::parse(&args.pair)).await {
+        None => Vec::new(),
+        Some(Ok(tokens)) => tokens,
+        Some(Err(e)) => {
+            note!(out, "Token addresses are not available: {e}");
+            Vec::new()
+        }
+    }
+}
+
 /// One summary run: the summary and its report, as the CLI prints it.
 async fn summary_run(
     args: &SummaryArgs,
     factory: &dyn ChainClientFactory,
     thresholds: &HealthThresholds,
+    tokens: &[TokenAddress],
     run_num: Option<u64>,
     out: &Output,
 ) -> Result<(MarketSummary, String)> {
     let (book, volume_24h) = fetch_book_and_volume(args, thresholds, factory, out).await?;
     let summary = MarketSummary::from_order_book(&book, thresholds, volume_24h);
     let report = match args.format {
-        SummaryFormat::Text => summary.format_text(Some(&args.venue)),
+        SummaryFormat::Text => summary.format_text_with_tokens(Some(&args.venue), tokens),
         SummaryFormat::Json => {
             let mut json = summary.to_json();
             if let Some(obj) = json.as_object_mut() {
                 obj.insert("run".to_string(), serde_json::json!(run_num));
                 obj.insert("venue".to_string(), serde_json::json!(args.venue));
+                if !tokens.is_empty() {
+                    obj.insert("tokens".to_string(), serde_json::json!(tokens));
+                }
             }
             format!("{}\n", serde_json::to_string_pretty(&json)?)
         }
@@ -405,9 +427,12 @@ async fn run_summary(
     out: &Output,
 ) -> Result<()> {
     let thresholds = args.health.resolve(config);
+    // Once per command: the coin list does not change between runs.
+    let tokens = token_addresses(&args, out).await;
 
     let Some(schedule) = summary_schedule(&args)? else {
-        let (summary, report) = summary_run(&args, factory, &thresholds, None, out).await?;
+        let (summary, report) =
+            summary_run(&args, factory, &thresholds, &tokens, None, out).await?;
         out!(out, "{report}")?;
         return write_report(&args, &summary, out);
     };
@@ -420,9 +445,10 @@ async fn run_summary(
     );
     let metrics = series::summary_metrics(&thresholds);
     let last = repeat::run(&schedule, &metrics, args.csv.as_deref(), out, |n| {
-        let (args, thresholds, metrics) = (&args, &thresholds, &metrics);
+        let (args, thresholds, metrics, tokens) = (&args, &thresholds, &metrics, &tokens);
         async move {
-            let (summary, report) = summary_run(args, factory, thresholds, Some(n), out).await?;
+            let (summary, report) =
+                summary_run(args, factory, thresholds, tokens, Some(n), out).await?;
             Ok(RunOutput {
                 sample: series::sample(&summary, metrics),
                 snapshot: report,
@@ -1927,13 +1953,13 @@ capabilities:
             ..Default::default()
         };
         let thresholds = args.health.resolve(&Config::default());
-        let (summary, _) = summary_run(&args, &factory, &thresholds, Some(1), &quiet())
+        let (summary, _) = summary_run(&args, &factory, &thresholds, &[], Some(1), &quiet())
             .await
             .unwrap();
         assert!(summary.healthy, "{:?}", summary.checks);
 
         let strict = HealthThresholds::default();
-        let (summary, _) = summary_run(&args, &factory, &strict, None, &quiet())
+        let (summary, _) = summary_run(&args, &factory, &strict, &[], None, &quiet())
             .await
             .unwrap();
         assert!(!summary.healthy);
@@ -1946,7 +1972,7 @@ capabilities:
         factory.mock_dex.token_data.as_mut().unwrap().pairs[0].liquidity_base = Some(10_000_000.0);
         let args = dex_args(SummaryFormat::Json);
         let thresholds = args.health.resolve(&Config::default());
-        let (summary, report) = summary_run(&args, &factory, &thresholds, None, &quiet())
+        let (summary, report) = summary_run(&args, &factory, &thresholds, &[], None, &quiet())
             .await
             .unwrap();
         assert!(summary.healthy, "{:?}", summary.checks);
@@ -1972,7 +1998,7 @@ capabilities:
         let factory = dex_factory(&[(50_000.0, 1_000.0)]);
         let args = dex_args(SummaryFormat::Text);
         let thresholds = args.health.resolve(&Config::default());
-        let (_, report) = summary_run(&args, &factory, &thresholds, None, &quiet())
+        let (_, report) = summary_run(&args, &factory, &thresholds, &[], None, &quiet())
             .await
             .unwrap();
         assert!(report.contains("pool reserves not reported"), "{report}");

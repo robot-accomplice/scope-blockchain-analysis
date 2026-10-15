@@ -25,6 +25,7 @@ pub struct ExchangeClient {
     ticker: Option<Box<dyn TickerClient>>,
     trade_history: Option<Box<dyn TradeHistoryClient>>,
     ohlc: Option<Box<dyn OhlcClient>>,
+    assets: Option<ConfigurableExchangeClient>,
 }
 
 impl ExchangeClient {
@@ -50,6 +51,7 @@ impl ExchangeClient {
         } else {
             None
         };
+        let assets = desc.capabilities.assets.is_some().then(|| client.clone());
         let ohlc: Option<Box<dyn OhlcClient>> = if desc.has_ohlc() {
             Some(Box::new(client))
         } else {
@@ -64,6 +66,7 @@ impl ExchangeClient {
             ticker,
             trade_history,
             ohlc,
+            assets,
         }
     }
 
@@ -141,6 +144,25 @@ impl ExchangeClient {
             .ok_or_else(|| venue_error(&self.venue_id, "does not support trades"))?
             .fetch_recent_trades(pair, limit)
             .await
+    }
+
+    /// The token lines for `pair` from the venue's coin list, or `None`
+    /// when the venue has no `assets` capability.
+    pub async fn fetch_token_addresses(
+        &self,
+        pair: &super::pair::Pair,
+    ) -> Option<Result<Vec<super::assets::TokenAddress>>> {
+        let client = self.assets.as_ref()?;
+        let quote = pair
+            .quote
+            .clone()
+            .unwrap_or_else(|| self.descriptor.symbol.default_quote.clone());
+        Some(
+            client
+                .fetch_assets()
+                .await
+                .map(|assets| super::assets::token_addresses(&pair.base, &quote, &assets)),
+        )
     }
 
     /// Fetch OHLC candlesticks (if supported).

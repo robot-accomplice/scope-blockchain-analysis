@@ -142,6 +142,17 @@ pub struct ResponseMapping {
     /// Base volume field name (for OHLC). Falls back to `volume_24h` if absent.
     pub ohlc_volume: Option<String>,
     pub close_time: Option<String>,
+
+    // -- Asset (coin list) fields --
+    /// Field with the asset symbol in each coin item (e.g. `coin`).
+    pub asset: Option<String>,
+    /// Key of the network array in each coin item (e.g. `networkList`).
+    pub networks_key: Option<String>,
+    /// Field with the network name in each network item (e.g. `network`).
+    pub network: Option<String>,
+    /// Field with the token contract in each network item (e.g.
+    /// `contractAddress`).
+    pub contract: Option<String>,
 }
 
 /// Maps venue-specific side indicators to canonical buy/sell.
@@ -174,6 +185,9 @@ pub struct CapabilitySet {
     pub trades: Option<EndpointDescriptor>,
     /// OHLC / klines / candlestick endpoint.
     pub ohlc: Option<EndpointDescriptor>,
+    /// Coin list with each asset's networks and token contracts, so a
+    /// report can show which token a symbol is.
+    pub assets: Option<EndpointDescriptor>,
 }
 
 /// Complete venue descriptor deserialized from a YAML file.
@@ -429,6 +443,7 @@ mod tests {
             headers: HashMap::new(),
             error_envelope: None,
             capabilities: CapabilitySet {
+                assets: None,
                 order_book: Some(EndpointDescriptor {
                     method: HttpMethod::GET,
                     path: "/depth".to_string(),
@@ -479,6 +494,7 @@ mod tests {
             headers: HashMap::new(),
             error_envelope: None,
             capabilities: CapabilitySet {
+                assets: None,
                 order_book: Some(EndpointDescriptor {
                     method: HttpMethod::GET,
                     path: "/depth".to_string(),
@@ -778,6 +794,7 @@ capabilities:
             headers: HashMap::new(),
             error_envelope: None,
             capabilities: CapabilitySet {
+                assets: None,
                 order_book: None,
                 ticker: None,
                 trades: Some(EndpointDescriptor {
@@ -811,6 +828,7 @@ capabilities:
             headers: HashMap::new(),
             error_envelope: None,
             capabilities: CapabilitySet {
+                assets: None,
                 order_book: Some(EndpointDescriptor {
                     method: HttpMethod::GET,
                     path: "/depth".to_string(),
@@ -851,6 +869,7 @@ capabilities:
             headers: HashMap::new(),
             error_envelope: None,
             capabilities: CapabilitySet {
+                assets: None,
                 order_book: None,
                 ticker: Some(EndpointDescriptor {
                     method: HttpMethod::GET,
@@ -891,6 +910,7 @@ capabilities:
             headers: HashMap::new(),
             error_envelope: None,
             capabilities: CapabilitySet {
+                assets: None,
                 order_book: None,
                 ticker: None,
                 trades: Some(EndpointDescriptor {
@@ -931,6 +951,7 @@ capabilities:
             headers: HashMap::new(),
             error_envelope: None,
             capabilities: CapabilitySet {
+                assets: None,
                 order_book: None,
                 ticker: None,
                 trades: None,
