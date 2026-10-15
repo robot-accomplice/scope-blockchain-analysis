@@ -97,7 +97,7 @@ classDiagram
 ```mermaid
 flowchart TD
     A[scope web --daemon] --> B{Fork child process}
-    B --> C[Write PID to ~/.local/share/scope/scope-web.pid]
+    B --> C[Write PID to ~/.scope-bca/state/scope-web.pid]
     B --> D[Redirect output to scope-web.log]
     C --> E[Parent exits]
     D --> F[Child runs Axum server]

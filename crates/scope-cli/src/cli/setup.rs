@@ -302,7 +302,7 @@ fn mask_key(key: &str) -> String {
 fn reset_config(out: &Output) -> Result<()> {
     let config_path = Config::config_path().ok_or_else(|| {
         ScopeError::Config(ConfigError::NotFound {
-            path: PathBuf::from("~/.config/scope/config.yaml"),
+            path: PathBuf::from("~/.scope-bca/config.yaml"),
         })
     })?;
     reset_config_impl(&mut crate::cli::prompt::stdin(), out, &config_path)
@@ -335,7 +335,7 @@ fn reset_config_impl(reader: &mut impl BufRead, out: &Output, config_path: &Path
 async fn configure_single_key(key_name: &str, config: &Config, out: &Output) -> Result<()> {
     let config_path = Config::config_path().ok_or_else(|| {
         ScopeError::Config(ConfigError::NotFound {
-            path: PathBuf::from("~/.config/scope/config.yaml"),
+            path: PathBuf::from("~/.scope-bca/config.yaml"),
         })
     })?;
     configure_single_key_impl(
@@ -479,7 +479,7 @@ fn get_api_key_url(key_name: &str) -> &'static str {
 async fn run_setup_wizard(config: &Config, out: &Output) -> Result<()> {
     let config_path = Config::config_path().ok_or_else(|| {
         ScopeError::Config(ConfigError::NotFound {
-            path: PathBuf::from("~/.config/scope/config.yaml"),
+            path: PathBuf::from("~/.scope-bca/config.yaml"),
         })
     })?;
     run_setup_wizard_impl(&mut crate::cli::prompt::stdin(), out, config, &config_path)

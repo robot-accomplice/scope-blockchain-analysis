@@ -31,13 +31,11 @@ pub struct Session {
     status: Option<i32>,
 }
 
-/// Where scope keeps its journal under a given HOME.
-pub fn data_dir(home: &Path) -> PathBuf {
-    if cfg!(target_os = "macos") {
-        home.join("Library/Application Support/scope")
-    } else {
-        home.join(".local/share/scope")
-    }
+/// Where scope keeps its TUI journal under a given HOME: the binary runs
+/// with `HOME` set and no `SCOPE_BCA_HOME`, so its home is
+/// `<HOME>/.scope-bca` (docs/design/2026-10-15-scope-bca-home-design.md).
+pub fn state_dir(home: &Path) -> PathBuf {
+    home.join(".scope-bca").join("state")
 }
 
 fn size(cols: u16, rows: u16) -> PtySize {

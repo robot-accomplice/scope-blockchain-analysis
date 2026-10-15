@@ -29,7 +29,7 @@ A command-line tool for blockchain data analysis, portfolio tracking, transactio
 - **Transaction Analysis**: Look up and decode blockchain transactions across all supported chains
 - **Token Crawling**: Crawl DEX data for any token -- price, volume, liquidity, holder analysis, and risk scoring with markdown report generation
 - **Live Monitoring**: Real-time TUI dashboard with five layout presets (Dashboard, Chart, Feed, Compact, Exchange), responsive terminal sizing, config-driven widget visibility, price/volume/candlestick charts, price alerts, whale detection, CSV export, and auto-pause on input
-- **Exchange Venues**: Data-driven CEX integration via YAML descriptors, with 11 built-in venues (Binance, Biconomy, Bitget, Bybit, Coinbase, Crypto.com, Gate.io, HTX, Kraken, MEXC, OKX) with order book, ticker, trades, and OHLC support; add custom venues by dropping a YAML file in `~/.config/scope/venues/`
+- **Exchange Venues**: Data-driven CEX integration via YAML descriptors, with 11 built-in venues (Binance, Biconomy, Bitget, Bybit, Coinbase, Crypto.com, Gate.io, HTX, Kraken, MEXC, OKX) with order book, ticker, trades, and OHLC support; add custom venues by dropping a YAML file in `~/.scope-bca/venues/`
 - **Portfolio Management**: Track multiple addresses across chains with labels, tags, and aggregated balance views; `@label` shortcuts work in both CLI and web UI for instant address recall
 - **Compliance & Risk Assessment**: Risk scoring, transaction pattern detection, taint analysis, and compliance reporting
 - **Data Export**: Export address history and portfolio data to JSON or CSV with date range filtering
@@ -153,7 +153,7 @@ scope monitor USDC --venue binance                           # real exchange OHL
 scope venues list                                           # show all available venues
 scope ven list --format json                                # machine-readable
 scope venues schema                                         # YAML schema for writing custom venues
-scope venues init                                           # copy built-in descriptors to ~/.config/scope/venues/
+scope venues init                                           # copy built-in descriptors to ~/.scope-bca/venues/
 scope venues validate my-venue.yaml                         # validate a custom descriptor
 
 # Token health (DEX + optional market)
@@ -244,7 +244,7 @@ Not sure which command to use? Here's a quick decision tree:
 | Fetch OHLC/candlestick data from a venue | `scope market ohlc <symbol> --venue <venue> --interval 1h` |
 | Fetch recent trades from a venue | `scope market trades <symbol> --venue <venue>` |
 | List available exchange venues | `scope venues list` |
-| Add a custom exchange venue | `scope venues schema` then drop YAML in `~/.config/scope/venues/` |
+| Add a custom exchange venue | `scope venues schema` then drop YAML in `~/.scope-bca/venues/` |
 | Assess compliance risk for an address | `scope compliance risk <addr>` |
 | Manage a portfolio of watched addresses | `scope portfolio add/remove/list/summary` |
 | Export data to JSON/CSV | `scope export --address <addr> --output file.json` |
@@ -275,7 +275,7 @@ Representative output for key commands:
 │  okx               order_book, ticker, trades, ohlc
 ├──────────────────────────────────────────────────
 │  Loaded            11 venues (0 built-in, 11 user)
-│  User dir          ~/.config/scope/venues
+│  User dir          ~/.scope-bca/venues
 └──────────────────────────────────────────────────
 ```
 
@@ -512,7 +512,7 @@ Assessing risk for 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 on ethereum...
 
 ```text
 ┌─ Scope Configuration Status ──────────────────
-│  Config File        ~/.config/scope/config.yaml
+│  Config File        ~/.scope-bca/config.yaml
 │
 ├── API Keys
 │  ✓ etherscan        configured
@@ -589,7 +589,7 @@ Scope uses **YAML descriptor files** to define CEX API integrations. This data-d
 
 1. Run `scope venues schema` to see the YAML format
 2. Create a YAML file following the schema
-3. Place it in `~/.config/scope/venues/`
+3. Place it in `~/.scope-bca/venues/`
 4. Validate with `scope venues validate my-venue.yaml`
 5. Use it immediately: `scope market summary USDC --venue my-venue`
 
@@ -597,7 +597,7 @@ Or initialise the user directory with all built-in descriptors for reference:
 
 ```bash
 scope venues init
-# Copies all 11 built-in descriptors to ~/.config/scope/venues/
+# Copies all 11 built-in descriptors to ~/.scope-bca/venues/
 # Edit them to customise behaviour or use as templates
 ```
 
@@ -864,7 +864,9 @@ With `--venue`, the Order Book and Recent Trades panels show the venue's real bo
 
 ## Configuration
 
-On first run, Scope detects that no configuration file exists and offers to launch the interactive setup wizard. The wizard walks you through configuring API keys, RPC endpoints, and output preferences, then saves the result to `~/.config/scope/config.yaml`.
+On first run, Scope detects that no configuration file exists and offers to launch the interactive setup wizard. The wizard walks you through configuring API keys, RPC endpoints, and output preferences, then saves the result to `~/.scope-bca/config.yaml`.
+
+All scope files are in one folder, `~/.scope-bca` (set `SCOPE_BCA_HOME` to use another folder): `config.yaml`, `venues/`, `data/` (address book, token aliases) and `state/` (TUI session, history and logs). On the first start after an upgrade, scope copies your files from `~/.config/scope` and the platform data folder into it. It does not change or delete the old files. `~/.scope-bca/state/migration.jsonl` lists each file and what happened to it. Delete the old folders when you no longer need them.
 
 You can revisit the setup wizard at any time without editing the config file directly:
 
@@ -906,7 +908,7 @@ output:
   color: true
 
 portfolio:
-  data_dir: "~/.config/scope/data"
+  data_dir: "~/.scope-bca/data"
 
 # Monitor TUI configuration (all optional, shown with defaults)
 monitor:
@@ -1011,7 +1013,7 @@ The `scope market` command has three subcommands:
 - **Tunable thresholds**: All 13 health-check thresholds are overridable defaults. Built-in defaults: min-levels=10, max-spread-pct=3, min-top3-depth=300, min-top10-depth=2000, min-depth=3000, peg-range=0.001, bid/ask ratio 0.2-5.0x, amm-step-pct=0.1, depth-window-pct=2, min-depth-volume-pct=5, max-depth-volume-pct=10. Order of precedence: CLI flag or web request field > `market.health` in `config.yaml` > built-in default. The same flags work on `market summary`, `token-health --with-market`, and `insights`. The web `/api/market` and `/api/token-health` endpoints accept the same keys (snake_case) in the JSON body.
 
 ```yaml
-# ~/.config/scope/config.yaml — omitted keys keep the built-in default
+# ~/.scope-bca/config.yaml — omitted keys keep the built-in default
 market:
   health:
     min_levels: 10

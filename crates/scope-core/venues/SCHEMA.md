@@ -4,7 +4,7 @@ This document describes the YAML schema for exchange venue descriptors used by S
 
 ## Overview
 
-Each `.yaml` file in this directory defines how Scope communicates with one exchange's REST API. The `VenueRegistry` loads all built-in descriptors at compile time and any user descriptors from `~/.config/scope/venues/` (Linux) or `~/Library/Application Support/scope/venues/` (macOS) at runtime.
+Each `.yaml` file in this directory defines how Scope communicates with one exchange's REST API. The `VenueRegistry` loads all built-in descriptors at compile time and any user descriptors from `~/.scope-bca/venues/` at runtime (`SCOPE_BCA_HOME` moves the folder).
 
 To validate a descriptor: `scope venues validate <file>`
 

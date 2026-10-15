@@ -132,7 +132,7 @@
 //!
 //! ## Configuration
 //!
-//! Scope reads configuration from `~/.config/scope/config.yaml`:
+//! Scope reads configuration from `~/.scope-bca/config.yaml`:
 //!
 //! ```yaml
 //! chains:

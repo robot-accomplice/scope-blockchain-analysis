@@ -5,7 +5,7 @@
 //!
 //! 1. CLI arguments
 //! 2. Environment variables (`SCOPE_*` prefix)
-//! 3. User config file (`~/.config/scope/config.yaml`)
+//! 3. User config file (`~/.scope-bca/config.yaml`)
 //! 4. Built-in defaults
 //!
 //! ## Configuration File Format
@@ -260,7 +260,7 @@ impl Config {
     /// # Arguments
     ///
     /// * `path` - Optional path to a configuration file. If `None`, looks
-    ///   for config at `~/.config/scope/config.yaml`.
+    ///   for config at `~/.scope-bca/config.yaml`.
     ///
     /// # Returns
     ///
@@ -589,7 +589,7 @@ impl Default for ExportConfig {
 
 /// Monitor-specific configuration.
 ///
-/// Loaded from the `monitor:` section of `~/.config/scope/config.yaml`.
+/// Loaded from the `monitor:` section of `~/.scope-bca/config.yaml`.
 /// All fields have sensible defaults so the section is entirely optional.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]

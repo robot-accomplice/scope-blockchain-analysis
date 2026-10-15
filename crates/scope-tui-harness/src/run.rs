@@ -2,7 +2,7 @@
 
 use crate::scenario::{Scenario, Step, Tier, key_bytes};
 use crate::screen::{SnapshotResult, compare_snapshot, mask};
-use crate::session::{Session, StartOpts, data_dir};
+use crate::session::{Session, StartOpts, state_dir};
 use anyhow::Result;
 use regex::Regex;
 use std::path::{Path, PathBuf};
@@ -38,7 +38,7 @@ const SETTLE: Duration = Duration::from_millis(150);
 const POLL: Duration = Duration::from_millis(100);
 
 fn journal(home: &Path) -> Vec<serde_json::Value> {
-    std::fs::read_to_string(data_dir(home).join("tui-events.jsonl"))
+    std::fs::read_to_string(state_dir(home).join("tui-events.jsonl"))
         .unwrap_or_default()
         .lines()
         .filter_map(|l| serde_json::from_str(l).ok())
@@ -97,7 +97,7 @@ pub fn run_scenario(
     ctx: &RunCtx,
 ) -> Result<(Outcome, Session, tempfile::TempDir)> {
     let home = tempfile::tempdir()?;
-    let cfg_dir = home.path().join(".config/scope");
+    let cfg_dir = home.path().join(".scope-bca");
     std::fs::create_dir_all(&cfg_dir)?;
     std::fs::write(
         cfg_dir.join("config.yaml"),

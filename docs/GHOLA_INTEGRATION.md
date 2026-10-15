@@ -83,7 +83,7 @@ cp ghola /usr/local/bin/
 
 ## Configuration
 
-Enable the ghola sidecar in `~/.config/scope/config.yaml`:
+Enable the ghola sidecar in `~/.scope-bca/config.yaml`:
 
 ```yaml
 ghola:
