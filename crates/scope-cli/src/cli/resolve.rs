@@ -21,6 +21,7 @@ pub struct Candidate {
     pub chain: String,
     /// The contract; `None` for a native coin or an unknown contract.
     pub address: Option<String>,
+    pub price_usd: Option<f64>,
     pub liquidity_usd: Option<f64>,
 }
 
@@ -105,6 +106,171 @@ fn same_contract(a: &str, b: &str) -> bool {
         a.eq_ignore_ascii_case(b)
     } else {
         a == b
+    }
+}
+
+/// A DexScreener search result as a candidate. An empty address (the CEX
+/// ticker fallback) is a token without a contract.
+pub(crate) fn dex_candidate(r: &scope::chains::dex::TokenSearchResult) -> Candidate {
+    Candidate {
+        symbol: r.symbol.clone(),
+        name: r.name.clone(),
+        chain: r.chain.clone(),
+        address: (!r.address.is_empty()).then(|| r.address.clone()),
+        price_usd: r.price_usd,
+        liquidity_usd: Some(r.liquidity_usd),
+    }
+}
+
+/// The venue's networks for `symbol`, one candidate each.
+pub(crate) fn venue_candidates_from(
+    symbol: &str,
+    assets: &[scope::market::assets::AssetInfo],
+) -> Vec<Candidate> {
+    assets
+        .iter()
+        .filter(|a| a.symbol.eq_ignore_ascii_case(symbol))
+        .flat_map(|a| {
+            a.networks.iter().map(|n| Candidate {
+                symbol: a.symbol.clone(),
+                name: a.symbol.clone(),
+                chain: n.network.clone(),
+                address: n.contract.clone(),
+                price_usd: None,
+                liquidity_usd: None,
+            })
+        })
+        .collect()
+}
+
+/// Candidates from a DexScreener search, with the CEX ticker fallback when
+/// `fallback` is set and the search finds nothing.
+pub struct DexCandidates<'a> {
+    pub dex: &'a dyn scope::chains::DexDataSource,
+    pub out: &'a Output,
+    pub fallback: bool,
+}
+
+#[async_trait::async_trait]
+impl CandidateSource for DexCandidates<'_> {
+    async fn candidates(&self, symbol: &str, chain: Option<&str>) -> Result<Vec<Candidate>> {
+        let mut found = self.dex.search_tokens(symbol, chain).await?;
+        if found.is_empty()
+            && self.fallback
+            && let Some(f) = crate::cli::token_pick::cex_fallback(
+                symbol,
+                chain.unwrap_or("ethereum"),
+                None,
+                self.out,
+            )
+            .await
+        {
+            found.push(f);
+        }
+        Ok(found.iter().map(dex_candidate).collect())
+    }
+
+    fn searched(&self, chain: Option<&str>) -> String {
+        format!(
+            "DexScreener on {}{}",
+            chain.unwrap_or("all chains"),
+            if self.fallback {
+                " and the CEX ticker fallback"
+            } else {
+                ""
+            }
+        )
+    }
+}
+
+/// Candidates from a CEX venue's coin list (the `assets` capability).
+pub struct VenueCandidates<'a> {
+    pub client: &'a scope::market::ExchangeClient,
+}
+
+#[async_trait::async_trait]
+impl CandidateSource for VenueCandidates<'_> {
+    async fn candidates(&self, symbol: &str, _chain: Option<&str>) -> Result<Vec<Candidate>> {
+        match self.client.fetch_assets().await {
+            Some(assets) => Ok(venue_candidates_from(symbol, &assets?)),
+            // No `assets` capability: the venue symbol is all that is known.
+            None => Ok(vec![Candidate {
+                symbol: symbol.to_uppercase(),
+                name: symbol.to_uppercase(),
+                chain: String::new(),
+                address: None,
+                price_usd: None,
+                liquidity_usd: None,
+            }]),
+        }
+    }
+
+    fn searched(&self, _chain: Option<&str>) -> String {
+        format!("the {} coin list", self.client.venue_id())
+    }
+}
+
+impl BindingStore for TokenAliases {
+    fn get(&self, symbol: &str, chain: Option<&str>) -> Option<TokenInfo> {
+        TokenAliases::get(self, symbol, chain).cloned()
+    }
+
+    fn save(&mut self, c: &Candidate, venue: Option<&str>) -> Result<()> {
+        let address = c.address.as_deref().unwrap_or("");
+        self.add_binding(&c.symbol, &c.chain, address, &c.name, venue);
+        TokenAliases::save(self)
+    }
+}
+
+/// Asks on the terminal: the numbered token list, then yes/no.
+pub struct TerminalPicker<'a> {
+    pub out: &'a Output,
+}
+
+#[async_trait::async_trait]
+impl Picker for TerminalPicker<'_> {
+    async fn pick(&self, _input: &str, cs: &[Candidate]) -> Result<usize> {
+        let table = crate::cli::token_pick::candidate_table(cs);
+        let mut input = crate::cli::prompt::stdin();
+        crate::cli::prompt::pick(&mut input, self.out, &table, "token", cs.len())
+    }
+
+    async fn confirm(&self, question: &str) -> Result<bool> {
+        let mut input = crate::cli::prompt::stdin();
+        let answer = crate::cli::prompt::ask(&mut input, self.out, question)?;
+        Ok(matches!(
+            answer.trim().to_ascii_lowercase().as_str(),
+            "y" | "yes"
+        ))
+    }
+}
+
+/// Never asks: a choice is an error that lists the candidates.
+pub struct NoTerminalPicker;
+
+#[async_trait::async_trait]
+impl Picker for NoTerminalPicker {
+    async fn pick(&self, input: &str, cs: &[Candidate]) -> Result<usize> {
+        Err(ScopeError::AmbiguousToken {
+            input: input.to_string(),
+            candidates: cs.iter().map(candidate_line).collect(),
+        })
+    }
+
+    async fn confirm(&self, _question: &str) -> Result<bool> {
+        Ok(false)
+    }
+}
+
+/// The picker for this run: no prompt in the TUI pane (plan 2 adds an
+/// overlay), for JSON output, or without a terminal.
+pub fn picker_for<'a>(out: &'a Output, json: bool) -> Box<dyn Picker + 'a> {
+    use std::io::IsTerminal as _;
+    let terminal = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    if out.is_tui() || json || !terminal {
+        Box::new(NoTerminalPicker)
+    } else {
+        Box::new(TerminalPicker { out })
     }
 }
 
@@ -313,6 +479,7 @@ mod tests {
             name: "USDN".into(),
             chain: chain.into(),
             address: Some(address.into()),
+            price_usd: None,
             liquidity_usd: None,
         }
     }
@@ -672,6 +839,91 @@ mod tests {
         assert!(
             text.contains("ethereum 0xA") && text.contains("bsc 0xB"),
             "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_no_terminal_picker_lists_every_candidate_and_the_hint() {
+        let err = NoTerminalPicker
+            .pick("USDN", &[c("ethereum", "0xA"), c("bsc", "0xB")])
+            .await
+            .unwrap_err();
+        let text = err.to_string();
+        assert!(
+            text.contains("ethereum 0xA") && text.contains("bsc 0xB"),
+            "{text}"
+        );
+        assert!(text.contains("--token"), "{text}");
+        assert!(!NoTerminalPicker.confirm("save?").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_picker_for_json_never_prompts() {
+        // A JSON run must not wait for stdin.
+        let (o, _cap) = Output::capture();
+        let p = picker_for(&o, true);
+        let r = p
+            .pick("USDN", &[c("ethereum", "0xA"), c("bsc", "0xB")])
+            .await;
+        assert!(matches!(r, Err(ScopeError::AmbiguousToken { .. })));
+    }
+
+    #[test]
+    fn test_venue_candidates_are_one_per_network() {
+        use scope::market::assets::{AssetInfo, AssetNetwork};
+        let assets = vec![
+            AssetInfo {
+                symbol: "USDN".into(),
+                networks: vec![
+                    AssetNetwork {
+                        network: "ETH".into(),
+                        contract: Some("0xA".into()),
+                    },
+                    AssetNetwork {
+                        network: "BSC".into(),
+                        contract: Some("0xB".into()),
+                    },
+                ],
+            },
+            AssetInfo {
+                symbol: "BTC".into(),
+                networks: vec![],
+            },
+        ];
+        let cs = venue_candidates_from("usdn", &assets);
+        assert_eq!(cs.len(), 2);
+        assert_eq!(cs[0].address.as_deref(), Some("0xA"));
+        assert_eq!(cs[0].chain, "ETH", "the venue's name; resolve maps it");
+    }
+
+    #[test]
+    fn test_dex_results_become_candidates_with_liquidity() {
+        let r = scope::chains::dex::TokenSearchResult {
+            address: "0xA".into(),
+            symbol: "USDN".into(),
+            name: "USDN".into(),
+            chain: "ethereum".into(),
+            price_usd: None,
+            volume_24h: 0.0,
+            liquidity_usd: 5.0,
+            market_cap: None,
+        };
+        assert_eq!(dex_candidate(&r).liquidity_usd, Some(5.0));
+        // The CEX ticker fallback has no address: no contract.
+        let mut f = r.clone();
+        f.address = String::new();
+        assert_eq!(dex_candidate(&f).address, None);
+    }
+
+    #[test]
+    fn test_the_alias_file_is_a_binding_store() {
+        let mut aliases = TokenAliases::default();
+        let store: &mut dyn BindingStore = &mut aliases;
+        store.save(&c("bsc", "0xB"), Some("weex")).unwrap();
+        let got = store.get("usdn", Some("bsc")).unwrap();
+        assert_eq!(
+            (got.address.as_str(), got.venue.as_deref()),
+            ("0xB", Some("weex"))
         );
     }
 

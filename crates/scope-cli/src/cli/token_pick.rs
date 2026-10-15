@@ -137,22 +137,30 @@ const RULE_COLS: usize = {
 /// The header, a rule and one row per result, each line ending in a
 /// newline.
 fn table(results: &[TokenSearchResult]) -> String {
-    let mut list = format!("\nFound {} matching tokens:\n\n", results.len());
+    let candidates: Vec<_> = results
+        .iter()
+        .map(crate::cli::resolve::dex_candidate)
+        .collect();
+    candidate_table(&candidates)
+}
+
+/// The numbered table the resolver's terminal picker shows.
+pub(crate) fn candidate_table(candidates: &[crate::cli::resolve::Candidate]) -> String {
+    let mut list = format!("\nFound {} matching tokens:\n\n", candidates.len());
     list.push_str(&row(COLUMNS.map(|(header, _, _)| header.to_string())));
     list.push_str(&format!("{}\n", "─".repeat(RULE_COLS)));
-    for (i, token) in results.iter().enumerate() {
-        let price = token
-            .price_usd
-            .map(|p| format!("${:.6}", p))
-            .unwrap_or_else(|| "N/A".to_string());
+    let na = || "N/A".to_string();
+    for (i, c) in candidates.iter().enumerate() {
         list.push_str(&row([
             (i + 1).to_string(),
-            token.symbol.clone(),
-            cut_with_ellipsis(&token.name, NAME_COLS),
-            abbreviate(&token.address),
-            token.chain.clone(),
-            price,
-            scope::display::format_large_number(token.liquidity_usd),
+            c.symbol.clone(),
+            cut_with_ellipsis(&c.name, NAME_COLS),
+            c.address.as_deref().map(abbreviate).unwrap_or_default(),
+            c.chain.clone(),
+            c.price_usd.map(|p| format!("${:.6}", p)).unwrap_or_else(na),
+            c.liquidity_usd
+                .map(scope::display::format_large_number)
+                .unwrap_or_else(na),
         ]));
     }
     list

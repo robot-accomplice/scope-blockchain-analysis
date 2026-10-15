@@ -146,6 +146,12 @@ impl ExchangeClient {
             .await
     }
 
+    /// The venue's coin list, or `None` when the venue has no `assets`
+    /// capability.
+    pub async fn fetch_assets(&self) -> Option<Result<Vec<super::assets::AssetInfo>>> {
+        Some(self.assets.as_ref()?.fetch_assets().await)
+    }
+
     /// The token lines for `pair` from the venue's coin list, or `None`
     /// when the venue has no `assets` capability.
     pub async fn fetch_token_addresses(
