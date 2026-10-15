@@ -14,6 +14,9 @@ use scope::config::Config;
 
 use super::health_args::HealthArgs;
 use crate::cli::repeat::{self, RunOutput, Schedule};
+use crate::cli::resolve::{
+    BindingStore, ResolveContext, VenueCandidates, VenueKind, picker_for, resolve,
+};
 use scope::display::terminal as t;
 use scope::error::{Result, ScopeError};
 use scope::market::assets::TokenAddress;
@@ -106,6 +109,10 @@ pub struct SummaryArgs {
     #[arg(long, default_value = scope::market::DEFAULT_VENUE, value_name = "VENUE", help = VENUE_HELP)]
     pub venue: String,
 
+    /// The base token's contract: the venue's symbol must be this token.
+    #[arg(long = "token", value_name = "CONTRACT")]
+    pub token_contract: Option<String>,
+
     /// Chain for a DEX venue. The venue already names its chain, so this is
     /// only a check: a different chain is an error. Ignored for CEX venues.
     #[arg(long, value_name = "CHAIN")]
@@ -193,6 +200,10 @@ pub struct OhlcArgs {
     #[arg(long, default_value = scope::market::DEFAULT_VENUE, value_name = "VENUE")]
     pub venue: String,
 
+    /// The base token's contract: the venue's symbol must be this token.
+    #[arg(long = "token", value_name = "CONTRACT")]
+    pub token_contract: Option<String>,
+
     /// Candle interval (e.g., 1m, 5m, 15m, 1h, 4h, 1d).
     #[arg(long, default_value = "1h", value_name = "INTERVAL")]
     pub interval: String,
@@ -219,6 +230,10 @@ pub struct TradesArgs {
     /// Exchange venue (e.g., binance, mexc, bybit).
     #[arg(long, default_value = scope::market::DEFAULT_VENUE, value_name = "VENUE")]
     pub venue: String,
+
+    /// The base token's contract: the venue's symbol must be this token.
+    #[arg(long = "token", value_name = "CONTRACT")]
+    pub token_contract: Option<String>,
 
     /// Maximum number of trades to fetch.
     #[arg(long, default_value = "50", value_name = "LIMIT")]
@@ -353,6 +368,51 @@ async fn fetch_book_and_volume(
     scope::market::fetch_book_and_volume(&venue, &Pair::parse(&args.pair), thresholds, &dex).await
 }
 
+/// On a CEX venue, proves which token the base symbol is: a saved binding
+/// must match the venue's coin list, and a symbol on several networks is a
+/// choice (asked, or an error without a terminal). The venue symbol itself
+/// does not change.
+pub(crate) async fn check_cex_token(
+    client: &ExchangeClient,
+    base: &str,
+    chain: Option<String>,
+    token_flag: Option<String>,
+    store: &mut dyn BindingStore,
+    json: bool,
+    out: &Output,
+) -> Result<()> {
+    let ctx = ResolveContext {
+        chain,
+        venue: VenueKind::Cex(client.venue_id().to_string()),
+        token_flag,
+        yes: false,
+        save: false,
+    };
+    let source = VenueCandidates { client };
+    let picker = picker_for(out, json);
+    resolve(base, &ctx, &source, picker.as_ref(), store, out)
+        .await
+        .map(|_| ())
+}
+
+/// [`check_cex_token`] for a command's venue name and pair, once per
+/// command; a DEX venue resolves its token in the analytics lookup.
+async fn check_venue_token(
+    venue: &str,
+    pair: &str,
+    chain: Option<String>,
+    token_flag: Option<String>,
+    json: bool,
+    out: &Output,
+) -> Result<()> {
+    let Ok(MarketVenue::Cex(client)) = MarketVenue::from_name(venue) else {
+        return Ok(());
+    };
+    let base = Pair::parse(pair).base;
+    let mut aliases = scope::tokens::TokenAliases::load();
+    check_cex_token(&client, &base, chain, token_flag, &mut aliases, json, out).await
+}
+
 /// The pair's tokens on the venue (network and contract), when the venue
 /// lists its assets. A failed lookup is noted and gives no lines: the
 /// summary itself does not depend on it.
@@ -439,6 +499,16 @@ async fn run_summary(
     out: &Output,
 ) -> Result<()> {
     let thresholds = args.health.resolve(config);
+    let json = matches!(args.format, SummaryFormat::Json);
+    check_venue_token(
+        &args.venue,
+        &args.pair,
+        args.chain.clone(),
+        args.token_contract.clone(),
+        json,
+        out,
+    )
+    .await?;
     // Once per command: the coin list does not change between runs.
     let tokens = token_addresses(&args, out).await;
 
@@ -488,6 +558,15 @@ async fn run_summary(
 
 /// Execute the `scope market ohlc` command.
 async fn run_ohlc(args: OhlcArgs, out: &Output) -> Result<()> {
+    check_venue_token(
+        &args.venue,
+        &args.pair,
+        None,
+        args.token_contract.clone(),
+        false,
+        out,
+    )
+    .await?;
     let client = VenueRegistry::load()?.create_exchange_client(&args.venue)?;
     run_ohlc_with(&client, args, out).await
 }
@@ -584,6 +663,15 @@ async fn run_ohlc_with(client: &ExchangeClient, args: OhlcArgs, out: &Output) ->
 
 /// Execute the `scope market trades` command.
 async fn run_trades(args: TradesArgs, out: &Output) -> Result<()> {
+    check_venue_token(
+        &args.venue,
+        &args.pair,
+        None,
+        args.token_contract.clone(),
+        false,
+        out,
+    )
+    .await?;
     let client = VenueRegistry::load()?.create_exchange_client(&args.venue)?;
     run_trades_with(&client, args, out).await
 }
@@ -720,6 +808,7 @@ capabilities:
         let args = SummaryArgs {
             pair: "USDC".to_string(),
             venue: "eth".to_string(),
+            token_contract: None,
             chain: None,
             health: HealthArgs {
                 peg_target: Some(1.0),
@@ -753,6 +842,7 @@ capabilities:
         let args = SummaryArgs {
             pair: "USDC".to_string(),
             venue: "eth".to_string(),
+            token_contract: None,
             chain: None,
             health: HealthArgs {
                 peg_target: Some(1.0),
@@ -786,6 +876,7 @@ capabilities:
         let args = |duration: Option<&str>| SummaryArgs {
             pair: "USDC".to_string(),
             venue: "binance".to_string(),
+            token_contract: None,
             chain: None,
             health: HealthArgs::default(),
             format: SummaryFormat::Text,
@@ -1094,6 +1185,7 @@ capabilities:
         let args = SummaryArgs {
             pair: "USDC".to_string(),
             venue: "binance".to_string(),
+            token_contract: None,
             chain: None,
             health: HealthArgs {
                 peg_target: Some(1.0),
@@ -1199,6 +1291,7 @@ capabilities:
         let args = MarketCommands::Summary(SummaryArgs {
             pair: "USDC".to_string(),
             venue: "eth".to_string(),
+            token_contract: None,
             chain: None,
             health: HealthArgs {
                 peg_target: Some(1.0),
@@ -1283,6 +1376,7 @@ capabilities:
         let args = SummaryArgs {
             pair: "USDC".to_string(),
             venue: "eth".to_string(),
+            token_contract: None,
             chain: None,
             health: HealthArgs {
                 peg_target: Some(1.0),
@@ -1332,6 +1426,7 @@ capabilities:
         let args = OhlcArgs {
             pair: "BTC".to_string(),
             venue: "binance".to_string(),
+            token_contract: None,
             interval: "1h".to_string(),
             limit: 100,
             format: OhlcFormat::Text,
@@ -1347,6 +1442,7 @@ capabilities:
         let args = TradesArgs {
             pair: "ETH".to_string(),
             venue: "okx".to_string(),
+            token_contract: None,
             limit: 50,
             format: OhlcFormat::Json,
         };
@@ -1360,6 +1456,7 @@ capabilities:
         let args = OhlcArgs {
             pair: "BTC".to_string(),
             venue: "nonexistent_venue".to_string(),
+            token_contract: None,
             interval: "1h".to_string(),
             limit: 10,
             format: OhlcFormat::Text,
@@ -1379,6 +1476,7 @@ capabilities:
         let args = TradesArgs {
             pair: "BTC".to_string(),
             venue: "nonexistent_venue".to_string(),
+            token_contract: None,
             limit: 10,
             format: OhlcFormat::Text,
         };
@@ -1397,6 +1495,7 @@ capabilities:
         let cmd = MarketCommands::Ohlc(OhlcArgs {
             pair: "BTC".to_string(),
             venue: "nonexistent_test_venue".to_string(),
+            token_contract: None,
             interval: "1h".to_string(),
             limit: 5,
             format: OhlcFormat::Text,
@@ -1418,6 +1517,7 @@ capabilities:
         let cmd = MarketCommands::Trades(TradesArgs {
             pair: "ETH".to_string(),
             venue: "nonexistent_test_venue".to_string(),
+            token_contract: None,
             limit: 5,
             format: OhlcFormat::Json,
         });
@@ -1430,6 +1530,93 @@ capabilities:
         let config = Config::default();
         let result = run(cmd, &config, &factory, &quiet()).await;
         assert!(result.is_err());
+    }
+
+    /// A venue at `server` whose coin list is `/coins`.
+    fn venue_with_coins(server: &mockito::ServerGuard) -> ExchangeClient {
+        let mut desc = VenueRegistry::load()
+            .unwrap()
+            .get("binance")
+            .unwrap()
+            .clone();
+        desc.base_url = server.url();
+        desc.capabilities.assets =
+            Some(serde_yaml::from_str("path: /coins\nresponse: {}\n").unwrap());
+        ExchangeClient::from_descriptor(&desc)
+    }
+
+    async fn coins(server: &mut mockito::ServerGuard, body: &str) -> mockito::Mock {
+        server
+            .mock("GET", "/coins")
+            .with_status(200)
+            .with_body(body)
+            .create_async()
+            .await
+    }
+
+    #[tokio::test]
+    async fn test_a_cex_run_stops_when_the_saved_token_is_not_the_venues() {
+        // A saved USDN on ethereum (0xAAA); the venue lists USDN on ETH as
+        // 0xBBB. The summary must not report on the venue's token.
+        let mut server = mockito::Server::new_async().await;
+        let _m = coins(
+            &mut server,
+            r#"[{"coin":"USDN","networkList":[{"network":"ETH","contractAddress":"0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"}]}]"#,
+        )
+        .await;
+        let client = venue_with_coins(&server);
+        let mut store = scope::tokens::TokenAliases::default();
+        store.add_binding(
+            "USDN",
+            "ethereum",
+            "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "USDN",
+            Some("binance"),
+        );
+        let err = check_cex_token(
+            &client,
+            "USDN",
+            Some("ethereum".into()),
+            None,
+            &mut store,
+            false,
+            &quiet(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ScopeError::TokenMismatch { .. }), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_a_cex_symbol_on_two_networks_stops_without_a_terminal() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = coins(
+            &mut server,
+            r#"[{"coin":"USDN","networkList":[
+                {"network":"ETH","contractAddress":"0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},
+                {"network":"BSC","contractAddress":"0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"}]}]"#,
+        )
+        .await;
+        let client = venue_with_coins(&server);
+        let mut store = scope::tokens::TokenAliases::default();
+        let err = check_cex_token(&client, "USDN", None, None, &mut store, false, &quiet())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ScopeError::AmbiguousToken { .. }), "{err}");
+        // With --token the run goes on.
+        assert!(
+            check_cex_token(
+                &client,
+                "USDN",
+                None,
+                Some("0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into()),
+                &mut store,
+                false,
+                &quiet()
+            )
+            .await
+            .is_ok()
+        );
     }
 
     /// The binance mapping with a local reply, so the test needs no network (#39).
@@ -1446,6 +1633,7 @@ capabilities:
         OhlcArgs {
             pair: "BTC".to_string(),
             venue: "binance".to_string(),
+            token_contract: None,
             interval: "1h".to_string(),
             limit: 2,
             format,
@@ -1456,6 +1644,7 @@ capabilities:
         TradesArgs {
             pair: "BTC".to_string(),
             venue: "binance".to_string(),
+            token_contract: None,
             limit: 2,
             format,
         }
@@ -1693,6 +1882,7 @@ capabilities:
         let args = SummaryArgs {
             pair: "USDC".to_string(),
             venue: "eth".to_string(),
+            token_contract: None,
             chain: None,
             health: HealthArgs {
                 peg_target: Some(1.0),
@@ -1734,6 +1924,7 @@ capabilities:
         let cmd = MarketCommands::Summary(SummaryArgs {
             pair: "USDC".to_string(),
             venue: "binance".to_string(),
+            token_contract: None,
             chain: None,
             health: HealthArgs {
                 peg_target: Some(1.0),
@@ -1756,6 +1947,7 @@ capabilities:
         let ohlc_cmd = MarketCommands::Ohlc(OhlcArgs {
             pair: "BTC".to_string(),
             venue: "binance".to_string(),
+            token_contract: None,
             interval: "1h".to_string(),
             limit: 100,
             format: OhlcFormat::Text,
@@ -1765,6 +1957,7 @@ capabilities:
         let trades_cmd = MarketCommands::Trades(TradesArgs {
             pair: "ETH".to_string(),
             venue: "binance".to_string(),
+            token_contract: None,
             limit: 50,
             format: OhlcFormat::Json,
         });
@@ -1776,6 +1969,7 @@ capabilities:
         let args = SummaryArgs {
             pair: "DAI".to_string(),
             venue: "binance".to_string(),
+            token_contract: None,
             chain: None,
             health: HealthArgs {
                 peg_target: Some(1.0),
@@ -1848,6 +2042,7 @@ capabilities:
         let args = TradesArgs {
             pair: "USDC".to_string(),
             venue: "binance".to_string(),
+            token_contract: None,
             limit: 50,
             format: OhlcFormat::Text,
         };
@@ -1896,6 +2091,7 @@ capabilities:
         SummaryArgs {
             pair: USDC_ADDR.to_string(),
             venue: "eth".to_string(),
+            token_contract: None,
             chain: None,
             health: HealthArgs::default(),
             format,

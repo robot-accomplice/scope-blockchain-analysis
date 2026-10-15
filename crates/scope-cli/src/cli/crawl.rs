@@ -26,18 +26,17 @@
 
 use crate::cli::output::Output;
 use crate::cli::progress::{self, Spinner};
-use crate::cli::token_pick;
+use crate::cli::resolve::{DexCandidates, ResolveContext, VenueKind, picker_for, resolve};
 use crate::outln;
 use clap::Args;
 use scope::chains::{
     ChainClientFactory, DexClient, DexDataSource, DexPair, Token, TokenAnalytics, TokenHolder,
-    TokenSearchResult, infer_chain_from_address,
+    infer_chain_from_address,
 };
 use scope::config::{Config, OutputFormat};
 use scope::display::{charts, report};
 use scope::error::{Result, ScopeError};
 use scope::tokens::TokenAliases;
-use std::io::BufRead;
 use std::path::PathBuf;
 
 /// Time period for analytics data.
@@ -163,13 +162,18 @@ pub struct CrawlArgs {
     #[arg(long, value_name = "PATH")]
     pub report: Option<PathBuf>,
 
-    /// Skip interactive prompts (use first match for token search).
+    /// Skip the save question. An ambiguous symbol still stops: choose
+    /// with --token.
     #[arg(long)]
     pub yes: bool,
 
-    /// Save the selected token as an alias for future use.
+    /// Save the chosen token so the symbol always means it.
     #[arg(long)]
     pub save: bool,
+
+    /// The token's contract: use it and skip the symbol lookup.
+    #[arg(long = "token", value_name = "CONTRACT")]
+    pub token_contract: Option<String>,
 }
 
 /// Token resolution result with optional alias info.
@@ -181,12 +185,9 @@ struct ResolvedToken {
     alias_info: Option<(String, String)>,
 }
 
-/// Resolves a token input (address, symbol, or name) to a concrete address and chain.
-///
-/// This function handles:
-/// 1. Direct addresses (0x...) - used as-is
-/// 2. Saved aliases - looked up from storage
-/// 3. Token names/symbols - searched via DEX API with interactive selection
+/// Resolves a token input (address or symbol) to a concrete address and
+/// chain: an address is used as is (with its chain inferred); anything
+/// else goes through [`crate::cli::resolve`].
 ///
 /// Uses `dex_client` for search to enable dependency injection and testing.
 ///
@@ -218,115 +219,32 @@ async fn resolve_token_input(
         });
     }
 
-    // Check if it's a saved alias
-    let chain_filter = if args.chain != "ethereum" {
-        Some(args.chain.as_str())
-    } else {
-        None
+    let ctx = ResolveContext {
+        chain: (args.chain != "ethereum").then(|| args.chain.clone()),
+        venue: VenueKind::Dex,
+        token_flag: args.token_contract.clone(),
+        yes: args.yes,
+        save: args.save,
     };
-
-    if let Some(token_info) = aliases.get(input, chain_filter) {
-        let msg = format!(
-            "Using saved token: {} ({}) on {}",
-            token_info.symbol, token_info.name, token_info.chain
-        );
-        progress::status(spinner, out, &msg);
-        return Ok(ResolvedToken {
-            address: token_info.address.clone(),
-            chain: token_info.chain.clone(),
-            alias_info: Some((token_info.symbol.clone(), token_info.name.clone())),
-        });
-    }
-
-    // Search for tokens by name/symbol
+    let source = DexCandidates {
+        dex: dex_client,
+        out,
+        fallback: true,
+    };
     progress::status(spinner, out, &format!("Searching for '{}'...", input));
-
-    let mut search_results = dex_client.search_tokens(input, chain_filter).await?;
-
-    // Fallback: if DexScreener has no results, try CEX venue ticker
-    if search_results.is_empty()
-        && let Some(fallback) = token_pick::cex_fallback(input, &args.chain, spinner, out).await
-    {
-        search_results.push(fallback);
-    }
-
-    if search_results.is_empty() {
-        return Err(ScopeError::NotFound(format!(
-            "No token found matching '{}' on {} (checked DexScreener and CEX venues)",
-            input, args.chain
-        )));
-    }
-
-    let selected = select_token(&search_results, args.yes, spinner, out)?;
-
-    // Offer to save the alias
-    if args.save || (!args.yes && prompt_save_alias(out)) {
-        aliases.add(
-            &selected.symbol,
-            &selected.chain,
-            &selected.address,
-            &selected.name,
-        );
-        if let Err(e) = aliases.save() {
-            tracing::debug!("Failed to save token alias: {}", e);
-        } else {
-            let saved = format!("Saved {} as alias for future use.", selected.symbol);
-            progress::notice(spinner, out, &saved);
-        }
-    }
-
+    let picker = picker_for(out, matches!(args.format, OutputFormat::Json));
+    let r = resolve(input, &ctx, &source, picker.as_ref(), aliases, out).await?;
     Ok(ResolvedToken {
-        address: selected.address.clone(),
-        chain: selected.chain.clone(),
-        alias_info: Some((selected.symbol.clone(), selected.name.clone())),
+        address: r.address.unwrap_or_default(),
+        chain: if r.chain.is_empty() {
+            args.chain.clone()
+        } else {
+            r.chain
+        },
+        alias_info: Some((r.symbol, r.name)),
     })
 }
 
-/// Picks one of the search results: the only one, the first with
-/// `auto_select`, or the one the user picks from a list.
-fn select_token<'a>(
-    results: &'a [TokenSearchResult],
-    auto_select: bool,
-    spinner: Option<&Spinner>,
-    out: &Output,
-) -> Result<&'a TokenSearchResult> {
-    select_token_impl(
-        results,
-        auto_select,
-        &mut crate::cli::prompt::stdin(),
-        spinner,
-        out,
-    )
-}
-
-/// Testable implementation of select_token with injected input.
-fn select_token_impl<'a>(
-    results: &'a [TokenSearchResult],
-    auto_select: bool,
-    reader: &mut impl BufRead,
-    spinner: Option<&Spinner>,
-    out: &Output,
-) -> Result<&'a TokenSearchResult> {
-    if results.len() == 1 || auto_select {
-        let selected = &results[0];
-        token_pick::announce(spinner, out, selected);
-        return Ok(selected);
-    }
-    token_pick::pick_token(reader, spinner, out, results)
-}
-
-/// Prompts the user to save the token alias.
-fn prompt_save_alias(out: &Output) -> bool {
-    prompt_save_alias_impl(&mut crate::cli::prompt::stdin(), out)
-}
-
-/// Testable implementation of prompt_save_alias with injected input.
-fn prompt_save_alias_impl(reader: &mut impl BufRead, out: &Output) -> bool {
-    crate::cli::prompt::ask(reader, out, "Save this token for future use? [y/N]: ")
-        .is_ok_and(|input| matches!(input.trim().to_lowercase().as_str(), "y" | "yes"))
-}
-
-/// Fetches token analytics for composite commands (e.g., token-health).
 /// Resolves token input (address or symbol) and returns full analytics.
 ///
 /// When an optional `spinner` is provided, progress messages (searching,
@@ -340,6 +258,8 @@ pub async fn fetch_analytics_for_input(
     spinner: Option<&crate::cli::progress::Spinner>,
     out: &Output,
 ) -> Result<TokenAnalytics> {
+    // `yes: false`: an ambiguous symbol asks, or stops without a terminal.
+    // It was `true`, which took the first search match silently.
     let args = CrawlArgs {
         token: token_input.to_string(),
         chain: chain.to_string(),
@@ -348,8 +268,9 @@ pub async fn fetch_analytics_for_input(
         format: OutputFormat::Table,
         no_charts: true,
         report: None,
-        yes: true,
+        yes: false,
         save: false,
+        token_contract: None,
     };
     let mut aliases = TokenAliases::load();
     let dex_client = clients.create_dex_client();
@@ -1274,6 +1195,57 @@ mod tests {
         }
     }
 
+    /// A search that finds two tokens with the exact symbol USDN.
+    struct TwoUsdn;
+
+    #[async_trait::async_trait]
+    impl scope::chains::DexDataSource for TwoUsdn {
+        async fn get_token_price(&self, _chain: &str, _address: &str) -> Option<f64> {
+            None
+        }
+        async fn get_native_token_price(&self, _chain: &str) -> Option<f64> {
+            None
+        }
+        async fn get_token_data(
+            &self,
+            _chain: &str,
+            _address: &str,
+        ) -> Result<scope::chains::dex::DexTokenData> {
+            Err(ScopeError::NotFound("not in this fake".into()))
+        }
+        async fn search_tokens(
+            &self,
+            _query: &str,
+            _chain: Option<&str>,
+        ) -> Result<Vec<scope::chains::dex::TokenSearchResult>> {
+            let usdn = |chain: &str, address: &str| scope::chains::dex::TokenSearchResult {
+                address: address.into(),
+                symbol: "USDN".into(),
+                name: "USDN".into(),
+                chain: chain.into(),
+                price_usd: Some(1.0),
+                volume_24h: 0.0,
+                liquidity_usd: 1.0,
+                market_cap: None,
+            };
+            Ok(vec![usdn("ethereum", "0xA"), usdn("bsc", "0xB")])
+        }
+    }
+
+    #[tokio::test]
+    async fn test_crawl_yes_with_two_matches_stops_with_the_candidates() {
+        // Jon, 2026-10-15: --yes no longer picks the first match.
+        let mut aliases = TokenAliases::default();
+        let mut args = make_test_crawl_args();
+        args.token = "USDN".into();
+        args.yes = true;
+        let err = resolve_token_input(&args, &mut aliases, &TwoUsdn, None, &quiet())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ScopeError::AmbiguousToken { .. }), "{err}");
+        assert!(err.to_string().contains("bsc 0xB"), "{err}");
+    }
+
     fn make_test_crawl_args() -> CrawlArgs {
         CrawlArgs {
             token: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
@@ -1285,6 +1257,7 @@ mod tests {
             report: None,
             yes: false,
             save: false,
+            token_contract: None,
         }
     }
 
@@ -1553,6 +1526,7 @@ mod tests {
             report: None,
             yes: true,
             save: false,
+            token_contract: None,
         };
         let result = super::run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
@@ -1572,6 +1546,7 @@ mod tests {
             report: None,
             yes: true,
             save: false,
+            token_contract: None,
         };
         let result = super::run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
@@ -1591,6 +1566,7 @@ mod tests {
             report: None,
             yes: true,
             save: false,
+            token_contract: None,
         };
         let result = super::run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
@@ -1613,6 +1589,7 @@ mod tests {
             report: Some(report_path.clone()),
             yes: true,
             save: false,
+            token_contract: None,
         };
         let (out, cap) = crate::cli::output::Output::capture();
         super::run(args, &Config::default(), &factory, &out)
@@ -1655,6 +1632,7 @@ mod tests {
             report: None,
             yes: true,
             save: false,
+            token_contract: None,
         };
         let result = super::run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
@@ -1681,6 +1659,7 @@ mod tests {
             report: None,
             yes: true,
             save: false,
+            token_contract: None,
         };
         let result = super::run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
@@ -1700,6 +1679,7 @@ mod tests {
             report: None,
             yes: true,
             save: false,
+            token_contract: None,
         };
         let result = super::run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
@@ -1719,6 +1699,7 @@ mod tests {
             report: None,
             yes: true,
             save: false,
+            token_contract: None,
         };
         let result = super::run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
@@ -1738,6 +1719,7 @@ mod tests {
             report: None,
             yes: true,
             save: false,
+            token_contract: None,
         };
         let result = super::run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
@@ -1757,6 +1739,7 @@ mod tests {
             report: None,
             yes: true,
             save: false,
+            token_contract: None,
         };
         let result = super::run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
@@ -1780,6 +1763,7 @@ mod tests {
             report: None,
             yes: true,
             save: false,
+            token_contract: None,
         };
         let result = super::run(args, &config, &factory, &quiet()).await;
         assert!(result.is_err());
@@ -1807,6 +1791,7 @@ mod tests {
             report: None,
             yes: true,
             save: false,
+            token_contract: None,
         };
         let result = super::run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
@@ -1879,6 +1864,7 @@ mod tests {
             report: None,
             yes: true,
             save: false,
+            token_contract: None,
         };
         let result = super::run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
@@ -1899,6 +1885,7 @@ mod tests {
             report: Some(tmp.path().to_path_buf()),
             yes: true,
             save: false,
+            token_contract: None,
         };
         let result = super::run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
@@ -2000,39 +1987,6 @@ mod tests {
     }
 
     #[test]
-    fn test_select_token_auto_select() {
-        let results = vec![TokenSearchResult {
-            address: "0xtoken".to_string(),
-            symbol: "TKN".to_string(),
-            name: "Test Token".to_string(),
-            chain: "ethereum".to_string(),
-            price_usd: Some(10.0),
-            volume_24h: 100000.0,
-            liquidity_usd: 500000.0,
-            market_cap: Some(1000000.0),
-        }];
-        let selected = select_token(&results, true, None, &quiet()).unwrap();
-        assert_eq!(selected.symbol, "TKN");
-    }
-
-    #[test]
-    fn test_select_token_single_result() {
-        let results = vec![TokenSearchResult {
-            address: "0xtoken".to_string(),
-            symbol: "SINGLE".to_string(),
-            name: "Single Token".to_string(),
-            chain: "ethereum".to_string(),
-            price_usd: None,
-            volume_24h: 0.0,
-            liquidity_usd: 0.0,
-            market_cap: None,
-        }];
-        // Single result auto-selects even without auto_select flag
-        let selected = select_token(&results, false, None, &quiet()).unwrap();
-        assert_eq!(selected.symbol, "SINGLE");
-    }
-
-    #[test]
     fn test_output_table_with_dex_with_holders() {
         let mut analytics = make_test_analytics(true);
         analytics.holders = vec![
@@ -2064,273 +2018,6 @@ mod tests {
     }
 
     // ========================================================================
-    // select_token_impl tests
-    // ========================================================================
-
-    fn make_search_results() -> Vec<TokenSearchResult> {
-        vec![
-            TokenSearchResult {
-                symbol: "USDC".to_string(),
-                name: "USD Coin".to_string(),
-                address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
-                chain: "ethereum".to_string(),
-                price_usd: Some(1.0),
-                volume_24h: 1_000_000.0,
-                liquidity_usd: 500_000_000.0,
-                market_cap: Some(30_000_000_000.0),
-            },
-            TokenSearchResult {
-                symbol: "USDC".to_string(),
-                name: "USD Coin on Polygon".to_string(),
-                address: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174".to_string(),
-                chain: "polygon".to_string(),
-                price_usd: Some(0.9999),
-                volume_24h: 500_000.0,
-                liquidity_usd: 100_000_000.0,
-                market_cap: None,
-            },
-            TokenSearchResult {
-                symbol: "USDC".to_string(),
-                name: "Very Long Token Name That Should Be Truncated To Fit".to_string(),
-                address: "0x1234567890abcdef".to_string(),
-                chain: "arbitrum".to_string(),
-                price_usd: None,
-                volume_24h: 0.0,
-                liquidity_usd: 50_000.0,
-                market_cap: None,
-            },
-        ]
-    }
-
-    #[test]
-    fn test_select_token_impl_auto_select_multi() {
-        let results = make_search_results();
-        let (out, cap) = crate::cli::output::Output::capture();
-        let mut reader = std::io::Cursor::new(b"" as &[u8]);
-
-        let selected = select_token_impl(&results, true, &mut reader, None, &out).unwrap();
-        assert_eq!(selected.symbol, "USDC");
-        assert_eq!(selected.chain, "ethereum");
-        let output = cap.err();
-        assert!(output.contains("Selected:"));
-    }
-
-    #[test]
-    fn test_select_token_impl_single_result() {
-        let results = vec![make_search_results().remove(0)];
-        let out = crate::cli::output::Output::capture().0;
-        let mut reader = std::io::Cursor::new(b"" as &[u8]);
-
-        let selected = select_token_impl(&results, false, &mut reader, None, &out).unwrap();
-        assert_eq!(selected.symbol, "USDC");
-    }
-
-    #[test]
-    fn test_select_token_user_selects_second() {
-        let results = make_search_results();
-        let input = b"2\n";
-        let mut reader = std::io::Cursor::new(&input[..]);
-        let (out, cap) = crate::cli::output::Output::capture();
-
-        let selected = select_token_impl(&results, false, &mut reader, None, &out).unwrap();
-        assert_eq!(selected.chain, "polygon");
-        let output = cap.err();
-        assert!(output.contains("Found 3 matching tokens"));
-        assert!(output.contains("USDC"));
-    }
-
-    #[test]
-    fn test_select_token_shows_address_column() {
-        let results = make_search_results();
-        let input = b"1\n";
-        let mut reader = std::io::Cursor::new(&input[..]);
-        let (out, cap) = crate::cli::output::Output::capture();
-
-        select_token_impl(&results, false, &mut reader, None, &out).unwrap();
-        let output = cap.err();
-
-        // Table header should include Address column
-        assert!(output.contains("Address"));
-        // Abbreviated addresses should appear
-        assert!(output.contains("0xA0b8…eB48"));
-        assert!(output.contains("0x2791…4174"));
-    }
-
-    #[test]
-    fn test_select_token_user_selects_third() {
-        let results = make_search_results();
-        let input = b"3\n";
-        let mut reader = std::io::Cursor::new(&input[..]);
-        let (out, cap) = crate::cli::output::Output::capture();
-
-        let selected = select_token_impl(&results, false, &mut reader, None, &out).unwrap();
-        assert_eq!(selected.chain, "arbitrum");
-        // The long name is cut to 20 columns, ending in the one ellipsis.
-        let output = cap.err();
-        let row = output
-            .lines()
-            .find(|l| l.trim_start().starts_with("3 "))
-            .unwrap();
-        assert!(row.contains("Very Long Token Nam… "), "{row}");
-    }
-
-    #[test]
-    fn test_select_token_invalid_input() {
-        let results = make_search_results();
-        let input = b"abc\n";
-        let mut reader = std::io::Cursor::new(&input[..]);
-        let out = crate::cli::output::Output::capture().0;
-
-        let result = select_token_impl(&results, false, &mut reader, None, &out);
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Invalid selection")
-        );
-    }
-
-    #[test]
-    fn test_select_token_out_of_range_zero() {
-        let results = make_search_results();
-        let input = b"0\n";
-        let mut reader = std::io::Cursor::new(&input[..]);
-        let out = crate::cli::output::Output::capture().0;
-
-        let result = select_token_impl(&results, false, &mut reader, None, &out);
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Selection must be between")
-        );
-    }
-
-    #[test]
-    fn test_select_token_out_of_range_high() {
-        let results = make_search_results();
-        let input = b"99\n";
-        let mut reader = std::io::Cursor::new(&input[..]);
-        let out = crate::cli::output::Output::capture().0;
-
-        let result = select_token_impl(&results, false, &mut reader, None, &out);
-        assert!(result.is_err());
-    }
-
-    // ========================================================================
-    // prompt_save_alias_impl tests
-    // ========================================================================
-
-    #[test]
-    fn test_prompt_save_alias_yes() {
-        let input = b"y\n";
-        let mut reader = std::io::Cursor::new(&input[..]);
-        let (out, cap) = crate::cli::output::Output::capture();
-
-        assert!(prompt_save_alias_impl(&mut reader, &out));
-        let output = cap.err();
-        assert!(output.contains("Save this token"));
-    }
-
-    #[test]
-    fn test_prompt_save_alias_yes_full() {
-        let input = b"yes\n";
-        let mut reader = std::io::Cursor::new(&input[..]);
-        let out = crate::cli::output::Output::capture().0;
-
-        assert!(prompt_save_alias_impl(&mut reader, &out));
-    }
-
-    #[test]
-    fn test_prompt_save_alias_no() {
-        let input = b"n\n";
-        let mut reader = std::io::Cursor::new(&input[..]);
-        let out = crate::cli::output::Output::capture().0;
-
-        assert!(!prompt_save_alias_impl(&mut reader, &out));
-    }
-
-    #[test]
-    fn test_prompt_save_alias_empty() {
-        let input = b"\n";
-        let mut reader = std::io::Cursor::new(&input[..]);
-        let out = crate::cli::output::Output::capture().0;
-
-        assert!(!prompt_save_alias_impl(&mut reader, &out));
-    }
-
-    #[test]
-    fn test_prompt_save_alias_uppercase_y() {
-        let input = b"Y\n";
-        let mut reader = std::io::Cursor::new(&input[..]);
-        let out = crate::cli::output::Output::capture().0;
-
-        assert!(prompt_save_alias_impl(&mut reader, &out));
-    }
-
-    #[test]
-    fn test_prompt_save_alias_uppercase_yes() {
-        let input = b"YES\n";
-        let mut reader = std::io::Cursor::new(&input[..]);
-        let out = crate::cli::output::Output::capture().0;
-
-        assert!(prompt_save_alias_impl(&mut reader, &out));
-    }
-
-    #[test]
-    fn test_prompt_save_alias_other_input() {
-        let input = b"maybe\n";
-        let mut reader = std::io::Cursor::new(&input[..]);
-        let out = crate::cli::output::Output::capture().0;
-
-        assert!(!prompt_save_alias_impl(&mut reader, &out));
-    }
-
-    /// Failing writer for error-path tests.
-    struct FailingWriter;
-    impl std::io::Write for FailingWriter {
-        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
-            Err(std::io::Error::other("write failed"))
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Err(std::io::Error::other("flush failed"))
-        }
-    }
-
-    /// Reader that fails on read_line (via fill_buf).
-    struct FailingReader;
-    impl std::io::Read for FailingReader {
-        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
-            Err(std::io::Error::other("read failed"))
-        }
-    }
-    impl std::io::BufRead for FailingReader {
-        fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
-            Err(std::io::Error::other("read failed"))
-        }
-        fn consume(&mut self, _amt: usize) {}
-    }
-
-    #[test]
-    fn test_prompt_save_alias_impl_write_fails() {
-        let input = b"y\n";
-        let mut reader = std::io::Cursor::new(&input[..]);
-        let out = crate::cli::output::Output::from_writers(Vec::new(), FailingWriter);
-
-        assert!(!prompt_save_alias_impl(&mut reader, &out));
-    }
-
-    #[test]
-    fn test_prompt_save_alias_impl_read_fails() {
-        let mut reader = FailingReader;
-        let out = crate::cli::output::Output::capture().0;
-
-        assert!(!prompt_save_alias_impl(&mut reader, &out));
-    }
-
-    // ========================================================================
     // output_table and output_csv tests
     // ========================================================================
 
@@ -2355,6 +2042,7 @@ mod tests {
             report: None,
             yes: false,
             save: false,
+            token_contract: None,
         };
         let result = output_table(&analytics, &args, &quiet());
         assert!(result.is_ok());
@@ -2379,6 +2067,7 @@ mod tests {
             report: None,
             yes: false,
             save: false,
+            token_contract: None,
         };
         let result = output_table(&analytics, &args, &quiet());
         assert!(result.is_ok());
@@ -2421,6 +2110,7 @@ mod tests {
             report: None,
             yes: false,
             save: false,
+            token_contract: None,
         };
         let result = output_table(&analytics, &args, &quiet());
         assert!(result.is_ok());

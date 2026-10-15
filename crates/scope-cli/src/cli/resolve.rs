@@ -85,7 +85,7 @@ pub trait Picker: Send + Sync {
 }
 
 /// The saved bindings.
-pub trait BindingStore {
+pub trait BindingStore: Send {
     fn get(&self, symbol: &str, chain: Option<&str>) -> Option<TokenInfo>;
     fn save(&mut self, candidate: &Candidate, venue: Option<&str>) -> Result<()>;
 }
@@ -263,11 +263,11 @@ impl Picker for NoTerminalPicker {
 }
 
 /// The picker for this run: no prompt in the TUI pane (plan 2 adds an
-/// overlay), for JSON output, or without a terminal.
+/// overlay), in a server, for JSON output, or without a terminal.
 pub fn picker_for<'a>(out: &'a Output, json: bool) -> Box<dyn Picker + 'a> {
     use std::io::IsTerminal as _;
     let terminal = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-    if out.is_tui() || json || !terminal {
+    if !out.prompts_allowed() || json || !terminal {
         Box::new(NoTerminalPicker)
     } else {
         Box::new(TerminalPicker { out })
@@ -366,12 +366,18 @@ async fn steps(
             source: Source::Binding,
         });
     }
-    // 4. the candidates: exact symbols only
+    // 4. the candidates: exact symbols, or the exact contract when the
+    // input is one that is not in a known address format
     let candidates: Vec<Candidate> = source
         .candidates(&symbol, ctx.chain.as_deref())
         .await?
         .into_iter()
-        .filter(|c| c.symbol.eq_ignore_ascii_case(&symbol))
+        .filter(|c| {
+            c.symbol.eq_ignore_ascii_case(&symbol)
+                || c.address
+                    .as_deref()
+                    .is_some_and(|a| a.eq_ignore_ascii_case(input.trim()))
+        })
         .collect();
     *seen = candidates.clone();
     // 5. none, one, or a choice
@@ -769,6 +775,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_a_pasted_contract_matches_its_candidate() {
+        // An input that is a contract in no known address format still
+        // means the candidate with that contract, not a symbol search miss.
+        let mut t = c("ethereum", "0xTEST123");
+        t.symbol = "TEST".into();
+        let r = resolve(
+            "0xTEST123",
+            &ctx(VenueKind::Dex),
+            &Fake(Ok(vec![t])),
+            &Scripted::new(None, false),
+            &mut Store::default(),
+            &out(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.address.as_deref(), Some("0xTEST123"));
+    }
+
+    #[tokio::test]
     async fn test_two_candidates_ask_then_save_on_yes() {
         let mut store = Store::default();
         let picker = Scripted::new(Some(1), true);
@@ -855,6 +880,30 @@ mod tests {
         );
         assert!(text.contains("--token"), "{text}");
         assert!(!NoTerminalPicker.confirm("save?").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_pane_commands_never_use_the_terminal_picker() {
+        // Review focus 5: in the TUI pane a prompt would read the TUI's
+        // stdin and hang.
+        let (o, _cap) = Output::capture_merged();
+        assert!(o.is_tui());
+        let p = picker_for(&o, false);
+        let r = p
+            .pick("USDN", &[c("ethereum", "0xA"), c("bsc", "0xB")])
+            .await;
+        assert!(matches!(r, Err(ScopeError::AmbiguousToken { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_a_server_output_never_prompts() {
+        // scope web passes stdio output; a request must not wait on stdin.
+        let o = Output::stdio().without_prompts();
+        let p = picker_for(&o, false);
+        let r = p
+            .pick("USDN", &[c("ethereum", "0xA"), c("bsc", "0xB")])
+            .await;
+        assert!(matches!(r, Err(ScopeError::AmbiguousToken { .. })));
     }
 
     #[tokio::test]

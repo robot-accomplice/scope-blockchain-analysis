@@ -10,7 +10,7 @@ steps:
   # Enter key's CR to LF (no ICRNL), as a real terminal does.
   - type: "1\n"
   # No spinner draws over a prompt, so the save question is on screen.
-  - wait_for: { text: "Save this token for future use\\? \\[y/N\\]", timeout: 20s }
+  - wait_for: { text: "Save so USDC always means \\S+ on \\S+\\? \\[y/N\\]", timeout: 20s }
   - type: "n\n"
   - wait_for: { text: "Ran outside the TUI: crawl USDC \\(ok, \\d+\\.\\ds\\)", timeout: 20s }
   # Lines of the crawl report, in the TUI scrollback above the note.
