@@ -1,0 +1,27 @@
+name: a repeating run updates one view in place and leaves one copy (#58)
+tiers: [offline]
+terminal: { cols: 120, rows: 36 }
+masks: ['scope v\d+\.\d+\.\d+\S*']
+steps:
+  - type: "market summary USDC --venue binance --every 2s --duration 8s"
+  - key: Enter
+  - wait_for: { text: "run 3 of", timeout: 20s }
+  # One view: the latest snapshot beside the trends, not one report per run.
+  - expect_screen:
+      contains: ["Trends · run", "Health", "Mid price", "Spread %", "Bid depth"]
+      not_contains: ["--- Run #"]
+  # Esc stops the run; the view stays with its footer.
+  - key: Esc
+  - wait_for: { text: "Cancelled after", timeout: 10s }
+  - expect_screen: { contains: ["Trends · run", "Press any key to leave the view"] }
+  # At 80×24 the trends move under the snapshot and fewer charts fit.
+  - resize: { cols: 79, rows: 24 }
+  - wait_for: { text: "Trends · run", timeout: 5s }
+  - expect_screen: { contains: ["Health", "Mid price"] }
+  # Any key leaves the view: one copy of the final report and a summary.
+  - resize: { cols: 120, rows: 36 }
+  - key: Esc
+  - wait_for: { text: "runs · ", timeout: 5s }
+  - expect_screen: { contains: ["Cancelled after"], not_contains: ["Trends · run"] }
+  - key: Ctrl-D
+  - expect_exit: 0

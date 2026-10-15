@@ -6,17 +6,28 @@
 //! Supports one-shot or repeated runs with configurable frequency and duration.
 
 use crate::cli::crawl::{self, Period};
+use crate::cli::output::Output;
+use crate::{note, out, outln};
 use clap::{Args, Subcommand};
-use scope::chains::ChainClientFactory;
+use scope::chains::{ChainClientFactory, TokenAnalytics};
 use scope::config::Config;
 
 use super::health_args::HealthArgs;
+use crate::cli::repeat::{self, RunOutput, Schedule};
 use scope::display::terminal as t;
 use scope::error::{Result, ScopeError};
+use scope::market::assets::TokenAddress;
+use scope::market::series;
 use scope::market::{
-    HealthThresholds, MarketSummary, OrderBook, VenueRegistry, order_book_from_analytics,
+    DexAnalyticsSource, ExchangeClient, HealthThresholds, MarketSummary, MarketVenue, OrderBook,
+    Pair, VENUE_HELP, VenueRegistry,
 };
 use std::time::Duration;
+
+/// Help for every market pair argument; the rule is `scope::market::Pair::parse`.
+const PAIR_HELP: &str = "Pair or base symbol. BASE_QUOTE, BASE/QUOTE and BASE-QUOTE work for any quote \
+    (BTC_ETH). BASEQUOTE works only for a stable or fiat quote (OPUSDT, BTCEUR); WETH stays \
+    WETH. A bare base (USDC) uses the venue's default quote.";
 
 /// Default interval between summary runs when in repeat mode (60 seconds).
 pub const DEFAULT_EVERY_SECS: u64 = 60;
@@ -66,7 +77,7 @@ pub enum MarketCommands {
   |  Best Ask           1.0001  (+0.010%)               |
   |  Mid Price          1.0000  (+0.000%)               |
   |  Spread             0.0002  (0.020%)                |
-  |  Volume (24h)       125000 USDT                     |
+  |  Volume (24h)       125.00K USDT                    |
   |                                                     |
   |-- Health Checks                                     |
   |  + No sells below peg                               |
@@ -86,18 +97,16 @@ pub enum MarketCommands {
   ..."
 )]
 pub struct SummaryArgs {
-    /// Base token symbol (e.g., USDC, DAI) or @label from address book. Quote is USDT.
-    #[arg(default_value = "USDC", value_name = "SYMBOL")]
+    #[arg(default_value = scope::market::DEFAULT_PAIR, value_name = "SYMBOL", help = PAIR_HELP)]
     pub pair: String,
 
-    /// Market venue (e.g., binance, biconomy, mexc, okx, eth, solana).
-    /// Use `scope venues list` to see all available venues.
-    #[arg(long, default_value = "binance", value_name = "VENUE")]
+    #[arg(long, default_value = scope::market::DEFAULT_VENUE, value_name = "VENUE", help = VENUE_HELP)]
     pub venue: String,
 
-    /// Chain for DEX venues (ethereum or solana). Ignored for CEX.
-    #[arg(long, default_value = "ethereum", value_name = "CHAIN")]
-    pub chain: String,
+    /// Chain for a DEX venue. The venue already names its chain, so this is
+    /// only a check: a different chain is an error. Ignored for CEX venues.
+    #[arg(long, value_name = "CHAIN")]
+    pub chain: Option<String>,
 
     /// Health threshold overrides (flag > config `market.health` > default).
     #[command(flatten)]
@@ -173,12 +182,11 @@ pub enum SummaryFormat {
   ]"
 )]
 pub struct OhlcArgs {
-    /// Trading pair symbol (e.g., USDC, BTC). Quote is USDT by default.
-    #[arg(default_value = "USDC", value_name = "SYMBOL")]
+    #[arg(default_value = scope::market::DEFAULT_PAIR, value_name = "SYMBOL", help = PAIR_HELP)]
     pub pair: String,
 
     /// Exchange venue (e.g., binance, mexc, bybit).
-    #[arg(long, default_value = "binance", value_name = "VENUE")]
+    #[arg(long, default_value = scope::market::DEFAULT_VENUE, value_name = "VENUE")]
     pub venue: String,
 
     /// Candle interval (e.g., 1m, 5m, 15m, 1h, 4h, 1d).
@@ -201,12 +209,11 @@ pub struct OhlcArgs {
   scope market trades DAI --venue binance --limit 20
   scope market trades ETH --venue okx --format json")]
 pub struct TradesArgs {
-    /// Trading pair symbol (e.g., USDC, BTC). Quote is USDT by default.
-    #[arg(default_value = "USDC", value_name = "SYMBOL")]
+    #[arg(default_value = scope::market::DEFAULT_PAIR, value_name = "SYMBOL", help = PAIR_HELP)]
     pub pair: String,
 
     /// Exchange venue (e.g., binance, mexc, bybit).
-    #[arg(long, default_value = "binance", value_name = "VENUE")]
+    #[arg(long, default_value = scope::market::DEFAULT_VENUE, value_name = "VENUE")]
     pub venue: String,
 
     /// Maximum number of trades to fetch.
@@ -233,69 +240,51 @@ pub async fn run(
     args: MarketCommands,
     config: &Config,
     factory: &dyn ChainClientFactory,
+    out: &Output,
 ) -> Result<()> {
     match args {
-        MarketCommands::Summary(summary_args) => run_summary(summary_args, config, factory).await,
-        MarketCommands::Ohlc(ohlc_args) => run_ohlc(ohlc_args).await,
-        MarketCommands::Trades(trades_args) => run_trades(trades_args).await,
+        MarketCommands::Summary(summary_args) => {
+            run_summary(summary_args, config, factory, out).await
+        }
+        MarketCommands::Ohlc(ohlc_args) => run_ohlc(ohlc_args, out).await,
+        MarketCommands::Trades(trades_args) => run_trades(trades_args, out).await,
+    }
+}
+
+/// The venue symbol for user pair input (see [`Pair::parse`]).
+///
+/// Kept only for the monitor (`monitor/mod.rs`), which still calls it; the
+/// market commands call `venue_symbol` directly.
+pub(crate) fn venue_pair(exchange: &scope::market::ExchangeClient, input: &str) -> String {
+    exchange.venue_symbol(&Pair::parse(input))
+}
+
+/// Token analytics from the crawl pipeline: the CLI and web adapter for the
+/// core [`DexAnalyticsSource`] port.
+pub struct CrawlDexSource<'a> {
+    /// Chain clients for the token lookup.
+    pub factory: &'a dyn ChainClientFactory,
+    /// Where the crawl reports progress and warnings.
+    pub out: &'a Output,
+}
+
+#[async_trait::async_trait]
+impl DexAnalyticsSource for CrawlDexSource<'_> {
+    async fn token_analytics(&self, token: &str, chain: &str) -> Result<TokenAnalytics> {
+        crawl::fetch_analytics_for_input(
+            token,
+            chain,
+            Period::Hour24,
+            10,
+            self.factory,
+            None,
+            self.out,
+        )
+        .await
     }
 }
 
 /// Parse duration strings like "30s", "5m", "1h", "24h" into seconds.
-/// Normalize a pair argument to tolerate `key=value` style invocations.
-///
-/// Examples:
-/// - `USDC_USDT` -> `USDC_USDT`
-/// - `pair=USDC_USDT` -> `USDC_USDT`
-/// - `pair_symbol=USDC_USDT` -> `USDC_USDT`
-fn normalize_pair_input(pair: &str) -> &str {
-    let p = pair.trim();
-    if let Some((lhs, rhs)) = p.split_once('=')
-        && !rhs.is_empty()
-        && lhs
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-    {
-        return rhs;
-    }
-    p
-}
-
-/// Parse base/quote symbols from user input.
-///
-/// Supports:
-/// - Delimited forms: `BASE_QUOTE`, `BASE/QUOTE`, `BASE-QUOTE`
-/// - Concatenated common quote forms: `BASEUSDT`, `BASEUSDC`, `BASEUSD`, `BASEBTC`
-/// - Fallback: treat input as base-only and let venue default quote apply.
-fn parse_pair_components(pair: &str) -> (&str, Option<&str>) {
-    let p = normalize_pair_input(pair);
-
-    for sep in ['_', '/', '-'] {
-        if let Some((base, quote)) = p.split_once(sep)
-            && !base.is_empty()
-            && !quote.is_empty()
-        {
-            return (base, Some(quote));
-        }
-    }
-
-    const COMMON_QUOTES: [&str; 7] = ["USDT", "USDC", "USD", "BTC", "ETH", "EUR", "TRY"];
-    for quote in COMMON_QUOTES {
-        if p.len() > quote.len() && p.to_uppercase().ends_with(quote) {
-            let base_len = p.len() - quote.len();
-            return (&p[..base_len], Some(quote));
-        }
-    }
-
-    (p, None)
-}
-
-/// Extract base symbol from pair (e.g. "DAI_USDT" -> "DAI", "USDCUSDT" -> "USDC", "USDC" -> "USDC").
-#[cfg(test)]
-fn base_symbol_from_pair(pair: &str) -> &str {
-    parse_pair_components(pair).0
-}
-
 fn parse_duration(s: &str) -> Result<u64> {
     let s = s.trim();
     if s.is_empty() {
@@ -333,341 +322,148 @@ fn parse_duration(s: &str) -> Result<u64> {
 
 /// Builds markdown report content for a market summary.
 fn market_summary_to_markdown(summary: &MarketSummary, venue: &str, pair: &str) -> String {
-    let bid_dev = summary
-        .best_bid
-        .map(|b| (b - summary.peg_target) / summary.peg_target * 100.0);
-    let ask_dev = summary
-        .best_ask
-        .map(|a| (a - summary.peg_target) / summary.peg_target * 100.0);
-    let volume_row = summary
-        .volume_24h
-        .map(|v| format!("| Volume (24h) | {:.0} USDT |  \n", v))
-        .unwrap_or_default();
-    let exec_buy = summary
-        .execution_10k_buy
-        .as_ref()
-        .map(|e| {
-            if e.fillable {
-                format!("{:.2} bps", e.slippage_bps)
-            } else {
-                "insufficient".to_string()
-            }
-        })
-        .unwrap_or_else(|| "-".to_string());
-    let exec_sell = summary
-        .execution_10k_sell
-        .as_ref()
-        .map(|e| {
-            if e.fillable {
-                format!("{:.2} bps", e.slippage_bps)
-            } else {
-                "insufficient".to_string()
-            }
-        })
-        .unwrap_or_else(|| "-".to_string());
     let mut md = format!(
         "# Market Health Report: {}  \n\
-        **Venue:** {}  \n\
-        **Generated:** {}  \n\n\
-        ## Peg & Spread  \n\
-        | Metric | Value |  \n\
-        |--------|-------|  \n\
-        | Peg Target | {:.4} |  \n\
-        | Best Bid | {} |  \n\
-        | Best Ask | {} |  \n\
-        | Mid Price | {} |  \n\
-        | Spread | {} |  \n\
-        {}\
-        | 10k Buy Slippage | {} |  \n\
-        | 10k Sell Slippage | {} |  \n\
-        | Bid Depth | {:.0} |  \n\
-        | Ask Depth | {:.0} |  \n\
-        | Healthy | {} |  \n\n\
-        ## Health Checks  \n",
+        **Generated:** {}  \n\n",
         pair,
-        venue,
         chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC"),
-        summary.peg_target,
-        summary
-            .best_bid
-            .map(|b| format!("{:.4} ({:+.3}%)", b, bid_dev.unwrap_or(0.0)))
-            .unwrap_or_else(|| "-".to_string()),
-        summary
-            .best_ask
-            .map(|a| format!("{:.4} ({:+.3}%)", a, ask_dev.unwrap_or(0.0)))
-            .unwrap_or_else(|| "-".to_string()),
-        summary
-            .mid_price
-            .map(|m| format!("{:.4}", m))
-            .unwrap_or_else(|| "-".to_string()),
-        summary
-            .spread
-            .map(|s| format!("{:.4}", s))
-            .unwrap_or_else(|| "-".to_string()),
-        volume_row,
-        exec_buy,
-        exec_sell,
-        summary.bid_depth,
-        summary.ask_depth,
-        if summary.healthy { "✓" } else { "✗" }
     );
-    for check in &summary.checks {
-        let (icon, msg) = match check {
-            scope::market::HealthCheck::Pass(m) => ("✓", m.as_str()),
-            scope::market::HealthCheck::Fail(m) => ("✗", m.as_str()),
-        };
-        md.push_str(&format!("- {} {}\n", icon, msg));
-    }
+    md.push_str(&summary.format_markdown(Some(venue)));
     md.push_str(&scope::display::report::report_footer());
     md
 }
 
-/// Whether the venue string refers to a DEX venue (handled by DexScreener, not the registry).
-fn is_dex_venue(venue: &str) -> bool {
-    matches!(venue.to_lowercase().as_str(), "ethereum" | "eth" | "solana")
-}
-
-/// Resolve DEX venue name to a canonical chain name.
-fn dex_venue_to_chain(venue: &str) -> &str {
-    match venue.to_lowercase().as_str() {
-        "ethereum" | "eth" => "ethereum",
-        "solana" => "solana",
-        _ => "ethereum",
-    }
-}
-
+/// Fetches the book and volume for the summary arguments. `--chain`, when
+/// given, must name the DEX venue's chain.
 async fn fetch_book_and_volume(
     args: &SummaryArgs,
+    thresholds: &HealthThresholds,
     factory: &dyn ChainClientFactory,
+    out: &Output,
 ) -> Result<(OrderBook, Option<f64>)> {
-    let (base, quote) = parse_pair_components(&args.pair);
-    let base = base.to_string();
+    let venue = MarketVenue::from_name(&args.venue)?;
+    if let Some(chain) = &args.chain {
+        venue.require_chain(chain)?;
+    }
+    let dex = CrawlDexSource { factory, out };
+    scope::market::fetch_book_and_volume(&venue, &Pair::parse(&args.pair), thresholds, &dex).await
+}
 
-    if is_dex_venue(&args.venue) {
-        // DEX path: synthesize from DexScreener analytics
-        let chain = dex_venue_to_chain(&args.venue);
-        let analytics =
-            crawl::fetch_analytics_for_input(&base, chain, Period::Hour24, 10, factory, None)
-                .await?;
-        if analytics.dex_pairs.is_empty() {
-            return Err(ScopeError::Chain(format!(
-                "No DEX pairs found for {} on {}",
-                base, chain
-            )));
+/// The pair's tokens on the venue (network and contract), when the venue
+/// lists its assets. A failed lookup is noted and gives no lines: the
+/// summary itself does not depend on it.
+async fn token_addresses(args: &SummaryArgs, out: &Output) -> Vec<TokenAddress> {
+    let Ok(MarketVenue::Cex(client)) = MarketVenue::from_name(&args.venue) else {
+        return Vec::new();
+    };
+    match client.fetch_token_addresses(&Pair::parse(&args.pair)).await {
+        None => Vec::new(),
+        Some(Ok(tokens)) => tokens,
+        Some(Err(e)) => {
+            note!(out, "Token addresses are not available: {e}");
+            Vec::new()
         }
-        let best_pair = analytics
-            .dex_pairs
-            .iter()
-            .max_by(|a, b| {
-                a.liquidity_usd
-                    .partial_cmp(&b.liquidity_usd)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .ok_or_else(|| ScopeError::Chain("No DEX pairs after filter".to_string()))?;
-        let book = order_book_from_analytics(chain, best_pair, &analytics.token.symbol);
-        let volume = Some(best_pair.volume_24h);
-        Ok((book, volume))
-    } else {
-        // CEX path: use VenueRegistry + ExchangeClient
-        let registry = VenueRegistry::load()?;
-        let exchange = registry.create_exchange_client(&args.venue)?;
-        let pair = match quote {
-            Some(q) => exchange.format_pair_with_quote(&base, q),
-            None => exchange.format_pair(&base),
-        };
-        let book = exchange.fetch_order_book(&pair).await?;
-
-        // Get volume from ticker if available
-        let volume = if exchange.has_ticker() {
-            exchange
-                .fetch_ticker(&pair)
-                .await
-                .ok()
-                .and_then(|t| t.quote_volume_24h.or(t.volume_24h))
-        } else {
-            None
-        };
-        Ok((book, volume))
     }
 }
 
-async fn run_summary_once(
+/// One summary run: the summary and its report, as the CLI prints it.
+async fn summary_run(
     args: &SummaryArgs,
     factory: &dyn ChainClientFactory,
     thresholds: &HealthThresholds,
+    tokens: &[TokenAddress],
     run_num: Option<u64>,
-) -> Result<MarketSummary> {
-    if let Some(n) = run_num {
-        let ts = chrono::Utc::now().format("%H:%M:%S");
-        eprintln!("  --- Run #{} at {} ---\n", n, ts);
-    }
-
-    let (book, volume_24h) = fetch_book_and_volume(args, factory).await?;
+    out: &Output,
+) -> Result<(MarketSummary, String)> {
+    let (book, volume_24h) = fetch_book_and_volume(args, thresholds, factory, out).await?;
     let summary = MarketSummary::from_order_book(&book, thresholds, volume_24h);
-
-    let venue_label = args.venue.clone();
-
-    match args.format {
-        SummaryFormat::Text => {
-            print!("{}", summary.format_text(Some(&venue_label)));
-        }
+    let report = match args.format {
+        SummaryFormat::Text => summary.format_text_with_tokens(Some(&args.venue), tokens),
         SummaryFormat::Json => {
-            let json = serde_json::json!({
-                "run": run_num,
-                "venue": venue_label,
-                "pair": summary.pair,
-                "peg_target": summary.peg_target,
-                "best_bid": summary.best_bid,
-                "best_ask": summary.best_ask,
-                "mid_price": summary.mid_price,
-                "spread": summary.spread,
-                "volume_24h": summary.volume_24h,
-                "execution_10k_buy": summary.execution_10k_buy.as_ref().map(|e| serde_json::json!({
-                    "fillable": e.fillable,
-                    "slippage_bps": e.slippage_bps
-                })),
-                "execution_10k_sell": summary.execution_10k_sell.as_ref().map(|e| serde_json::json!({
-                    "fillable": e.fillable,
-                    "slippage_bps": e.slippage_bps
-                })),
-                "ask_depth": summary.ask_depth,
-                "bid_depth": summary.bid_depth,
-                "ask_levels": summary.asks.len(),
-                "bid_levels": summary.bids.len(),
-                "healthy": summary.healthy,
-                "checks": summary.checks.iter().map(|c| match c {
-                    scope::market::HealthCheck::Pass(m) => serde_json::json!({"status": "pass", "message": m}),
-                    scope::market::HealthCheck::Fail(m) => serde_json::json!({"status": "fail", "message": m}),
-                }).collect::<Vec<_>>(),
-            });
-            println!("{}", serde_json::to_string_pretty(&json)?);
+            let mut json = summary.to_json();
+            if let Some(obj) = json.as_object_mut() {
+                obj.insert("run".to_string(), serde_json::json!(run_num));
+                obj.insert("venue".to_string(), serde_json::json!(args.venue));
+                if !tokens.is_empty() {
+                    obj.insert("tokens".to_string(), serde_json::json!(tokens));
+                }
+            }
+            format!("{}\n", serde_json::to_string_pretty(&json)?)
         }
-    }
+    };
+    Ok((summary, report))
+}
 
-    Ok(summary)
+/// Writes the `--report` file for `summary`, when one was asked for.
+fn write_report(args: &SummaryArgs, summary: &MarketSummary, out: &Output) -> Result<()> {
+    if let Some(ref report_path) = args.report {
+        let md = market_summary_to_markdown(summary, &args.venue, &args.pair);
+        std::fs::write(report_path, md)?;
+        out.note_saved("Report", report_path.display());
+    }
+    Ok(())
+}
+
+/// The `--every`/`--duration` schedule, when either flag is set.
+fn summary_schedule(args: &SummaryArgs) -> Result<Option<Schedule>> {
+    if args.every.is_none() && args.duration.is_none() {
+        return Ok(None);
+    }
+    let secs = |flag: &Option<String>, default| {
+        flag.as_deref()
+            .map(parse_duration)
+            .transpose()
+            .map(|v| v.unwrap_or(default))
+    };
+    let every = secs(&args.every, DEFAULT_EVERY_SECS)?;
+    let duration = secs(&args.duration, DEFAULT_DURATION_SECS)?;
+    Schedule::new(Duration::from_secs(every), Duration::from_secs(duration)).map(Some)
 }
 
 async fn run_summary(
     args: SummaryArgs,
     config: &Config,
     factory: &dyn ChainClientFactory,
+    out: &Output,
 ) -> Result<()> {
     let thresholds = args.health.resolve(config);
+    // Once per command: the coin list does not change between runs.
+    let tokens = token_addresses(&args, out).await;
 
-    let repeat_mode = args.every.is_some() || args.duration.is_some();
+    let Some(schedule) = summary_schedule(&args)? else {
+        let (summary, report) =
+            summary_run(&args, factory, &thresholds, &tokens, None, out).await?;
+        out!(out, "{report}")?;
+        return write_report(&args, &summary, out);
+    };
 
-    if !repeat_mode {
-        let summary = run_summary_once(&args, factory, &thresholds, None).await?;
-        if let Some(ref report_path) = args.report {
-            let venue_label = args.venue.clone();
-            let md = market_summary_to_markdown(&summary, &venue_label, &args.pair);
-            std::fs::write(report_path, md)?;
-            eprintln!("\nReport saved to: {}", report_path.display());
-        }
-        return Ok(());
-    }
-
-    let every_secs = args
-        .every
-        .as_ref()
-        .map(|s| parse_duration(s))
-        .transpose()?
-        .unwrap_or(DEFAULT_EVERY_SECS);
-
-    let duration_secs = args
-        .duration
-        .as_ref()
-        .map(|s| parse_duration(s))
-        .transpose()?
-        .unwrap_or(DEFAULT_DURATION_SECS);
-
-    if every_secs == 0 {
-        return Err(ScopeError::Chain("Interval must be positive".to_string()));
-    }
-
-    let every = Duration::from_secs(every_secs);
-    let start = std::time::Instant::now();
-    let duration = Duration::from_secs(duration_secs);
-
-    eprintln!(
+    note!(
+        out,
         "Running market summary every {}s for {}s (Ctrl+C to stop early)\n",
-        every_secs, duration_secs
+        schedule.every.as_secs(),
+        schedule.duration.as_secs()
     );
-
-    let mut run_num: u64 = 1;
-    #[allow(unused_assignments)]
-    let mut last_summary: Option<MarketSummary> = None;
-
-    // Initialize CSV if requested
-    if let Some(ref csv_path) = args.csv {
-        let header =
-            "timestamp,run,best_bid,best_ask,mid_price,spread,bid_depth,ask_depth,healthy\n";
-        std::fs::write(csv_path, header)?;
-    }
-
-    loop {
-        let summary = run_summary_once(&args, factory, &thresholds, Some(run_num)).await?;
-        last_summary = Some(summary.clone());
-
-        // Append CSV row
-        if let Some(ref csv_path) = args.csv {
-            let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
-            let bid = summary
-                .best_bid
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "-".to_string());
-            let ask = summary
-                .best_ask
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "-".to_string());
-            let mid = summary
-                .mid_price
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "-".to_string());
-            let spread = summary
-                .spread
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "-".to_string());
-            let row = format!(
-                "{},{},{},{},{},{},{},{},{}\n",
-                ts,
-                run_num,
-                bid,
-                ask,
-                mid,
-                spread,
-                summary.bid_depth,
-                summary.ask_depth,
-                summary.healthy
-            );
-            let mut f = std::fs::OpenOptions::new().append(true).open(csv_path)?;
-            use std::io::Write;
-            f.write_all(row.as_bytes())?;
+    let metrics = series::summary_metrics(&thresholds);
+    let last = repeat::run(&schedule, &metrics, args.csv.as_deref(), out, |n| {
+        let (args, thresholds, metrics, tokens) = (&args, &thresholds, &metrics, &tokens);
+        async move {
+            let (summary, report) =
+                summary_run(args, factory, thresholds, tokens, Some(n), out).await?;
+            Ok(RunOutput {
+                sample: series::sample(&summary, metrics),
+                snapshot: report,
+                value: summary,
+            })
         }
+    })
+    .await?;
 
-        if start.elapsed() >= duration {
-            eprintln!("\nCompleted {} run(s) over {}s.", run_num, duration_secs);
-            break;
-        }
-
-        run_num += 1;
-
-        let remaining = duration.saturating_sub(start.elapsed());
-        let sleep_duration = if remaining < every { remaining } else { every };
-        tokio::time::sleep(sleep_duration).await;
-    }
-
-    // Save final report if requested (last_summary always set when loop runs)
-    if let (Some(ref report_path), Some(summary)) = (args.report, last_summary.as_ref()) {
-        let venue_label = args.venue.clone();
-        let md = market_summary_to_markdown(summary, &venue_label, &args.pair);
-        std::fs::write(report_path, md)?;
-        eprintln!("Report saved to: {}", report_path.display());
+    if let Some(summary) = last {
+        write_report(&args, &summary, out)?;
     }
     if let Some(ref csv_path) = args.csv {
-        eprintln!("Time-series CSV saved to: {}", csv_path.display());
+        out.note_saved("Time-series CSV", csv_path.display());
     }
-
     Ok(())
 }
 
@@ -676,51 +472,31 @@ async fn run_summary(
 // =============================================================================
 
 /// Execute the `scope market ohlc` command.
-async fn run_ohlc(args: OhlcArgs) -> Result<()> {
-    let registry = VenueRegistry::load()?;
-    let descriptor = registry.get(&args.venue).ok_or_else(|| {
-        ScopeError::NotFound(format!(
-            "Venue '{}' not found. Use `scope venues list` to see available venues.",
-            args.venue
-        ))
-    })?;
+async fn run_ohlc(args: OhlcArgs, out: &Output) -> Result<()> {
+    let client = VenueRegistry::load()?.create_exchange_client(&args.venue)?;
+    run_ohlc_with(&client, args, out).await
+}
 
-    let client = scope::market::ExchangeClient::from_descriptor(descriptor);
-    let (base, quote) = parse_pair_components(&args.pair);
-    let pair = match quote {
-        Some(q) => client.format_pair_with_quote(base, q),
-        None => client.format_pair(base),
-    };
+/// `scope market ohlc` on `client`, the venue that `args.venue` names.
+async fn run_ohlc_with(client: &ExchangeClient, args: OhlcArgs, out: &Output) -> Result<()> {
+    let pair = client.venue_symbol(&Pair::parse(&args.pair));
 
     let candles = client.fetch_ohlc(&pair, &args.interval, args.limit).await?;
 
     match args.format {
         OhlcFormat::Json => {
-            let json_candles: Vec<serde_json::Value> = candles
-                .iter()
-                .map(|c| {
-                    serde_json::json!({
-                        "open_time": c.open_time,
-                        "open": c.open,
-                        "high": c.high,
-                        "low": c.low,
-                        "close": c.close,
-                        "volume": c.volume,
-                        "close_time": c.close_time,
-                    })
-                })
-                .collect();
-            let json_str = serde_json::to_string_pretty(&json_candles)
+            let json_str = serde_json::to_string_pretty(&candles)
                 .map_err(|e| ScopeError::Chain(format!("JSON serialization failed: {e}")))?;
-            println!("{json_str}");
+            outln!(out, "{json_str}")?;
         }
         OhlcFormat::Text => {
-            println!(
+            outln!(
+                out,
                 "{}",
                 t::section_header(&format!("OHLC — {} ({})", pair, args.venue))
-            );
-            println!("{}", t::kv_row("Interval", &args.interval));
-            println!("{}", t::kv_row("Limit", &args.limit.to_string()));
+            )?;
+            outln!(out, "{}", t::kv_row("Interval", &args.interval))?;
+            outln!(out, "{}", t::kv_row("Limit", &args.limit.to_string()))?;
 
             let cols = [
                 t::Col {
@@ -754,7 +530,7 @@ async fn run_ohlc(args: OhlcArgs) -> Result<()> {
                     align: '>',
                 },
             ];
-            println!("{}", t::table_header(&cols));
+            outln!(out, "{}", t::table_header(&cols))?;
 
             for c in &candles {
                 let dt = chrono::DateTime::from_timestamp_millis(c.open_time as i64)
@@ -773,14 +549,15 @@ async fn run_ohlc(args: OhlcArgs) -> Result<()> {
                     close_str.as_str(),
                     volume_str.as_str(),
                 ];
-                println!("{}", t::table_row(&cols, &values));
+                outln!(out, "{}", t::table_row(&cols, &values))?;
             }
 
-            println!(
+            outln!(
+                out,
                 "{}",
                 t::info_row(&format!("{} candles returned", candles.len()))
-            );
-            println!("{}", t::section_footer());
+            )?;
+            outln!(out, "{}", t::section_footer())?;
         }
     }
     Ok(())
@@ -791,47 +568,29 @@ async fn run_ohlc(args: OhlcArgs) -> Result<()> {
 // =============================================================================
 
 /// Execute the `scope market trades` command.
-async fn run_trades(args: TradesArgs) -> Result<()> {
-    let registry = VenueRegistry::load()?;
-    let descriptor = registry.get(&args.venue).ok_or_else(|| {
-        ScopeError::NotFound(format!(
-            "Venue '{}' not found. Use `scope venues list` to see available venues.",
-            args.venue
-        ))
-    })?;
+async fn run_trades(args: TradesArgs, out: &Output) -> Result<()> {
+    let client = VenueRegistry::load()?.create_exchange_client(&args.venue)?;
+    run_trades_with(&client, args, out).await
+}
 
-    let client = scope::market::ExchangeClient::from_descriptor(descriptor);
-    let (base, quote) = parse_pair_components(&args.pair);
-    let pair = match quote {
-        Some(q) => client.format_pair_with_quote(base, q),
-        None => client.format_pair(base),
-    };
+/// `scope market trades` on `client`, the venue that `args.venue` names.
+async fn run_trades_with(client: &ExchangeClient, args: TradesArgs, out: &Output) -> Result<()> {
+    let pair = client.venue_symbol(&Pair::parse(&args.pair));
 
     let trades = client.fetch_recent_trades(&pair, args.limit).await?;
 
     match args.format {
         OhlcFormat::Json => {
-            let json_trades: Vec<serde_json::Value> = trades
-                .iter()
-                .map(|t| {
-                    serde_json::json!({
-                        "price": t.price,
-                        "quantity": t.quantity,
-                        "quote_quantity": t.quote_quantity,
-                        "timestamp_ms": t.timestamp_ms,
-                        "side": format!("{:?}", t.side),
-                    })
-                })
-                .collect();
-            let json_str = serde_json::to_string_pretty(&json_trades)
+            let json_str = serde_json::to_string_pretty(&trades)
                 .map_err(|e| ScopeError::Chain(format!("JSON serialization failed: {e}")))?;
-            println!("{json_str}");
+            outln!(out, "{json_str}")?;
         }
         OhlcFormat::Text => {
-            println!(
+            outln!(
+                out,
                 "{}",
                 t::section_header(&format!("Recent Trades — {} ({})", pair, args.venue))
-            );
+            )?;
 
             let cols = [
                 t::Col {
@@ -855,7 +614,7 @@ async fn run_trades(args: TradesArgs) -> Result<()> {
                     align: '>',
                 },
             ];
-            println!("{}", t::table_header(&cols));
+            outln!(out, "{}", t::table_header(&cols))?;
 
             for t in &trades {
                 let time = chrono::DateTime::from_timestamp_millis(t.timestamp_ms as i64)
@@ -873,14 +632,15 @@ async fn run_trades(args: TradesArgs) -> Result<()> {
                     price_str.as_str(),
                     qty_str.as_str(),
                 ];
-                println!("{}", t::table_row(&cols, &values));
+                outln!(out, "{}", t::table_row(&cols, &values))?;
             }
 
-            println!(
+            outln!(
+                out,
                 "{}",
                 t::info_row(&format!("{} trades returned", trades.len()))
-            );
-            println!("{}", t::section_footer());
+            )?;
+            outln!(out, "{}", t::section_footer())?;
         }
     }
     Ok(())
@@ -890,6 +650,11 @@ async fn run_trades(args: TradesArgs) -> Result<()> {
 mod tests {
     use super::*;
     use scope::chains::DefaultClientFactory;
+    use scope::market::DexVenue;
+
+    fn quiet() -> crate::cli::output::Output {
+        crate::cli::output::Output::capture().0
+    }
 
     /// Helper to create a mock venue YAML pointing at the given mock server URL.
     /// Writes a temporary venue descriptor to the user venues directory so the
@@ -940,7 +705,7 @@ capabilities:
         let args = SummaryArgs {
             pair: "USDC".to_string(),
             venue: "eth".to_string(),
-            chain: "ethereum".to_string(),
+            chain: None,
             health: HealthArgs {
                 peg_target: Some(1.0),
                 peg_range: Some(0.01),
@@ -964,7 +729,7 @@ capabilities:
             http,
         };
         // DEX path: will hit real DexScreener API, may fail in offline environments
-        let _result = run_summary(args, &Config::default(), &factory).await;
+        let _result = run_summary(args, &Config::default(), &factory, &quiet()).await;
         // We don't assert success because it depends on network, just confirm no panic
     }
 
@@ -973,7 +738,7 @@ capabilities:
         let args = SummaryArgs {
             pair: "USDC".to_string(),
             venue: "eth".to_string(),
-            chain: "ethereum".to_string(),
+            chain: None,
             health: HealthArgs {
                 peg_target: Some(1.0),
                 peg_range: Some(0.01),
@@ -996,7 +761,7 @@ capabilities:
             chains_config: Default::default(),
             http,
         };
-        let _result = run_summary(args, &Config::default(), &factory).await;
+        let _result = run_summary(args, &Config::default(), &factory, &quiet()).await;
     }
 
     #[test]
@@ -1053,56 +818,59 @@ capabilities:
 
     #[test]
     fn test_base_symbol_from_pair_underscore() {
-        assert_eq!(base_symbol_from_pair("DAI_USDT"), "DAI");
-        assert_eq!(base_symbol_from_pair("USDC_USDT"), "USDC");
+        assert_eq!(Pair::parse("DAI_USDT").base, "DAI");
+        assert_eq!(Pair::parse("USDC_USDT").base, "USDC");
     }
 
     #[test]
     fn test_base_symbol_from_pair_lowercase_underscore() {
-        assert_eq!(base_symbol_from_pair("dai_usdt"), "dai");
+        assert_eq!(Pair::parse("dai_usdt").base, "dai");
     }
 
     #[test]
     fn test_base_symbol_from_pair_slash() {
-        assert_eq!(base_symbol_from_pair("USDC/USDT"), "USDC");
+        assert_eq!(Pair::parse("USDC/USDT").base, "USDC");
     }
 
     #[test]
     fn test_base_symbol_from_pair_concat() {
-        assert_eq!(base_symbol_from_pair("USDCUSDT"), "USDC");
-        assert_eq!(base_symbol_from_pair("DAIUSDT"), "DAI");
+        assert_eq!(Pair::parse("USDCUSDT").base, "USDC");
+        assert_eq!(Pair::parse("DAIUSDT").base, "DAI");
     }
 
     #[test]
     fn test_base_symbol_from_pair_plain() {
-        assert_eq!(base_symbol_from_pair("USDC"), "USDC");
-        assert_eq!(base_symbol_from_pair("ETH"), "ETH");
+        assert_eq!(Pair::parse("USDC").base, "USDC");
+        assert_eq!(Pair::parse("ETH").base, "ETH");
     }
 
     #[test]
     fn test_base_symbol_from_pair_whitespace() {
-        assert_eq!(base_symbol_from_pair("  DAI_USDT  "), "DAI");
+        assert_eq!(Pair::parse("  DAI_USDT  ").base, "DAI");
     }
 
     #[test]
     fn test_normalize_pair_input_key_value() {
-        assert_eq!(normalize_pair_input("pair=USDT_PUSD"), "USDT_PUSD");
-        assert_eq!(normalize_pair_input("pair_symbol=USDT_PUSD"), "USDT_PUSD");
-        assert_eq!(normalize_pair_input("USDT_PUSD"), "USDT_PUSD");
+        assert_eq!(Pair::parse("pair=USDT_PUSD").to_string(), "USDT/PUSD");
+        assert_eq!(
+            Pair::parse("pair_symbol=USDT_PUSD").to_string(),
+            "USDT/PUSD"
+        );
+        assert_eq!(Pair::parse("USDT_PUSD").to_string(), "USDT/PUSD");
     }
 
     #[test]
     fn test_parse_pair_components_delimited() {
-        assert_eq!(parse_pair_components("USDT_PUSD"), ("USDT", Some("PUSD")));
-        assert_eq!(parse_pair_components("ETH/USDC"), ("ETH", Some("USDC")));
-        assert_eq!(parse_pair_components("BTC-USDT"), ("BTC", Some("USDT")));
+        assert_eq!(Pair::parse("USDT_PUSD").to_string(), "USDT/PUSD");
+        assert_eq!(Pair::parse("ETH/USDC").to_string(), "ETH/USDC");
+        assert_eq!(Pair::parse("BTC-USDT").to_string(), "BTC/USDT");
     }
 
     #[test]
     fn test_parse_pair_components_concat_common_quote() {
-        assert_eq!(parse_pair_components("BTCUSDT"), ("BTC", Some("USDT")));
-        assert_eq!(parse_pair_components("ETHUSD"), ("ETH", Some("USD")));
-        assert_eq!(parse_pair_components("ARB"), ("ARB", None));
+        assert_eq!(Pair::parse("BTCUSDT").to_string(), "BTC/USDT");
+        assert_eq!(Pair::parse("ETHUSD").to_string(), "ETH/USD");
+        assert_eq!(Pair::parse("ARB").quote, None);
     }
 
     // ====================================================================
@@ -1114,11 +882,15 @@ capabilities:
         use scope::market::{HealthCheck, MarketSummary};
         let summary = MarketSummary {
             pair: "USDCUSDT".to_string(),
+            source: scope::market::BookSource::Exchange,
             peg_target: 1.0,
+            peg_range: scope::market::health::DEFAULT_PEG_RANGE,
             best_bid: Some(0.9999),
             best_ask: Some(1.0001),
             mid_price: Some(1.0000),
             spread: Some(0.0002),
+            spread_pct: None,
+            top_depth: Default::default(),
             volume_24h: Some(1_000_000.0),
             bid_depth: 50_000.0,
             ask_depth: 50_000.0,
@@ -1145,11 +917,15 @@ capabilities:
         use scope::market::{HealthCheck, MarketSummary};
         let summary = MarketSummary {
             pair: "TESTUSDT".to_string(),
+            source: scope::market::BookSource::Exchange,
             peg_target: 1.0,
+            peg_range: scope::market::health::DEFAULT_PEG_RANGE,
             best_bid: None,
             best_ask: None,
             mid_price: None,
             spread: None,
+            spread_pct: None,
+            top_depth: Default::default(),
             volume_24h: None,
             bid_depth: 0.0,
             ask_depth: 0.0,
@@ -1261,12 +1037,12 @@ capabilities:
     #[test]
     fn test_base_symbol_from_pair_various_inputs() {
         // Additional coverage for edge cases
-        assert_eq!(base_symbol_from_pair("USDC"), "USDC");
-        assert_eq!(base_symbol_from_pair("BTCUSDT"), "BTC");
-        assert_eq!(base_symbol_from_pair("ETH/USDT"), "ETH");
-        assert_eq!(base_symbol_from_pair("DAI_USDT"), "DAI");
-        assert_eq!(base_symbol_from_pair("X"), "X"); // short symbol, no USDT suffix
-        assert_eq!(base_symbol_from_pair(""), "");
+        assert_eq!(Pair::parse("USDC").base, "USDC");
+        assert_eq!(Pair::parse("BTCUSDT").base, "BTC");
+        assert_eq!(Pair::parse("ETH/USDT").base, "ETH");
+        assert_eq!(Pair::parse("DAI_USDT").base, "DAI");
+        assert_eq!(Pair::parse("X").base, "X"); // short symbol, no USDT suffix
+        assert_eq!(Pair::parse("").base, "");
     }
 
     #[test]
@@ -1274,7 +1050,7 @@ capabilities:
         let args = SummaryArgs {
             pair: "USDC".to_string(),
             venue: "binance".to_string(),
-            chain: "ethereum".to_string(),
+            chain: None,
             health: HealthArgs {
                 peg_target: Some(1.0),
                 peg_range: Some(0.001),
@@ -1302,15 +1078,43 @@ capabilities:
     }
 
     #[test]
+    fn test_markdown_leaves_out_the_peg_deviation_when_there_is_none() {
+        // A peg target of 0 has no deviation: no "(+0.000%)", the same as the text report.
+        use scope::market::{BookSource, OrderBook, OrderBookLevel};
+        let level = |price| OrderBookLevel {
+            price,
+            quantity: 100.0,
+        };
+        let book = OrderBook {
+            pair: "USDC/USDT".to_string(),
+            source: BookSource::Exchange,
+            bids: vec![level(0.9999)],
+            asks: vec![level(1.0001)],
+        };
+        let thresholds = HealthThresholds {
+            peg_target: 0.0,
+            ..HealthThresholds::default()
+        };
+        let summary = MarketSummary::from_order_book(&book, &thresholds, None);
+        let md = market_summary_to_markdown(&summary, "binance", "USDC");
+        assert!(md.contains("0.9999") && !md.contains("0.9999 ("), "{md}");
+        assert!(!md.contains("(+0.000%)"), "{md}");
+    }
+
+    #[test]
     fn test_market_summary_to_markdown_with_execution_estimates() {
         use scope::market::{ExecutionEstimate, ExecutionSide, HealthCheck, MarketSummary};
         let summary = MarketSummary {
             pair: "TESTUSDT".to_string(),
+            source: scope::market::BookSource::Exchange,
             peg_target: 1.0,
+            peg_range: scope::market::health::DEFAULT_PEG_RANGE,
             best_bid: Some(0.9999),
             best_ask: Some(1.0001),
             mid_price: Some(1.0000),
             spread: Some(0.0002),
+            spread_pct: None,
+            top_depth: Default::default(),
             volume_24h: Some(1_000_000.0),
             bid_depth: 50_000.0,
             ask_depth: 50_000.0,
@@ -1351,7 +1155,7 @@ capabilities:
         let args = MarketCommands::Summary(SummaryArgs {
             pair: "USDC".to_string(),
             venue: "eth".to_string(),
-            chain: "ethereum".to_string(),
+            chain: None,
             health: HealthArgs {
                 peg_target: Some(1.0),
                 peg_range: Some(0.01),
@@ -1375,28 +1179,40 @@ capabilities:
             http,
         };
         let config = Config::default();
-        let _result = run(args, &config, &factory).await;
+        let _result = run(args, &config, &factory, &quiet()).await;
         // Don't assert success - depends on network
     }
 
     #[test]
     fn test_is_dex_venue() {
-        assert!(is_dex_venue("eth"));
-        assert!(is_dex_venue("ethereum"));
-        assert!(is_dex_venue("Ethereum"));
-        assert!(is_dex_venue("solana"));
-        assert!(is_dex_venue("Solana"));
-        assert!(!is_dex_venue("binance"));
-        assert!(!is_dex_venue("okx"));
-        assert!(!is_dex_venue("mexc"));
+        assert!(DexVenue::parse("eth").is_some());
+        assert!(DexVenue::parse("ethereum").is_some());
+        assert!(DexVenue::parse("Ethereum").is_some());
+        assert!(DexVenue::parse("solana").is_some());
+        assert!(DexVenue::parse("Solana").is_some());
+        assert!(DexVenue::parse("binance").is_none());
+        assert!(DexVenue::parse("okx").is_none());
+        assert!(DexVenue::parse("mexc").is_none());
     }
 
     #[test]
     fn test_dex_venue_to_chain() {
-        assert_eq!(dex_venue_to_chain("eth"), "ethereum");
-        assert_eq!(dex_venue_to_chain("ethereum"), "ethereum");
-        assert_eq!(dex_venue_to_chain("Ethereum"), "ethereum");
-        assert_eq!(dex_venue_to_chain("solana"), "solana");
+        assert_eq!(
+            DexVenue::parse("eth").map(DexVenue::chain),
+            Some("ethereum")
+        );
+        assert_eq!(
+            DexVenue::parse("ethereum").map(DexVenue::chain),
+            Some("ethereum")
+        );
+        assert_eq!(
+            DexVenue::parse("Ethereum").map(DexVenue::chain),
+            Some("ethereum")
+        );
+        assert_eq!(
+            DexVenue::parse("solana").map(DexVenue::chain),
+            Some("solana")
+        );
     }
 
     #[test]
@@ -1423,7 +1239,7 @@ capabilities:
         let args = SummaryArgs {
             pair: "USDC".to_string(),
             venue: "eth".to_string(),
-            chain: "ethereum".to_string(),
+            chain: None,
             health: HealthArgs {
                 peg_target: Some(1.0),
                 peg_range: Some(0.01),
@@ -1446,7 +1262,7 @@ capabilities:
             chains_config: Default::default(),
             http,
         };
-        let _result = run_summary(args, &Config::default(), &factory).await;
+        let _result = run_summary(args, &Config::default(), &factory, &quiet()).await;
     }
 
     // ====================================================================
@@ -1504,12 +1320,12 @@ capabilities:
             limit: 10,
             format: OhlcFormat::Text,
         };
-        let result = run_ohlc(args).await;
+        let result = run_ohlc(args, &quiet()).await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("not found"),
-            "expected 'not found' error, got: {}",
+            err.contains("Unknown venue"),
+            "expected 'Unknown venue' error, got: {}",
             err
         );
     }
@@ -1522,12 +1338,12 @@ capabilities:
             limit: 10,
             format: OhlcFormat::Text,
         };
-        let result = run_trades(args).await;
+        let result = run_trades(args, &quiet()).await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("not found"),
-            "expected 'not found' error, got: {}",
+            err.contains("Unknown venue"),
+            "expected 'Unknown venue' error, got: {}",
             err
         );
     }
@@ -1548,7 +1364,7 @@ capabilities:
             http,
         };
         let config = Config::default();
-        let result = run(cmd, &config, &factory).await;
+        let result = run(cmd, &config, &factory, &quiet()).await;
         // Should error with venue not found
         assert!(result.is_err());
     }
@@ -1568,85 +1384,109 @@ capabilities:
             http,
         };
         let config = Config::default();
-        let result = run(cmd, &config, &factory).await;
+        let result = run(cmd, &config, &factory, &quiet()).await;
         assert!(result.is_err());
     }
 
-    #[tokio::test]
-    async fn test_run_ohlc_text_format_with_real_venue() {
-        // Uses a real venue with a real API call. May succeed or fail depending
-        // on network availability. Exercises venue resolution and client creation.
-        let args = OhlcArgs {
+    /// The binance mapping with a local reply, so the test needs no network (#39).
+    fn binance_at(server: &mockito::ServerGuard) -> ExchangeClient {
+        scope::market::testing::venue_at("binance", &server.url())
+    }
+
+    const KLINES: &str = r#"[[1700000000000,"1.0","1.5","0.5","1.25","1000.5",1700003599999],
+        [1700003600000,"1.25","2.0","1.0","1.75","20.25",1700007199999]]"#;
+    const TRADES: &str = r#"[{"id":1,"price":"1.5","qty":"2.5","quoteQty":"3.75","time":1700000000000,"isBuyerMaker":true},
+        {"id":2,"price":"1.6","qty":"1.0","quoteQty":"1.6","time":1700000001000,"isBuyerMaker":false}]"#;
+
+    fn ohlc_args(format: OhlcFormat) -> OhlcArgs {
+        OhlcArgs {
             pair: "BTC".to_string(),
             venue: "binance".to_string(),
             interval: "1h".to_string(),
-            limit: 3,
-            format: OhlcFormat::Text,
-        };
-        let _result = run_ohlc(args).await;
-        // Don't assert success — depends on network
-    }
-
-    #[tokio::test]
-    async fn test_run_ohlc_json_format_with_real_venue() {
-        let args = OhlcArgs {
-            pair: "ETH".to_string(),
-            venue: "binance".to_string(),
-            interval: "15m".to_string(),
             limit: 2,
-            format: OhlcFormat::Json,
-        };
-        let _result = run_ohlc(args).await;
+            format,
+        }
     }
 
-    #[tokio::test]
-    async fn test_run_trades_text_format_with_real_venue() {
-        let args = TradesArgs {
+    fn trades_args(format: OhlcFormat) -> TradesArgs {
+        TradesArgs {
             pair: "BTC".to_string(),
             venue: "binance".to_string(),
-            limit: 5,
-            format: OhlcFormat::Text,
-        };
-        let _result = run_trades(args).await;
-    }
-
-    #[tokio::test]
-    async fn test_run_trades_json_format_with_real_venue() {
-        let args = TradesArgs {
-            pair: "ETH".to_string(),
-            venue: "binance".to_string(),
-            limit: 3,
-            format: OhlcFormat::Json,
-        };
-        let _result = run_trades(args).await;
-    }
-
-    #[tokio::test]
-    async fn test_run_ohlc_multiple_venues() {
-        // Exercise venue resolution for several built-in venues
-        for venue in &["mexc", "okx", "bybit"] {
-            let args = OhlcArgs {
-                pair: "BTC".to_string(),
-                venue: venue.to_string(),
-                interval: "1h".to_string(),
-                limit: 2,
-                format: OhlcFormat::Json,
-            };
-            let _result = run_ohlc(args).await;
+            limit: 2,
+            format,
         }
     }
 
+    async fn serve(path: &str, body: &str) -> mockito::ServerGuard {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", path)
+            .match_query(mockito::Matcher::UrlEncoded(
+                "symbol".into(),
+                "BTCUSDT".into(),
+            ))
+            .with_body(body)
+            .create_async()
+            .await;
+        server
+    }
+
     #[tokio::test]
-    async fn test_run_trades_multiple_venues() {
-        for venue in &["mexc", "okx", "bybit"] {
-            let args = TradesArgs {
-                pair: "BTC".to_string(),
-                venue: venue.to_string(),
-                limit: 3,
-                format: OhlcFormat::Text,
-            };
-            let _result = run_trades(args).await;
-        }
+    async fn test_ohlc_text_shows_every_candle() {
+        let server = serve("/api/v3/klines", KLINES).await;
+        let (out, cap) = Output::capture();
+        run_ohlc_with(&binance_at(&server), ohlc_args(OhlcFormat::Text), &out)
+            .await
+            .unwrap();
+        let text = crate::cli::ansi::strip(&cap.out());
+        assert!(text.contains("OHLC — BTCUSDT (binance)"), "{text}");
+        assert!(text.contains("1.250000"), "{text}");
+        assert!(text.contains("1000.50"), "{text}");
+        assert!(text.contains("2 candles returned"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn test_ohlc_json_keeps_every_field() {
+        let server = serve("/api/v3/klines", KLINES).await;
+        let (out, cap) = Output::capture();
+        run_ohlc_with(&binance_at(&server), ohlc_args(OhlcFormat::Json), &out)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&cap.out()).unwrap();
+        assert_eq!(v.as_array().unwrap().len(), 2);
+        assert_eq!(v[0]["open_time"], 1_700_000_000_000u64);
+        assert_eq!(v[1]["close"], 1.75);
+        assert_eq!(v[1]["volume"], 20.25);
+    }
+
+    #[tokio::test]
+    async fn test_trades_text_shows_side_price_and_quantity() {
+        let server = serve("/api/v3/trades", TRADES).await;
+        let (out, cap) = Output::capture();
+        run_trades_with(&binance_at(&server), trades_args(OhlcFormat::Text), &out)
+            .await
+            .unwrap();
+        let text = crate::cli::ansi::strip(&cap.out());
+        assert!(text.contains("Recent Trades — BTCUSDT (binance)"), "{text}");
+        // isBuyerMaker true is a sell; false is a buy.
+        assert!(text.contains("SELL") && text.contains("BUY"), "{text}");
+        assert!(text.contains("1.500000") && text.contains("2.50"), "{text}");
+        assert!(text.contains("2 trades returned"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn test_trades_json_keeps_every_field() {
+        let server = serve("/api/v3/trades", TRADES).await;
+        let (out, cap) = Output::capture();
+        run_trades_with(&binance_at(&server), trades_args(OhlcFormat::Json), &out)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&cap.out()).unwrap();
+        assert_eq!(v[0]["side"], "sell");
+        assert_eq!(v[1]["side"], "buy");
+        assert_eq!(v[0]["id"], "1");
+        assert_eq!(v[0]["quote_quantity"], 3.75);
+        assert_eq!(v[1]["timestamp_ms"], 1_700_000_001_000u64);
     }
 
     // ====================================================================
@@ -1700,14 +1540,14 @@ capabilities:
     }
 
     // ====================================================================
-    // dex_venue_to_chain — unknown venue fallback
+    // An unknown venue is not a DEX venue (it used to map to ethereum)
     // ====================================================================
 
     #[test]
-    fn test_dex_venue_to_chain_unknown_returns_ethereum() {
-        assert_eq!(dex_venue_to_chain("binance"), "ethereum");
-        assert_eq!(dex_venue_to_chain("kraken"), "ethereum");
-        assert_eq!(dex_venue_to_chain("unknown"), "ethereum");
+    fn test_unknown_venue_is_not_a_dex_venue() {
+        assert_eq!(DexVenue::parse("binance"), None);
+        assert_eq!(DexVenue::parse("kraken"), None);
+        assert_eq!(DexVenue::parse("unknown"), None);
     }
 
     // ====================================================================
@@ -1719,11 +1559,15 @@ capabilities:
         use scope::market::{HealthCheck, MarketSummary};
         let summary = MarketSummary {
             pair: "TESTUSDT".to_string(),
+            source: scope::market::BookSource::Exchange,
             peg_target: 1.0,
+            peg_range: scope::market::health::DEFAULT_PEG_RANGE,
             best_bid: Some(0.9999),
             best_ask: Some(1.0001),
             mid_price: Some(1.0000),
             spread: Some(0.0002),
+            spread_pct: None,
+            top_depth: Default::default(),
             volume_24h: Some(500_000.0),
             bid_depth: 40_000.0,
             ask_depth: 45_000.0,
@@ -1750,11 +1594,15 @@ capabilities:
         use scope::market::MarketSummary;
         let summary = MarketSummary {
             pair: "X".to_string(),
+            source: scope::market::BookSource::Exchange,
             peg_target: 1.0,
+            peg_range: scope::market::health::DEFAULT_PEG_RANGE,
             best_bid: Some(1.0),
             best_ask: Some(1.0),
             mid_price: Some(1.0),
             spread: Some(0.0),
+            spread_pct: None,
+            top_depth: Default::default(),
             volume_24h: None,
             bid_depth: 100.0,
             ask_depth: 100.0,
@@ -1769,7 +1617,8 @@ capabilities:
         };
         let md = market_summary_to_markdown(&summary, "Venue", "X");
         assert!(md.contains("Market Health Report"));
-        assert!(md.contains("Health Checks"));
+        // No checks, no checks section.
+        assert!(!md.contains("Health Checks:"));
     }
 
     // ====================================================================
@@ -1800,7 +1649,7 @@ capabilities:
         let args = SummaryArgs {
             pair: "USDC".to_string(),
             venue: "eth".to_string(),
-            chain: "ethereum".to_string(),
+            chain: None,
             health: HealthArgs {
                 peg_target: Some(1.0),
                 peg_range: Some(0.01),
@@ -1822,7 +1671,7 @@ capabilities:
             chains_config: Default::default(),
             http,
         };
-        let result = run_summary(args, &Config::default(), &factory).await;
+        let result = run_summary(args, &Config::default(), &factory, &quiet()).await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -1841,7 +1690,7 @@ capabilities:
         let cmd = MarketCommands::Summary(SummaryArgs {
             pair: "USDC".to_string(),
             venue: "binance".to_string(),
-            chain: "ethereum".to_string(),
+            chain: None,
             health: HealthArgs {
                 peg_target: Some(1.0),
                 peg_range: Some(0.001),
@@ -1883,7 +1732,7 @@ capabilities:
         let args = SummaryArgs {
             pair: "DAI".to_string(),
             venue: "binance".to_string(),
-            chain: "ethereum".to_string(),
+            chain: None,
             health: HealthArgs {
                 peg_target: Some(1.0),
                 peg_range: Some(0.001),
@@ -1910,7 +1759,7 @@ capabilities:
     #[test]
     fn test_base_symbol_from_pair_4char_usdt() {
         // "USDT" itself has len 4, so doesn't satisfy p.len() > 4
-        assert_eq!(base_symbol_from_pair("USDT"), "USDT");
+        assert_eq!(Pair::parse("USDT").base, "USDT");
     }
 
     #[test]
@@ -1918,11 +1767,15 @@ capabilities:
         use scope::market::{HealthCheck, MarketSummary};
         let summary = MarketSummary {
             pair: "X".to_string(),
+            source: scope::market::BookSource::Exchange,
             peg_target: 1.0,
+            peg_range: scope::market::health::DEFAULT_PEG_RANGE,
             best_bid: Some(0.99),
             best_ask: Some(1.01),
             mid_price: Some(1.0),
             spread: Some(0.02),
+            spread_pct: None,
+            top_depth: Default::default(),
             volume_24h: None,
             bid_depth: 100.0,
             ask_depth: 100.0,
@@ -1980,6 +1833,7 @@ capabilities:
                 price_usd: 1.0,
                 volume_24h,
                 liquidity_usd,
+                liquidity_base: None,
                 price_change_24h: 0.0,
                 buys_24h: 0,
                 sells_24h: 0,
@@ -1998,7 +1852,7 @@ capabilities:
         SummaryArgs {
             pair: USDC_ADDR.to_string(),
             venue: "eth".to_string(),
-            chain: "ethereum".to_string(),
+            chain: None,
             health: HealthArgs::default(),
             format,
             every: None,
@@ -2012,20 +1866,79 @@ capabilities:
     async fn test_dex_book_uses_most_liquid_pair() {
         // The synthetic book must come from the deepest pool, not the first one.
         let factory = dex_factory(&[(1_000.0, 10.0), (50_000.0, 777.0), (2_000.0, 20.0)]);
-        let (book, volume) = fetch_book_and_volume(&dex_args(SummaryFormat::Text), &factory)
-            .await
-            .unwrap();
+        let (book, volume) = fetch_book_and_volume(
+            &dex_args(SummaryFormat::Text),
+            &HealthThresholds::default(),
+            &factory,
+            &quiet(),
+        )
+        .await
+        .unwrap();
         assert_eq!(volume, Some(777.0));
-        let depth: f64 = book.bids.iter().chain(&book.asks).map(|l| l.value()).sum();
+        let depth = book.total_depth(scope::market::BookSide::Bid)
+            + book.total_depth(scope::market::BookSide::Ask);
         assert!((depth - 50_000.0).abs() < 1.0, "depth {depth}");
+    }
+
+    /// `--venue sol` is the Solana DEX (it used to go to the CEX registry
+    /// and fail with "unknown venue").
+    #[tokio::test]
+    async fn test_venue_sol_reads_the_solana_dex() {
+        let factory = dex_factory(&[(50_000.0, 777.0)]);
+        let mut args = dex_args(SummaryFormat::Text);
+        args.venue = "sol".to_string();
+        let result =
+            fetch_book_and_volume(&args, &HealthThresholds::default(), &factory, &quiet()).await;
+        let (book, volume) = result.unwrap();
+        assert_eq!(volume, Some(777.0));
+        assert_eq!(book.pair, "USDC/USD");
+    }
+
+    /// `--chain` is one rule with the venue: a chain that is not the DEX
+    /// venue's chain is an error, in any case.
+    #[tokio::test]
+    async fn test_chain_must_match_the_dex_venue() {
+        let factory = dex_factory(&[(50_000.0, 1.0)]);
+        let mut args = dex_args(SummaryFormat::Text);
+        args.chain = Some("Solana".to_string());
+        let err = fetch_book_and_volume(&args, &HealthThresholds::default(), &factory, &quiet())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("reads chain ethereum"), "{err}");
+
+        args.chain = Some("ETH".to_string());
+        assert!(
+            fetch_book_and_volume(&args, &HealthThresholds::default(), &factory, &quiet())
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unknown_venue_is_an_error() {
+        let factory = dex_factory(&[(50_000.0, 1.0)]);
+        let mut args = dex_args(SummaryFormat::Text);
+        args.venue = "polygon".to_string();
+        let err = fetch_book_and_volume(&args, &HealthThresholds::default(), &factory, &quiet())
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("Unknown venue \"polygon\""),
+            "{err}"
+        );
     }
 
     #[tokio::test]
     async fn test_dex_no_pairs_is_error() {
         let factory = dex_factory(&[]);
-        let err = fetch_book_and_volume(&dex_args(SummaryFormat::Text), &factory)
-            .await
-            .unwrap_err();
+        let err = fetch_book_and_volume(
+            &dex_args(SummaryFormat::Text),
+            &HealthThresholds::default(),
+            &factory,
+            &quiet(),
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("No DEX pairs found"), "{err}");
     }
 
@@ -2040,16 +1953,55 @@ capabilities:
             ..Default::default()
         };
         let thresholds = args.health.resolve(&Config::default());
-        let summary = run_summary_once(&args, &factory, &thresholds, Some(1))
+        let (summary, _) = summary_run(&args, &factory, &thresholds, &[], Some(1), &quiet())
             .await
             .unwrap();
         assert!(summary.healthy, "{:?}", summary.checks);
 
         let strict = HealthThresholds::default();
-        let summary = run_summary_once(&args, &factory, &strict, None)
+        let (summary, _) = summary_run(&args, &factory, &strict, &[], None, &quiet())
             .await
             .unwrap();
         assert!(!summary.healthy);
+    }
+
+    #[tokio::test]
+    async fn test_dex_json_shows_amm_source_and_na_checks() {
+        // #37 acceptance: JSON shows "status": "n/a", and the book source.
+        let mut factory = dex_factory(&[(20_000_000.0, 1_000.0)]);
+        factory.mock_dex.token_data.as_mut().unwrap().pairs[0].liquidity_base = Some(10_000_000.0);
+        let args = dex_args(SummaryFormat::Json);
+        let thresholds = args.health.resolve(&Config::default());
+        let (summary, report) = summary_run(&args, &factory, &thresholds, &[], None, &quiet())
+            .await
+            .unwrap();
+        assert!(summary.healthy, "{:?}", summary.checks);
+        let v: serde_json::Value = serde_json::from_str(&report).unwrap();
+        assert_eq!(v["book_source"], "synthetic_amm");
+        let statuses: Vec<&str> = v["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["status"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            statuses.iter().filter(|s| **s == "n/a").count(),
+            3,
+            "{:?}",
+            statuses
+        );
+        assert!(!statuses.contains(&"fail"));
+    }
+
+    #[tokio::test]
+    async fn test_dex_without_reserves_says_estimate() {
+        let factory = dex_factory(&[(50_000.0, 1_000.0)]);
+        let args = dex_args(SummaryFormat::Text);
+        let thresholds = args.health.resolve(&Config::default());
+        let (_, report) = summary_run(&args, &factory, &thresholds, &[], None, &quiet())
+            .await
+            .unwrap();
+        assert!(report.contains("pool reserves not reported"), "{report}");
     }
 
     #[tokio::test]
@@ -2059,7 +2011,7 @@ capabilities:
         let factory = dex_factory(&[(50_000.0, 1_000.0)]);
         let mut args = dex_args(SummaryFormat::Text);
         args.report = Some(report.clone());
-        run_summary(args, &Config::default(), &factory)
+        run_summary(args, &Config::default(), &factory, &quiet())
             .await
             .unwrap();
         let md = std::fs::read_to_string(&report).unwrap();
@@ -2078,15 +2030,23 @@ capabilities:
         args.duration = Some("1s".to_string());
         args.csv = Some(csv.clone());
         args.report = Some(report.clone());
-        run_summary(args, &Config::default(), &factory)
+        run_summary(args, &Config::default(), &factory, &quiet())
             .await
             .unwrap();
 
         let body = std::fs::read_to_string(&csv).unwrap();
         let mut lines = body.lines();
-        assert_eq!(
-            lines.next(),
-            Some("timestamp,run,best_bid,best_ask,mid_price,spread,bid_depth,ask_depth,healthy")
+        // Today's columns stay first and in order; #58 appends the rest.
+        let header = lines.next().unwrap();
+        assert!(
+            header.starts_with(
+                "timestamp,run,best_bid,best_ask,mid_price,spread,bid_depth,ask_depth,healthy,"
+            ),
+            "{header}"
+        );
+        assert!(
+            header.contains("spread_pct") && header.ends_with("ask_top10_depth"),
+            "{header}"
         );
         // One run at t=0, one after the 1s sleep: the loop must not stop early.
         let rows: Vec<_> = lines.collect();
@@ -2094,5 +2054,47 @@ capabilities:
         assert!(rows[0].split(',').nth(1) == Some("1"));
         assert!(rows[1].split(',').nth(1) == Some("2"));
         assert!(report.exists());
+    }
+
+    #[tokio::test]
+    async fn test_run_summary_repeat_publishes_run_progress() {
+        // The TUI draws `run N of M` from this hook, so the total must be
+        // known at the start and the run number must advance.
+        let (out, captured) = Output::capture_merged();
+        let hook = out.progress_hook().expect("a merged capture has a hook");
+        let factory = dex_factory(&[(50_000.0, 1_000.0)]);
+        let mut args = dex_args(SummaryFormat::Json);
+        args.every = Some("1s".to_string());
+        args.duration = Some("2s".to_string());
+        run_summary(args, &Config::default(), &factory, &out)
+            .await
+            .unwrap();
+        let p = hook.lock().unwrap().clone();
+        // Runs at 0s, 1s and 2s.
+        assert_eq!(p.total, Some(3), "{p:?}");
+        assert_eq!(p.run, 3, "{p:?}");
+        assert_eq!(p.next_at, None, "no next run after the last: {p:?}");
+        assert!(captured.out().contains("every 1s for 2s"));
+        assert!(captured.out().contains("Completed 3 run(s)"));
+    }
+
+    #[tokio::test]
+    async fn test_a_failed_run_ends_a_repeating_summary() {
+        // A run that errors stops the repeat and returns the error, so the
+        // pane footer is `✗ Failed in`. It does not skip to the next run.
+        let (out, _captured) = Output::capture_merged();
+        let hook = out.progress_hook().unwrap();
+        let factory = dex_factory(&[]);
+        let mut args = dex_args(SummaryFormat::Json);
+        args.every = Some("1s".to_string());
+        args.duration = Some("30s".to_string());
+        let started = std::time::Instant::now();
+        let result = run_summary(args, &Config::default(), &factory, &out).await;
+        assert!(result.is_err(), "no DEX pairs is a failed run");
+        assert_eq!(hook.lock().unwrap().run, 1, "no second run after the error");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "it did not sleep on"
+        );
     }
 }

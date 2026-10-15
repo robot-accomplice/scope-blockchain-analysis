@@ -1,0 +1,39 @@
+{
+  "recorded": "2026-10-12T16:36:11.558890+00:00",
+  "request": {
+    "method": "GET",
+    "url": "https://api.binance.com/api/v3/ticker/24hr?symbol=USDCUSDT",
+    "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "responses": [
+    {
+      "status": 200,
+      "headers": {
+        "access-control-allow-methods": "GET, HEAD, OPTIONS",
+        "access-control-allow-origin": "*",
+        "cache-control": "no-cache, no-store, must-revalidate",
+        "connection": "keep-alive",
+        "content-security-policy": "default-src 'self'",
+        "content-type": "application/json;charset=UTF-8",
+        "date": "Mon, 12 Oct 2026 16:36:11 GMT",
+        "expires": "0",
+        "pragma": "no-cache",
+        "server": "nginx",
+        "strict-transport-security": "max-age=31536000; includeSubdomains",
+        "via": "1.1 2478ce31ef26e7b89dad036bcc8aea12.cloudfront.net (CloudFront)",
+        "x-amz-cf-id": "pbArgBugic_FJiZkWUtBxf0d7ozuJoI0RLzeTHn1eWyzRiNVYVH-Gw==",
+        "x-amz-cf-pop": "MXP53-P8",
+        "x-cache": "Miss from cloudfront",
+        "x-content-security-policy": "default-src 'self'",
+        "x-content-type-options": "nosniff",
+        "x-frame-options": "SAMEORIGIN",
+        "x-mbx-used-weight": "7",
+        "x-mbx-used-weight-1m": "7",
+        "x-mbx-uuid": "9e057fa9-1a92-4a8d-b402-602ed90c1619",
+        "x-webkit-csp": "default-src 'self'",
+        "x-xss-protection": "1; mode=block"
+      },
+      "body": "{\"symbol\":\"USDCUSDT\",\"priceChange\":\"0.00011000\",\"priceChangePercent\":\"0.011\",\"weightedAvgPrice\":\"1.00095445\",\"prevClosePrice\":\"1.00093000\",\"lastPrice\":\"1.00104000\",\"lastQty\":\"500.00000000\",\"bidPrice\":\"1.00103000\",\"bidQty\":\"1874643.00000000\",\"askPrice\":\"1.00104000\",\"askQty\":\"1540747.00000000\",\"openPrice\":\"1.00093000\",\"highPrice\":\"1.00121000\",\"lowPrice\":\"1.00070000\",\"volume\":\"3269610679.00000000\",\"quoteVolume\":\"3272731372.86902000\",\"openTime\":1791736571374,\"closeTime\":1791822971374,\"firstId\":501903763,\"lastId\":502514629,\"count\":610867}"
+    }
+  ]
+}

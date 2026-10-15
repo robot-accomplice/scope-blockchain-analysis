@@ -216,6 +216,11 @@ pub mod config;
 /// for token analytics data.
 pub mod display;
 
+/// Diagnostics sink for library warnings.
+///
+/// Routes warnings to stderr, or to a TUI pane while a redirect is active.
+pub mod diag;
+
 /// Error types and result aliases.
 ///
 /// Defines [`ScopeError`] for all error conditions and provides a
@@ -253,6 +258,9 @@ pub mod http;
 /// Fetches level-2 order book data from exchange APIs and runs
 /// configurable health checks for stablecoin markets.
 pub mod market;
+
+/// The user's directories, resolved in one place (sandboxed in tests).
+pub mod paths;
 
 /// Library version string.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

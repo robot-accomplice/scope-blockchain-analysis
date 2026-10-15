@@ -34,6 +34,29 @@ To view the interactive schema: `scope venues schema`
 
 ---
 
+## `error_envelope` Object (optional)
+
+Some venues send an error with HTTP 200 and a status field in the JSON body. Without this object, Scope reads that body as data and reports a missing key. With it, Scope reports the venue's own message: `Venue error (<id>): <message> (code <code>)`.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `code_key` | string | No | — | Status field, for example `retCode` (Bybit) or `code` (OKX). A reply without this field is a success. |
+| `ok_codes` | list of strings | No | `[]` | Status values that mean success. Numbers are compared as strings, so write `"0"`. |
+| `message_key` | string | Yes | — | Field with the error text. Without `code_key`, the reply is an error when this field is a non-empty string or array (Kraken: `error: [...]`). |
+
+Example (Bybit):
+
+```yaml
+error_envelope:
+  code_key: retCode
+  ok_codes: ["0"]
+  message_key: retMsg
+```
+
+Venues that send errors with an HTTP 4xx or 5xx status do not need this object.
+
+---
+
 ## `capabilities` Object
 
 Each capability is optional. Omit a capability if the exchange doesn't support it.
@@ -43,6 +66,7 @@ Each capability is optional. Omit a capability if the exchange doesn't support i
 | `order_book` | Level-2 order book / depth endpoint |
 | `ticker` | 24h ticker / market stats endpoint |
 | `trades` | Recent trades endpoint |
+| `assets` | Coin list with each asset's networks and token contracts. `market summary` shows the pair's token contracts under the header. |
 
 ---
 
@@ -80,6 +104,7 @@ Each capability is optional. Omit a capability if the exchange doesn't support i
 | `low_24h` | string | JSON field for 24h low. |
 | `volume_24h` | string | JSON field for 24h base volume. |
 | `quote_volume_24h` | string | JSON field for 24h quote volume. |
+| `price_change_pct_24h` | string | JSON field for the 24h price change in percent (0.5 = +0.5%, not a fraction). |
 | `best_bid` | string | JSON field for best bid price. |
 | `best_ask` | string | JSON field for best ask price. |
 
@@ -113,6 +138,26 @@ Used when an endpoint returns data for all pairs and you need to filter.
 |-------|------|-------------|
 | `field` | string | Response field to match against. |
 | `value` | string | Expected value (supports `{pair}` placeholder). |
+
+---
+
+## `response` Object — Asset Fields
+
+The `assets` endpoint returns a list of coins, and each coin has a list of networks. Every field has a default, so `response: {}` is enough for a Binance-shaped list (`[{"coin": ..., "networkList": [{"network": ..., "contractAddress": ...}]}]`).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `items_key` | string | — | JSON key containing the coin array. Omit if the root is the array. |
+| `asset` | string | `coin` | Field with the asset symbol in each coin. |
+| `networks_key` | string | `networkList` | Key of the network array in each coin. |
+| `network` | string | `network` | Field with the network name in each network. |
+| `contract` | string | `contractAddress` | Field with the token contract. A value shorter than 20 characters (for example `btc`) is a native coin, not a contract. |
+
+```yaml
+  assets:
+    path: /api/v3/coins
+    response: {}
+```
 
 ---
 

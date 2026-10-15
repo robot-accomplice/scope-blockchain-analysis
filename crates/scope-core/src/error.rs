@@ -52,6 +52,17 @@ pub enum ScopeError {
     #[error("Chain client error: {0}")]
     Chain(String),
 
+    /// A market venue (exchange) request or capability failed.
+    ///
+    /// `venue` is the venue id that made the request, for example `bybit`.
+    #[error("Venue error ({venue}): {message}")]
+    Venue {
+        /// Venue id from the descriptor.
+        venue: String,
+        /// What went wrong.
+        message: String,
+    },
+
     /// HTTP request to an external API failed.
     ///
     /// Wraps reqwest errors for network failures, timeouts, or HTTP error responses.
@@ -71,13 +82,11 @@ pub enum ScopeError {
     #[error("Invalid transaction hash: {0}")]
     InvalidHash(String),
 
-    /// File system operation failed.
+    /// An I/O operation failed. Context goes into the error's message
+    /// (`io::Error::new(e.kind(), …)`); the kind stays, so callers can
+    /// tell a closed pipe from a full disk.
     #[error("I/O error: {0}")]
     IoError(#[from] std::io::Error),
-
-    /// File system operation failed (string variant).
-    #[error("I/O error: {0}")]
-    Io(String),
 
     /// Data export operation failed.
     #[error("Export failed: {0}")]
@@ -99,6 +108,12 @@ pub enum ScopeError {
     #[error("Not found: {0}")]
     NotFound(String),
 
+    /// The request itself is at fault and the caller can fix it: an unknown
+    /// venue, or a chain that a DEX venue does not read. The message is
+    /// shown as is.
+    #[error("{0}")]
+    InvalidInput(String),
+
     /// Compliance or risk analysis failed.
     #[error("Compliance error: {0}")]
     Compliance(String),
@@ -114,6 +129,40 @@ pub enum ScopeError {
     /// Other unspecified error.
     #[error("{0}")]
     Other(String),
+}
+
+impl ScopeError {
+    /// The one way to wrap an I/O error with what was being done: the
+    /// message reads `<context>: <error>` and the error kind stays, so a
+    /// closed pipe is still a closed pipe.
+    pub fn io_context(e: std::io::Error, context: impl std::fmt::Display) -> Self {
+        let kind = e.kind();
+        let wrapped = IoContext {
+            context: context.to_string(),
+            source: e,
+        };
+        Self::IoError(std::io::Error::new(kind, wrapped))
+    }
+}
+
+/// An I/O error and what was being done. It keeps the original error as
+/// its source.
+#[derive(Debug)]
+struct IoContext {
+    context: String,
+    source: std::io::Error,
+}
+
+impl std::fmt::Display for IoContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.context, self.source)
+    }
+}
+
+impl std::error::Error for IoContext {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
 }
 
 /// Configuration-specific error type.
@@ -192,6 +241,15 @@ mod tests {
     }
 
     #[test]
+    fn test_venue_error_display_names_the_venue() {
+        let err = ScopeError::Venue {
+            venue: "bybit".into(),
+            message: "API error: HTTP 400".into(),
+        };
+        assert_eq!(err.to_string(), "Venue error (bybit): API error: HTTP 400");
+    }
+
+    #[test]
     fn test_bca_error_display_chain() {
         let err = ScopeError::Chain("connection refused".into());
         assert_eq!(err.to_string(), "Chain client error: connection refused");
@@ -239,6 +297,38 @@ mod tests {
         let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
         let bca_err: ScopeError = io_err.into();
         assert!(matches!(bca_err, ScopeError::IoError(_)));
+    }
+
+    #[test]
+    fn test_io_error_with_context_keeps_its_kind_and_the_old_text() {
+        // One I/O variant: the context is in the message, and the kind
+        // stays for checks such as a closed pipe.
+        let denied = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let err = ScopeError::io_context(denied, "Failed to write token aliases");
+        let source = std::error::Error::source(&err).and_then(std::error::Error::source);
+        assert_eq!(
+            source.map(|s| s.to_string()).as_deref(),
+            Some("denied"),
+            "the source stays"
+        );
+        assert_eq!(
+            err.to_string(),
+            "I/O error: Failed to write token aliases: denied"
+        );
+        assert!(
+            matches!(&err, ScopeError::IoError(e) if e.kind() == std::io::ErrorKind::PermissionDenied)
+        );
+    }
+
+    #[test]
+    fn test_save_report_failure_names_the_path_and_keeps_the_kind() {
+        let dir = std::env::temp_dir().join("scope-no-such-dir-for-report-test");
+        let err = crate::display::report::save_report("x", dir.join("r.md")).unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with("I/O error: Failed to write report to ")
+        );
+        assert!(matches!(&err, ScopeError::IoError(e) if e.kind() == std::io::ErrorKind::NotFound));
     }
 
     #[test]

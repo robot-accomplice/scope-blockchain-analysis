@@ -18,7 +18,7 @@ pub struct HealthArgs {
     #[arg(long = "peg", value_name = "TARGET", help = with_default("Peg target (e.g., 1.0 for USD stablecoins).", health::DEFAULT_PEG_TARGET))]
     pub peg_target: Option<f64>,
 
-    #[arg(long, value_name = "RANGE", help = with_default("Peg range for outlier filtering (orders outside peg ± range×5 excluded). E.g., 0.001 = ±0.5% around peg.", health::DEFAULT_PEG_RANGE))]
+    #[arg(long, value_name = "RANGE", help = with_default(&peg_range_help(), health::DEFAULT_PEG_RANGE))]
     pub peg_range: Option<f64>,
 
     #[arg(long, value_name = "N", help = with_default("Minimum valid order book levels (price > 0, quantity > 0) per side.", health::DEFAULT_MIN_LEVELS))]
@@ -41,6 +41,42 @@ pub struct HealthArgs {
 
     #[arg(long, value_name = "USDT", help = with_default("Min depth of the top 10 valid levels per side, in quote terms.", health::DEFAULT_MIN_TOP10_DEPTH))]
     pub min_top10_depth: Option<f64>,
+
+    #[arg(long, value_name = "PCT", value_parser = positive_pct, help = with_default("Price step between levels of a synthetic AMM book (DEX venues), in percent.", health::DEFAULT_AMM_STEP_PCT))]
+    pub amm_step_pct: Option<f64>,
+
+    #[arg(long, value_name = "PCT", value_parser = positive_pct, help = with_default("Half-width of the depth window for the depth/volume rule, in percent of the mid price.", health::DEFAULT_DEPTH_WINDOW_PCT))]
+    pub depth_window_pct: Option<f64>,
+
+    #[arg(long, value_name = "PCT", value_parser = positive_pct, help = with_default("Depth/volume floor: depth within the window below this percent of 24h volume fails.", health::DEFAULT_MIN_DEPTH_VOLUME_PCT))]
+    pub min_depth_volume_pct: Option<f64>,
+
+    #[arg(long, value_name = "PCT", value_parser = positive_pct, help = with_default("Depth/volume ceiling: depth within the window above this percent of 24h volume warns.", health::DEFAULT_MAX_DEPTH_VOLUME_PCT))]
+    pub max_depth_volume_pct: Option<f64>,
+}
+
+/// Parses a percentage that must be finite and greater than zero.
+fn positive_pct(s: &str) -> Result<f64, String> {
+    let v: f64 = s.parse().map_err(|e| format!("{e}"))?;
+    if v.is_finite() && v > 0.0 {
+        Ok(v)
+    } else {
+        Err(format!("must be a number greater than 0, got {s}"))
+    }
+}
+
+/// Help for `--peg-range`, with the band width taken from the constants.
+fn peg_range_help() -> String {
+    let band_pct = health::PegBands::new(health::DEFAULT_PEG_TARGET, health::DEFAULT_PEG_RANGE)
+        .outlier_width()
+        / health::DEFAULT_PEG_TARGET
+        * health::PERCENT_PER_RATIO;
+    format!(
+        "Peg range. The outlier band is peg ± range×{factor}: levels outside it are left out of depth and level counts (best prices still include them). E.g., {range} = ±{band_pct}% around a peg of {target}.",
+        factor = health::PEG_OUTLIER_FACTOR,
+        range = health::DEFAULT_PEG_RANGE,
+        target = health::DEFAULT_PEG_TARGET,
+    )
 }
 
 /// Help text with the built-in default, so `--help` names the value in force.
@@ -61,6 +97,10 @@ impl HealthArgs {
             max_spread_pct: self.max_spread_pct,
             min_top3_depth: self.min_top3_depth,
             min_top10_depth: self.min_top10_depth,
+            amm_step_pct: self.amm_step_pct,
+            depth_window_pct: self.depth_window_pct,
+            min_depth_volume_pct: self.min_depth_volume_pct,
+            max_depth_volume_pct: self.max_depth_volume_pct,
         })
     }
 }
@@ -114,5 +154,42 @@ mod tests {
     fn test_peg_flag_sets_peg_target() {
         let t = resolve(&["--peg", "0.98"], &Config::default());
         assert_eq!(t.peg_target, 0.98);
+    }
+
+    #[test]
+    fn test_amm_step_flag_resolves_and_rejects_non_positive() {
+        #[derive(clap::Parser)]
+        struct W {
+            #[command(flatten)]
+            h: HealthArgs,
+        }
+        use clap::Parser;
+        let w = W::try_parse_from(["x", "--amm-step-pct", "0.05"]).unwrap();
+        assert_eq!(w.h.resolve(&Config::default()).amm_step_pct, 0.05);
+        let w = W::try_parse_from(["x"]).unwrap();
+        assert_eq!(
+            w.h.resolve(&Config::default()).amm_step_pct,
+            health::DEFAULT_AMM_STEP_PCT
+        );
+        for bad in ["0", "-1", "nan", "inf", "abc"] {
+            assert!(
+                W::try_parse_from(["x", "--amm-step-pct", bad]).is_err(),
+                "{}",
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn test_depth_volume_flags_override_config() {
+        let mut config = Config::default();
+        config.market.health.min_depth_volume_pct = 3.0;
+        let t = resolve(
+            &["--max-depth-volume-pct", "25", "--depth-window-pct", "1"],
+            &config,
+        );
+        assert_eq!(t.min_depth_volume_pct, 3.0);
+        assert_eq!(t.max_depth_volume_pct, 25.0);
+        assert_eq!(t.depth_window_pct, 1.0);
     }
 }

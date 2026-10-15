@@ -32,7 +32,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust
         with:
           targets: ${{ matrix.target }}
       
@@ -98,17 +98,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust
       - uses: Swatinem/rust-cache@v2
 
       # Publish order matches the dependency graph:
       #   scope-bca-core  →  scope-bca-cli  →  scope-bca
-      # Each publish step is fire-and-forget for "already exists" so that
-      # partial-retry runs don't fail the whole job. The `sleep` between steps
+      # publish-crate.sh skips a version that crates.io already has, so a rerun
+      # after a partial release works. Any other error fails the step (#45).
+      # The `sleep` between steps
       # gives the crates.io sparse index time to serve the freshly uploaded
       # version before the next crate's verify step tries to resolve it.
       - name: Publish scope-bca-core
-        run: cargo publish -p scope-bca-core || echo "::warning::cargo publish for scope-bca-core failed (version may already exist)"
+        run: scripts/publish-crate.sh scope-bca-core
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
@@ -116,7 +117,7 @@ jobs:
         run: sleep 45
 
       - name: Publish scope-bca-cli
-        run: cargo publish -p scope-bca-cli || echo "::warning::cargo publish for scope-bca-cli failed (version may already exist)"
+        run: scripts/publish-crate.sh scope-bca-cli
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
@@ -124,6 +125,15 @@ jobs:
         run: sleep 45
 
       - name: Publish scope-bca
-        run: cargo publish -p scope-bca || echo "::warning::cargo publish for scope-bca failed (version may already exist)"
+        run: scripts/publish-crate.sh scope-bca
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  homebrew:
+    name: Update Homebrew tap
+    needs: create-release
+    uses: ./.github/workflows/homebrew.yml
+    with:
+      tag: ${{ github.ref_name }}
+    secrets:
+      HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}

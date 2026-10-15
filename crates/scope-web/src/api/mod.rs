@@ -22,6 +22,46 @@ use crate::AppState;
 use axum::Router;
 use std::sync::Arc;
 
+/// The one map from a core error kind to an HTTP status: a missing resource
+/// is 404, a request fault (unknown venue, chain mismatch, bad address) is
+/// 400, and anything else is 500.
+pub(crate) fn status_for(err: &scope::error::ScopeError) -> axum::http::StatusCode {
+    use axum::http::StatusCode;
+    use scope::error::ScopeError;
+    match err {
+        ScopeError::NotFound(_) => StatusCode::NOT_FOUND,
+        ScopeError::InvalidInput(_)
+        | ScopeError::InvalidAddress(_)
+        | ScopeError::InvalidHash(_) => StatusCode::BAD_REQUEST,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+/// A JSON error body, `{ "error": message }`, with `status`.
+pub(crate) fn error_response(
+    status: axum::http::StatusCode,
+    message: impl Into<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let body = serde_json::json!({ "error": message.into() });
+    (status, axum::Json(body)).into_response()
+}
+
+/// Serde default for a request's chain field.
+pub(crate) fn default_chain() -> String {
+    scope::chains::DEFAULT_CHAIN.to_string()
+}
+
+/// Serde default for a request's market venue field.
+pub(crate) fn default_venue() -> String {
+    scope::market::DEFAULT_VENUE.to_string()
+}
+
+/// Serde default for a market request's pair field.
+pub(crate) fn default_pair() -> String {
+    scope::market::DEFAULT_PAIR.to_string()
+}
+
 /// Result of resolving a user input through the address book.
 ///
 /// When the input matches an address book entry (either via `@label`
@@ -43,12 +83,13 @@ pub struct ResolvedInput {
 ///
 /// # Errors
 ///
-/// Returns a user-facing error string when `@label` is used but the label
-/// doesn't exist in the address book — this should be returned as a 400.
+/// [`scope::error::ScopeError::InvalidInput`] when `@label` names no address
+/// book entry — a request fault, so handlers answer
+/// `error_response(status_for(&e), ...)` with 400.
 pub fn resolve_address_book(
     input: &str,
     config: &scope::config::Config,
-) -> Result<ResolvedInput, String> {
+) -> scope::error::Result<ResolvedInput> {
     match scope_cli::cli::address_book::resolve_address_book_input(input, config) {
         Ok(Some((address, chain))) => Ok(ResolvedInput {
             value: address,
@@ -58,7 +99,11 @@ pub fn resolve_address_book(
             value: input.to_string(),
             chain: None,
         }),
-        Err(e) => Err(e.to_string()),
+        // A misspelled @label is a bad request, not a missing resource.
+        Err(scope::error::ScopeError::NotFound(msg)) => {
+            Err(scope::error::ScopeError::InvalidInput(msg))
+        }
+        Err(e) => Err(scope::error::ScopeError::InvalidInput(e.to_string())),
     }
 }
 
@@ -118,7 +163,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = Arc::new(AppState { config, factory });
+        let state = Arc::new(AppState::new(config, factory));
         let _router = routes(state);
         // If this doesn't panic, routes are properly constructed
     }
@@ -161,7 +206,9 @@ mod tests {
         };
         let result = resolve_address_book("@nonexistent", &config);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("@nonexistent"));
+        let err = result.unwrap_err();
+        assert!(matches!(err, scope::error::ScopeError::InvalidInput(_)));
+        assert!(err.to_string().contains("@nonexistent"));
     }
 
     #[test]
@@ -223,5 +270,29 @@ mod tests {
         let r = result.unwrap();
         assert_eq!(r.value, "USDC");
         assert_eq!(r.chain, None);
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+    use axum::http::StatusCode;
+    use scope::error::ScopeError;
+
+    /// One map from core error kinds to HTTP status: a missing resource
+    /// (e.g. no DEX pairs for the token) is 404, bad input is 400, and
+    /// anything else is 500.
+    #[test]
+    fn core_error_kinds_map_to_one_status_each() {
+        let no_pairs = ScopeError::NotFound("No DEX pairs found for USDC on solana".into());
+        assert_eq!(status_for(&no_pairs), StatusCode::NOT_FOUND);
+        assert_eq!(
+            status_for(&ScopeError::InvalidAddress("0x1".into())),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            status_for(&ScopeError::Network("timeout".into())),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 }

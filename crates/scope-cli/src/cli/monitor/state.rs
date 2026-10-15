@@ -3,11 +3,20 @@
 use ratatui::widgets::ListState;
 use scope::chains::DexPair;
 use scope::chains::dex::DexTokenData;
-use scope::market::{OrderBook, OrderBookLevel, Trade, TradeSide};
+use scope::market::{
+    HealthThresholds, OrderBook, Trade, TradeSide, most_liquid, order_book_from_analytics,
+};
 use std::collections::VecDeque;
 use std::fs;
 use std::io::{BufWriter, Write as _};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// Default directory for CSV exports when config `export.path` is not set.
+const DEFAULT_EXPORT_DIR: &str = "./scope-exports";
+
+/// The CSV header of a monitor export.
+const EXPORT_HEADER: &str =
+    "timestamp,price_usd,volume_24h,liquidity_usd,buys_24h,sells_24h,market_cap\n";
 use std::time::{Duration, Instant};
 
 use super::config::{
@@ -16,6 +25,9 @@ use super::config::{
     MAX_REFRESH_SECS, MIN_REFRESH_SECS, MonitorConfig, OhlcCandle, ScaleMode, TimePeriod,
     WidgetVisibility,
 };
+
+/// Recent trades the monitor keeps, synthetic or from the venue.
+pub(crate) const MAX_RECENT_TRADES: usize = 200;
 
 /// State for the live token monitor.
 pub struct MonitorState {
@@ -85,6 +97,9 @@ pub struct MonitorState {
     /// Refresh rate.
     pub refresh_rate: Duration,
 
+    /// The key overlay (`?`) is open (#68).
+    pub show_keys: bool,
+
     /// Whether monitoring is paused.
     pub paused: bool,
 
@@ -120,6 +135,18 @@ pub struct MonitorState {
 
     /// Recent trades (synthetic from DEX pair data or real from exchange API).
     pub recent_trades: VecDeque<Trade>,
+
+    /// Health thresholds for the book built from DEX pairs: config
+    /// `market.health`, as `market summary` uses.
+    pub thresholds: HealthThresholds,
+
+    /// The venue whose real order book `order_book` holds (#78). `None`
+    /// while the book is built from DEX pairs.
+    pub book_venue: Option<String>,
+
+    /// The venue whose real trades `recent_trades` holds. `None` while the
+    /// trades are synthetic.
+    pub trades_venue: Option<String>,
 
     /// Raw DEX pair data for the exchange view.
     pub dex_pairs: Vec<DexPair>,
@@ -171,6 +198,9 @@ pub struct MonitorState {
     /// Path to the current export file.
     pub export_path: Option<PathBuf>,
 
+    /// Directory where the E key starts new exports (config `export.path`).
+    pub export_dir: PathBuf,
+
     /// Rolling volume average for spike detection (simple moving average).
     pub volume_avg: f64,
 
@@ -191,6 +221,49 @@ pub struct MonitorState {
 
     /// Venue-formatted pair symbol for OHLC queries (e.g., "BTCUSDT").
     pub venue_pair: Option<String>,
+
+    /// Venue id from `--venue` (e.g., "binance"), when a venue is set.
+    pub venue: Option<String>,
+
+    /// The token is priced from the venue ticker alone (`--pair`, or the
+    /// venue fallback). DexScreener is never called in this mode.
+    pub venue_only: bool,
+
+    /// False when the venue ticker gives no 24h change: `price_change_24h`
+    /// is then a placeholder, shown as n/a.
+    pub change_24h_known: bool,
+
+    /// False when the 24h volume is not known in USD: `volume_24h` is then
+    /// a placeholder. It is not charted, exported or fed to alerts.
+    pub volume_known: bool,
+}
+
+/// Where the data comes from: the chain, or `<VENUE> <pair>` in venue-only
+/// mode.
+pub(crate) fn source_label(chain: &str, venue: Option<(&str, &str)>) -> String {
+    match venue {
+        Some((id, pair)) => format!("{} {}", id.to_uppercase(), pair),
+        None => chain.to_uppercase(),
+    }
+}
+
+/// Where the monitor keeps its price cache: the system temp directory. In
+/// tests, a directory for each process and test thread: tests run in
+/// parallel and must not save, read or remove each other's cache file (a
+/// shared file failed `test_cache_roundtrip_save_load` on CI).
+fn cache_dir() -> PathBuf {
+    let dir = std::env::temp_dir();
+    #[cfg(test)]
+    let dir = {
+        let own = dir.join(format!(
+            "scope-monitor-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::create_dir_all(&own);
+        own
+    };
+    dir
 }
 
 impl MonitorState {
@@ -258,6 +331,7 @@ impl MonitorState {
             fdv: token_data.fdv,
             last_update: now,
             refresh_rate: Duration::from_secs(DEFAULT_REFRESH_SECS),
+            show_keys: false,
             paused: false,
             log_messages: VecDeque::with_capacity(10),
             log_list_state: ListState::default(),
@@ -270,6 +344,9 @@ impl MonitorState {
             liquidity_pairs: Vec::new(),
             order_book: None,
             recent_trades: VecDeque::new(),
+            thresholds: HealthThresholds::default(),
+            book_venue: None,
+            trades_venue: None,
             dex_pairs: token_data.pairs.clone(),
             websites: token_data.websites.clone(),
             socials: token_data
@@ -292,6 +369,7 @@ impl MonitorState {
             // Phase 8: Export
             export_active: false,
             export_path: None,
+            export_dir: PathBuf::from(DEFAULT_EXPORT_DIR),
             volume_avg: token_data.volume_24h,
             // Phase 9: Auto-Pause
             auto_pause_on_input: false,
@@ -300,6 +378,10 @@ impl MonitorState {
             // Exchange OHLC
             exchange_ohlc: Vec::new(),
             venue_pair: None,
+            venue: None,
+            venue_only: false,
+            change_24h_known: true,
+            volume_known: true,
         }
     }
 
@@ -312,6 +394,49 @@ impl MonitorState {
         self.color_scheme = config.color_scheme;
         self.alerts = config.alerts.clone();
         self.auto_pause_on_input = config.auto_pause_on_input;
+        self.export_dir = config
+            .export
+            .path
+            .as_deref()
+            .map_or_else(|| PathBuf::from(DEFAULT_EXPORT_DIR), PathBuf::from);
+    }
+
+    /// Switches to venue-only mode and records which stats `ticker` gives.
+    /// Call it before `update` with data built from the same ticker.
+    pub fn set_venue_ticker(&mut self, ticker: &scope::market::Ticker) {
+        self.venue_only = true;
+        self.change_24h_known = ticker.price_change_pct_24h.is_some();
+        self.volume_known = ticker.usd_volume().is_some();
+        if !self.volume_known {
+            // Synthetic volume built from a placeholder is not data.
+            self.volume_history.clear();
+        }
+    }
+
+    /// The source of the data, for the header and the startup line.
+    pub fn source_label(&self) -> String {
+        let venue = self.venue_only.then(|| {
+            (
+                self.venue.as_deref().unwrap_or("venue"),
+                self.venue_pair.as_deref().unwrap_or(&self.symbol),
+            )
+        });
+        source_label(&self.chain, venue)
+    }
+
+    /// The 24h change, or `None` when the source does not give it.
+    pub fn change_24h(&self) -> Option<f64> {
+        self.change_24h_known.then_some(self.price_change_24h)
+    }
+
+    /// True when the 5m/1h/6h changes are data. A venue ticker has none.
+    pub fn short_changes_known(&self) -> bool {
+        !self.venue_only
+    }
+
+    /// The 24h volume in USD, or `None` when it is not known in USD.
+    pub fn volume_usd(&self) -> Option<f64> {
+        self.volume_known.then_some(self.volume_24h)
     }
 
     /// Toggles between line and candlestick chart modes.
@@ -327,7 +452,7 @@ impl MonitorState {
 
     /// Returns the path to the cache file for a token.
     pub(crate) fn cache_path(token_address: &str, chain: &str) -> PathBuf {
-        let mut path = std::env::temp_dir();
+        let mut path = cache_dir();
         // Create a safe filename from address (first 16 chars) and chain
         let safe_addr = token_address
             .chars()
@@ -473,82 +598,28 @@ impl MonitorState {
         history
     }
 
-    /// Generates a multi-level synthetic order book from DEX pair data.
-    ///
-    /// Aggregates liquidity across all pairs and distributes it into
-    /// realistic bid/ask levels around the current mid price. Levels are
-    /// spaced logarithmically so near-mid levels are denser.
-    pub(crate) fn generate_synthetic_order_book(
-        pairs: &[DexPair],
-        symbol: &str,
-        price: f64,
-        total_liquidity: f64,
-    ) -> Option<OrderBook> {
-        if price <= 0.0 || total_liquidity <= 0.0 {
-            return None;
-        }
+    /// The book built from DEX pairs: the core AMM book of the most liquid
+    /// pool, with the source it reports (H1). `None` without a priced pool.
+    pub(crate) fn dex_book(&self, pairs: &[DexPair], symbol: &str) -> Option<OrderBook> {
+        most_liquid(pairs)
+            .filter(|p| p.price_usd > 0.0)
+            .map(|p| order_book_from_analytics(&self.chain, p, symbol, &self.thresholds))
+    }
 
-        // Spread is tighter for more liquid markets
-        let base_spread_bps = if total_liquidity > 1_000_000.0 {
-            5.0 // 0.05%
-        } else if total_liquidity > 100_000.0 {
-            15.0 // 0.15%
-        } else {
-            50.0 // 0.50%
-        };
+    /// Shows the venue's real order book (#78). DEX refreshes no longer
+    /// replace it.
+    pub fn set_venue_book(&mut self, venue: &str, book: OrderBook) {
+        self.book_venue = Some(venue.to_string());
+        self.order_book = Some(book);
+    }
 
-        let half_spread = price * base_spread_bps / 10_000.0;
-        let half_liq = total_liquidity / 2.0;
-        let num_levels: usize = 15;
-
-        // Generate ask levels (ascending from mid + half_spread)
-        let mut asks = Vec::with_capacity(num_levels);
-        for i in 0..num_levels {
-            // Exponential spacing: tighter near the mid, wider further out
-            let offset_pct = (1.0 + i as f64 * 0.3).powf(1.4) * 0.001;
-            let ask_price = price + half_spread + price * offset_pct;
-            // Liquidity decreases further from mid (exponential decay)
-            let weight = (-1.5 * i as f64 / num_levels as f64).exp();
-            let level_liq = half_liq * weight / num_levels as f64 * 2.5;
-            let quantity = level_liq / ask_price;
-            if quantity > 0.0 {
-                asks.push(OrderBookLevel {
-                    price: ask_price,
-                    quantity,
-                });
-            }
-        }
-
-        // Generate bid levels (descending from mid - half_spread)
-        let mut bids = Vec::with_capacity(num_levels);
-        for i in 0..num_levels {
-            let offset_pct = (1.0 + i as f64 * 0.3).powf(1.4) * 0.001;
-            let bid_price = price - half_spread - price * offset_pct;
-            if bid_price <= 0.0 {
-                break;
-            }
-            let weight = (-1.5 * i as f64 / num_levels as f64).exp();
-            let level_liq = half_liq * weight / num_levels as f64 * 2.5;
-            let quantity = level_liq / bid_price;
-            if quantity > 0.0 {
-                bids.push(OrderBookLevel {
-                    price: bid_price,
-                    quantity,
-                });
-            }
-        }
-
-        // Find best quote token from pairs for the pair label
-        let quote = pairs
-            .first()
-            .map(|p| p.quote_token.as_str())
-            .unwrap_or("USD");
-
-        Some(OrderBook {
-            pair: format!("{}/{}", symbol, quote),
-            bids,
-            asks,
-        })
+    /// Shows the venue's real recent trades, oldest first, in place of the
+    /// synthetic ones.
+    pub fn set_venue_trades(&mut self, venue: &str, mut trades: Vec<Trade>) {
+        trades.sort_by_key(|t| t.timestamp_ms);
+        let keep = trades.len().saturating_sub(MAX_RECENT_TRADES);
+        self.trades_venue = Some(venue.to_string());
+        self.recent_trades = trades.into_iter().skip(keep).collect();
     }
 
     /// Updates the state with new token data.
@@ -562,11 +633,13 @@ impl MonitorState {
             value: token_data.price_usd,
             is_real: true,
         });
-        self.volume_history.push_back(DataPoint {
-            timestamp: now_ts,
-            value: token_data.volume_24h,
-            is_real: true,
-        });
+        if self.volume_known {
+            self.volume_history.push_back(DataPoint {
+                timestamp: now_ts,
+                value: token_data.volume_24h,
+                is_real: true,
+            });
+        }
         self.real_data_count += 1;
 
         // Trim data points older than 24 hours
@@ -619,15 +692,13 @@ impl MonitorState {
 
         // Update DEX pairs and generate synthetic order book
         self.dex_pairs = token_data.pairs.clone();
-        self.order_book = Self::generate_synthetic_order_book(
-            &token_data.pairs,
-            &token_data.symbol,
-            token_data.price_usd,
-            token_data.liquidity_usd,
-        );
+        if self.book_venue.is_none() {
+            self.order_book = self.dex_book(&token_data.pairs, &token_data.symbol);
+        }
 
-        // Generate synthetic trade from price movement
-        if token_data.price_usd > 0.0 {
+        // Generate a synthetic trade from price movement, unless the venue's
+        // real trades are shown.
+        if self.trades_venue.is_none() && token_data.price_usd > 0.0 {
             let side = if price_changed && token_data.price_usd > self.current_price {
                 TradeSide::Buy
             } else if price_changed {
@@ -658,8 +729,7 @@ impl MonitorState {
                 side,
                 id: None,
             });
-            // Keep at most 200 trades
-            while self.recent_trades.len() > 200 {
+            while self.recent_trades.len() > MAX_RECENT_TRADES {
                 self.recent_trades.pop_front();
             }
         }
@@ -687,9 +757,14 @@ impl MonitorState {
 
         // ── Volume average for spike detection ──
         // Exponential moving average: 10% weight on new value
-        self.volume_avg = self.volume_avg * 0.9 + token_data.volume_24h * 0.1;
+        if self.volume_known {
+            self.volume_avg = self.volume_avg * 0.9 + token_data.volume_24h * 0.1;
+        }
 
-        self.log(format!("Updated: ${:.6}", token_data.price_usd));
+        self.log(format!(
+            "Updated: {}",
+            scope::display::format::format_price_usd(token_data.price_usd)
+        ));
 
         // Periodically save to cache (every 60 updates, ~5 minutes at 5s refresh)
         if self.real_data_count.is_multiple_of(60) {
@@ -706,7 +781,11 @@ impl MonitorState {
             && self.current_price < min
         {
             self.active_alerts.push(ActiveAlert {
-                message: format!("⚠ Price ${:.6} below min ${:.6}", self.current_price, min),
+                message: format!(
+                    "⚠ Price {} below min {}",
+                    scope::display::format::format_price_usd(self.current_price),
+                    scope::display::format::format_price_usd(min)
+                ),
                 triggered_at: Instant::now(),
             });
         }
@@ -716,13 +795,18 @@ impl MonitorState {
             && self.current_price > max
         {
             self.active_alerts.push(ActiveAlert {
-                message: format!("⚠ Price ${:.6} above max ${:.6}", self.current_price, max),
+                message: format!(
+                    "⚠ Price {} above max {}",
+                    scope::display::format::format_price_usd(self.current_price),
+                    scope::display::format::format_price_usd(max)
+                ),
                 triggered_at: Instant::now(),
             });
         }
 
         // Volume spike alert
         if let Some(threshold_pct) = self.alerts.volume_spike_threshold_pct
+            && self.volume_known
             && self.volume_avg > 0.0
         {
             let spike_pct = ((token_data.volume_24h - self.volume_avg) / self.volume_avg) * 100.0;
@@ -758,49 +842,83 @@ impl MonitorState {
     }
 
     /// Writes a single CSV row to the export file.
+    ///
+    /// A failed write stops the export and logs the reason, so the REC
+    /// indicator never claims rows that were not written.
     pub(crate) fn write_export_row(&mut self) {
-        if let Some(ref path) = self.export_path {
-            // Open file in append mode
-            if let Ok(file) = fs::OpenOptions::new().append(true).open(path) {
-                let mut writer = BufWriter::new(file);
-                let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-                let market_cap_str = self
-                    .market_cap
-                    .map(|mc| format!("{:.2}", mc))
-                    .unwrap_or_default();
-                let row = format!(
-                    "{},{:.8},{:.2},{:.2},{},{},{}\n",
-                    timestamp,
-                    self.current_price,
-                    self.volume_24h,
-                    self.liquidity_usd,
-                    self.buys_24h,
-                    self.sells_24h,
-                    market_cap_str,
-                );
-                let _ = writer.write_all(row.as_bytes());
-            }
+        let Some(path) = self.export_path.clone() else {
+            return;
+        };
+        if let Err(e) = self.append_export_row(&path) {
+            self.log(format!("Export failed: {}: {}", path.display(), e));
+            self.export_active = false;
+            self.export_path = None;
         }
     }
 
-    /// Starts CSV export: creates the file and writes the header.
+    fn append_export_row(&self, path: &Path) -> std::io::Result<()> {
+        let file = fs::OpenOptions::new().append(true).open(path)?;
+        let mut writer = BufWriter::new(file);
+        let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let market_cap_str = self
+            .market_cap
+            .map(|mc| format!("{:.2}", mc))
+            .unwrap_or_default();
+        // Unknown values are empty fields, not zeros.
+        let volume_str = self
+            .volume_usd()
+            .map(|v| format!("{:.2}", v))
+            .unwrap_or_default();
+        let (liquidity_str, buys_str, sells_str) = if self.venue_only {
+            Default::default()
+        } else {
+            (
+                format!("{:.2}", self.liquidity_usd),
+                self.buys_24h.to_string(),
+                self.sells_24h.to_string(),
+            )
+        };
+        let row = format!(
+            "{},{:.8},{},{},{},{},{}\n",
+            timestamp,
+            self.current_price,
+            volume_str,
+            liquidity_str,
+            buys_str,
+            sells_str,
+            market_cap_str,
+        );
+        writer.write_all(row.as_bytes())?;
+        writer.flush()
+    }
+
+    /// Starts CSV export in the export directory, with a timestamped name.
+    /// A failure is logged and leaves the export off.
     pub fn start_export(&mut self) {
-        let base_dir = PathBuf::from("./scope-exports");
-        let _ = fs::create_dir_all(&base_dir);
         let date_str = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
-        let filename = format!("{}_{}.csv", self.symbol, date_str);
-        let path = base_dir.join(filename);
-
-        // Write CSV header
-        if let Ok(mut file) = fs::File::create(&path) {
-            let header =
-                "timestamp,price_usd,volume_24h,liquidity_usd,buys_24h,sells_24h,market_cap\n";
-            let _ = file.write_all(header.as_bytes());
+        let path = self
+            .export_dir
+            .join(format!("{}_{}.csv", self.symbol, date_str));
+        if let Err(e) = self.start_export_to(&path) {
+            self.log(format!("Export failed: {}: {}", path.display(), e));
         }
+    }
 
-        self.export_path = Some(path.clone());
+    /// Starts CSV export at `path`: creates its directory and the file, and
+    /// writes the header.
+    ///
+    /// # Errors
+    ///
+    /// Returns the file system error. The export stays off.
+    pub fn start_export_to(&mut self, path: &Path) -> std::io::Result<()> {
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            fs::create_dir_all(parent)?;
+        }
+        fs::File::create(path)?.write_all(EXPORT_HEADER.as_bytes())?;
+        self.export_path = Some(path.to_path_buf());
         self.export_active = true;
         self.log(format!("Export started: {}", path.display()));
+        Ok(())
     }
 
     /// Stops CSV export and closes the file.

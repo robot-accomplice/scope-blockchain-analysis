@@ -61,12 +61,15 @@ impl VenueRegistry {
     /// User venues with the same `id` as a built-in override the built-in,
     /// allowing users to customize endpoints without recompiling.
     pub fn load() -> Result<Self> {
-        let mut registry = Self::default();
+        Self::load_from(&Self::user_venues_dir())
+    }
 
-        // Load user venues from ~/.config/scope/venues/
-        let user_dir = Self::user_venues_dir();
+    /// The built-in venues, plus the user venues in `user_dir`. A file that
+    /// cannot be read or parsed is skipped with a warning.
+    pub fn load_from(user_dir: &std::path::Path) -> Result<Self> {
+        let mut registry = Self::default();
         if user_dir.is_dir()
-            && let Ok(entries) = std::fs::read_dir(&user_dir)
+            && let Ok(entries) = std::fs::read_dir(user_dir)
         {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -80,7 +83,7 @@ impl VenueRegistry {
                                 registry.venues.insert(desc.id.clone(), desc);
                             }
                             Err(e) => {
-                                eprintln!(
+                                crate::notice!(
                                     "Warning: failed to parse venue file {}: {}",
                                     path.display(),
                                     e
@@ -88,7 +91,7 @@ impl VenueRegistry {
                             }
                         },
                         Err(e) => {
-                            eprintln!(
+                            crate::notice!(
                                 "Warning: failed to read venue file {}: {}",
                                 path.display(),
                                 e
@@ -131,37 +134,28 @@ impl VenueRegistry {
 
     /// Find the closest venue name to a given input (for typo suggestions).
     pub fn suggest(&self, input: &str) -> Option<&str> {
-        let input_lower = input.to_lowercase();
-        self.venues
-            .keys()
-            .map(|k| (k.as_str(), strsim_distance(&input_lower, &k.to_lowercase())))
-            .filter(|(_, dist)| *dist <= 3)
-            .min_by_key(|(_, dist)| *dist)
-            .map(|(k, _)| k)
+        closest(input, self.list())
     }
 
     /// Path to the user venues directory (`~/.config/scope/venues/`).
     pub fn user_venues_dir() -> PathBuf {
-        dirs::home_dir()
+        crate::paths::home_dir()
             .map(|h| h.join(".config").join("scope").join("venues"))
             .unwrap_or_else(|| PathBuf::from(".config").join("scope").join("venues"))
     }
 
     /// Create an ExchangeClient for the given venue ID.
     ///
-    /// Returns an error if the venue is not found, with a suggestion if
-    /// a close match exists.
+    /// An unknown ID is [`ScopeError::InvalidInput`] that lists the registry
+    /// venues and names the closest one. DEX venues are not listed: this
+    /// lookup cannot serve them (see `MarketVenue::resolve`).
     pub fn create_exchange_client(
         &self,
         venue_id: &str,
     ) -> Result<crate::market::exchange::ExchangeClient> {
-        let desc = self.get(venue_id).ok_or_else(|| {
-            let hint = self
-                .suggest(venue_id)
-                .map(|s| format!("\n\n  Did you mean \"{}\"?\n\n  Available venues: {}\n  Run `scope venues list` for details.", s, self.list().join(", ")))
-                .unwrap_or_else(|| format!("\n\n  Available venues: {}\n  Run `scope venues list` for details.", self.list().join(", ")));
-            ScopeError::Chain(format!("Unknown venue \"{}\"{}", venue_id, hint))
-        })?;
+        let desc = self
+            .get(venue_id)
+            .ok_or_else(|| unknown_venue(venue_id, &self.list()))?;
         Ok(crate::market::exchange::ExchangeClient::from_descriptor(
             desc,
         ))
@@ -173,6 +167,40 @@ impl VenueRegistry {
             .map_err(|e| ScopeError::Config(crate::error::ConfigError::Parse { source: e }))
     }
 }
+
+/// The unknown-venue error: names the closest of `ids` and lists them all.
+/// Each lookup passes the ids it can serve, so it never suggests a venue it
+/// would reject.
+pub(crate) fn unknown_venue<S: AsRef<str>>(input: &str, ids: &[S]) -> ScopeError {
+    let ids: Vec<&str> = ids.iter().map(AsRef::as_ref).collect();
+    let available = format!(
+        "\n\n  Available venues: {}\n  Run `scope venues list` for details.",
+        ids.join(", ")
+    );
+    let hint = match closest(input, ids) {
+        Some(s) => format!("\n\n  Did you mean \"{s}\"?{available}"),
+        None => available,
+    };
+    ScopeError::InvalidInput(format!("Unknown venue \"{input}\"{hint}"))
+}
+
+/// The id nearest to `input`, ignoring case, within one edit for each
+/// [`SUGGEST_LENGTH_PER_EDIT`] characters of the longer name.
+fn closest<'a>(input: &str, ids: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
+    let input_lower = input.to_lowercase();
+    ids.into_iter()
+        .map(|k| (k, strsim_distance(&input_lower, &k.to_lowercase())))
+        // A fixed limit suggested `okx` for `weex` (#69). Scale it to the name.
+        .filter(|(k, dist)| {
+            *dist * SUGGEST_LENGTH_PER_EDIT <= input_lower.chars().count().max(k.len())
+        })
+        .min_by_key(|(_, dist)| *dist)
+        .map(|(k, _)| k)
+}
+
+/// A suggestion may differ by one edit for each this many characters of the
+/// longer name.
+const SUGGEST_LENGTH_PER_EDIT: usize = 3;
 
 /// Simple Levenshtein distance for typo suggestions.
 fn strsim_distance(a: &str, b: &str) -> usize {
@@ -206,6 +234,29 @@ fn strsim_distance(a: &str, b: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_user_venue_overrides_built_in_and_bad_files_are_skipped() {
+        // A user venue with a built-in id replaces the built-in (custom
+        // endpoints without a rebuild); a broken file does not stop the load.
+        let dir = tempfile::tempdir().unwrap();
+        let binance = include_str!("../../venues/binance.yaml")
+            .replace("name: Binance Spot", "name: My Binance");
+        std::fs::write(dir.path().join("binance.yaml"), binance).unwrap();
+        std::fs::write(dir.path().join("broken.yml"), "id: [unclosed").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "not a venue").unwrap();
+
+        let registry = VenueRegistry::load_from(dir.path()).unwrap();
+        assert_eq!(registry.len(), VenueRegistry::default().len());
+        assert_eq!(registry.get("binance").unwrap().name, "My Binance");
+    }
+
+    #[test]
+    fn test_missing_user_dir_gives_the_built_ins() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = VenueRegistry::load_from(&dir.path().join("none")).unwrap();
+        assert_eq!(registry.len(), VenueRegistry::default().len());
+    }
 
     #[test]
     fn test_registry_default_loads_built_in() {
@@ -249,6 +300,9 @@ mod tests {
     fn test_registry_suggest_typo() {
         let registry = VenueRegistry::default();
         assert_eq!(registry.suggest("binace"), Some("binance"));
+        assert_eq!(registry.suggest("gate"), Some("gateio"));
+        // #69: "weex" is 3 edits from "okx", too far for a 4-letter name.
+        assert_eq!(registry.suggest("weex"), None);
         assert_eq!(registry.suggest("krakn"), Some("kraken"));
         assert_eq!(registry.suggest("bybi"), Some("bybit"));
     }

@@ -3,12 +3,12 @@
 use crate::AppState;
 use axum::Json;
 use axum::extract::State;
-use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use scope::chains::ChainClientFactory;
 use scope_cli::cli::address::{self, AddressArgs};
 use serde::Deserialize;
 use std::sync::Arc;
+
+use super::{error_response, status_for};
 
 /// Request body for address analysis.
 #[derive(Debug, Deserialize)]
@@ -16,7 +16,7 @@ pub struct AddressRequest {
     /// Blockchain address to analyze.
     pub address: String,
     /// Target chain (default: "ethereum").
-    #[serde(default = "default_chain")]
+    #[serde(default = "super::default_chain")]
     pub chain: String,
     /// Include transaction history.
     #[serde(default)]
@@ -30,10 +30,6 @@ pub struct AddressRequest {
     /// Generate dossier (address + risk).
     #[serde(default)]
     pub dossier: bool,
-}
-
-fn default_chain() -> String {
-    "ethereum".to_string()
 }
 
 fn default_limit() -> u32 {
@@ -52,13 +48,7 @@ pub async fn handle(
     // Resolve address book shortcuts (@label or direct address match)
     let resolved = match super::resolve_address_book(&req.address, &state.config) {
         Ok(r) => r,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": e })),
-            )
-                .into_response();
-        }
+        Err(e) => return error_response(status_for(&e), e.to_string()),
     };
     let address = resolved.value;
     let chain = resolved.chain.unwrap_or(req.chain);
@@ -77,22 +67,18 @@ pub async fn handle(
     let client: Box<dyn scope::chains::ChainClient> =
         match state.factory.create_chain_client(&args.chain) {
             Ok(c) => c,
-            Err(e) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({ "error": e.to_string() })),
-                )
-                    .into_response();
-            }
+            Err(e) => return error_response(status_for(&e), e.to_string()),
         };
 
-    match address::analyze_address(&args, client.as_ref()).await {
+    match address::analyze_address(
+        &args,
+        client.as_ref(),
+        &scope_cli::cli::output::Output::stdio(),
+    )
+    .await
+    {
         Ok(report) => Json(serde_json::json!(report)).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => error_response(status_for(&e), e.to_string()),
     }
 }
 
@@ -135,7 +121,7 @@ mod tests {
 
     #[test]
     fn test_defaults() {
-        assert_eq!(default_chain(), "ethereum");
+        assert_eq!(super::super::default_chain(), "ethereum");
         assert_eq!(default_limit(), 100);
     }
 
@@ -170,7 +156,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = AddressRequest {
             address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
             chain: "ethereum".to_string(),
@@ -208,7 +194,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = AddressRequest {
             address: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
             chain: "bitcoin".to_string(),
@@ -253,7 +239,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = AddressRequest {
             address: "@nonexistent-label".to_string(),
             chain: "ethereum".to_string(),

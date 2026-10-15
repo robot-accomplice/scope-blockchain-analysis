@@ -1,0 +1,33 @@
+name: Scheduled Security Audit
+
+# New RustSec advisories appear between pushes (#42). This run finds them
+# daily on both long-lived branches. GitHub runs scheduled workflows only on
+# the default branch, so each job checks out its branch. On a scheduled run,
+# audit-check opens an issue for each new advisory; that issue is the alert.
+# The ignore list is .cargo/audit.toml on the checked-out branch.
+
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  checks: write
+
+jobs:
+  audit:
+    name: Audit ${{ matrix.ref }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ref: [develop, main]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ matrix.ref }}
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

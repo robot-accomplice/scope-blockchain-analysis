@@ -1,0 +1,20 @@
+ <MASK> ──────────────────── idle
+ℹ Type `help` for commands. `exit` or
+Ctrl-D leaves.
+ℹ Try: `market summary USDC --venue
+binance` · `venues list` · `insights
+<address>`
+ℹ Tab completes a command or flag;
+Ctrl-K opens the command palette.
+scope:auto> venues list
+
+┌─ Available Venues ────────────────────
+│  biconomy          order_book, ticker,
+│                    trades, ohlc
+│  binance           order_book, ticker,
+────────────────────────────────────────
+┌scope:auto> ──────────────────────────┐
+│                                      │
+└──────────────────────────────────────┘
+
+ scrolled up 32 lines · PgDn …

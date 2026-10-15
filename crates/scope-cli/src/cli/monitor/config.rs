@@ -1,6 +1,6 @@
 //! Configuration types, constants, and data structures for the monitor TUI.
 
-use ratatui::style::Color;
+pub use crate::cli::theme::{ColorPalette, ColorSchemeExt};
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
@@ -208,71 +208,6 @@ impl ChartMode {
             ChartMode::VolumeProfile => "VolPro",
         }
     }
-}
-
-/// Extension trait for `ColorScheme` that provides TUI-specific palette
-/// rendering (depends on `ratatui::style::Color` which is not in scope-core).
-pub trait ColorSchemeExt {
-    fn palette(&self) -> ColorPalette;
-}
-
-impl ColorSchemeExt for ColorScheme {
-    /// Returns the named color palette for this scheme.
-    fn palette(&self) -> ColorPalette {
-        match self {
-            ColorScheme::GreenRed => ColorPalette {
-                up: Color::Green,
-                down: Color::Red,
-                neutral: Color::Gray,
-                header_fg: Color::White,
-                border: Color::DarkGray,
-                highlight: Color::Yellow,
-                volume_bar: Color::Blue,
-                sparkline: Color::Cyan,
-            },
-            ColorScheme::BlueOrange => ColorPalette {
-                up: Color::Blue,
-                down: Color::Rgb(255, 165, 0), // orange
-                neutral: Color::Gray,
-                header_fg: Color::White,
-                border: Color::DarkGray,
-                highlight: Color::Cyan,
-                volume_bar: Color::Magenta,
-                sparkline: Color::LightBlue,
-            },
-            ColorScheme::Monochrome => ColorPalette {
-                up: Color::White,
-                down: Color::DarkGray,
-                neutral: Color::Gray,
-                header_fg: Color::White,
-                border: Color::DarkGray,
-                highlight: Color::White,
-                volume_bar: Color::Gray,
-                sparkline: Color::White,
-            },
-        }
-    }
-}
-
-/// Named color palette derived from a ColorScheme.
-#[derive(Debug, Clone, Copy)]
-pub struct ColorPalette {
-    /// Color for price-up / bullish.
-    pub up: Color,
-    /// Color for price-down / bearish.
-    pub down: Color,
-    /// Neutral/secondary text color.
-    pub neutral: Color,
-    /// Header foreground.
-    pub header_fg: Color,
-    /// Border color.
-    pub border: Color,
-    /// Highlight/accent color.
-    pub highlight: Color,
-    /// Volume bar color.
-    pub volume_bar: Color,
-    /// Sparkline color.
-    pub sparkline: Color,
 }
 
 /// An active (currently firing) alert with a description.

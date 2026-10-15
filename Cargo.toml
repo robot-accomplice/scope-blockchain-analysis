@@ -1,9 +1,9 @@
 [workspace]
-members = ["crates/scope-core", "crates/scope-cli", "crates/scope-web"]
+members = ["crates/scope-core", "crates/scope-cli", "crates/scope-web", "crates/scope-tui-harness"]
 resolver = "2"
 
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 authors = ["Jon Machen <robot@accomplice.ch>"]
 license = "MIT"

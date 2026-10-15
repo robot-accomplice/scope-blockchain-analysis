@@ -27,8 +27,10 @@ pub mod monitor;
 
 use axum::Router;
 use axum::response::IntoResponse;
-use scope::chains::DefaultClientFactory;
+use scope::chains::{ChainClientFactory, DefaultClientFactory};
 use scope::config::Config;
+use scope_cli::cli::output::Output;
+use scope_cli::note;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
@@ -37,8 +39,19 @@ use tower_http::cors::{Any, CorsLayer};
 pub struct AppState {
     /// Application configuration (same as CLI).
     pub config: Config,
-    /// Client factory for creating chain and DEX clients.
-    pub factory: DefaultClientFactory,
+    /// Client factory for creating chain and DEX clients. A trait object, so
+    /// handler tests can run on a mock factory without network.
+    pub factory: Box<dyn ChainClientFactory>,
+}
+
+impl AppState {
+    /// State with `config` and the `factory` that builds chain clients.
+    pub fn new(config: Config, factory: impl ChainClientFactory + 'static) -> Self {
+        Self {
+            config,
+            factory: Box::new(factory),
+        }
+    }
 }
 
 /// Builds the Axum router with all API routes and static file serving.
@@ -100,28 +113,21 @@ async fn serve_ui(uri: axum::http::Uri) -> impl axum::response::IntoResponse {
 /// Starts the web server on the given address.
 ///
 /// This is the main entry point called from the CLI `web` command handler.
-pub async fn start_server(addr: SocketAddr, config: Config) -> anyhow::Result<()> {
-    let http: std::sync::Arc<dyn scope::http::HttpClient> = if config.ghola.enabled {
-        match scope::http::GholaHttpClient::new(config.ghola.stealth, config.ghola.buffer_size) {
-            Ok(client) => std::sync::Arc::new(client),
-            Err(_) => std::sync::Arc::new(
-                scope::http::NativeHttpClient::new().expect("Failed to create HTTP client"),
-            ),
-        }
-    } else {
-        std::sync::Arc::new(
-            scope::http::NativeHttpClient::new().expect("Failed to create HTTP client"),
-        )
-    };
+pub async fn start_server(addr: SocketAddr, config: Config, out: &Output) -> anyhow::Result<()> {
+    let built = scope::http::init(&config)?;
+    for notice in &built.notices {
+        tracing::warn!("{notice}");
+    }
+    let http = built.client;
     let factory = DefaultClientFactory {
         chains_config: config.chains.clone(),
         http,
     };
-    let state = Arc::new(AppState { config, factory });
+    let state = Arc::new(AppState::new(config, factory));
     let app = build_router(state);
 
     tracing::info!("Scope web server listening on http://{}", addr);
-    eprintln!("Scope web server listening on http://{}", addr);
+    note!(out, "Scope web server listening on http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
@@ -144,37 +150,46 @@ pub fn log_file_path() -> std::path::PathBuf {
 }
 
 /// Stops a running daemon by reading its PID file and sending SIGTERM.
-pub fn stop_daemon() -> anyhow::Result<()> {
+/// Tells the user what happened, as notes on `out`.
+///
+/// # Errors
+///
+/// The PID file cannot be read or holds no PID.
+pub fn stop_daemon(out: &Output) -> scope::error::Result<()> {
     let pid_path = pid_file_path();
     if !pid_path.exists() {
-        eprintln!("No daemon PID file found at {}", pid_path.display());
-        eprintln!("Is the daemon running?");
+        note!(out, "No daemon PID file found at {}", pid_path.display());
+        note!(out, "Is the daemon running?");
         return Ok(());
     }
 
-    let pid_str = std::fs::read_to_string(&pid_path)?;
-    let pid: u32 = pid_str
-        .trim()
-        .parse()
-        .map_err(|e| anyhow::anyhow!("Invalid PID in {}: {}", pid_path.display(), e))?;
+    let pid_str = std::fs::read_to_string(&pid_path).map_err(|e| {
+        scope::error::ScopeError::io_context(e, format!("cannot read {}", pid_path.display()))
+    })?;
+    let pid: u32 = pid_str.trim().parse().map_err(|e| {
+        scope::error::ScopeError::Other(format!("Invalid PID in {}: {}", pid_path.display(), e))
+    })?;
 
-    eprintln!("Stopping Scope web daemon (PID {})...", pid);
+    note!(out, "Stopping Scope web daemon (PID {})...", pid);
 
     #[cfg(unix)]
     {
         // Send SIGTERM to the daemon process
         let result = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
         if result == 0 {
-            eprintln!("Daemon stopped.");
+            note!(out, "Daemon stopped.");
         } else {
-            eprintln!("Failed to stop daemon (process may have already exited).");
+            note!(
+                out,
+                "Failed to stop daemon (process may have already exited)."
+            );
         }
     }
 
     #[cfg(not(unix))]
     {
-        eprintln!("Daemon stop is only supported on Unix systems.");
-        eprintln!("Please manually terminate PID {}.", pid);
+        note!(out, "Daemon stop is only supported on Unix systems.");
+        note!(out, "Please manually terminate PID {}.", pid);
     }
 
     // Remove PID file
@@ -186,8 +201,12 @@ pub fn stop_daemon() -> anyhow::Result<()> {
 ///
 /// Spawns the current executable as a detached child process with
 /// stdout/stderr redirected to a log file, then writes the PID.
+///
+/// # Errors
+///
+/// The data directory, log file, PID file or child process cannot be made.
 #[cfg(unix)]
-pub fn start_daemon(addr: SocketAddr, config: Config) -> anyhow::Result<()> {
+pub fn start_daemon(addr: SocketAddr, config: Config, out: &Output) -> scope::error::Result<()> {
     use std::io::Write;
 
     let _ = config; // Config reloaded from disk in child
@@ -198,10 +217,10 @@ pub fn start_daemon(addr: SocketAddr, config: Config) -> anyhow::Result<()> {
     let pid_path = pid_file_path();
     let log_path = log_file_path();
 
-    eprintln!("Starting Scope web daemon...");
-    eprintln!("  URL:  http://{}", addr);
-    eprintln!("  PID:  {}", pid_path.display());
-    eprintln!("  Log:  {}", log_path.display());
+    note!(out, "Starting Scope web daemon...");
+    note!(out, "URL:  http://{}", addr);
+    note!(out, "PID:  {}", pid_path.display());
+    note!(out, "Log:  {}", log_path.display());
 
     // Redirect stdout/stderr to log file
     let log_file = std::fs::OpenOptions::new()
@@ -231,19 +250,20 @@ pub fn start_daemon(addr: SocketAddr, config: Config) -> anyhow::Result<()> {
     let mut f = std::fs::File::create(&pid_path)?;
     write!(f, "{}", pid)?;
 
-    eprintln!("Daemon started with PID {}", pid);
-    eprintln!("Stop with: scope web --stop");
+    note!(out, "Daemon started with PID {}", pid);
+    note!(out, "Stop with: scope web --stop");
 
     Ok(())
 }
 
 /// Fallback for non-Unix: run in foreground.
 #[cfg(not(unix))]
-pub fn start_daemon(addr: SocketAddr, config: Config) -> anyhow::Result<()> {
-    eprintln!("Daemon mode is only supported on Unix systems.");
-    eprintln!("Starting in foreground instead...");
+pub fn start_daemon(addr: SocketAddr, config: Config, out: &Output) -> scope::error::Result<()> {
+    note!(out, "Daemon mode is only supported on Unix systems.");
+    note!(out, "Starting in foreground instead...");
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(start_server(addr, config))
+    rt.block_on(start_server(addr, config, out))
+        .map_err(|e| scope::error::ScopeError::Other(e.to_string()))
 }
 
 /// Returns true if running as a daemon child process.
@@ -281,7 +301,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = Arc::new(AppState { config, factory });
+        let state = Arc::new(AppState::new(config, factory));
         let _router = build_router(state);
     }
 
@@ -304,6 +324,39 @@ mod tests {
         let html = String::from_utf8(body.to_vec()).unwrap();
         assert!(html.contains("<!DOCTYPE html>"));
         assert!(html.contains("Scope"));
+    }
+
+    /// H6: the market panel must not send a peg the user did not set, or the
+    /// configured `market.health.peg_target` never applies on the web.
+    #[test]
+    fn test_ui_sends_peg_only_when_the_user_sets_it() {
+        let js = include_str!("static/app.js");
+        let html = include_str!("static/index.html");
+        assert!(!js.contains("|| 1.0"), "app.js falls back to a fixed peg");
+        assert!(
+            !html.contains(r#"id="mkt-peg" value="#),
+            "index.html fixes the peg field value"
+        );
+        assert!(
+            js.contains("market.peg_target"),
+            "peg field not filled from config"
+        );
+        assert!(js.contains("pegUserSet"), "peg not gated on a user edit");
+    }
+
+    /// M5: DEX venues come from `/api/venues`, not from lists in the UI.
+    #[test]
+    fn test_ui_hard_codes_no_dex_venue() {
+        let js = include_str!("static/app.js");
+        let html = include_str!("static/index.html");
+        for text in ["Ethereum DEX", "Solana DEX"] {
+            assert!(!js.contains(text), "app.js lists {text}");
+            assert!(!html.contains(text), "index.html lists {text}");
+        }
+        assert!(
+            js.contains("v.kind !== 'dex'"),
+            "CEX-only selects must drop DEX venues"
+        );
     }
 
     #[tokio::test]
@@ -452,7 +505,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = AppState { config, factory };
+        let state = AppState::new(config, factory);
         // Verify state fields are accessible
         let _ = state.config.chains.api_keys.len();
     }
@@ -470,7 +523,8 @@ mod tests {
     #[test]
     fn test_stop_daemon_invoked_no_pid_file() {
         // Exercise stop_daemon when PID file does not exist (common in tests)
-        let result = stop_daemon();
+        let (out, _) = Output::capture();
+        let result = stop_daemon(&out);
         assert!(result.is_ok());
     }
 
@@ -483,7 +537,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        Arc::new(AppState { config, factory })
+        Arc::new(AppState::new(config, factory))
     }
 
     // ========================================================================

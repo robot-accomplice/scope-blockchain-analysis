@@ -4,6 +4,8 @@
 
 use crate::cli::address::{self, AddressArgs, AddressReport};
 use crate::cli::address_report;
+use crate::cli::output::Output;
+use crate::note;
 use clap::{Args, Subcommand};
 use scope::chains::{ChainClientFactory, infer_chain_from_address};
 use scope::config::Config;
@@ -38,7 +40,7 @@ pub struct BatchArgs {
     pub output: std::path::PathBuf,
 
     /// Default chain for addresses (when not specified per-address).
-    #[arg(short, long, default_value = "ethereum")]
+    #[arg(short, long, default_value = scope::chains::DEFAULT_CHAIN)]
     pub chain: String,
 
     /// Include risk assessment per address (uses ETHERSCAN_API_KEY for Ethereum).
@@ -51,9 +53,10 @@ pub async fn run(
     args: ReportCommands,
     config: &Config,
     clients: &dyn ChainClientFactory,
+    out: &Output,
 ) -> Result<()> {
     match args {
-        ReportCommands::Batch(batch_args) => run_batch(batch_args, config, clients).await,
+        ReportCommands::Batch(batch_args) => run_batch(batch_args, config, clients, out).await,
     }
 }
 
@@ -61,6 +64,7 @@ async fn run_batch(
     args: BatchArgs,
     config: &Config,
     clients: &dyn ChainClientFactory,
+    out: &Output,
 ) -> Result<()> {
     let targets = resolve_targets(&args)?;
     if targets.is_empty() {
@@ -75,21 +79,15 @@ async fn run_batch(
             "Batch report{}",
             if args.with_risk { " (with risk)" } else { "" }
         ),
+        out,
     );
     let mut reports = Vec::new();
     let mut risk_assessments: Vec<Option<scope::compliance::risk::RiskAssessment>> = Vec::new();
 
-    let engine = match scope::compliance::datasource::BlockchainDataClient::from_env_opt() {
-        Some(client) => scope::compliance::risk::RiskEngine::with_data_client(client),
-        None => scope::compliance::risk::RiskEngine::new(),
-    };
+    let engine = scope::compliance::risk::RiskEngine::from_env();
 
     for (address, chain) in &targets {
-        let short_addr = if address.len() > 12 {
-            format!("{}...{}", &address[..6], &address[address.len() - 4..])
-        } else {
-            address.clone()
-        };
+        let short_addr = scope::display::text::abbreviate(address);
         prog.inc(&short_addr);
 
         let addr_args = AddressArgs {
@@ -104,7 +102,7 @@ async fn run_batch(
         };
 
         let client = clients.create_chain_client(chain)?;
-        match address::analyze_address(&addr_args, client.as_ref()).await {
+        match address::analyze_address(&addr_args, client.as_ref(), out).await {
             Ok(report) => {
                 let risk = if args.with_risk {
                     engine.assess_address(address, chain).await.ok()
@@ -115,7 +113,7 @@ async fn run_batch(
                 risk_assessments.push(risk);
             }
             Err(e) => {
-                eprintln!("Warning: Failed to analyze {}: {}", address, e);
+                note!(out, "Warning: Failed to analyze {}: {}", address, e);
             }
         }
     }
@@ -123,7 +121,7 @@ async fn run_batch(
     prog.finish("All addresses analyzed.");
     let md = batch_report_to_markdown(&reports, &risk_assessments, args.with_risk);
     std::fs::write(&args.output, &md)?;
-    println!("Batch report saved to: {}", args.output.display());
+    out.note_saved("Batch report", args.output.display());
     Ok(())
 }
 
@@ -143,9 +141,9 @@ fn resolve_targets(args: &BatchArgs) -> Result<Vec<(String, String)>> {
 
     if let Some(ref path) = args.from_file {
         if !path.exists() {
-            return Err(ScopeError::Io(format!(
-                "File not found: {}",
-                path.display()
+            return Err(ScopeError::IoError(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("File not found: {}", path.display()),
             )));
         }
         let content = std::fs::read_to_string(path)?;
@@ -223,6 +221,10 @@ mod tests {
     use super::*;
     use crate::cli::address::{AddressReport, Balance, TokenBalance, TransactionSummary};
     use tempfile::NamedTempFile;
+
+    fn quiet() -> crate::cli::output::Output {
+        crate::cli::output::Output::capture().0
+    }
 
     #[test]
     fn test_resolve_targets_addresses_only() {
@@ -434,6 +436,7 @@ mod tests {
                 evidence: vec!["Known address".to_string()],
             }],
             recommendations: vec!["Continue monitoring".to_string()],
+            not_assessed: Vec::new(),
             assessed_at: chrono::Utc::now(),
         };
         let risks = vec![Some(risk)];
@@ -507,7 +510,7 @@ mod tests {
         let config = Config::default();
         let factory = MockClientFactory::new();
 
-        let result = run_batch(args, &config, &factory).await;
+        let result = run_batch(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
 
         // Verify the report was written
@@ -535,7 +538,7 @@ mod tests {
         let config = Config::default();
         let factory = MockClientFactory::new();
 
-        let result = run_batch(args, &config, &factory).await;
+        let result = run_batch(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
         let content = std::fs::read_to_string(&output_path).unwrap();
         assert!(content.contains("Risk Assessment"));
@@ -559,7 +562,7 @@ mod tests {
         let config = Config::default();
         let factory = MockClientFactory::new();
 
-        let result = run_batch(args, &config, &factory).await;
+        let result = run_batch(args, &config, &factory, &quiet()).await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("No addresses"));
@@ -583,7 +586,7 @@ mod tests {
         let config = Config::default();
         let factory = MockClientFactory::new();
 
-        let result = run(args, &config, &factory).await;
+        let result = run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 }

@@ -19,6 +19,8 @@
 //! scope address-book summary
 //! ```
 
+use crate::cli::output::Output;
+use crate::{note, outln};
 use clap::{Args, Subcommand};
 use scope::chains::{ChainClientFactory, native_symbol};
 use scope::config::{Config, OutputFormat};
@@ -76,7 +78,7 @@ pub struct AddArgs {
     pub label: Option<String>,
 
     /// Blockchain network for this address.
-    #[arg(short, long, default_value = "ethereum")]
+    #[arg(short, long, default_value = scope::chains::DEFAULT_CHAIN)]
     pub chain: String,
 
     /// Tags for categorization.
@@ -124,21 +126,22 @@ pub async fn run(
     args: AddressBookArgs,
     config: &Config,
     clients: &dyn ChainClientFactory,
+    out: &Output,
 ) -> Result<()> {
     let data_dir = config.data_dir();
     let format = args.format.unwrap_or(config.output.format);
 
     match args.command {
-        AddressBookCommands::Add(add_args) => run_add(add_args, &data_dir).await,
-        AddressBookCommands::Remove(remove_args) => run_remove(remove_args, &data_dir).await,
-        AddressBookCommands::List => run_list(&data_dir, format).await,
+        AddressBookCommands::Add(add_args) => run_add(add_args, &data_dir, out).await,
+        AddressBookCommands::Remove(remove_args) => run_remove(remove_args, &data_dir, out).await,
+        AddressBookCommands::List => run_list(&data_dir, format, out).await,
         AddressBookCommands::Summary(summary_args) => {
-            run_summary(summary_args, &data_dir, format, clients).await
+            run_summary(summary_args, &data_dir, format, clients, out).await
         }
     }
 }
 
-async fn run_add(args: AddArgs, data_dir: &PathBuf) -> Result<()> {
+async fn run_add(args: AddArgs, data_dir: &PathBuf, out: &Output) -> Result<()> {
     tracing::info!(address = %args.address, "Adding address to address book");
 
     let mut address_book = AddressBook::load(data_dir)?;
@@ -157,18 +160,19 @@ async fn run_add(args: AddArgs, data_dir: &PathBuf) -> Result<()> {
     address_book.add_address(watched)?;
     address_book.save(data_dir)?;
 
-    println!(
+    outln!(
+        out,
         "Added {} to address book{}",
         args.address,
         args.label
             .map(|l| format!(" as '{}'", l))
             .unwrap_or_default()
-    );
+    )?;
 
     Ok(())
 }
 
-async fn run_remove(args: RemoveArgs, data_dir: &PathBuf) -> Result<()> {
+async fn run_remove(args: RemoveArgs, data_dir: &PathBuf, out: &Output) -> Result<()> {
     tracing::info!(address = %args.address, "Removing address from address book");
 
     let mut address_book = AddressBook::load(data_dir)?;
@@ -176,44 +180,49 @@ async fn run_remove(args: RemoveArgs, data_dir: &PathBuf) -> Result<()> {
 
     if removed {
         address_book.save(data_dir)?;
-        println!("Removed {} from address book", args.address);
+        outln!(out, "Removed {} from address book", args.address)?;
     } else {
-        println!("Address not found in address book: {}", args.address);
+        outln!(out, "Address not found in address book: {}", args.address)?;
     }
 
     Ok(())
 }
 
-async fn run_list(data_dir: &std::path::Path, format: OutputFormat) -> Result<()> {
+async fn run_list(data_dir: &std::path::Path, format: OutputFormat, out: &Output) -> Result<()> {
     let address_book = AddressBook::load(data_dir)?;
 
     if address_book.addresses.is_empty() {
-        println!("Address book is empty. Add addresses with 'scope address-book add <address>'");
+        outln!(
+            out,
+            "Address book is empty. Add addresses with 'scope address-book add <address>'"
+        )?;
         return Ok(());
     }
 
     match format {
         OutputFormat::Json => {
             let json = serde_json::to_string_pretty(&address_book.addresses)?;
-            println!("{}", json);
+            outln!(out, "{}", json)?;
         }
         OutputFormat::Csv => {
-            println!("address,label,chain,tags");
+            outln!(out, "address,label,chain,tags")?;
             for addr in &address_book.addresses {
-                println!(
+                outln!(
+                    out,
                     "{},{},{},{}",
                     addr.address,
                     addr.label.as_deref().unwrap_or(""),
                     addr.chain,
                     addr.tags.join(";")
-                );
+                )?;
             }
         }
         OutputFormat::Table => {
-            println!("Address Book");
-            println!("===================");
+            outln!(out, "Address Book")?;
+            outln!(out, "===================")?;
             for addr in &address_book.addresses {
-                println!(
+                outln!(
+                    out,
                     "  {} ({}) - {}{}",
                     addr.address,
                     addr.chain,
@@ -223,9 +232,9 @@ async fn run_list(data_dir: &std::path::Path, format: OutputFormat) -> Result<()
                     } else {
                         format!(" [{}]", addr.tags.join(", "))
                     }
-                );
+                )?;
             }
-            println!("\nTotal: {} addresses", address_book.addresses.len());
+            outln!(out, "\nTotal: {} addresses", address_book.addresses.len())?;
         }
         OutputFormat::Markdown => {
             let mut md = "# Address Book\n\n".to_string();
@@ -248,7 +257,7 @@ async fn run_list(data_dir: &std::path::Path, format: OutputFormat) -> Result<()
                 "\n**Total:** {} addresses\n",
                 address_book.addresses.len()
             ));
-            println!("{}", md);
+            outln!(out, "{}", md)?;
         }
     }
 
@@ -260,11 +269,15 @@ async fn run_summary(
     data_dir: &std::path::Path,
     format: OutputFormat,
     clients: &dyn ChainClientFactory,
+    out: &Output,
 ) -> Result<()> {
     let address_book = AddressBook::load(data_dir)?;
 
     if address_book.addresses.is_empty() {
-        println!("Address book is empty. Add addresses with 'scope address-book add <address>'");
+        outln!(
+            out,
+            "Address book is empty. Add addresses with 'scope address-book add <address>'"
+        )?;
         return Ok(());
     }
 
@@ -286,8 +299,9 @@ async fn run_summary(
             &watched.chain,
             clients,
             args.include_tokens,
+            out,
         )
-        .await;
+        .await?;
 
         // Aggregate chain balances
         if let Some(chain_bal) = balances_by_chain.get_mut(&watched.chain) {
@@ -325,56 +339,54 @@ async fn run_summary(
     match format {
         OutputFormat::Json => {
             let json = serde_json::to_string_pretty(&summary)?;
-            println!("{}", json);
+            outln!(out, "{}", json)?;
         }
         OutputFormat::Csv => {
-            println!("address,label,chain,balance,usd");
+            outln!(out, "address,label,chain,balance,usd")?;
             for addr in &summary.addresses {
-                println!(
+                outln!(
+                    out,
                     "{},{},{},{},{}",
                     addr.address,
                     addr.label.as_deref().unwrap_or(""),
                     addr.chain,
                     addr.balance,
                     addr.usd.map_or(String::new(), |u| format!("{:.2}", u))
-                );
+                )?;
             }
         }
         OutputFormat::Table => {
-            println!("Address Book Summary");
-            println!("=================");
-            println!("Addresses: {}", summary.address_count);
-            println!();
+            outln!(out, "Address Book Summary")?;
+            outln!(out, "=================")?;
+            outln!(out, "Addresses: {}", summary.address_count)?;
+            outln!(out)?;
 
             for addr in &summary.addresses {
-                println!(
+                outln!(
+                    out,
                     "  {} ({}) - {} {}",
                     addr.label.as_deref().unwrap_or(&addr.address),
                     addr.chain,
                     addr.balance,
                     addr.usd.map_or(String::new(), |u| format!("(${:.2})", u))
-                );
+                )?;
 
                 // Show token balances
                 for token in &addr.tokens {
-                    let addr_short = if token.contract_address.len() >= 8 {
-                        &token.contract_address[..8]
-                    } else {
-                        &token.contract_address
-                    };
-                    let symbol = token.symbol.as_deref().unwrap_or(addr_short);
-                    println!("    └─ {} {}", token.balance, symbol);
+                    let addr_short = scope::display::text::abbreviate(&token.contract_address);
+                    let symbol = token.symbol.as_deref().unwrap_or(&addr_short);
+                    outln!(out, "    └─ {} {}", token.balance, symbol)?;
                 }
             }
 
             if let Some(total) = summary.total_usd {
-                println!();
-                println!("Total Value: ${:.2}", total);
+                outln!(out)?;
+                outln!(out, "Total Value: ${:.2}", total)?;
             }
         }
         OutputFormat::Markdown => {
             let md = address_book_summary_to_markdown(&summary);
-            println!("{}", md);
+            outln!(out, "{}", md)?;
         }
     }
 
@@ -382,7 +394,7 @@ async fn run_summary(
     if let Some(ref report_path) = args.report {
         let md = address_book_summary_to_markdown(&summary);
         std::fs::write(report_path, md)?;
-        println!("\nReport saved to: {}", report_path.display());
+        out.note_saved("Report", report_path.display());
     }
 
     Ok(())
@@ -463,13 +475,14 @@ async fn fetch_address_balance(
     chain: &str,
     clients: &dyn ChainClientFactory,
     _include_tokens: bool,
-) -> (String, Vec<TokenSummary>) {
+    out: &Output,
+) -> std::io::Result<(String, Vec<TokenSummary>)> {
     let client = match clients.create_chain_client(chain) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("  ⚠ Unsupported chain: {}", chain);
+            note!(out, "⚠ Unsupported chain: {}", chain);
             tracing::debug!(error = %e, chain = %chain, "Failed to create chain client");
-            return ("Error".to_string(), vec![]);
+            return Ok(("Error".to_string(), vec![]));
         }
     };
 
@@ -477,7 +490,7 @@ async fn fetch_address_balance(
     let native_balance = match client.get_balance(address).await {
         Ok(bal) => bal.formatted,
         Err(e) => {
-            eprintln!("  ⚠ Could not fetch balance for {}", address);
+            note!(out, "⚠ Could not fetch balance for {}", address);
             tracing::debug!(error = %e, address = %address, "Failed to fetch balance");
             "Error".to_string()
         }
@@ -495,13 +508,13 @@ async fn fetch_address_balance(
             })
             .collect(),
         Err(e) => {
-            eprintln!("  ⚠ Token balances unavailable");
+            note!(out, "⚠ Token balances unavailable");
             tracing::debug!(error = %e, "Could not fetch token balances");
             vec![]
         }
     };
 
-    (native_balance, tokens)
+    Ok((native_balance, tokens))
 }
 
 // ============================================================================
@@ -512,6 +525,10 @@ async fn fetch_address_balance(
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    fn quiet() -> crate::cli::output::Output {
+        crate::cli::output::Output::capture().0
+    }
 
     fn create_test_address_book() -> AddressBook {
         AddressBook {
@@ -652,7 +669,7 @@ mod tests {
             command: AddressBookCommands::List,
             format: Some(OutputFormat::Table),
         };
-        let result = super::run(args, &config, &factory).await;
+        let result = super::run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -677,7 +694,7 @@ mod tests {
             }),
             format: Some(OutputFormat::Table),
         };
-        let result = super::run(add_args, &config, &factory).await;
+        let result = super::run(add_args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
 
         // List
@@ -685,7 +702,7 @@ mod tests {
             command: AddressBookCommands::List,
             format: Some(OutputFormat::Json),
         };
-        let result = super::run(list_args, &config, &factory).await;
+        let result = super::run(list_args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -710,7 +727,9 @@ mod tests {
             }),
             format: None,
         };
-        super::run(add_args, &config, &factory).await.unwrap();
+        super::run(add_args, &config, &factory, &quiet())
+            .await
+            .unwrap();
 
         // Summary
         let summary_args = AddressBookArgs {
@@ -722,7 +741,7 @@ mod tests {
             }),
             format: Some(OutputFormat::Json),
         };
-        let result = super::run(summary_args, &config, &factory).await;
+        let result = super::run(summary_args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -747,7 +766,9 @@ mod tests {
             }),
             format: None,
         };
-        super::run(add_args, &config, &factory).await.unwrap();
+        super::run(add_args, &config, &factory, &quiet())
+            .await
+            .unwrap();
 
         let remove_args = AddressBookArgs {
             command: AddressBookCommands::Remove(RemoveArgs {
@@ -755,7 +776,7 @@ mod tests {
             }),
             format: None,
         };
-        let result = super::run(remove_args, &config, &factory).await;
+        let result = super::run(remove_args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -780,7 +801,9 @@ mod tests {
             }),
             format: None,
         };
-        super::run(add_args, &config, &factory).await.unwrap();
+        super::run(add_args, &config, &factory, &quiet())
+            .await
+            .unwrap();
 
         // CSV summary
         let summary_args = AddressBookArgs {
@@ -792,7 +815,7 @@ mod tests {
             }),
             format: Some(OutputFormat::Csv),
         };
-        let result = super::run(summary_args, &config, &factory).await;
+        let result = super::run(summary_args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -817,7 +840,9 @@ mod tests {
             }),
             format: None,
         };
-        super::run(add_args, &config, &factory).await.unwrap();
+        super::run(add_args, &config, &factory, &quiet())
+            .await
+            .unwrap();
 
         // Table summary
         let summary_args = AddressBookArgs {
@@ -829,7 +854,7 @@ mod tests {
             }),
             format: Some(OutputFormat::Table),
         };
-        let result = super::run(summary_args, &config, &factory).await;
+        let result = super::run(summary_args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -854,7 +879,9 @@ mod tests {
             }),
             format: None,
         };
-        super::run(add_eth, &config, &factory).await.unwrap();
+        super::run(add_eth, &config, &factory, &quiet())
+            .await
+            .unwrap();
 
         let add_poly = AddressBookArgs {
             command: AddressBookCommands::Add(AddArgs {
@@ -865,7 +892,9 @@ mod tests {
             }),
             format: None,
         };
-        super::run(add_poly, &config, &factory).await.unwrap();
+        super::run(add_poly, &config, &factory, &quiet())
+            .await
+            .unwrap();
 
         // Filter by chain
         let summary_args = AddressBookArgs {
@@ -877,7 +906,7 @@ mod tests {
             }),
             format: Some(OutputFormat::Json),
         };
-        let result = super::run(summary_args, &config, &factory).await;
+        let result = super::run(summary_args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -902,7 +931,9 @@ mod tests {
             }),
             format: None,
         };
-        super::run(add_args, &config, &factory).await.unwrap();
+        super::run(add_args, &config, &factory, &quiet())
+            .await
+            .unwrap();
 
         // Filter by tag
         let summary_args = AddressBookArgs {
@@ -914,7 +945,7 @@ mod tests {
             }),
             format: Some(OutputFormat::Json),
         };
-        let result = super::run(summary_args, &config, &factory).await;
+        let result = super::run(summary_args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -938,7 +969,9 @@ mod tests {
             }),
             format: None,
         };
-        super::run(add_args, &config, &factory).await.unwrap();
+        super::run(add_args, &config, &factory, &quiet())
+            .await
+            .unwrap();
 
         let summary_args = AddressBookArgs {
             command: AddressBookCommands::Summary(SummaryArgs {
@@ -949,7 +982,7 @@ mod tests {
             }),
             format: None, // Default format
         };
-        let result = super::run(summary_args, &config, &factory).await;
+        let result = super::run(summary_args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -974,7 +1007,7 @@ mod tests {
             }),
             format: Some(OutputFormat::Table),
         };
-        let result = super::run(summary_args, &config, &factory).await;
+        let result = super::run(summary_args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -998,7 +1031,7 @@ mod tests {
             }),
             format: None,
         };
-        let result = super::run(add_args, &config, &factory).await;
+        let result = super::run(add_args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1040,14 +1073,16 @@ mod tests {
             }),
             format: None,
         };
-        super::run(add_args, &config, &factory).await.unwrap();
+        super::run(add_args, &config, &factory, &quiet())
+            .await
+            .unwrap();
 
         // List with CSV
         let list_args = AddressBookArgs {
             command: AddressBookCommands::List,
             format: Some(OutputFormat::Csv),
         };
-        let result = super::run(list_args, &config, &factory).await;
+        let result = super::run(list_args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1072,7 +1107,9 @@ mod tests {
             }),
             format: None,
         };
-        super::run(add_args, &config, &factory).await.unwrap();
+        super::run(add_args, &config, &factory, &quiet())
+            .await
+            .unwrap();
 
         let add_args2 = AddressBookArgs {
             command: AddressBookCommands::Add(AddArgs {
@@ -1083,14 +1120,16 @@ mod tests {
             }),
             format: None,
         };
-        super::run(add_args2, &config, &factory).await.unwrap();
+        super::run(add_args2, &config, &factory, &quiet())
+            .await
+            .unwrap();
 
         // List with Table
         let list_args = AddressBookArgs {
             command: AddressBookCommands::List,
             format: Some(OutputFormat::Table),
         };
-        let result = super::run(list_args, &config, &factory).await;
+        let result = super::run(list_args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1115,7 +1154,9 @@ mod tests {
             }),
             format: None,
         };
-        super::run(add_args, &config, &factory).await.unwrap();
+        super::run(add_args, &config, &factory, &quiet())
+            .await
+            .unwrap();
 
         // Summary with Table and tokens included
         let summary_args = AddressBookArgs {
@@ -1127,7 +1168,7 @@ mod tests {
             }),
             format: Some(OutputFormat::Table),
         };
-        let result = super::run(summary_args, &config, &factory).await;
+        let result = super::run(summary_args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1152,7 +1193,7 @@ mod tests {
             }),
             format: None,
         };
-        super::run(add1, &config, &factory).await.unwrap();
+        super::run(add1, &config, &factory, &quiet()).await.unwrap();
 
         let add2 = AddressBookArgs {
             command: AddressBookCommands::Add(AddArgs {
@@ -1163,7 +1204,7 @@ mod tests {
             }),
             format: None,
         };
-        super::run(add2, &config, &factory).await.unwrap();
+        super::run(add2, &config, &factory, &quiet()).await.unwrap();
 
         // Summary - should aggregate chain balances
         let summary_args = AddressBookArgs {
@@ -1175,7 +1216,7 @@ mod tests {
             }),
             format: Some(OutputFormat::Table),
         };
-        let result = super::run(summary_args, &config, &factory).await;
+        let result = super::run(summary_args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1200,14 +1241,16 @@ mod tests {
             }),
             format: None,
         };
-        super::run(add_args, &config, &factory).await.unwrap();
+        super::run(add_args, &config, &factory, &quiet())
+            .await
+            .unwrap();
 
         // List with default format (None -> Table)
         let list_args = AddressBookArgs {
             command: AddressBookCommands::List,
             format: None,
         };
-        let result = super::run(list_args, &config, &factory).await;
+        let result = super::run(list_args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1986,7 +2029,7 @@ mod tests {
             }),
             format: None,
         };
-        let result = super::run(add_args, &config, &factory).await;
+        let result = super::run(add_args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -2007,7 +2050,7 @@ mod tests {
             }),
             format: None,
         };
-        let result = super::run(remove_args, &config, &factory).await;
+        let result = super::run(remove_args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -2031,13 +2074,15 @@ mod tests {
             }),
             format: None,
         };
-        super::run(add_args, &config, &factory).await.unwrap();
+        super::run(add_args, &config, &factory, &quiet())
+            .await
+            .unwrap();
 
         let list_args = AddressBookArgs {
             command: AddressBookCommands::List,
             format: Some(OutputFormat::Markdown),
         };
-        let result = super::run(list_args, &config, &factory).await;
+        let result = super::run(list_args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -2061,7 +2106,9 @@ mod tests {
             }),
             format: None,
         };
-        super::run(add_args, &config, &factory).await.unwrap();
+        super::run(add_args, &config, &factory, &quiet())
+            .await
+            .unwrap();
 
         let summary_args = AddressBookArgs {
             command: AddressBookCommands::Summary(SummaryArgs {
@@ -2072,7 +2119,7 @@ mod tests {
             }),
             format: Some(OutputFormat::Markdown),
         };
-        let result = super::run(summary_args, &config, &factory).await;
+        let result = super::run(summary_args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -2097,7 +2144,9 @@ mod tests {
             }),
             format: None,
         };
-        super::run(add_args, &config, &factory).await.unwrap();
+        super::run(add_args, &config, &factory, &quiet())
+            .await
+            .unwrap();
 
         let summary_args = AddressBookArgs {
             command: AddressBookCommands::Summary(SummaryArgs {
@@ -2108,7 +2157,7 @@ mod tests {
             }),
             format: Some(OutputFormat::Table),
         };
-        let result = super::run(summary_args, &config, &factory).await;
+        let result = super::run(summary_args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
         assert!(report_path.exists());
         let content = std::fs::read_to_string(&report_path).unwrap();
@@ -2135,7 +2184,7 @@ mod tests {
             }),
             format: None,
         };
-        super::run(add_args, &config, &mock_factory())
+        super::run(add_args, &config, &mock_factory(), &quiet())
             .await
             .unwrap();
 
@@ -2149,7 +2198,7 @@ mod tests {
             }),
             format: Some(OutputFormat::Json),
         };
-        let result = super::run(summary_args, &config, &failing_factory).await;
+        let result = super::run(summary_args, &config, &failing_factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -2173,13 +2222,15 @@ mod tests {
             }),
             format: Some(OutputFormat::Json),
         };
-        super::run(add_args, &config, &factory).await.unwrap();
+        super::run(add_args, &config, &factory, &quiet())
+            .await
+            .unwrap();
 
         let list_args = AddressBookArgs {
             command: AddressBookCommands::List,
             format: Some(OutputFormat::Json),
         };
-        let result = super::run(list_args, &config, &factory).await;
+        let result = super::run(list_args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 }

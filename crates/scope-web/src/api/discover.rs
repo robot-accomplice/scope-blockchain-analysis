@@ -3,11 +3,12 @@
 use crate::AppState;
 use axum::Json;
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use scope::chains::DexClient;
 use serde::Deserialize;
 use std::sync::Arc;
+
+use super::{error_response, status_for};
 
 /// Query parameters for token discovery.
 #[derive(Debug, Deserialize)]
@@ -57,11 +58,7 @@ pub async fn handle(
             };
             Json(serde_json::json!(filtered)).into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => error_response(status_for(&e), e.to_string()),
     }
 }
 
@@ -124,7 +121,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
 
         let params = DiscoverQuery {
             source: "profiles".to_string(),
@@ -151,7 +148,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
 
         let params = DiscoverQuery {
             source: "boosts".to_string(),
@@ -178,7 +175,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
 
         let params = DiscoverQuery {
             source: "top-boosts".to_string(),
@@ -205,7 +202,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
 
         let params = DiscoverQuery {
             source: "profiles".to_string(),
@@ -233,7 +230,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
 
         let params = DiscoverQuery {
             source: "unknown-source".to_string(),

@@ -361,9 +361,7 @@ struct DexScreenerSearchResponse {
 impl DexClient {
     /// Creates a new DEX client.
     pub fn new() -> Self {
-        let http: Arc<dyn HttpClient> =
-            Arc::new(crate::http::NativeHttpClient::new().expect("Failed to build HTTP client"));
-        Self::new_with_http(http)
+        Self::new_with_http(crate::http::transport())
     }
 
     /// Creates a new DEX client with a pre-built HTTP transport.
@@ -378,26 +376,16 @@ impl DexClient {
     #[cfg(any(test, feature = "test-support"))]
     pub fn with_base_url(base_url: &str) -> Self {
         Self {
-            http: Arc::new(
-                crate::http::NativeHttpClient::new().expect("failed to create HTTP client"),
-            ),
+            http: crate::http::transport(),
             base_url: base_url.to_string(),
         }
     }
 
     /// Maps chain names to DexScreener chain IDs.
     fn map_chain_to_dexscreener(chain: &str) -> String {
-        match chain.to_lowercase().as_str() {
-            "ethereum" | "eth" => "ethereum".to_string(),
-            "polygon" | "matic" => "polygon".to_string(),
-            "arbitrum" | "arb" => "arbitrum".to_string(),
-            "optimism" | "op" => "optimism".to_string(),
-            "base" => "base".to_string(),
-            "bsc" | "bnb" => "bsc".to_string(),
-            "solana" | "sol" => "solana".to_string(),
-            "avalanche" | "avax" => "avalanche".to_string(),
-            _ => chain.to_lowercase(),
-        }
+        super::registry::chain(chain)
+            .and_then(|c| c.dexscreener_id)
+            .map_or_else(|| chain.to_lowercase(), str::to_string)
     }
 
     /// Fetches the USD price of a token by its address.
@@ -424,17 +412,8 @@ impl DexClient {
     ///
     /// Uses well-known wrapped token addresses to determine the native token price.
     pub async fn get_native_token_price(&self, chain: &str) -> Option<f64> {
-        let (search_chain, token_address) = match chain.to_lowercase().as_str() {
-            "ethereum" | "eth" => ("ethereum", "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"), // WETH
-            "polygon" | "matic" => ("polygon", "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270"), // WMATIC
-            "arbitrum" | "arb" => ("arbitrum", "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"), // WETH on Arb
-            "optimism" | "op" => ("optimism", "0x4200000000000000000000000000000000000006"), // WETH on OP
-            "base" => ("base", "0x4200000000000000000000000000000000000006"), // WETH on Base
-            "bsc" | "bnb" => ("bsc", "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"), // WBNB
-            "solana" | "sol" => ("solana", "So11111111111111111111111111111111111111112"), // Wrapped SOL
-            "tron" | "trx" => return None, // Tron wrapped token varies; skip for now
-            _ => return None,
-        };
+        let c = super::registry::chain(chain)?;
+        let (search_chain, token_address) = (c.dexscreener_id?, c.wrapped_native?);
 
         self.get_token_price(search_chain, token_address).await
     }
@@ -551,6 +530,7 @@ impl DexClient {
                 price_usd: pair_price,
                 volume_24h: pair.volume.as_ref().and_then(|v| v.h24).unwrap_or(0.0),
                 liquidity_usd: pair_liquidity,
+                liquidity_base: pair.liquidity.as_ref().and_then(|l| l.base),
                 price_change_24h: price_change,
                 buys_24h: txn_counts_24h.as_ref().map(|t| t.buys).unwrap_or(0),
                 sells_24h: txn_counts_24h.as_ref().map(|t| t.sells).unwrap_or(0),
@@ -1100,6 +1080,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_dex_client_new_uses_the_shared_transport() {
+        let shared = crate::http::transport();
+        let client = DexClient::new();
+        assert!(std::sync::Arc::ptr_eq(&client.http, &shared));
+    }
+
+    #[test]
     fn test_chain_mapping() {
         assert_eq!(
             DexClient::map_chain_to_dexscreener("ethereum"),
@@ -1196,6 +1183,8 @@ mod tests {
         assert!(data.volume_24h > 0.0);
         assert!(data.liquidity_usd > 0.0);
         assert_eq!(data.pairs.len(), 1);
+        // The pool's base reserve feeds the synthetic AMM book (#37).
+        assert_eq!(data.pairs[0].liquidity_base, Some(100.0));
         assert!(data.total_buys_24h > 0);
         assert!(data.total_sells_24h > 0);
         assert!(!data.price_history.is_empty());

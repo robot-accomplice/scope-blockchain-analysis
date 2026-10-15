@@ -143,7 +143,7 @@ impl AddressBook {
             .iter()
             .any(|a| a.address.to_lowercase() == watched.address.to_lowercase())
         {
-            return Err(ScopeError::Chain(format!(
+            return Err(ScopeError::InvalidInput(format!(
                 "Address already in address book: {}",
                 watched.address
             )));
@@ -209,9 +209,11 @@ pub fn resolve_address_book_input(
     if let Some(label) = input.strip_prefix('@') {
         if let Some(watched) = address_book.find_by_label(label) {
             let label_display = watched.label.as_deref().unwrap_or(label);
-            eprintln!(
+            crate::notice!(
                 "  Using '{}' → {} ({})",
-                label_display, watched.address, watched.chain
+                label_display,
+                watched.address,
+                watched.chain
             );
             return Ok(Some((watched.address.clone(), watched.chain.clone())));
         }

@@ -19,7 +19,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-const SIDECAR_ADDR: &str = "127.0.0.1:18789";
+pub(crate) const SIDECAR_ADDR: &str = "127.0.0.1:18789";
 const SIDECAR_URL: &str = "http://127.0.0.1:18789";
 const SPAWN_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -160,7 +160,7 @@ pub fn ghola_in_path() -> bool {
         .unwrap_or(false)
 }
 
-fn is_bridge_running() -> bool {
+pub(crate) fn is_bridge_running() -> bool {
     SIDECAR_ADDR
         .parse()
         .ok()
@@ -168,19 +168,18 @@ fn is_bridge_running() -> bool {
         .is_some()
 }
 
+/// What a failed `ghola --serve` spawn says, with where to get ghola.
+const GHOLA_SPAWN_FAILED: &str = "failed to spawn ghola --serve (install it with \
+     `go install github.com/robot-accomplice/ghola/cmd/ghola@latest` or from \
+     https://github.com/robot-accomplice/ghola/releases)";
+
 fn spawn_sidecar() -> Result<(), ScopeError> {
     let child = Command::new("ghola")
         .arg("--serve")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .map_err(|e| {
-            ScopeError::Network(format!(
-                "failed to spawn ghola --serve: {e}\n  \
-                 Install: go install github.com/robot-accomplice/ghola/cmd/ghola@latest\n  \
-                 Or download from: https://github.com/robot-accomplice/ghola/releases"
-            ))
-        })?;
+        .map_err(|e| ScopeError::io_context(e, GHOLA_SPAWN_FAILED))?;
     SIDECAR_PID.store(child.id(), Ordering::Relaxed);
     Ok(())
 }

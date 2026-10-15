@@ -1,0 +1,28 @@
+name: Commands outside the TUI return by themselves; Ctrl-C cancels a prompt
+tiers: [offline]
+steps:
+  # The monitor takes Ctrl-C as a quit key: it ends with outcome ok, and
+  # the TUI comes back without an Enter.
+  - type: "monitor USDC --venue binance --pair USDC_USDT"
+  - key: Enter
+  - wait_for: { text: "Key Metrics" }
+  # A refresh in --pair mode asks the venue, not DexScreener. A DexScreener
+  # request is a replay miss, and its error text is "no fixture for".
+  - wait_for: { text: "Updated: \\$", timeout: 20s }
+  - expect_screen: { not_contains: ["no fixture"] }
+  - key: Ctrl-C
+  - wait_for: { text: "Ran outside the TUI: monitor" }
+  - expect_journal: { argv_prefix: ["scope", "monitor"], outcome: ok }
+  # The setup wizard waits at a stdin prompt. Ctrl-C (SIGINT on the cooked
+  # terminal) cancels it, and the TUI comes back and keeps working.
+  - type: "setup"
+  - key: Enter
+  - wait_for: { text: "API key" }
+  - key: Ctrl-C
+  - wait_for: { text: "Ran outside the TUI: setup \\(cancelled, \\d+\\.\\ds\\)" }
+  - expect_journal: { argv_prefix: ["scope", "setup"], outcome: cancelled }
+  - type: "ctx"
+  - key: Enter
+  - wait_for: { text: "Current Context" }
+  - key: Ctrl-D
+  - expect_exit: 0

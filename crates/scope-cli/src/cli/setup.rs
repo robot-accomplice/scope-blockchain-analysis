@@ -17,10 +17,13 @@
 //! scope setup --key etherscan
 //! ```
 
+use crate::cli::output::Output;
+use crate::cli::prompt::ask;
+use crate::{note, outln};
 use clap::Args;
 use scope::config::{Config, OutputFormat};
 use scope::error::{ConfigError, Result, ScopeError};
-use std::io::{self, BufRead, Write};
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
 /// Arguments for the setup command.
@@ -55,39 +58,44 @@ struct ConfigItem {
 }
 
 /// Runs the setup command.
-pub async fn run(args: SetupArgs, config: &Config) -> Result<()> {
+pub async fn run(args: SetupArgs, config: &Config, out: &Output) -> Result<()> {
     if args.status {
-        show_status(config);
+        show_status(config, out)?;
         return Ok(());
     }
 
     if args.reset {
-        return reset_config();
+        return reset_config(out);
     }
 
+    // Changes start from the file, not the caller's copy: the TUI loads
+    // the config once at start, and saving that copy wrote stale values
+    // (test keys and RPCs) back over the user's file.
+    let config = &Config::load(None)?;
+
     if let Some(ref key_name) = args.key {
-        return configure_single_key(key_name, config).await;
+        return configure_single_key(key_name, config, out).await;
     }
 
     // Run full setup wizard
-    run_setup_wizard(config).await
+    run_setup_wizard(config, out).await
 }
 
 /// Shows the current configuration status.
-fn show_status(config: &Config) {
+fn show_status(config: &Config, out: &Output) -> std::io::Result<()> {
     use scope::display::terminal as t;
 
-    println!("{}", t::section_header("Scope Configuration Status"));
+    outln!(out, "{}", t::section_header("Scope Configuration Status"))?;
 
     // Config file location
     let config_path = Config::config_path()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "Not found".to_string());
-    println!("{}", t::kv_row("Config file", &config_path));
-    println!("{}", t::blank_row());
+    outln!(out, "{}", t::kv_row("Config file", &config_path))?;
+    outln!(out, "{}", t::blank_row())?;
 
     // API Keys
-    println!("{}", t::subsection_header("API Keys"));
+    outln!(out, "{}", t::subsection_header("API Keys"))?;
 
     let api_keys = get_api_key_items(config);
     let mut missing_keys = Vec::new();
@@ -101,38 +109,41 @@ fn show_status(config: &Config) {
             } else {
                 format!("{} {}", item.name, hint)
             };
-            println!("{}", t::check_pass(&msg));
+            outln!(out, "{}", t::check_pass(&msg))?;
         } else {
             missing_keys.push(item.name);
-            println!("{}", t::check_fail(item.name));
+            outln!(out, "{}", t::check_fail(item.name))?;
         }
-        println!("{}", t::kv_row("Chain", info.chain));
+        outln!(out, "{}", t::kv_row("Chain", info.chain))?;
     }
 
     // Show where to get missing keys
     if !missing_keys.is_empty() {
-        println!("{}", t::blank_row());
-        println!("{}", t::subsection_header("Missing API Keys"));
+        outln!(out, "{}", t::blank_row())?;
+        outln!(out, "{}", t::subsection_header("Missing API Keys"))?;
         for key_name in missing_keys {
             let info = get_api_key_info(key_name);
-            println!("{}", t::link_row(key_name, info.url));
+            outln!(out, "{}", t::link_row(key_name, info.url))?;
         }
     }
 
-    println!("{}", t::blank_row());
-    println!("{}", t::subsection_header("Defaults"));
-    println!(
+    outln!(out, "{}", t::blank_row())?;
+    outln!(out, "{}", t::subsection_header("Defaults"))?;
+    outln!(
+        out,
         "{}",
         t::kv_row(
             "Chain",
             config.chains.ethereum_rpc.as_deref().unwrap_or("ethereum")
         )
-    );
-    println!(
+    )?;
+    outln!(
+        out,
         "{}",
         t::kv_row("Output format", &format!("{:?}", config.output.format))
-    );
-    println!(
+    )?;
+    outln!(
+        out,
         "{}",
         t::kv_row(
             "Color output",
@@ -142,66 +153,78 @@ fn show_status(config: &Config) {
                 "disabled"
             }
         )
-    );
+    )?;
 
     // Ghola sidecar status
-    println!("{}", t::blank_row());
-    println!("{}", t::subsection_header("Ghola Sidecar"));
+    outln!(out, "{}", t::blank_row())?;
+    outln!(out, "{}", t::subsection_header("Ghola Sidecar"))?;
 
     let ghola_in_path = which_ghola();
     if ghola_in_path {
-        println!("{}", t::check_pass("ghola binary found in PATH"));
+        outln!(out, "{}", t::check_pass("ghola binary found in PATH"))?;
     } else {
-        println!("{}", t::check_fail("ghola binary not found in PATH"));
-        println!(
+        outln!(out, "{}", t::check_fail("ghola binary not found in PATH"))?;
+        outln!(
+            out,
             "{}",
             t::info_row("Install: go install github.com/robot-accomplice/ghola@latest")
-        );
+        )?;
     }
 
     if config.ghola.enabled {
-        println!("{}", t::check_pass("Ghola transport enabled in config"));
+        outln!(
+            out,
+            "{}",
+            t::check_pass("Ghola transport enabled in config")
+        )?;
         if config.ghola.stealth {
-            println!(
+            outln!(
+                out,
                 "{}",
                 t::check_pass("Stealth mode active (temporal drift + ghost signing)")
-            );
+            )?;
         } else {
-            println!(
+            outln!(
+                out,
                 "{}",
                 t::kv_row(
                     "Stealth mode",
                     "disabled (set ghola.stealth: true to enable)"
                 )
-            );
+            )?;
         }
-        println!(
+        outln!(
+            out,
             "{}",
             t::kv_row(
                 "Buffer size",
                 &format!("{} bytes", config.ghola.buffer_size)
             )
-        );
+        )?;
     } else {
-        println!(
+        outln!(
+            out,
             "{}",
             t::kv_row(
                 "Transport",
                 "native (set ghola.enabled: true in config to use sidecar)",
             )
-        );
+        )?;
     }
 
-    println!("{}", t::blank_row());
-    println!(
+    outln!(out, "{}", t::blank_row())?;
+    outln!(
+        out,
         "{}",
         t::info_row("Run 'scope setup' to configure missing settings.")
-    );
-    println!(
+    )?;
+    outln!(
+        out,
         "{}",
         t::info_row("Run 'scope setup --key <provider>' to configure a specific key.")
-    );
-    println!("{}", t::section_footer());
+    )?;
+    outln!(out, "{}", t::section_footer())?;
+    Ok(())
 }
 
 /// Checks whether the `ghola` binary is present on `$PATH`.
@@ -276,67 +299,48 @@ fn mask_key(key: &str) -> String {
 }
 
 /// Resets configuration to defaults.
-fn reset_config() -> Result<()> {
+fn reset_config(out: &Output) -> Result<()> {
     let config_path = Config::config_path().ok_or_else(|| {
         ScopeError::Config(ConfigError::NotFound {
             path: PathBuf::from("~/.config/scope/config.yaml"),
         })
     })?;
-    let stdin = io::stdin();
-    let stdout = io::stdout();
-    reset_config_impl(&mut stdin.lock(), &mut stdout.lock(), &config_path)
+    reset_config_impl(&mut crate::cli::prompt::stdin(), out, &config_path)
 }
 
 /// Testable implementation of reset_config with injected I/O and path.
-fn reset_config_impl(
-    reader: &mut impl BufRead,
-    writer: &mut impl Write,
-    config_path: &Path,
-) -> Result<()> {
+fn reset_config_impl(reader: &mut impl BufRead, out: &Output, config_path: &Path) -> Result<()> {
     if config_path.exists() {
-        write!(
-            writer,
-            "This will delete your current configuration. Continue? [y/N]: "
-        )
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
-        writer.flush().map_err(|e| ScopeError::Io(e.to_string()))?;
-
-        let mut input = String::new();
-        reader
-            .read_line(&mut input)
-            .map_err(|e| ScopeError::Io(e.to_string()))?;
+        let input = ask(
+            reader,
+            out,
+            "This will delete your current configuration. Continue? [y/N]: ",
+        )?;
 
         if !matches!(input.trim().to_lowercase().as_str(), "y" | "yes") {
-            writeln!(writer, "Cancelled.").map_err(|e| ScopeError::Io(e.to_string()))?;
+            note!(out, "Cancelled.");
             return Ok(());
         }
 
-        std::fs::remove_file(config_path).map_err(|e| ScopeError::Io(e.to_string()))?;
-        writeln!(writer, "Configuration reset to defaults.")
-            .map_err(|e| ScopeError::Io(e.to_string()))?;
+        std::fs::remove_file(config_path)?;
+        note!(out, "Configuration reset to defaults.");
     } else {
-        writeln!(
-            writer,
-            "No configuration file found. Already using defaults."
-        )
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
+        note!(out, "No configuration file found. Already using defaults.");
     }
 
     Ok(())
 }
 
 /// Configures a single API key.
-async fn configure_single_key(key_name: &str, config: &Config) -> Result<()> {
+async fn configure_single_key(key_name: &str, config: &Config, out: &Output) -> Result<()> {
     let config_path = Config::config_path().ok_or_else(|| {
         ScopeError::Config(ConfigError::NotFound {
             path: PathBuf::from("~/.config/scope/config.yaml"),
         })
     })?;
-    let stdin = io::stdin();
-    let stdout = io::stdout();
     configure_single_key_impl(
-        &mut stdin.lock(),
-        &mut stdout.lock(),
+        &mut crate::cli::prompt::stdin(),
+        out,
         key_name,
         config,
         &config_path,
@@ -346,7 +350,7 @@ async fn configure_single_key(key_name: &str, config: &Config) -> Result<()> {
 /// Testable implementation of configure_single_key with injected I/O.
 fn configure_single_key_impl(
     reader: &mut impl BufRead,
-    writer: &mut impl Write,
+    out: &Output,
     key_name: &str,
     config: &Config,
     config_path: &Path,
@@ -361,46 +365,41 @@ fn configure_single_key_impl(
     ];
 
     if !valid_keys.contains(&key_name) {
-        writeln!(writer, "Unknown API key: {}", key_name)
-            .map_err(|e| ScopeError::Io(e.to_string()))?;
-        writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
-        writeln!(writer, "Valid options:").map_err(|e| ScopeError::Io(e.to_string()))?;
+        note!(out, "Unknown API key: {}", key_name);
+        note!(out);
+        note!(out, "Valid options:");
         for key in valid_keys {
             let info = get_api_key_info(key);
-            writeln!(writer, "  {:<15} - {}", key, info.chain)
-                .map_err(|e| ScopeError::Io(e.to_string()))?;
+            note!(out, "  {:<15} - {}", key, info.chain);
         }
         return Ok(());
     }
 
     let info = get_api_key_info(key_name);
-    writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(
-        writer,
+    note!(out);
+    note!(
+        out,
         "╔══════════════════════════════════════════════════════════════╗"
-    )
-    .map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(writer, "║  Configure {} API Key", key_name.to_uppercase())
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(
-        writer,
+    );
+    note!(out, "║  Configure {} API Key", key_name.to_uppercase());
+    note!(
+        out,
         "╚══════════════════════════════════════════════════════════════╝"
-    )
-    .map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(writer, "Chain: {}", info.chain).map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(writer, "Enables: {}", info.features).map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(writer, "How to get your free API key:").map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(writer, "  {}", info.signup_steps).map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(writer, "URL: {}", info.url).map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
+    );
+    note!(out);
+    note!(out, "Chain: {}", info.chain);
+    note!(out, "Enables: {}", info.features);
+    note!(out);
+    note!(out, "How to get your free API key:");
+    note!(out, "  {}", info.signup_steps);
+    note!(out);
+    note!(out, "URL: {}", info.url);
+    note!(out);
 
-    let key = prompt_api_key_impl(reader, writer, key_name)?;
+    let key = prompt_api_key_impl(reader, out, key_name)?;
 
     if key.is_empty() {
-        writeln!(writer, "Skipped.").map_err(|e| ScopeError::Io(e.to_string()))?;
+        note!(out, "Skipped.");
         return Ok(());
     }
 
@@ -409,7 +408,7 @@ fn configure_single_key_impl(
     new_config.chains.api_keys.insert(key_name.to_string(), key);
 
     save_config_to_path(&new_config, config_path)?;
-    writeln!(writer, "✓ {} API key saved.", key_name).map_err(|e| ScopeError::Io(e.to_string()))?;
+    note!(out, "✓ {} API key saved.", key_name);
 
     Ok(())
 }
@@ -477,188 +476,150 @@ fn get_api_key_url(key_name: &str) -> &'static str {
 }
 
 /// Runs the full setup wizard.
-async fn run_setup_wizard(config: &Config) -> Result<()> {
+async fn run_setup_wizard(config: &Config, out: &Output) -> Result<()> {
     let config_path = Config::config_path().ok_or_else(|| {
         ScopeError::Config(ConfigError::NotFound {
             path: PathBuf::from("~/.config/scope/config.yaml"),
         })
     })?;
-    let stdin = io::stdin();
-    let stdout = io::stdout();
-    run_setup_wizard_impl(&mut stdin.lock(), &mut stdout.lock(), config, &config_path)
+    run_setup_wizard_impl(&mut crate::cli::prompt::stdin(), out, config, &config_path)
 }
 
 /// Testable implementation of the setup wizard with injected I/O.
 fn run_setup_wizard_impl(
     reader: &mut impl BufRead,
-    writer: &mut impl Write,
+    out: &Output,
     config: &Config,
     config_path: &Path,
 ) -> Result<()> {
-    writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(
-        writer,
+    note!(out);
+    note!(
+        out,
         "╔══════════════════════════════════════════════════════════════╗"
-    )
-    .map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(
-        writer,
+    );
+    note!(
+        out,
         "║                    Scope Setup Wizard                        ║"
-    )
-    .map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(
-        writer,
+    );
+    note!(
+        out,
         "╚══════════════════════════════════════════════════════════════╝"
-    )
-    .map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(
-        writer,
+    );
+    note!(out);
+    note!(
+        out,
         "This wizard will help you configure Scope (Blockchain Crawler CLI)."
-    )
-    .map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(writer, "Press Enter to skip any optional setting.")
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
+    );
+    note!(out, "Press Enter to skip any optional setting.");
+    note!(out);
 
     let mut new_config = config.clone();
     let mut changes_made = false;
 
     // Step 1: API Keys
-    writeln!(writer, "Step 1: API Keys").map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(writer, "{}", "=".repeat(60)).map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(
-        writer,
+    note!(out, "Step 1: API Keys");
+    note!(out, "{}", "=".repeat(60));
+    note!(out);
+    note!(
+        out,
         "API keys enable access to block explorer data including:"
-    )
-    .map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(writer, "  • Token balances and holder information")
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(writer, "  • Transaction history and details")
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(writer, "  • Contract verification status")
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(writer, "  • Token analytics and metrics")
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(
-        writer,
+    );
+    note!(out, "  • Token balances and holder information");
+    note!(out, "  • Transaction history and details");
+    note!(out, "  • Contract verification status");
+    note!(out, "  • Token analytics and metrics");
+    note!(out);
+    note!(
+        out,
         "All API keys are FREE and take just a minute to obtain."
-    )
-    .map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
+    );
+    note!(out);
 
     // Etherscan (primary)
     if !config.chains.api_keys.contains_key("etherscan") {
         let info = get_api_key_info("etherscan");
-        writeln!(
-            writer,
+        note!(
+            out,
             "┌────────────────────────────────────────────────────────────┐"
-        )
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
-        writeln!(
-            writer,
+        );
+        note!(
+            out,
             "│  ETHERSCAN API KEY (Recommended)                           │"
-        )
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
-        writeln!(
-            writer,
+        );
+        note!(
+            out,
             "└────────────────────────────────────────────────────────────┘"
-        )
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
-        writeln!(writer, "  Chain: {}", info.chain).map_err(|e| ScopeError::Io(e.to_string()))?;
-        writeln!(writer, "  Enables: {}", info.features)
-            .map_err(|e| ScopeError::Io(e.to_string()))?;
-        writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
-        writeln!(writer, "  How to get your free API key:")
-            .map_err(|e| ScopeError::Io(e.to_string()))?;
-        writeln!(writer, "  {}", info.signup_steps).map_err(|e| ScopeError::Io(e.to_string()))?;
-        writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
-        writeln!(writer, "  URL: {}", info.url).map_err(|e| ScopeError::Io(e.to_string()))?;
-        writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
-        if let Some(key) = prompt_optional_key_impl(reader, writer, "etherscan")? {
+        );
+        note!(out, "  Chain: {}", info.chain);
+        note!(out, "  Enables: {}", info.features);
+        note!(out);
+        note!(out, "  How to get your free API key:");
+        note!(out, "  {}", info.signup_steps);
+        note!(out);
+        note!(out, "  URL: {}", info.url);
+        note!(out);
+        if let Some(key) = prompt_optional_key_impl(reader, out, "etherscan")? {
             new_config
                 .chains
                 .api_keys
                 .insert("etherscan".to_string(), key);
             changes_made = true;
         }
-        writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
+        note!(out);
     } else {
-        writeln!(writer, "✓ Etherscan API key already configured")
-            .map_err(|e| ScopeError::Io(e.to_string()))?;
-        writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
+        note!(out, "✓ Etherscan API key already configured");
+        note!(out);
     }
 
     // Ask about other chains
-    write!(
-        writer,
-        "Configure API keys for other chains (BSC, Polygon, Arbitrum, etc.)? [y/N]: "
-    )
-    .map_err(|e| ScopeError::Io(e.to_string()))?;
-    writer.flush().map_err(|e| ScopeError::Io(e.to_string()))?;
-
-    let mut input = String::new();
-    reader
-        .read_line(&mut input)
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
+    let input = ask(
+        reader,
+        out,
+        "Configure API keys for other chains (BSC, Polygon, Arbitrum, etc.)? [y/N]: ",
+    )?;
 
     if matches!(input.trim().to_lowercase().as_str(), "y" | "yes") {
-        writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
+        note!(out);
 
         let other_chains = ["bscscan", "polygonscan", "arbiscan", "basescan", "optimism"];
 
         for key_name in other_chains {
             if !config.chains.api_keys.contains_key(key_name) {
                 let info = get_api_key_info(key_name);
-                writeln!(
-                    writer,
+                note!(
+                    out,
                     "┌────────────────────────────────────────────────────────────┐"
-                )
-                .map_err(|e| ScopeError::Io(e.to_string()))?;
-                writeln!(writer, "│  {} API KEY", key_name.to_uppercase())
-                    .map_err(|e| ScopeError::Io(e.to_string()))?;
-                writeln!(
-                    writer,
+                );
+                note!(out, "│  {} API KEY", key_name.to_uppercase());
+                note!(
+                    out,
                     "└────────────────────────────────────────────────────────────┘"
-                )
-                .map_err(|e| ScopeError::Io(e.to_string()))?;
-                writeln!(writer, "  Chain: {}", info.chain)
-                    .map_err(|e| ScopeError::Io(e.to_string()))?;
-                writeln!(writer, "  Enables: {}", info.features)
-                    .map_err(|e| ScopeError::Io(e.to_string()))?;
-                writeln!(writer, "  URL: {}", info.url)
-                    .map_err(|e| ScopeError::Io(e.to_string()))?;
-                writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
-                if let Some(key) = prompt_optional_key_impl(reader, writer, key_name)? {
+                );
+                note!(out, "  Chain: {}", info.chain);
+                note!(out, "  Enables: {}", info.features);
+                note!(out, "  URL: {}", info.url);
+                note!(out);
+                if let Some(key) = prompt_optional_key_impl(reader, out, key_name)? {
                     new_config.chains.api_keys.insert(key_name.to_string(), key);
                     changes_made = true;
                 }
-                writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
+                note!(out);
             }
         }
     }
 
     // Step 2: Preferences
-    writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(writer, "Step 2: Preferences").map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(writer, "{}", "=".repeat(60)).map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
+    note!(out);
+    note!(out, "Step 2: Preferences");
+    note!(out, "{}", "=".repeat(60));
+    note!(out);
 
     // Default output format
-    writeln!(writer, "Default output format:").map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(writer, "  1. table (default)").map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(writer, "  2. json").map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(writer, "  3. csv").map_err(|e| ScopeError::Io(e.to_string()))?;
-    write!(writer, "Select [1-3, Enter for default]: ")
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
-    writer.flush().map_err(|e| ScopeError::Io(e.to_string()))?;
-
-    input.clear();
-    reader
-        .read_line(&mut input)
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
+    note!(out, "Default output format:");
+    note!(out, "  1. table (default)");
+    note!(out, "  2. json");
+    note!(out, "  3. csv");
+    let input = ask(reader, out, "Select [1-3, Enter for default]: ")?;
 
     match input.trim() {
         "2" => {
@@ -674,56 +635,37 @@ fn run_setup_wizard_impl(
 
     // Save configuration
     if changes_made {
-        writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
-        writeln!(writer, "Saving configuration...").map_err(|e| ScopeError::Io(e.to_string()))?;
+        note!(out);
+        note!(out, "Saving configuration...");
         save_config_to_path(&new_config, config_path)?;
-        writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
-        writeln!(
-            writer,
-            "✓ Configuration saved to ~/.config/scope/config.yaml"
-        )
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
+        out.note_saved("Configuration", config_path.display());
     } else {
-        writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
-        writeln!(writer, "No changes made.").map_err(|e| ScopeError::Io(e.to_string()))?;
+        note!(out);
+        note!(out, "No changes made.");
     }
 
-    writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(writer, "Setup complete! You can now use Scope.")
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(writer, "Quick start:").map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(writer, "  scope crawl USDC              # Analyze a token")
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(
-        writer,
-        "  scope address 0x...           # Analyze an address"
-    )
-    .map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(
-        writer,
+    note!(out);
+    note!(out, "Setup complete! You can now use Scope.");
+    note!(out);
+    note!(out, "Quick start:");
+    note!(out, "  scope crawl USDC              # Analyze a token");
+    note!(out, "  scope address 0x...           # Analyze an address");
+    note!(
+        out,
         "  scope insights <target>       # Auto-detect and analyze"
-    )
-    .map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(
-        writer,
-        "  scope monitor USDC            # Live TUI dashboard"
-    )
-    .map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(writer, "  scope interactive             # Interactive mode")
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(
-        writer,
+    );
+    note!(out, "  scope monitor USDC            # Live TUI dashboard");
+    note!(out, "  scope interactive             # Interactive mode");
+    note!(out);
+    note!(
+        out,
         "Run 'scope setup --status' to view your configuration."
-    )
-    .map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(
-        writer,
+    );
+    note!(
+        out,
         "Run 'scope completions zsh > _scope' for shell tab-completion."
-    )
-    .map_err(|e| ScopeError::Io(e.to_string()))?;
-    writeln!(writer).map_err(|e| ScopeError::Io(e.to_string()))?;
+    );
+    note!(out);
 
     Ok(())
 }
@@ -731,17 +673,14 @@ fn run_setup_wizard_impl(
 /// Testable implementation of prompt_optional_key with injected I/O.
 fn prompt_optional_key_impl(
     reader: &mut impl BufRead,
-    writer: &mut impl Write,
+    out: &Output,
     name: &str,
 ) -> Result<Option<String>> {
-    write!(writer, "  {} API key (or Enter to skip): ", name)
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
-    writer.flush().map_err(|e| ScopeError::Io(e.to_string()))?;
-
-    let mut input = String::new();
-    reader
-        .read_line(&mut input)
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
+    let input = ask(
+        reader,
+        out,
+        &format!("  {} API key (or Enter to skip): ", name),
+    )?;
 
     let key = input.trim().to_string();
     if key.is_empty() {
@@ -752,18 +691,8 @@ fn prompt_optional_key_impl(
 }
 
 /// Testable implementation of prompt_api_key with injected I/O.
-fn prompt_api_key_impl(
-    reader: &mut impl BufRead,
-    writer: &mut impl Write,
-    name: &str,
-) -> Result<String> {
-    write!(writer, "Enter {} API key: ", name).map_err(|e| ScopeError::Io(e.to_string()))?;
-    writer.flush().map_err(|e| ScopeError::Io(e.to_string()))?;
-
-    let mut input = String::new();
-    reader
-        .read_line(&mut input)
-        .map_err(|e| ScopeError::Io(e.to_string()))?;
+fn prompt_api_key_impl(reader: &mut impl BufRead, out: &Output, name: &str) -> Result<String> {
+    let input = ask(reader, out, &format!("Enter {} API key: ", name))?;
 
     Ok(input.trim().to_string())
 }
@@ -772,42 +701,15 @@ fn prompt_api_key_impl(
 fn save_config_to_path(config: &Config, config_path: &Path) -> Result<()> {
     // Ensure directory exists
     if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| ScopeError::Io(e.to_string()))?;
+        std::fs::create_dir_all(parent)?;
     }
 
-    // Build YAML manually for cleaner output
-    let mut yaml = String::new();
-    yaml.push_str("# Scope Configuration\n");
-    yaml.push_str("# Generated by 'scope setup'\n\n");
-
-    // Chains section
-    yaml.push_str("chains:\n");
-
-    // API keys
-    if !config.chains.api_keys.is_empty() {
-        yaml.push_str("  api_keys:\n");
-        for (name, key) in &config.chains.api_keys {
-            yaml.push_str(&format!("    {}: \"{}\"\n", name, key));
-        }
-    }
-
-    // RPC endpoints (if configured)
-    if let Some(ref rpc) = config.chains.ethereum_rpc {
-        yaml.push_str(&format!("  ethereum_rpc: \"{}\"\n", rpc));
-    }
-
-    // Output section
-    yaml.push_str("\noutput:\n");
-    yaml.push_str(&format!("  format: {}\n", config.output.format));
-    yaml.push_str(&format!("  color: {}\n", config.output.color));
-
-    // Ghola sidecar section
-    yaml.push_str("\nghola:\n");
-    yaml.push_str(&format!("  enabled: {}\n", config.ghola.enabled));
-    yaml.push_str(&format!("  stealth: {}\n", config.ghola.stealth));
-    yaml.push_str(&format!("  buffer_size: {}\n", config.ghola.buffer_size));
-
-    std::fs::write(config_path, yaml).map_err(|e| ScopeError::Io(e.to_string()))?;
+    // The whole config: a hand-written subset dropped the sections setup
+    // does not edit (monitor, market, address book, web, other RPCs).
+    let body = serde_yaml::to_string(config)
+        .map_err(|e| ScopeError::Other(format!("Failed to serialize config: {}", e)))?;
+    let yaml = format!("# Scope Configuration\n# Generated by 'scope setup'\n\n{body}");
+    std::fs::write(config_path, yaml)?;
 
     Ok(())
 }
@@ -820,6 +722,10 @@ fn save_config_to_path(config: &Config, config_path: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    fn quiet() -> crate::cli::output::Output {
+        crate::cli::output::Output::capture().0
+    }
 
     #[test]
     fn test_mask_key_long() {
@@ -1024,7 +930,7 @@ mod tests {
     #[test]
     fn test_show_status_no_panic() {
         let config = Config::default();
-        show_status(&config);
+        show_status(&config, &quiet()).unwrap();
     }
 
     #[test]
@@ -1038,7 +944,7 @@ mod tests {
             .chains
             .api_keys
             .insert("bscscan".to_string(), "xyz".to_string());
-        show_status(&config);
+        show_status(&config, &quiet()).unwrap();
     }
 
     // ========================================================================
@@ -1053,7 +959,7 @@ mod tests {
             key: None,
             reset: false,
         };
-        let result = run(args, &config).await;
+        let result = run(args, &config, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1065,9 +971,19 @@ mod tests {
             key: Some("nonexistent".to_string()),
             reset: false,
         };
-        // This should print "Unknown API key" but still return Ok
-        let result = run(args, &config).await;
+        // `setup --key` run from the TUI: its text must go through the
+        // Output, or the TUI scrollback never shows it. It is not data, so
+        // it stays out of Ctrl-Y, save and piped stdout.
+        let (out, cap) = crate::cli::output::Output::capture();
+        let result = run(args, &config, &out).await;
         assert!(result.is_ok());
+        assert!(
+            cap.err().starts_with("Unknown API key: nonexistent\n"),
+            "{:?}",
+            cap.err()
+        );
+        assert!(cap.err().contains("etherscan"), "{:?}", cap.err());
+        assert_eq!(cap.out(), "", "wizard text is not data");
     }
 
     // ========================================================================
@@ -1089,7 +1005,7 @@ mod tests {
             .chains
             .api_keys
             .insert("bscscan".to_string(), "bsc".to_string()); // Short key
-        show_status(&config);
+        show_status(&config, &quiet()).unwrap();
     }
 
     #[test]
@@ -1109,7 +1025,7 @@ mod tests {
                 .insert(key.to_string(), format!("{}_key_12345678", key));
         }
         // No missing keys → should skip "where to get" section
-        show_status(&config);
+        show_status(&config, &quiet()).unwrap();
     }
 
     #[test]
@@ -1118,7 +1034,7 @@ mod tests {
         config.chains.ethereum_rpc = Some("https://custom.rpc.example.com".to_string());
         config.output.format = OutputFormat::Json;
         config.output.color = false;
-        show_status(&config);
+        show_status(&config, &quiet()).unwrap();
     }
 
     #[test]
@@ -1235,11 +1151,11 @@ mod tests {
     fn test_prompt_api_key_impl_with_input() {
         let input = b"MY_SECRET_API_KEY_123\n";
         let mut reader = std::io::Cursor::new(&input[..]);
-        let mut writer = Vec::new();
+        let (out, cap) = crate::cli::output::Output::capture();
 
-        let result = prompt_api_key_impl(&mut reader, &mut writer, "etherscan").unwrap();
+        let result = prompt_api_key_impl(&mut reader, &out, "etherscan").unwrap();
         assert_eq!(result, "MY_SECRET_API_KEY_123");
-        let output = String::from_utf8(writer).unwrap();
+        let output = cap.err();
         assert!(output.contains("Enter etherscan API key"));
     }
 
@@ -1247,9 +1163,9 @@ mod tests {
     fn test_prompt_api_key_impl_empty_input() {
         let input = b"\n";
         let mut reader = std::io::Cursor::new(&input[..]);
-        let mut writer = Vec::new();
+        let out = crate::cli::output::Output::capture().0;
 
-        let result = prompt_api_key_impl(&mut reader, &mut writer, "bscscan").unwrap();
+        let result = prompt_api_key_impl(&mut reader, &out, "bscscan").unwrap();
         assert_eq!(result, "");
     }
 
@@ -1257,9 +1173,9 @@ mod tests {
     fn test_prompt_optional_key_impl_with_key() {
         let input = b"my_key_12345\n";
         let mut reader = std::io::Cursor::new(&input[..]);
-        let mut writer = Vec::new();
+        let out = crate::cli::output::Output::capture().0;
 
-        let result = prompt_optional_key_impl(&mut reader, &mut writer, "polygonscan").unwrap();
+        let result = prompt_optional_key_impl(&mut reader, &out, "polygonscan").unwrap();
         assert_eq!(result, Some("my_key_12345".to_string()));
     }
 
@@ -1267,11 +1183,11 @@ mod tests {
     fn test_prompt_optional_key_impl_skip() {
         let input = b"\n";
         let mut reader = std::io::Cursor::new(&input[..]);
-        let mut writer = Vec::new();
+        let (out, cap) = crate::cli::output::Output::capture();
 
-        let result = prompt_optional_key_impl(&mut reader, &mut writer, "arbiscan").unwrap();
+        let result = prompt_optional_key_impl(&mut reader, &out, "arbiscan").unwrap();
         assert_eq!(result, None);
-        let output = String::from_utf8(writer).unwrap();
+        let output = cap.err();
         assert!(output.contains("arbiscan API key"));
     }
 
@@ -1299,6 +1215,29 @@ mod tests {
     }
 
     #[test]
+    fn test_save_keeps_the_sections_setup_does_not_edit() {
+        // Saving a key must not drop the user's other settings.
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.yaml");
+        let mut config = Config::default();
+        config.chains.solana_rpc = Some("https://my-sol.example.com".to_string());
+        config.monitor.refresh_seconds = 42;
+        config.market.health.min_levels = 3;
+        config.web.auth_token = Some("web-token".to_string());
+
+        save_config_to_path(&config, &config_path).unwrap();
+
+        let back = Config::load(Some(&config_path)).unwrap();
+        assert_eq!(
+            back.chains.solana_rpc.as_deref(),
+            Some("https://my-sol.example.com")
+        );
+        assert_eq!(back.monitor.refresh_seconds, 42);
+        assert_eq!(back.market.health.min_levels, 3);
+        assert_eq!(back.web.auth_token.as_deref(), Some("web-token"));
+    }
+
+    #[test]
     fn test_save_config_to_path_with_rpc() {
         let tmp = tempfile::tempdir().unwrap();
         let config_path = tmp.path().join("config.yaml");
@@ -1320,11 +1259,11 @@ mod tests {
 
         let input = b"y\n";
         let mut reader = std::io::Cursor::new(&input[..]);
-        let mut writer = Vec::new();
+        let (out, cap) = crate::cli::output::Output::capture();
 
-        reset_config_impl(&mut reader, &mut writer, &config_path).unwrap();
+        reset_config_impl(&mut reader, &out, &config_path).unwrap();
         assert!(!config_path.exists());
-        let output = String::from_utf8(writer).unwrap();
+        let output = cap.err();
         assert!(output.contains("Configuration reset to defaults"));
     }
 
@@ -1336,9 +1275,9 @@ mod tests {
 
         let input = b"yes\n";
         let mut reader = std::io::Cursor::new(&input[..]);
-        let mut writer = Vec::new();
+        let out = crate::cli::output::Output::capture().0;
 
-        reset_config_impl(&mut reader, &mut writer, &config_path).unwrap();
+        reset_config_impl(&mut reader, &out, &config_path).unwrap();
         assert!(!config_path.exists());
     }
 
@@ -1350,11 +1289,11 @@ mod tests {
 
         let input = b"n\n";
         let mut reader = std::io::Cursor::new(&input[..]);
-        let mut writer = Vec::new();
+        let (out, cap) = crate::cli::output::Output::capture();
 
-        reset_config_impl(&mut reader, &mut writer, &config_path).unwrap();
+        reset_config_impl(&mut reader, &out, &config_path).unwrap();
         assert!(config_path.exists()); // Not deleted
-        let output = String::from_utf8(writer).unwrap();
+        let output = cap.err();
         assert!(output.contains("Cancelled"));
     }
 
@@ -1365,10 +1304,10 @@ mod tests {
 
         let input = b"";
         let mut reader = std::io::Cursor::new(&input[..]);
-        let mut writer = Vec::new();
+        let (out, cap) = crate::cli::output::Output::capture();
 
-        reset_config_impl(&mut reader, &mut writer, &config_path).unwrap();
-        let output = String::from_utf8(writer).unwrap();
+        reset_config_impl(&mut reader, &out, &config_path).unwrap();
+        let output = cap.err();
         assert!(output.contains("No configuration file found"));
     }
 
@@ -1380,12 +1319,11 @@ mod tests {
 
         let input = b"MY_ETH_KEY_12345678\n";
         let mut reader = std::io::Cursor::new(&input[..]);
-        let mut writer = Vec::new();
+        let (out, cap) = crate::cli::output::Output::capture();
 
-        configure_single_key_impl(&mut reader, &mut writer, "etherscan", &config, &config_path)
-            .unwrap();
+        configure_single_key_impl(&mut reader, &out, "etherscan", &config, &config_path).unwrap();
 
-        let output = String::from_utf8(writer).unwrap();
+        let output = cap.err();
         assert!(output.contains("Configure ETHERSCAN API Key"));
         assert!(output.contains("Ethereum Mainnet"));
         assert!(output.contains("etherscan API key saved"));
@@ -1404,12 +1342,11 @@ mod tests {
 
         let input = b"\n";
         let mut reader = std::io::Cursor::new(&input[..]);
-        let mut writer = Vec::new();
+        let (out, cap) = crate::cli::output::Output::capture();
 
-        configure_single_key_impl(&mut reader, &mut writer, "etherscan", &config, &config_path)
-            .unwrap();
+        configure_single_key_impl(&mut reader, &out, "etherscan", &config, &config_path).unwrap();
 
-        let output = String::from_utf8(writer).unwrap();
+        let output = cap.err();
         assert!(output.contains("Skipped"));
         assert!(!config_path.exists()); // No file created
     }
@@ -1422,12 +1359,11 @@ mod tests {
 
         let input = b"";
         let mut reader = std::io::Cursor::new(&input[..]);
-        let mut writer = Vec::new();
+        let (out, cap) = crate::cli::output::Output::capture();
 
-        configure_single_key_impl(&mut reader, &mut writer, "invalid", &config, &config_path)
-            .unwrap();
+        configure_single_key_impl(&mut reader, &out, "invalid", &config, &config_path).unwrap();
 
-        let output = String::from_utf8(writer).unwrap();
+        let output = cap.err();
         assert!(output.contains("Unknown API key: invalid"));
         assert!(output.contains("Valid options"));
     }
@@ -1440,12 +1376,11 @@ mod tests {
 
         let input = b"BSC_KEY_ABCDEF\n";
         let mut reader = std::io::Cursor::new(&input[..]);
-        let mut writer = Vec::new();
+        let (out, cap) = crate::cli::output::Output::capture();
 
-        configure_single_key_impl(&mut reader, &mut writer, "bscscan", &config, &config_path)
-            .unwrap();
+        configure_single_key_impl(&mut reader, &out, "bscscan", &config, &config_path).unwrap();
 
-        let output = String::from_utf8(writer).unwrap();
+        let output = cap.err();
         assert!(output.contains("Configure BSCSCAN API Key"));
         assert!(output.contains("BNB Smart Chain"));
         assert!(config_path.exists());
@@ -1460,11 +1395,11 @@ mod tests {
         // Skip etherscan, decline other chains, keep default format
         let input = b"\nn\n\n";
         let mut reader = std::io::Cursor::new(&input[..]);
-        let mut writer = Vec::new();
+        let (out, cap) = crate::cli::output::Output::capture();
 
-        run_setup_wizard_impl(&mut reader, &mut writer, &config, &config_path).unwrap();
+        run_setup_wizard_impl(&mut reader, &out, &config, &config_path).unwrap();
 
-        let output = String::from_utf8(writer).unwrap();
+        let output = cap.err();
         assert!(output.contains("Scope Setup Wizard"));
         assert!(output.contains("Step 1: API Keys"));
         assert!(output.contains("Step 2: Preferences"));
@@ -1482,11 +1417,11 @@ mod tests {
         // Provide etherscan key, decline other chains, select JSON format (2)
         let input = b"MY_ETH_KEY\nn\n2\n";
         let mut reader = std::io::Cursor::new(&input[..]);
-        let mut writer = Vec::new();
+        let (out, cap) = crate::cli::output::Output::capture();
 
-        run_setup_wizard_impl(&mut reader, &mut writer, &config, &config_path).unwrap();
+        run_setup_wizard_impl(&mut reader, &out, &config, &config_path).unwrap();
 
-        let output = String::from_utf8(writer).unwrap();
+        let output = cap.err();
         assert!(output.contains("Configuration saved"));
         assert!(config_path.exists());
         let content = std::fs::read_to_string(&config_path).unwrap();
@@ -1503,11 +1438,11 @@ mod tests {
         // Skip etherscan, decline other chains, select CSV format (3)
         let input = b"\nn\n3\n";
         let mut reader = std::io::Cursor::new(&input[..]);
-        let mut writer = Vec::new();
+        let (out, cap) = crate::cli::output::Output::capture();
 
-        run_setup_wizard_impl(&mut reader, &mut writer, &config, &config_path).unwrap();
+        run_setup_wizard_impl(&mut reader, &out, &config, &config_path).unwrap();
 
-        let output = String::from_utf8(writer).unwrap();
+        let output = cap.err();
         assert!(output.contains("Configuration saved"));
         let content = std::fs::read_to_string(&config_path).unwrap();
         assert!(content.contains("csv"));
@@ -1522,11 +1457,11 @@ mod tests {
         // Skip etherscan, say yes to other chains, provide bscscan key, skip rest, keep default format
         let input = b"\ny\nBSC_KEY_123\n\n\n\n\n\n";
         let mut reader = std::io::Cursor::new(&input[..]);
-        let mut writer = Vec::new();
+        let (out, cap) = crate::cli::output::Output::capture();
 
-        run_setup_wizard_impl(&mut reader, &mut writer, &config, &config_path).unwrap();
+        run_setup_wizard_impl(&mut reader, &out, &config, &config_path).unwrap();
 
-        let output = String::from_utf8(writer).unwrap();
+        let output = cap.err();
         assert!(output.contains("BSCSCAN API KEY"));
         assert!(output.contains("Configuration saved"));
         let content = std::fs::read_to_string(&config_path).unwrap();
@@ -1546,11 +1481,11 @@ mod tests {
         // Decline other chains, keep default format
         let input = b"n\n\n";
         let mut reader = std::io::Cursor::new(&input[..]);
-        let mut writer = Vec::new();
+        let (out, cap) = crate::cli::output::Output::capture();
 
-        run_setup_wizard_impl(&mut reader, &mut writer, &config, &config_path).unwrap();
+        run_setup_wizard_impl(&mut reader, &out, &config, &config_path).unwrap();
 
-        let output = String::from_utf8(writer).unwrap();
+        let output = cap.err();
         assert!(output.contains("Etherscan API key already configured"));
         assert!(output.contains("No changes made"));
     }
@@ -1599,7 +1534,7 @@ mod tests {
     fn test_show_status_ghola_disabled() {
         let config = Config::default();
         // Just verify it doesn't panic
-        show_status(&config);
+        show_status(&config, &quiet()).unwrap();
     }
 
     #[test]
@@ -1607,7 +1542,7 @@ mod tests {
         let mut config = Config::default();
         config.ghola.enabled = true;
         config.ghola.stealth = true;
-        show_status(&config);
+        show_status(&config, &quiet()).unwrap();
     }
 
     #[test]
@@ -1615,6 +1550,6 @@ mod tests {
         let mut config = Config::default();
         config.ghola.enabled = true;
         config.ghola.stealth = false;
-        show_status(&config);
+        show_status(&config, &quiet()).unwrap();
     }
 }

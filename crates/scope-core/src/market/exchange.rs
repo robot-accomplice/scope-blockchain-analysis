@@ -1,13 +1,16 @@
 //! ExchangeClient facade: composes OrderBook, Ticker, and TradeHistory
 //! capabilities behind a unified interface with capability discovery.
 
-use crate::error::{Result, ScopeError};
-use crate::market::configurable_client::ConfigurableExchangeClient;
+use crate::error::Result;
+use crate::market::configurable_client::{ConfigurableExchangeClient, venue_error};
 use crate::market::descriptor::VenueDescriptor;
 use crate::market::orderbook::{
     Candle, MarketSnapshot, OhlcClient, OrderBook, OrderBookClient, Ticker, TickerClient, Trade,
     TradeHistoryClient,
 };
+
+/// Recent trades in a market snapshot when the caller names no limit.
+pub const DEFAULT_SNAPSHOT_TRADES: u32 = 50;
 
 /// Unified exchange client that wraps per-capability trait objects.
 ///
@@ -22,6 +25,7 @@ pub struct ExchangeClient {
     ticker: Option<Box<dyn TickerClient>>,
     trade_history: Option<Box<dyn TradeHistoryClient>>,
     ohlc: Option<Box<dyn OhlcClient>>,
+    assets: Option<ConfigurableExchangeClient>,
 }
 
 impl ExchangeClient {
@@ -47,6 +51,7 @@ impl ExchangeClient {
         } else {
             None
         };
+        let assets = desc.capabilities.assets.is_some().then(|| client.clone());
         let ohlc: Option<Box<dyn OhlcClient>> = if desc.has_ohlc() {
             Some(Box::new(client))
         } else {
@@ -61,6 +66,7 @@ impl ExchangeClient {
             ticker,
             trade_history,
             ohlc,
+            assets,
         }
     }
 
@@ -78,14 +84,11 @@ impl ExchangeClient {
         &self.venue_name
     }
 
-    /// Format a trading pair for this venue.
-    pub fn format_pair(&self, base: &str) -> String {
-        self.descriptor.format_pair(base, None)
-    }
-
-    /// Format a trading pair with explicit quote currency.
-    pub fn format_pair_with_quote(&self, base: &str, quote: &str) -> String {
-        self.descriptor.format_pair(base, Some(quote))
+    /// The venue's symbol for a pair; a pair with no quote uses the venue's
+    /// default quote.
+    pub fn venue_symbol(&self, pair: &super::pair::Pair) -> String {
+        self.descriptor
+            .format_pair(&pair.base, pair.quote.as_deref())
     }
 
     // =========================================================================
@@ -120,9 +123,7 @@ impl ExchangeClient {
     pub async fn fetch_order_book(&self, pair: &str) -> Result<OrderBook> {
         self.order_book
             .as_ref()
-            .ok_or_else(|| {
-                ScopeError::Chain(format!("{} does not support order book", self.venue_name))
-            })?
+            .ok_or_else(|| venue_error(&self.venue_id, "does not support order book"))?
             .fetch_order_book(pair)
             .await
     }
@@ -131,9 +132,7 @@ impl ExchangeClient {
     pub async fn fetch_ticker(&self, pair: &str) -> Result<Ticker> {
         self.ticker
             .as_ref()
-            .ok_or_else(|| {
-                ScopeError::Chain(format!("{} does not support ticker", self.venue_name))
-            })?
+            .ok_or_else(|| venue_error(&self.venue_id, "does not support ticker"))?
             .fetch_ticker(pair)
             .await
     }
@@ -142,18 +141,35 @@ impl ExchangeClient {
     pub async fn fetch_recent_trades(&self, pair: &str, limit: u32) -> Result<Vec<Trade>> {
         self.trade_history
             .as_ref()
-            .ok_or_else(|| {
-                ScopeError::Chain(format!("{} does not support trades", self.venue_name))
-            })?
+            .ok_or_else(|| venue_error(&self.venue_id, "does not support trades"))?
             .fetch_recent_trades(pair, limit)
             .await
+    }
+
+    /// The token lines for `pair` from the venue's coin list, or `None`
+    /// when the venue has no `assets` capability.
+    pub async fn fetch_token_addresses(
+        &self,
+        pair: &super::pair::Pair,
+    ) -> Option<Result<Vec<super::assets::TokenAddress>>> {
+        let client = self.assets.as_ref()?;
+        let quote = pair
+            .quote
+            .clone()
+            .unwrap_or_else(|| self.descriptor.symbol.default_quote.clone());
+        Some(
+            client
+                .fetch_assets()
+                .await
+                .map(|assets| super::assets::token_addresses(&pair.base, &quote, &assets)),
+        )
     }
 
     /// Fetch OHLC candlesticks (if supported).
     pub async fn fetch_ohlc(&self, pair: &str, interval: &str, limit: u32) -> Result<Vec<Candle>> {
         self.ohlc
             .as_ref()
-            .ok_or_else(|| ScopeError::Chain(format!("{} does not support OHLC", self.venue_name)))?
+            .ok_or_else(|| venue_error(&self.venue_id, "does not support OHLC"))?
             .fetch_ohlc(pair, interval, limit)
             .await
     }
@@ -162,11 +178,12 @@ impl ExchangeClient {
     // Combined fetch
     // =========================================================================
 
-    /// Fetch all available market data for a pair in one call.
+    /// Fetch all available market data for a pair in one call, with up to
+    /// `trades_limit` recent trades.
     ///
     /// Each capability is fetched independently; failures in one capability
     /// do not prevent others from succeeding (they just produce `None`).
-    pub async fn fetch_market_snapshot(&self, pair: &str) -> MarketSnapshot {
+    pub async fn fetch_market_snapshot(&self, pair: &str, trades_limit: u32) -> MarketSnapshot {
         let order_book = if self.has_order_book() {
             self.fetch_order_book(pair).await.ok()
         } else {
@@ -180,7 +197,7 @@ impl ExchangeClient {
         };
 
         let recent_trades = if self.has_trade_history() {
-            self.fetch_recent_trades(pair, 50).await.ok()
+            self.fetch_recent_trades(pair, trades_limit).await.ok()
         } else {
             None
         };
@@ -210,6 +227,7 @@ impl std::fmt::Debug for ExchangeClient {
 mod tests {
     use super::*;
     use crate::market::descriptor::{CapabilitySet, SymbolCase, SymbolConfig, VenueDescriptor};
+    use crate::market::pair::Pair;
     use crate::market::registry::VenueRegistry;
     use std::collections::HashMap;
 
@@ -226,6 +244,7 @@ mod tests {
                 case: SymbolCase::Upper,
             },
             headers: HashMap::new(),
+            error_envelope: None,
             capabilities: CapabilitySet::default(),
         }
     }
@@ -248,8 +267,17 @@ mod tests {
         let registry = VenueRegistry::default();
         let desc = registry.get("binance").unwrap();
         let client = ExchangeClient::from_descriptor(desc);
-        assert_eq!(client.format_pair("BTC"), "BTCUSDT");
-        assert_eq!(client.format_pair_with_quote("ETH", "USD"), "ETHUSD");
+        assert_eq!(client.venue_symbol(&Pair::parse("ETH_USD")), "ETHUSD");
+        assert_eq!(client.venue_symbol(&Pair::parse("BTC")), "BTCUSDT");
+    }
+
+    /// The audit input: the CLI and the web both send `DAIUSDC`, not
+    /// `DAI_USDCUSDT`.
+    #[test]
+    fn test_dai_usdc_on_binance_is_daiusdc() {
+        let registry = VenueRegistry::default();
+        let client = ExchangeClient::from_descriptor(registry.get("binance").unwrap());
+        assert_eq!(client.venue_symbol(&Pair::parse("DAI_USDC")), "DAIUSDC");
     }
 
     #[test]
@@ -303,7 +331,7 @@ mod tests {
 
         let err = client.fetch_order_book("BTCUSDT").await.unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("Empty"));
+        assert!(msg.contains("(empty)"));
         assert!(msg.contains("does not support order book"));
     }
 
@@ -314,7 +342,7 @@ mod tests {
 
         let err = client.fetch_ticker("BTCUSDT").await.unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("Empty"));
+        assert!(msg.contains("(empty)"));
         assert!(msg.contains("does not support ticker"));
     }
 
@@ -325,7 +353,7 @@ mod tests {
 
         let err = client.fetch_ohlc("BTCUSDT", "1h", 100).await.unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("Empty"));
+        assert!(msg.contains("(empty)"));
         assert!(msg.contains("does not support OHLC"));
     }
 
@@ -336,7 +364,7 @@ mod tests {
 
         let err = client.fetch_recent_trades("BTCUSDT", 50).await.unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("Empty"));
+        assert!(msg.contains("(empty)"));
         assert!(msg.contains("does not support trades"));
     }
 
@@ -345,7 +373,9 @@ mod tests {
         let desc = make_empty_descriptor();
         let client = ExchangeClient::from_descriptor(&desc);
 
-        let snapshot = client.fetch_market_snapshot("BTCUSDT").await;
+        let snapshot = client
+            .fetch_market_snapshot("BTCUSDT", DEFAULT_SNAPSHOT_TRADES)
+            .await;
 
         assert!(snapshot.order_book.is_none());
         assert!(snapshot.ticker.is_none());

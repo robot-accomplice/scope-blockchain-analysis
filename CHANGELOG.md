@@ -7,6 +7,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-14
+
+### Changed (breaking)
+- **The REPL is replaced by a full-screen TUI.** `scope tui`, `scope interactive` and `scope shell` open it. Every CLI command runs inside it with the same flags and output; the REPL ran 7 of 17 commands. The REPL session commands (`chain`, `format`, `limit`, `+tokens`, `+txs`, `trace`, `decode`, `tokens`, `ctx`, `clear`) stay. Your history and saved context carry over. The `rustyline` dependency is removed. (#50)
+- **Health checks can be `warn`.** JSON checks can have `"status": "warn"`: the value is outside its target but is not a failure, and it does not count against `healthy`. Consumers must handle `warn` (the web UI does).
+- **New default rule: depth/volume.** Bid + ask depth within ±2% of mid should be 5–10% of 24h volume. Below 5% fails, so some books that were healthy are now unhealthy. Above 10% warns. Without 24h volume the rule is `n/a`. Overrides: `--depth-window-pct`, `--min-depth-volume-pct`, `--max-depth-volume-pct`, the same `market.health` keys, and web request fields.
+- **Every health check shows its value and limit**, pass or fail (for example `Bid depth: 3294 USDT (min 3000)`). Before, a passing level count or depth rule was not shown.
+- **Health checks can be `n/a`.** JSON checks are now `{"status": "pass" | "fail" | "n/a", "message": …}`. An `n/a` check does not apply to the book and does not count against `healthy`. Consumers that match only `pass` or `fail` must handle `n/a`. (#52)
+- **DEX venues (`eth`, `solana`) use a synthetic book from the AMM curve.** Results for DEX venues change: level count and spread are `n/a`; top-3 and top-10 depth now mean depth within ±0.3% and ±1%. Without pool reserves, scope keeps the old single-level estimate and labels it. (#52)
+- **`monitor --export FILE` writes to that file at launch.** Config `monitor.export.path` is the directory for the `E` key. Before, `--export` did nothing. (#51)
+- **`monitor --venue` must name a known venue.** An unknown venue is now an error that lists the known ones; before, it was dropped without a word. (#54)
+- **A failed write is an error.** For example `scope completions zsh | true` exits with status 1 and prints the I/O error; before, it panicked with status 101. (#48)
+- **Log output (`-v`) goes to stderr.** Before, it went to stdout and mixed with piped JSON. (#50)
+- **`scope tui` needs a terminal.** It exits with status 2 when stdin or stdout is not a terminal, or `TERM=dumb`. One rule decides color everywhere: `NO_COLOR`, `TERM=dumb` or no terminal turns it off. (#71)
+- **Signals end the TUI cleanly.** SIGTERM, SIGHUP, SIGINT and SIGQUIT restore the terminal, save the history and exit with 128+N. Ctrl-Z stops the process and `fg` redraws it. (#71)
+- **Status lines go to stderr.** Notes, warnings, prompts and `saved to` lines no longer mix into piped data, so `--format json --report` prints valid JSON. `compliance trace` and `analyze` failures exit with an error status. (#70–#77)
+- **Prices use one precision rule everywhere** (CLI, TUI, monitor, web): 2 decimals from 1000, 6 near a USD peg, 4 from 1, then 6, 8, 10. A book takes its decimals from the peg, so its rows line up. Peg prices in the CLI change from `1.0001` to `1.000100`.
+- **Amounts name their quote currency.** Depth, volume and size labels use the pair's quote (`USD` for a DEX book) instead of always `USDT`. JSON summaries gain `"quote"`; the web labels depth with it instead of `$`. A DEX book's volume is labeled `Volume (24h, best pool)`.
+- **Token risk rules agree across the crawl report, compliance and insights.** 5 buys and 0 sells is now a honeypot sign in compliance too, $0 liquidity is very low there too, and insights calls $75K limited.
+- **Chain aliases work everywhere** (`eth`, `matic`, `arb`, `op`, `bnb`, `sol`, `trx`), and `--chain` help and errors list every chain, `aegis` included.
+- **`clear` empties the TUI pane; `reset` resets the session context** (was `clear`). (#67)
+- **The TUI no longer runs `completions`**, as it already did not run `interactive` or `web`; it says to run it in a shell. (#66)
+- **`market summary --csv` appends columns** after the existing ones (`peg_deviation_pct`, `spread_pct`, `bid_top3_depth`, `ask_top3_depth`, `bid_top10_depth`, `ask_top10_depth`). The existing columns and their format do not change. (#58)
+- **CLI trades JSON** writes `side` as `buy`/`sell` (was `Buy`/`Sell`) and includes `id`, as the web does.
+- **The theme is one system.** Colors come from `scope::display::theme` roles for the CLI, TUI and monitor. Monitor borders are dim, not dark gray; the Blue/Orange scheme keeps its up/down colors but no longer has its own accents; footer keys are bracketed words (`[q]uit`); scheme names are words (`green-red`). `owo-colors` is no longer a dependency.
+- **Release process.** `just release` is replaced by `just release-prep X.Y.Z` (on `develop`) and `just release-tag` (on `main`). A crates.io publish error now fails the release. (#80, #81)
+- **Library API (`scope-bca-cli`, `scope-bca-core`).**
+  - Command handlers take an `&Output`, and the print macros (`outln!`, `errln!`) return `io::Result`. The command router moved from the binary to `scope_cli::cli::dispatch`. `display_error`, `Spinner::new` and `StepProgress::new` return `io::Result`. (#48)
+  - `HealthCheck` has a third variant, `NotApplicable`. `OrderBook` and `MarketSummary` have a `source: BookSource` field. `DexPair` has `liquidity_base`. `HealthThresholds` has `amm_step_pct`. `order_book_from_analytics` takes `&HealthThresholds`. (#52)
+  - `http::Request` has a new public field, `timeout: Option<Duration>`. Struct literals must set it. `Request::with_timeout` sets it for one request. `NativeHttpClient` uses it; `GholaHttpClient` ignores it. (#61)
+  - `ScopeError::Io` is removed (use `ScopeError::io_context`); `ScopeError::InvalidInput` is new for request faults. `ExchangeClient::format_pair` is removed (use `venue_symbol(&Pair)`). `fetch_market_snapshot` takes a trades limit. `Ticker` gains `price_change_pct_24h` and `Serialize`; `Trade` and `Candle` gain `Serialize`. `VenueDescriptor` gains `error_envelope`. `orderbook_level` takes the quote currency.
+  - New modules: `market::pair`, `market::venue`, `market::series`, `market::fetch`, `chains::registry`, `compliance::token_risk`, `display::theme`, `display::text`.
+
+### Added
+- `market summary` shows the pair's token contracts under the header when the venue descriptor has the new `assets` capability (the venue's coin list). JSON output gets a `tokens` array. (#101)
+- **TUI learnability.** `Tab` completes commands, flags, enum values, `@labels`, token aliases, venues and chains. A row under the input shows the command's usage and the next argument. `Ctrl-K` opens a fuzzy command palette. `Esc` or `Ctrl-C` cancels a running command, including `--every` loops. (#50, #53)
+- **TUI event log.** Each submitted line is recorded in `tui-events.jsonl` in the scope data directory: input, parsed arguments, route, outcome, error and duration. (#50)
+- **`market.health.amm_step_pct`** (default 0.1): the price step of the synthetic AMM book, as a config key, the `--amm-step-pct` flag and a web request field. (#52)
+- **The book source is shown** in text, JSON (`book_source`: `exchange`, `synthetic_amm`, `synthetic_estimate`) and markdown reports. (#52)
+- **Errors show their cause chain** (`caused by: …`). When a TLS handshake gets a non-TLS reply, the hint names a router, firewall, proxy or VPN that may block the host. (#54)
+- **`monitor --venue` falls back to the venue** when DexScreener fails (unreachable, blocked, or the token is unknown there), and says why. (#54)
+- **`monitor --pair` accepts any common pair form** (`USDN_USDT`, `USDN/USDT`, `USDN-USDT`, `USDNUSDT`) and converts it to the venue's own format. (#56)
+- **Library API: new module `http::shared`.** It selects the HTTP transport in one place. `build` makes a transport from config, `init` installs it for the process, and `transport` returns the installed one. (#61)
+- **HTTP record and replay, for tests.** Set `SCOPE_HTTP_MODE=record` and `SCOPE_HTTP_FIXTURES=DIR` to save each response as a fixture file in `DIR`. Set `SCOPE_HTTP_MODE=replay` to answer from those files; a replay run never uses the network, and a request with no fixture is an error. Record does not write a fixture that contains a configured API key, token or RPC secret. Library API: new module `http::replay`. (#62)
+- **TUI test harness.** The new `scope-tui-harness` crate runs YAML scenarios against the real `scope tui` in a pseudo-terminal. It types keys, waits for screen text and checks the screen, the event journal, files and the exit code. Offline scenarios use replayed HTTP fixtures. Run them with `just tui-test`. A failed scenario saves its screen and journal under `target/tui-harness/`.
+- **Repeating view (#58).** In the TUI, `market summary … --every` shows one view that updates in place: the latest report beside its trends, a pass/fail strip with the last failure, and a chart per key value with its threshold line. Esc stops it and the view stays; the next key leaves it with one copy of the report and a summary (`42 runs · 1 failed (run 16)`). `save x.csv` writes the series.
+- **The monitor shows the venue's real order book and trades** with `--venue` (#78), and its DEX book is the same AMM book as `market summary`.
+- **Monitor keys (#68).** `?` lists every key; `r` confirms a refresh; the footer shows the refresh interval; a price beside an error is marked `(stale)`.
+- **TUI discoverability (#66).** The first screen suggests commands and names Tab and Ctrl-K; help names aliases (`quit`, `q`); the palette marks its row and shows a key legend; hints name a flag's value and an unknown flag.
+- **TUI editing (#67).** Ctrl-B, Alt-B, Alt-F and Alt-K; ↑ on an empty line brings back a line that Esc cleared; the pane says when it dropped old lines.
+- **TUI release fixes (#70–#77).** Bracketed paste, wide characters, Ctrl-C cancels commands that run outside the TUI, `help <command>`, scrolling, search, a `Terminal too small` guard, footers (`✓ Done`, `✗ Failed`, `Cancelled after`), a status bar and run progress, copy (`Ctrl-Y`) and `save`, and a crash log.
+- **`scope venues list` and `/api/venues` include the DEX venues** (`ethereum`, `solana`).
+- **Venue errors sent with HTTP 200** show the venue's own message (Bybit, OKX, HTX, Kraken, Biconomy); venue descriptors can declare an `error_envelope`. (#69)
+- **Local gates.** The pre-push hook checks the commit identity, then runs `fmt`, `clippy`, `cargo audit` and coverage; it no longer changes `.coverage-last` (use `just coverage-baseline`). (#40, #43)
+- **CI.** Rust is pinned in `rust-toolchain.toml` (#41); a daily scheduled audit runs on `develop` and `main` (#42); one audit ignore list in `.cargo/audit.toml` (#40).
+- **`just tui-record NAME`** records a harness scenario's API replies as fixtures.
+
+### Fixed
+- Compliance risk reports no longer score factors that have no data. Such factors are listed as not assessed, and the level is `Incomplete`. Compliance now uses the Etherscan key from the config and the Etherscan V2 API. (#100)
+- Running the test suite overwrote the user's real config (API keys and RPC URLs), address book and token aliases. Tests now use a sandbox in the temp directory. `setup` now starts from the config file and keeps every section. (#98)
+- Repeat runs drifted: each run waited a full interval after the last one ended, so a 1-hour run every 30 s made fewer runs than it showed. Runs now keep their schedule. The text report also shortens the 24h volume and the side totals. (#97)
+- `insights` printed token liquidity and volume as `$$500.00K`. They now print `$500.00K`. (#95)
+- rustls is now 0.23.46. This fixes RUSTSEC-2026-0346, 0347, 0348 and 0349. (#94)
+- 24h volume used the ticker's base volume as if it were USDT when a venue reported no quote volume. It is now converted with the mid price.
+- The monitor used a hard-coded DEX client for refreshes, which ignored the configured HTTP transport and Ghola. (#51)
+- Some requests did not use the configured HTTP transport. Every request now uses it. Ghola now also covers the exchange venues, the DEX client, and the contract and compliance requests. (#61)
+- `scope web` now logs a warning when Ghola is enabled but not available and it uses the native transport. Before, it gave no warning. (#61)
+- CSV export errors in the monitor were dropped. A failed write now stops the export and logs the reason. (#51)
+- `scope web` through the command router hit `unreachable!`. It now returns an error. (#48)
+- Library warnings (for example the Etherscan Pro key notice) now go to stderr, or into the TUI pane while it runs. (#50)
+- The README build-from-source command failed on the virtual workspace manifest. It is now `cargo install --path crates/scope-web`. (#46)
+- Tests no longer call live APIs; coverage is the same with the network on or off (#39). Ten tests that called live venues and asserted nothing now assert against local mock servers.
+- `SOLUSD` parsed as SO/LUSD; it is SOL/USD again.
+- A symbol DexScreener does not know asked Binance for `USDCUSDTUSDT`; it asks for `USDCUSDT`.
+- `/api/exchange/snapshot` ignored `trades_limit` and always fetched 50.
+- With `ghola.enabled` and no sidecar, every request failed; scope now falls back to native HTTP and says why. (#64)
+- Unknown venue `weex` suggested `okx`; suggestions now need a close match. (#69)
+- Enter typed while the TUI started was lost. (#63)
+- The monitor's key tests drove a test-only copy of the key handler; there is now one handler.
+
 ## [0.6.0] - 2026-10-09
 
 ### Changed (breaking)
@@ -270,7 +350,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Configuration system with YAML support
 - Support for ERC-20, SPL, and TRC-20 tokens
 
-[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.5.6...v0.6.0
+[0.5.6]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.5.5...v0.5.6
+[0.5.5]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.5.4...v0.5.5
+[0.5.4]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.5.3...v0.5.4
+[0.5.3]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.5.2...v0.5.3
+[0.5.2]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.5.1...v0.5.2
+[0.5.1]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.4.4...v0.5.0
+[0.4.4]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.4.2...v0.4.4
+[0.4.2]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.4.1...v0.4.2
+[0.4.1]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.3.1...v0.4.0
 [1.0.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.3.1...v1.0.0
 [0.3.1]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.3.0...v0.3.1
@@ -279,4 +371,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.2.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.1.0...v0.2.0
 [0.2.1]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.2.0...v0.2.1
 [0.2.2]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.2.1...v0.2.2
-[0.6.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.5.6...v0.6.0

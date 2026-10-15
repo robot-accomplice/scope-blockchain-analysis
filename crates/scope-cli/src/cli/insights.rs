@@ -5,7 +5,9 @@
 
 use crate::cli::address::{self, AddressArgs};
 use crate::cli::crawl::{Period, fetch_analytics_for_input};
+use crate::cli::output::Output;
 use crate::cli::tx::{fetch_transaction_report, format_tx_markdown};
+use crate::outln;
 use clap::Args;
 use scope::chains::{
     ChainClientFactory, infer_chain_from_address, infer_chain_from_hash, native_symbol,
@@ -15,8 +17,9 @@ use scope::config::Config;
 use super::health_args::HealthArgs;
 use scope::display::report;
 use scope::error::Result;
-use scope::market::{MarketSummary, VenueRegistry};
-use scope::tokens::TokenAliases;
+use scope::market::health::PegStatus;
+use scope::market::{MarketSummary, MarketVenue, VenueRegistry, fetch_token_summary};
+use scope::tokens::{TokenAliases, is_stablecoin_symbol};
 
 /// Target type inferred from user input.
 #[derive(Debug, Clone)]
@@ -93,7 +96,7 @@ pub fn infer_target(input: &str, chain_override: Option<&str>) -> InferredTarget
 
     // Address (format implies chain)
     if TokenAliases::is_address(trimmed) {
-        let chain = infer_chain_from_address(trimmed).unwrap_or("ethereum");
+        let chain = infer_chain_from_address(trimmed).unwrap_or(scope::chains::DEFAULT_CHAIN);
         return InferredTarget::Address {
             chain: chain.to_string(),
         };
@@ -101,7 +104,7 @@ pub fn infer_target(input: &str, chain_override: Option<&str>) -> InferredTarget
 
     // Default: token (symbol or name)
     InferredTarget::Token {
-        chain: "ethereum".to_string(),
+        chain: scope::chains::DEFAULT_CHAIN.to_string(),
     }
 }
 
@@ -110,6 +113,7 @@ pub async fn run(
     mut args: InsightsArgs,
     config: &Config,
     clients: &dyn ChainClientFactory,
+    out: &Output,
 ) -> Result<()> {
     // Resolve address book label → address + chain
     if let Some((address, chain)) =
@@ -124,11 +128,14 @@ pub async fn run(
     let chain_override = args.chain.as_deref();
     let target = infer_target(&args.target, chain_override);
 
-    let sp = crate::cli::progress::Spinner::new(&format!(
-        "Analyzing {} on {}...",
-        target_type_label(&target),
-        chain_label(&target)
-    ));
+    let sp = crate::cli::progress::Spinner::new(
+        &format!(
+            "Analyzing {} on {}...",
+            target_type_label(&target),
+            chain_label(&target)
+        ),
+        out,
+    );
 
     let mut output = String::new();
     output.push_str("# Scope Insights\n\n");
@@ -154,7 +161,7 @@ pub async fn run(
                 dossier: false,
             };
             let client = clients.create_chain_client(chain)?;
-            let report = address::analyze_address(&addr_args, client.as_ref()).await?;
+            let report = address::analyze_address(&addr_args, client.as_ref(), out).await?;
 
             // Contract vs EOA (EVM chains support get_code)
             let code_result = client.get_code(&args.target).await;
@@ -204,27 +211,13 @@ pub async fn run(
             }
 
             // Risk assessment (compliance engine)
-            let risk_assessment =
-                match scope::compliance::datasource::BlockchainDataClient::from_env_opt() {
-                    Some(data_client) => {
-                        scope::compliance::risk::RiskEngine::with_data_client(data_client)
-                            .assess_address(&args.target, chain)
-                            .await
-                            .ok()
-                    }
-                    None => scope::compliance::risk::RiskEngine::new()
-                        .assess_address(&args.target, chain)
-                        .await
-                        .ok(),
-                };
+            let risk_assessment = scope::compliance::risk::RiskEngine::from_env()
+                .assess_address(&args.target, chain)
+                .await
+                .ok();
 
             if let Some(ref risk) = risk_assessment {
-                output.push_str(&format!(
-                    "\n- **Risk:** {} {:.1}/10 ({:?})\n",
-                    risk.risk_level.emoji(),
-                    risk.overall_score,
-                    risk.risk_level
-                ));
+                output.push_str(&risk_line(risk));
             }
 
             // Meta analysis
@@ -320,6 +313,7 @@ pub async fn run(
                 10,
                 clients,
                 Some(&sp),
+                out,
             )
             .await?;
 
@@ -348,13 +342,16 @@ pub async fn run(
                 "- **Address:** `{}`\n",
                 analytics.token.contract_address
             ));
-            output.push_str(&format!("- **Price:** ${:.6}\n", analytics.price_usd));
             output.push_str(&format!(
-                "- **Liquidity (24h):** ${}\n",
+                "- **Price:** {}\n",
+                scope::display::format::format_price_usd(analytics.price_usd)
+            ));
+            output.push_str(&format!(
+                "- **Liquidity (24h):** {}\n",
                 scope::display::format_usd(analytics.liquidity_usd)
             ));
             output.push_str(&format!(
-                "- **Volume (24h):** ${}\n",
+                "- **Volume (24h):** {}\n",
                 scope::display::format_usd(analytics.volume_24h)
             ));
 
@@ -374,51 +371,28 @@ pub async fn run(
             ));
 
             // Stablecoin: auto-include market/peg via venue registry
-            let mut peg_healthy: Option<bool> = None;
-            if is_stablecoin(&analytics.token.symbol)
+            let mut peg_status: Option<PegStatus> = None;
+            if is_stablecoin_symbol(&analytics.token.symbol)
                 && let Ok(registry) = VenueRegistry::load()
             {
-                // Try binance first, fall back to any available CEX
-                let venue_id = if registry.contains("binance") {
-                    "binance"
+                // Try the default venue first, fall back to any available CEX
+                let venue_id = if registry.contains(scope::market::DEFAULT_VENUE) {
+                    scope::market::DEFAULT_VENUE
                 } else {
-                    registry.list().first().copied().unwrap_or("binance")
+                    registry
+                        .list()
+                        .first()
+                        .copied()
+                        .unwrap_or(scope::market::DEFAULT_VENUE)
                 };
-                if let Ok(exchange) = registry.create_exchange_client(venue_id) {
-                    let pair = exchange.format_pair(&analytics.token.symbol);
-                    if let Ok(book) = exchange.fetch_order_book(&pair).await {
-                        let thresholds = args.health.resolve(config);
-                        let volume_24h = if exchange.has_ticker() {
-                            exchange
-                                .fetch_ticker(&pair)
-                                .await
-                                .ok()
-                                .and_then(|t| t.quote_volume_24h.or(t.volume_24h))
-                        } else {
-                            None
-                        };
-                        let summary =
-                            MarketSummary::from_order_book(&book, &thresholds, volume_24h);
-                        let deviation_bps = summary
-                            .mid_price
-                            .map(|m| (m - 1.0) * 10_000.0)
-                            .unwrap_or(0.0);
-                        peg_healthy = Some(deviation_bps.abs() < 10.0);
-                        let peg_status = if peg_healthy.unwrap_or(false) {
-                            "Peg healthy"
-                        } else if deviation_bps.abs() < 50.0 {
-                            "Slight peg deviation"
-                        } else {
-                            "Peg deviation"
-                        };
-                        output.push_str(&format!(
-                            "- **Market ({} {}):** {} (deviation: {:.1} bps)\n",
-                            exchange.venue_name(),
-                            pair,
-                            peg_status,
-                            deviation_bps
-                        ));
-                    }
+                let thresholds = args.health.resolve(config);
+                if let (Some(desc), Ok(venue)) = (
+                    registry.get(venue_id),
+                    MarketVenue::resolve(venue_id, &registry),
+                ) && let Ok(summary) = fetch_token_summary(&venue, &analytics, &thresholds).await
+                {
+                    peg_status = Some(summary.peg_status());
+                    output.push_str(&peg_line(&desc.name, &summary.pair, &summary));
                 }
             }
 
@@ -426,8 +400,8 @@ pub async fn run(
             let top_holder_pct = analytics.holders.first().map(|h| h.percentage);
             let meta = meta_analysis_token(
                 &risk_summary,
-                is_stablecoin(&analytics.token.symbol),
-                peg_healthy,
+                is_stablecoin_symbol(&analytics.token.symbol),
+                peg_status,
                 top_holder_pct,
                 analytics.liquidity_usd,
             );
@@ -446,7 +420,7 @@ pub async fn run(
     }
 
     sp.finish("Insights complete.");
-    println!("{}", output);
+    outln!(out, "{}", output)?;
     Ok(())
 }
 
@@ -501,12 +475,8 @@ fn format_tx_value(value_str: &str, chain: &str) -> (String, bool) {
     } else {
         value_str.parse().unwrap_or(0)
     };
-    let decimals = match chain.to_lowercase().as_str() {
-        "ethereum" | "polygon" | "arbitrum" | "optimism" | "base" | "bsc" | "aegis" => 18,
-        "solana" => 9,
-        "tron" => 6,
-        _ => 18,
-    };
+    let decimals =
+        scope::chains::registry::chain(chain).map_or(18, |c| i32::from(c.native_decimals));
     let divisor = 10_f64.powi(decimals);
     let human = wei as f64 / divisor;
     let symbol = native_symbol(chain);
@@ -516,12 +486,72 @@ fn format_tx_value(value_str: &str, chain: &str) -> (String, bool) {
     (formatted, high_value)
 }
 
-/// Common stablecoin symbols for auto-including market/peg analysis.
-fn is_stablecoin(symbol: &str) -> bool {
-    matches!(
-        symbol.to_uppercase().as_str(),
-        "USDC" | "USDT" | "DAI" | "BUSD" | "TUSD" | "USDP" | "FRAX" | "LUSD" | "GUSD"
-    )
+/// The words for one peg status, written once. The market line, the
+/// executive summary, the key takeaway and the recommendation all read it.
+struct PegWords {
+    /// Label on the market line.
+    label: &'static str,
+    /// Sentence for the executive summary, when there is something to say.
+    synthesis: Option<&'static str>,
+    /// Key takeaway that replaces the generic one, when the peg is a concern.
+    takeaway: Option<&'static str>,
+    /// Whether to recommend verifying the peg on other venues.
+    verify_elsewhere: bool,
+}
+
+fn peg_words(status: PegStatus) -> PegWords {
+    const DEVIATION_SYNTHESIS: &str =
+        "Stablecoin peg deviation detected — verify on multiple venues.";
+    const DEVIATION_TAKEAWAY: &str =
+        "Stablecoin deviating from peg — check additional venues before trading.";
+    match status {
+        PegStatus::OnPeg => PegWords {
+            label: "Peg healthy",
+            synthesis: Some("Stablecoin peg is healthy on observed venue."),
+            takeaway: None,
+            verify_elsewhere: false,
+        },
+        PegStatus::BookUnhealthy => PegWords {
+            label: "Peg on target, but market health checks fail",
+            synthesis: Some(
+                "Stablecoin peg is on target, but the market's health checks fail — verify on multiple venues.",
+            ),
+            takeaway: Some(
+                "Stablecoin market health checks fail — check additional venues before trading.",
+            ),
+            verify_elsewhere: true,
+        },
+        PegStatus::SlightDeviation => PegWords {
+            label: "Slight peg deviation",
+            synthesis: Some(DEVIATION_SYNTHESIS),
+            takeaway: Some(DEVIATION_TAKEAWAY),
+            verify_elsewhere: true,
+        },
+        PegStatus::Deviation => PegWords {
+            label: "Peg deviation",
+            synthesis: Some(DEVIATION_SYNTHESIS),
+            takeaway: Some(DEVIATION_TAKEAWAY),
+            verify_elsewhere: true,
+        },
+        PegStatus::NoPrice => PegWords {
+            label: "Peg unknown (no mid price: a side has no valid level)",
+            synthesis: None,
+            takeaway: None,
+            verify_elsewhere: true,
+        },
+    }
+}
+
+/// The peg line of the insights report. The verdict is the market
+/// summary's own ([`MarketSummary::peg_status`]); this only words it.
+fn peg_line(venue: &str, pair: &str, summary: &MarketSummary) -> String {
+    let label = peg_words(summary.peg_status()).label;
+    let deviation = summary
+        .mid_price
+        .and_then(|mid| summary.peg_deviation_bps(mid))
+        .map(|bps| format!(" (deviation: {bps:.1} bps)"))
+        .unwrap_or_default();
+    format!("- **Market ({venue} {pair}):** {label}{deviation}\n")
 }
 
 /// Meta-analysis: synthesizes observations into an executive summary, key takeaway, and recommendations.
@@ -529,6 +559,26 @@ struct MetaAnalysis {
     synthesis: String,
     key_takeaway: String,
     recommendations: Vec<String>,
+}
+
+/// The report's risk line. A partial score is not a verdict, so an
+/// incomplete assessment lists what had no data instead of a score.
+fn risk_line(risk: &scope::compliance::risk::RiskAssessment) -> String {
+    let emoji = risk.risk_level.emoji();
+    if risk.not_assessed.is_empty() {
+        return format!(
+            "\n- **Risk:** {} {:.1}/10 ({:?})\n",
+            emoji, risk.overall_score, risk.risk_level
+        );
+    }
+    let mut line = format!(
+        "\n- **Risk:** {} not assessed in full. No data for:\n",
+        emoji
+    );
+    for reason in &risk.not_assessed {
+        line.push_str(&format!("  - {}\n", reason));
+    }
+    line
 }
 
 fn meta_analysis_address(
@@ -562,6 +612,11 @@ fn meta_analysis_address(
         synthesis_parts.push("Concentrated in a single token.".to_string());
     }
 
+    // An incomplete assessment gives no score to read.
+    let (risk_score, risk_level) = match risk_level {
+        Some(scope::compliance::risk::RiskLevel::Incomplete) => (None, None),
+        _ => (risk_score, risk_level),
+    };
     if let (Some(score), Some(level)) = (risk_score, risk_level) {
         if score >= 7.0 {
             synthesis_parts.push(format!("Elevated risk ({:?}).", level));
@@ -663,7 +718,7 @@ fn meta_analysis_tx(
 fn meta_analysis_token(
     risk_summary: &report::TokenRiskSummary,
     is_stablecoin: bool,
-    peg_healthy: Option<bool>,
+    peg: Option<PegStatus>,
     top_holder_pct: Option<f64>,
     liquidity_usd: f64,
 ) -> MetaAnalysis {
@@ -677,23 +732,24 @@ fn meta_analysis_token(
         synthesis_parts.push("Moderate risk — mixed signals.".to_string());
     }
 
-    if is_stablecoin && let Some(healthy) = peg_healthy {
-        if healthy {
-            synthesis_parts.push("Stablecoin peg is healthy on observed venue.".to_string());
-        } else {
-            synthesis_parts
-                .push("Stablecoin peg deviation detected — verify on multiple venues.".to_string());
-        }
+    let peg_words = peg.filter(|_| is_stablecoin).map(peg_words);
+    if let Some(sentence) = peg_words.as_ref().and_then(|w| w.synthesis) {
+        synthesis_parts.push(sentence.to_string());
     }
 
     if top_holder_pct.map(|p| p > 30.0).unwrap_or(false) {
         synthesis_parts.push("Concentration risk: top holder holds significant share.".to_string());
     }
 
-    if liquidity_usd > 1_000_000.0 {
-        synthesis_parts.push("Strong liquidity depth.".to_string());
-    } else if liquidity_usd < 50_000.0 {
-        synthesis_parts.push("Limited liquidity — slippage risk for larger trades.".to_string());
+    // The liquidity classes of the report and compliance (token_risk).
+    use scope::compliance::token_risk::{LiquidityTier, liquidity_tier};
+    let tier = liquidity_tier(liquidity_usd);
+    match tier {
+        LiquidityTier::Good => synthesis_parts.push("Strong liquidity depth.".to_string()),
+        LiquidityTier::VeryLow | LiquidityTier::Low => {
+            synthesis_parts.push("Limited liquidity — slippage risk for larger trades.".to_string())
+        }
+        LiquidityTier::Moderate => {}
     }
 
     let synthesis = synthesis_parts.join(" ");
@@ -708,8 +764,8 @@ fn meta_analysis_token(
                 .cloned()
                 .unwrap_or_else(|| "multiple factors".to_string())
         )
-    } else if is_stablecoin && peg_healthy == Some(false) {
-        "Stablecoin deviating from peg — check additional venues before trading.".to_string()
+    } else if let Some(takeaway) = peg_words.as_ref().and_then(|w| w.takeaway) {
+        takeaway.to_string()
     } else if !risk_summary.positives.is_empty() && risk_summary.concerns.is_empty() {
         "Favorable risk profile — standard diligence applies.".to_string()
     } else {
@@ -727,10 +783,10 @@ fn meta_analysis_token(
     if top_holder_pct.map(|p| p > 25.0).unwrap_or(false) {
         recommendations.push("Monitor top holder movements for distribution changes.".to_string());
     }
-    if is_stablecoin && peg_healthy != Some(true) {
+    if is_stablecoin && peg_words.as_ref().is_none_or(|w| w.verify_elsewhere) {
         recommendations.push("Verify peg across multiple DEX/CEX venues.".to_string());
     }
-    if liquidity_usd < 100_000.0 && risk_summary.score <= 5 {
+    if matches!(tier, LiquidityTier::VeryLow | LiquidityTier::Low) && risk_summary.score <= 5 {
         recommendations.push("Use limit orders or split trades to manage slippage.".to_string());
     }
 
@@ -744,11 +800,109 @@ fn meta_analysis_token(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use scope::market::{BookSource, HealthThresholds, OrderBook, OrderBookLevel};
+
+    fn summary_with_peg(peg_target: f64, mid_price: Option<f64>) -> MarketSummary {
+        let level = |price| OrderBookLevel {
+            price,
+            quantity: 1000.0,
+        };
+        let book = OrderBook {
+            pair: "X/USDT".to_string(),
+            source: BookSource::Exchange,
+            bids: vec![level(peg_target)],
+            asks: vec![level(peg_target)],
+        };
+        let thresholds = HealthThresholds {
+            peg_target,
+            ..HealthThresholds::default()
+        };
+        let mut summary = MarketSummary::from_order_book(&book, &thresholds, None);
+        summary.mid_price = mid_price;
+        // A one-level book fails the level checks; these tests judge the peg.
+        summary.healthy = true;
+        summary
+    }
+
+    #[test]
+    fn test_peg_line_uses_the_summary_peg_target_not_one() {
+        // 6 bps above a 0.5 peg is healthy; measured against 1.0 it would be 5000 bps.
+        let on_peg = summary_with_peg(0.5, Some(0.5003));
+        assert_eq!(on_peg.peg_status(), PegStatus::OnPeg);
+        let line = peg_line("v", "X/USDT", &on_peg);
+        assert!(
+            line.contains("Peg healthy") && line.contains("6.0 bps"),
+            "{line}"
+        );
+        assert_eq!(
+            summary_with_peg(0.5, Some(0.5020)).peg_status(),
+            PegStatus::SlightDeviation
+        );
+        assert_eq!(
+            summary_with_peg(0.5, Some(0.52)).peg_status(),
+            PegStatus::Deviation
+        );
+    }
+
+    #[test]
+    fn test_peg_line_never_says_healthy_without_a_mid() {
+        let summary = summary_with_peg(1.0, None);
+        assert_eq!(summary.peg_status(), PegStatus::NoPrice);
+        assert!(!peg_line("v", "X/USDT", &summary).contains("Peg healthy"));
+    }
+
+    #[test]
+    fn test_peg_line_never_says_healthy_when_the_market_summary_is_unhealthy() {
+        let mut summary = summary_with_peg(1.0, Some(1.0));
+        summary.healthy = false;
+        assert_eq!(summary.peg_status(), PegStatus::BookUnhealthy);
+        assert!(!peg_line("v", "X/USDT", &summary).contains("Peg healthy"));
+    }
+
+    #[test]
+    fn test_book_unhealthy_is_worded_the_same_on_every_line() {
+        let mut summary = summary_with_peg(1.0, Some(1.0));
+        summary.healthy = false;
+        let status = summary.peg_status();
+        let line = peg_line("v", "X/USDT", &summary);
+        assert!(line.contains("market health checks fail"), "{line}");
+        let risk = report::TokenRiskSummary {
+            score: 3,
+            level: "Low",
+            emoji: "🟢",
+            concerns: vec![],
+            positives: vec![],
+        };
+        let meta = meta_analysis_token(&risk, true, Some(status), None, 5_000_000.0);
+        assert!(
+            meta.synthesis.contains("health checks fail"),
+            "{}",
+            meta.synthesis
+        );
+        assert!(!meta.synthesis.contains("deviation detected"));
+        assert!(meta.key_takeaway.contains("health checks fail"));
+        assert!(meta.recommendations.iter().any(|r| r.contains("peg")));
+    }
+
+    #[test]
+    fn test_peg_bands_follow_the_configured_peg_range() {
+        // With a range of 0.01, a mid 0.4% off the peg is still on the peg.
+        let mut summary = summary_with_peg(1.0, Some(1.004));
+        summary.peg_range = 0.01;
+        assert_eq!(summary.peg_status(), PegStatus::OnPeg);
+        summary.peg_range = 0.001;
+        assert_eq!(summary.peg_status(), PegStatus::SlightDeviation);
+    }
+
     use async_trait::async_trait;
     use scope::chains::{
         Balance as ChainBalance, ChainClient, ChainClientFactory, DexDataSource,
         Token as ChainToken, TokenBalance as ChainTokenBalance, Transaction as ChainTransaction,
     };
+
+    fn quiet() -> crate::cli::output::Output {
+        crate::cli::output::Output::capture().0
+    }
 
     // ====================================================================
     // Mock Chain Client for testing run() paths
@@ -970,6 +1124,7 @@ mod tests {
                     quote_token: "USDC".to_string(),
                     price_usd: 1.5,
                     liquidity_usd: 500_000.0,
+                    liquidity_base: None,
                     volume_24h: 1_000_000.0,
                     price_change_24h: 5.2,
                     buys_24h: 100,
@@ -1138,7 +1293,7 @@ mod tests {
             trace: false,
             health: Default::default(),
         };
-        let result = run(args, &config, &factory).await;
+        let result = run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1153,7 +1308,7 @@ mod tests {
             trace: false,
             health: Default::default(),
         };
-        let result = run(args, &config, &factory).await;
+        let result = run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1169,7 +1324,7 @@ mod tests {
             trace: false,
             health: Default::default(),
         };
-        let result = run(args, &config, &factory).await;
+        let result = run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1185,7 +1340,7 @@ mod tests {
             trace: false,
             health: Default::default(),
         };
-        let result = run(args, &config, &factory).await;
+        let result = run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1200,7 +1355,7 @@ mod tests {
             trace: false,
             health: Default::default(),
         };
-        let result = run(args, &config, &factory).await;
+        let result = run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1215,8 +1370,13 @@ mod tests {
             trace: false,
             health: Default::default(),
         };
-        let result = run(args, &config, &factory).await;
-        assert!(result.is_ok());
+        let (out, cap) = crate::cli::output::Output::capture();
+        run(args, &config, &factory, &out).await.unwrap();
+        // format_usd adds the "$" itself; a "$" in the format string printed "$$500.00K".
+        let text = cap.out();
+        assert!(text.contains("**Liquidity (24h):** $500.00K"), "{}", text);
+        assert!(text.contains("**Volume (24h):** $1.00M"), "{}", text);
+        assert!(!text.contains("$$"), "{}", text);
     }
 
     #[tokio::test]
@@ -1230,7 +1390,7 @@ mod tests {
             trace: false,
             health: Default::default(),
         };
-        let result = run(args, &config, &factory).await;
+        let result = run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1320,31 +1480,31 @@ mod tests {
 
     #[test]
     fn test_is_stablecoin() {
-        assert!(is_stablecoin("USDC"));
-        assert!(is_stablecoin("usdt"));
-        assert!(is_stablecoin("DAI"));
-        assert!(is_stablecoin("BUSD"));
-        assert!(is_stablecoin("TUSD"));
-        assert!(is_stablecoin("USDP"));
-        assert!(is_stablecoin("FRAX"));
-        assert!(is_stablecoin("LUSD"));
-        assert!(is_stablecoin("GUSD"));
-        assert!(!is_stablecoin("ETH"));
-        assert!(!is_stablecoin("PEPE"));
-        assert!(!is_stablecoin("WBTC"));
+        assert!(is_stablecoin_symbol("USDC"));
+        assert!(is_stablecoin_symbol("usdt"));
+        assert!(is_stablecoin_symbol("DAI"));
+        assert!(is_stablecoin_symbol("BUSD"));
+        assert!(is_stablecoin_symbol("TUSD"));
+        assert!(is_stablecoin_symbol("USDP"));
+        assert!(is_stablecoin_symbol("FRAX"));
+        assert!(is_stablecoin_symbol("LUSD"));
+        assert!(is_stablecoin_symbol("GUSD"));
+        assert!(!is_stablecoin_symbol("ETH"));
+        assert!(!is_stablecoin_symbol("PEPE"));
+        assert!(!is_stablecoin_symbol("WBTC"));
     }
 
     #[test]
     fn test_is_stablecoin_empty_string() {
-        assert!(!is_stablecoin(""));
+        assert!(!is_stablecoin_symbol(""));
     }
 
     #[test]
     fn test_is_stablecoin_case_insensitive() {
         // to_uppercase() makes comparison case-insensitive
-        assert!(is_stablecoin("UsDc"));
-        assert!(is_stablecoin("FraX"));
-        assert!(!is_stablecoin("SOL")); // SOL is not a stablecoin
+        assert!(is_stablecoin_symbol("UsDc"));
+        assert!(is_stablecoin_symbol("FraX"));
+        assert!(!is_stablecoin_symbol("SOL")); // SOL is not a stablecoin
     }
 
     // ====================================================================
@@ -1588,6 +1748,53 @@ mod tests {
     }
 
     #[test]
+    fn test_risk_line_gives_a_score_only_for_a_complete_assessment() {
+        use scope::compliance::risk::{RiskAssessment, RiskLevel};
+        let mut risk = RiskAssessment {
+            address: "0x1".into(),
+            chain: "ethereum".into(),
+            overall_score: 2.4,
+            risk_level: RiskLevel::Low,
+            factors: Vec::new(),
+            not_assessed: Vec::new(),
+            assessed_at: chrono::Utc::now(),
+            recommendations: Vec::new(),
+        };
+        assert!(
+            risk_line(&risk).contains("2.4/10 (Low)"),
+            "{}",
+            risk_line(&risk)
+        );
+
+        risk.risk_level = RiskLevel::Incomplete;
+        risk.not_assessed = vec!["Source of Funds: no Etherscan API key".into()];
+        let line = risk_line(&risk);
+        assert!(!line.contains("/10"), "{line}");
+        assert!(line.contains("not assessed in full"), "{line}");
+        assert!(
+            line.contains("  - Source of Funds: no Etherscan API key"),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn test_meta_analysis_does_not_call_an_incomplete_assessment_low() {
+        // A score from factors without data is not a verdict.
+        let level = scope::compliance::risk::RiskLevel::Incomplete;
+        let meta = meta_analysis_address(false, Some(50.0), 0, Some(2.0), Some(&level));
+        assert!(!meta.synthesis.contains("Low risk"), "{}", meta.synthesis);
+        assert!(
+            !meta.key_takeaway.contains("Overall risk"),
+            "{}",
+            meta.key_takeaway
+        );
+
+        let low = scope::compliance::risk::RiskLevel::Low;
+        let meta = meta_analysis_address(false, Some(50.0), 0, Some(2.0), Some(&low));
+        assert!(meta.synthesis.contains("Low risk"), "{}", meta.synthesis);
+    }
+
+    #[test]
     fn test_meta_analysis_address_eoa_moderate_value() {
         let meta = meta_analysis_address(false, Some(50_000.0), 3, None, None);
         assert!(meta.synthesis.contains("wallet (EOA)"));
@@ -1790,7 +1997,7 @@ mod tests {
             concerns: vec![],
             positives: vec!["Stable peg".to_string()],
         };
-        let meta = meta_analysis_token(&summary, true, Some(true), None, 5_000_000.0);
+        let meta = meta_analysis_token(&summary, true, Some(PegStatus::OnPeg), None, 5_000_000.0);
         assert!(meta.synthesis.contains("Stablecoin peg is healthy"));
     }
 
@@ -1803,7 +2010,7 @@ mod tests {
             concerns: vec![],
             positives: vec![],
         };
-        let meta = meta_analysis_token(&summary, true, Some(false), None, 500_000.0);
+        let meta = meta_analysis_token(&summary, true, Some(PegStatus::Deviation), None, 500_000.0);
         assert!(meta.synthesis.contains("peg deviation"));
         assert!(meta.key_takeaway.contains("deviating from peg"));
         assert!(meta.recommendations.iter().any(|r| r.contains("peg")));
@@ -1824,6 +2031,24 @@ mod tests {
             meta.recommendations
                 .iter()
                 .any(|r| r.contains("top holder"))
+        );
+    }
+
+    // M7: $75K is low liquidity in the report; the summary says so too.
+    #[test]
+    fn test_meta_analysis_names_low_liquidity_as_the_report_does() {
+        let summary = report::TokenRiskSummary {
+            score: 3,
+            level: "Low",
+            emoji: "🟢",
+            concerns: vec![],
+            positives: vec![],
+        };
+        let meta = meta_analysis_token(&summary, false, None, None, 75_000.0);
+        assert!(
+            meta.synthesis.contains("Limited liquidity"),
+            "{}",
+            meta.synthesis
         );
     }
 
@@ -1854,7 +2079,7 @@ mod tests {
             positives: vec![],
         };
         let meta = meta_analysis_token(&summary, true, None, None, 1_000_000.0);
-        // When peg_healthy is None, recommendation should still suggest verifying peg
+        // When there is no peg status, recommendation should still suggest verifying peg
         assert!(meta.recommendations.iter().any(|r| r.contains("peg")));
     }
 
@@ -2159,7 +2384,7 @@ mod tests {
             concerns: vec![],
             positives: vec!["Strong liquidity".to_string()],
         };
-        let meta = meta_analysis_token(&risk, true, Some(true), Some(5.0), 5_000_000.0);
+        let meta = meta_analysis_token(&risk, true, Some(PegStatus::OnPeg), Some(5.0), 5_000_000.0);
         assert!(meta.synthesis.contains("peg is healthy"));
         assert!(meta.synthesis.contains("Strong liquidity"));
     }
@@ -2173,7 +2398,13 @@ mod tests {
             concerns: vec!["Peg deviation".to_string()],
             positives: vec![],
         };
-        let meta = meta_analysis_token(&risk, true, Some(false), Some(40.0), 100_000.0);
+        let meta = meta_analysis_token(
+            &risk,
+            true,
+            Some(PegStatus::Deviation),
+            Some(40.0),
+            100_000.0,
+        );
         assert!(meta.synthesis.contains("peg deviation"));
         assert!(meta.synthesis.contains("Concentration risk"));
     }

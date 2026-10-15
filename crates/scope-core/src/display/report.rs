@@ -196,7 +196,10 @@ fn generate_executive_summary(analytics: &TokenAnalytics) -> String {
     summary.push_str("## Executive Summary\n\n");
     summary.push_str("| Metric | Value |\n");
     summary.push_str("|--------|-------|\n");
-    summary.push_str(&format!("| Price | ${:.6} |\n", analytics.price_usd));
+    summary.push_str(&format!(
+        "| Price | {} |\n",
+        crate::display::format::format_price_usd(analytics.price_usd)
+    ));
     summary.push_str(&format!(
         "| 24h Change | {:+.2}% |\n",
         analytics.price_change_24h
@@ -234,7 +237,7 @@ fn generate_executive_summary(analytics: &TokenAnalytics) -> String {
 
     summary.push_str(&format!(
         "| Total Holders | {} |\n",
-        format_number(analytics.total_holders as f64)
+        crate::display::format::format_large_number(analytics.total_holders as f64)
     ));
 
     if let Some(ref supply) = analytics.total_supply {
@@ -281,9 +284,18 @@ fn generate_price_analysis(analytics: &TokenAnalytics) -> String {
         section.push_str("\n### Price Range (Period)\n\n");
         section.push_str("| Stat | Value |\n");
         section.push_str("|------|-------|\n");
-        section.push_str(&format!("| High | ${:.6} |\n", max_price));
-        section.push_str(&format!("| Low | ${:.6} |\n", min_price));
-        section.push_str(&format!("| Average | ${:.6} |\n", avg_price));
+        section.push_str(&format!(
+            "| High | {} |\n",
+            crate::display::format::format_price_usd(max_price)
+        ));
+        section.push_str(&format!(
+            "| Low | {} |\n",
+            crate::display::format::format_price_usd(min_price)
+        ));
+        section.push_str(&format!(
+            "| Average | {} |\n",
+            crate::display::format::format_price_usd(avg_price)
+        ));
     }
 
     section
@@ -522,41 +534,25 @@ fn generate_security_analysis(analytics: &TokenAnalytics) -> String {
     // Honeypot Risk Analysis (buy/sell ratio)
     let buys = analytics.total_buys_24h;
     let sells = analytics.total_sells_24h;
-    let (honeypot_status, honeypot_details) = if buys == 0 && sells == 0 {
-        ("⚪ UNKNOWN", "No transaction data available".to_string())
-    } else if sells == 0 && buys > 0 {
-        (
+    use crate::compliance::token_risk::{Honeypot, HoneypotLevel, honeypot};
+    let sign = honeypot(buys, sells);
+    let (honeypot_status, honeypot_details) = match (sign, sign.level()) {
+        (Honeypot::Unknown, _) => ("⚪ UNKNOWN", "No transaction data available".to_string()),
+        (Honeypot::NoSells { buys }, _) => (
             "🔴 HIGH",
             format!("{} buys / 0 sells - Possible honeypot!", buys),
-        )
-    } else {
-        let ratio = if sells > 0 {
-            buys as f64 / sells as f64
-        } else {
-            f64::INFINITY
-        };
-        if ratio > 10.0 {
+        ),
+        (Honeypot::Ratio(ratio), level) => {
+            let (status, words) = match level {
+                HoneypotLevel::High => ("🔴 HIGH", "Suspicious activity!"),
+                HoneypotLevel::Medium => ("🟠 MEDIUM", "Elevated risk"),
+                _ => ("🟢 LOW", "Normal activity"),
+            };
             (
-                "🔴 HIGH",
+                status,
                 format!(
-                    "{} buys / {} sells (ratio: {:.2}) - Suspicious activity!",
-                    buys, sells, ratio
-                ),
-            )
-        } else if ratio > 3.0 {
-            (
-                "🟠 MEDIUM",
-                format!(
-                    "{} buys / {} sells (ratio: {:.2}) - Elevated risk",
-                    buys, sells, ratio
-                ),
-            )
-        } else {
-            (
-                "🟢 LOW",
-                format!(
-                    "{} buys / {} sells (ratio: {:.2}) - Normal activity",
-                    buys, sells, ratio
+                    "{} buys / {} sells (ratio: {:.2}) - {}",
+                    buys, sells, ratio, words
                 ),
             )
         }
@@ -800,22 +796,22 @@ impl RiskFactors {
     /// Calculate risk factors from token analytics.
     fn from_analytics(analytics: &TokenAnalytics) -> Self {
         // Honeypot risk based on buy/sell ratio
-        let honeypot = if analytics.total_buys_24h == 0 && analytics.total_sells_24h == 0 {
-            5 // Unknown, moderate risk
-        } else if analytics.total_sells_24h == 0 && analytics.total_buys_24h > 0 {
-            10 // Maximum risk
-        } else {
-            let ratio = analytics.total_buys_24h as f64 / analytics.total_sells_24h.max(1) as f64;
-            if ratio > 10.0 {
-                9
-            } else if ratio > 5.0 {
-                7
-            } else if ratio > 3.0 {
-                5
-            } else if ratio > 2.0 {
-                3
-            } else {
-                1
+        use crate::compliance::token_risk::{Honeypot, honeypot};
+        let honeypot = match honeypot(analytics.total_buys_24h, analytics.total_sells_24h) {
+            Honeypot::Unknown => 5,         // Unknown, moderate risk
+            Honeypot::NoSells { .. } => 10, // Maximum risk
+            Honeypot::Ratio(ratio) => {
+                if ratio > 10.0 {
+                    9
+                } else if ratio > 5.0 {
+                    7
+                } else if ratio > 3.0 {
+                    5
+                } else if ratio > 2.0 {
+                    3
+                } else {
+                    1
+                }
             }
         };
 
@@ -1025,13 +1021,19 @@ fn generate_risk_indicators(analytics: &TokenAnalytics) -> String {
         positives.push("🟢 **Reasonable distribution** - No extreme concentration in top holders");
     }
 
-    // Liquidity risk
-    if analytics.liquidity_usd < 10_000.0 {
-        risks.push("🔴 **Very low liquidity** - High slippage risk for trades");
-    } else if analytics.liquidity_usd < 100_000.0 {
-        risks.push("🟠 **Low liquidity** - Moderate slippage risk for larger trades");
-    } else if analytics.liquidity_usd > 1_000_000.0 {
-        positives.push("🟢 **Good liquidity** - Sufficient depth for most trades");
+    // Liquidity risk (token_risk tiers)
+    use crate::compliance::token_risk::{LiquidityTier, liquidity_tier};
+    match liquidity_tier(analytics.liquidity_usd) {
+        LiquidityTier::VeryLow => {
+            risks.push("🔴 **Very low liquidity** - High slippage risk for trades")
+        }
+        LiquidityTier::Low => {
+            risks.push("🟠 **Low liquidity** - Moderate slippage risk for larger trades")
+        }
+        LiquidityTier::Good => {
+            positives.push("🟢 **Good liquidity** - Sufficient depth for most trades")
+        }
+        LiquidityTier::Moderate => {}
     }
 
     // Volume risk
@@ -1125,23 +1127,9 @@ pub fn report_footer() -> String {
 /// Returns `Ok(())` on success, or an error if the file cannot be written.
 pub fn save_report(report: &str, path: impl AsRef<Path>) -> Result<()> {
     std::fs::write(path.as_ref(), report).map_err(|e| {
-        crate::error::ScopeError::Io(format!(
-            "Failed to write report to {}: {}",
-            path.as_ref().display(),
-            e
-        ))
+        let context = format!("Failed to write report to {}", path.as_ref().display());
+        crate::error::ScopeError::io_context(e, context)
     })
-}
-
-/// Formats a number with commas.
-fn format_number(value: f64) -> String {
-    if value >= 1_000_000.0 {
-        format!("{:.2}M", value / 1_000_000.0)
-    } else if value >= 1_000.0 {
-        format!("{:.0}K", value / 1_000.0)
-    } else {
-        format!("{:.0}", value)
-    }
 }
 
 /// Capitalizes the first letter of a string.
@@ -1436,6 +1424,7 @@ mod tests {
                 price_usd: 1.0002,
                 volume_24h: 500000000.0,
                 liquidity_usd: 250000000.0,
+                liquidity_base: None,
                 price_change_24h: 0.01,
                 buys_24h: 1234,
                 sells_24h: 1189,
@@ -1865,14 +1854,6 @@ mod tests {
     }
 
     #[test]
-    fn test_format_number_edge_cases() {
-        assert_eq!(format_number(0.0), "0");
-        assert_eq!(format_number(500.0), "500");
-        assert_eq!(format_number(1500.0), "2K");
-        assert_eq!(format_number(1_500_000.0), "1.50M");
-    }
-
-    #[test]
     fn test_capitalize_edge_cases() {
         assert_eq!(capitalize("a"), "A");
         assert_eq!(capitalize("ABC"), "ABC");
@@ -1954,6 +1935,7 @@ mod tests {
             price_usd: 1.0,
             volume_24h: 100_000.0,
             liquidity_usd: 5_000_000.0,
+            liquidity_base: None,
             price_change_24h: 0.0,
             buys_24h: 50,
             sells_24h: 50,
@@ -2534,13 +2516,6 @@ mod tests {
         let factors = RiskFactors::from_analytics(&analytics);
         // 1 social = moderate social presence
         assert!(factors.social <= 5);
-    }
-
-    #[test]
-    fn test_format_number_large_values() {
-        assert_eq!(format_number(1_500_000_000.0), "1500.00M");
-        assert_eq!(format_number(500_000.0), "500K");
-        assert_eq!(format_number(42.0), "42");
     }
 
     #[test]

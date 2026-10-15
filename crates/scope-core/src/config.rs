@@ -49,6 +49,9 @@
 //!     peg_range: 0.001
 //!     min_bid_ask_ratio: 0.2
 //!     max_bid_ask_ratio: 5.0
+//!     depth_window_pct: 2.0       # depth/volume rule: depth within ±2% of mid
+//!     min_depth_volume_pct: 5.0   # below 5% of 24h volume fails
+//!     max_depth_volume_pct: 10.0  # above 10% of 24h volume warns
 //! ```
 //!
 //! ## Error Handling
@@ -321,7 +324,7 @@ impl Config {
     /// Returns the first location that exists, or the XDG-style path if neither exists.
     pub fn default_path() -> PathBuf {
         // Prefer XDG-style ~/.config/scope/ which is common for CLI tools
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = crate::paths::home_dir() {
             let xdg_path = home.join(".config").join("scope").join("config.yaml");
             if xdg_path.exists() {
                 return xdg_path;
@@ -329,7 +332,7 @@ impl Config {
         }
 
         // Check platform-specific config dir
-        if let Some(config_dir) = dirs::config_dir() {
+        if let Some(config_dir) = crate::paths::config_dir() {
             let platform_path = config_dir.join("scope").join("config.yaml");
             if platform_path.exists() {
                 return platform_path;
@@ -337,7 +340,7 @@ impl Config {
         }
 
         // Default to XDG-style path for new configs
-        dirs::home_dir()
+        crate::paths::home_dir()
             .map(|h| h.join(".config").join("scope").join("config.yaml"))
             .unwrap_or_else(|| PathBuf::from(".").join("scope").join("config.yaml"))
     }
@@ -348,14 +351,14 @@ impl Config {
     /// the path cannot be determined (e.g., no home directory).
     /// Prefers the XDG-style `~/.config/scope/` location.
     pub fn config_path() -> Option<PathBuf> {
-        dirs::home_dir().map(|h| h.join(".config").join("scope").join("config.yaml"))
+        crate::paths::home_dir().map(|h| h.join(".config").join("scope").join("config.yaml"))
     }
 
     /// Returns the default data directory for address book storage.
     ///
     /// Uses `~/.config/scope/data` on all platforms for consistency.
     pub fn default_data_dir() -> PathBuf {
-        dirs::home_dir()
+        crate::paths::home_dir()
             .map(|h| h.join(".config").join("scope").join("data"))
             .unwrap_or_else(|| PathBuf::from(".config").join("scope").join("data"))
     }
@@ -566,9 +569,9 @@ impl ColorScheme {
     /// Returns a short display label.
     pub fn label(&self) -> &'static str {
         match self {
-            ColorScheme::GreenRed => "G/R",
-            ColorScheme::BlueOrange => "B/O",
-            ColorScheme::Monochrome => "Mono",
+            ColorScheme::GreenRed => "green-red",
+            ColorScheme::BlueOrange => "blue-orange",
+            ColorScheme::Monochrome => "mono",
         }
     }
 }

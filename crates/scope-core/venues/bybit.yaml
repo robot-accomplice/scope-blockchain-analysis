@@ -8,6 +8,11 @@ symbol:
   template: "{base}{quote}"
   default_quote: USDT
 
+error_envelope:
+  code_key: retCode
+  ok_codes: ["0"]
+  message_key: retMsg
+
 capabilities:
   order_book:
     path: /v5/market/orderbook

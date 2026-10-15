@@ -1,0 +1,7 @@
+# Read by `cargo tarpaulin` from the repo root: the local hook
+# (scripts/check-coverage.sh) and CI (.github/workflows/coverage.yml) share it.
+[default]
+# scope-tui-harness is test tooling, not product code, so it is not measured.
+# A package exclude is not enough: other crates' tests link the harness, so
+# tarpaulin still reports its files. Exclude the files.
+exclude-files = ["crates/scope-tui-harness/*"]

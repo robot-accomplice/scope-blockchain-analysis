@@ -45,7 +45,7 @@ A command-line tool for blockchain data analysis, portfolio tracking, transactio
 - **Progress Indicators**: Spinners and progress bars for all long-running operations; auto-hidden in pipes
 - **Colorized Errors**: Errors in red, remediation hints dimmed, plain text when piped
 - **Browser Mode** (`scope web` / `scope serve`): Locally hosted web UI (feature-gated; build with `--features web`)
-- **Interactive Mode**: REPL with preserved context between commands for faster workflow
+- **TUI** (`scope tui`): A full-screen terminal UI that runs every CLI command with the same flags, with tab completion, inline usage hints, a command palette, and context that persists between commands
 - **Setup Wizard**: Guided first-run configuration with `scope setup` for API keys and preferences
 - **USD Valuation**: Native token balances enriched with real-time USD prices via DexScreener
 - **Multi-Chain Support**:
@@ -59,12 +59,20 @@ A command-line tool for blockchain data analysis, portfolio tracking, transactio
 cargo install scope-bca
 ```
 
+Or install with Homebrew (macOS and Linux, prebuilt binaries):
+
+```bash
+# Homebrew loads formulae from a third-party tap only after you trust it
+brew trust --formula robot-accomplice/tap/scope
+brew install robot-accomplice/tap/scope
+```
+
 Or build from source:
 
 ```bash
 git clone https://github.com/robot-accomplice/scope-blockchain-analysis.git
 cd scope-blockchain-analysis
-cargo install --path .
+cargo install --path crates/scope-web
 ```
 
 ## Shell Completion
@@ -139,7 +147,7 @@ scope crawl 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --chain ethereum
 scope monitor USDC                                          # defaults to ethereum
 scope mon PEPE --chain ethereum --layout chart-focus        # short alias with options
 scope monitor USDC --layout exchange                        # exchange-style: order book + chart + trades
-scope monitor USDC --venue binance                           # real exchange OHLC instead of synthetic candles
+scope monitor USDC --venue binance                           # real exchange OHLC, order book and trades
 
 # Exchange venues
 scope venues list                                           # show all available venues
@@ -179,8 +187,9 @@ scope report batch --addresses 0x742d...,0xabc... --output batch-report.md
 # Agent-friendly markdown output
 scope --ai address 0x742d...
 
-# Interactive mode (includes live monitor, portfolio, and all commands)
-scope interactive
+# Full-screen TUI: every command, with completion and a command palette
+scope tui
+scope interactive  # same as `scope tui`
 ```
 
 ### Browser Mode
@@ -730,70 +739,80 @@ scope export --address 0x742d... --output history.csv --format csv --from 2025-0
 scope export --portfolio --output portfolio.json
 ```
 
-## Interactive Mode
+## TUI
 
-Launch a REPL where context persists between commands. Interactive mode provides access to all commands plus the live monitor:
+`scope tui` (also `scope interactive` and `scope shell`) opens a full-screen terminal UI. Every CLI command runs inside it, with the same flags, the same output, and the same error messages. Type a command as you would after `scope`:
 
-```bash
-$ scope interactive
-
-scope:ethereum> chain solana
-Chain set to: solana
-
-scope:solana> address 7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU
-# Uses solana chain automatically
-
-scope:solana> format json
-Format set to: json
-
-scope:solana> monitor USDC
-# Launches a real-time TUI dashboard with price/volume charts
-
-scope:solana> venues list
-# List all available exchange venues
-
-scope:solana> exit
+```text
+scope:auto> address 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
+scope:auto> market summary USDC --venue binance --every 30s --duration 1h
+scope:auto> compliance risk @cold-wallet
 ```
 
-Available interactive commands:
+**Session commands.** These change the context that later commands use. The context is saved between sessions.
 
-- `address` / `addr` -- Analyze a blockchain address
-- `tx` / `transaction` -- Analyze a transaction
-- `contract` / `ct` -- Analyze a smart contract (security, proxy, vulnerabilities)
-- `crawl` / `token` -- Crawl token analytics
-- `monitor` / `mon` -- Live TUI dashboard with five layout presets, widget toggles, price/volume/candlestick charts, alerts, CSV export, and auto-pause
-- `portfolio` / `port` -- Portfolio management (add, remove, list, summary)
-- `tokens` / `aliases` -- Token alias management (add, remove, list, recent)
-- `venues` / `ven` -- Venue management (list, schema, init, validate)
-- `setup` / `config` -- Configuration commands
-- `chain` -- Set or show current chain
-- `format` -- Set or show output format (table, json, csv)
-- `limit` -- Set or show transaction limit
-- `+tokens` / `+txs` -- Toggle token/transaction display flags for address command
-- `trace` / `decode` -- Toggle trace/decode flags for tx command
-- `ctx` / `context` -- Show current session context
-- `clear` / `reset` -- Reset context to defaults
-- `help` / `?` -- Show help
-- `exit` / `quit` -- Exit interactive mode
+| Command | What it does |
+| --- | --- |
+| `chain [name\|auto]` | Show, pin or unpin the chain. A pinned chain is added as `--chain` to commands that accept it. `auto` lets each command infer the chain. |
+| `format [table\|json\|csv\|markdown]` | Show or set the output format for commands that accept it |
+| `+tokens`, `+txs` | Toggle token balances and transactions for `address` |
+| `trace`, `decode` | Toggle trace and decode for `tx` |
+| `limit [n]` | Show or set the transaction limit for `address` |
+| `tokens [list\|recent\|add\|remove]` | Manage saved token aliases |
+| `ctx` / `reset` | Show or reset the session context |
+| `clear` | Clear the output pane |
+| `save <file>` | Write the last output to a file (`save x.csv` after an `--every` run writes its series) |
+| `help [command]` / `exit` | Show help, or one command's help; leave the TUI (also `quit`, `q`, Ctrl-D) |
+
+A flag you type always wins over the context. `address` and `tx` with no target reuse the last one.
+
+**Keys.**
+
+| Key | Action |
+| --- | --- |
+| `Enter` | Run the line |
+| `Tab` | Complete the command, flag, value, `@label`, token alias, venue or chain. Several matches open a menu. |
+| `Ctrl-K` | Command palette: fuzzy search over every command and your history. `Enter` fills the line; `Enter` again runs it. |
+| `↑` / `↓` | History. On an empty line, `↑` first brings back a line that `Esc` cleared. |
+| `Ctrl-A` / `Ctrl-E`, `Ctrl-B`, `Alt-B` / `Alt-F` | Start / end of line, one left, one word left / right |
+| `Ctrl-U` / `Ctrl-W` / `Alt-K` | Delete to the start, the word before, to the end |
+| `Ctrl-F` or `/` | Search the output; `Ctrl-R` searches the history |
+| `Ctrl-Y` | Copy the last output (needs a terminal that allows OSC 52; `save` works everywhere) |
+| `PgUp` / `PgDn` | Scroll the output |
+| `Esc` / `Ctrl-C` | Cancel the running command (for example a `--every` loop); idle, `Esc` clears the line |
+| `Ctrl-D` | Leave the TUI |
+
+The row under the input shows the usage of the command you type and the next argument it expects, the value a flag needs (with its allowed values), or an unknown flag. The pane keeps the last 5000 lines and says when it dropped older ones.
+
+**Repeating view.** A command with `--every` (for example `market summary USDC --venue binance --every 30s --duration 1h`) shows one view that updates in place: the latest report beside its trends (a pass/fail strip with the last failure, and a chart per key value with its threshold line). Below 80 columns the trends sit under the report. `Esc` stops the run and the view stays; the next key leaves it with one copy of the final report and a summary such as `42 runs · 1 failed (run 16)`.
+
+**Commands that need the terminal.** `setup`, `crawl` with a name or symbol (it asks you to pick a token), and `monitor` run on the plain terminal. The TUI steps aside, runs the command, and comes back by itself when it ends; `Ctrl-C` cancels it. The scrollback shows its output and how long it took. `interactive`, `web` and `completions` do not run in the TUI.
+
+**Files.** The TUI keeps its history in `history.txt` and a log of every submitted line in `tui-events.jsonl` (input, parsed arguments, outcome, error, duration), both in the scope data directory.
 
 ### Live Monitor
 
 The monitor launches a real-time TUI dashboard. You can start it two ways:
 
 ```bash
-# Direct from the command line (no interactive mode needed)
+# Direct from the command line
 scope monitor USDC
 scope mon PEPE --chain ethereum --layout chart-focus --refresh 3
 scope monitor USDC --layout exchange    # Exchange-style: order book + chart + trades
 
-# Or from interactive mode
-scope interactive
-scope> monitor USDC
+# Or from the TUI
+scope tui
+scope:auto> monitor USDC
 ```
 
 **Direct-command flags:** `--chain` / `-c`, `--layout` / `-l`, `--refresh` / `-r`, `--scale` / `-s`, `--color-scheme`, `--export` / `-e`, `--venue` / `-v`.
 
 Use `--venue binance` (or any CEX venue) to fetch real exchange OHLC data instead of synthetic candles. The time period selector (1m, 5m, 15m, 1h, 4h, 1d) maps directly to the venue's candlestick intervals.
+
+- **`--venue`** must name a known venue (`scope venues list`). An unknown venue is an error.
+- **When DexScreener fails** (unreachable, blocked, or the token is unknown there) and `--venue` is set, the monitor uses that venue's ticker for the token and tells you why.
+- **`--pair`** prices the token from the venue alone (exchange-only mode). Write the pair in any common form, `USDN_USDT`, `USDN/USDT`, `USDN-USDT` or `USDNUSDT` (the joined form only for a stable or fiat quote such as USDT, USDC, DAI, EUR); scope converts it to the venue's own format.
+- **`--export FILE`** starts CSV export to that file at launch. The `E` key starts an export in the directory set by `monitor.export.path` in `config.yaml` (default `./scope-exports/`). A file that cannot be written is an error, not a silent no-op.
 
 The monitor supports five layout presets that can be switched at runtime or configured in `config.yaml`:
 
@@ -805,7 +824,7 @@ The monitor supports five layout presets that can be switched at runtime or conf
 | **Compact** | Minimal single-column sparkline view for small terminals |
 | **Exchange** | Exchange-style view: order book, chart, recent trades, market info |
 
-The monitor automatically selects the best layout for your terminal size (responsive breakpoints). Manual layout switching disables auto-selection until you press `A`.
+The monitor automatically selects the best layout for your terminal size (responsive breakpoints). `monitor.layout` in `config.yaml` is only the starting preset; auto-selection still applies to it. The `--layout` flag pins the layout: auto-selection stays off. Manual layout switching also disables auto-selection until you press `A`.
 
 **Monitor features:**
 
@@ -817,29 +836,31 @@ The monitor automatically selects the best layout for your terminal size (respon
 - **Liquidity depth**: Per-pair liquidity breakdown across DEXes
 - **Exchange view**: Live order book, ticker, and recent trade history from any configured CEX venue
 - **Alerts**: Configurable price min/max, whale detection, and volume spike thresholds
-- **CSV export**: Record live data to `./scope-exports/` with a single keypress
+- **CSV export**: Record live data with a single keypress (`E`), or from launch with `--export FILE`
 - **Auto-pause**: Optionally pause data fetching while interacting
 
-**Monitor keybindings:**
+**Monitor keybindings** (`?` shows this list in the monitor):
 
 | Key | Action |
 | --- | --- |
-| `Q` / `Esc` | Quit monitor |
-| `R` | Force refresh |
-| `P` / `Space` | Pause/resume |
+| `q` / `Esc` / `Ctrl-C` | Quit monitor |
+| `r` | Refresh now (the activity log confirms it) |
+| `p` / `Space` | Pause/resume |
 | `Shift+P` | Toggle auto-pause on input |
-| `E` | Toggle CSV export (REC indicator when active) |
-| `L` | Cycle layout forward (Dashboard -> Chart -> Feed -> Compact -> Exchange) |
-| `H` | Cycle layout backward |
-| `W` + `1-5` | Toggle widget visibility (1=price chart, 2=volume, 3=buy/sell, 4=metrics, 5=activity) |
-| `A` | Re-enable auto layout |
-| `C` | Cycle chart mode (Line / Candlestick / Volume Profile) |
-| `S` | Toggle log/linear scale |
-| `/` | Cycle color scheme (Green/Red, Blue/Orange, Monochrome) |
-| `T` / `Tab` | Cycle time period |
+| `e` | Toggle CSV export (REC indicator when active) |
+| `l` / `h` | Next / previous layout (Dashboard, Chart, Feed, Compact, Exchange) |
+| `w` + `1-5` | Toggle widget visibility (1=price chart, 2=volume, 3=buy/sell, 4=metrics, 5=activity) |
+| `a` | Re-enable auto layout |
+| `c` | Cycle chart mode (Line / Candlestick / Volume Profile) |
+| `s` | Toggle log/linear scale |
+| `/` | Cycle color scheme (green-red, blue-orange, mono) |
+| `t` / `Tab` | Cycle time period |
 | `1-6` | Select time period (1m, 5m, 15m, 1h, 4h, 1d) |
-| `J` / `K` | Scroll activity log |
-| `+` / `-` | Adjust refresh speed |
+| `j` / `k` | Scroll activity log |
+| `+` / `-` | Slower / faster refresh (the footer shows the interval: `↻ 3s of 5s`) |
+| `?` | Show every key; any key closes the list |
+
+With `--venue`, the Order Book and Recent Trades panels show the venue's real book and trades, and their titles name the venue. Without one, the book is the DEX pool's AMM book, the same as `market summary`, and the title names its source.
 
 ## Configuration
 
@@ -889,7 +910,7 @@ portfolio:
 
 # Monitor TUI configuration (all optional, shown with defaults)
 monitor:
-  layout: dashboard          # dashboard | chart-focus | feed | compact | exchange
+  layout: dashboard          # starting preset; auto-layout still applies (--layout pins it)
   refresh_seconds: 10
   scale: linear              # linear | log
   color_scheme: green-red    # green-red | blue-orange | monochrome
@@ -969,7 +990,10 @@ just lint      # Run lints
 just summary   # USDC market summary (peg, spread, volume, execution, health checks)
 ```
 
-**Git hooks**: A pre-push hook runs the coverage check (80% minimum, no regression) before allowing a push. Install with `just install-hooks`. Requires `cargo install cargo-tarpaulin`.
+**Git hooks**: Install with `just install-hooks`. Requires `cargo install cargo-audit cargo-tarpaulin`. Before a push, the pre-push hook:
+1. Stops commits whose author or committer email is not `robot@accomplice.ch`. Set it once in your checkout: `git config --local user.name robot-accomplice` and `git config --local user.email robot@accomplice.ch`.
+2. Runs `cargo fmt --check`, `cargo clippy -D warnings` and `cargo audit`. The audit ignore list is `.cargo/audit.toml`, which CI also reads.
+3. Runs the coverage check: 80% minimum, and no drop below the committed `.coverage-last`. The hook does not change `.coverage-last`. To raise the baseline, run `just coverage-baseline` and commit the file.
 
 ### Peg & Order Book Health (`scope market`)
 
@@ -981,9 +1005,10 @@ The `scope market` command has three subcommands:
 - **Volume**: 24h quote volume (from venue ticker; omitted for DEX venues)
 - **Execution**: Simulated 10k USDT buy/sell slippage or "insufficient liquidity"
 - **Order book**: Ask/bid levels with depth (base and quote amounts)
-- **Health checks**: No sells below peg, bid/ask ratio, spread, minimum valid levels, total depth, and top-3/top-10 depth per side
+- **Health checks**: No sells below peg, bid/ask ratio, spread, minimum valid levels, total depth, top-3/top-10 depth per side, and depth/volume (bid + ask depth within ±2% of mid should be 5–10% of 24h volume: below fails, above warns). Every check shows its value and limit. Each check is `pass`, `fail`, `warn` or `n/a`. A `warn` does not make the book unhealthy. An `n/a` check does not apply to the book, is always shown, and does not count against "healthy".
+- **DEX venues** (`eth`, `solana`): there is no real order book, so scope builds a synthetic one from the pool's reserves on the constant-product curve (x·y=k), with one level at each `amm-step-pct` (default 0.1%). Level count and spread are `n/a` for this book: the step sets the level count, and the real spread is the pool fee, which DexScreener does not report. Top-3 and top-10 depth apply; with a 0.1% step they mean depth within ±0.3% and ±1%. When DexScreener does not report the reserves, scope falls back to a single-level estimate and labels the book as such. The output names the book source in every format (`book_source` in JSON: `exchange`, `synthetic_amm` or `synthetic_estimate`). Concentrated-liquidity (v3) pools are treated as constant-product pools, because DexScreener does not supply tick data.
 - **Output**: Text (default) or JSON; see [Output Examples](#output-examples) for sample
-- **Tunable thresholds**: All 9 health-check thresholds are overridable defaults. Built-in defaults: min-levels=10, max-spread-pct=3, min-top3-depth=300, min-top10-depth=2000, min-depth=3000, peg-range=0.001, bid/ask ratio 0.2-5.0x. Order of precedence: CLI flag or web request field > `market.health` in `config.yaml` > built-in default. The same flags work on `market summary`, `token-health --with-market`, and `insights`. The web `/api/market` and `/api/token-health` endpoints accept the same keys (snake_case) in the JSON body.
+- **Tunable thresholds**: All 13 health-check thresholds are overridable defaults. Built-in defaults: min-levels=10, max-spread-pct=3, min-top3-depth=300, min-top10-depth=2000, min-depth=3000, peg-range=0.001, bid/ask ratio 0.2-5.0x, amm-step-pct=0.1, depth-window-pct=2, min-depth-volume-pct=5, max-depth-volume-pct=10. Order of precedence: CLI flag or web request field > `market.health` in `config.yaml` > built-in default. The same flags work on `market summary`, `token-health --with-market`, and `insights`. The web `/api/market` and `/api/token-health` endpoints accept the same keys (snake_case) in the JSON body.
 
 ```yaml
 # ~/.config/scope/config.yaml — omitted keys keep the built-in default
@@ -993,6 +1018,7 @@ market:
     max_spread_pct: 3.0
     min_top3_depth: 300
     min_top10_depth: 2000
+    amm_step_pct: 0.1     # synthetic AMM book step for DEX venues, in percent
 ```
 
 ```bash

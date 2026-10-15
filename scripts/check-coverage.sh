@@ -2,8 +2,11 @@
 # =============================================================================
 # Coverage check script for scope-blockchain-analysis
 # - Ensures coverage meets mandatory 80% threshold
-# - Tracks last known coverage in .coverage-last to prevent regressions
+# - Fails when coverage is below the committed baseline in .coverage-last
 # - Run via pre-push hook or manually: ./scripts/check-coverage.sh
+# - --record also writes the new value to .coverage-last. Only
+#   `just coverage-baseline` and release prep use it, so a push never
+#   leaves the working tree dirty (#40).
 # =============================================================================
 
 set -e
@@ -12,6 +15,8 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 COVERAGE_FILE="$REPO_ROOT/.coverage-last"
+RECORD=false
+[ "${1:-}" = "--record" ] && RECORD=true
 MANDATORY_THRESHOLD=80
 
 # -----------------------------------------------------------------------------
@@ -60,7 +65,7 @@ if ! ge "$COVERAGE_PCT" "$MANDATORY_THRESHOLD"; then
     echo "   Add more tests to reach the required coverage."
     echo ""
     echo "Top uncovered modules:"
-    echo "$COVERAGE_OUTPUT" | grep -E '^\|\| src/' 2>/dev/null | head -10 || true
+    echo "$COVERAGE_OUTPUT" | grep -E '^\|\| crates/' 2>/dev/null | head -10 || true
     exit 1
 fi
 
@@ -80,11 +85,14 @@ if [ -f "$COVERAGE_FILE" ]; then
         echo "✓ Coverage improved: ${LAST_COVERAGE}% → ${COVERAGE_PCT}%"
     fi
 else
-    echo "✓ First run: recording ${COVERAGE_PCT}% as baseline in .coverage-last"
+    echo "✓ No baseline yet. Record one with: just coverage-baseline"
 fi
 
 # -----------------------------------------------------------------------------
-# Record new baseline
+# Record new baseline (--record only)
 # -----------------------------------------------------------------------------
-echo "$COVERAGE_PCT" > "$COVERAGE_FILE"
+if $RECORD; then
+    echo "$COVERAGE_PCT" > "$COVERAGE_FILE"
+    echo "✓ Recorded ${COVERAGE_PCT}% in .coverage-last. Commit it."
+fi
 echo "✓ Coverage check passed (${COVERAGE_PCT}% >= ${MANDATORY_THRESHOLD}%)"

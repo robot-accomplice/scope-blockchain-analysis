@@ -87,6 +87,7 @@
 
 pub mod dex;
 pub mod ethereum;
+pub mod registry;
 pub mod solana;
 pub mod tron;
 
@@ -456,6 +457,11 @@ pub struct DexPair {
     /// Liquidity in USD.
     pub liquidity_usd: f64,
 
+    /// Base-token reserve of the pool (DexScreener `liquidity.base`), when
+    /// reported. The synthetic AMM order book is built from it.
+    #[serde(default)]
+    pub liquidity_base: Option<f64>,
+
     /// Price change percentage in 24h.
     pub price_change_24h: f64,
 
@@ -690,6 +696,9 @@ pub struct GasByFunction {
 // Chain Metadata
 // ============================================================================
 
+/// The chain a request falls back to when none is given.
+pub const DEFAULT_CHAIN: &str = "ethereum";
+
 /// Metadata for a blockchain network (symbol, decimals, explorer URLs).
 ///
 /// Used for normalized presentation across all chains.
@@ -709,64 +718,18 @@ pub struct ChainMetadata {
 ///
 /// Returns `None` for unknown chains.
 pub fn chain_metadata(chain: &str) -> Option<ChainMetadata> {
-    match chain.to_lowercase().as_str() {
-        "ethereum" | "eth" => Some(ChainMetadata {
-            chain_id: "ethereum",
-            native_symbol: "ETH",
-            native_decimals: 18,
-            explorer_token_base: "https://etherscan.io/token",
-        }),
-        "polygon" => Some(ChainMetadata {
-            chain_id: "polygon",
-            native_symbol: "MATIC",
-            native_decimals: 18,
-            explorer_token_base: "https://polygonscan.com/token",
-        }),
-        "arbitrum" => Some(ChainMetadata {
-            chain_id: "arbitrum",
-            native_symbol: "ETH",
-            native_decimals: 18,
-            explorer_token_base: "https://arbiscan.io/token",
-        }),
-        "optimism" => Some(ChainMetadata {
-            chain_id: "optimism",
-            native_symbol: "ETH",
-            native_decimals: 18,
-            explorer_token_base: "https://optimistic.etherscan.io/token",
-        }),
-        "base" => Some(ChainMetadata {
-            chain_id: "base",
-            native_symbol: "ETH",
-            native_decimals: 18,
-            explorer_token_base: "https://basescan.org/token",
-        }),
-        "bsc" => Some(ChainMetadata {
-            chain_id: "bsc",
-            native_symbol: "BNB",
-            native_decimals: 18,
-            explorer_token_base: "https://bscscan.com/token",
-        }),
-        "solana" | "sol" => Some(ChainMetadata {
-            chain_id: "solana",
-            native_symbol: "SOL",
-            native_decimals: 9,
-            explorer_token_base: "https://solscan.io/token",
-        }),
-        "tron" | "trx" => Some(ChainMetadata {
-            chain_id: "tron",
-            native_symbol: "TRX",
-            native_decimals: 6,
-            explorer_token_base: "https://tronscan.org/#/token20",
-        }),
-        _ => None,
-    }
+    let c = registry::chain(chain)?;
+    Some(ChainMetadata {
+        chain_id: c.id,
+        native_symbol: c.native_symbol,
+        native_decimals: c.native_decimals,
+        explorer_token_base: c.explorer_token_base?,
+    })
 }
 
 /// Returns the native token symbol for a chain, or "???" if unknown.
 pub fn native_symbol(chain: &str) -> &'static str {
-    chain_metadata(chain)
-        .map(|m| m.native_symbol)
-        .unwrap_or("???")
+    registry::chain(chain).map_or("???", |c| c.native_symbol)
 }
 
 // ============================================================================

@@ -1,0 +1,29 @@
+name: Ctrl-Z and SIGTSTP stop the TUI; SIGCONT redraws it with the draft
+tiers: [offline]
+steps:
+  - type: "draf"
+  - wait_for: { text: "draf" }
+  # Ctrl-Z gives the terminal back (main screen) and stops the process.
+  - key: Ctrl-Z
+  - expect_screen: { not_contains: ["scope v", "draf"] }
+  - signal: CONT
+  - wait_for: { text: "draf" }
+  - expect_screen: { contains: ["scope v"] }
+  # An outside SIGTSTP takes the same path.
+  - signal: TSTP
+  - expect_screen: { not_contains: ["scope v", "draf"] }
+  - signal: CONT
+  - type: "x"
+  - wait_for: { text: "drafx" }
+  - expect_screen: { contains: ["scope v"] }
+  # An outside SIGSTOP cannot be caught. A key typed while stopped waits
+  # in the tty; SIGCONT alone must set up the terminal and read it.
+  - signal: STOP
+  - type: "y"
+  - expect_screen: { not_contains: ["drafxy"] }
+  - signal: CONT
+  - wait_for: { text: "drafxy" }
+  - expect_screen: { contains: ["scope v"] }
+  - key: Ctrl-U
+  - key: Ctrl-D
+  - expect_exit: 0

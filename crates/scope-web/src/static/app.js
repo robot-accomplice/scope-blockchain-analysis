@@ -54,20 +54,33 @@ function showError(resultEl, msg) {
 }
 
 // ===== Formatting Helpers =====
+// Decimals for a price: the same rule as the CLI and the TUI
+// (scope::display::format::price_decimals). The stablecoin band is
+// scope::tokens STABLECOIN_PRICE_RANGE.
+function priceDigits(n) {
+  var a = Math.abs(n);
+  if (a >= 1000) return 2;
+  if (a >= 0.95 && a <= 1.05) return 6;
+  if (a >= 1) return 4;
+  if (a >= 0.01) return 6;
+  if (a >= 0.0001) return 8;
+  return 10;
+}
+
 function fmtPrice(n) {
   if (n == null) return '-';
-  if (n >= 1000) return '$' + n.toLocaleString(undefined, { maximumFractionDigits: 2 });
-  if (n >= 1) return '$' + n.toFixed(4);
-  if (n >= 0.01) return '$' + n.toFixed(6);
-  return '$' + n.toFixed(8);
+  return '$' + formatPrice(n);
 }
 
 function fmtUsd(n) {
   if (n == null) return '-';
-  if (n >= 1e9) return '$' + (n / 1e9).toFixed(2) + 'B';
-  if (n >= 1e6) return '$' + (n / 1e6).toFixed(2) + 'M';
-  if (n >= 1e3) return '$' + (n / 1e3).toFixed(2) + 'K';
-  return '$' + n.toFixed(2);
+  return '$' + fmtCompact(n);
+}
+
+// An amount in a pair's quote currency (depth is not always dollars).
+function fmtQuote(n, quote) {
+  if (n == null) return '-';
+  return fmtCompact(n) + ' ' + (quote || '');
 }
 
 function fmtNum(n) {
@@ -99,10 +112,7 @@ function fmtTimestamp(ts) {
 
 function formatPrice(n) {
   if (n === null || n === undefined) return '-';
-  if (n >= 1000) return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
-  if (n >= 1) return n.toFixed(4);
-  if (n >= 0.01) return n.toFixed(6);
-  return n.toFixed(8);
+  return n.toFixed(priceDigits(n));
 }
 
 function fmtCompact(n) {
@@ -699,6 +709,41 @@ function crawlToMarkdown(data) {
   return md;
 }
 
+// ===== Health checks =====
+// A check's status is 'pass', 'fail', 'warn' or 'n/a'. n/a checks do not
+// apply to the book (for example spread on a synthetic AMM book) (#37).
+// warn checks are outside their target but are not failures (for example
+// depth far above the depth/volume ceiling). Neither counts against
+// "healthy".
+var CHECK_STYLE = {
+  'pass': { cls: 'pass', icon: '\u2713', md: '[x]' },
+  'fail': { cls: 'fail', icon: '\u2717', md: '[ ]' },
+  'warn': { cls: 'warn', icon: '!',      md: '[!]' },
+  'n/a':  { cls: 'na',   icon: '\u2013', md: '(n/a)' }
+};
+
+function checkStyle(c) {
+  return CHECK_STYLE[c.status] || CHECK_STYLE['fail'];
+}
+
+function renderCheckList(checks) {
+  var checkList = el('div', { className: 'check-list' });
+  checks.forEach(function(c) {
+    var st = checkStyle(c);
+    var item = el('div', { className: 'check-item ' + st.cls });
+    item.appendChild(el('span', { className: 'check-icon', textContent: st.icon }));
+    item.appendChild(el('span', { textContent: c.message }));
+    checkList.appendChild(item);
+  });
+  return checkList;
+}
+
+var BOOK_SOURCE_LABEL = {
+  'exchange': 'Exchange order book',
+  'synthetic_amm': 'Synthetic (AMM curve x\u00b7y=k)',
+  'synthetic_estimate': 'Synthetic estimate (pool reserves not reported)'
+};
+
 // ===== Market Summary Renderer =====
 function renderMarketSummary(resultEl, data) {
   var view = el('div', { className: 'result-view' });
@@ -716,8 +761,9 @@ function renderMarketSummary(resultEl, data) {
   grid.appendChild(metricCard('Mid Price', formatPrice(data.mid_price)));
   grid.appendChild(metricCard('Spread', formatPrice(data.spread)));
   if (data.volume_24h != null) grid.appendChild(metricCard('Volume (24h)', fmtUsd(data.volume_24h)));
-  grid.appendChild(metricCard('Bid Depth', fmtUsd(data.bid_depth)));
-  grid.appendChild(metricCard('Ask Depth', fmtUsd(data.ask_depth)));
+  grid.appendChild(metricCard('Bid Depth', fmtQuote(data.bid_depth, data.quote)));
+  grid.appendChild(metricCard('Ask Depth', fmtQuote(data.ask_depth, data.quote)));
+  if (data.book_source) grid.appendChild(metricCard('Book', BOOK_SOURCE_LABEL[data.book_source] || data.book_source));
   view.appendChild(grid);
 
   // Execution simulation
@@ -727,13 +773,13 @@ function renderMarketSummary(resultEl, data) {
     if (data.execution_10k_buy) {
       var b = data.execution_10k_buy;
       execGrid.appendChild(metricCard('Buy VWAP', formatPrice(b.vwap),
-        { text: b.slippage_bps.toFixed(1) + ' bps slippage', cls: b.slippage_bps > 10 ? 'negative' : 'positive' }
+        { text: b.slippage_bps.toFixed(1) + ' bps slippage', cls: b.slippage_bps > data.slippage_warn_bps ? 'negative' : 'positive' }
       ));
     }
     if (data.execution_10k_sell) {
       var s = data.execution_10k_sell;
       execGrid.appendChild(metricCard('Sell VWAP', formatPrice(s.vwap),
-        { text: s.slippage_bps.toFixed(1) + ' bps slippage', cls: s.slippage_bps > 10 ? 'negative' : 'positive' }
+        { text: s.slippage_bps.toFixed(1) + ' bps slippage', cls: s.slippage_bps > data.slippage_warn_bps ? 'negative' : 'positive' }
       ));
     }
     view.appendChild(execGrid);
@@ -742,15 +788,7 @@ function renderMarketSummary(resultEl, data) {
   // Health checks
   if (data.checks && data.checks.length > 0) {
     view.appendChild(el('div', { className: 'section-title' }, 'Health Checks'));
-    var checkList = el('div', { className: 'check-list' });
-    data.checks.forEach(function(c) {
-      var pass = c.status === 'pass';
-      var item = el('div', { className: 'check-item ' + (pass ? 'pass' : 'fail') });
-      item.appendChild(el('span', { className: 'check-icon', textContent: pass ? '\u2713' : '\u2717' }));
-      item.appendChild(el('span', { textContent: c.message }));
-      checkList.appendChild(item);
-    });
-    view.appendChild(checkList);
+    view.appendChild(renderCheckList(data.checks));
   }
 
   // Order book (reuse exchange renderer components)
@@ -785,11 +823,12 @@ function marketToMarkdown(data) {
   md += '| Best Ask | ' + formatPrice(data.best_ask) + ' |\n';
   md += '| Spread | ' + formatPrice(data.spread) + ' |\n';
   md += '| Mid Price | ' + formatPrice(data.mid_price) + ' |\n';
+  if (data.book_source) md += '| Book | ' + (BOOK_SOURCE_LABEL[data.book_source] || data.book_source) + ' |\n';
   md += '| Healthy | ' + (data.healthy ? 'Yes' : 'No') + ' |\n';
   if (data.checks && data.checks.length > 0) {
     md += '\n## Health Checks\n\n';
     data.checks.forEach(function(c) {
-      md += '- [' + (c.status === 'pass' ? 'x' : ' ') + '] ' + c.message + '\n';
+      md += '- ' + checkStyle(c).md + ' ' + c.message + '\n';
     });
   }
   return md;
@@ -833,20 +872,12 @@ function renderTokenHealth(resultEl, data) {
     mGrid.appendChild(metricCard('Bid', formatPrice(m.best_bid)));
     mGrid.appendChild(metricCard('Ask', formatPrice(m.best_ask)));
     mGrid.appendChild(metricCard('Spread', formatPrice(m.spread)));
-    mGrid.appendChild(metricCard('Bid Depth', fmtUsd(m.bid_depth)));
-    mGrid.appendChild(metricCard('Ask Depth', fmtUsd(m.ask_depth)));
+    mGrid.appendChild(metricCard('Bid Depth', fmtQuote(m.bid_depth, m.quote)));
+    mGrid.appendChild(metricCard('Ask Depth', fmtQuote(m.ask_depth, m.quote)));
     view.appendChild(mGrid);
 
     if (m.checks && m.checks.length > 0) {
-      var checkList = el('div', { className: 'check-list' });
-      m.checks.forEach(function(c) {
-        var pass = c.status === 'pass';
-        var item = el('div', { className: 'check-item ' + (pass ? 'pass' : 'fail') });
-        item.appendChild(el('span', { className: 'check-icon', textContent: pass ? '\u2713' : '\u2717' }));
-        item.appendChild(el('span', { textContent: c.message }));
-        checkList.appendChild(item);
-      });
-      view.appendChild(checkList);
+      view.appendChild(renderCheckList(m.checks));
     }
   }
 
@@ -1612,11 +1643,17 @@ function runTokenHealth() {
 function runMarket() {
   var pair = document.getElementById('mkt-pair').value.trim();
   if (!pair) return;
-  apiPost('/api/market/summary', {
+  var body = {
     pair: pair,
     market_venue: document.getElementById('mkt-venue').value,
-    peg: parseFloat(document.getElementById('mkt-peg').value) || 1.0,
-  }, document.getElementById('market-results'), renderMarketSummary);
+  };
+  // Send a peg only when the user set one; otherwise the server uses the
+  // configured market.health.peg_target, as the CLI and token health do.
+  var pegEl = document.getElementById('mkt-peg');
+  if (pegEl.dataset.pegUserSet && pegEl.value !== '') {
+    body.peg = parseFloat(pegEl.value);
+  }
+  apiPost('/api/market/summary', body, document.getElementById('market-results'), renderMarketSummary);
 }
 
 function runCompliance() {
@@ -1750,31 +1787,25 @@ async function loadVenues() {
       populateVenueSelects(data.venues);
     }
   } catch (e) {
-    // Silently fall back to hardcoded options
+    // Silently keep the default option in the page
   }
 }
 
+// DEX venues go only to selects marked data-dex (token health, market);
+// the exchange snapshot and monitor read CEX venues only.
 function populateVenueSelects(venues) {
+  var cexVenues = venues.filter(function(v) { return v.kind !== 'dex'; });
   document.querySelectorAll('.venue-select').forEach(function(sel) {
     var hasNone = sel.options.length > 0 && sel.options[0].value === '';
     var currentValue = sel.value;
     while (sel.options.length > (hasNone ? 1 : 0)) {
       sel.remove(hasNone ? 1 : 0);
     }
-    venues.forEach(function(v) {
+    var listed = sel.dataset.dex === undefined ? cexVenues : venues;
+    listed.forEach(function(v) {
       var opt = document.createElement('option');
       opt.value = v.id;
       opt.textContent = v.name;
-      sel.appendChild(opt);
-    });
-    var dexVenues = [
-      { id: 'eth', name: 'Ethereum DEX' },
-      { id: 'solana', name: 'Solana DEX' },
-    ];
-    dexVenues.forEach(function(d) {
-      var opt = document.createElement('option');
-      opt.value = d.id;
-      opt.textContent = d.name;
       sel.appendChild(opt);
     });
     if (currentValue) sel.value = currentValue;
@@ -2188,6 +2219,10 @@ async function loadConfigStatus() {
 
     document.getElementById('version').textContent = 'v' + (data.version || '?');
 
+    // The market panel shows the configured peg until the user edits it.
+    var pegEl = document.getElementById('mkt-peg');
+    if (data.market && !pegEl.dataset.pegUserSet) pegEl.value = data.market.peg_target;
+
     var statusEl = document.getElementById('setup-status');
     clearElement(statusEl);
 
@@ -2283,6 +2318,9 @@ document.querySelectorAll('input[type="text"]').forEach(function(input) {
 });
 
 // ===== Init =====
+document.getElementById('mkt-peg').addEventListener('input', function(e) {
+  e.target.dataset.pegUserSet = '1';
+});
 loadConfigStatus();
 loadAddressBook();
 loadVenues();

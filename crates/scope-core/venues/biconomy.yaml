@@ -11,6 +11,11 @@ symbol:
 headers:
   X-SITE-ID: "127"
 
+error_envelope:
+  code_key: code
+  ok_codes: ["0"]
+  message_key: message
+
 capabilities:
   order_book:
     path: /api/v1/depth

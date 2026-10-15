@@ -5,58 +5,84 @@
 //! JSON responses via `response_root`, and mapping fields to common types.
 
 use crate::error::{Result, ScopeError};
+use crate::http::{HttpClient, Request};
 use crate::market::descriptor::{EndpointDescriptor, HttpMethod, ResponseMapping, VenueDescriptor};
 use crate::market::orderbook::{
     Candle, OhlcClient, OrderBook, OrderBookClient, OrderBookLevel, Ticker, TickerClient, Trade,
     TradeHistoryClient, TradeSide,
 };
+use crate::market::pair::Pair;
 use async_trait::async_trait;
-use reqwest::Client;
 use serde_json::Value;
+use std::sync::Arc;
 use std::time::Duration;
 
-fn format_http_api_error(venue: &str, status: reqwest::StatusCode, body: &str) -> ScopeError {
+fn format_http_api_error(venue: &str, status: u16, body: &str) -> ScopeError {
+    // Keep the canonical reason text, such as `400 Bad Request`.
+    let status = reqwest::StatusCode::from_u16(status)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|_| status.to_string());
     let body = body.trim();
     let binance_invalid_symbol = venue.to_lowercase().contains("binance")
         && (body.contains("\"code\":-1121")
             || body.contains("\"code\": -1121")
             || body.to_lowercase().contains("invalid symbol"));
 
-    if body.is_empty() {
-        ScopeError::Chain(format!("{venue} API error: HTTP {status}"))
+    let message = if body.is_empty() {
+        format!("API error: HTTP {status}")
     } else if binance_invalid_symbol {
         let preview: String = body.chars().take(200).collect();
-        ScopeError::Chain(format!(
-            "{venue} API error: HTTP {status} — response: {preview}\n\
+        format!(
+            "API error: HTTP {status} — response: {preview}\n\
              Hint: Binance returned 'Invalid symbol'. Verify pair ordering and venue format \
              (e.g. BASE/QUOTE -> BASEQUOTE), or try another venue if the market is unavailable."
-        ))
+        )
     } else {
         let preview: String = body.chars().take(200).collect();
-        ScopeError::Chain(format!(
-            "{venue} API error: HTTP {status} — response: {preview}"
-        ))
+        format!("API error: HTTP {status} — response: {preview}")
+    };
+    venue_error(venue, message)
+}
+
+/// A venue failure that names the venue by its descriptor id.
+pub(crate) fn venue_error(venue: &str, message: impl Into<String>) -> ScopeError {
+    ScopeError::Venue {
+        venue: venue.to_string(),
+        message: message.into(),
     }
 }
 
 /// A generic exchange client driven entirely by a [`VenueDescriptor`].
 ///
 /// No venue-specific Rust code — all behavior comes from the YAML descriptor.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ConfigurableExchangeClient {
     descriptor: VenueDescriptor,
-    http: Client,
+    http: Arc<dyn HttpClient>,
+}
+
+impl std::fmt::Debug for ConfigurableExchangeClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConfigurableExchangeClient")
+            .field("descriptor", &self.descriptor)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ConfigurableExchangeClient {
-    /// Create a new client from a venue descriptor.
+    /// Create a new client from a venue descriptor, using the process transport.
     pub fn new(descriptor: VenueDescriptor) -> Self {
-        let timeout = descriptor.timeout_secs.unwrap_or(15);
-        let http = Client::builder()
-            .timeout(Duration::from_secs(timeout))
-            .build()
-            .expect("reqwest client build");
+        Self::with_http(descriptor, crate::http::transport())
+    }
+
+    /// Create a client that sends its requests through `http`.
+    pub fn with_http(descriptor: VenueDescriptor, http: Arc<dyn HttpClient>) -> Self {
         Self { descriptor, http }
+    }
+
+    /// Per-request timeout from the descriptor.
+    fn timeout(&self) -> Duration {
+        Duration::from_secs(self.descriptor.timeout_secs.unwrap_or(15))
     }
 
     /// The venue descriptor driving this client.
@@ -67,6 +93,59 @@ impl ConfigurableExchangeClient {
     /// Format a pair using the venue's symbol config.
     pub fn format_pair(&self, base: &str, quote: Option<&str>) -> String {
         self.descriptor.format_pair(base, quote)
+    }
+
+    /// The venue's coin list (the `assets` capability): each asset's
+    /// networks and token contracts. Items without a symbol are skipped.
+    pub async fn fetch_assets(&self) -> Result<Vec<super::assets::AssetInfo>> {
+        use super::assets::{AssetInfo, AssetNetwork, contract_of};
+        let endpoint = self
+            .descriptor
+            .capabilities
+            .assets
+            .as_ref()
+            .ok_or_else(|| venue_error(&self.descriptor.id, "does not list assets"))?;
+        let json = self.fetch_endpoint(endpoint, "", None).await?;
+        let data = self.navigate_root(&json, endpoint.response_root.as_deref())?;
+        let r = &endpoint.response;
+        let items = match r.items_key.as_deref() {
+            Some(k) if !k.is_empty() => data.get(k).unwrap_or(data),
+            _ => data,
+        }
+        .as_array()
+        .ok_or_else(|| venue_error(&self.descriptor.id, "expected array for assets"))?;
+        let field = |f: &Option<String>, default: &str| f.clone().unwrap_or_else(|| default.into());
+        let (asset, networks_key) = (
+            field(&r.asset, "coin"),
+            field(&r.networks_key, "networkList"),
+        );
+        let (network, contract) = (
+            field(&r.network, "network"),
+            field(&r.contract, "contractAddress"),
+        );
+        Ok(items
+            .iter()
+            .filter_map(|item| {
+                let symbol = self.extract_string(item, &asset)?;
+                let networks = item
+                    .get(&networks_key)
+                    .and_then(Value::as_array)
+                    .map(|ns| {
+                        ns.iter()
+                            .filter_map(|n| {
+                                Some(AssetNetwork {
+                                    network: self.extract_string(n, &network)?,
+                                    contract: self
+                                        .extract_string(n, &contract)
+                                        .and_then(|c| contract_of(&c)),
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Some(AssetInfo { symbol, networks })
+            })
+            .collect())
     }
 
     // =========================================================================
@@ -80,73 +159,13 @@ impl ConfigurableExchangeClient {
         pair: &str,
         limit: Option<u32>,
     ) -> Result<Value> {
-        let url = format!(
-            "{}{}",
-            self.descriptor.base_url,
-            self.interpolate_path(&endpoint.path, pair)
-        );
-
-        let limit_str = limit.unwrap_or(100).to_string();
-
-        match endpoint.method {
-            HttpMethod::GET => {
-                let mut req = self.http.get(&url);
-                // Add headers
-                for (k, v) in &self.descriptor.headers {
-                    req = req.header(k, v);
-                }
-                // Add query params with interpolation
-                let params: Vec<(String, String)> = endpoint
-                    .params
-                    .iter()
-                    .map(|(k, v)| (k.clone(), self.interpolate_value(v, pair, &limit_str)))
-                    .collect();
-                if !params.is_empty() {
-                    req = req.query(&params);
-                }
-
-                let resp = req.send().await?;
-                if !resp.status().is_success() {
-                    let status = resp.status();
-                    let body = resp.text().await.unwrap_or_default();
-                    return Err(format_http_api_error(&self.descriptor.name, status, &body));
-                }
-                resp.json::<Value>().await.map_err(|e| {
-                    ScopeError::Chain(format!("{} JSON parse error: {}", self.descriptor.name, e))
-                })
-            }
-            HttpMethod::POST => {
-                let mut req = self.http.post(&url);
-                for (k, v) in &self.descriptor.headers {
-                    req = req.header(k, v);
-                }
-                // Build request body from template with interpolation
-                if let Some(body_template) = &endpoint.request_body {
-                    let body = self.interpolate_json(body_template, pair, &limit_str);
-                    req = req.json(&body);
-                }
-
-                let resp = req.send().await?;
-                if !resp.status().is_success() {
-                    let status = resp.status();
-                    let body = resp.text().await.unwrap_or_default();
-                    return Err(format_http_api_error(&self.descriptor.name, status, &body));
-                }
-                resp.json::<Value>().await.map_err(|e| {
-                    ScopeError::Chain(format!("{} JSON parse error: {}", self.descriptor.name, e))
-                })
-            }
-        }
+        self.fetch_endpoint_with_interval(endpoint, pair, limit, "")
+            .await
     }
 
     /// Interpolate `{pair}` placeholders in a URL path.
     fn interpolate_path(&self, path: &str, pair: &str) -> String {
         path.replace("{pair}", pair)
-    }
-
-    /// Interpolate `{pair}`, `{limit}`, and `{interval}` placeholders in a string value.
-    fn interpolate_value(&self, template: &str, pair: &str, limit: &str) -> String {
-        self.interpolate_value_full(template, pair, limit, "")
     }
 
     /// Full interpolation with all supported placeholders.
@@ -163,7 +182,8 @@ impl ConfigurableExchangeClient {
             .replace("{interval}", interval)
     }
 
-    /// Recursively interpolate `{pair}`, `{limit}`, and `{interval}` in a JSON value template.
+    /// Interpolation with an empty `{interval}`; only the unit tests call it.
+    #[cfg(test)]
     fn interpolate_json(&self, value: &Value, pair: &str, limit: &str) -> Value {
         self.interpolate_json_full(value, pair, limit, "")
     }
@@ -213,12 +233,11 @@ impl ConfigurableExchangeClient {
         );
         let limit_str = limit.unwrap_or(100).to_string();
 
-        match endpoint.method {
+        let mut req = match endpoint.method {
             HttpMethod::GET => {
-                let mut req = self.http.get(&url);
-                for (k, v) in &self.descriptor.headers {
-                    req = req.header(k, v);
-                }
+                let mut full_url = reqwest::Url::parse(&url).map_err(|e| {
+                    venue_error(&self.descriptor.id, format!("invalid URL {url}: {e}"))
+                })?;
                 let params: Vec<(String, String)> = endpoint
                     .params
                     .iter()
@@ -230,39 +249,48 @@ impl ConfigurableExchangeClient {
                     })
                     .collect();
                 if !params.is_empty() {
-                    req = req.query(&params);
+                    full_url.query_pairs_mut().extend_pairs(params.iter());
                 }
-                let resp = req.send().await?;
-                if !resp.status().is_success() {
-                    let status = resp.status();
-                    let body = resp.text().await.unwrap_or_default();
-                    return Err(format_http_api_error(&self.descriptor.name, status, &body));
-                }
-                resp.json::<Value>().await.map_err(|e| {
-                    ScopeError::Chain(format!("{} JSON parse error: {}", self.descriptor.name, e))
-                })
+                Request::get(full_url.as_str())
             }
-            HttpMethod::POST => {
-                let mut req = self.http.post(&url);
-                for (k, v) in &self.descriptor.headers {
-                    req = req.header(k, v);
+            HttpMethod::POST => match &endpoint.request_body {
+                Some(template) => {
+                    let body = self.interpolate_json_full(template, pair, &limit_str, interval);
+                    Request::post_json(&url, body.to_string())
                 }
-                if let Some(body_template) = &endpoint.request_body {
-                    let body =
-                        self.interpolate_json_full(body_template, pair, &limit_str, interval);
-                    req = req.json(&body);
-                }
-                let resp = req.send().await?;
-                if !resp.status().is_success() {
-                    let status = resp.status();
-                    let body = resp.text().await.unwrap_or_default();
-                    return Err(format_http_api_error(&self.descriptor.name, status, &body));
-                }
-                resp.json::<Value>().await.map_err(|e| {
-                    ScopeError::Chain(format!("{} JSON parse error: {}", self.descriptor.name, e))
-                })
-            }
+                // No body template: send no body.
+                None => Request {
+                    method: "POST".into(),
+                    body: None,
+                    ..Request::get(&url)
+                },
+            },
         }
+        .with_timeout(self.timeout());
+        for (k, v) in &self.descriptor.headers {
+            req = req.with_header(k, v);
+        }
+
+        let resp = self.http.send(req).await?;
+        if !resp.is_success() {
+            return Err(format_http_api_error(
+                &self.descriptor.id,
+                resp.status_code,
+                &resp.body,
+            ));
+        }
+        let reply = serde_json::from_str::<Value>(&resp.body)
+            .map_err(|e| venue_error(&self.descriptor.id, format!("JSON parse error: {e}")))?;
+        // Some venues report errors with HTTP 200 and an error envelope (#69).
+        if let Some(message) = self
+            .descriptor
+            .error_envelope
+            .as_ref()
+            .and_then(|env| env.error_message(&reply))
+        {
+            return Err(venue_error(&self.descriptor.id, message));
+        }
+        Ok(reply)
     }
 
     // =========================================================================
@@ -289,34 +317,30 @@ impl ConfigurableExchangeClient {
                 // Wildcard: take the first value in the object (for Kraken)
                 current = match current {
                     Value::Object(map) => map.values().next().ok_or_else(|| {
-                        ScopeError::Chain(format!(
-                            "{}: empty object at wildcard '*'",
-                            self.descriptor.name
-                        ))
+                        venue_error(&self.descriptor.id, "empty object at wildcard '*'")
                     })?,
                     _ => {
-                        return Err(ScopeError::Chain(format!(
-                            "{}: expected object at wildcard '*', got {:?}",
-                            self.descriptor.name,
-                            current_type(current)
-                        )));
+                        return Err(venue_error(
+                            &self.descriptor.id,
+                            format!(
+                                "expected object at wildcard '*', got {:?}",
+                                current_type(current)
+                            ),
+                        ));
                     }
                 };
             } else if let Ok(idx) = segment.parse::<usize>() {
                 // Numeric index
                 current = current.get(idx).ok_or_else(|| {
-                    ScopeError::Chain(format!(
-                        "{}: index {} out of bounds",
-                        self.descriptor.name, idx
-                    ))
+                    venue_error(&self.descriptor.id, format!("index {} out of bounds", idx))
                 })?;
             } else {
                 // Object key
                 current = current.get(segment).ok_or_else(|| {
-                    ScopeError::Chain(format!(
-                        "{}: missing key '{}' in response",
-                        self.descriptor.name, segment
-                    ))
+                    venue_error(
+                        &self.descriptor.id,
+                        format!("missing key '{}' in response", segment),
+                    )
                 })?;
             }
         }
@@ -360,12 +384,9 @@ impl ConfigurableExchangeClient {
 
     /// Parse order book levels from a JSON array.
     fn parse_levels(&self, arr: &Value, mapping: &ResponseMapping) -> Result<Vec<OrderBookLevel>> {
-        let items = arr.as_array().ok_or_else(|| {
-            ScopeError::Chain(format!(
-                "{}: expected array for levels",
-                self.descriptor.name
-            ))
-        })?;
+        let items = arr
+            .as_array()
+            .ok_or_else(|| venue_error(&self.descriptor.id, "expected array for levels"))?;
 
         let level_format = mapping.level_format.as_deref().unwrap_or("positional");
         let mut levels = Vec::with_capacity(items.len());
@@ -389,11 +410,11 @@ impl ConfigurableExchangeClient {
                 }
             };
 
-            if let (Some(price), Some(quantity)) = (price, quantity)
-                && price > 0.0
-                && quantity > 0.0
-            {
-                levels.push(OrderBookLevel { price, quantity });
+            if let (Some(price), Some(quantity)) = (price, quantity) {
+                let level = OrderBookLevel { price, quantity };
+                if level.is_valid() {
+                    levels.push(level);
+                }
             }
         }
 
@@ -438,12 +459,7 @@ impl OrderBookClient for ConfigurableExchangeClient {
             .capabilities
             .order_book
             .as_ref()
-            .ok_or_else(|| {
-                ScopeError::Chain(format!(
-                    "{} does not support order book",
-                    self.descriptor.name
-                ))
-            })?;
+            .ok_or_else(|| venue_error(&self.descriptor.id, "does not support order book"))?;
 
         let json = self.fetch_endpoint(endpoint, pair_symbol, None).await?;
         let data = self.navigate_root(&json, endpoint.response_root.as_deref())?;
@@ -452,16 +468,16 @@ impl OrderBookClient for ConfigurableExchangeClient {
         let bids_key = endpoint.response.bids_key.as_deref().unwrap_or("bids");
 
         let asks_arr = data.get(asks_key).ok_or_else(|| {
-            ScopeError::Chain(format!(
-                "{}: missing '{}' in order book response",
-                self.descriptor.name, asks_key
-            ))
+            venue_error(
+                &self.descriptor.id,
+                format!("missing '{}' in order book response", asks_key),
+            )
         })?;
         let bids_arr = data.get(bids_key).ok_or_else(|| {
-            ScopeError::Chain(format!(
-                "{}: missing '{}' in order book response",
-                self.descriptor.name, bids_key
-            ))
+            venue_error(
+                &self.descriptor.id,
+                format!("missing '{}' in order book response", bids_key),
+            )
         })?;
 
         let mut asks = self.parse_levels(asks_arr, &endpoint.response)?;
@@ -480,9 +496,14 @@ impl OrderBookClient for ConfigurableExchangeClient {
         });
 
         // Build display pair name
-        let pair = format_display_pair(pair_symbol, &self.descriptor.symbol.template);
+        let pair = Pair::parse(pair_symbol).to_string();
 
-        Ok(OrderBook { pair, bids, asks })
+        Ok(OrderBook {
+            pair,
+            source: super::types::BookSource::Exchange,
+            bids,
+            asks,
+        })
     }
 }
 
@@ -494,9 +515,7 @@ impl TickerClient for ConfigurableExchangeClient {
             .capabilities
             .ticker
             .as_ref()
-            .ok_or_else(|| {
-                ScopeError::Chain(format!("{} does not support ticker", self.descriptor.name))
-            })?;
+            .ok_or_else(|| venue_error(&self.descriptor.id, "does not support ticker"))?;
 
         let json = self.fetch_endpoint(endpoint, pair_symbol, None).await?;
 
@@ -510,10 +529,7 @@ impl TickerClient for ConfigurableExchangeClient {
                 root.get(items_key).unwrap_or(root)
             };
             let arr = items.as_array().ok_or_else(|| {
-                ScopeError::Chain(format!(
-                    "{}: expected array for ticker filter",
-                    self.descriptor.name
-                ))
+                venue_error(&self.descriptor.id, "expected array for ticker filter")
             })?;
             let filter_value = filter.value.replace("{pair}", pair_symbol);
             arr.iter()
@@ -523,10 +539,10 @@ impl TickerClient for ConfigurableExchangeClient {
                         .is_some_and(|s| s == filter_value)
                 })
                 .ok_or_else(|| {
-                    ScopeError::Chain(format!(
-                        "{}: no ticker found for pair {}",
-                        self.descriptor.name, pair_symbol
-                    ))
+                    venue_error(
+                        &self.descriptor.id,
+                        format!("no ticker found for pair {}", pair_symbol),
+                    )
                 })?
                 .clone()
         } else {
@@ -535,7 +551,7 @@ impl TickerClient for ConfigurableExchangeClient {
         };
 
         let r = &endpoint.response;
-        let pair = format_display_pair(pair_symbol, &self.descriptor.symbol.template);
+        let pair = Pair::parse(pair_symbol).to_string();
 
         Ok(Ticker {
             pair,
@@ -553,6 +569,10 @@ impl TickerClient for ConfigurableExchangeClient {
                 .quote_volume_24h
                 .as_ref()
                 .and_then(|f| self.extract_f64(&data, f)),
+            price_change_pct_24h: r
+                .price_change_pct_24h
+                .as_ref()
+                .and_then(|f| self.extract_f64(&data, f)),
             best_bid: r.best_bid.as_ref().and_then(|f| self.extract_f64(&data, f)),
             best_ask: r.best_ask.as_ref().and_then(|f| self.extract_f64(&data, f)),
         })
@@ -567,9 +587,7 @@ impl TradeHistoryClient for ConfigurableExchangeClient {
             .capabilities
             .trades
             .as_ref()
-            .ok_or_else(|| {
-                ScopeError::Chain(format!("{} does not support trades", self.descriptor.name))
-            })?;
+            .ok_or_else(|| venue_error(&self.descriptor.id, "does not support trades"))?;
 
         let json = self
             .fetch_endpoint(endpoint, pair_symbol, Some(limit))
@@ -584,12 +602,9 @@ impl TradeHistoryClient for ConfigurableExchangeClient {
             data.get(items_key).unwrap_or(data)
         };
 
-        let items = arr.as_array().ok_or_else(|| {
-            ScopeError::Chain(format!(
-                "{}: expected array for trades",
-                self.descriptor.name
-            ))
-        })?;
+        let items = arr
+            .as_array()
+            .ok_or_else(|| venue_error(&self.descriptor.id, "expected array for trades"))?;
 
         let r = &endpoint.response;
         let mut trades = Vec::with_capacity(items.len());
@@ -635,9 +650,12 @@ impl OhlcClient for ConfigurableExchangeClient {
         interval: &str,
         limit: u32,
     ) -> Result<Vec<Candle>> {
-        let endpoint = self.descriptor.capabilities.ohlc.as_ref().ok_or_else(|| {
-            ScopeError::Chain(format!("{} does not support OHLC", self.descriptor.name))
-        })?;
+        let endpoint = self
+            .descriptor
+            .capabilities
+            .ohlc
+            .as_ref()
+            .ok_or_else(|| venue_error(&self.descriptor.id, "does not support OHLC"))?;
 
         // Map canonical interval (e.g., "1m") to venue-specific format (e.g., "1min")
         let mapped_interval = endpoint
@@ -659,12 +677,9 @@ impl OhlcClient for ConfigurableExchangeClient {
             data.get(items_key).unwrap_or(data)
         };
 
-        let items = arr.as_array().ok_or_else(|| {
-            ScopeError::Chain(format!(
-                "{}: expected array for OHLC data",
-                self.descriptor.name
-            ))
-        })?;
+        let items = arr
+            .as_array()
+            .ok_or_else(|| venue_error(&self.descriptor.id, "expected array for OHLC data"))?;
 
         let r = &endpoint.response;
         let format = r.ohlc_format.as_deref().unwrap_or("objects");
@@ -781,83 +796,49 @@ fn current_type(val: &Value) -> &'static str {
     }
 }
 
-/// Convert a raw pair symbol back to display format (e.g., "BTCUSDT" → "BTC/USDT").
-fn format_display_pair(raw: &str, template: &str) -> String {
-    // Try to reverse-engineer the separator from the template
-    let sep = if template.contains('_') {
-        "_"
-    } else if template.contains('-') {
-        "-"
-    } else {
-        ""
-    };
-
-    if !sep.is_empty() {
-        raw.replace(sep, "/")
-    } else {
-        // No separator: try to find where the quote starts
-        let upper = raw.to_uppercase();
-        for quote in &["USDT", "USD", "USDC", "BTC", "ETH", "EUR", "GBP"] {
-            if upper.ends_with(quote) {
-                let base_end = raw.len() - quote.len();
-                if base_end > 0 {
-                    return format!("{}/{}", &raw[..base_end], &raw[base_end..]);
-                }
-            }
-        }
-        raw.to_string()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_format_display_pair_underscore() {
-        assert_eq!(
-            format_display_pair("BTC_USDT", "{base}_{quote}"),
-            "BTC/USDT"
-        );
+        assert_eq!(Pair::parse("BTC_USDT").to_string(), "BTC/USDT");
     }
 
     #[test]
     fn test_format_display_pair_dash() {
-        assert_eq!(
-            format_display_pair("BTC-USDT", "{base}-{quote}"),
-            "BTC/USDT"
-        );
+        assert_eq!(Pair::parse("BTC-USDT").to_string(), "BTC/USDT");
     }
 
     #[test]
     fn test_format_display_pair_concatenated() {
-        assert_eq!(format_display_pair("BTCUSDT", "{base}{quote}"), "BTC/USDT");
-        assert_eq!(format_display_pair("ETHUSD", "{base}{quote}"), "ETH/USD");
+        assert_eq!(Pair::parse("BTCUSDT").to_string(), "BTC/USDT");
+        assert_eq!(Pair::parse("ETHUSD").to_string(), "ETH/USD");
     }
 
     #[test]
     fn test_format_display_pair_eur_concatenated() {
-        assert_eq!(format_display_pair("XBTEUR", "{base}{quote}"), "XBT/EUR");
+        assert_eq!(Pair::parse("XBTEUR").to_string(), "XBT/EUR");
     }
 
     #[test]
     fn test_format_display_pair_gbp_concatenated() {
-        assert_eq!(format_display_pair("XBTGBP", "{base}{quote}"), "XBT/GBP");
+        assert_eq!(Pair::parse("XBTGBP").to_string(), "XBT/GBP");
     }
 
     #[test]
     fn test_format_display_pair_usdc_concatenated() {
-        assert_eq!(format_display_pair("ETHUSDC", "{base}{quote}"), "ETH/USDC");
+        assert_eq!(Pair::parse("ETHUSDC").to_string(), "ETH/USDC");
     }
 
     #[test]
     fn test_format_display_pair_no_quote_match_returns_raw() {
-        assert_eq!(format_display_pair("XYZABC", "{base}{quote}"), "XYZABC");
+        assert_eq!(Pair::parse("XYZABC").to_string(), "XYZABC");
     }
 
     #[test]
     fn test_format_display_pair_base_zero_len_returns_raw() {
-        assert_eq!(format_display_pair("USDT", "{base}{quote}"), "USDT");
+        assert_eq!(Pair::parse("USDT").to_string(), "USDT");
     }
 
     #[test]
@@ -1037,13 +1018,14 @@ mod tests {
                 case: SymbolCase::Upper,
             },
             headers: std::collections::HashMap::new(),
+            error_envelope: None,
             capabilities: CapabilitySet::default(),
         }
     }
 
     // -------------------------------------------------------------------------
     // Additional tests for coverage of descriptor(), format_pair(), current_type,
-    // extract_string(), navigate_field(), parse_levels(), parse_side(), format_display_pair
+    // extract_string(), navigate_field(), parse_levels(), parse_side(), venue pair display
     // -------------------------------------------------------------------------
 
     #[test]
@@ -1393,17 +1375,17 @@ mod tests {
 
     #[test]
     fn test_format_display_pair_unknown_quote() {
-        assert_eq!(format_display_pair("XYZABC", "{base}{quote}"), "XYZABC");
+        assert_eq!(Pair::parse("XYZABC").to_string(), "XYZABC");
     }
 
     #[test]
     fn test_format_display_pair_single_char() {
-        assert_eq!(format_display_pair("A", "{base}{quote}"), "A");
+        assert_eq!(Pair::parse("A").to_string(), "A");
     }
 
     #[test]
     fn test_format_display_pair_quote_only_no_split() {
-        assert_eq!(format_display_pair("USDT", "{base}{quote}"), "USDT");
+        assert_eq!(Pair::parse("USDT").to_string(), "USDT");
     }
 
     // -------------------------------------------------------------------------
@@ -1424,7 +1406,9 @@ mod tests {
                 case: SymbolCase::Upper,
             },
             headers: std::collections::HashMap::new(),
+            error_envelope: None,
             capabilities: CapabilitySet {
+                assets: None,
                 order_book: Some(EndpointDescriptor {
                     path: "/api/v1/depth".to_string(),
                     method: HttpMethod::GET,
@@ -1566,6 +1550,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_fetch_assets_reads_the_coin_list() {
+        // WEEX's /api/v3/coins shape: the report needs each asset's
+        // networks and contracts; a native placeholder is no contract.
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/v3/coins")
+            .with_status(200)
+            .with_body(
+                serde_json::json!([
+                    {"coin": "USDN", "networkList": [
+                        {"network": "ETH", "contractAddress": "0xeC747DAf41A4Ca4ebE72356592F8301924132907"}
+                    ]},
+                    {"coin": "BTC", "networkList": [{"network": "BTC", "contractAddress": "btc"}]},
+                    {"name": "no symbol"}
+                ])
+                .to_string(),
+            )
+            .create_async()
+            .await;
+        let mut desc = make_http_test_descriptor(&server.url());
+        desc.capabilities.assets =
+            Some(serde_yaml::from_str("path: /api/v3/coins\nresponse: {}\n").unwrap());
+        let client = ConfigurableExchangeClient::new(desc.clone());
+        let assets = client.fetch_assets().await.unwrap();
+        assert_eq!(assets.len(), 2, "an item without a symbol is skipped");
+        assert_eq!(
+            assets[0].networks[0].contract.as_deref(),
+            Some("0xeC747DAf41A4Ca4ebE72356592F8301924132907")
+        );
+        assert_eq!(assets[1].networks[0].contract, None);
+        mock.assert_async().await;
+
+        let exchange = super::super::ExchangeClient::from_descriptor(&desc);
+        let pair = super::super::Pair::parse("USDN");
+        let tokens = exchange
+            .fetch_token_addresses(&pair)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(tokens[0].symbol, "USDN");
+        // No assets capability: no lookup at all.
+        desc.capabilities.assets = None;
+        let plain = super::super::ExchangeClient::from_descriptor(&desc);
+        assert!(plain.fetch_token_addresses(&pair).await.is_none());
+    }
+
+    #[tokio::test]
     async fn test_fetch_recent_trades_via_http() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
@@ -1641,6 +1672,39 @@ mod tests {
         mock.assert_async().await;
     }
 
+    // #69: Bybit answers an unknown symbol with HTTP 200 and an error
+    // envelope. The client must report the venue's message, not a missing key.
+    #[tokio::test]
+    async fn test_fetch_order_book_http_200_error_envelope() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/v1/depth")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_body(r#"{"retCode":10001,"retMsg":"Not supported symbols","result":{}}"#)
+            .create_async()
+            .await;
+
+        let mut desc = make_http_test_descriptor(&server.url());
+        desc.error_envelope = Some(crate::market::descriptor::ErrorEnvelope {
+            code_key: Some("retCode".into()),
+            ok_codes: vec!["0".into()],
+            message_key: "retMsg".into(),
+        });
+        let err = ConfigurableExchangeClient::new(desc)
+            .fetch_order_book("ZZQXUSDT")
+            .await
+            .unwrap_err();
+        match err {
+            ScopeError::Venue { venue, message } => {
+                assert_eq!(venue, "mock_test");
+                assert_eq!(message, "Not supported symbols (code 10001)");
+            }
+            other => panic!("expected a venue error, got {other:?}"),
+        }
+        mock.assert_async().await;
+    }
+
     #[tokio::test]
     async fn test_fetch_order_book_binance_invalid_symbol_hint() {
         let mut server = mockito::Server::new_async().await;
@@ -1656,7 +1720,7 @@ mod tests {
             .await;
 
         let mut desc = make_http_test_descriptor(&server.url());
-        desc.name = "Binance Spot".to_string();
+        desc.id = "binance".to_string();
         let client = ConfigurableExchangeClient::new(desc);
         let err = client.fetch_order_book("USDTPUSD").await.unwrap_err();
         let err_msg = err.to_string();
@@ -2039,7 +2103,9 @@ mod tests {
                 case: SymbolCase::Upper,
             },
             headers: std::collections::HashMap::new(),
+            error_envelope: None,
             capabilities: CapabilitySet {
+                assets: None,
                 order_book: None,
                 ticker: None,
                 trades: None,
@@ -2186,7 +2252,9 @@ mod tests {
                 case: SymbolCase::Upper,
             },
             headers: std::collections::HashMap::new(),
+            error_envelope: None,
             capabilities: CapabilitySet {
+                assets: None,
                 order_book: None,
                 ticker: None,
                 trades: None,
@@ -2296,7 +2364,9 @@ mod tests {
                 case: SymbolCase::Upper,
             },
             headers: std::collections::HashMap::new(),
+            error_envelope: None,
             capabilities: CapabilitySet {
+                assets: None,
                 order_book: None,
                 ticker: None,
                 trades: None,
@@ -2384,7 +2454,9 @@ mod tests {
                 case: SymbolCase::Upper,
             },
             headers: std::collections::HashMap::new(),
+            error_envelope: None,
             capabilities: CapabilitySet {
+                assets: None,
                 order_book: None,
                 ticker: None,
                 trades: None,
@@ -2604,7 +2676,9 @@ mod tests {
                 case: SymbolCase::Upper,
             },
             headers: std::collections::HashMap::new(),
+            error_envelope: None,
             capabilities: CapabilitySet {
+                assets: None,
                 order_book: None,
                 ticker: None,
                 trades: None,
@@ -2666,7 +2740,9 @@ mod tests {
                 case: SymbolCase::Upper,
             },
             headers: std::collections::HashMap::new(),
+            error_envelope: None,
             capabilities: CapabilitySet {
+                assets: None,
                 order_book: None,
                 ticker: None,
                 trades: None,
@@ -2749,7 +2825,9 @@ mod tests {
                 case: SymbolCase::Upper,
             },
             headers: std::collections::HashMap::new(),
+            error_envelope: None,
             capabilities: CapabilitySet {
+                assets: None,
                 order_book: None,
                 ticker: None,
                 trades: None,
@@ -2788,5 +2866,166 @@ mod tests {
         assert_eq!(candles[0].open, 100.0);
         assert_eq!(candles[1].close, 110.0);
         mock.assert_async().await;
+    }
+
+    mod transport_tests {
+        use super::*;
+        use crate::http::{HttpClient, Request, Response};
+        use std::sync::{Arc, Mutex};
+
+        /// Records requests and answers with a fixed response.
+        struct Spy {
+            seen: Mutex<Vec<Request>>,
+            status: u16,
+            body: String,
+        }
+
+        #[async_trait::async_trait]
+        impl HttpClient for Spy {
+            async fn send(&self, req: Request) -> crate::error::Result<Response> {
+                self.seen.lock().unwrap().push(req);
+                Ok(Response {
+                    status_code: self.status,
+                    headers: Default::default(),
+                    body: self.body.clone(),
+                })
+            }
+        }
+
+        fn binance_like() -> VenueDescriptor {
+            // Use the built-in binance descriptor so the test follows real config.
+            crate::market::VenueRegistry::load()
+                .unwrap()
+                .get("binance")
+                .unwrap()
+                .clone()
+        }
+
+        /// The monitor shows the venue's 24h change. Binance gives it in
+        /// percent as `priceChangePercent`; a venue that does not map it
+        /// gives `None`, never a made-up 0.
+        #[tokio::test]
+        async fn test_ticker_carries_the_24h_change_when_the_venue_gives_it() {
+            let body = r#"{"symbol":"USDCUSDT","lastPrice":"1.0011","priceChangePercent":"-0.250","volume":"10","quoteVolume":"10.01"}"#;
+            let spy = Arc::new(Spy {
+                seen: Mutex::new(vec![]),
+                status: 200,
+                body: body.to_string(),
+            });
+            let client = ConfigurableExchangeClient::with_http(binance_like(), spy.clone());
+            let ticker = client.fetch_ticker("USDCUSDT").await.unwrap();
+            assert_eq!(ticker.price_change_pct_24h, Some(-0.25));
+
+            let mut desc = binance_like();
+            if let Some(t) = desc.capabilities.ticker.as_mut() {
+                t.response.price_change_pct_24h = None;
+            }
+            let client = ConfigurableExchangeClient::with_http(desc, spy);
+            let ticker = client.fetch_ticker("USDCUSDT").await.unwrap();
+            assert_eq!(ticker.price_change_pct_24h, None);
+        }
+
+        #[tokio::test]
+        async fn test_venue_requests_go_through_the_given_transport() {
+            let spy = Arc::new(Spy {
+                seen: Mutex::new(vec![]),
+                status: 200,
+                body: r#"{"bids":[],"asks":[]}"#.into(),
+            });
+            let client = ConfigurableExchangeClient::with_http(binance_like(), spy.clone());
+            let _ = client.fetch_order_book("USDCUSDT").await;
+            let seen = spy.seen.lock().unwrap();
+            assert_eq!(seen.len(), 1);
+            assert!(seen[0].url.contains("symbol=USDCUSDT"), "{}", seen[0].url);
+            assert_eq!(
+                seen[0].timeout,
+                Some(std::time::Duration::from_secs(
+                    binance_like().timeout_secs.unwrap_or(15)
+                ))
+            );
+        }
+
+        #[tokio::test]
+        async fn test_venue_http_400_names_the_venue_that_failed() {
+            let spy = Arc::new(Spy {
+                seen: Mutex::new(vec![]),
+                status: 400,
+                body: r#"{"msg":"bad"}"#.into(),
+            });
+            let client = ConfigurableExchangeClient::with_http(binance_like(), spy);
+            let err = client.fetch_order_book("BADPAIR").await.unwrap_err();
+            assert!(matches!(err, ScopeError::Venue { .. }), "{err:?}");
+            assert!(
+                err.to_string().starts_with("Venue error (binance):"),
+                "{err}"
+            );
+        }
+
+        /// Issue #69: `--venue bybit` reported a Binance error. The label and
+        /// the request host must both come from the chosen venue.
+        #[tokio::test]
+        async fn test_each_venue_labels_errors_and_requests_with_its_own_id() {
+            let registry = crate::market::VenueRegistry::load().unwrap();
+            for id in ["bybit", "mexc", "okx", "gateio", "kraken"] {
+                let desc = registry.get(id).unwrap().clone();
+                let spy = Arc::new(Spy {
+                    seen: Mutex::new(vec![]),
+                    status: 500,
+                    body: String::new(),
+                });
+                let client = ConfigurableExchangeClient::with_http(desc.clone(), spy.clone());
+                let pair = desc.format_pair("BTC", None);
+                let err = client.fetch_order_book(&pair).await.unwrap_err();
+                let text = err.to_string();
+                assert!(
+                    text.starts_with(&format!("Venue error ({id}):")),
+                    "{id}: {text}"
+                );
+                assert!(!text.to_lowercase().contains("binance"), "{id}: {text}");
+                let seen = spy.seen.lock().unwrap();
+                assert!(
+                    seen[0].url.starts_with(&desc.base_url),
+                    "{id}: request went to {}",
+                    seen[0].url
+                );
+                assert!(!seen[0].url.contains("binance"), "{id}: {}", seen[0].url);
+            }
+        }
+
+        #[tokio::test]
+        async fn test_missing_response_key_names_the_venue() {
+            let spy = Arc::new(Spy {
+                seen: Mutex::new(vec![]),
+                status: 200,
+                body: r#"{"retCode":10001,"retMsg":"params error"}"#.into(),
+            });
+            let desc = crate::market::VenueRegistry::load()
+                .unwrap()
+                .get("bybit")
+                .unwrap()
+                .clone();
+            let client = ConfigurableExchangeClient::with_http(desc, spy);
+            let err = client.fetch_order_book("USDDUSDT").await.unwrap_err();
+            assert!(matches!(err, ScopeError::Venue { .. }), "{err:?}");
+            assert!(err.to_string().starts_with("Venue error (bybit):"), "{err}");
+        }
+
+        #[tokio::test]
+        async fn test_venue_http_error_text_is_unchanged() {
+            // The Binance -1121 hint must survive the move off reqwest::StatusCode.
+            let spy = Arc::new(Spy {
+                seen: Mutex::new(vec![]),
+                status: 400,
+                body: r#"{"code":-1121,"msg":"Invalid symbol."}"#.into(),
+            });
+            let client = ConfigurableExchangeClient::with_http(binance_like(), spy);
+            let err = client
+                .fetch_order_book("BADPAIR")
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("HTTP 400 Bad Request"), "{err}");
+            assert!(err.contains("Invalid symbol"), "{err}");
+        }
     }
 }

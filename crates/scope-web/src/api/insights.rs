@@ -3,12 +3,12 @@
 use crate::AppState;
 use axum::Json;
 use axum::extract::State;
-use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use scope::chains::ChainClientFactory;
 use scope_cli::cli::insights::{self, InsightsArgs};
 use serde::Deserialize;
 use std::sync::Arc;
+
+use super::{error_response, status_for};
 
 /// Request body for insights analysis.
 #[derive(Debug, Deserialize)]
@@ -40,13 +40,7 @@ pub async fn handle(
     // Resolve address book shortcuts (@label or direct address match)
     let resolved = match super::resolve_address_book(&req.target, &state.config) {
         Ok(r) => r,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": e })),
-            )
-                .into_response();
-        }
+        Err(e) => return error_response(status_for(&e), e.to_string()),
     };
     let target_str = resolved.value;
     let chain_override = req.chain.or(resolved.chain);
@@ -92,25 +86,21 @@ pub async fn handle(
             let client: Box<dyn scope::chains::ChainClient> =
                 match state.factory.create_chain_client(chain) {
                     Ok(c) => c,
-                    Err(e) => {
-                        return (
-                            StatusCode::BAD_REQUEST,
-                            Json(serde_json::json!({ "error": e.to_string() })),
-                        )
-                            .into_response();
-                    }
+                    Err(e) => return error_response(status_for(&e), e.to_string()),
                 };
-            match scope_cli::cli::address::analyze_address(&addr_args, client.as_ref()).await {
+            match scope_cli::cli::address::analyze_address(
+                &addr_args,
+                client.as_ref(),
+                &scope_cli::cli::output::Output::stdio(),
+            )
+            .await
+            {
                 Ok(report) => Json(serde_json::json!({
                     "target_info": target_type,
                     "data": report,
                 }))
                 .into_response(),
-                Err(e) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({ "error": e.to_string() })),
-                )
-                    .into_response(),
+                Err(e) => error_response(status_for(&e), e.to_string()),
             }
         }
         insights::InferredTarget::Transaction { chain } => {
@@ -119,7 +109,7 @@ pub async fn handle(
                 chain,
                 args.decode,
                 args.trace,
-                &state.factory,
+                state.factory.as_ref(),
             )
             .await
             {
@@ -128,11 +118,7 @@ pub async fn handle(
                     "data": report,
                 }))
                 .into_response(),
-                Err(e) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({ "error": e.to_string() })),
-                )
-                    .into_response(),
+                Err(e) => error_response(status_for(&e), e.to_string()),
             }
         }
         insights::InferredTarget::Token { chain } => {
@@ -141,8 +127,9 @@ pub async fn handle(
                 chain,
                 scope_cli::cli::crawl::Period::Hour24,
                 10,
-                &state.factory,
+                state.factory.as_ref(),
                 None,
+                &scope_cli::cli::output::Output::stdio(),
             )
             .await
             {
@@ -151,11 +138,7 @@ pub async fn handle(
                     "data": analytics,
                 }))
                 .into_response(),
-                Err(e) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({ "error": e.to_string() })),
-                )
-                    .into_response(),
+                Err(e) => error_response(status_for(&e), e.to_string()),
             }
         }
     }
@@ -250,7 +233,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = InsightsRequest {
             target: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
             chain: None,
@@ -277,7 +260,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = InsightsRequest {
             target: "USDC".to_string(),
             chain: Some("ethereum".to_string()),
@@ -304,7 +287,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = InsightsRequest {
             target: "0xabc123def456789012345678901234567890123456789012345678901234abcd"
                 .to_string(),
@@ -333,7 +316,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = InsightsRequest {
             target: "0x0000000000000000000000000000000000000000".to_string(),
             chain: Some("ethereum".to_string()),
@@ -366,7 +349,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = InsightsRequest {
             target: "0x0000000000000000000000000000000000000000000000000000000000000000"
                 .to_string(),
@@ -400,7 +383,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = InsightsRequest {
             target: "NONEXISTENT_TOKEN_XYZ_123".to_string(),
             chain: Some("ethereum".to_string()),
@@ -440,7 +423,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = InsightsRequest {
             target: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
             chain: Some("bitcoin".to_string()), // Unsupported chain
@@ -483,7 +466,7 @@ mod tests {
             chains_config: config.chains.clone(),
             http,
         };
-        let state = std::sync::Arc::new(AppState { config, factory });
+        let state = std::sync::Arc::new(AppState::new(config, factory));
         let req = InsightsRequest {
             target: "@no-such-label".to_string(),
             chain: None,

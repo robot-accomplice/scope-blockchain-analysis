@@ -55,25 +55,27 @@
 //! ```
 
 use anyhow::Result;
-use clap::{CommandFactory, Parser};
-use clap_complete::generate;
+use clap::Parser;
 use scope::Config;
-use scope::chains::DefaultClientFactory;
 use scope::config::OutputFormat;
-use scope::http::HttpClient;
+use scope::error::ScopeError;
 use scope_cli::cli::errors::display_error;
+use scope_cli::cli::output::Output;
+use scope_cli::cli::prompt;
 use scope_cli::cli::{Cli, Commands};
-use std::io::{self, Write};
-use std::sync::Arc;
+use scope_cli::note;
+use std::io::{self, IsTerminal};
 use tracing_subscriber::EnvFilter;
 
 /// ASCII art banner featuring a Portia jumping spider.
 /// Loaded from `assets/banner.txt` at compile time.
 const BANNER: &str = include_str!("../assets/banner.txt");
 
-/// Prints the startup banner to stderr.
-fn print_banner() {
-    eprintln!("{}", BANNER);
+/// Reports `message` as a failed command and exits with `code`.
+fn fail(out: &Output, message: String, code: i32) -> ! {
+    // With stderr gone there is no channel left; the code still tells.
+    let _ = display_error(&ScopeError::Other(message), out);
+    std::process::exit(code);
 }
 
 /// Application entry point.
@@ -84,13 +86,31 @@ fn print_banner() {
 async fn main() -> Result<()> {
     // Parse CLI arguments
     let cli = Cli::parse();
+    let out = Output::stdio();
 
     // Initialize logging based on verbosity
     init_logging(cli.verbose);
 
+    if cli.no_color {
+        scope::display::theme::set_color_override(Some(false));
+    }
+
+    // The TUI needs a terminal. Check before the config load and the setup
+    // prompt, which read stdin.
+    if matches!(cli.command, Commands::Interactive(_)) {
+        let term = std::env::var("TERM").ok();
+        if let Err(message) = scope_cli::cli::tui::tui_terminal_ok(
+            io::stdin().is_terminal(),
+            io::stdout().is_terminal(),
+            term.as_deref(),
+        ) {
+            fail(&out, message, 2);
+        }
+    }
+
     // Show banner in verbose mode
     if cli.verbose > 0 {
-        print_banner();
+        note!(out, "{}", BANNER);
     }
 
     tracing::debug!("Scope v{} starting", scope::VERSION);
@@ -100,7 +120,10 @@ async fn main() -> Result<()> {
 
     // Load configuration
     let mut config = Config::load(cli.config.as_deref()).unwrap_or_else(|e| {
-        eprintln!("  ⚠ Could not load config, using defaults (use -v for details)");
+        note!(
+            out,
+            "⚠ Could not load config, using defaults (use -v for details)"
+        );
         tracing::debug!("Failed to load config: {}", e);
         Config::default()
     });
@@ -115,13 +138,13 @@ async fn main() -> Result<()> {
         let addr: std::net::SocketAddr = format!("{}:{}", web_args.bind, web_args.port)
             .parse()
             .unwrap_or_else(|_| {
-                eprintln!("Invalid bind address: {}:{}", web_args.bind, web_args.port);
-                std::process::exit(1);
+                let message = format!("Invalid bind address: {}:{}", web_args.bind, web_args.port);
+                fail(&out, message, 1)
             });
 
         if web_args.stop {
-            if let Err(e) = scope_web::stop_daemon() {
-                eprintln!("Error: {}", e);
+            if let Err(e) = scope_web::stop_daemon(&out) {
+                let _ = display_error(&e, &out);
                 std::process::exit(1);
             }
             return Ok(());
@@ -129,40 +152,40 @@ async fn main() -> Result<()> {
 
         // If running as daemon child, skip daemon forking
         if scope_web::is_daemon_child() || !web_args.daemon {
-            return scope_web::start_server(addr, config)
+            return scope_web::start_server(addr, config, &out)
                 .await
                 .map_err(|e| anyhow::anyhow!(e));
         }
 
         // Fork daemon
-        if let Err(e) = scope_web::start_daemon(addr, config) {
-            eprintln!("Error: {}", e);
+        if let Err(e) = scope_web::start_daemon(addr, config, &out) {
+            let _ = display_error(&e, &out);
             std::process::exit(1);
         }
         return Ok(());
     }
 
     // Check if config file exists and prompt for setup if needed
-    if !is_setup_command && !config_file_exists(&cli) && prompt_for_setup() {
+    if !is_setup_command && !config_file_exists(&cli) && prompt_for_setup(&out) {
         // Run setup wizard
         let setup_args = scope_cli::cli::setup::SetupArgs {
             status: false,
             key: None,
             reset: false,
         };
-        if let Err(e) = scope_cli::cli::setup::run(setup_args, &config).await {
-            eprintln!("Setup failed: {}", e);
+        if let Err(e) = scope_cli::cli::setup::run(setup_args, &config, &out).await {
+            let _ = display_error(&e, &out);
         }
         // Reload config after setup
         let mut config = Config::load(cli.config.as_deref()).unwrap_or_default();
         if cli.ai {
             config.output.format = OutputFormat::Markdown;
         }
-        return dispatch(cli.command, &config).await;
+        return dispatch(cli.command, &config, &out).await;
     }
 
     // Dispatch the command through the unified handler
-    dispatch(cli.command, &config).await
+    dispatch(cli.command, &config, &out).await
 }
 
 /// Checks if a configuration file exists.
@@ -174,152 +197,49 @@ fn config_file_exists(cli: &Cli) -> bool {
 }
 
 /// Prompts the user to run setup.
-fn prompt_for_setup() -> bool {
-    eprintln!();
-    eprintln!("Welcome to Scope Blockchain Analysis!");
-    eprintln!();
-    eprintln!("No configuration file found. Would you like to run the setup wizard");
-    eprintln!("to configure API keys and preferences?");
-    eprintln!();
-    eprint!("Run setup now? [Y/n]: ");
-    io::stderr().flush().ok();
-
-    let mut input = String::new();
-    if io::stdin().read_line(&mut input).is_err() {
+fn prompt_for_setup(out: &Output) -> bool {
+    note!(out);
+    note!(out, "Welcome to Scope Blockchain Analysis!");
+    note!(out);
+    note!(
+        out,
+        "No configuration file found. Would you like to run the setup wizard"
+    );
+    note!(out, "to configure API keys and preferences?");
+    note!(out);
+    let Ok(input) = prompt::ask_stdin(out, "Run setup now? [Y/n]: ") else {
         return false;
-    }
+    };
 
     let response = input.trim().to_lowercase();
     // Default to yes if user just presses Enter
     response.is_empty() || response == "y" || response == "yes"
 }
 
-/// Unified command dispatcher.
+/// Runs one command through the shared dispatcher with stdout/stderr output.
 ///
-/// Creates the HTTP transport and client factory, then routes the command
-/// to the appropriate handler. Called from both the main flow and the
-/// post-setup-wizard path.
-async fn dispatch(command: Commands, config: &Config) -> Result<()> {
+/// Prints the version line for non-interactive commands, and on failure
+/// prints the error with remediation hints and exits with status 1. Exits
+/// with the TUI's code when a signal ended it.
+async fn dispatch(command: Commands, config: &Config, out: &Output) -> Result<()> {
     // Print version on stderr for non-interactive commands
     if !command.is_interactive() {
-        eprintln!("Scope v{}", scope::VERSION);
+        note!(out, "Scope v{}", scope::VERSION);
     }
 
-    let http: Arc<dyn HttpClient> = create_http_client(config);
-    let factory = DefaultClientFactory {
-        chains_config: config.chains.clone(),
-        http,
-    };
-
-    let result = match command {
-        Commands::Completions(args) => {
-            let mut cmd = Cli::command();
-            generate(args.shell, &mut cmd, "scope", &mut io::stdout());
-            Ok(())
-        }
-        Commands::Address(args) => scope_cli::cli::address::run(args, config, &factory).await,
-        Commands::Tx(args) => scope_cli::cli::tx::run(args, config, &factory).await,
-        Commands::Crawl(args) => scope_cli::cli::crawl::run(args, config, &factory).await,
-        Commands::AddressBook(args) => {
-            scope_cli::cli::address_book::run(args, config, &factory).await
-        }
-        Commands::Export(args) => scope_cli::cli::export::run(args, config, &factory).await,
-        Commands::Interactive(args) => {
-            scope_cli::cli::interactive::run(args, config, &factory).await
-        }
-        Commands::Monitor(args) => {
-            scope_cli::cli::monitor::run_direct(args, config, &factory).await
-        }
-        Commands::Setup(args) => scope_cli::cli::setup::run(args, config).await,
-        Commands::Compliance(compliance_cmd) => match compliance_cmd {
-            scope_cli::cli::compliance::ComplianceCommands::Risk(mut args) => {
-                if let Some((addr, chain)) =
-                    scope_cli::cli::address_book::resolve_address_book_input(&args.address, config)?
-                {
-                    args.address = addr;
-                    if args.chain.is_none() {
-                        args.chain = Some(chain);
-                    }
-                }
-                scope_cli::cli::compliance::handle_risk(args)
-                    .await
-                    .map_err(|e| scope::error::ScopeError::Compliance(e.to_string()))
-            }
-            scope_cli::cli::compliance::ComplianceCommands::Trace(args) => {
-                scope_cli::cli::compliance::handle_trace(args)
-                    .await
-                    .map_err(|e| scope::error::ScopeError::Compliance(e.to_string()))
-            }
-            scope_cli::cli::compliance::ComplianceCommands::Analyze(mut args) => {
-                if let Some((addr, _chain)) =
-                    scope_cli::cli::address_book::resolve_address_book_input(&args.address, config)?
-                {
-                    args.address = addr;
-                }
-                scope_cli::cli::compliance::handle_analyze(args)
-                    .await
-                    .map_err(|e| scope::error::ScopeError::Compliance(e.to_string()))
-            }
-            scope_cli::cli::compliance::ComplianceCommands::ComplianceReport(mut args) => {
-                if !std::path::Path::new(&args.target).exists()
-                    && let Some((addr, _chain)) =
-                        scope_cli::cli::address_book::resolve_address_book_input(
-                            &args.target,
-                            config,
-                        )?
-                {
-                    args.target = addr;
-                }
-                scope_cli::cli::compliance::handle_compliance_report(args)
-                    .await
-                    .map_err(|e| scope::error::ScopeError::Compliance(e.to_string()))
-            }
-        },
-        Commands::Market(cmd) => scope_cli::cli::market::run(cmd, config, &factory).await,
-        Commands::TokenHealth(args) => {
-            scope_cli::cli::token_health::run(args, config, &factory).await
-        }
-        Commands::Venues(cmd) => scope_cli::cli::venues::run(cmd),
-        Commands::Report(cmd) => scope_cli::cli::report::run(cmd, config, &factory).await,
-        Commands::Discover(args) => scope_cli::cli::discover::run(args, config.output.format)
-            .await
-            .map_err(|e| scope::error::ScopeError::Discovery(e.to_string())),
-        Commands::Insights(args) => scope_cli::cli::insights::run(args, config, &factory).await,
-        Commands::Contract(ref args) => scope_cli::cli::contract::run(args, config, &factory).await,
-        // Web command is handled in main() before dispatch
-        Commands::Web(_) => unreachable!("Web command handled before dispatch"),
-    };
-
-    if let Err(e) = result {
-        tracing::debug!("Command failed: {}", e);
-        display_error(&e);
-        std::process::exit(1);
-    }
-
-    Ok(())
-}
-
-/// Creates the appropriate HTTP transport based on Ghola configuration.
-///
-/// When `config.ghola.enabled` is `true`, attempts to create a Ghola
-/// sidecar client. Falls back to native `reqwest` if Ghola fails to start
-/// or is not installed.
-fn create_http_client(config: &Config) -> Arc<dyn HttpClient> {
-    if config.ghola.enabled {
-        match scope::http::GholaHttpClient::new(config.ghola.stealth, config.ghola.buffer_size) {
-            Ok(client) => {
-                tracing::info!("Using Ghola sidecar for HTTP transport");
-                return Arc::new(client);
-            }
-            Err(e) => {
-                eprintln!("  ⚠ Ghola sidecar enabled but unavailable: {}", e);
-                eprintln!("    Install: go install github.com/robot-accomplice/ghola@latest");
-                eprintln!("    Falling back to native HTTP transport");
-            }
+    match scope_cli::cli::dispatch::dispatch(command, config, out).await {
+        Ok(0) => Ok(()),
+        // The TUI ended on a signal (128+N); it already restored the
+        // terminal and saved.
+        Ok(code) => std::process::exit(code),
+        Err(e) => {
+            tracing::debug!("Command failed: {}", e);
+            // If stderr itself fails there is no channel left to report on;
+            // the non-zero exit status still tells the caller that it failed.
+            let _ = display_error(&e, out);
+            std::process::exit(1);
         }
     }
-
-    Arc::new(scope::http::NativeHttpClient::new().expect("Failed to create HTTP client"))
 }
 
 /// Initializes the tracing subscriber for logging.
@@ -345,7 +265,10 @@ fn init_logging(verbosity: u8) {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(format!("scope={},warn", level)));
 
+    // Logs go to the diagnostics sink: stderr by default, the TUI pane while
+    // the TUI owns the screen. Never stdout, which carries command data.
     let builder = tracing_subscriber::fmt()
+        .with_writer(|| scope::diag::Stderr)
         .with_env_filter(filter)
         .with_target(false)
         .with_thread_ids(false);
@@ -468,32 +391,5 @@ mod tests {
     fn test_cli_completions_parsing() {
         let result = Cli::try_parse_from(["scope", "completions", "bash"]);
         assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_create_http_client_default_config() {
-        let config = Config::default();
-        let client = create_http_client(&config);
-        // Default config has ghola.enabled = false, so should get NativeHttpClient
-        let _: &dyn HttpClient = &*client;
-    }
-
-    #[test]
-    fn test_create_http_client_ghola_enabled() {
-        let mut config = Config::default();
-        config.ghola.enabled = true;
-        config.ghola.stealth = true;
-        let client = create_http_client(&config);
-        // Should still succeed (falls back to native if ghola not installed)
-        let _: &dyn HttpClient = &*client;
-    }
-
-    #[test]
-    fn test_create_http_client_ghola_no_stealth() {
-        let mut config = Config::default();
-        config.ghola.enabled = true;
-        config.ghola.stealth = false;
-        let client = create_http_client(&config);
-        let _: &dyn HttpClient = &*client;
     }
 }

@@ -41,7 +41,7 @@
 //!   report       Batch and combined reports
 //!
 //! Config & interactive:
-//!   interactive  REPL with preserved context (alias: shell)
+//!   interactive  Full-screen TUI for every command (alias: tui, shell)
 //!   setup        Configure API keys and preferences (alias: config)
 //!   completions  Generate shell completions for bash/zsh/fish
 //!
@@ -57,10 +57,13 @@
 pub mod address;
 pub mod address_book;
 pub mod address_report;
+pub(crate) mod ansi;
+pub mod charts;
 pub mod compliance;
 pub mod contract;
 pub mod crawl;
 pub mod discover;
+pub mod dispatch;
 pub mod errors;
 pub mod export;
 pub mod health_args;
@@ -68,10 +71,19 @@ pub mod insights;
 pub mod interactive;
 pub mod market;
 pub mod monitor;
+pub mod output;
+pub(crate) mod plain;
 pub mod progress;
+pub mod prompt;
+pub mod repeat;
 pub mod report;
+pub(crate) mod screen;
 pub mod setup;
+pub(crate) mod textfit;
+pub mod theme;
 pub mod token_health;
+pub(crate) mod token_pick;
+pub mod tui;
 pub mod tx;
 pub mod venues;
 
@@ -256,11 +268,11 @@ pub enum Commands {
     Report(report::ReportCommands),
 
     // -- Config & interactive -------------------------------------------------
-    /// Interactive mode with preserved context.
+    /// Full-screen TUI that runs every command, with preserved context.
     ///
-    /// Launch a REPL where chain, format, and other settings persist
-    /// between commands for faster workflow.
-    #[command(visible_alias = "shell")]
+    /// Every CLI command runs inside it with the same flags. Chain, format,
+    /// and other settings persist between commands.
+    #[command(visible_aliases = ["tui", "shell"])]
     Interactive(InteractiveArgs),
 
     /// Configure Scope settings and API keys.
@@ -287,7 +299,7 @@ pub enum Commands {
 
 impl Commands {
     /// Returns `true` for interactive/long-running commands that manage their
-    /// own UI (TUI, REPL, web server, setup wizard, shell completions).
+    /// own UI (TUI, live monitor, web server, setup wizard, shell completions).
     /// Non-interactive commands return `false` and get a version header.
     pub fn is_interactive(&self) -> bool {
         matches!(
@@ -456,6 +468,14 @@ mod tests {
     #[test]
     fn test_cli_parse_interactive_command() {
         let cli = Cli::try_parse_from(["scope", "interactive"]).unwrap();
+
+        assert!(matches!(cli.command, Commands::Interactive(_)));
+    }
+
+    #[test]
+    fn test_cli_parse_tui_alias() {
+        // `scope tui` is the short name for interactive mode (#47).
+        let cli = Cli::try_parse_from(["scope", "tui"]).unwrap();
 
         assert!(matches!(cli.command, Commands::Interactive(_)));
     }

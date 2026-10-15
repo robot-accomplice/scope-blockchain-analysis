@@ -16,6 +16,8 @@
 //! scope export --address-book --output address_book.json
 //! ```
 
+use crate::cli::output::Output;
+use crate::note;
 use clap::Args;
 use scope::chains::{ChainClientFactory, infer_chain_from_address};
 use scope::config::{Config, OutputFormat};
@@ -53,7 +55,7 @@ pub struct ExportArgs {
     pub format: Option<OutputFormat>,
 
     /// Target blockchain network (for address export).
-    #[arg(short, long, default_value = "ethereum")]
+    #[arg(short, long, default_value = scope::chains::DEFAULT_CHAIN)]
     pub chain: String,
 
     /// Start date for transaction history (YYYY-MM-DD).
@@ -102,11 +104,12 @@ pub struct ExportReport {
 /// # Errors
 ///
 /// Returns [`ScopeError::Export`] if the export operation fails.
-/// Returns [`ScopeError::Io`] if file operations fail.
+/// Returns [`ScopeError::IoError`] if file operations fail.
 pub async fn run(
     mut args: ExportArgs,
     config: &Config,
     clients: &dyn ChainClientFactory,
+    out: &Output,
 ) -> Result<()> {
     // Resolve address book label → address + chain
     if let Some(ref input) = args.address
@@ -128,11 +131,11 @@ pub async fn run(
         "Starting export"
     );
 
-    let sp = crate::cli::progress::Spinner::new("Exporting data...");
+    let sp = crate::cli::progress::Spinner::new("Exporting data...", out);
     let result = if args.address_book {
-        export_address_book(&args, format, config).await
+        export_address_book(&args, format, config, out).await
     } else if let Some(ref address) = args.address {
-        export_address(address, &args, format, clients).await
+        export_address(address, &args, format, clients, out).await
     } else {
         Err(ScopeError::Export(
             "Must specify either --address or --address-book".to_string(),
@@ -156,6 +159,7 @@ async fn export_address_book(
     args: &ExportArgs,
     format: OutputFormat,
     config: &Config,
+    out: &Output,
 ) -> Result<()> {
     use crate::cli::address_book::AddressBook;
 
@@ -213,9 +217,9 @@ async fn export_address_book(
             .as_secs(),
     };
 
-    println!(
-        "Exported {} address book addresses to {}",
-        report.record_count, report.output_path
+    out.note_saved(
+        &format!("{} address book addresses", report.record_count),
+        &report.output_path,
     );
 
     Ok(())
@@ -227,6 +231,7 @@ async fn export_address(
     args: &ExportArgs,
     format: OutputFormat,
     clients: &dyn ChainClientFactory,
+    out: &Output,
 ) -> Result<()> {
     // Auto-detect chain if default
     let chain = if args.chain == "ethereum" {
@@ -243,7 +248,7 @@ async fn export_address(
         "Exporting address data"
     );
 
-    eprintln!("  Fetching transactions for {} on {}...", address, chain);
+    note!(out, "Fetching transactions for {} on {}...", address, chain);
 
     // Fetch real transaction history
     let client = clients.create_chain_client(&chain)?;
@@ -352,9 +357,9 @@ async fn export_address(
             .as_secs(),
     };
 
-    println!(
-        "Exported {} transactions to {}",
-        report.record_count, report.output_path
+    out.note_saved(
+        &format!("{} transactions", report.record_count),
+        &report.output_path,
     );
 
     Ok(())
@@ -446,6 +451,10 @@ pub struct ExportData {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    fn quiet() -> crate::cli::output::Output {
+        crate::cli::output::Output::capture().0
+    }
 
     #[test]
     fn test_detect_format_json() {
@@ -644,7 +653,7 @@ mod tests {
             limit: 1000,
         };
 
-        let result = export_address_book(&args, OutputFormat::Json, &config).await;
+        let result = export_address_book(&args, OutputFormat::Json, &config, &quiet()).await;
         assert!(result.is_ok());
         assert!(output_path.exists());
 
@@ -689,7 +698,7 @@ mod tests {
             limit: 1000,
         };
 
-        let result = export_address_book(&args, OutputFormat::Csv, &config).await;
+        let result = export_address_book(&args, OutputFormat::Csv, &config, &quiet()).await;
         assert!(result.is_ok());
 
         let content = std::fs::read_to_string(&output_path).unwrap();
@@ -735,7 +744,7 @@ mod tests {
             limit: 1000,
         };
 
-        let result = export_address_book(&args, OutputFormat::Markdown, &config).await;
+        let result = export_address_book(&args, OutputFormat::Markdown, &config, &quiet()).await;
         assert!(result.is_ok());
         assert!(output_path.exists());
 
@@ -837,7 +846,7 @@ mod tests {
             limit: 1000,
         };
 
-        let result = export_address_book(&args, OutputFormat::Table, &config).await;
+        let result = export_address_book(&args, OutputFormat::Table, &config, &quiet()).await;
         assert!(result.is_err()); // Table format not supported for export
     }
 
@@ -861,7 +870,7 @@ mod tests {
             chains_config: scope::config::ChainsConfig::default(),
             http,
         };
-        let result = run(args, &config, &factory).await;
+        let result = run(args, &config, &factory, &quiet()).await;
         assert!(result.is_err());
     }
 
@@ -906,7 +915,7 @@ mod tests {
             to: None,
             limit: 100,
         };
-        let result = run(args, &config, &factory).await;
+        let result = run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
         // Verify file was written
         let content = std::fs::read_to_string(tmp.path()).unwrap();
@@ -928,7 +937,7 @@ mod tests {
             to: None,
             limit: 100,
         };
-        let result = run(args, &config, &factory).await;
+        let result = run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
         let content = std::fs::read_to_string(tmp.path()).unwrap();
         assert!(content.contains("hash,block,timestamp"));
@@ -964,7 +973,7 @@ mod tests {
             to: None,
             limit: 100,
         };
-        let result = run(args, &config, &factory).await;
+        let result = run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
         let content = std::fs::read_to_string(tmp.path()).unwrap();
         assert!(content.contains("polygon"));
@@ -986,7 +995,7 @@ mod tests {
             to: Some("2025-12-31".to_string()),
             limit: 100,
         };
-        let result = run(args, &config, &factory).await;
+        let result = run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1005,7 +1014,7 @@ mod tests {
             to: None,
             limit: 100,
         };
-        let result = run(args, &config, &factory).await;
+        let result = run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
         let content = std::fs::read_to_string(tmp.path()).unwrap();
         assert!(content.contains("# Transaction Export"));
@@ -1030,7 +1039,7 @@ mod tests {
             to: None,
             limit: 100,
         };
-        let result = run(args, &config, &factory).await;
+        let result = run(args, &config, &factory, &quiet()).await;
         assert!(result.is_err()); // Table format not supported for export
     }
 
@@ -1065,7 +1074,7 @@ mod tests {
             to: None,
             limit: 100,
         };
-        let result = run(args, &config, &factory).await;
+        let result = run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
         let content = std::fs::read_to_string(tmp.path()).unwrap();
         // Transaction should be filtered out (before from date)
@@ -1103,7 +1112,7 @@ mod tests {
             to: Some("2025-12-31".to_string()), // Filter: only before 2025-12-31
             limit: 100,
         };
-        let result = run(args, &config, &factory).await;
+        let result = run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
         let content = std::fs::read_to_string(tmp.path()).unwrap();
         // Transaction should be filtered out (after to date)

@@ -5,6 +5,8 @@
 //! peg deviation, and order book depth.
 
 use crate::cli::crawl::{self, Period};
+use crate::cli::output::Output;
+use crate::outln;
 use clap::Args;
 use scope::chains::{ChainClientFactory, TokenAnalytics};
 use scope::config::Config;
@@ -12,7 +14,7 @@ use scope::config::Config;
 use super::health_args::HealthArgs;
 use scope::display::report;
 use scope::error::{Result, ScopeError};
-use scope::market::{MarketSummary, VenueRegistry, order_book_from_analytics};
+use scope::market::{MarketSummary, fetch_token_summary_by_name};
 
 /// Arguments for the token-health command.
 #[derive(Debug, Args)]
@@ -66,17 +68,14 @@ pub struct TokenHealthArgs {
     pub token: String,
 
     /// Target blockchain network.
-    #[arg(short, long, default_value = "ethereum")]
+    #[arg(short, long, default_value = scope::chains::DEFAULT_CHAIN)]
     pub chain: String,
 
     /// Include order book / market summary (for stablecoins).
     #[arg(long)]
     pub with_market: bool,
 
-    /// Market venue for order book data (e.g., binance, mexc, okx, eth, solana).
-    /// CEX venues use the venue registry; "eth"/"solana" use DEX liquidity.
-    /// Run `scope venues list` to see available venues.
-    #[arg(long, default_value = "binance")]
+    #[arg(long, default_value = scope::market::DEFAULT_VENUE, help = scope::market::VENUE_HELP)]
     pub venue: String,
 
     /// Output format.
@@ -93,13 +92,14 @@ pub async fn run(
     mut args: TokenHealthArgs,
     config: &Config,
     clients: &dyn ChainClientFactory,
+    out: &Output,
 ) -> Result<()> {
     // Resolve address book label → address + chain
     if let Some((address, chain)) =
         crate::cli::address_book::resolve_address_book_input(&args.token, config)?
     {
         args.token = address;
-        if args.chain == "ethereum" {
+        if args.chain == scope::chains::DEFAULT_CHAIN {
             args.chain = chain;
         }
     }
@@ -111,7 +111,7 @@ pub async fn run(
         args.format
     };
     // 1. Fetch DEX analytics (crawl)
-    let sp = crate::cli::progress::Spinner::new("Fetching token health data...");
+    let sp = crate::cli::progress::Spinner::new("Fetching token health data...", out);
     let analytics = crawl::fetch_analytics_for_input(
         &args.token,
         &args.chain,
@@ -119,6 +119,7 @@ pub async fn run(
         10,
         clients,
         Some(&sp),
+        out,
     )
     .await?;
 
@@ -126,78 +127,12 @@ pub async fn run(
     let market_summary = if args.with_market {
         sp.set_message("Fetching market data...");
         let thresholds = args.health.resolve(config);
-        if is_dex_venue(&args.venue) {
-            // DEX venues: synthesize from analytics (only when chain matches venue)
-            let venue_chain = dex_venue_to_chain(&args.venue);
-            if analytics.chain.eq_ignore_ascii_case(venue_chain) && !analytics.dex_pairs.is_empty()
-            {
-                let best_pair = analytics
-                    .dex_pairs
-                    .iter()
-                    .max_by(|a, b| {
-                        a.liquidity_usd
-                            .partial_cmp(&b.liquidity_usd)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    })
-                    .unwrap();
-                let book =
-                    order_book_from_analytics(&analytics.chain, best_pair, &analytics.token.symbol);
-                let volume_24h = Some(best_pair.volume_24h);
-                Some(MarketSummary::from_order_book(
-                    &book,
-                    &thresholds,
-                    volume_24h,
-                ))
-            } else {
-                if analytics.chain.ne(venue_chain) {
-                    sp.println(&format!(
-                        "  Warning: DEX venue '{}' requires --chain {} (got {})",
-                        args.venue, venue_chain, analytics.chain
-                    ));
-                } else if analytics.dex_pairs.is_empty() {
-                    sp.println(&format!(
-                        "  Warning: No DEX pairs found for {} on {}",
-                        analytics.token.symbol, analytics.chain
-                    ));
-                }
+        let summary = fetch_token_summary_by_name(&args.venue, &analytics, &thresholds).await;
+        match summary {
+            Ok(summary) => Some(summary),
+            Err(e) => {
+                sp.println(&format!("  Warning: market data unavailable: {e}"));
                 None
-            }
-        } else {
-            // CEX venues: use VenueRegistry + ExchangeClient
-            match VenueRegistry::load().and_then(|r| r.create_exchange_client(&args.venue)) {
-                Ok(exchange) => {
-                    let pair = exchange.format_pair(&analytics.token.symbol);
-                    match exchange.fetch_order_book(&pair).await {
-                        Ok(book) => {
-                            let volume_24h = if exchange.has_ticker() {
-                                exchange
-                                    .fetch_ticker(&pair)
-                                    .await
-                                    .ok()
-                                    .and_then(|t| t.quote_volume_24h.or(t.volume_24h))
-                            } else {
-                                None
-                            };
-                            Some(MarketSummary::from_order_book(
-                                &book,
-                                &thresholds,
-                                volume_24h,
-                            ))
-                        }
-                        Err(e) => {
-                            sp.println(&format!(
-                                "  Warning: Market data unavailable for {} on {}",
-                                analytics.token.symbol, args.venue
-                            ));
-                            tracing::debug!("Market data error: {}", e);
-                            None
-                        }
-                    }
-                }
-                Err(e) => {
-                    sp.println(&format!("  Warning: {}", e));
-                    None
-                }
             }
         }
     } else {
@@ -215,32 +150,18 @@ pub async fn run(
     match format {
         scope::config::OutputFormat::Markdown => {
             let md = token_health_to_markdown(&analytics, market_summary.as_ref(), venue_label);
-            println!("{}", md);
+            outln!(out, "{}", md)?;
         }
         scope::config::OutputFormat::Json => {
             let json = token_health_to_json(&analytics, market_summary.as_ref())?;
-            println!("{}", json);
+            outln!(out, "{}", json)?;
         }
         scope::config::OutputFormat::Table | scope::config::OutputFormat::Csv => {
-            output_token_health_table(&analytics, market_summary.as_ref(), venue_label)?;
+            output_token_health_table(&analytics, market_summary.as_ref(), venue_label, out)?;
         }
     }
 
     Ok(())
-}
-
-/// Whether the venue string refers to a DEX venue.
-fn is_dex_venue(venue: &str) -> bool {
-    matches!(venue.to_lowercase().as_str(), "ethereum" | "eth" | "solana")
-}
-
-/// Resolve DEX venue name to a canonical chain name.
-fn dex_venue_to_chain(venue: &str) -> &str {
-    match venue.to_lowercase().as_str() {
-        "ethereum" | "eth" => "ethereum",
-        "solana" => "solana",
-        _ => "ethereum",
-    }
 }
 
 fn token_health_to_markdown(
@@ -254,50 +175,7 @@ fn token_health_to_markdown(
     if let Some(summary) = market {
         md.push_str("\n---\n\n");
         md.push_str("## Market / Order Book\n\n");
-        if let Some(v) = venue {
-            md.push_str(&format!("**Venue:** {}  \n\n", v));
-        }
-        md.push_str(&format!(
-            "| Metric | Value |\n|--------|-------|\n\
-             | Peg Target | {:.4} |\n\
-             | Best Bid | {} |\n\
-             | Best Ask | {} |\n\
-             | Mid Price | {} |\n\
-             | Spread | {} |\n\
-             | Bid Depth | {:.0} |\n\
-             | Ask Depth | {:.0} |\n\
-             | Healthy | {} |\n",
-            summary.peg_target,
-            summary
-                .best_bid
-                .map(|b| format!("{:.4}", b))
-                .unwrap_or_else(|| "-".to_string()),
-            summary
-                .best_ask
-                .map(|a| format!("{:.4}", a))
-                .unwrap_or_else(|| "-".to_string()),
-            summary
-                .mid_price
-                .map(|m| format!("{:.4}", m))
-                .unwrap_or_else(|| "-".to_string()),
-            summary
-                .spread
-                .map(|s| format!("{:.4}", s))
-                .unwrap_or_else(|| "-".to_string()),
-            summary.bid_depth,
-            summary.ask_depth,
-            if summary.healthy { "Yes" } else { "No" }
-        ));
-        if !summary.checks.is_empty() {
-            md.push_str("\n**Health Checks:**\n");
-            for check in &summary.checks {
-                let (icon, msg) = match check {
-                    scope::market::HealthCheck::Pass(m) => ("✓", m.as_str()),
-                    scope::market::HealthCheck::Fail(m) => ("✗", m.as_str()),
-                };
-                md.push_str(&format!("- {} {}\n", icon, msg));
-            }
-        }
+        md.push_str(&summary.format_markdown(venue));
     }
 
     md.push_str(&report::report_footer());
@@ -308,22 +186,7 @@ fn token_health_to_json(
     analytics: &TokenAnalytics,
     market: Option<&MarketSummary>,
 ) -> Result<String> {
-    let market_json = market.map(|m| {
-        serde_json::json!({
-            "peg_target": m.peg_target,
-            "best_bid": m.best_bid,
-            "best_ask": m.best_ask,
-            "mid_price": m.mid_price,
-            "spread": m.spread,
-            "bid_depth": m.bid_depth,
-            "ask_depth": m.ask_depth,
-            "healthy": m.healthy,
-            "checks": m.checks.iter().map(|c| match c {
-                scope::market::HealthCheck::Pass(msg) => serde_json::json!({"status": "pass", "message": msg}),
-                scope::market::HealthCheck::Fail(msg) => serde_json::json!({"status": "fail", "message": msg}),
-            }).collect::<Vec<_>>()
-        })
-    });
+    let market_json = market.map(|m| m.to_json());
     let json = serde_json::json!({
         "analytics": analytics,
         "market": market_json
@@ -335,109 +198,123 @@ fn output_token_health_table(
     analytics: &TokenAnalytics,
     market: Option<&MarketSummary>,
     venue: Option<&str>,
+    out: &Output,
 ) -> Result<()> {
     use scope::display::terminal as t;
 
     let title = format!("{} ({})", analytics.token.symbol, analytics.token.name);
-    println!("{}", t::section_header(&title));
+    outln!(out, "{}", t::section_header(&title))?;
 
     // DEX Analytics subsection
-    println!("{}", t::subsection_header("DEX Analytics"));
-    println!(
+    outln!(out, "{}", t::subsection_header("DEX Analytics"))?;
+    outln!(
+        out,
         "{}",
-        t::kv_row("Price", &format!("${:.6}", analytics.price_usd))
-    );
-    println!(
+        t::kv_row(
+            "Price",
+            &scope::display::format::format_price_usd(analytics.price_usd)
+        )
+    )?;
+    outln!(
+        out,
         "{}",
         t::kv_row_delta(
             "24h Change",
             analytics.price_change_24h,
             &format!("{:+.2}%", analytics.price_change_24h)
         )
-    );
-    println!(
+    )?;
+    outln!(
+        out,
         "{}",
         t::kv_row(
             "24h Volume",
-            &format!(
-                "${}",
-                scope::display::format_large_number(analytics.volume_24h)
-            )
+            &scope::display::format_usd(analytics.volume_24h)
         )
-    );
-    println!(
+    )?;
+    outln!(
+        out,
         "{}",
         t::kv_row(
             "Liquidity",
-            &format!(
-                "${}",
-                scope::display::format_large_number(analytics.liquidity_usd)
-            )
+            &scope::display::format_usd(analytics.liquidity_usd)
         )
-    );
+    )?;
     if let Some(mc) = analytics.market_cap {
-        println!(
+        outln!(
+            out,
             "{}",
-            t::kv_row(
-                "Market Cap",
-                &format!("${}", scope::display::format_large_number(mc))
-            )
-        );
+            t::kv_row("Market Cap", &scope::display::format_usd(mc))
+        )?;
     }
     if let Some(top10) = analytics.top_10_concentration {
-        println!("{}", t::kv_row("Top 10 Holders", &format!("{:.1}%", top10)));
+        outln!(
+            out,
+            "{}",
+            t::kv_row("Top 10 Holders", &format!("{:.1}%", top10))
+        )?;
     }
 
     // Market / Order Book subsection
     if let Some(summary) = market {
-        println!("{}", t::subsection_header("Market / Order Book"));
+        outln!(out, "{}", t::subsection_header("Market / Order Book"))?;
         if let Some(v) = venue {
-            println!("{}", t::kv_row("Venue", v));
+            outln!(out, "{}", t::kv_row("Venue", v))?;
         }
-        println!(
+        outln!(
+            out,
             "{}",
-            t::kv_row("Peg Target", &format!("{:.4}", summary.peg_target))
-        );
+            t::kv_row(
+                "Peg Target",
+                &format!(
+                    "{:.d$}",
+                    summary.peg_target,
+                    d = scope::display::format::price_decimals(summary.peg_target)
+                ),
+            )
+        )?;
         if let Some(b) = summary.best_bid {
-            println!(
+            outln!(
+                out,
                 "{}",
-                t::kv_row("Best Bid", &t::format_price_peg(b, summary.peg_target))
-            );
+                t::kv_row("Best Bid", &t::format_price_peg(b, &summary.peg_bands()))
+            )?;
         }
         if let Some(a) = summary.best_ask {
-            println!(
+            outln!(
+                out,
                 "{}",
-                t::kv_row("Best Ask", &t::format_price_peg(a, summary.peg_target))
-            );
+                t::kv_row("Best Ask", &t::format_price_peg(a, &summary.peg_bands()))
+            )?;
         }
         if let Some(m) = summary.mid_price {
-            println!(
+            outln!(
+                out,
                 "{}",
-                t::kv_row("Mid Price", &t::format_price_peg(m, summary.peg_target))
-            );
+                t::kv_row("Mid Price", &t::format_price_peg(m, &summary.peg_bands()))
+            )?;
         }
-        println!(
+        outln!(
+            out,
             "{}",
             t::kv_row("Bid Depth", &format!("{:.0} USDT", summary.bid_depth))
-        );
-        println!(
+        )?;
+        outln!(
+            out,
             "{}",
             t::kv_row("Ask Depth", &format!("{:.0} USDT", summary.ask_depth))
-        );
-        println!("{}", t::blank_row());
+        )?;
+        outln!(out, "{}", t::blank_row())?;
 
         // Health checks
         for check in &summary.checks {
-            match check {
-                scope::market::HealthCheck::Pass(m) => println!("{}", t::check_pass(m)),
-                scope::market::HealthCheck::Fail(m) => println!("{}", t::check_fail(m)),
-            }
+            outln!(out, "{}", check.render_text())?;
         }
-        println!("{}", t::blank_row());
-        println!("{}", t::status_line(summary.healthy));
+        outln!(out, "{}", t::blank_row())?;
+        outln!(out, "{}", t::status_line(summary.healthy))?;
     }
 
-    println!("{}", t::section_footer());
+    outln!(out, "{}", t::section_footer())?;
     Ok(())
 }
 
@@ -448,7 +325,12 @@ mod tests {
     use scope::chains::mocks::MockClientFactory;
     use scope::chains::{DexPair, Token, TokenAnalytics, TokenHolder, TokenSocial};
     use scope::config::OutputFormat;
+    use scope::market::DexVenue;
     use scope::market::{HealthCheck, MarketSummary};
+
+    fn quiet() -> crate::cli::output::Output {
+        crate::cli::output::Output::capture().0
+    }
 
     fn make_test_analytics(with_dex_pairs: bool) -> TokenAnalytics {
         TokenAnalytics {
@@ -489,6 +371,7 @@ mod tests {
                     price_usd: 0.9999,
                     volume_24h: 5_000_000.0,
                     liquidity_usd: 50_000_000.0,
+                    liquidity_base: None,
                     price_change_24h: -0.01,
                     buys_24h: 1000,
                     sells_24h: 900,
@@ -529,11 +412,15 @@ mod tests {
         use scope::market::{ExecutionEstimate, ExecutionSide};
         MarketSummary {
             pair: "USDC/USDT".to_string(),
+            source: scope::market::BookSource::Exchange,
             peg_target: 1.0,
+            peg_range: scope::market::health::DEFAULT_PEG_RANGE,
             best_bid: Some(0.9999),
             best_ask: Some(1.0001),
             mid_price: Some(1.0),
             spread: Some(0.0002),
+            spread_pct: None,
+            top_depth: Default::default(),
             volume_24h: Some(1_000_000.0),
             execution_10k_buy: Some(ExecutionEstimate {
                 notional_usdt: 10_000.0,
@@ -565,28 +452,38 @@ mod tests {
 
     #[test]
     fn test_is_dex_venue() {
-        assert!(is_dex_venue("eth"));
-        assert!(is_dex_venue("ethereum"));
-        assert!(is_dex_venue("solana"));
-        assert!(!is_dex_venue("binance"));
-        assert!(!is_dex_venue("okx"));
+        assert!(DexVenue::parse("eth").is_some());
+        assert!(DexVenue::parse("ethereum").is_some());
+        assert!(DexVenue::parse("solana").is_some());
+        assert!(DexVenue::parse("binance").is_none());
+        assert!(DexVenue::parse("okx").is_none());
     }
 
     #[test]
     fn test_is_dex_venue_values() {
-        assert!(is_dex_venue("eth"));
-        assert!(is_dex_venue("ethereum"));
-        assert!(is_dex_venue("solana"));
-        assert!(!is_dex_venue("binance"));
-        assert!(!is_dex_venue("mexc"));
+        assert!(DexVenue::parse("eth").is_some());
+        assert!(DexVenue::parse("ethereum").is_some());
+        assert!(DexVenue::parse("solana").is_some());
+        assert!(DexVenue::parse("binance").is_none());
+        assert!(DexVenue::parse("mexc").is_none());
     }
 
     #[test]
     fn test_dex_venue_to_chain_values() {
-        assert_eq!(dex_venue_to_chain("eth"), "ethereum");
-        assert_eq!(dex_venue_to_chain("ethereum"), "ethereum");
-        assert_eq!(dex_venue_to_chain("solana"), "solana");
-        assert_eq!(dex_venue_to_chain("unknown"), "ethereum");
+        assert_eq!(
+            DexVenue::parse("eth").map(DexVenue::chain),
+            Some("ethereum")
+        );
+        assert_eq!(
+            DexVenue::parse("ethereum").map(DexVenue::chain),
+            Some("ethereum")
+        );
+        assert_eq!(
+            DexVenue::parse("solana").map(DexVenue::chain),
+            Some("solana")
+        );
+        // An unknown name is not a DEX venue; it used to map to ethereum.
+        assert_eq!(DexVenue::parse("unknown"), None);
     }
 
     #[test]
@@ -631,7 +528,7 @@ mod tests {
         assert!(md.contains("Market / Order Book"));
         assert!(md.contains("binance"));
         assert!(md.contains("0.9999"));
-        assert!(md.contains("Yes"));
+        assert!(md.contains("| Healthy | ✓ |"));
         assert!(md.contains("Health Checks"));
     }
 
@@ -643,7 +540,7 @@ mod tests {
         assert!(md.contains("Market / Order Book"));
         assert!(!md.contains("Venue:")); // Should not include venue when None
         assert!(md.contains("0.9999"));
-        assert!(md.contains("Yes"));
+        assert!(md.contains("| Healthy | ✓ |"));
     }
 
     #[test]
@@ -658,11 +555,33 @@ mod tests {
         ];
         let md = token_health_to_markdown(&analytics, Some(&market), Some("binance"));
         assert!(md.contains("Market / Order Book"));
-        assert!(md.contains("No")); // Should show unhealthy
+        assert!(md.contains("| Healthy | ✗ |")); // Should show unhealthy
         assert!(md.contains("Health Checks"));
         assert!(md.contains("✗")); // Should show fail checks
         assert!(md.contains("Peg deviation too high"));
         assert!(md.contains("Insufficient bid depth"));
+    }
+
+    /// token-health and market share one chain rule: a DEX venue never builds
+    /// a book from another chain's pools, and `sol` names the Solana DEX.
+    #[tokio::test]
+    async fn test_dex_venue_on_another_chain_is_an_error() {
+        let analytics = make_test_analytics(true);
+        let t = scope::market::HealthThresholds::default();
+        let err = fetch_token_summary_by_name("sol", &analytics, &t)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("reads chain solana"), "{err}");
+        assert!(
+            fetch_token_summary_by_name("ETH", &analytics, &t)
+                .await
+                .is_ok()
+        );
+        // An unknown name is the one unknown-venue error (a warning here).
+        let err = fetch_token_summary_by_name("polygon", &analytics, &t)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("Unknown venue"), "{err}");
     }
 
     #[test]
@@ -706,7 +625,7 @@ mod tests {
     #[test]
     fn test_output_token_health_table_without_market() {
         let analytics = make_test_analytics(false);
-        let result = output_token_health_table(&analytics, None, None);
+        let result = output_token_health_table(&analytics, None, None, &quiet());
         assert!(result.is_ok());
     }
 
@@ -714,7 +633,8 @@ mod tests {
     fn test_output_token_health_table_with_market() {
         let analytics = make_test_analytics(false);
         let market = make_test_market_summary();
-        let result = output_token_health_table(&analytics, Some(&market), Some("biconomy"));
+        let result =
+            output_token_health_table(&analytics, Some(&market), Some("biconomy"), &quiet());
         assert!(result.is_ok());
     }
 
@@ -723,7 +643,7 @@ mod tests {
         let mut analytics = make_test_analytics(false);
         analytics.market_cap = None;
         analytics.top_10_concentration = None;
-        let result = output_token_health_table(&analytics, None, None);
+        let result = output_token_health_table(&analytics, None, None, &quiet());
         assert!(result.is_ok());
         // Should not panic when market_cap and top_10_concentration are None
     }
@@ -779,7 +699,7 @@ mod tests {
             health: Default::default(),
         };
 
-        let result = run(args, &config, &factory).await;
+        let result = run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -802,7 +722,7 @@ mod tests {
             health: Default::default(),
         };
 
-        let result = run(args, &config, &factory).await;
+        let result = run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -821,7 +741,7 @@ mod tests {
             health: Default::default(),
         };
 
-        let result = run(args, &config, &factory).await;
+        let result = run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -837,6 +757,7 @@ mod tests {
             price_usd: 0.9999,
             volume_24h: 5_000_000.0,
             liquidity_usd: 50_000_000.0,
+            liquidity_base: None,
             price_change_24h: -0.01,
             buys_24h: 1000,
             sells_24h: 900,
@@ -859,7 +780,7 @@ mod tests {
             health: Default::default(),
         };
 
-        let result = run(args, &config, &factory).await;
+        let result = run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -883,6 +804,7 @@ mod tests {
             price_usd: 1.0,
             volume_24h: 1_000.0,
             liquidity_usd,
+            liquidity_base: None,
             price_change_24h: 0.0,
             buys_24h: 0,
             sells_24h: 0,
@@ -904,7 +826,13 @@ mod tests {
             pair_with_liquidity(90_000.0),
             pair_with_liquidity(5_000.0),
         ]));
-        let result = run(dex_market_args("eth"), &Config::default(), &factory).await;
+        let result = run(
+            dex_market_args("eth"),
+            &Config::default(),
+            &factory,
+            &quiet(),
+        )
+        .await;
         assert!(result.is_ok());
     }
 
@@ -915,7 +843,13 @@ mod tests {
         factory.mock_dex.token_data =
             Some(make_test_dex_token_data(vec![pair_with_liquidity(1_000.0)]));
         // Token is on ethereum; the solana venue cannot price it.
-        let result = run(dex_market_args("solana"), &Config::default(), &factory).await;
+        let result = run(
+            dex_market_args("solana"),
+            &Config::default(),
+            &factory,
+            &quiet(),
+        )
+        .await;
         assert!(result.is_ok());
     }
 
@@ -924,22 +858,37 @@ mod tests {
     async fn test_run_token_health_dex_market_no_pairs_still_reports() {
         let mut factory = MockClientFactory::new();
         factory.mock_dex.token_data = Some(make_test_dex_token_data(vec![]));
-        let result = run(dex_market_args("eth"), &Config::default(), &factory).await;
+        let result = run(
+            dex_market_args("eth"),
+            &Config::default(),
+            &factory,
+            &quiet(),
+        )
+        .await;
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_dex_venue_to_chain_case_insensitive() {
-        assert_eq!(dex_venue_to_chain("ETH"), "ethereum");
-        assert_eq!(dex_venue_to_chain("Ethereum"), "ethereum");
-        assert_eq!(dex_venue_to_chain("SOLANA"), "solana");
+        assert_eq!(
+            DexVenue::parse("ETH").map(DexVenue::chain),
+            Some("ethereum")
+        );
+        assert_eq!(
+            DexVenue::parse("Ethereum").map(DexVenue::chain),
+            Some("ethereum")
+        );
+        assert_eq!(
+            DexVenue::parse("SOLANA").map(DexVenue::chain),
+            Some("solana")
+        );
     }
 
     #[test]
     fn test_is_dex_venue_uppercase() {
-        assert!(is_dex_venue("ETH"));
-        assert!(is_dex_venue("SOLANA"));
-        assert!(!is_dex_venue("BINANCE"));
+        assert!(DexVenue::parse("ETH").is_some());
+        assert!(DexVenue::parse("SOLANA").is_some());
+        assert!(DexVenue::parse("BINANCE").is_none());
     }
 
     #[test]
@@ -982,7 +931,8 @@ mod tests {
         market.best_bid = None;
         market.best_ask = None;
         market.mid_price = None;
-        let result = output_token_health_table(&analytics, Some(&market), Some("binance"));
+        let result =
+            output_token_health_table(&analytics, Some(&market), Some("binance"), &quiet());
         assert!(result.is_ok());
     }
 
@@ -991,7 +941,7 @@ mod tests {
         let analytics = make_test_analytics(false);
         let mut market = make_test_market_summary();
         market.checks = vec![];
-        let result = output_token_health_table(&analytics, Some(&market), None);
+        let result = output_token_health_table(&analytics, Some(&market), None, &quiet());
         assert!(result.is_ok());
     }
 
@@ -999,7 +949,7 @@ mod tests {
     fn test_output_token_health_table_market_without_venue() {
         let analytics = make_test_analytics(false);
         let market = make_test_market_summary();
-        let result = output_token_health_table(&analytics, Some(&market), None);
+        let result = output_token_health_table(&analytics, Some(&market), None, &quiet());
         assert!(result.is_ok());
     }
 
@@ -1038,7 +988,7 @@ mod tests {
             health: Default::default(),
         };
 
-        let result = run(args, &config, &factory).await;
+        let result = run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1058,7 +1008,7 @@ mod tests {
             health: Default::default(),
         };
 
-        let result = run(args, &config, &factory).await;
+        let result = run(args, &config, &factory, &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1087,7 +1037,7 @@ mod tests {
     #[test]
     fn test_output_token_health_table_with_dex_pairs_analytics() {
         let analytics = make_test_analytics(true);
-        let result = output_token_health_table(&analytics, None, None);
+        let result = output_token_health_table(&analytics, None, None, &quiet());
         assert!(result.is_ok());
     }
 
@@ -1107,7 +1057,8 @@ mod tests {
         market.best_bid = None;
         market.best_ask = None;
         market.mid_price = None;
-        let result = output_token_health_table(&analytics, Some(&market), Some("binance"));
+        let result =
+            output_token_health_table(&analytics, Some(&market), Some("binance"), &quiet());
         assert!(result.is_ok());
     }
 }
