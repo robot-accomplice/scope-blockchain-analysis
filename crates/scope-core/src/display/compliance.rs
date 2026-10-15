@@ -130,6 +130,17 @@ fn format_risk_table(assessment: &RiskAssessment, detailed: bool) -> String {
         }
     }
 
+    if !assessment.not_assessed.is_empty() {
+        output.push_str(&t::subsection_header(
+            "Not Assessed (no data; not in the score)",
+        ));
+        output.push('\n');
+        for reason in &assessment.not_assessed {
+            output.push_str(&t::bullet_row(reason));
+            output.push('\n');
+        }
+    }
+
     // Recommendations
     if !assessment.recommendations.is_empty() {
         output.push_str(&t::subsection_header("Recommendations"));
@@ -203,6 +214,14 @@ fn format_risk_markdown(assessment: &RiskAssessment, detailed: bool) -> String {
         }
     }
 
+    if !assessment.not_assessed.is_empty() {
+        md.push_str("## Not Assessed\n\nThese factors had no data. They are not in the score.\n\n");
+        for reason in &assessment.not_assessed {
+            md.push_str(&format!("- {}\n", reason));
+        }
+        md.push('\n');
+    }
+
     if !assessment.recommendations.is_empty() {
         md.push_str("## Recommendations\n\n");
         for rec in &assessment.recommendations {
@@ -247,6 +266,7 @@ mod tests {
                     evidence: vec!["Evidence 2".to_string()],
                 },
             ],
+            not_assessed: Vec::new(),
             assessed_at: Utc::now(),
             recommendations: vec!["Monitor closely".to_string()],
         }
@@ -259,6 +279,25 @@ mod tests {
         assert!(output.contains("Risk Assessment Report"));
         assert!(output.contains("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2"));
         assert!(output.contains("ethereum"));
+    }
+
+    #[test]
+    fn test_incomplete_report_lists_what_was_not_assessed() {
+        // A report without data must say so in every format, not read as Low.
+        let mut assessment = create_test_assessment();
+        assessment.risk_level = RiskLevel::Incomplete;
+        assessment.not_assessed = vec!["Source of Funds: no Etherscan API key".to_string()];
+        for format in [OutputFormat::Table, OutputFormat::Markdown] {
+            let output = format_risk_report(&assessment, format, false);
+            assert!(output.contains("Not Assessed"), "{output}");
+            assert!(
+                output.contains("Source of Funds: no Etherscan API key"),
+                "{output}"
+            );
+            assert!(output.contains("Incomplete"), "{output}");
+        }
+        let json = format_risk_report(&assessment, OutputFormat::Json, false);
+        assert!(json.contains("\"not_assessed\""), "{json}");
     }
 
     #[test]

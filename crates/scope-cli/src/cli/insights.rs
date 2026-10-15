@@ -217,12 +217,7 @@ pub async fn run(
                 .ok();
 
             if let Some(ref risk) = risk_assessment {
-                output.push_str(&format!(
-                    "\n- **Risk:** {} {:.1}/10 ({:?})\n",
-                    risk.risk_level.emoji(),
-                    risk.overall_score,
-                    risk.risk_level
-                ));
+                output.push_str(&risk_line(risk));
             }
 
             // Meta analysis
@@ -566,6 +561,26 @@ struct MetaAnalysis {
     recommendations: Vec<String>,
 }
 
+/// The report's risk line. A partial score is not a verdict, so an
+/// incomplete assessment lists what had no data instead of a score.
+fn risk_line(risk: &scope::compliance::risk::RiskAssessment) -> String {
+    let emoji = risk.risk_level.emoji();
+    if risk.not_assessed.is_empty() {
+        return format!(
+            "\n- **Risk:** {} {:.1}/10 ({:?})\n",
+            emoji, risk.overall_score, risk.risk_level
+        );
+    }
+    let mut line = format!(
+        "\n- **Risk:** {} not assessed in full. No data for:\n",
+        emoji
+    );
+    for reason in &risk.not_assessed {
+        line.push_str(&format!("  - {}\n", reason));
+    }
+    line
+}
+
 fn meta_analysis_address(
     is_contract: bool,
     usd_value: Option<f64>,
@@ -597,6 +612,11 @@ fn meta_analysis_address(
         synthesis_parts.push("Concentrated in a single token.".to_string());
     }
 
+    // An incomplete assessment gives no score to read.
+    let (risk_score, risk_level) = match risk_level {
+        Some(scope::compliance::risk::RiskLevel::Incomplete) => (None, None),
+        _ => (risk_score, risk_level),
+    };
     if let (Some(score), Some(level)) = (risk_score, risk_level) {
         if score >= 7.0 {
             synthesis_parts.push(format!("Elevated risk ({:?}).", level));
@@ -1725,6 +1745,53 @@ mod tests {
         assert!(meta.synthesis.contains("Significant value"));
         assert!(meta.synthesis.contains("Diversified"));
         assert!(meta.recommendations.iter().any(|r| r.contains("contract")));
+    }
+
+    #[test]
+    fn test_risk_line_gives_a_score_only_for_a_complete_assessment() {
+        use scope::compliance::risk::{RiskAssessment, RiskLevel};
+        let mut risk = RiskAssessment {
+            address: "0x1".into(),
+            chain: "ethereum".into(),
+            overall_score: 2.4,
+            risk_level: RiskLevel::Low,
+            factors: Vec::new(),
+            not_assessed: Vec::new(),
+            assessed_at: chrono::Utc::now(),
+            recommendations: Vec::new(),
+        };
+        assert!(
+            risk_line(&risk).contains("2.4/10 (Low)"),
+            "{}",
+            risk_line(&risk)
+        );
+
+        risk.risk_level = RiskLevel::Incomplete;
+        risk.not_assessed = vec!["Source of Funds: no Etherscan API key".into()];
+        let line = risk_line(&risk);
+        assert!(!line.contains("/10"), "{line}");
+        assert!(line.contains("not assessed in full"), "{line}");
+        assert!(
+            line.contains("  - Source of Funds: no Etherscan API key"),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn test_meta_analysis_does_not_call_an_incomplete_assessment_low() {
+        // A score from factors without data is not a verdict.
+        let level = scope::compliance::risk::RiskLevel::Incomplete;
+        let meta = meta_analysis_address(false, Some(50.0), 0, Some(2.0), Some(&level));
+        assert!(!meta.synthesis.contains("Low risk"), "{}", meta.synthesis);
+        assert!(
+            !meta.key_takeaway.contains("Overall risk"),
+            "{}",
+            meta.key_takeaway
+        );
+
+        let low = scope::compliance::risk::RiskLevel::Low;
+        let meta = meta_analysis_address(false, Some(50.0), 0, Some(2.0), Some(&low));
+        assert!(meta.synthesis.contains("Low risk"), "{}", meta.synthesis);
     }
 
     #[test]

@@ -168,7 +168,10 @@ fn risk_engine(
 ) -> RiskEngine {
     let line = match client {
         Some(_) => "Using Etherscan API for enhanced analysis".to_string(),
-        None => format!("Note: Set {ETHERSCAN_KEY_ENV} for enhanced analysis"),
+        None => format!(
+            "Note: no Etherscan API key, so most risk factors are not assessed. \
+             Add one with `scope setup --key etherscan` or {ETHERSCAN_KEY_ENV}."
+        ),
     };
     crate::cli::progress::notice(spinner, out, &line);
     RiskEngine::with_optional_client(client.cloned())
@@ -1148,6 +1151,7 @@ mod tests {
                 evidence: vec![],
             }],
             recommendations: vec!["Continue monitoring".to_string()],
+            not_assessed: Vec::new(),
             assessed_at: chrono::Utc::now(),
         };
         let patterns: Vec<(
@@ -1200,6 +1204,7 @@ mod tests {
                 "Continue monitoring".to_string(),
                 "Review transaction patterns".to_string(),
             ],
+            not_assessed: Vec::new(),
             assessed_at: chrono::Utc::now(),
         };
         let patterns: Vec<(
@@ -1244,6 +1249,7 @@ mod tests {
                 evidence: vec![],
             }],
             recommendations: vec!["Continue monitoring".to_string()],
+            not_assessed: Vec::new(),
             assessed_at: chrono::Utc::now(),
         };
         let patterns: Vec<(String, String, Option<PatternAnalysis>)> = vec![(
@@ -1292,6 +1298,7 @@ mod tests {
                 evidence: vec![],
             }],
             recommendations: vec!["File SAR".to_string()],
+            not_assessed: Vec::new(),
             assessed_at: chrono::Utc::now(),
         };
         let patterns: Vec<(
@@ -1328,6 +1335,7 @@ mod tests {
                 evidence: vec![],
             }],
             recommendations: vec![],
+            not_assessed: Vec::new(),
             assessed_at: chrono::Utc::now(),
         };
         let patterns: Vec<(

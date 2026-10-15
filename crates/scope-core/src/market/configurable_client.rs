@@ -95,6 +95,59 @@ impl ConfigurableExchangeClient {
         self.descriptor.format_pair(base, quote)
     }
 
+    /// The venue's coin list (the `assets` capability): each asset's
+    /// networks and token contracts. Items without a symbol are skipped.
+    pub async fn fetch_assets(&self) -> Result<Vec<super::assets::AssetInfo>> {
+        use super::assets::{AssetInfo, AssetNetwork, contract_of};
+        let endpoint = self
+            .descriptor
+            .capabilities
+            .assets
+            .as_ref()
+            .ok_or_else(|| venue_error(&self.descriptor.id, "does not list assets"))?;
+        let json = self.fetch_endpoint(endpoint, "", None).await?;
+        let data = self.navigate_root(&json, endpoint.response_root.as_deref())?;
+        let r = &endpoint.response;
+        let items = match r.items_key.as_deref() {
+            Some(k) if !k.is_empty() => data.get(k).unwrap_or(data),
+            _ => data,
+        }
+        .as_array()
+        .ok_or_else(|| venue_error(&self.descriptor.id, "expected array for assets"))?;
+        let field = |f: &Option<String>, default: &str| f.clone().unwrap_or_else(|| default.into());
+        let (asset, networks_key) = (
+            field(&r.asset, "coin"),
+            field(&r.networks_key, "networkList"),
+        );
+        let (network, contract) = (
+            field(&r.network, "network"),
+            field(&r.contract, "contractAddress"),
+        );
+        Ok(items
+            .iter()
+            .filter_map(|item| {
+                let symbol = self.extract_string(item, &asset)?;
+                let networks = item
+                    .get(&networks_key)
+                    .and_then(Value::as_array)
+                    .map(|ns| {
+                        ns.iter()
+                            .filter_map(|n| {
+                                Some(AssetNetwork {
+                                    network: self.extract_string(n, &network)?,
+                                    contract: self
+                                        .extract_string(n, &contract)
+                                        .and_then(|c| contract_of(&c)),
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Some(AssetInfo { symbol, networks })
+            })
+            .collect())
+    }
+
     // =========================================================================
     // HTTP request building
     // =========================================================================
@@ -1355,6 +1408,7 @@ mod tests {
             headers: std::collections::HashMap::new(),
             error_envelope: None,
             capabilities: CapabilitySet {
+                assets: None,
                 order_book: Some(EndpointDescriptor {
                     path: "/api/v1/depth".to_string(),
                     method: HttpMethod::GET,
@@ -1493,6 +1547,53 @@ mod tests {
         assert_eq!(ticker.best_bid, Some(50095.0));
         assert_eq!(ticker.best_ask, Some(50105.0));
         mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_fetch_assets_reads_the_coin_list() {
+        // WEEX's /api/v3/coins shape: the report needs each asset's
+        // networks and contracts; a native placeholder is no contract.
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/v3/coins")
+            .with_status(200)
+            .with_body(
+                serde_json::json!([
+                    {"coin": "USDN", "networkList": [
+                        {"network": "ETH", "contractAddress": "0xeC747DAf41A4Ca4ebE72356592F8301924132907"}
+                    ]},
+                    {"coin": "BTC", "networkList": [{"network": "BTC", "contractAddress": "btc"}]},
+                    {"name": "no symbol"}
+                ])
+                .to_string(),
+            )
+            .create_async()
+            .await;
+        let mut desc = make_http_test_descriptor(&server.url());
+        desc.capabilities.assets =
+            Some(serde_yaml::from_str("path: /api/v3/coins\nresponse: {}\n").unwrap());
+        let client = ConfigurableExchangeClient::new(desc.clone());
+        let assets = client.fetch_assets().await.unwrap();
+        assert_eq!(assets.len(), 2, "an item without a symbol is skipped");
+        assert_eq!(
+            assets[0].networks[0].contract.as_deref(),
+            Some("0xeC747DAf41A4Ca4ebE72356592F8301924132907")
+        );
+        assert_eq!(assets[1].networks[0].contract, None);
+        mock.assert_async().await;
+
+        let exchange = super::super::ExchangeClient::from_descriptor(&desc);
+        let pair = super::super::Pair::parse("USDN");
+        let tokens = exchange
+            .fetch_token_addresses(&pair)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(tokens[0].symbol, "USDN");
+        // No assets capability: no lookup at all.
+        desc.capabilities.assets = None;
+        let plain = super::super::ExchangeClient::from_descriptor(&desc);
+        assert!(plain.fetch_token_addresses(&pair).await.is_none());
     }
 
     #[tokio::test]
@@ -2004,6 +2105,7 @@ mod tests {
             headers: std::collections::HashMap::new(),
             error_envelope: None,
             capabilities: CapabilitySet {
+                assets: None,
                 order_book: None,
                 ticker: None,
                 trades: None,
@@ -2152,6 +2254,7 @@ mod tests {
             headers: std::collections::HashMap::new(),
             error_envelope: None,
             capabilities: CapabilitySet {
+                assets: None,
                 order_book: None,
                 ticker: None,
                 trades: None,
@@ -2263,6 +2366,7 @@ mod tests {
             headers: std::collections::HashMap::new(),
             error_envelope: None,
             capabilities: CapabilitySet {
+                assets: None,
                 order_book: None,
                 ticker: None,
                 trades: None,
@@ -2352,6 +2456,7 @@ mod tests {
             headers: std::collections::HashMap::new(),
             error_envelope: None,
             capabilities: CapabilitySet {
+                assets: None,
                 order_book: None,
                 ticker: None,
                 trades: None,
@@ -2573,6 +2678,7 @@ mod tests {
             headers: std::collections::HashMap::new(),
             error_envelope: None,
             capabilities: CapabilitySet {
+                assets: None,
                 order_book: None,
                 ticker: None,
                 trades: None,
@@ -2636,6 +2742,7 @@ mod tests {
             headers: std::collections::HashMap::new(),
             error_envelope: None,
             capabilities: CapabilitySet {
+                assets: None,
                 order_book: None,
                 ticker: None,
                 trades: None,
@@ -2720,6 +2827,7 @@ mod tests {
             headers: std::collections::HashMap::new(),
             error_envelope: None,
             capabilities: CapabilitySet {
+                assets: None,
                 order_book: None,
                 ticker: None,
                 trades: None,

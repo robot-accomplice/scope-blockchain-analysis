@@ -13,6 +13,9 @@ pub enum RiskLevel {
     Medium,   // 4-6
     High,     // 7-8
     Critical, // 9-10
+    /// At least one factor had no data, so the score covers only part of
+    /// the assessment and must not be read as Low.
+    Incomplete,
 }
 
 impl RiskLevel {
@@ -31,6 +34,7 @@ impl RiskLevel {
             RiskLevel::Medium => "🟡",
             RiskLevel::High => "🔴",
             RiskLevel::Critical => "⚫",
+            RiskLevel::Incomplete => "⚪",
         }
     }
 }
@@ -66,8 +70,17 @@ pub struct RiskAssessment {
     pub overall_score: f32, // 0-10
     pub risk_level: RiskLevel,
     pub factors: Vec<RiskFactor>,
+    /// The factors that had no data, each with the reason. They are not
+    /// in `factors` or the score.
+    #[serde(default)]
+    pub not_assessed: Vec<String>,
     pub assessed_at: DateTime<Utc>,
     pub recommendations: Vec<String>,
+}
+
+/// Why a factor was not assessed when there is no data client.
+fn no_data(factor: &str) -> String {
+    format!("{factor}: no Etherscan API key (scope setup --key etherscan)")
 }
 
 use super::datasource::{BlockchainDataClient, analyze_patterns};
@@ -104,31 +117,29 @@ impl RiskEngine {
         address: &str,
         chain: &str,
     ) -> anyhow::Result<RiskAssessment> {
+        // A factor without data is not scored: a default score made a
+        // report with no data read as Low risk.
+        let results = [
+            self.analyze_behavior(address, chain).await,
+            self.analyze_associations(address, chain).await,
+            self.analyze_sources(address, chain).await,
+            self.identify_entity(address, chain).await,
+        ];
         let mut factors = Vec::new();
-
-        // 1. Behavioral Analysis (Transaction Patterns)
-        if let Ok(factor) = self.analyze_behavior(address, chain).await {
-            factors.push(factor);
+        let mut not_assessed = Vec::new();
+        for result in results {
+            match result {
+                Ok(factor) => factors.push(factor),
+                Err(reason) => not_assessed.push(reason),
+            }
         }
 
-        // 2. Association Analysis (Connected Addresses)
-        if let Ok(factor) = self.analyze_associations(address, chain).await {
-            factors.push(factor);
-        }
-
-        // 3. Source Analysis (Where funds came from)
-        if let Ok(factor) = self.analyze_sources(address, chain).await {
-            factors.push(factor);
-        }
-
-        // 4. Entity Recognition (Known services)
-        if let Ok(factor) = self.identify_entity(address, chain).await {
-            factors.push(factor);
-        }
-
-        // Calculate weighted score
         let overall_score = self.calculate_weighted_score(&factors);
-        let risk_level = RiskLevel::from_score(overall_score);
+        let risk_level = if not_assessed.is_empty() {
+            RiskLevel::from_score(overall_score)
+        } else {
+            RiskLevel::Incomplete
+        };
 
         // Generate recommendations
         let recommendations = self.generate_recommendations(&factors, risk_level);
@@ -139,13 +150,14 @@ impl RiskEngine {
             overall_score,
             risk_level,
             factors,
+            not_assessed,
             assessed_at: Utc::now(),
             recommendations,
         })
     }
 
     /// Analyze transaction behavior patterns
-    async fn analyze_behavior(&self, address: &str, chain: &str) -> anyhow::Result<RiskFactor> {
+    async fn analyze_behavior(&self, address: &str, chain: &str) -> Result<RiskFactor, String> {
         let mut evidence = Vec::new();
         let mut score: f32 = 2.0; // Default low score
 
@@ -191,11 +203,13 @@ impl RiskEngine {
                     ));
                 }
                 Err(e) => {
-                    evidence.push(format!("Could not fetch transaction data: {}", e));
+                    return Err(format!(
+                        "Behavioral Patterns: could not fetch transactions: {e}"
+                    ));
                 }
             }
         } else {
-            evidence.push("No data client configured - using default scores".to_string());
+            return Err(no_data("Behavioral Patterns"));
         }
 
         // Ensure score stays in bounds
@@ -212,7 +226,7 @@ impl RiskEngine {
     }
 
     /// Analyze associations with known addresses
-    async fn analyze_associations(&self, address: &str, chain: &str) -> anyhow::Result<RiskFactor> {
+    async fn analyze_associations(&self, address: &str, chain: &str) -> Result<RiskFactor, String> {
         let mut evidence = Vec::new();
         let mut score: f32 = 1.5; // Default low score
 
@@ -249,11 +263,13 @@ impl RiskEngine {
                     }
                 }
                 Err(e) => {
-                    evidence.push(format!("Could not analyze associations: {}", e));
+                    return Err(format!(
+                        "Address Associations: could not fetch transactions: {e}"
+                    ));
                 }
             }
         } else {
-            evidence.push("No data client configured - using default scores".to_string());
+            return Err(no_data("Address Associations"));
         }
 
         score = score.clamp(0.0, 10.0);
@@ -269,7 +285,7 @@ impl RiskEngine {
     }
 
     /// Analyze source of funds
-    async fn analyze_sources(&self, address: &str, chain: &str) -> anyhow::Result<RiskFactor> {
+    async fn analyze_sources(&self, address: &str, chain: &str) -> Result<RiskFactor, String> {
         let mut evidence = Vec::new();
         let mut score: f32 = 2.0; // Default low-medium score
 
@@ -301,11 +317,13 @@ impl RiskEngine {
                     }
                 }
                 Err(e) => {
-                    evidence.push(format!("Could not analyze sources: {}", e));
+                    return Err(format!(
+                        "Source of Funds: could not fetch transactions: {e}"
+                    ));
                 }
             }
         } else {
-            evidence.push("No data client configured - using default scores".to_string());
+            return Err(no_data("Source of Funds"));
         }
 
         score = score.clamp(0.0, 10.0);
@@ -321,15 +339,15 @@ impl RiskEngine {
     }
 
     /// Identify if address belongs to known entity
-    async fn identify_entity(&self, address: &str, _chain: &str) -> anyhow::Result<RiskFactor> {
+    async fn identify_entity(&self, address: &str, _chain: &str) -> Result<RiskFactor, String> {
         let mut evidence = Vec::new();
         let mut score: f32 = 2.0;
 
-        // Check for known entity patterns
-        // This would typically integrate with a database of known addresses
-
-        // Placeholder: Check if address has code (is a contract)
-        if let Some(client) = &self.data_client {
+        // Only the contract check below runs: no known-entity list exists.
+        let Some(client) = &self.data_client else {
+            return Err(no_data("Entity Identification"));
+        };
+        {
             // Try to get internal transactions - contracts often have these
             match client.get_internal_transactions(address).await {
                 Ok(internal_txs) => {
@@ -347,8 +365,7 @@ impl RiskEngine {
             }
         }
 
-        // Known exchange addresses would be checked here
-        evidence.push("Address not in known entity database (implement integration)".to_string());
+        evidence.push("Known-entity lists are not checked".to_string());
 
         score = score.clamp(0.0, 10.0);
 
@@ -400,6 +417,11 @@ impl RiskEngine {
             }
             RiskLevel::Low => {
                 recommendations.push("Standard monitoring".to_string());
+            }
+            RiskLevel::Incomplete => {
+                recommendations.push(
+                    "Do not rely on this result: add the missing data and assess again".to_string(),
+                );
             }
         }
 
@@ -915,8 +937,10 @@ mod tests {
             "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2"
         );
         assert_eq!(assessment.chain, "ethereum");
-        assert!(assessment.overall_score >= 0.0 && assessment.overall_score <= 10.0);
-        assert!(!assessment.factors.is_empty());
+        // Without data nothing is scored, and the result says so.
+        assert!(assessment.factors.is_empty());
+        assert_eq!(assessment.not_assessed.len(), 4);
+        assert!(matches!(assessment.risk_level, RiskLevel::Incomplete));
         assert!(!assessment.recommendations.is_empty());
     }
 
@@ -957,14 +981,31 @@ mod tests {
         let engine = RiskEngine::new();
         let assessment = engine.assess_address("0xtest", "ethereum").await.unwrap();
 
-        // Without a data client, should have 4 factors (behavior, association, source, entity)
-        assert_eq!(assessment.factors.len(), 4);
-
-        let categories: Vec<_> = assessment.factors.iter().map(|f| f.category).collect();
-        assert!(categories.contains(&RiskCategory::Behavioral));
-        assert!(categories.contains(&RiskCategory::Association));
-        assert!(categories.contains(&RiskCategory::Source));
-        assert!(categories.contains(&RiskCategory::Entity));
+        // Without a data client, all 4 factors are listed as not assessed
+        // (a default score made a report with no data read as Low).
+        assert!(assessment.factors.is_empty());
+        for name in [
+            "Behavioral Patterns",
+            "Address Associations",
+            "Source of Funds",
+            "Entity Identification",
+        ] {
+            assert!(
+                assessment
+                    .not_assessed
+                    .iter()
+                    .any(|r| r.starts_with(name) && r.contains("no Etherscan API key")),
+                "{name}: {:?}",
+                assessment.not_assessed
+            );
+        }
+        assert!(matches!(assessment.risk_level, RiskLevel::Incomplete));
+        assert!(
+            !assessment
+                .recommendations
+                .iter()
+                .any(|r| r.contains("Standard monitoring"))
+        );
     }
 
     #[tokio::test]
@@ -1016,6 +1057,7 @@ mod tests {
             overall_score: 3.5,
             risk_level: RiskLevel::Medium,
             factors: vec![],
+            not_assessed: Vec::new(),
             assessed_at: Utc::now(),
             recommendations: vec!["Test recommendation".to_string()],
         };
@@ -1149,14 +1191,8 @@ mod tests {
             .assess_address("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2", "ethereum")
             .await
             .unwrap();
-        // Should have 4 risk factors (behavior, associations, sources, entity)
-        assert_eq!(assessment.factors.len(), 4);
-        // Check factor names
-        let factor_names: Vec<&str> = assessment.factors.iter().map(|f| f.name.as_str()).collect();
-        assert!(factor_names.contains(&"Behavioral Patterns"));
-        assert!(factor_names.contains(&"Address Associations"));
-        assert!(factor_names.contains(&"Source of Funds"));
-        assert!(factor_names.contains(&"Entity Identification"));
+        // Every factor is accounted for: scored or listed as not assessed.
+        assert_eq!(assessment.factors.len() + assessment.not_assessed.len(), 4);
     }
 
     #[test]
@@ -1175,6 +1211,7 @@ mod tests {
                 evidence: vec!["evidence1".to_string()],
             }],
             recommendations: vec!["recommendation".to_string()],
+            not_assessed: Vec::new(),
             assessed_at: Utc::now(),
         };
         let json = serde_json::to_string(&assessment).unwrap();
@@ -1360,20 +1397,18 @@ mod tests {
         let engine = RiskEngine::with_data_client(client);
         let assessment = engine.assess_address("0xAddr", "ethereum").await.unwrap();
 
-        // Should still produce an assessment, but with error evidence
-        assert_eq!(assessment.factors.len(), 4);
-        // Behavior factor should mention the error
-        let behavior = assessment
-            .factors
-            .iter()
-            .find(|f| f.name == "Behavioral Patterns")
-            .unwrap();
+        // A failed fetch is not data: the three transaction factors are
+        // not assessed, with the reason, and the result is incomplete.
+        assert_eq!(assessment.factors.len(), 1, "{:?}", assessment.not_assessed);
+        assert_eq!(assessment.factors[0].name, "Entity Identification");
+        assert_eq!(assessment.not_assessed.len(), 3);
         assert!(
-            behavior
-                .evidence
+            assessment
+                .not_assessed
                 .iter()
-                .any(|e| e.contains("Could not fetch"))
+                .all(|r| r.contains("could not fetch transactions"))
         );
+        assert!(matches!(assessment.risk_level, RiskLevel::Incomplete));
     }
 
     #[tokio::test]

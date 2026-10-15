@@ -292,6 +292,7 @@ mod tests {
                 description: "A test risk factor".to_string(),
                 evidence: vec!["evidence".to_string()],
             }],
+            not_assessed: Vec::new(),
             assessed_at: Utc::now(),
             recommendations: vec!["Be cautious".to_string()],
         };
