@@ -77,9 +77,9 @@ The six files in section 2 call the new functions. No caller builds a path with 
 The migration runs once at startup, before the config loads. It runs in the `scope` binary only, not in the library.
 
 1. For each file in the table in section 2 (`portfolio.yaml` excluded), find the old path.
-2. If the old file exists and the new file does not exist, copy the old file to the new path. Create the parent folder when necessary.
+2. If the old file exists and the new file does not exist, copy the old file to the new path. Create the parent folder when necessary. Copy to a temporary file (`<name>.migrating`) and rename it, so that a copy that stops partway never becomes the new file.
 3. Never delete or change an old file. Never write over a new file.
-4. For each file that it examines, write one line to `state/migration.jsonl`: the time, the source, the destination, and the result (`copied`, `kept-existing`, `no-source` or `failed: <error>`).
+4. For each file that it copies, and for each copy that fails, write one line to `state/migration.jsonl`: the time, the source, the destination, and the result (`copied` or `failed: <error>`). A start with nothing to copy writes nothing, so a read-only home still works and the log does not grow.
 5. If it copied at least one file, show one note: `Moved your scope files to ~/.scope-bca (copied N files; the old files are unchanged).`
 6. If a copy fails, stop with an error. The error names the file and the cause. The files that were copied before the failure stay. The next start tries the remaining files again.
 

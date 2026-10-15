@@ -6,7 +6,8 @@
 //!
 //! ## Storage Location
 //!
-//! Token aliases are stored in `~/.local/share/scope/tokens.yaml`
+//! Token aliases are stored in `~/.scope-bca/data/tokens.yaml` (see
+//! [`crate::paths`]).
 //!
 //! ## Usage
 //!

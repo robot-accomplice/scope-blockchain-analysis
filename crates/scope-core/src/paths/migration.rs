@@ -4,8 +4,9 @@
 //! `~/.config/scope` (or the platform config folder), and tokens and TUI
 //! state in the platform data folder. On each start, every old file
 //! whose new copy does not exist is copied. Nothing old is deleted or
-//! changed, and no new file is written over. Every file examined gets one
-//! line in `state/migration.jsonl` (the audit record).
+//! changed, and no new file is written over. Each copy, and each failed
+//! copy, gets one line in `state/migration.jsonl` (the audit record). A
+//! start with nothing to copy writes nothing, so a read-only home works.
 
 use crate::error::{Result, ScopeError};
 use std::io::Write as _;
@@ -119,17 +120,17 @@ pub fn items_for(
 }
 
 /// Copies each item whose source exists and whose destination does not,
-/// logging every item to `log`. Stops at the first failed copy with an
-/// error that names the file; the files copied before it stay.
+/// logging each copy and each failure to `log`. Stops at the first failed
+/// copy with an error that names the file; the files copied before it stay.
 pub fn run(items: &[Item], log: &Path) -> Result<Report> {
     let mut copied = 0;
     for item in items {
         let result = copy_one(item);
-        let text = match &result {
-            Ok(outcome) => outcome.as_str().to_string(),
-            Err(e) => format!("failed: {e}"),
-        };
-        append_log(log, item, &text)?;
+        match &result {
+            Ok(Outcome::Copied) => append_log(log, item, Outcome::Copied.as_str())?,
+            Ok(_) => {}
+            Err(e) => append_log(log, item, &format!("failed: {e}"))?,
+        }
         match result {
             Ok(Outcome::Copied) => copied += 1,
             Ok(_) => {}
@@ -158,7 +159,14 @@ fn copy_one(item: &Item) -> std::io::Result<Outcome> {
     if let Some(parent) = item.to.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::copy(&item.from, &item.to)?;
+    // Copy to a temporary file and rename it: a copy that stops partway
+    // (disk full, a kill) must not become the new file, which later starts
+    // would keep. A temporary file left by such a copy is replaced.
+    let mut name = item.to.file_name().unwrap_or_default().to_os_string();
+    name.push(".migrating");
+    let temp = item.to.with_file_name(name);
+    std::fs::copy(&item.from, &temp)?;
+    std::fs::rename(&temp, &item.to)?;
     Ok(Outcome::Copied)
 }
 
@@ -296,11 +304,6 @@ mod tests {
             fs::read_to_string(f.home.join("config.yaml")).unwrap(),
             "new\n"
         );
-        let config = log_lines(&f)
-            .into_iter()
-            .find(|l| l["to"].as_str().unwrap().ends_with("config.yaml"))
-            .unwrap();
-        assert_eq!(config["result"], "kept-existing");
     }
 
     #[test]
@@ -312,24 +315,60 @@ mod tests {
     }
 
     #[test]
-    fn test_the_log_has_one_line_per_file_with_its_result() {
+    fn test_the_log_records_each_copy_and_nothing_else() {
+        // The audit record: one line per copied (or failed) file.
         let f = fixture();
         put(&f.xdg.join("config.yaml"), "chains: {}\n");
+        put(&f.platform_data.join("scope/tokens.yaml"), "aliases: {}\n");
         run_fixture(&f).unwrap();
         let lines = log_lines(&f);
-        assert_eq!(lines.len(), items(&f).len());
+        assert_eq!(lines.len(), 2, "{lines:?}");
         for line in &lines {
             assert!(line["at"].is_string() && line["from"].is_string() && line["to"].is_string());
+            assert_eq!(line["result"], "copied");
         }
-        let results: Vec<&str> = lines
-            .iter()
-            .map(|l| l["result"].as_str().unwrap())
-            .collect();
-        assert_eq!(results.iter().filter(|r| **r == "copied").count(), 1);
-        assert!(
-            results.iter().all(|r| *r == "copied" || *r == "no-source"),
-            "{results:?}"
+        run_fixture(&f).unwrap();
+        assert_eq!(
+            log_lines(&f).len(),
+            2,
+            "a start with nothing to copy adds no line"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_nothing_to_copy_writes_nothing_so_a_read_only_home_works() {
+        // Review C1/I2: with nothing to copy, a start must not write at
+        // all (a read-only home ran every command before this change) and
+        // must not grow the log.
+        use std::os::unix::fs::PermissionsExt;
+        let f = fixture();
+        put(&f.home.join("config.yaml"), "chains: {}\n");
+        fs::set_permissions(&f.home, fs::Permissions::from_mode(0o555)).unwrap();
+        let result = run_fixture(&f);
+        fs::set_permissions(&f.home, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(result.unwrap().copied, 0);
+        assert!(
+            !f.home.join("state").exists(),
+            "no log when nothing happened"
+        );
+    }
+
+    #[test]
+    fn test_a_copy_left_by_a_crash_is_replaced_not_kept() {
+        // Review I1: a copy that stopped partway must not become the new
+        // file. Copies go through a temporary file and a rename, and a
+        // temporary file left by a crash is replaced.
+        let f = fixture();
+        put(&f.xdg.join("config.yaml"), "chains: {}\n");
+        let leftover = f.home.join("config.yaml.migrating");
+        put(&leftover, "chai");
+        assert_eq!(run_fixture(&f).unwrap().copied, 1);
+        assert_eq!(
+            fs::read_to_string(f.home.join("config.yaml")).unwrap(),
+            "chains: {}\n"
+        );
+        assert!(!leftover.exists(), "the temporary file is gone");
     }
 
     #[cfg(unix)]

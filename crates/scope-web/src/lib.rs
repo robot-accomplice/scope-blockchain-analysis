@@ -139,14 +139,19 @@ pub async fn start_server(addr: SocketAddr, config: Config, out: &Output) -> any
 // Daemon management
 // ============================================================================
 
+/// The folder of the daemon's PID and log files.
+pub fn daemon_dir() -> std::path::PathBuf {
+    scope::paths::state_dir()
+}
+
 /// Returns the path to the PID file for the daemon.
 pub fn pid_file_path() -> std::path::PathBuf {
-    scope::paths::state_dir().join("scope-web.pid")
+    daemon_dir().join("scope-web.pid")
 }
 
 /// Returns the path to the log file for the daemon.
 pub fn log_file_path() -> std::path::PathBuf {
-    scope::paths::state_dir().join("scope-web.log")
+    daemon_dir().join("scope-web.log")
 }
 
 /// Stops a running daemon by reading its PID file and sending SIGTERM.
@@ -211,8 +216,7 @@ pub fn start_daemon(addr: SocketAddr, config: Config, out: &Output) -> scope::er
 
     let _ = config; // Config reloaded from disk in child
 
-    let data_dir = Config::default_data_dir();
-    std::fs::create_dir_all(&data_dir)?;
+    std::fs::create_dir_all(daemon_dir())?;
 
     let pid_path = pid_file_path();
     let log_path = log_file_path();
@@ -303,6 +307,15 @@ mod tests {
         };
         let state = Arc::new(AppState::new(config, factory));
         let _router = build_router(state);
+    }
+
+    #[test]
+    fn test_the_daemon_creates_the_folder_its_files_go_in() {
+        // Review M1: the PID and log files are in daemon_dir(), the folder
+        // start_daemon creates, so a fresh home can start the daemon.
+        assert_eq!(pid_file_path().parent(), Some(daemon_dir().as_path()));
+        assert_eq!(log_file_path().parent(), Some(daemon_dir().as_path()));
+        assert_eq!(daemon_dir(), scope::paths::state_dir());
     }
 
     #[test]

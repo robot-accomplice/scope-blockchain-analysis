@@ -156,7 +156,7 @@
 //!   color: true
 //!
 //! address_book:
-//!   data_dir: "~/.local/share/scope"
+//!   data_dir: "/Users/me/scope-address-book"  # optional; absolute path
 //! ```
 //!
 //! ## Error Handling

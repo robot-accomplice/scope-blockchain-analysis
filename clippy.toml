@@ -2,10 +2,10 @@
 # sandboxes them in test builds. Tests that wrote the real directories
 # replaced a user's API keys, address book and token aliases.
 disallowed-methods = [
-    { path = "dirs::home_dir", reason = "use scope::paths::home_dir (sandboxed in tests)" },
-    { path = "dirs::config_dir", reason = "use scope::paths::config_dir (sandboxed in tests)" },
-    { path = "dirs::data_dir", reason = "use scope::paths::data_dir (sandboxed in tests)" },
+    { path = "dirs::home_dir", reason = "use scope::paths::user_home or home (sandboxed in tests)" },
+    { path = "dirs::config_dir", reason = "use scope::paths::config_file (sandboxed in tests)" },
+    { path = "dirs::data_dir", reason = "use scope::paths::data_dir or state_dir (sandboxed in tests)" },
     { path = "dirs::data_local_dir", reason = "add it to scope::paths (sandboxed in tests)" },
     { path = "dirs::cache_dir", reason = "add it to scope::paths (sandboxed in tests)" },
-    { path = "std::env::home_dir", reason = "use scope::paths::home_dir (sandboxed in tests)" },
+    { path = "std::env::home_dir", reason = "use scope::paths::user_home (sandboxed in tests)" },
 ]

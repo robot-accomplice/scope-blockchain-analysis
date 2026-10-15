@@ -31,7 +31,7 @@
 //!   color: true
 //!
 //! address_book:
-//!   data_dir: "~/.local/share/scope"
+//!   data_dir: "/Users/me/scope-address-book"  # optional; absolute path
 //!
 //! ghola:
 //!   enabled: false        # route HTTP through Ghola sidecar
@@ -169,7 +169,8 @@ pub struct OutputConfig {
 pub struct AddressBookConfig {
     /// Directory for storing address book data.
     ///
-    /// Defaults to `~/.local/share/scope` on Linux/macOS.
+    /// Defaults to `~/.scope-bca/data` (see [`crate::paths`]). Use an absolute
+    /// path: `~` is not expanded.
     pub data_dir: Option<PathBuf>,
 }
 
