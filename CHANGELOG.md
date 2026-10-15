@@ -8,9 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed (breaking)
+- `crawl --yes` no longer selects the first match for an ambiguous symbol. It stops with the candidates; pass `--token <contract>`. `--yes` now skips only the save question.
+- `token-health`, `insights` and `market` on a DEX venue no longer take the first search match. An ambiguous symbol asks in a terminal, or stops with the candidates.
 - All scope files are now in one folder, `~/.scope-bca` (`SCOPE_BCA_HOME` moves it): `config.yaml`, `venues/`, `data/` and `state/`. On the first start, scope copies the files from `~/.config/scope` and the platform data folder, and writes `state/migration.jsonl`. The old files are not changed.
 
 ### Added
+- One token resolver for every command that takes a symbol: it lists the candidates and asks, saves the choice on request, takes `--token <contract>`, checks saved choices against a CEX venue's coin list, and records each lookup in `state/resolutions.jsonl`.
 - `--duration forever` (or `inf`) runs a repeating command until `Esc` or `Ctrl-C`. (#96)
 
 ## [0.7.0] - 2026-10-14
