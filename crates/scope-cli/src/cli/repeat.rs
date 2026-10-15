@@ -234,7 +234,7 @@ mod tests {
         let series = series.lock().unwrap();
         assert_eq!(series.runs.len(), crate::cli::output::MAX_SERIES_RUNS);
         assert_eq!(
-            series.dropped as u64,
+            series.dropped,
             stop - 1 - crate::cli::output::MAX_SERIES_RUNS as u64
         );
     }
