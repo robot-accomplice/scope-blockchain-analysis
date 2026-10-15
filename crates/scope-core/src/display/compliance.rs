@@ -283,6 +283,8 @@ mod tests {
 
     #[test]
     fn test_incomplete_report_lists_what_was_not_assessed() {
+        // The table wraps at the terminal width, which width tests change.
+        let _lock = crate::display::terminal::width_lock();
         // A report without data must say so in every format, not read as Low.
         let mut assessment = create_test_assessment();
         assessment.risk_level = RiskLevel::Incomplete;

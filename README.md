@@ -692,12 +692,20 @@ scope crawl USDC --report report.md
 # Disable ASCII charts, output as JSON
 scope crawl USDC --no-charts --format json
 
-# Skip interactive prompts (use first match)
-scope crawl USDC --yes
+# Choose the token by contract (no question); --yes only skips the save question
+scope crawl USDC --token 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --yes
 
 # Save the selected token as an alias for future use
 scope crawl USDC --save
 ```
+
+### Choosing a token
+
+A symbol such as `USDN` can name more than one token. When it does, scope lists the tokens (chain, contract, name) and asks you to choose one. Then it asks whether to save the choice: "Save so USDN always means 0x… on ethereum?". A saved choice is used from then on without a question. On an exchange venue that lists its coins' contracts, scope also checks the saved contract against the venue's, and stops if they differ.
+
+Without a terminal (a pipe, `--format json`, a script, the web API or a command in the TUI pane), scope does not ask. It stops with the list. Pass `--token <contract>` to choose (`crawl`, `token-health`, `insights`, `monitor` and `market summary|ohlc|trades` take it). `--yes` skips only the save question.
+
+Saved choices are in `~/.scope-bca/data/tokens.yaml`. In the TUI, `tokens list` shows them and `tokens remove <SYMBOL>` removes one. Each lookup is recorded in `~/.scope-bca/state/resolutions.jsonl`.
 
 ## Token Discovery
 

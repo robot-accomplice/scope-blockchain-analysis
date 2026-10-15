@@ -73,7 +73,7 @@ pub async fn handle(
     match address::analyze_address(
         &args,
         client.as_ref(),
-        &scope_cli::cli::output::Output::stdio(),
+        &scope_cli::cli::output::Output::stdio().without_prompts(),
     )
     .await
     {

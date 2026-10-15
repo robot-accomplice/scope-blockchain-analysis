@@ -39,6 +39,20 @@ const fn allow(
 
 const ALLOWED: &[Allowed] = &[
     allow(
+        "resolve.rs",
+        "picker_for",
+        "io::stdin()",
+        1,
+        "asks whether stdin is a terminal before a prompt; reads nothing",
+    ),
+    allow(
+        "resolve.rs",
+        "picker_for",
+        "stdout()",
+        1,
+        "asks whether stdout is a terminal before a prompt; writes nothing",
+    ),
+    allow(
         "output.rs",
         "stdio",
         "stdout()",

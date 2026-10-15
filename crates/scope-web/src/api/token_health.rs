@@ -53,7 +53,7 @@ pub async fn handle(
         10,
         state.factory.as_ref(),
         None,
-        &scope_cli::cli::output::Output::stdio(),
+        &scope_cli::cli::output::Output::stdio().without_prompts(),
     )
     .await
     {
