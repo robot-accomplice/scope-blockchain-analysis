@@ -1744,6 +1744,23 @@ mod tests {
     }
 
     #[test]
+    fn test_meta_analysis_does_not_call_an_incomplete_assessment_low() {
+        // A score from factors without data is not a verdict.
+        let level = scope::compliance::risk::RiskLevel::Incomplete;
+        let meta = meta_analysis_address(false, Some(50.0), 0, Some(2.0), Some(&level));
+        assert!(!meta.synthesis.contains("Low risk"), "{}", meta.synthesis);
+        assert!(
+            !meta.key_takeaway.contains("Overall risk"),
+            "{}",
+            meta.key_takeaway
+        );
+
+        let low = scope::compliance::risk::RiskLevel::Low;
+        let meta = meta_analysis_address(false, Some(50.0), 0, Some(2.0), Some(&low));
+        assert!(meta.synthesis.contains("Low risk"), "{}", meta.synthesis);
+    }
+
+    #[test]
     fn test_meta_analysis_address_eoa_moderate_value() {
         let meta = meta_analysis_address(false, Some(50_000.0), 3, None, None);
         assert!(meta.synthesis.contains("wallet (EOA)"));

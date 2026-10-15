@@ -282,6 +282,25 @@ mod tests {
     }
 
     #[test]
+    fn test_incomplete_report_lists_what_was_not_assessed() {
+        // A report without data must say so in every format, not read as Low.
+        let mut assessment = create_test_assessment();
+        assessment.risk_level = RiskLevel::Incomplete;
+        assessment.not_assessed = vec!["Source of Funds: no Etherscan API key".to_string()];
+        for format in [OutputFormat::Table, OutputFormat::Markdown] {
+            let output = format_risk_report(&assessment, format, false);
+            assert!(output.contains("Not Assessed"), "{output}");
+            assert!(
+                output.contains("Source of Funds: no Etherscan API key"),
+                "{output}"
+            );
+            assert!(output.contains("Incomplete"), "{output}");
+        }
+        let json = format_risk_report(&assessment, OutputFormat::Json, false);
+        assert!(json.contains("\"not_assessed\""), "{json}");
+    }
+
+    #[test]
     fn test_format_risk_report_detailed() {
         let assessment = create_test_assessment();
         let output = format_risk_report(&assessment, OutputFormat::Table, true);
