@@ -132,7 +132,7 @@
 //!
 //! ## Configuration
 //!
-//! Scope reads configuration from `~/.config/scope/config.yaml`:
+//! Scope reads configuration from `~/.scope-bca/config.yaml`:
 //!
 //! ```yaml
 //! chains:
@@ -156,7 +156,7 @@
 //!   color: true
 //!
 //! address_book:
-//!   data_dir: "~/.local/share/scope"
+//!   data_dir: "/Users/me/scope-address-book"  # optional; absolute path
 //! ```
 //!
 //! ## Error Handling

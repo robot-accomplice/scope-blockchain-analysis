@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (breaking)
+- All scope files are now in one folder, `~/.scope-bca` (`SCOPE_BCA_HOME` moves it): `config.yaml`, `venues/`, `data/` and `state/`. On the first start, scope copies the files from `~/.config/scope` and the platform data folder, and writes `state/migration.jsonl`. The old files are not changed.
+
+### Added
+- `--duration forever` (or `inf`) runs a repeating command until `Esc` or `Ctrl-C`. (#96)
+
 ## [0.7.0] - 2026-10-14
 
 ### Changed (breaking)

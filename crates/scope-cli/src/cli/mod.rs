@@ -137,7 +137,7 @@ pub struct Cli {
 
     /// Path to configuration file.
     ///
-    /// Overrides the default location (~/.config/scope/config.yaml).
+    /// Overrides the default location (~/.scope-bca/config.yaml).
     #[arg(long, global = true, value_name = "PATH")]
     pub config: Option<PathBuf>,
 

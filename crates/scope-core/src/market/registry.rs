@@ -1,7 +1,7 @@
 //! Venue registry: loads and manages venue descriptors.
 //!
 //! Built-in descriptors are embedded at compile time via `include_str!`.
-//! User descriptors in `~/.config/scope/venues/*.yaml` override built-in
+//! User descriptors in `~/.scope-bca/venues/*.yaml` override built-in
 //! venues with the same `id`.
 
 use crate::error::{Result, ScopeError};
@@ -34,7 +34,7 @@ const BUILT_IN_VENUES: &[(&str, &str)] = &[
 /// Registry of all available venue descriptors (built-in + user-defined).
 ///
 /// Built-in venues are compiled into the binary. User venues in
-/// `~/.config/scope/venues/*.yaml` can override or extend them.
+/// `~/.scope-bca/venues/*.yaml` can override or extend them.
 #[derive(Debug, Clone)]
 pub struct VenueRegistry {
     venues: HashMap<String, VenueDescriptor>,
@@ -137,11 +137,9 @@ impl VenueRegistry {
         closest(input, self.list())
     }
 
-    /// Path to the user venues directory (`~/.config/scope/venues/`).
+    /// Path to the user venues directory (`~/.scope-bca/venues/`).
     pub fn user_venues_dir() -> PathBuf {
-        crate::paths::home_dir()
-            .map(|h| h.join(".config").join("scope").join("venues"))
-            .unwrap_or_else(|| PathBuf::from(".config").join("scope").join("venues"))
+        crate::paths::venues_dir()
     }
 
     /// Create an ExchangeClient for the given venue ID.

@@ -118,6 +118,19 @@ async fn main() -> Result<()> {
     // Check if this is a setup command (don't prompt for setup if already running setup)
     let is_setup_command = matches!(cli.command, Commands::Setup(_));
 
+    // Copy files from the old locations into ~/.scope-bca, once. The old
+    // files stay (spec: docs/design/2026-10-15-scope-bca-home-design.md).
+    match scope::paths::migration::migrate() {
+        Ok(report) if report.copied > 0 => note!(
+            out,
+            "Moved your scope files to {} (copied {} files; the old files are unchanged).",
+            scope::paths::home().display(),
+            report.copied
+        ),
+        Ok(_) => {}
+        Err(e) => fail(&out, e.to_string(), 1),
+    }
+
     // Load configuration
     let mut config = Config::load(cli.config.as_deref()).unwrap_or_else(|e| {
         note!(

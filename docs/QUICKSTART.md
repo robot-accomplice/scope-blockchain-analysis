@@ -335,7 +335,7 @@ scope address 0x742d... --format json | jq '.'
 
 ## Next Steps
 
-- **Configuration:** `scope setup --status` and `~/.config/scope/config.yaml`
+- **Configuration:** `scope setup --status` and `~/.scope-bca/config.yaml`
 - **Shell completion:** `scope completions zsh > ~/.zfunc/_scope`
 - **Architecture:** [docs/architecture/](architecture/README.md) for dataflow diagrams
 - **Full reference:** `scope <command> --help` for subcommand options with examples
