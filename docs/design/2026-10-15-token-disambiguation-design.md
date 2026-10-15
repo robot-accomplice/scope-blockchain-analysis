@@ -60,6 +60,8 @@ The steps, in this order:
    2 or more: call the picker.
 6. After a pick: ask "Save so <SYMBOL> always means <contract> on <chain>? [y/N]". `--yes` answers no without a question. `--save` (crawl has it today) answers yes. Save means `store.add(...)`.
 
+`crawl --yes` no longer selects the first match. It only skips the save question. With `--yes`, an ambiguous symbol stops in the same way as when there is no keyboard (`AmbiguousToken`, which lists the candidates and the `--token` hint). This is a breaking change for scripts that relied on the first match (Jon, 2026-10-15). The `--yes` help text and the CHANGELOG say so.
+
 `crawl`, `monitor`, `token-health`, `insights` and `market summary|ohlc|trades` (DEX and CEX) call `resolve`. The two copies in `crawl` and `monitor` are removed.
 
 On a CEX, `market` then uses the venue symbol as before. The resolver only proves which token the symbol is.
