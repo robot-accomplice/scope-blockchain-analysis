@@ -4,4 +4,8 @@
 
 [advisories]
 # RUSTSEC-2025-0119: number_prefix is unmaintained (a warning). indicatif 0.17 pulls it in; 0.18 does not.
-ignore = ["RUSTSEC-2025-0119"]
+# RUSTSEC-2024-0449: unsafe-libyaml is unmaintained (a warning, no known
+#   vulnerability). serde_yaml pulls it in. scope parses only YAML it ships
+#   or the user's own files (config, venues, tokens, address book), never
+#   YAML from the network. Remove this when scope is off serde_yaml (#118).
+ignore = ["RUSTSEC-2025-0119", "RUSTSEC-2024-0449"]
