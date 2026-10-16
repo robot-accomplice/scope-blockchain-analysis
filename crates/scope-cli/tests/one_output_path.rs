@@ -103,14 +103,14 @@ const ALLOWED: &[Allowed] = &[
     ),
     allow(
         "web/main.rs",
-        "main",
+        "run",
         "io::stdin()",
         1,
         "asks whether stdin is a terminal before the TUI starts; reads nothing",
     ),
     allow(
         "web/main.rs",
-        "main",
+        "run",
         "stdout()",
         1,
         "asks whether stdout is a terminal before the TUI starts; writes nothing",

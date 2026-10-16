@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - One token resolver for every command that takes a symbol: it lists the candidates and asks, saves the choice on request, takes `--token <contract>`, checks saved choices against a CEX venue's coin list, and records each lookup in `state/resolutions.jsonl`.
 - `--duration forever` (or `inf`) runs a repeating command until `Esc` or `Ctrl-C`. (#96)
 
+### Fixed
+- On Windows, a debug build of `scope` no longer overflows its stack on commands such as `completions` and `venues list`: the CLI runs on a thread with an 8 MB stack on every platform.
+- The tests and the TUI harness run on Windows, and CI checks Windows (clippy and tests).
+
 ## [0.7.0] - 2026-10-14
 
 ### Changed (breaking)

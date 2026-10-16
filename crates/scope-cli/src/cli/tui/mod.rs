@@ -88,8 +88,10 @@ pub struct TuiExit {
     pub code: i32,
 }
 
-/// A process signal the TUI listens for.
+/// A process signal the TUI listens for. Off Unix only Ctrl-C (`Int`)
+/// arrives; the other variants stay so one match covers every platform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) enum Signal {
     Term,
     Hup,
@@ -1818,7 +1820,9 @@ mod tests {
         let file = dir.path().join("one.json");
         let mut events = script(&[
             "venues list --format json",
-            &format!("save {}", file.display()),
+            // Quoted: the line splits by shell rules, where `\` in a
+            // Windows path is an escape.
+            &format!("save '{}'", file.display()),
         ]);
         events.push(ctrl_y_event());
         let (res, state, host, _) = drive(events).await;
@@ -1844,7 +1848,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("two.json");
         std::fs::write(&file, "old").unwrap();
-        let save = format!("save {}", file.display());
+        // Quoted, as above.
+        let save = format!("save '{}'", file.display());
         let journal = Journal::at(dir.path().join("h"), dir.path().join("e.jsonl"));
         let (res, state, _, _) = drive_with(
             journal,

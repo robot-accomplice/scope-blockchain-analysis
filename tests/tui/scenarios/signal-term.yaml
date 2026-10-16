@@ -1,5 +1,7 @@
 name: SIGTERM restores the terminal and records the signal
 tiers: [offline]
+# Signals do not exist on Windows.
+unix_only: true
 steps:
   - type: "ctx"
   - key: Enter

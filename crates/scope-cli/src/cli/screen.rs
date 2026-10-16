@@ -175,9 +175,11 @@ mod tests {
                 )
                 .unwrap();
             assert!(out.starts_with(ALT_SCREEN_AND_PASTE), "{out:?}");
+            // On Windows crossterm turns the mouse on through the console
+            // API, so no bytes show it.
             assert_eq!(
                 out.ends_with(MOUSE_ON),
-                mouse == Mouse::Capture,
+                mouse == Mouse::Capture && !cfg!(windows),
                 "mouse capture only for the monitor"
             );
             screen.give_back(&mut Vec::new(), || {});

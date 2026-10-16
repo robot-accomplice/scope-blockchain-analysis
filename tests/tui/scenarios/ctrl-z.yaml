@@ -1,5 +1,7 @@
 name: Ctrl-Z and SIGTSTP stop the TUI; SIGCONT redraws it with the draft
 tiers: [offline]
+# Ctrl-Z stops the process with SIGTSTP, which Windows has not.
+unix_only: true
 steps:
   - type: "draf"
   - wait_for: { text: "draf" }

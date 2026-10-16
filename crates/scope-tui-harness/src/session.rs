@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 const READ_CHUNK: usize = 8192;
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 const RECV_SLICE: Duration = Duration::from_millis(50);
+/// A terminal's cursor-position query (DSR 6), which the harness answers.
+const CURSOR_QUERY: &[u8] = b"\x1b[6n";
 
 pub struct StartOpts {
     pub binary: PathBuf,
@@ -31,11 +33,16 @@ pub struct Session {
     status: Option<i32>,
 }
 
-/// Where scope keeps its TUI journal under a given HOME: the binary runs
-/// with `HOME` set and no `SCOPE_BCA_HOME`, so its home is
-/// `<HOME>/.scope-bca` (docs/design/2026-10-15-scope-bca-home-design.md).
+/// The scope home under a given HOME, `<HOME>/.scope-bca`
+/// (docs/design/2026-10-15-scope-bca-home-design.md). The child gets it
+/// as `SCOPE_BCA_HOME`, so it is the same on every platform.
+pub fn scope_home(home: &Path) -> PathBuf {
+    home.join(".scope-bca")
+}
+
+/// Where scope keeps its TUI journal under a given HOME.
 pub fn state_dir(home: &Path) -> PathBuf {
-    home.join(".scope-bca").join("state")
+    scope_home(home).join("state")
 }
 
 fn size(cols: u16, rows: u16) -> PtySize {
@@ -55,6 +62,21 @@ impl Session {
         cmd.env_clear();
         cmd.env("PATH", std::env::var("PATH").unwrap_or_default());
         cmd.env("HOME", &o.home);
+        // Windows finds the user's home by API, not by HOME, so the temp
+        // HOME alone does not keep scope out of the real one.
+        cmd.env("SCOPE_BCA_HOME", scope_home(&o.home));
+        #[cfg(windows)]
+        {
+            // A Windows process needs these to start (sockets, temp files).
+            for k in ["SystemRoot", "windir", "SystemDrive", "PATHEXT", "ComSpec"] {
+                if let Some(v) = std::env::var_os(k) {
+                    cmd.env(k, v);
+                }
+            }
+            cmd.env("USERPROFILE", &o.home);
+            cmd.env("TEMP", &o.home);
+            cmd.env("TMP", &o.home);
+        }
         cmd.env("TZ", "UTC");
         cmd.env("LANG", "C.UTF-8");
         cmd.env("TERM", "xterm-256color");
@@ -136,8 +158,12 @@ impl Session {
             let left = until.saturating_duration_since(Instant::now());
             match self.rx.recv_timeout(left.min(RECV_SLICE)) {
                 Ok(chunk) => {
+                    // A query may span two chunks: look from a little
+                    // before the new bytes.
+                    let from = self.raw.len().saturating_sub(CURSOR_QUERY.len() - 1);
                     self.parser.process(&chunk);
                     self.raw.extend_from_slice(&chunk);
+                    self.answer_cursor_queries(from)?;
                     if Instant::now() >= until {
                         return Ok(());
                     }
@@ -147,6 +173,22 @@ impl Session {
                 Err(RecvTimeoutError::Timeout) => {}
             }
         }
+    }
+
+    /// Answers each cursor-position query in `raw[from..]` as a terminal
+    /// does, with `ESC [ row ; col R`. Windows' ConPTY asks once at start
+    /// and waits for the answer before the child's output goes through.
+    fn answer_cursor_queries(&mut self, from: usize) -> Result<()> {
+        let queries = self.raw[from..]
+            .windows(CURSOR_QUERY.len())
+            .filter(|w| *w == CURSOR_QUERY)
+            .count();
+        for _ in 0..queries {
+            let (row, col) = self.parser.screen().cursor_position();
+            let reply = format!("\x1b[{};{}R", row + 1, col + 1);
+            self.send(reply.as_bytes())?;
+        }
+        Ok(())
     }
 
     pub fn screen(&self) -> String {

@@ -22,7 +22,9 @@
 use crate::cli::output::Output;
 use scope::error::ScopeError;
 use std::io::{self, BufRead};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+#[cfg(any(unix, test))]
+use std::sync::atomic::Ordering;
 
 /// Set when a signal cancels the suspend-mode command. A prompt read that
 /// sees it stops with [`io::ErrorKind::Interrupted`]. The TUI clears it
@@ -35,6 +37,7 @@ pub(crate) static CANCEL: AtomicBool = AtomicBool::new(false);
 const POLL_INTERVAL_MS: libc::c_int = 100;
 
 /// The error a cancelled read returns.
+#[cfg(unix)]
 fn cancelled() -> io::Error {
     io::Error::new(io::ErrorKind::Interrupted, "cancelled")
 }
