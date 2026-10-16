@@ -322,7 +322,11 @@ fn parse_duration(s: &str) -> Result<u64> {
 }
 
 /// Builds markdown report content for a market summary.
-fn market_summary_to_markdown(summary: &MarketSummary, venue: &str, pair: &str) -> String {
+pub(crate) fn market_summary_to_markdown(
+    summary: &MarketSummary,
+    venue: &str,
+    pair: &str,
+) -> String {
     let mut md = format!(
         "# Market Health Report: {}  \n\
         **Generated:** {}  \n\n",

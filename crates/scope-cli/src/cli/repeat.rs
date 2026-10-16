@@ -90,7 +90,12 @@ where
     F: FnMut(u64) -> Fut,
     Fut: Future<Output = Result<RunOutput<T>>>,
 {
-    let columns = series::csv_columns(metrics).map_err(|e| ScopeError::Other(e.to_string()))?;
+    // The CSV columns, only for a CSV: a caller without one may pass an
+    // empty table (a watchlist writes its own trail).
+    let columns = match csv {
+        Some(_) => series::csv_columns(metrics).map_err(|e| ScopeError::Other(e.to_string()))?,
+        None => Vec::new(),
+    };
     if let Some(path) = csv {
         std::fs::write(path, series::csv_header(&columns))
             .map_err(|e| ScopeError::io_context(e, format!("cannot write {}", path.display())))?;
