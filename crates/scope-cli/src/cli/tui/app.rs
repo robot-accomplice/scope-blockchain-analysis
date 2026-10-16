@@ -66,6 +66,17 @@ pub enum Overlay {
     Search(SearchState),
     /// The Ctrl-R search of the history.
     HistorySearch(HistorySearchState),
+    /// A question a running command asks (which token a symbol means).
+    Choice(ChoiceState),
+}
+
+/// The open question from a running command: a list to choose from.
+pub struct ChoiceState {
+    prompt: String,
+    options: Vec<String>,
+    selected: usize,
+    /// Where the answer goes; `None` once it is sent.
+    reply: Option<tokio::sync::oneshot::Sender<Option<usize>>>,
 }
 
 /// What Esc does in the current state.
@@ -73,6 +84,8 @@ pub enum Overlay {
 enum EscAction {
     ClosePalette,
     CloseMenu,
+    /// Answers the open question with "cancelled".
+    AnswerChoice,
     CloseSearch,
     CloseHistorySearch,
     /// Cancels the running command.
@@ -88,6 +101,7 @@ impl EscAction {
         match self {
             Self::ClosePalette => Some("Esc closes palette"),
             Self::CloseMenu => Some("Esc closes menu"),
+            Self::AnswerChoice => Some("↑↓ Enter chooses · Esc cancels"),
             Self::CloseSearch => Some("Esc closes search"),
             Self::CloseHistorySearch => Some("Esc closes history search"),
             Self::Cancel => Some("Esc cancels"),
@@ -307,6 +321,8 @@ pub struct TuiState {
     vocab: Vocab,
     /// The open completion menu, palette or search, if any.
     pub overlay: Option<Overlay>,
+    /// The slot through which a pane command asks a question.
+    pub(crate) asker: crate::cli::output::Asker,
     /// The view must move to the current search match at the next draw,
     /// which knows the fitted rows.
     reveal: Cell<bool>,
@@ -344,6 +360,7 @@ impl TuiState {
             journal,
             vocab,
             overlay: None,
+            asker: crate::cli::output::Asker::default(),
             reveal: Cell::new(false),
             search_width: Cell::new(0),
         }
@@ -365,6 +382,22 @@ impl TuiState {
         // every mode and keeps the draft and any overlay.
         if ctrl && key.code == KeyCode::Char('z') {
             return Action::Suspend;
+        }
+        // An open question takes every key until it is answered.
+        if let Some(Overlay::Choice(ch)) = &mut self.overlay {
+            let n = ch.options.len().max(1);
+            match key.code {
+                KeyCode::Down | KeyCode::Tab => ch.selected = (ch.selected + 1) % n,
+                KeyCode::Up | KeyCode::BackTab => ch.selected = (ch.selected + n - 1) % n,
+                KeyCode::Enter => {
+                    let pick = ch.selected;
+                    self.answer_choice(Some(pick));
+                }
+                KeyCode::Esc => self.answer_choice(None),
+                KeyCode::Char('c') if ctrl => return Action::Cancel,
+                _ => {}
+            }
+            return Action::None;
         }
         // A finished repeating view stays until the next key. That key
         // leaves it and then does its normal job, so typing goes on.
@@ -1307,6 +1340,8 @@ impl TuiState {
     /// Starts a pane command. Returns the output its handler must write to.
     pub fn start(&mut self, input: &str, inv: &Invocation) -> Output {
         let (out, captured) = Output::capture_merged();
+        // A question the command asks shows as a list in the TUI.
+        let out = out.with_asker(self.asker.clone());
         let diag = scope::diag::redirect(captured.out_sink());
         self.failed = false;
         self.last_series = None;
@@ -1326,7 +1361,39 @@ impl TuiState {
     /// Ends the pane command: moves its output into the scrollback, shows
     /// the error if it failed, and logs the event.
     pub fn finish(&mut self, ending: Ending) {
+        // The command is gone: so is the question it asked.
+        if matches!(self.overlay, Some(Overlay::Choice(_))) {
+            self.overlay = None;
+        }
+        self.asker.lock().unwrap_or_else(|e| e.into_inner()).take();
         self.finish_with(ending);
+    }
+
+    /// Opens the question a running command put in the ask slot, when no
+    /// question is open.
+    pub fn poll_ask(&mut self) {
+        if matches!(self.overlay, Some(Overlay::Choice(_))) {
+            return;
+        }
+        let ask = self.asker.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(ask) = ask {
+            self.overlay = Some(Overlay::Choice(ChoiceState {
+                prompt: ask.prompt,
+                options: ask.options,
+                selected: 0,
+                reply: Some(ask.reply),
+            }));
+        }
+    }
+
+    /// Sends `answer` to the command that asked and closes the list.
+    fn answer_choice(&mut self, answer: Option<usize>) {
+        if let Some(Overlay::Choice(mut ch)) = self.overlay.take()
+            && let Some(reply) = ch.reply.take()
+        {
+            // The command may be gone already; then nobody waits.
+            let _ = reply.send(answer);
+        }
     }
 
     /// `finish`. Every footer carries its glyph or words, and its style
@@ -1679,6 +1746,44 @@ impl TuiState {
             f.render_widget(Paragraph::new(lines).block(Block::bordered()), area);
         }
 
+        if let Some(Overlay::Choice(ch)) = &self.overlay {
+            let frame = f.area();
+            let rows = ch.options.len().min(MENU_ROWS).max(1);
+            let first = ch.selected.saturating_sub(rows - 1);
+            let height = (rows as u16 + 2).min(input.y);
+            // Each row is "NN. option"; the borders add two columns.
+            const NUMBER_COLS: usize = 4;
+            let widest = ch
+                .options
+                .iter()
+                .map(|o| UnicodeWidthStr::width(o.as_str()) + NUMBER_COLS)
+                .chain([UnicodeWidthStr::width(ch.prompt.as_str())])
+                .max()
+                .unwrap_or(0) as u16;
+            let area = ratatui::layout::Rect {
+                x: input.x,
+                y: input.y.saturating_sub(height),
+                width: (widest + 2).min(frame.width.saturating_sub(input.x)),
+                height,
+            };
+            let shown = ch.options.iter().enumerate().skip(first).take(rows);
+            let lines: Vec<Line> = shown
+                .map(|(i, o)| {
+                    let style = if i == ch.selected {
+                        SELECTED
+                    } else {
+                        Style::new()
+                    };
+                    Line::styled(format!("{:>2}. {o}", i + 1), style)
+                })
+                .collect();
+            f.render_widget(ratatui::widgets::Clear, area);
+            f.render_widget(
+                Paragraph::new(lines).block(Block::bordered().title(ch.prompt.as_str())),
+                area,
+            );
+        }
+
         if self.busy_hint {
             f.render_widget(
                 Paragraph::new(Line::styled(format!(" {}", BUSY_NOTE), WARN)),
@@ -1791,6 +1896,7 @@ impl TuiState {
     /// and the status bar both read it.
     fn esc_action(&self) -> EscAction {
         match (&self.overlay, &self.running) {
+            (Some(Overlay::Choice(_)), _) => EscAction::AnswerChoice,
             (Some(Overlay::Palette(_)), _) => EscAction::ClosePalette,
             (Some(Overlay::Menu(_)), _) => EscAction::CloseMenu,
             (Some(Overlay::Search(_)), _) => EscAction::CloseSearch,
@@ -1809,6 +1915,7 @@ impl TuiState {
             | EscAction::CloseMenu
             | EscAction::CloseSearch
             | EscAction::CloseHistorySearch => self.close_overlay(),
+            EscAction::AnswerChoice => self.answer_choice(None),
             EscAction::Cancel => return Action::Cancel,
             EscAction::ClearLine => {
                 let line = std::mem::take(&mut self.input);
@@ -2169,6 +2276,71 @@ mod tests {
             Journal::default(),
             Vocab::default(),
         )
+    }
+
+    fn asked(s: &mut TuiState, options: &[&str]) -> tokio::sync::oneshot::Receiver<Option<usize>> {
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        *s.asker.lock().unwrap() = Some(crate::cli::output::Ask {
+            prompt: "Choose one:".into(),
+            options: options.iter().map(|o| o.to_string()).collect(),
+            reply,
+        });
+        s.poll_ask();
+        rx
+    }
+
+    #[test]
+    fn test_the_choice_list_answers_with_the_selected_row() {
+        let mut s = state();
+        let mut rx = asked(&mut s, &["ethereum 0xA USDN", "bsc 0xB USDN"]);
+        assert!(matches!(s.overlay, Some(Overlay::Choice(_))));
+        s.handle_key(key(KeyCode::Down));
+        s.handle_key(key(KeyCode::Enter));
+        assert_eq!(rx.try_recv().unwrap(), Some(1));
+        assert!(s.overlay.is_none());
+    }
+
+    #[test]
+    fn test_escape_answers_none_and_does_not_cancel_the_command() {
+        let mut s = state();
+        let mut rx = asked(&mut s, &["a", "b"]);
+        assert!(matches!(s.handle_key(key(KeyCode::Esc)), Action::None));
+        assert_eq!(rx.try_recv().unwrap(), None);
+        assert!(s.overlay.is_none());
+    }
+
+    #[test]
+    fn test_cancelling_the_command_closes_the_choice() {
+        // Review focus 1: the command is gone, so is its receiver.
+        let mut s = state();
+        let rx = asked(&mut s, &["a", "b"]);
+        drop(rx);
+        s.finish(Ending::Cancelled);
+        assert!(s.overlay.is_none());
+        assert!(s.asker.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_a_long_choice_scrolls_with_the_selection() {
+        // Review focus 2: 20 options; the 15th must be on screen.
+        let mut s = state();
+        let options: Vec<String> = (1..=20).map(|i| format!("chain{i} 0x{i} T")).collect();
+        let refs: Vec<&str> = options.iter().map(String::as_str).collect();
+        let _rx = asked(&mut s, &refs);
+        for _ in 0..14 {
+            s.handle_key(key(KeyCode::Down));
+        }
+        let text = screen(&s, 100, 30);
+        assert!(text.contains("chain15 0x15 T"), "{text}");
+        assert!(text.contains("Choose one:"), "{text}");
+    }
+
+    #[test]
+    fn test_the_choice_draws_in_a_tiny_terminal() {
+        // Review focus 3.
+        let mut s = state();
+        let _rx = asked(&mut s, &["a", "b", "c"]);
+        let _ = screen(&s, 20, 6);
     }
 
     fn type_str(s: &mut TuiState, text: &str) {

@@ -424,6 +424,9 @@ async fn event_loop<H: Host>(
 
     loop {
         drain_into(&idle_buf, state);
+        // A question from the running command opens as a list. The live
+        // tick wakes the loop while a command runs, so it shows within one.
+        state.poll_ask();
         host.terminal()
             .draw(|f| {
                 state.render(f);
