@@ -180,6 +180,18 @@ fn exited(sess: &mut Session) -> Result<()> {
     }
 }
 
+/// The bytes a `type` step sends. A line feed ends a line at a cooked
+/// prompt: the unix pty has no ICRNL, so the scenarios type `\n`. ConPTY
+/// turns an input LF into Ctrl+J, which does not end a console read; a
+/// console line ends with Enter, a CR.
+fn typed_bytes(text: &str) -> std::borrow::Cow<'_, str> {
+    if cfg!(windows) {
+        text.replace('\n', "\r").into()
+    } else {
+        text.into()
+    }
+}
+
 /// Sends a named signal to the scope process.
 #[cfg(unix)]
 fn send_signal(sess: &Session, name: &str) -> Result<()> {
@@ -217,7 +229,7 @@ fn run_step(
     match step {
         Step::Type(text) => {
             exited(sess)?;
-            sess.send(text.as_bytes())?;
+            sess.send(typed_bytes(text).as_bytes())?;
             sess.pump(SETTLE)?;
         }
         Step::Key(k) => {

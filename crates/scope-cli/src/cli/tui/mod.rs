@@ -242,8 +242,22 @@ fn signal_stream() -> Result<BoxStream<'static, Signal>> {
     Ok(futures::stream::select_all(streams).boxed())
 }
 
-/// No signal handling off unix.
-#[cfg(not(unix))]
+/// Ctrl-C at the console, as INT. The TUI's raw mode reads Ctrl-C as a
+/// key, so this fires only while a suspend-mode command has the cooked
+/// console. Installing the handler replaces the default, which ends the
+/// process.
+#[cfg(windows)]
+fn signal_stream() -> Result<BoxStream<'static, Signal>> {
+    let mut handler = tokio::signal::windows::ctrl_c()
+        .map_err(|e| ScopeError::io_context(e, "cannot install the Ctrl-C handler"))?;
+    Ok(futures::stream::poll_fn(move |cx| {
+        handler.poll_recv(cx).map(|got| got.map(|()| Signal::Int))
+    })
+    .boxed())
+}
+
+/// No signal handling off unix and Windows.
+#[cfg(not(any(unix, windows)))]
 fn signal_stream() -> Result<BoxStream<'static, Signal>> {
     Ok(futures::stream::pending().boxed())
 }

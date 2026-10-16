@@ -99,7 +99,14 @@ const ALLOWED: &[Allowed] = &[
         "stdin",
         "io::stdin()",
         1,
-        "the prompt input off unix, where no cancellable reader exists",
+        "the prompt input off unix and Windows, where no cancellable reader exists",
+    ),
+    allow(
+        "prompt.rs",
+        "new",
+        "io::stdin()",
+        1,
+        "the Windows prompt input when stdin is not a console",
     ),
     allow(
         "web/main.rs",

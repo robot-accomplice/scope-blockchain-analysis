@@ -136,7 +136,7 @@ pub fn plan(
     config: &Config,
     out: &Output,
 ) -> io::Result<Plan> {
-    let Some(words) = shlex::split(line) else {
+    let Some(words) = split_line(line) else {
         errln!(out, "Unbalanced quotes in: {}", line)?;
         return Ok(Plan::Done);
     };
@@ -681,6 +681,46 @@ const SESSION_ALIASES: &[(&str, &str)] = &[
 
 /// The `SESSION_COMMANDS` name for a typed word (any case), or the word
 /// itself when it is not an alias.
+/// Splits a line of input into words; `None` when a quote is not closed.
+///
+/// On unix the rules are the shell's (shlex). On Windows a backslash is
+/// a path separator, so `save C:\Users\me\out.json` keeps its path; see
+/// [`split_backslash_literal`].
+pub(crate) fn split_line(line: &str) -> Option<Vec<String>> {
+    if cfg!(windows) {
+        split_backslash_literal(line)
+    } else {
+        shlex::split(line)
+    }
+}
+
+/// Splits `line` at whitespace outside quotes. Single and double quotes
+/// group words and are removed; a backslash is an ordinary character, so
+/// a quote cannot be escaped (quote it with the other kind). `None` when a
+/// quote is not closed.
+fn split_backslash_literal(line: &str) -> Option<Vec<String>> {
+    let mut words = Vec::new();
+    let mut word: Option<String> = None;
+    let mut quote: Option<char> = None;
+    for c in line.chars() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => word.get_or_insert_default().push(c),
+            None if c == '"' || c == '\'' => {
+                quote = Some(c);
+                word.get_or_insert_default();
+            }
+            None if c.is_whitespace() => words.extend(word.take()),
+            None => word.get_or_insert_default().push(c),
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    words.extend(word);
+    Some(words)
+}
+
 pub(crate) fn session_command_name(word: &str) -> String {
     let word = word.to_lowercase();
     SESSION_ALIASES
@@ -784,6 +824,33 @@ mod tests {
 
     const ADDR: &str = "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2";
     const TX: &str = "0xabc123def456789012345678901234567890123456789012345678901234abcd";
+
+    #[test]
+    fn test_backslash_literal_split_keeps_windows_paths() {
+        let split = |s: &str| split_backslash_literal(s).unwrap();
+        assert_eq!(
+            split(r"save C:\Users\x\f.json"),
+            ["save", r"C:\Users\x\f.json"]
+        );
+        assert_eq!(
+            split(r#"save "C:\My Files\f.json""#),
+            ["save", r"C:\My Files\f.json"]
+        );
+        assert_eq!(split(r"a 'b c'd  e"), ["a", "b cd", "e"]);
+        assert_eq!(split(r#"x "" y"#), ["x", "", "y"]);
+        assert_eq!(split("   "), Vec::<String>::new());
+        assert_eq!(split_backslash_literal(r#"save "C:\x"#), None);
+    }
+
+    #[test]
+    fn test_split_line_uses_the_platform_rules() {
+        let words = split_line(r"save C:\x\f.json").unwrap();
+        if cfg!(windows) {
+            assert_eq!(words, ["save", r"C:\x\f.json"]);
+        } else {
+            assert_eq!(words, ["save", "C:xf.json"]);
+        }
+    }
 
     fn plan_line(line: &str, ctx: &mut SessionContext) -> (Plan, crate::cli::output::Captured) {
         let (o, cap) = Output::capture();

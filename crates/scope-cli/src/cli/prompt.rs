@@ -10,6 +10,12 @@
 //! input in short steps and checks `CANCEL` between them. It reads one
 //! byte at a time, so it never takes bytes after the newline.
 //!
+//! On Windows the console edits the line itself and hands it over whole,
+//! so the reader calls `ReadConsoleW` and waits for the line. Ctrl-C makes
+//! that read return empty with `ERROR_OPERATION_ABORTED` (std retries
+//! then, so a `read_line` would keep waiting); the reader takes it as the
+//! cancel.
+//!
 //! Outside the TUI nothing sets `CANCEL`, and the reader acts as
 //! `read_line` does.
 //!
@@ -37,7 +43,7 @@ pub(crate) static CANCEL: AtomicBool = AtomicBool::new(false);
 const POLL_INTERVAL_MS: libc::c_int = 100;
 
 /// The error a cancelled read returns.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn cancelled() -> io::Error {
     io::Error::new(io::ErrorKind::Interrupted, "cancelled")
 }
@@ -104,10 +110,181 @@ pub(crate) fn stdin() -> PromptInput<'static> {
     PromptInput::new(libc::STDIN_FILENO, &CANCEL)
 }
 
-/// The input for a prompt: stdin. There is no cancel off unix.
-#[cfg(not(unix))]
+/// The input for a prompt: stdin, cancellable by Ctrl-C at the console.
+#[cfg(windows)]
+pub(crate) fn stdin() -> console::ConsoleInput<'static> {
+    console::ConsoleInput::new(&CANCEL)
+}
+
+/// The input for a prompt: stdin. There is no cancel off unix and Windows.
+#[cfg(not(any(unix, windows)))]
 pub(crate) fn stdin() -> io::StdinLock<'static> {
     io::stdin().lock()
+}
+
+#[cfg(windows)]
+mod console {
+    use super::cancelled;
+    use std::io::{self, BufRead, Read};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use windows_sys::Win32::Foundation::{ERROR_OPERATION_ABORTED, GetLastError, HANDLE};
+    use windows_sys::Win32::System::Console::{
+        GetConsoleMode, GetStdHandle, ReadConsoleW, STD_INPUT_HANDLE,
+    };
+
+    /// Prompt input on Windows. A console stdin is read with
+    /// `ReadConsoleW`, so Ctrl-C ends the read; any other stdin (a pipe,
+    /// a file) is read as std reads it.
+    pub(crate) struct ConsoleInput<'a> {
+        /// The console input handle; `None` when stdin is not a console.
+        console: Option<HANDLE>,
+        std: io::StdinLock<'static>,
+        cancel: &'a AtomicBool,
+        /// Bytes of a console read that the caller has not taken yet.
+        pending: Vec<u8>,
+    }
+
+    impl<'a> ConsoleInput<'a> {
+        pub(crate) fn new(cancel: &'a AtomicBool) -> Self {
+            // SAFETY: GetStdHandle takes no pointers; GetConsoleMode
+            // writes one u32 and fails on a handle that is not a console.
+            let console = unsafe {
+                let handle = GetStdHandle(STD_INPUT_HANDLE);
+                let mut mode = 0u32;
+                (GetConsoleMode(handle, &mut mode) != 0).then_some(handle)
+            };
+            Self {
+                console,
+                std: io::stdin().lock(),
+                cancel,
+                pending: Vec::new(),
+            }
+        }
+
+        /// Reads console input up to and including the end of a line into
+        /// `pending`. Leaves it empty at end of input (Ctrl-Z).
+        ///
+        /// # Errors
+        ///
+        /// `Interrupted` when Ctrl-C aborts the read or the cancel flag is
+        /// set; `InvalidData` when the input is not valid UTF-16; or the
+        /// read error.
+        fn read_console_line(&mut self, handle: HANDLE) -> io::Result<()> {
+            let mut line: Vec<u16> = Vec::new();
+            let mut buf = [0u16; 1024];
+            loop {
+                if self.cancel.load(Ordering::SeqCst) {
+                    return Err(cancelled());
+                }
+                let mut read = 0u32;
+                // SAFETY: the buffer is valid for `buf.len()` u16s, and
+                // ReadConsoleW writes at most that many and the count.
+                let ok = unsafe {
+                    ReadConsoleW(
+                        handle,
+                        buf.as_mut_ptr().cast(),
+                        buf.len() as u32,
+                        &mut read,
+                        std::ptr::null(),
+                    )
+                };
+                if ok == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                if read == 0 {
+                    // SAFETY: reads the calling thread's last error.
+                    if unsafe { GetLastError() } == ERROR_OPERATION_ABORTED {
+                        // Ctrl-C. The TUI's handler sets the flag too, but
+                        // maybe not yet, and run_suspended checks it.
+                        self.cancel.store(true, Ordering::SeqCst);
+                        return Err(cancelled());
+                    }
+                    break;
+                }
+                let got = &buf[..read as usize];
+                line.extend_from_slice(got);
+                // Ctrl-Z at the start of a line is end of input, as std
+                // reads it.
+                if line.first() == Some(&0x1a) {
+                    line.clear();
+                    break;
+                }
+                if got.last() == Some(&u16::from(b'\n')) {
+                    break;
+                }
+            }
+            let text = String::from_utf16(&line).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "console input was not valid UTF-16",
+                )
+            })?;
+            self.pending = text.into_bytes();
+            Ok(())
+        }
+    }
+
+    impl Read for ConsoleInput<'_> {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            let available = self.fill_buf()?;
+            let n = available.len().min(out.len());
+            out[..n].copy_from_slice(&available[..n]);
+            self.consume(n);
+            Ok(n)
+        }
+    }
+
+    impl BufRead for ConsoleInput<'_> {
+        /// A cancel returns `Other`, not `Interrupted`: the std helpers
+        /// over `fill_buf` retry on `Interrupted`, so they would never
+        /// stop.
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            let Some(handle) = self.console else {
+                return self.std.fill_buf();
+            };
+            if self.pending.is_empty() {
+                match self.read_console_line(handle) {
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {
+                        return Err(io::Error::other(e));
+                    }
+                    other => other?,
+                }
+            }
+            Ok(&self.pending)
+        }
+
+        fn consume(&mut self, amt: usize) {
+            if self.console.is_none() {
+                self.std.consume(amt);
+            } else {
+                self.pending.drain(..amt.min(self.pending.len()));
+            }
+        }
+
+        /// Reads one line, as `BufRead::read_line` does, and appends it
+        /// to `buf`. Returns the number of bytes read; 0 at end of input.
+        ///
+        /// # Errors
+        ///
+        /// `Interrupted` when Ctrl-C cancels the read; or the read error.
+        fn read_line(&mut self, buf: &mut String) -> io::Result<usize> {
+            let Some(handle) = self.console else {
+                return self.std.read_line(buf);
+            };
+            if self.pending.is_empty() {
+                self.read_console_line(handle)?;
+            }
+            let end = self
+                .pending
+                .iter()
+                .position(|&b| b == b'\n')
+                .map_or(self.pending.len(), |i| i + 1);
+            let line: Vec<u8> = self.pending.drain(..end).collect();
+            let text = String::from_utf8(line).expect("decoded from UTF-16");
+            buf.push_str(&text);
+            Ok(text.len())
+        }
+    }
 }
 
 /// A line reader over a file descriptor that stops when `cancel` is set.
