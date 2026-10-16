@@ -22,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--duration forever` (or `inf`) runs a repeating command until `Esc` or `Ctrl-C`. (#96)
 
 ### Fixed
+- `--token <address>` without `--chain` takes the chain from the address format, as a positional address does. (#108)
+- A saved native coin (a CEX pick with no contract) no longer shows as an empty contract ("your saved token is , but …"); messages say "its native coin". (#108)
+- A venue's `AVAXC` network is Avalanche, so `--chain avalanche` finds a token saved from it. (#108)
+- `scope web --stop` also stops a daemon that 0.7.0 or older started (its PID file is in `~/.config/scope/data`). (#106)
+- A leading `~` in `address_book.data_dir` is the home folder; before, scope made a folder named `~`. (#106)
 - On Windows, a debug build of `scope` no longer overflows its stack on commands such as `completions` and `venues list`: the CLI runs on a thread with an 8 MB stack on every platform.
 - The tests and the TUI harness run on Windows, and CI checks Windows (clippy, tests and the offline TUI scenarios).
 - On Windows, `setup --status` finds the `ghola` binary on the PATH. It asked `which`, which Windows lacks, so it said "not found" in a normal PowerShell.

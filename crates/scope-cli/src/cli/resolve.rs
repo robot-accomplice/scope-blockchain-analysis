@@ -264,13 +264,18 @@ impl Picker for TerminalPicker<'_> {
     }
 
     async fn confirm(&self, question: &str) -> Result<bool> {
-        let mut input = crate::cli::prompt::stdin();
-        let answer = crate::cli::prompt::ask(&mut input, self.out, question)?;
-        Ok(matches!(
-            answer.trim().to_ascii_lowercase().as_str(),
-            "y" | "yes"
-        ))
+        confirm_from(&mut crate::cli::prompt::stdin(), self.out, question)
     }
+}
+
+/// Asks `question` and reads the answer from `reader`: yes for `y` or
+/// `yes` in any case, no for anything else.
+fn confirm_from(reader: &mut impl std::io::BufRead, out: &Output, question: &str) -> Result<bool> {
+    let answer = crate::cli::prompt::ask(reader, out, question)?;
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
 }
 
 /// Asks in the TUI: puts the question in the pane's ask slot and waits for
@@ -411,10 +416,16 @@ async fn steps(
     seen: &mut Vec<Candidate>,
 ) -> Result<Resolved> {
     let symbol = input.trim().to_uppercase();
+    // With no chain set, an address names its chain where its format
+    // does, for `--token` as for a positional address (#108).
     let direct = |address: &str, source: Source| Resolved {
         symbol: symbol.clone(),
         name: symbol.clone(),
-        chain: ctx.chain.clone().unwrap_or_default(),
+        chain: ctx.chain.clone().unwrap_or_else(|| {
+            scope::chains::infer_chain_from_address(address)
+                .unwrap_or_default()
+                .to_string()
+        }),
         address: Some(address.to_string()),
         source,
     };
@@ -454,13 +465,14 @@ async fn steps(
             out,
             "Using your saved {symbol}: {} {}",
             saved.chain,
-            saved.address
+            binding_label(&saved)
         );
+        let address = binding_contract(&saved).map(str::to_string);
         return Ok(Resolved {
             symbol,
             name: saved.name,
             chain: saved.chain,
-            address: Some(saved.address),
+            address,
             source: Source::Binding,
         });
     }
@@ -513,7 +525,7 @@ async fn steps(
     };
     // 6. the save question
     let chain = chain_for_network(&chosen.chain);
-    let contract = chosen.address.as_deref().unwrap_or("its native coin");
+    let contract = chosen.address.as_deref().unwrap_or(NATIVE_COIN);
     let save = ctx.save
         || picker
             .confirm(&format!(
@@ -544,7 +556,7 @@ fn save_choice(
             note!(
                 out,
                 "Saved: {symbol} means {} on {}.",
-                binding.address.as_deref().unwrap_or("its native coin"),
+                binding.address.as_deref().unwrap_or(NATIVE_COIN),
                 binding.chain
             );
             true
@@ -556,13 +568,27 @@ fn save_choice(
     }
 }
 
+/// A saved binding's contract. A native coin (a CEX pick with no
+/// contract) is saved with an empty address and has none (#108).
+fn binding_contract(t: &TokenInfo) -> Option<&str> {
+    (!t.address.is_empty()).then_some(t.address.as_str())
+}
+
+/// A saved binding's contract for a message, or "its native coin".
+fn binding_label(t: &TokenInfo) -> &str {
+    binding_contract(t).unwrap_or(NATIVE_COIN)
+}
+
+/// How a message names a token with no contract.
+const NATIVE_COIN: &str = "its native coin";
+
 /// A saved binding as a candidate, for a choice between bindings.
 fn binding_candidate(t: &TokenInfo) -> Candidate {
     Candidate {
         symbol: t.symbol.clone(),
         name: t.name.clone(),
         chain: t.chain.clone(),
-        address: Some(t.address.clone()),
+        address: binding_contract(t).map(str::to_string),
         price_usd: None,
         liquidity_usd: None,
     }
@@ -603,7 +629,7 @@ async fn check_binding(
     let mismatch = |venue_contract: String| ScopeError::TokenMismatch {
         symbol: symbol.to_string(),
         chain: saved.chain.clone(),
-        saved: saved.address.clone(),
+        saved: binding_label(saved).to_string(),
         venue_contract,
         venue: venue.to_string(),
     };
@@ -611,10 +637,12 @@ async fn check_binding(
         .iter()
         .find(|c| chain_for_network(&c.chain) == saved.chain)
     {
-        Some(c) => match &c.address {
-            Some(contract) if !same_contract(contract, &saved.address) => {
+        Some(c) => match (&c.address, binding_contract(saved)) {
+            (Some(contract), Some(saved)) if !same_contract(contract, saved) => {
                 Err(mismatch(contract.clone()))
             }
+            // A saved native coin that the venue lists as a contract.
+            (Some(contract), None) => Err(mismatch(contract.clone())),
             _ => Ok(()),
         },
         None => {
@@ -1279,6 +1307,114 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, ScopeError::TokenMismatch { .. }), "{err}");
         assert!(err.to_string().contains("TRC20"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_a_token_flag_with_no_chain_takes_the_address_chain() {
+        // #108 1: `--token <address>` infers the chain, as a positional
+        // address does.
+        let ctx = |token: &str| ResolveContext {
+            chain: None,
+            token_flag: Some(token.into()),
+            ..ctx(VenueKind::Dex)
+        };
+        for (token, chain) in [
+            ("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", "ethereum"),
+            ("TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t", "tron"),
+        ] {
+            let r = resolve(
+                "USDC",
+                &ctx(token),
+                &Fake(Ok(vec![])),
+                &Scripted::new(None, false),
+                &mut Store::default(),
+                &out(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(r.chain, chain, "{token}");
+        }
+        // A chain the user set still wins.
+        let r = resolve(
+            "USDC",
+            &ResolveContext {
+                chain: Some("base".into()),
+                ..ctx("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
+            },
+            &Fake(Ok(vec![])),
+            &Scripted::new(None, false),
+            &mut Store::default(),
+            &out(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.chain, "base");
+    }
+
+    #[tokio::test]
+    async fn test_a_saved_native_coin_has_no_contract_and_says_so() {
+        // #108 2: a native-coin binding is saved with an empty address.
+        let native = |chain: &str| Candidate {
+            address: None,
+            ..c(chain, "")
+        };
+        let (o, cap) = Output::capture();
+        let mut store = Store(vec![binding("ethereum", "", Some("weex"))]);
+        let r = resolve(
+            "USDN",
+            &ctx(cex()),
+            &Fake(Ok(vec![native("ETH")])),
+            &Scripted::new(None, false),
+            &mut store,
+            &o,
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.address, None, "no empty contract");
+        assert!(
+            cap.err().contains("ethereum its native coin"),
+            "{}",
+            cap.err()
+        );
+
+        // The venue now lists a contract on that chain: a mismatch that
+        // names the native coin, never an empty contract.
+        let mut store = Store(vec![binding("ethereum", "", Some("weex"))]);
+        let err = resolve(
+            "USDN",
+            &ctx(cex()),
+            &Fake(Ok(vec![c("ETH", "0xAAA")])),
+            &Scripted::new(None, false),
+            &mut store,
+            &out(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ScopeError::TokenMismatch { .. }), "{err}");
+        assert!(err.to_string().contains("its native coin"), "{err}");
+        assert!(!err.to_string().contains("is , "), "{err}");
+    }
+
+    #[test]
+    fn test_the_terminal_confirm_takes_y_and_yes_in_any_case() {
+        // #108 4.
+        for (answer, yes) in [
+            ("y\n", true),
+            ("yes\n", true),
+            ("Y\n", true),
+            (" YES \n", true),
+            ("\n", false),
+            ("n\n", false),
+            ("yep\n", false),
+            ("", false),
+        ] {
+            let mut reader = std::io::Cursor::new(answer.as_bytes());
+            assert_eq!(
+                confirm_from(&mut reader, &out(), "Save? [y/N]: ").unwrap(),
+                yes,
+                "{answer:?}"
+            );
+        }
     }
 
     /// A CEX venue that does not list contracts (no `assets`).

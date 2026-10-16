@@ -334,12 +334,22 @@ impl Config {
         crate::paths::data_dir()
     }
 
-    /// Returns the effective data directory, using config or default.
+    /// Returns the effective data directory, using config or default. A
+    /// leading `~` in the config is the user's home folder.
     pub fn data_dir(&self) -> PathBuf {
-        self.address_book
-            .data_dir
-            .clone()
-            .unwrap_or_else(Self::default_data_dir)
+        match &self.address_book.data_dir {
+            Some(dir) => expand_home(dir, crate::paths::user_home()),
+            None => Self::default_data_dir(),
+        }
+    }
+}
+
+/// `dir` with a leading `~` as `home`. YAML has no shell to expand it, so
+/// `data_dir: "~/x"` made a folder named `~` (#106).
+fn expand_home(dir: &Path, home: Option<PathBuf>) -> PathBuf {
+    match (dir.strip_prefix("~"), home) {
+        (Ok(rest), Some(home)) => home.join(rest),
+        _ => dir.to_path_buf(),
     }
 }
 
@@ -641,6 +651,30 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_a_leading_tilde_in_data_dir_is_the_home_folder() {
+        let home = Some(PathBuf::from("/home/u"));
+        assert_eq!(
+            expand_home(Path::new("~/.scope-bca/data"), home.clone()),
+            PathBuf::from("/home/u").join(".scope-bca/data")
+        );
+        assert_eq!(
+            expand_home(Path::new("~"), home.clone()),
+            PathBuf::from("/home/u")
+        );
+        // Only a whole `~` component, and only at the start.
+        assert_eq!(
+            expand_home(Path::new("~x/d"), home.clone()),
+            PathBuf::from("~x/d")
+        );
+        assert_eq!(
+            expand_home(Path::new("/a/~/d"), home),
+            PathBuf::from("/a/~/d")
+        );
+        // No home folder known: the path stays as written.
+        assert_eq!(expand_home(Path::new("~/d"), None), PathBuf::from("~/d"));
+    }
 
     #[test]
     fn test_default_config() {

@@ -371,16 +371,15 @@ mod tests {
         assert!(!leftover.exists(), "the temporary file is gone");
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_a_failed_copy_stops_names_the_file_and_a_rerun_finishes() {
-        // Review focus 3: a source that cannot be read.
-        use std::os::unix::fs::PermissionsExt;
+        // Review focus 3: a source that cannot be read. A folder in its
+        // place cannot be copied, also as root, where mode 000 does not
+        // stop a read (#106), and on Windows.
         let f = fixture();
         put(&f.xdg.join("config.yaml"), "chains: {}\n");
         let tokens = f.platform_data.join("scope/tokens.yaml");
-        put(&tokens, "aliases: {}\n");
-        fs::set_permissions(&tokens, fs::Permissions::from_mode(0o000)).unwrap();
+        fs::create_dir_all(&tokens).unwrap();
 
         let err = run_fixture(&f).unwrap_err().to_string();
         assert!(err.contains("tokens.yaml"), "{err}");
@@ -392,7 +391,8 @@ mod tests {
                 .any(|l| l["result"].as_str().unwrap().starts_with("failed:"))
         );
 
-        fs::set_permissions(&tokens, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::remove_dir(&tokens).unwrap();
+        put(&tokens, "aliases: {}\n");
         let report = run_fixture(&f).unwrap();
         assert_eq!(report.copied, 1, "the rerun copies only what is left");
         assert!(f.home.join("data/tokens.yaml").exists());

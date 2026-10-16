@@ -876,7 +876,7 @@ With `--venue`, the Order Book and Recent Trades panels show the venue's real bo
 
 On first run, Scope detects that no configuration file exists and offers to launch the interactive setup wizard. The wizard walks you through configuring API keys, RPC endpoints, and output preferences, then saves the result to `~/.scope-bca/config.yaml`.
 
-All scope files are in one folder, `~/.scope-bca` (set `SCOPE_BCA_HOME` to use another folder): `config.yaml`, `venues/`, `data/` (address book, token aliases) and `state/` (TUI session, history and logs). On the first start after an upgrade, scope copies your files from `~/.config/scope` and the platform data folder into it. It does not change or delete the old files. `~/.scope-bca/state/migration.jsonl` lists each file it copied. Delete the old folders when you no longer need them.
+All scope files are in one folder, `~/.scope-bca` (set `SCOPE_BCA_HOME` to use another folder): `config.yaml`, `venues/`, `data/` (address book, token aliases) and `state/` (TUI session, history and logs). On the first start after an upgrade, scope copies your files from `~/.config/scope` and the platform data folder into it. It does not change or delete the old files. `~/.scope-bca/state/migration.jsonl` lists each file it copied. Delete the old folders when you no longer need them. If your config sets `address_book.data_dir` (or `portfolio.data_dir`), scope reads the address book from that folder, so the copy in `~/.scope-bca/data` is not used. A leading `~` in `data_dir` is your home folder.
 
 You can revisit the setup wizard at any time without editing the config file directly:
 

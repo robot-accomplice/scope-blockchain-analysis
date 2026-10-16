@@ -154,6 +154,21 @@ pub fn log_file_path() -> std::path::PathBuf {
     daemon_dir().join("scope-web.log")
 }
 
+/// Where versions before `~/.scope-bca` (0.7.0 and older) kept the PID
+/// file. The migration does not copy it: a daemon those versions started
+/// is still found here (#106).
+pub fn legacy_pid_file_path() -> Option<std::path::PathBuf> {
+    scope::paths::user_home().map(|h| h.join(".config/scope/data/scope-web.pid"))
+}
+
+/// The PID file to stop: the current one, else an older version's.
+fn pid_file_to_stop(
+    current: std::path::PathBuf,
+    legacy: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    std::iter::once(current).chain(legacy).find(|p| p.exists())
+}
+
 /// Stops a running daemon by reading its PID file and sending SIGTERM.
 /// Tells the user what happened, as notes on `out`.
 ///
@@ -161,12 +176,15 @@ pub fn log_file_path() -> std::path::PathBuf {
 ///
 /// The PID file cannot be read or holds no PID.
 pub fn stop_daemon(out: &Output) -> scope::error::Result<()> {
-    let pid_path = pid_file_path();
-    if !pid_path.exists() {
-        note!(out, "No daemon PID file found at {}", pid_path.display());
+    let Some(pid_path) = pid_file_to_stop(pid_file_path(), legacy_pid_file_path()) else {
+        note!(
+            out,
+            "No daemon PID file found at {}",
+            pid_file_path().display()
+        );
         note!(out, "Is the daemon running?");
         return Ok(());
-    }
+    };
 
     let pid_str = std::fs::read_to_string(&pid_path).map_err(|e| {
         scope::error::ScopeError::io_context(e, format!("cannot read {}", pid_path.display()))
@@ -500,6 +518,37 @@ mod tests {
         let path = pid_file_path();
         assert!(path.ends_with("scope-web.pid"));
         assert!(path.parent().is_some());
+    }
+
+    #[test]
+    fn test_stop_finds_the_current_pid_file_else_the_old_one() {
+        // #106 1: a daemon that 0.7.0 started keeps its PID file in
+        // ~/.config/scope/data.
+        let d = tempfile::tempdir().unwrap();
+        let current = d.path().join("state/scope-web.pid");
+        let legacy = d.path().join(".config/scope/data/scope-web.pid");
+        assert_eq!(
+            pid_file_to_stop(current.clone(), Some(legacy.clone())),
+            None
+        );
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, "1\n").unwrap();
+        assert_eq!(
+            pid_file_to_stop(current.clone(), Some(legacy.clone())),
+            Some(legacy.clone())
+        );
+        std::fs::create_dir_all(current.parent().unwrap()).unwrap();
+        std::fs::write(&current, "2\n").unwrap();
+        assert_eq!(
+            pid_file_to_stop(current.clone(), Some(legacy)),
+            Some(current),
+            "the current file wins"
+        );
+        assert!(
+            legacy_pid_file_path()
+                .unwrap()
+                .ends_with(".config/scope/data/scope-web.pid")
+        );
     }
 
     #[test]

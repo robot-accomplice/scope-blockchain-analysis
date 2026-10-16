@@ -26,8 +26,15 @@ pub struct AssetInfo {
 /// Venue network codes that are not chain names or aliases in
 /// `chains::registry` (which already knows eth, bnb, matic, arb, op, sol,
 /// trx).
-const NETWORK_CODES: [(&str, &str); 3] =
-    [("erc20", "ethereum"), ("bep20", "bsc"), ("trc20", "tron")];
+const NETWORK_CODES: [(&str, &str); 5] = [
+    ("erc20", "ethereum"),
+    ("bep20", "bsc"),
+    ("trc20", "tron"),
+    // Avalanche's C-Chain, as venues name it (#108: a saved AVAXC binding
+    // was never found by `--chain avalanche`).
+    ("avaxc", "avalanche"),
+    ("avax-c", "avalanche"),
+];
 
 /// The scope chain for a venue's network name (`ETH`, `ERC20`, `BSC`,
 /// `TRX`, …). An unknown network is its own name in lower case.
@@ -159,6 +166,8 @@ mod tests {
             ("TRX", "tron"),
             ("TRC20", "tron"),
             ("SOL", "solana"),
+            ("AVAXC", "avalanche"),
+            ("AVAX-C", "avalanche"),
         ] {
             assert_eq!(chain_for_network(code), chain, "{code}");
         }
