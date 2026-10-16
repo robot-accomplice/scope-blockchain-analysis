@@ -39,7 +39,7 @@ anyhow = "1.0"
 # Serialization (needed by CLI modules)
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-serde_yaml = "0.9"
+serde-saphyr = "2.0.0"
 
 # Terminal UI (unified TUI and live monitor)
 ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }

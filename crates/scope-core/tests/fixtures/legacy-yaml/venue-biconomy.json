@@ -1,0 +1,98 @@
+{
+  "base_url": "https://api.biconomy.com",
+  "capabilities": {
+    "ohlc": {
+      "interval_map": {
+        "15m": "15min",
+        "1d": "day",
+        "1h": "hour",
+        "1m": "1min",
+        "30m": "30min",
+        "4h": "hour",
+        "5m": "5min"
+      },
+      "params": {
+        "size": "{limit}",
+        "symbol": "{pair}",
+        "type": "{interval}"
+      },
+      "path": "/api/v1/kline",
+      "response": {
+        "ohlc_fields": [
+          "open_time",
+          "open",
+          "high",
+          "low",
+          "close",
+          "volume"
+        ],
+        "ohlc_format": "array_of_arrays"
+      }
+    },
+    "order_book": {
+      "params": {
+        "size": "100",
+        "symbol": "{pair}"
+      },
+      "path": "/api/v1/depth",
+      "response": {
+        "asks_key": "asks",
+        "bids_key": "bids",
+        "level_format": "positional"
+      }
+    },
+    "ticker": {
+      "path": "/api/v1/tickers",
+      "response": {
+        "best_ask": "sell",
+        "best_bid": "buy",
+        "filter": {
+          "field": "symbol",
+          "value": "{pair}"
+        },
+        "high_24h": "high",
+        "items_key": "ticker",
+        "last_price": "last",
+        "low_24h": "low",
+        "volume_24h": "vol"
+      }
+    },
+    "trades": {
+      "params": {
+        "size": "{limit}",
+        "symbol": "{pair}"
+      },
+      "path": "/api/v1/trades",
+      "response": {
+        "price": "price",
+        "quantity": "amount",
+        "side": {
+          "field": "side",
+          "mapping": {
+            "buy": "buy",
+            "sell": "sell"
+          }
+        },
+        "timestamp_ms": "timestamp"
+      }
+    }
+  },
+  "error_envelope": {
+    "code_key": "code",
+    "message_key": "message",
+    "ok_codes": [
+      "0"
+    ]
+  },
+  "headers": {
+    "X-SITE-ID": "127"
+  },
+  "id": "biconomy",
+  "name": "Biconomy",
+  "rate_limit_per_sec": 10,
+  "symbol": {
+    "default_quote": "USDT",
+    "template": "{base}_{quote}"
+  },
+  "timeout_secs": 15
+}

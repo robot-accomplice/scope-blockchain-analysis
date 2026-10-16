@@ -513,8 +513,7 @@ fn run_init_impl(args: InitArgs, dest: std::path::PathBuf, out: &Output) -> Resu
 }
 
 /// Serialize a VenueDescriptor to a readable YAML string.
-/// We use serde_yaml for this since VenueDescriptor doesn't derive Serialize;
-/// instead, we manually build a representation.
+/// VenueDescriptor doesn't derive Serialize, so the YAML is built by hand.
 fn serialize_descriptor_yaml(desc: &VenueDescriptor) -> String {
     // Build a YAML-compatible representation manually
     let mut lines = Vec::new();
@@ -918,7 +917,7 @@ capabilities:
       bids_key: bids
       level_format: positional
 "#;
-        let desc: VenueDescriptor = serde_yaml::from_str(yaml).unwrap();
+        let desc: VenueDescriptor = serde_saphyr::from_str(yaml).unwrap();
         let serialized = serialize_descriptor_yaml(&desc);
         assert!(serialized.contains("roundtrip_test"));
         assert!(serialized.contains("Roundtrip Exchange"));
@@ -987,7 +986,7 @@ capabilities:
           buy: buy
           sell: sell
 "#;
-        let desc: VenueDescriptor = serde_yaml::from_str(yaml).unwrap();
+        let desc: VenueDescriptor = serde_saphyr::from_str(yaml).unwrap();
         let serialized = serialize_descriptor_yaml(&desc);
         assert!(serialized.contains("order_book:"));
         assert!(serialized.contains("ticker:"));
@@ -1018,7 +1017,7 @@ capabilities:
       bids_key: bids
       level_format: positional
 "#;
-        let desc: VenueDescriptor = serde_yaml::from_str(yaml).unwrap();
+        let desc: VenueDescriptor = serde_saphyr::from_str(yaml).unwrap();
         let serialized = serialize_descriptor_yaml(&desc);
         assert!(serialized.contains("method: POST"));
         assert!(serialized.contains("response_root"));
@@ -1050,7 +1049,7 @@ capabilities:
           buy: B
           sell: S
 "#;
-        let desc: VenueDescriptor = serde_yaml::from_str(yaml).unwrap();
+        let desc: VenueDescriptor = serde_saphyr::from_str(yaml).unwrap();
         let serialized = serialize_descriptor_yaml(&desc);
         assert!(serialized.contains("filter:"));
         assert!(serialized.contains("field:"));

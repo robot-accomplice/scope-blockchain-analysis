@@ -151,7 +151,6 @@ pub struct Scenario {
     /// (signals, Ctrl-Z, bracketed paste). Elsewhere it is skipped.
     #[serde(default)]
     pub unix_only: bool,
-    #[serde(with = "serde_yaml::with::singleton_map_recursive")]
     pub steps: Vec<Step>,
 }
 
@@ -231,7 +230,7 @@ pub fn signal_number(name: &str) -> Result<i32> {
 
 /// Parses and validates a scenario.
 pub fn parse(yaml: &str) -> Result<Scenario> {
-    let s: Scenario = serde_yaml::from_str(yaml)?;
+    let s: Scenario = serde_saphyr::from_str(yaml)?;
     if s.tiers.is_empty() {
         bail!(
             "scenario {:?} has an empty tiers list; it never runs",

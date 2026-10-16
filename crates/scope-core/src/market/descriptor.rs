@@ -567,7 +567,7 @@ capabilities:
           "true": sell
           "false": buy
 "#;
-        let desc: VenueDescriptor = serde_yaml::from_str(yaml).unwrap();
+        let desc: VenueDescriptor = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(desc.id, "binance");
         assert_eq!(desc.name, "Binance Spot");
         assert_eq!(desc.base_url, "https://api.binance.com");
@@ -621,7 +621,7 @@ capabilities:
       bids_key: bids
       level_format: positional
 "#;
-        let desc: VenueDescriptor = serde_yaml::from_str(yaml).unwrap();
+        let desc: VenueDescriptor = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(desc.symbol.case, SymbolCase::Lower);
         assert_eq!(desc.format_pair("BTC", None), "btcusdt");
         let ob = desc.capabilities.order_book.as_ref().unwrap();
@@ -655,7 +655,7 @@ capabilities:
       bids_key: bids
       level_format: positional
 "#;
-        let desc: VenueDescriptor = serde_yaml::from_str(yaml).unwrap();
+        let desc: VenueDescriptor = serde_saphyr::from_str(yaml).unwrap();
         let ob = desc.capabilities.order_book.as_ref().unwrap();
         assert_eq!(ob.method, HttpMethod::POST);
         assert!(ob.request_body.is_some());
@@ -688,7 +688,7 @@ capabilities:
       level_price_field: price
       level_size_field: size
 "#;
-        let desc: VenueDescriptor = serde_yaml::from_str(yaml).unwrap();
+        let desc: VenueDescriptor = serde_saphyr::from_str(yaml).unwrap();
         let ob = desc.capabilities.order_book.as_ref().unwrap();
         assert_eq!(ob.response.level_format, Some("object".to_string()));
         assert_eq!(ob.response.level_price_field, Some("price".to_string()));
@@ -1027,7 +1027,7 @@ capabilities:
       ohlc_format: array_of_arrays
       ohlc_fields: [open_time, open, high, low, close, volume, close_time]
 "#;
-        let desc: VenueDescriptor = serde_yaml::from_str(yaml).unwrap();
+        let desc: VenueDescriptor = serde_saphyr::from_str(yaml).unwrap();
         assert!(desc.has_ohlc());
         assert!(desc.capability_names().contains(&"ohlc"));
         let ohlc = desc.capabilities.ohlc.as_ref().unwrap();
@@ -1068,7 +1068,7 @@ capabilities:
       ohlc_format: array_of_arrays
       ohlc_fields: [open_time, open, high, low, close, volume]
 "#;
-        let desc: VenueDescriptor = serde_yaml::from_str(yaml).unwrap();
+        let desc: VenueDescriptor = serde_saphyr::from_str(yaml).unwrap();
         assert!(desc.has_ohlc());
         let ohlc = desc.capabilities.ohlc.as_ref().unwrap();
         assert_eq!(ohlc.interval_map.len(), 7);
@@ -1086,7 +1086,7 @@ capabilities:
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("venues/biconomy.yaml"),
         )
         .expect("biconomy.yaml should exist");
-        let desc: VenueDescriptor = serde_yaml::from_str(&yaml).unwrap();
+        let desc: VenueDescriptor = serde_saphyr::from_str(&yaml).unwrap();
         assert_eq!(desc.id, "biconomy");
         assert_eq!(desc.name, "Biconomy");
         assert!(desc.has_order_book());
@@ -1151,7 +1151,7 @@ capabilities:
       price: p
       quantity: q
 "#;
-        let desc: VenueDescriptor = serde_yaml::from_str(yaml).unwrap();
+        let desc: VenueDescriptor = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(desc.id, "test_venue");
         assert_eq!(desc.name, "Test Venue Full");
         assert_eq!(desc.base_url, "https://api.test.com");
@@ -1210,7 +1210,7 @@ capabilities:
             ),
         ];
         for (yaml, error_reply, ok_reply, expected) in cases {
-            let desc: VenueDescriptor = serde_yaml::from_str(yaml).unwrap();
+            let desc: VenueDescriptor = serde_saphyr::from_str(yaml).unwrap();
             let env = desc.error_envelope.as_ref().expect("envelope");
             let error: serde_json::Value = serde_json::from_str(error_reply).unwrap();
             let ok: serde_json::Value = serde_json::from_str(ok_reply).unwrap();

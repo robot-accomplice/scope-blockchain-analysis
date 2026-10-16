@@ -1577,7 +1577,7 @@ mod tests {
             .await;
         let mut desc = make_http_test_descriptor(&server.url());
         desc.capabilities.assets =
-            Some(serde_yaml::from_str("path: /api/v3/coins\nresponse: {}\n").unwrap());
+            Some(serde_saphyr::from_str("path: /api/v3/coins\nresponse: {}\n").unwrap());
         let client =
             ConfigurableExchangeClient::with_http(desc.clone(), crate::http::test_transport());
         let assets = client.fetch_assets().await.unwrap();

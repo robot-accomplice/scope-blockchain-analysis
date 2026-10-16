@@ -1,0 +1,28 @@
+aliases:
+  usdn:
+    ethereum:
+      address: ''
+      symbol: USDN
+      name: USDN
+      chain: ethereum
+      last_used: null
+    bsc:
+      address: '0xB'
+      symbol: USDN
+      name: USDN
+      chain: bsc
+      last_used: 1760000000
+      venue: weex
+  usdc:
+    solana:
+      address: EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
+      symbol: USDC
+      name: USD Coin
+      chain: solana
+      last_used: null
+recent:
+- address: '0xB'
+  symbol: USDN
+  name: USDN
+  chain: bsc
+  last_used: 1760000001
