@@ -101,14 +101,23 @@ pub(crate) fn legacy_data_dir() -> Option<PathBuf> {
 }
 
 /// The test sandbox: `SCOPE_TEST_HOME` when set, else a directory for this
-/// process under the system temp directory.
+/// process under the system temp directory, emptied on first use.
 #[cfg(any(test, feature = "test-support"))]
 fn sandbox() -> PathBuf {
-    std::env::var_os(TEST_HOME_VAR)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::temp_dir().join(format!("scope-test-home-{}", std::process::id()))
+    static FRESH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    if let Some(dir) = std::env::var_os(TEST_HOME_VAR) {
+        return PathBuf::from(dir);
+    }
+    FRESH
+        .get_or_init(|| {
+            let dir = std::env::temp_dir().join(format!("scope-test-home-{}", std::process::id()));
+            // Process ids are reused: a finished test process with this id
+            // may have left its files here, such as a saved token choice
+            // that made a later run's ambiguous token resolve.
+            let _ = std::fs::remove_dir_all(&dir);
+            dir
         })
+        .clone()
 }
 
 #[cfg(test)]

@@ -1181,14 +1181,26 @@ mod tests {
 
     #[test]
     fn test_the_alias_file_is_a_binding_store() {
+        // This writes the test process's one tokens.yaml, which other
+        // tests read (a saved choice for their symbol settles an ambiguity
+        // they expect), so it saves a symbol no other test uses.
+        let symbol = "BINDING_STORE_TEST";
         let mut aliases = TokenAliases::default();
         let store: &mut dyn BindingStore = &mut aliases;
-        store.save(&c("bsc", "0xB"), Some("weex")).unwrap();
-        let got = store.get("usdn", Some("bsc")).unwrap();
+        let candidate = Candidate {
+            symbol: symbol.into(),
+            ..c("bsc", "0xB")
+        };
+        store.save(&candidate, Some("weex")).unwrap();
+        let got = store.get(symbol, Some("bsc")).unwrap();
         assert_eq!(
             (got.address.as_str(), got.venue.as_deref()),
             ("0xB", Some("weex"))
         );
+        let on_disk = TokenAliases::load().get(symbol, Some("bsc")).cloned();
+        aliases.remove(symbol, None);
+        let _ = TokenAliases::save(&aliases);
+        assert_eq!(on_disk.map(|t| t.address).as_deref(), Some("0xB"));
     }
 
     #[tokio::test]
