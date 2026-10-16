@@ -117,7 +117,7 @@ impl AddressBook {
         }
 
         let contents = std::fs::read_to_string(&path)?;
-        let address_book: AddressBook = serde_yaml::from_str(&contents)
+        let address_book: AddressBook = serde_saphyr::from_str(&contents)
             .map_err(|e| ScopeError::Config(crate::error::ConfigError::Parse { source: e }))?;
 
         Ok(address_book)
@@ -128,7 +128,7 @@ impl AddressBook {
         std::fs::create_dir_all(data_dir)?;
 
         let path = data_dir.join("address_book.yaml");
-        let contents = serde_yaml::to_string(self)
+        let contents = serde_saphyr::to_string(self)
             .map_err(|e| ScopeError::Export(format!("Failed to serialize address book: {}", e)))?;
 
         std::fs::write(&path, contents)?;

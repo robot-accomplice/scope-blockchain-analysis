@@ -102,7 +102,7 @@ impl TokenAliases {
     pub fn load() -> Self {
         Self::aliases_path()
             .and_then(|path| std::fs::read_to_string(&path).ok())
-            .and_then(|contents| serde_yaml::from_str(&contents).ok())
+            .and_then(|contents| serde_saphyr::from_str(&contents).ok())
             .unwrap_or_default()
     }
 
@@ -114,7 +114,7 @@ impl TokenAliases {
                     ScopeError::io_context(e, "Failed to create token aliases directory")
                 })?;
             }
-            let contents = serde_yaml::to_string(self)
+            let contents = serde_saphyr::to_string(self)
                 .map_err(|e| ScopeError::Export(format!("Failed to serialize aliases: {}", e)))?;
             std::fs::write(&path, contents)
                 .map_err(|e| ScopeError::io_context(e, "Failed to write token aliases"))?;
@@ -495,7 +495,7 @@ mod tests {
         assert_eq!(info.venue.as_deref(), Some("weex"));
         // A tokens.yaml written before this change has no `venue`.
         let old = "aliases:\n  USDN:\n    ethereum:\n      address: '0x1'\n      symbol: USDN\n      name: USDN\n      chain: ethereum\n";
-        let loaded: TokenAliases = serde_yaml::from_str(old).unwrap();
+        let loaded: TokenAliases = serde_saphyr::from_str(old).unwrap();
         assert_eq!(loaded.get("USDN", Some("ethereum")).unwrap().venue, None);
     }
 

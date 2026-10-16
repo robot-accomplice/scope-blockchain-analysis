@@ -1,0 +1,88 @@
+{
+  "base_url": "https://api.huobi.pro",
+  "capabilities": {
+    "ohlc": {
+      "params": {
+        "period": "{interval}",
+        "size": "{limit}",
+        "symbol": "{pair}"
+      },
+      "path": "/market/history/kline",
+      "response": {
+        "close": "close",
+        "high": "high",
+        "low": "low",
+        "ohlc_format": "objects",
+        "ohlc_volume": "vol",
+        "open": "open",
+        "open_time": "id"
+      },
+      "response_root": "data"
+    },
+    "order_book": {
+      "params": {
+        "symbol": "{pair}",
+        "type": "step0"
+      },
+      "path": "/market/depth",
+      "response": {
+        "asks_key": "asks",
+        "bids_key": "bids",
+        "level_format": "positional"
+      },
+      "response_root": "tick"
+    },
+    "ticker": {
+      "params": {
+        "symbol": "{pair}"
+      },
+      "path": "/market/detail/merged",
+      "response": {
+        "best_ask": "ask.0",
+        "best_bid": "bid.0",
+        "high_24h": "high",
+        "last_price": "close",
+        "low_24h": "low",
+        "quote_volume_24h": "vol",
+        "volume_24h": "amount"
+      },
+      "response_root": "tick"
+    },
+    "trades": {
+      "params": {
+        "symbol": "{pair}"
+      },
+      "path": "/market/trade",
+      "response": {
+        "id": "id",
+        "price": "price",
+        "quantity": "amount",
+        "side": {
+          "field": "direction",
+          "mapping": {
+            "buy": "buy",
+            "sell": "sell"
+          }
+        },
+        "timestamp_ms": "ts"
+      },
+      "response_root": "tick.data"
+    }
+  },
+  "error_envelope": {
+    "code_key": "status",
+    "message_key": "err-msg",
+    "ok_codes": [
+      "ok"
+    ]
+  },
+  "id": "htx",
+  "name": "HTX",
+  "rate_limit_per_sec": 10,
+  "symbol": {
+    "case": "lower",
+    "default_quote": "usdt",
+    "template": "{base}{quote}"
+  },
+  "timeout_secs": 15
+}

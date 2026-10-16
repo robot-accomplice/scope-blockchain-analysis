@@ -23,7 +23,7 @@ pub fn format_risk_report(
     match format {
         OutputFormat::Table => format_risk_table(assessment, detailed),
         OutputFormat::Json => serde_json::to_string_pretty(assessment).unwrap_or_default(),
-        OutputFormat::Yaml => serde_yaml::to_string(assessment).unwrap_or_default(),
+        OutputFormat::Yaml => serde_saphyr::to_string(assessment).unwrap_or_default(),
         OutputFormat::Markdown => format_risk_markdown(assessment, detailed),
     }
 }
@@ -426,7 +426,7 @@ mod tests {
         let assessment = create_test_assessment();
         let yaml = format_risk_report(&assessment, OutputFormat::Yaml, false);
         // Should be valid YAML that can be deserialized back
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        let parsed: serde_json::Value = serde_saphyr::from_str(&yaml).unwrap();
         assert!(parsed["address"].as_str().unwrap().starts_with("0x742d"));
     }
 

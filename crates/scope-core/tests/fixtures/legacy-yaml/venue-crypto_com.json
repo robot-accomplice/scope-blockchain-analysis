@@ -1,0 +1,96 @@
+{
+  "base_url": "https://api.crypto.com/exchange/v1",
+  "capabilities": {
+    "ohlc": {
+      "method": "POST",
+      "path": "/public/get-candlestick",
+      "request_body": {
+        "id": 1,
+        "method": "public/get-candlestick",
+        "nonce": "0",
+        "params": {
+          "instrument_name": "{pair}",
+          "timeframe": "{interval}"
+        }
+      },
+      "response": {
+        "close": "c",
+        "high": "h",
+        "low": "l",
+        "ohlc_format": "objects",
+        "ohlc_volume": "v",
+        "open": "o",
+        "open_time": "t"
+      },
+      "response_root": "result.data"
+    },
+    "order_book": {
+      "method": "POST",
+      "path": "/public/get-book",
+      "request_body": {
+        "method": "public/get-book",
+        "params": {
+          "depth": "100",
+          "instrument_name": "{pair}"
+        }
+      },
+      "response": {
+        "asks_key": "asks",
+        "bids_key": "bids",
+        "level_format": "positional"
+      },
+      "response_root": "result.data.0"
+    },
+    "ticker": {
+      "method": "POST",
+      "path": "/public/get-tickers",
+      "request_body": {
+        "method": "public/get-tickers",
+        "params": {
+          "instrument_name": "{pair}"
+        }
+      },
+      "response": {
+        "best_ask": "k",
+        "best_bid": "b",
+        "high_24h": "h",
+        "last_price": "a",
+        "low_24h": "l",
+        "volume_24h": "v"
+      },
+      "response_root": "result.data.0"
+    },
+    "trades": {
+      "method": "POST",
+      "path": "/public/get-trades",
+      "request_body": {
+        "method": "public/get-trades",
+        "params": {
+          "instrument_name": "{pair}"
+        }
+      },
+      "response": {
+        "id": "d",
+        "price": "p",
+        "quantity": "q",
+        "side": {
+          "field": "s",
+          "mapping": {
+            "BUY": "buy",
+            "SELL": "sell"
+          }
+        },
+        "timestamp_ms": "t"
+      },
+      "response_root": "result.data"
+    }
+  },
+  "id": "crypto_com",
+  "name": "Crypto.com",
+  "rate_limit_per_sec": 10,
+  "symbol": {
+    "default_quote": "USDT",
+    "template": "{base}_{quote}"
+  },
+  "timeout_secs": 15
+}

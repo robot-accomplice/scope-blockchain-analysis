@@ -2758,8 +2758,8 @@ mod tests {
             venue: None,
         };
 
-        let yaml = serde_yaml::to_string(&config).unwrap();
-        let parsed: MonitorConfig = serde_yaml::from_str(&yaml).unwrap();
+        let yaml = serde_saphyr::to_string(&config).unwrap();
+        let parsed: MonitorConfig = serde_saphyr::from_str(&yaml).unwrap();
         assert_eq!(parsed.layout, LayoutPreset::ChartFocus);
         assert_eq!(parsed.refresh_seconds, 5);
         assert!(parsed.widgets.price_chart);
@@ -2781,7 +2781,7 @@ widgets:
   metrics_panel: true
   activity_log: false
 "#;
-        let config: MonitorConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: MonitorConfig = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(config.layout, LayoutPreset::ChartFocus);
         assert_eq!(config.refresh_seconds, 15);
         assert!(!config.widgets.buy_sell_pressure);
@@ -2791,7 +2791,7 @@ widgets:
     #[test]
     fn test_monitor_config_serde_default_missing_fields() {
         let yaml = "layout: feed\n";
-        let config: MonitorConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: MonitorConfig = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(config.layout, LayoutPreset::Feed);
         assert_eq!(config.refresh_seconds, DEFAULT_REFRESH_SECS);
         assert!(config.widgets.price_chart); // defaults
@@ -3082,8 +3082,8 @@ widgets:
             whale_min_usd: Some(10_000.0),
             volume_spike_threshold_pct: Some(50.0),
         };
-        let yaml = serde_yaml::to_string(&config).unwrap();
-        let parsed: AlertConfig = serde_yaml::from_str(&yaml).unwrap();
+        let yaml = serde_saphyr::to_string(&config).unwrap();
+        let parsed: AlertConfig = serde_saphyr::from_str(&yaml).unwrap();
         assert_eq!(parsed.price_min, Some(0.5));
         assert_eq!(parsed.price_max, Some(2.0));
         assert_eq!(parsed.whale_min_usd, Some(10_000.0));
@@ -3320,7 +3320,7 @@ capabilities:
 "#,
             server.url()
         );
-        let desc: scope::market::VenueDescriptor = serde_yaml::from_str(&yaml).unwrap();
+        let desc: scope::market::VenueDescriptor = serde_saphyr::from_str(&yaml).unwrap();
         (
             server,
             scope::market::ExchangeClient::from_descriptor(&desc),
@@ -3489,7 +3489,7 @@ capabilities:
             "id: weexlike\nname: WEEX-like\nbase_url: {}\nsymbol:\n  template: \"{{base}}{{quote}}\"\n  default_quote: USDT\ncapabilities:\n  ticker:\n    path: /api/v1/ticker\n    params:\n      symbol: \"{{pair}}\"\n    response:\n      last_price: last\n      volume_24h: vol\n",
             server.url()
         );
-        let desc: scope::market::VenueDescriptor = serde_yaml::from_str(&yaml).unwrap();
+        let desc: scope::market::VenueDescriptor = serde_saphyr::from_str(&yaml).unwrap();
         let ex = scope::market::ExchangeClient::from_descriptor(&desc);
         for input in ["USDN_USDT", "USDN/USDT", "USDNUSDT"] {
             let (data, pair) = fetch_initial_data(
@@ -3600,8 +3600,8 @@ capabilities:
         let config = ExportConfig {
             path: Some("./my-exports".to_string()),
         };
-        let yaml = serde_yaml::to_string(&config).unwrap();
-        let parsed: ExportConfig = serde_yaml::from_str(&yaml).unwrap();
+        let yaml = serde_saphyr::to_string(&config).unwrap();
+        let parsed: ExportConfig = serde_saphyr::from_str(&yaml).unwrap();
         assert_eq!(parsed.path, Some("./my-exports".to_string()));
     }
 
@@ -3789,8 +3789,8 @@ capabilities:
             venue: Some("binance".to_string()),
         };
 
-        let yaml = serde_yaml::to_string(&config).unwrap();
-        let parsed: MonitorConfig = serde_yaml::from_str(&yaml).unwrap();
+        let yaml = serde_saphyr::to_string(&config).unwrap();
+        let parsed: MonitorConfig = serde_saphyr::from_str(&yaml).unwrap();
         assert_eq!(parsed.layout, LayoutPreset::Dashboard);
         assert_eq!(parsed.refresh_seconds, 10);
         assert_eq!(parsed.venue, Some("binance".to_string()));
@@ -3807,7 +3807,7 @@ capabilities:
 layout: dashboard
 refresh_seconds: 5
 "#;
-        let config: MonitorConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: MonitorConfig = serde_saphyr::from_str(yaml).unwrap();
         assert!(config.alerts.price_min.is_none());
         assert!(config.export.path.is_none());
         assert!(!config.auto_pause_on_input);
@@ -3853,17 +3853,17 @@ refresh_seconds: 5
     #[test]
     fn test_scale_mode_serde_roundtrip() {
         for mode in &[ScaleMode::Linear, ScaleMode::Log] {
-            let yaml = serde_yaml::to_string(mode).unwrap();
-            let parsed: ScaleMode = serde_yaml::from_str(&yaml).unwrap();
+            let yaml = serde_saphyr::to_string(mode).unwrap();
+            let parsed: ScaleMode = serde_saphyr::from_str(&yaml).unwrap();
             assert_eq!(&parsed, mode);
         }
     }
 
     #[test]
     fn test_scale_mode_serde_kebab_case() {
-        let parsed: ScaleMode = serde_yaml::from_str("linear").unwrap();
+        let parsed: ScaleMode = serde_saphyr::from_str("linear").unwrap();
         assert_eq!(parsed, ScaleMode::Linear);
-        let parsed: ScaleMode = serde_yaml::from_str("log").unwrap();
+        let parsed: ScaleMode = serde_saphyr::from_str("log").unwrap();
         assert_eq!(parsed, ScaleMode::Log);
     }
 
@@ -3886,19 +3886,19 @@ refresh_seconds: 5
             ColorScheme::BlueOrange,
             ColorScheme::Monochrome,
         ] {
-            let yaml = serde_yaml::to_string(scheme).unwrap();
-            let parsed: ColorScheme = serde_yaml::from_str(&yaml).unwrap();
+            let yaml = serde_saphyr::to_string(scheme).unwrap();
+            let parsed: ColorScheme = serde_saphyr::from_str(&yaml).unwrap();
             assert_eq!(&parsed, scheme);
         }
     }
 
     #[test]
     fn test_color_scheme_serde_kebab_case() {
-        let parsed: ColorScheme = serde_yaml::from_str("green-red").unwrap();
+        let parsed: ColorScheme = serde_saphyr::from_str("green-red").unwrap();
         assert_eq!(parsed, ColorScheme::GreenRed);
-        let parsed: ColorScheme = serde_yaml::from_str("blue-orange").unwrap();
+        let parsed: ColorScheme = serde_saphyr::from_str("blue-orange").unwrap();
         assert_eq!(parsed, ColorScheme::BlueOrange);
-        let parsed: ColorScheme = serde_yaml::from_str("monochrome").unwrap();
+        let parsed: ColorScheme = serde_saphyr::from_str("monochrome").unwrap();
         assert_eq!(parsed, ColorScheme::Monochrome);
     }
 
@@ -3966,21 +3966,21 @@ refresh_seconds: 5
             LayoutPreset::Feed,
             LayoutPreset::Compact,
         ] {
-            let yaml = serde_yaml::to_string(preset).unwrap();
-            let parsed: LayoutPreset = serde_yaml::from_str(&yaml).unwrap();
+            let yaml = serde_saphyr::to_string(preset).unwrap();
+            let parsed: LayoutPreset = serde_saphyr::from_str(&yaml).unwrap();
             assert_eq!(&parsed, preset);
         }
     }
 
     #[test]
     fn test_layout_preset_serde_kebab_case() {
-        let parsed: LayoutPreset = serde_yaml::from_str("dashboard").unwrap();
+        let parsed: LayoutPreset = serde_saphyr::from_str("dashboard").unwrap();
         assert_eq!(parsed, LayoutPreset::Dashboard);
-        let parsed: LayoutPreset = serde_yaml::from_str("chart-focus").unwrap();
+        let parsed: LayoutPreset = serde_saphyr::from_str("chart-focus").unwrap();
         assert_eq!(parsed, LayoutPreset::ChartFocus);
-        let parsed: LayoutPreset = serde_yaml::from_str("feed").unwrap();
+        let parsed: LayoutPreset = serde_saphyr::from_str("feed").unwrap();
         assert_eq!(parsed, LayoutPreset::Feed);
-        let parsed: LayoutPreset = serde_yaml::from_str("compact").unwrap();
+        let parsed: LayoutPreset = serde_saphyr::from_str("compact").unwrap();
         assert_eq!(parsed, LayoutPreset::Compact);
     }
 
@@ -3995,8 +3995,8 @@ refresh_seconds: 5
             holder_count: false,
             liquidity_depth: true,
         };
-        let yaml = serde_yaml::to_string(&vis).unwrap();
-        let parsed: WidgetVisibility = serde_yaml::from_str(&yaml).unwrap();
+        let yaml = serde_saphyr::to_string(&vis).unwrap();
+        let parsed: WidgetVisibility = serde_saphyr::from_str(&yaml).unwrap();
         assert!(!parsed.price_chart);
         assert!(parsed.volume_chart);
         assert!(!parsed.buy_sell_pressure);
@@ -6551,7 +6551,7 @@ refresh_seconds: 5
         // hold `layout: dashboard` that the user never chose, so
         // auto-layout still applies.
         let config = Config {
-            monitor: serde_yaml::from_str("layout: exchange\n").unwrap(),
+            monitor: serde_saphyr::from_str("layout: exchange\n").unwrap(),
             ..Default::default()
         };
         assert_eq!(launch(&bare, &config), (LayoutPreset::Exchange, auto));

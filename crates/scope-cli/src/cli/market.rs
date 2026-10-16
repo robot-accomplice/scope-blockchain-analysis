@@ -1615,7 +1615,7 @@ capabilities:
             .clone();
         desc.base_url = server.url();
         desc.capabilities.assets =
-            Some(serde_yaml::from_str("path: /coins\nresponse: {}\n").unwrap());
+            Some(serde_saphyr::from_str("path: /coins\nresponse: {}\n").unwrap());
         ExchangeClient::from_descriptor(&desc)
     }
 

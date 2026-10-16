@@ -1,0 +1,84 @@
+{
+  "base_url": "https://api.kraken.com/0",
+  "capabilities": {
+    "ohlc": {
+      "params": {
+        "interval": "{interval}",
+        "pair": "{pair}"
+      },
+      "path": "/public/OHLC",
+      "response": {
+        "ohlc_fields": [
+          "open_time",
+          "open",
+          "high",
+          "low",
+          "close",
+          "_vwap",
+          "volume"
+        ],
+        "ohlc_format": "array_of_arrays"
+      },
+      "response_root": "result.*"
+    },
+    "order_book": {
+      "params": {
+        "count": "100",
+        "pair": "{pair}"
+      },
+      "path": "/public/Depth",
+      "response": {
+        "asks_key": "asks",
+        "bids_key": "bids",
+        "level_format": "positional"
+      },
+      "response_root": "result.*"
+    },
+    "ticker": {
+      "params": {
+        "pair": "{pair}"
+      },
+      "path": "/public/Ticker",
+      "response": {
+        "best_ask": "a.0",
+        "best_bid": "b.0",
+        "high_24h": "h.1",
+        "last_price": "c.0",
+        "low_24h": "l.1",
+        "volume_24h": "v.1"
+      },
+      "response_root": "result.*"
+    },
+    "trades": {
+      "params": {
+        "count": "{limit}",
+        "pair": "{pair}"
+      },
+      "path": "/public/Trades",
+      "response": {
+        "price": "0",
+        "quantity": "1",
+        "side": {
+          "field": "3",
+          "mapping": {
+            "b": "buy",
+            "s": "sell"
+          }
+        },
+        "timestamp_ms": "2"
+      },
+      "response_root": "result.*"
+    }
+  },
+  "error_envelope": {
+    "message_key": "error"
+  },
+  "id": "kraken",
+  "name": "Kraken",
+  "rate_limit_per_sec": 5,
+  "symbol": {
+    "default_quote": "USD",
+    "template": "{base}{quote}"
+  },
+  "timeout_secs": 15
+}

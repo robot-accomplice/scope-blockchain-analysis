@@ -1,0 +1,84 @@
+{
+  "base_url": "https://api.gateio.ws",
+  "capabilities": {
+    "ohlc": {
+      "params": {
+        "currency_pair": "{pair}",
+        "interval": "{interval}",
+        "limit": "{limit}"
+      },
+      "path": "/api/v4/spot/candlesticks",
+      "response": {
+        "ohlc_fields": [
+          "open_time",
+          "volume",
+          "close",
+          "high",
+          "low",
+          "open"
+        ],
+        "ohlc_format": "array_of_arrays"
+      }
+    },
+    "order_book": {
+      "params": {
+        "currency_pair": "{pair}",
+        "limit": "100"
+      },
+      "path": "/api/v4/spot/order_book",
+      "response": {
+        "asks_key": "asks",
+        "bids_key": "bids",
+        "level_format": "positional"
+      }
+    },
+    "ticker": {
+      "params": {
+        "currency_pair": "{pair}"
+      },
+      "path": "/api/v4/spot/tickers",
+      "response": {
+        "best_ask": "lowest_ask",
+        "best_bid": "highest_bid",
+        "filter": {
+          "field": "currency_pair",
+          "value": "{pair}"
+        },
+        "high_24h": "high_24h",
+        "items_key": "",
+        "last_price": "last",
+        "low_24h": "low_24h",
+        "quote_volume_24h": "quote_volume",
+        "volume_24h": "base_volume"
+      }
+    },
+    "trades": {
+      "params": {
+        "currency_pair": "{pair}",
+        "limit": "{limit}"
+      },
+      "path": "/api/v4/spot/trades",
+      "response": {
+        "id": "id",
+        "price": "price",
+        "quantity": "amount",
+        "side": {
+          "field": "side",
+          "mapping": {
+            "buy": "buy",
+            "sell": "sell"
+          }
+        },
+        "timestamp_ms": "create_time_ms"
+      }
+    }
+  },
+  "id": "gateio",
+  "name": "Gate.io",
+  "rate_limit_per_sec": 10,
+  "symbol": {
+    "default_quote": "USDT",
+    "template": "{base}_{quote}"
+  },
+  "timeout_secs": 15
+}
