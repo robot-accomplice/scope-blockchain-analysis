@@ -35,7 +35,7 @@ enum Cmd {
         keep: bool,
         #[arg(long, default_value = "tests/tui/scenarios")]
         scenarios: PathBuf,
-        #[arg(long, default_value = "target/debug/scope")]
+        #[arg(long, default_value = if cfg!(windows) { "target/debug/scope.exe" } else { "target/debug/scope" })]
         binary: PathBuf,
         /// Run the named offline scenarios against the live APIs and write
         /// their replies as fixtures.
@@ -115,7 +115,7 @@ fn main() -> Result<()> {
                                 ms: 0,
                             }
                         }
-                        Ok(s) if !s.tiers.contains(&tier) => Line {
+                        Ok(s) if !s.tiers.contains(&tier) || (s.unix_only && !cfg!(unix)) => Line {
                             name: id,
                             tier,
                             result: Result3::Skip,

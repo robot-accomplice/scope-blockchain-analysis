@@ -1216,7 +1216,7 @@ impl TuiState {
             .next()
             .is_some_and(|w| w.eq_ignore_ascii_case("save"))
         {
-            let words = shlex::split(line);
+            let words = exec::split_line(line);
             self.save(line, words.as_ref().map(|w| &w[1..]));
             return Plan::Done;
         }

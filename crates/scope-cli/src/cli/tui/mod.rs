@@ -88,8 +88,10 @@ pub struct TuiExit {
     pub code: i32,
 }
 
-/// A process signal the TUI listens for.
+/// A process signal the TUI listens for. Off Unix only Ctrl-C (`Int`)
+/// arrives; the other variants stay so one match covers every platform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) enum Signal {
     Term,
     Hup,
@@ -240,8 +242,22 @@ fn signal_stream() -> Result<BoxStream<'static, Signal>> {
     Ok(futures::stream::select_all(streams).boxed())
 }
 
-/// No signal handling off unix.
-#[cfg(not(unix))]
+/// Ctrl-C at the console, as INT. The TUI's raw mode reads Ctrl-C as a
+/// key, so this fires only while a suspend-mode command has the cooked
+/// console. Installing the handler replaces the default, which ends the
+/// process.
+#[cfg(windows)]
+fn signal_stream() -> Result<BoxStream<'static, Signal>> {
+    let mut handler = tokio::signal::windows::ctrl_c()
+        .map_err(|e| ScopeError::io_context(e, "cannot install the Ctrl-C handler"))?;
+    Ok(futures::stream::poll_fn(move |cx| {
+        handler.poll_recv(cx).map(|got| got.map(|()| Signal::Int))
+    })
+    .boxed())
+}
+
+/// No signal handling off unix and Windows.
+#[cfg(not(any(unix, windows)))]
 fn signal_stream() -> Result<BoxStream<'static, Signal>> {
     Ok(futures::stream::pending().boxed())
 }
@@ -1821,7 +1837,9 @@ mod tests {
         let file = dir.path().join("one.json");
         let mut events = script(&[
             "venues list --format json",
-            &format!("save {}", file.display()),
+            // Quoted: the line splits by shell rules, where `\` in a
+            // Windows path is an escape.
+            &format!("save '{}'", file.display()),
         ]);
         events.push(ctrl_y_event());
         let (res, state, host, _) = drive(events).await;
@@ -1847,7 +1865,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("two.json");
         std::fs::write(&file, "old").unwrap();
-        let save = format!("save {}", file.display());
+        // Quoted, as above.
+        let save = format!("save '{}'", file.display());
         let journal = Journal::at(dir.path().join("h"), dir.path().join("e.jsonl"));
         let (res, state, _, _) = drive_with(
             journal,

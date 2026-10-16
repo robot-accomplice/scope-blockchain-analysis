@@ -77,6 +77,10 @@ base64 = "0.22"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# The console line read that Ctrl-C can cancel (prompt.rs)
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
+
 [dev-dependencies]
 scope = { path = "../scope-core", package = "scope-bca-core", version = "0.7.0", features = ["test-support"] }
 tempfile = "3.10"
