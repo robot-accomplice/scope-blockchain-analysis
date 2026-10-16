@@ -300,7 +300,10 @@ impl TuiPicker {
                 }
             };
             if !placed {
-                tokio::task::yield_now().await;
+                // A pause, not a yield: a yield wakes the TUI's task at
+                // once, and it would spin until the open question is
+                // answered.
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
         }
         answer.await.ok().flatten()
@@ -319,7 +322,12 @@ impl Picker for TuiPicker {
     }
 
     async fn confirm(&self, question: &str) -> Result<bool> {
-        let prompt = question.trim_end_matches([' ', ':']).to_string();
+        // The list is the answer: the terminal's "[y/N]: " does not apply.
+        let prompt = question
+            .trim_end_matches([' ', ':'])
+            .trim_end_matches("[y/N]")
+            .trim_end()
+            .to_string();
         let options = vec!["No".to_string(), "Yes".to_string()];
         Ok(self.ask(prompt, options).await == Some(1))
     }
@@ -1371,6 +1379,27 @@ mod tests {
             p.confirm("Save so …? [y/N]: ").await.unwrap(),
             "option 1 is Yes"
         );
+    }
+
+    #[tokio::test]
+    async fn test_the_save_list_title_has_no_terminal_hint() {
+        let asker = crate::cli::output::Asker::default();
+        let p = TuiPicker {
+            asker: asker.clone(),
+        };
+        let slot = asker.clone();
+        let title = tokio::spawn(async move {
+            loop {
+                let ask = slot.lock().unwrap().take();
+                if let Some(ask) = ask {
+                    let _ = ask.reply.send(Some(0));
+                    return ask.prompt;
+                }
+                tokio::task::yield_now().await;
+            }
+        });
+        assert!(!p.confirm("Save so X? [y/N]: ").await.unwrap());
+        assert_eq!(title.await.unwrap(), "Save so X?");
     }
 
     #[tokio::test]

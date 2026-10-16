@@ -383,18 +383,21 @@ impl TuiState {
         if ctrl && key.code == KeyCode::Char('z') {
             return Action::Suspend;
         }
-        // An open question takes every key until it is answered.
+        // An open question takes every key until it is answered. While the
+        // terminal is too small the list is not drawn, so only Esc (cancel
+        // the question) and Ctrl-C (cancel the command) act.
         if let Some(Overlay::Choice(ch)) = &mut self.overlay {
             let n = ch.options.len().max(1);
             match key.code {
+                KeyCode::Esc => return self.press_esc(),
+                KeyCode::Char('c') if ctrl => return Action::Cancel,
+                _ if self.too_small.get() => {}
                 KeyCode::Down | KeyCode::Tab => ch.selected = (ch.selected + 1) % n,
                 KeyCode::Up | KeyCode::BackTab => ch.selected = (ch.selected + n - 1) % n,
                 KeyCode::Enter => {
                     let pick = ch.selected;
                     self.answer_choice(Some(pick));
                 }
-                KeyCode::Esc => self.answer_choice(None),
-                KeyCode::Char('c') if ctrl => return Action::Cancel,
                 _ => {}
             }
             return Action::None;
@@ -643,7 +646,9 @@ impl TuiState {
             .map(|c| if c == '\t' { ' ' } else { c })
             .filter(|c| !c.is_control() && !BIDI_CONTROLS.iter().any(|r| r.contains(c)))
             .collect();
-        if clean.is_empty() {
+        // An open question keeps the focus: a paste neither answers nor
+        // closes it.
+        if clean.is_empty() || matches!(self.overlay, Some(Overlay::Choice(_))) {
             return;
         }
         // A search keeps the view where it is.
@@ -1377,6 +1382,8 @@ impl TuiState {
         }
         let ask = self.asker.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(ask) = ask {
+            // A search puts back what it moved before the list replaces it.
+            self.close_overlay();
             self.overlay = Some(Overlay::Choice(ChoiceState {
                 prompt: ask.prompt,
                 options: ask.options,
@@ -1748,7 +1755,10 @@ impl TuiState {
 
         if let Some(Overlay::Choice(ch)) = &self.overlay {
             let frame = f.area();
-            let rows = ch.options.len().clamp(1, MENU_ROWS);
+            // The rows that fit above the input line, inside the borders:
+            // the scroll follows these, so the selection stays in view.
+            let fit = usize::from(input.y.saturating_sub(2)).max(1);
+            let rows = ch.options.len().clamp(1, MENU_ROWS).min(fit);
             let first = ch.selected.saturating_sub(rows - 1);
             let height = (rows as u16 + 2).min(input.y);
             // Each row is "NN. option"; the borders add two columns.
@@ -2336,11 +2346,51 @@ mod tests {
     }
 
     #[test]
-    fn test_the_choice_draws_in_a_tiny_terminal() {
-        // Review focus 3.
+    fn test_the_choice_keeps_the_selection_in_view_at_the_smallest_size() {
+        // Review focus 3: at MIN_W x MIN_H only a few rows fit above the
+        // input line; the selected one must be among them.
         let mut s = state();
-        let _rx = asked(&mut s, &["a", "b", "c"]);
-        let _ = screen(&s, 20, 6);
+        let options: Vec<String> = (1..=8).map(|i| format!("opt{i}")).collect();
+        let refs: Vec<&str> = options.iter().map(String::as_str).collect();
+        let _rx = asked(&mut s, &refs);
+        for _ in 0..5 {
+            s.handle_key(key(KeyCode::Down));
+        }
+        let text = screen(&s, MIN_W, MIN_H);
+        assert!(text.contains("opt6"), "{text}");
+    }
+
+    #[test]
+    fn test_a_hidden_choice_is_not_answered_by_enter() {
+        let mut s = state();
+        let mut rx = asked(&mut s, &["a", "b"]);
+        let _ = screen(&s, 20, 6); // too small: the list is not drawn
+        s.handle_key(key(KeyCode::Enter));
+        assert!(rx.try_recv().is_err(), "no answer yet");
+        assert!(matches!(s.overlay, Some(Overlay::Choice(_))));
+        s.handle_key(key(KeyCode::Esc));
+        assert_eq!(rx.try_recv().unwrap(), None);
+    }
+
+    #[test]
+    fn test_a_paste_leaves_the_choice_open() {
+        let mut s = state();
+        let mut rx = asked(&mut s, &["a", "b"]);
+        s.paste("USDC");
+        assert!(matches!(s.overlay, Some(Overlay::Choice(_))));
+        assert!(rx.try_recv().is_err(), "no answer yet");
+        assert!(s.input.is_empty());
+    }
+
+    #[test]
+    fn test_a_question_puts_back_the_history_search_draft() {
+        let mut s = state();
+        type_str(&mut s, "draft");
+        s.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert!(matches!(s.overlay, Some(Overlay::HistorySearch(_))));
+        let _rx = asked(&mut s, &["a", "b"]);
+        assert!(matches!(s.overlay, Some(Overlay::Choice(_))));
+        assert_eq!(s.input, "draft");
     }
 
     fn type_str(s: &mut TuiState, text: &str) {
