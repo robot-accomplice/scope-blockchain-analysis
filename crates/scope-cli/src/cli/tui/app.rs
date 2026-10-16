@@ -371,6 +371,11 @@ impl TuiState {
         &self.journal
     }
 
+    /// Replaces the completion words, after the config was read again.
+    pub fn set_vocab(&mut self, vocab: Vocab) {
+        self.vocab = vocab;
+    }
+
     // ---------------------------------------------------------------- keys
 
     /// Applies one key event.

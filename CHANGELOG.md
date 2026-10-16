@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - All scope files are now in one folder, `~/.scope-bca` (`SCOPE_BCA_HOME` moves it): `config.yaml`, `venues/`, `data/` and `state/`. On the first start, scope copies the files from `~/.config/scope` and the platform data folder, and writes `state/migration.jsonl`. The old files are not changed.
 
 ### Added
+- After `setup` in the TUI, the TUI reads the config again, so a new API key works without a restart. Transport settings (proxy, Ghola) still need a restart. (#99)
 - In the TUI, a command asks which token a symbol means in a list (↑/↓, Enter; Esc cancels), instead of stopping.
 - One token resolver for every command that takes a symbol: it lists the candidates and asks, saves the choice on request, takes `--token <contract>`, checks saved choices against a CEX venue's coin list, and records each lookup in `state/resolutions.jsonl`.
 - `--duration forever` (or `inf`) runs a repeating command until `Esc` or `Ctrl-C`. (#96)

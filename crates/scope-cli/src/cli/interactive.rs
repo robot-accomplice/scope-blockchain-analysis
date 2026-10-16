@@ -26,8 +26,7 @@
 //! ```
 
 use clap::Args;
-use scope::chains::ChainClientFactory;
-use scope::config::{Config, OutputFormat};
+use scope::config::OutputFormat;
 use scope::error::Result;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -165,17 +164,18 @@ impl SessionContext {
     }
 }
 
-/// Opens the unified TUI. Returns how it ended.
+/// Opens the unified TUI with `settings`. `reload` reads them again after
+/// `setup`. Returns how it ended.
 ///
 /// # Errors
 ///
 /// Returns the TUI's terminal or save error.
 pub async fn run(
     args: InteractiveArgs,
-    config: &Config,
-    clients: &dyn ChainClientFactory,
+    settings: crate::cli::tui::Settings,
+    reload: crate::cli::tui::Reload<'_>,
 ) -> Result<crate::cli::tui::TuiExit> {
-    crate::cli::tui::run(args.no_banner, config, clients).await
+    crate::cli::tui::run(args.no_banner, settings, reload).await
 }
 
 // ============================================================================
