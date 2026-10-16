@@ -47,7 +47,7 @@ impl Default for VenueRegistry {
         };
         // Load built-in venues, ignoring parse errors for robustness.
         for (_id, yaml) in BUILT_IN_VENUES {
-            if let Ok(desc) = serde_yaml::from_str::<VenueDescriptor>(yaml) {
+            if let Ok(desc) = serde_saphyr::from_str::<VenueDescriptor>(yaml) {
                 registry.venues.insert(desc.id.clone(), desc);
             }
         }
@@ -78,18 +78,20 @@ impl VenueRegistry {
                     .is_some_and(|ext| ext == "yaml" || ext == "yml")
                 {
                     match std::fs::read_to_string(&path) {
-                        Ok(contents) => match serde_yaml::from_str::<VenueDescriptor>(&contents) {
-                            Ok(desc) => {
-                                registry.venues.insert(desc.id.clone(), desc);
+                        Ok(contents) => {
+                            match serde_saphyr::from_str::<VenueDescriptor>(&contents) {
+                                Ok(desc) => {
+                                    registry.venues.insert(desc.id.clone(), desc);
+                                }
+                                Err(e) => {
+                                    crate::notice!(
+                                        "Warning: failed to parse venue file {}: {}",
+                                        path.display(),
+                                        e
+                                    );
+                                }
                             }
-                            Err(e) => {
-                                crate::notice!(
-                                    "Warning: failed to parse venue file {}: {}",
-                                    path.display(),
-                                    e
-                                );
-                            }
-                        },
+                        }
                         Err(e) => {
                             crate::notice!(
                                 "Warning: failed to read venue file {}: {}",
@@ -161,7 +163,7 @@ impl VenueRegistry {
 
     /// Validate a venue descriptor YAML string.
     pub fn validate_yaml(yaml: &str) -> Result<VenueDescriptor> {
-        serde_yaml::from_str(yaml)
+        serde_saphyr::from_str(yaml)
             .map_err(|e| ScopeError::Config(crate::error::ConfigError::Parse { source: e }))
     }
 }

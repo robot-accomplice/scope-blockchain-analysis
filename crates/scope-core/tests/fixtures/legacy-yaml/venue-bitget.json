@@ -1,0 +1,83 @@
+{
+  "base_url": "https://api.bitget.com",
+  "capabilities": {
+    "ohlc": {
+      "params": {
+        "granularity": "{interval}",
+        "limit": "{limit}",
+        "symbol": "{pair}"
+      },
+      "path": "/api/v2/spot/market/candles",
+      "response": {
+        "ohlc_fields": [
+          "open_time",
+          "open",
+          "high",
+          "low",
+          "close",
+          "volume",
+          "close_time"
+        ],
+        "ohlc_format": "array_of_arrays"
+      }
+    },
+    "order_book": {
+      "params": {
+        "limit": "100",
+        "symbol": "{pair}"
+      },
+      "path": "/api/v2/spot/market/orderbook",
+      "response": {
+        "asks_key": "asks",
+        "bids_key": "bids",
+        "level_format": "positional"
+      },
+      "response_root": "data"
+    },
+    "ticker": {
+      "params": {
+        "symbol": "{pair}"
+      },
+      "path": "/api/v2/spot/market/tickers",
+      "response": {
+        "best_ask": "askPr",
+        "best_bid": "bidPr",
+        "high_24h": "high24h",
+        "last_price": "lastPr",
+        "low_24h": "low24h",
+        "quote_volume_24h": "quoteVolume",
+        "volume_24h": "baseVolume"
+      },
+      "response_root": "data.0"
+    },
+    "trades": {
+      "params": {
+        "limit": "{limit}",
+        "symbol": "{pair}"
+      },
+      "path": "/api/v2/spot/market/fills",
+      "response": {
+        "id": "tradeId",
+        "price": "price",
+        "quantity": "size",
+        "side": {
+          "field": "side",
+          "mapping": {
+            "buy": "buy",
+            "sell": "sell"
+          }
+        },
+        "timestamp_ms": "ts"
+      },
+      "response_root": "data"
+    }
+  },
+  "id": "bitget",
+  "name": "Bitget",
+  "rate_limit_per_sec": 10,
+  "symbol": {
+    "default_quote": "USDT",
+    "template": "{base}{quote}"
+  },
+  "timeout_secs": 15
+}

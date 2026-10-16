@@ -1,0 +1,74 @@
+{
+  "base_url": "https://api.coinbase.com",
+  "capabilities": {
+    "ohlc": {
+      "params": {
+        "granularity": "{interval}"
+      },
+      "path": "/products/{pair}/candles",
+      "response": {
+        "ohlc_fields": [
+          "open_time",
+          "low",
+          "high",
+          "open",
+          "close",
+          "volume"
+        ],
+        "ohlc_format": "array_of_arrays"
+      }
+    },
+    "order_book": {
+      "params": {
+        "limit": "100",
+        "product_id": "{pair}"
+      },
+      "path": "/api/v3/brokerage/market/product_book",
+      "response": {
+        "asks_key": "asks",
+        "bids_key": "bids",
+        "level_format": "object",
+        "level_price_field": "price",
+        "level_size_field": "size"
+      },
+      "response_root": "pricebook"
+    },
+    "ticker": {
+      "path": "/api/v3/brokerage/market/products/{pair}",
+      "response": {
+        "best_ask": "ask",
+        "best_bid": "bid",
+        "last_price": "price",
+        "volume_24h": "volume_24h"
+      }
+    },
+    "trades": {
+      "params": {
+        "limit": "{limit}"
+      },
+      "path": "/api/v3/brokerage/market/products/{pair}/ticker",
+      "response": {
+        "id": "trade_id",
+        "price": "price",
+        "quantity": "size",
+        "side": {
+          "field": "side",
+          "mapping": {
+            "BUY": "buy",
+            "SELL": "sell"
+          }
+        },
+        "timestamp_ms": "time"
+      },
+      "response_root": "trades"
+    }
+  },
+  "id": "coinbase",
+  "name": "Coinbase",
+  "rate_limit_per_sec": 10,
+  "symbol": {
+    "default_quote": "USD",
+    "template": "{base}-{quote}"
+  },
+  "timeout_secs": 15
+}

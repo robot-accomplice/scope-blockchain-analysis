@@ -1,0 +1,81 @@
+{
+  "base_url": "https://api.mexc.com",
+  "capabilities": {
+    "ohlc": {
+      "params": {
+        "interval": "{interval}",
+        "limit": "{limit}",
+        "symbol": "{pair}"
+      },
+      "path": "/api/v3/klines",
+      "response": {
+        "ohlc_fields": [
+          "open_time",
+          "open",
+          "high",
+          "low",
+          "close",
+          "volume",
+          "close_time"
+        ],
+        "ohlc_format": "array_of_arrays"
+      }
+    },
+    "order_book": {
+      "params": {
+        "limit": "100",
+        "symbol": "{pair}"
+      },
+      "path": "/api/v3/depth",
+      "response": {
+        "asks_key": "asks",
+        "bids_key": "bids",
+        "level_format": "positional"
+      }
+    },
+    "ticker": {
+      "params": {
+        "symbol": "{pair}"
+      },
+      "path": "/api/v3/ticker/24hr",
+      "response": {
+        "best_ask": "askPrice",
+        "best_bid": "bidPrice",
+        "high_24h": "highPrice",
+        "last_price": "lastPrice",
+        "low_24h": "lowPrice",
+        "quote_volume_24h": "quoteVolume",
+        "volume_24h": "volume"
+      }
+    },
+    "trades": {
+      "params": {
+        "limit": "{limit}",
+        "symbol": "{pair}"
+      },
+      "path": "/api/v3/trades",
+      "response": {
+        "id": "id",
+        "price": "price",
+        "quantity": "qty",
+        "quote_quantity": "quoteQty",
+        "side": {
+          "field": "isBuyerMaker",
+          "mapping": {
+            "false": "buy",
+            "true": "sell"
+          }
+        },
+        "timestamp_ms": "time"
+      }
+    }
+  },
+  "id": "mexc",
+  "name": "MEXC Global",
+  "rate_limit_per_sec": 10,
+  "symbol": {
+    "default_quote": "USDT",
+    "template": "{base}{quote}"
+  },
+  "timeout_secs": 15
+}

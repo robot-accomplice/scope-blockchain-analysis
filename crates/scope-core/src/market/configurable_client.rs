@@ -1571,7 +1571,7 @@ mod tests {
             .await;
         let mut desc = make_http_test_descriptor(&server.url());
         desc.capabilities.assets =
-            Some(serde_yaml::from_str("path: /api/v3/coins\nresponse: {}\n").unwrap());
+            Some(serde_saphyr::from_str("path: /api/v3/coins\nresponse: {}\n").unwrap());
         let client = ConfigurableExchangeClient::new(desc.clone());
         let assets = client.fetch_assets().await.unwrap();
         assert_eq!(assets.len(), 2, "an item without a symbol is skipped");

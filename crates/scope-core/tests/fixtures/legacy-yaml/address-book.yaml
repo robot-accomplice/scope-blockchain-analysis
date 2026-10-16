@@ -1,0 +1,11 @@
+addresses:
+- address: 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2
+  label: 'cold: wallet'
+  chain: ethereum
+  tags:
+  - cold
+  - tag with spaces
+  added_at: 1760000000
+- address: TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t
+  chain: tron
+  added_at: 0

@@ -231,7 +231,7 @@ pub enum ConfigError {
     Parse {
         /// The underlying YAML parsing error.
         #[source]
-        source: serde_yaml::Error,
+        source: serde_saphyr::Error,
     },
 
     /// Configuration values failed validation.

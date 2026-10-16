@@ -108,7 +108,7 @@ pub async fn handle_save(
         return error_response(status_for(&e), e.to_string());
     }
 
-    match serde_yaml::to_string(&config) {
+    match serde_saphyr::to_string(&config) {
         Ok(yaml) => {
             if let Err(e) = std::fs::write(&config_path, yaml) {
                 let e = ScopeError::io_context(e, "Failed to write config");

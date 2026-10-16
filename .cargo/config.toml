@@ -1,0 +1,7 @@
+[env]
+# Threads cargo starts (test threads) get the stack the `scope` binary gives
+# its main thread (MAIN_STACK_BYTES in crates/scope-web/src/main.rs). A TUI
+# test runs a whole session on its test thread; in a debug build that, plus
+# a YAML parse (128-256 KB in debug, about 16 KB in release), overflowed the
+# 2 MB default on Windows (#118).
+RUST_MIN_STACK = "8388608"

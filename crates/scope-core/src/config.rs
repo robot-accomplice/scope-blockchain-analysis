@@ -311,7 +311,7 @@ impl Config {
         })?;
 
         let config: Config =
-            serde_yaml::from_str(&contents).map_err(|e| ConfigError::Parse { source: e })?;
+            serde_saphyr::from_str(&contents).map_err(|e| ConfigError::Parse { source: e })?;
 
         Ok(config)
     }
@@ -846,10 +846,10 @@ market:
     #[test]
     fn test_output_format_serialization() {
         let json_format = OutputFormat::Json;
-        let serialized = serde_yaml::to_string(&json_format).unwrap();
+        let serialized = serde_saphyr::to_string(&json_format).unwrap();
         assert!(serialized.contains("json"));
 
-        let deserialized: OutputFormat = serde_yaml::from_str("csv").unwrap();
+        let deserialized: OutputFormat = serde_saphyr::from_str("csv").unwrap();
         assert_eq!(deserialized, OutputFormat::Csv);
     }
 
@@ -933,8 +933,8 @@ market:
         config.output.color = false;
         config.address_book.data_dir = Some(PathBuf::from("/custom"));
 
-        let yaml = serde_yaml::to_string(&config).unwrap();
-        let deserialized: Config = serde_yaml::from_str(&yaml).unwrap();
+        let yaml = serde_saphyr::to_string(&config).unwrap();
+        let deserialized: Config = serde_saphyr::from_str(&yaml).unwrap();
         assert_eq!(config, deserialized);
     }
 
@@ -1110,8 +1110,8 @@ ghola:
         config.ghola.stealth = true;
         config.ghola.buffer_size = 8192;
 
-        let yaml = serde_yaml::to_string(&config).unwrap();
-        let deserialized: Config = serde_yaml::from_str(&yaml).unwrap();
+        let yaml = serde_saphyr::to_string(&config).unwrap();
+        let deserialized: Config = serde_saphyr::from_str(&yaml).unwrap();
         assert_eq!(config.ghola, deserialized.ghola);
     }
 }
