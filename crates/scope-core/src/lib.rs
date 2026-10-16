@@ -265,6 +265,9 @@ pub mod metrics;
 /// The user's directories, resolved in one place (sandboxed in tests).
 pub mod paths;
 
+/// Watchlists: targets, rules and their evaluation (#47).
+pub mod watch;
+
 /// Library version string.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
