@@ -89,6 +89,18 @@ pub struct Series {
 /// The series shared between a repeating command and the screen.
 pub type SeriesHook = Arc<Mutex<Series>>;
 
+/// A question a command asks the TUI: the TUI shows `options` in a list
+/// and replies with the chosen index, or `None` when the user cancels.
+pub struct Ask {
+    pub prompt: String,
+    pub options: Vec<String>,
+    pub reply: tokio::sync::oneshot::Sender<Option<usize>>,
+}
+
+/// The slot through which a pane command asks the TUI one question at a
+/// time.
+pub type Asker = Arc<Mutex<Option<Ask>>>;
+
 /// The most runs a series keeps. Older runs are dropped.
 pub const MAX_SERIES_RUNS: usize = 500;
 
@@ -105,6 +117,8 @@ pub struct Output {
     tui: bool,
     /// False for a server: no command may wait for an answer on stdin.
     prompts: bool,
+    /// The TUI's ask slot, when the TUI pane shows this output.
+    asker: Option<Asker>,
 }
 
 impl Output {
@@ -119,6 +133,7 @@ impl Output {
             series: None,
             tui: false,
             prompts: true,
+            asker: None,
         }
     }
 
@@ -143,6 +158,7 @@ impl Output {
             series: None,
             tui: false,
             prompts: false,
+            asker: None,
         };
         (output, captured)
     }
@@ -174,6 +190,7 @@ impl Output {
             series: Some(SeriesHook::default()),
             tui: true,
             prompts: false,
+            asker: None,
         };
         (output, captured)
     }
@@ -218,6 +235,7 @@ impl Output {
             series: None,
             tui: true,
             prompts: self.prompts,
+            asker: None,
         };
         (output, captured)
     }
@@ -236,6 +254,7 @@ impl Output {
             series: None,
             tui: false,
             prompts: true,
+            asker: None,
         }
     }
 
@@ -249,6 +268,18 @@ impl Output {
     pub fn without_prompts(mut self) -> Self {
         self.prompts = false;
         self
+    }
+
+    /// This output with a slot through which a command asks the TUI a
+    /// question (the pane's list).
+    pub fn with_asker(mut self, asker: Asker) -> Self {
+        self.asker = Some(asker);
+        self
+    }
+
+    /// The ask slot, when a TUI shows this output.
+    pub fn asker(&self) -> Option<Asker> {
+        self.asker.clone()
     }
 
     /// True when a command may ask the user on the terminal.

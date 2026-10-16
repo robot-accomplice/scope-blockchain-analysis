@@ -273,6 +273,58 @@ impl Picker for TerminalPicker<'_> {
     }
 }
 
+/// Asks in the TUI: puts the question in the pane's ask slot and waits for
+/// the list's answer.
+pub struct TuiPicker {
+    pub asker: crate::cli::output::Asker,
+}
+
+impl TuiPicker {
+    async fn ask(&self, prompt: String, options: Vec<String>) -> Option<usize> {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        let mut ask = Some(crate::cli::output::Ask {
+            prompt,
+            options,
+            reply,
+        });
+        // One question at a time: wait until the slot is free. The lock
+        // is held only inside the block, never across an await.
+        while ask.is_some() {
+            let placed = {
+                let mut slot = self.asker.lock().unwrap_or_else(|e| e.into_inner());
+                if slot.is_none() {
+                    *slot = ask.take();
+                    true
+                } else {
+                    false
+                }
+            };
+            if !placed {
+                tokio::task::yield_now().await;
+            }
+        }
+        answer.await.ok().flatten()
+    }
+}
+
+#[async_trait::async_trait]
+impl Picker for TuiPicker {
+    async fn pick(&self, input: &str, cs: &[Candidate]) -> Result<usize> {
+        let prompt = format!("'{input}' matches more than one token. Choose one:");
+        self.ask(prompt, cs.iter().map(candidate_line).collect())
+            .await
+            .ok_or_else(|| {
+                ScopeError::Other(format!("Choosing a token for '{input}' was cancelled."))
+            })
+    }
+
+    async fn confirm(&self, question: &str) -> Result<bool> {
+        let prompt = question.trim_end_matches([' ', ':']).to_string();
+        let options = vec!["No".to_string(), "Yes".to_string()];
+        Ok(self.ask(prompt, options).await == Some(1))
+    }
+}
+
 /// Never asks: a choice is an error that lists the candidates.
 pub struct NoTerminalPicker;
 
@@ -290,12 +342,19 @@ impl Picker for NoTerminalPicker {
     }
 }
 
-/// The picker for this run: no prompt in the TUI pane (plan 2 adds an
-/// overlay), in a server, for JSON output, or without a terminal.
+/// The picker for this run: never for JSON output; the TUI's list when
+/// the TUI pane shows the output; no prompt in a server or without a
+/// terminal; else the terminal.
 pub fn picker_for<'a>(out: &'a Output, json: bool) -> Box<dyn Picker + 'a> {
     use std::io::IsTerminal as _;
+    if json {
+        return Box::new(NoTerminalPicker);
+    }
+    if let Some(asker) = out.asker() {
+        return Box::new(TuiPicker { asker });
+    }
     let terminal = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-    if !out.prompts_allowed() || json || !terminal {
+    if !out.prompts_allowed() || !terminal {
         Box::new(NoTerminalPicker)
     } else {
         Box::new(TerminalPicker { out })
@@ -1281,6 +1340,68 @@ mod tests {
         assert_eq!(r.address.as_deref(), Some("0xA"));
         assert!(matches!(r.source, Source::Picked { saved: false }));
         assert!(cap.err().contains("not saved"), "{}", cap.err());
+    }
+
+    /// Answers the next question in `asker` with `answer`.
+    fn answer(asker: &crate::cli::output::Asker, answer: Option<usize>) {
+        let asker = asker.clone();
+        tokio::spawn(async move {
+            loop {
+                let ask = asker.lock().unwrap().take();
+                if let Some(ask) = ask {
+                    let _ = ask.reply.send(answer);
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        });
+    }
+
+    #[tokio::test]
+    async fn test_the_tui_picker_asks_through_the_slot() {
+        let asker = crate::cli::output::Asker::default();
+        let p = TuiPicker {
+            asker: asker.clone(),
+        };
+        answer(&asker, Some(1));
+        let cs = [c("ethereum", "0xA"), c("bsc", "0xB")];
+        assert_eq!(p.pick("USDN", &cs).await.unwrap(), 1);
+        answer(&asker, Some(1));
+        assert!(
+            p.confirm("Save so …? [y/N]: ").await.unwrap(),
+            "option 1 is Yes"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_escape_on_the_choice_is_a_cancel() {
+        let asker = crate::cli::output::Asker::default();
+        let p = TuiPicker {
+            asker: asker.clone(),
+        };
+        answer(&asker, None);
+        let cs = [c("ethereum", "0xA"), c("bsc", "0xB")];
+        let err = p.pick("USDN", &cs).await.unwrap_err();
+        assert!(err.to_string().contains("cancelled"), "{err}");
+        answer(&asker, None);
+        assert!(
+            !p.confirm("Save?").await.unwrap(),
+            "Esc on the save question is No"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_a_pane_output_with_an_asker_gets_the_tui_picker() {
+        let (o, _cap) = Output::capture_merged();
+        let asker = crate::cli::output::Asker::default();
+        let o = o.with_asker(asker.clone());
+        let cs = [c("ethereum", "0xA"), c("bsc", "0xB")];
+        let p = picker_for(&o, false);
+        answer(&asker, Some(0));
+        assert_eq!(p.pick("USDN", &cs).await.unwrap(), 0);
+        // JSON still never asks.
+        let p = picker_for(&o, true);
+        assert!(p.pick("USDN", &cs).await.is_err());
     }
 
     #[tokio::test]
