@@ -61,6 +61,11 @@ pub fn venues_dir() -> PathBuf {
     home().join("venues")
 }
 
+/// `<home>/watchlists`: the user's saved watchlists (#47).
+pub fn watchlists_dir() -> PathBuf {
+    home().join("watchlists")
+}
+
 /// `<home>/data`: what scope keeps for the user.
 pub fn data_dir() -> PathBuf {
     home().join("data")
