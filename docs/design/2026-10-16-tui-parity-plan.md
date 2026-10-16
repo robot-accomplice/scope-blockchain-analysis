@@ -4,7 +4,7 @@
 
 **Goal:** close #47. `scope monitor` becomes the monitor wizard in the one TUI, its live view gives the same health results as `market summary`, and a metric set can be saved and loaded.
 
-**Spec:** `docs/design/2026-10-16-tui-parity-design.md` (draft, needs Jon's approval) and `docs/design/2026-10-10-tui-watchlist-design.md` (approved 2026-10-10), with the changes P1–P3 of the parity design.
+**Spec:** `docs/design/2026-10-16-tui-parity-design.md` (approved by Jon on 2026-10-16) and `docs/design/2026-10-10-tui-watchlist-design.md` (approved 2026-10-10), with the changes P1–P3 of the parity design.
 
 **Architecture:** the engine (`scope::watch`) is pure and lives in scope-core: types, rule evaluation, snapshot comparison, file format. scope-cli holds the fetchers, which call compute functions that return data, and the TUI screens (wizard, grid, detail), which are pure state plus a render function, like `TuiState`. The tick loop is `cli::repeat::run`. The metric catalog is `scope::market::series`, extended.
 
@@ -39,12 +39,12 @@
 | Phase | Tasks | PR | Depends on |
 |---|---|---|---|
 | R | R1 | `fix(tui): crawl with a symbol runs in the pane` | none |
-| E | E1–E6 | `feat(watch): watchlist engine` | #118 picks its YAML crate (E3 only) |
+| E | E1–E6 | `feat(watch): watchlist engine` | #120 merged (E3 only) |
 | U | U1–U8 | `feat(tui): monitor wizard and watchlist grid` | E |
-| M | M1–M2 | `refactor(monitor): retire the old dashboard` | U, and Q1 (now or one release later) |
+| M | M2 now (with U); M1 in the next release | `refactor(monitor): retire the old dashboard` | U; M1 waits one release (Q1) |
 | D | D1 | `docs: TUI parity` | U |
 
-R can start at once. E1, E2, E4 and E5 do not need the YAML crate; E3 waits for #118 or uses its pick.
+R can start at once. E1, E2, E4 and E5 do not need the YAML crate; E3 uses serde-saphyr, the crate #120 (for #118) moves to; rebase on it first.
 
 ---
 
@@ -67,13 +67,13 @@ R can start at once. E1, E2, E4 and E5 do not need the YAML crate; E3 waits for 
 
 ### Task E1: token and address metrics in the catalog (P3)
 
-**Files:** `crates/scope-core/src/market/series.rs` (or `scope::metrics`, after Q6), `crates/scope-core/src/market/mod.rs`.
+**Files:** `crates/scope-core/src/metrics.rs` (moved from `market/series.rs`, Q6), `crates/scope-core/src/market/mod.rs`.
 
 - [ ] Tests first: `MetricId::ALL` contains `PriceUsd`, `PriceChange24hPct`, `Volume24h`, `LiquidityUsd`, `Holders`, `NativeBalance`, `RiskScore`; each has a label, a unit and a `MetricGroup` (`Market`, `Token`, `Address`).
 - [ ] Add `MetricGroup` and `fn group(MetricId) -> MetricGroup`. `describe` covers the new ids; they have no default threshold.
 - [ ] Add `fn applies_to(MetricId, TargetKind) -> bool`: market metrics to token and pair, token metrics to token, address metrics to address.
 - [ ] Check that `summary_metrics` and the CSV column order of `market summary --csv` do not change (existing tests stay green).
-- [ ] If Q6 is "yes": move the module to `scope::metrics` and keep `pub use` at `scope::market::series`.
+- [ ] Move the module to `scope::metrics` and keep `pub use scope::metrics as series` at `scope::market::series` for one release (Q6).
 
 ### Task E2: types and rule evaluation (`scope::watch`)
 
@@ -141,7 +141,7 @@ R can start at once. E1, E2, E4 and E5 do not need the YAML crate; E3 waits for 
 **Files:** new `crates/scope-cli/src/cli/tui/wizard.rs`.
 
 - [ ] Tests first with scripted keys and `TestBackend`: `Tab`/`Shift-Tab` move between steps; an interval of `0s` shows an error and blocks "Start"; the fetch count updates when the interval changes.
-- [ ] Defaults from Q7.
+- [ ] Defaults 60s and 1h, the constants `market summary` uses (Q7). Test: both read the same constants.
 - [ ] `Esc` with changes asks "Leave without saving? [y/N]"; without changes it leaves at once.
 - [ ] Renders at 120×36, 80×24 and 40×10 with no overlap. Review focus 6.
 
@@ -188,7 +188,7 @@ R can start at once. E1, E2, E4 and E5 do not need the YAML crate; E3 waits for 
 **Files:** `crates/scope-cli/src/cli/watch/mod.rs`.
 
 - [ ] Tests first: `monitor.alerts.price_min` and `price_max` become the rules `price_usd >= min` and `price_usd <= max`; whale and volume-spike settings give one note, on the first load only.
-- [ ] Follow Q2 if Jon picks the new metrics instead.
+- [ ] The note names #122, the follow-up for the two metrics (Q2).
 
 ### Task U8: equivalence and harness scenarios
 
@@ -204,7 +204,7 @@ R can start at once. E1, E2, E4 and E5 do not need the YAML crate; E3 waits for 
 
 ### Task M1: remove `--dashboard` and `run_direct`
 
-Only after Q1 says when.
+In the release after the grid ships (Q1). Not in the PR that closes #47.
 
 **Files:** `crates/scope-cli/src/cli/monitor/` (most of it), `crates/scope-core/src/config.rs` (`MonitorConfig`: keep `refresh_seconds`, `alerts`, `venue`; drop `layout`, `widgets`, `scale`, `color_scheme` with a load warning), `CHANGELOG.md`.
 

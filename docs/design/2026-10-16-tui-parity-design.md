@@ -1,6 +1,6 @@
 # TUI Parity with the CLI (#47): Design
 
-- **Status:** draft for Jon's review. Do not implement before approval.
+- **Status:** approved by Jon on 2026-10-16, with the proposed answers to Q1–Q7 (section 9).
 - **Date:** 2026-10-16
 - **Issue:** #47 (TUI: full functional parity with the CLI).
 - **Builds on:** `2026-10-10-tui-watchlist-design.md` (approved 2026-10-10). That design replaced the "monitor wizard" of #47 with watchlists. This design does not replace it. It records what is done, closes the gaps that design does not cover, and changes it in three places (section 4.2).
@@ -88,10 +88,10 @@ The coverage table in #47 dates from 2026-10-09. Since then, the TUI (`scope tui
 
 ### Out
 
-- **Headless `scope watch` (plan H).** It is in the approved watchlist design, but #47 does not need it. It ships after #47 closes. Open question Q4.
-- **Guided first run and the setup form (plan F).** G6 stays: `setup` runs outside the TUI and returns to it, and the config reloads after it (#114). #47 counts a suspend-mode command as "runs in the TUI": the user starts it from the TUI and comes back to it. Open question Q3.
+- **Headless `scope watch` (plan H).** It is in the approved watchlist design, but #47 does not need it. It ships after #47 closes. See Q4 (section 9).
+- **Guided first run and the setup form (plan F).** G6 stays: `setup` runs outside the TUI and returns to it, and the config reloads after it (#114). #47 counts a suspend-mode command as "runs in the TUI": the user starts it from the TUI and comes back to it. See Q3 (section 9).
 - **`web` and `completions` in the TUI.** They stay refused, for the reasons in `TUI_REFUSED`.
-- **`--every` on more CLI commands** (`crawl`, `token-health`, `market trades`). A user who wants token metrics over time uses a watchlist. Open question Q5.
+- **`--every` on more CLI commands** (`crawl`, `token-health`, `market trades`). A user who wants token metrics over time uses a watchlist. See Q5 (section 9).
 - **Desktop notifications, webhooks, rule durations.** Out in the watchlist design, and still out.
 
 ## 4. Decisions
@@ -119,9 +119,9 @@ The coverage table in #47 dates from 2026-10-09. Since then, the TUI (`scope tui
 |---|---|
 | N1 | `scope monitor <args>` starts the TUI (the same entry as `scope tui`) and opens the wizard, filled from the arguments. The user confirms with Enter, and the grid starts. With `--yes` (new), the grid starts at once. |
 | N2 | `monitor` inside the TUI does the same: it opens the wizard in the TUI. It no longer routes outside. `route` gives `Commands::Monitor` a new route, `Route::Wizard`. |
-| N3 | The old dashboard (`monitor::run_direct` and its five layouts) is retired: the grid replaces it when plan U ships, and the code goes in a later PR (when: Q1). Its price and volume charts move into the grid's detail pane, through `cli::charts`. The order book panel and the trades feed become drill-down keys (`b`, `t`), which already run `market summary` and `market trades`. Open question Q1. |
+| N3 | The old dashboard (`monitor::run_direct` and its five layouts) is retired: the grid replaces it when plan U ships, and the dashboard stays behind `--dashboard` for one release and the code goes in the release after (Q1). Its price and volume charts move into the grid's detail pane, through `cli::charts`. The order book panel and the trades feed become drill-down keys (`b`, `t`), which already run `market summary` and `market trades`. See Q1 (section 9). |
 | N4 | `monitor` flags map onto the watchlist. New flags: `--duration`, `--report`, `--csv`, the `HealthArgs` overrides, `--preset`, and `--save <name>`. `--export` stays as a hidden alias of `--csv`, with a note. Section 5.3 has the table. |
-| N5 | The monitor's alert config (`monitor.alerts`: price min/max, whale size, volume spike) maps to rules where it can: `price_usd < min`, `price_usd > max`. Whale and volume-spike alerts have no metric. They are dropped, with a note on first load. Open question Q2. |
+| N5 | The monitor's alert config (`monitor.alerts`: price min/max, whale size, volume spike) maps to rules where it can: `price_usd < min`, `price_usd > max`. Whale and volume-spike alerts have no metric. They are dropped, with a note on first load. See Q2 (section 9). |
 | N6 | `crawl` with a symbol routes to the pane (G5). The `TuiPicker` asks there. |
 | N7 | The watchlist file waits for the YAML choice of #118, or uses the crate #118 picks. The loader is behind one function, `scope::watch::file::{load, save}`, so a crate change touches one file. |
 
@@ -133,7 +133,7 @@ The wizard is one screen with four steps. `Tab` and `Shift-Tab` move between ste
 
 1. **Targets.** A list of targets. `a` adds one: the user types a token, a pair, an address or an `@label`. The same resolver as the CLI runs (`resolve` with `TuiPicker`), so a symbol on many chains asks in a list. For a pair or a token with market metrics, the user picks a venue from the `VenueRegistry` list (the same list as `--venue <Tab>`). `d` deletes the selected target.
 2. **Metrics.** For the selected target: the "market health" preset (on by default for a pair or a token with a venue), and the catalog metrics that apply to its kind (section 6). Each metric has an operator and a value. The initial value is the threshold from `HealthThresholds` or config, the same order as `market summary`: wizard value, then config `market.health`, then the built-in default.
-3. **Timing.** Interval and duration. The defaults are open question Q7. The step shows the number of fetches for each tick and for the whole run, so a user sees the cost before starting (watchlist risk "fetch cost").
+3. **Timing.** Interval and duration. The defaults are 60s and 1h, the same as `market summary` (Q7). The step shows the number of fetches for each tick and for the whole run, so a user sees the cost before starting (watchlist risk "fetch cost").
 4. **Outputs.** CSV path, report path, and the watchlist name. "Save" writes the watchlist file. "Start" starts the grid; it saves first when a name is set.
 
 ### 5.2 Live view
@@ -182,7 +182,7 @@ scope monitor USDN --venue weex --every 30s --duration 1h
 
 The market group stays as it is. The preset uses `MarketSummary::checks` (P1); the market metrics stay available as single rules for users who want one number, for example `spread_pct < 0.5`.
 
-The module may move from `scope::market::series` to `scope::metrics` when token and address metrics join it. Open question Q6.
+The module may move from `scope::market::series` to `scope::metrics` when token and address metrics join it. See Q6 (section 9).
 
 ## 7. Equivalence for the trigger case
 
@@ -206,14 +206,14 @@ For each tick, the check list and the status of path 2 equal the `checks` and `h
 | **Terminal bell and flash** differ between terminals. | The banner is the reliable signal (watchlist design). |
 | **Web UI and `Warn` (P2).** The web API returns check status. | P2 adds `Warn` to the grid only. The JSON of `market summary` does not change. |
 
-## 9. Open questions for Jon
+## 9. Decisions on the open questions (Jon, 2026-10-16)
 
-| # | Question | Proposal |
+| # | Question | Decision |
 |---|---|---|
-| Q1 | Remove the old monitor dashboard (layouts, panels) when the grid ships, or keep it behind `scope monitor --dashboard` for one release? | Keep it one release behind `--dashboard`, with a deprecation note; remove it in the next. |
-| Q2 | The `monitor.alerts` whale and volume-spike alerts have no metric. Drop them, or add `LargestTrade` and `VolumeChangePct` metrics? | Drop them in #47, open an issue for the two metrics. |
-| Q3 | Does `setup` in suspend mode count as "runs in the TUI" for #47, or must #47 wait for plan F's setup form? | Count it. Plan F stays a separate step. |
-| Q4 | Is headless `scope watch` (plan H) part of closing #47? | No. It ships after #47, on the same engine. |
-| Q5 | Add `--every` to `token-health` and `market trades` too, or only through watchlists? | Only through watchlists. |
-| Q6 | Move `scope::market::series` to `scope::metrics` when token and address metrics join it? | Yes, in plan E's first task, with a re-export from the old path for one release. |
-| Q7 | Wizard defaults for interval and duration: one set with `market summary` (60s, 1h), or its own (30s, until stopped)? | One set, `market summary`'s (60s, 1h), so the user meets one rule. |
+| Q1 | Remove the old dashboard when the grid ships? | Keep it one release behind `scope monitor --dashboard`, with a deprecation note. Phase M removes it in the release after. |
+| Q2 | Whale and volume-spike alerts have no metric. | Drop them in #47, with a note on load. #122 tracks the `LargestTrade` and `VolumeChangePct` metrics. |
+| Q3 | Does `setup` in suspend mode count as "runs in the TUI"? | Yes. Plan F's setup form stays a separate step. |
+| Q4 | Is headless `scope watch` part of #47? | No. It ships after #47, on the same engine (#123). |
+| Q5 | `--every` on more commands? | No. Repeats of other metrics go through watchlists only. |
+| Q6 | Move `scope::market::series` to `scope::metrics`? | Yes, with a re-export from the old path for one release. |
+| Q7 | Wizard defaults for interval and duration? | One set for the CLI and the wizard: `market summary`'s (60s, 1h). |
