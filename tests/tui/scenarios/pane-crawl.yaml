@@ -1,0 +1,19 @@
+name: a crawl by symbol asks which token in the pane and shows its report there
+tiers: [offline]
+steps:
+  # USDC names many tokens. The crawl runs in the pane and asks in a list
+  # (#109), not on the plain terminal.
+  - type: "crawl USDC"
+  - key: Enter
+  - wait_for: { text: "'USDC' matches more than one token\\. Choose one:", timeout: 20s }
+  - expect_screen: { not_contains: ["Select token \\(1-", "Ran outside the TUI"] }
+  # Enter takes the first row; the save question is the same list.
+  - key: Enter
+  - wait_for: { text: "Save so USDC always means \\S+ on \\S+\\?", timeout: 20s }
+  # Row 1 is "No".
+  - key: Enter
+  - wait_for: { text: "Done in \\d+\\.\\ds", timeout: 20s }
+  - expect_screen: { contains: ["Top Trading Pairs", "orca USDC/USDC"] }
+  - expect_journal: { argv_prefix: ["scope", "crawl"], outcome: ok }
+  - key: Ctrl-D
+  - expect_exit: 0
