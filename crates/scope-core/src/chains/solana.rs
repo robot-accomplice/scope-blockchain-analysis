@@ -259,8 +259,12 @@ impl SolanaClient {
     /// let config = ChainsConfig::default();
     /// let client = SolanaClient::new(&config).unwrap();
     /// ```
+    #[deprecated(
+        since = "0.8.0",
+        note = "pass the transport: use `SolanaClient::new_with_http`"
+    )]
     pub fn new(config: &ChainsConfig) -> Result<Self> {
-        Self::new_with_http(config, crate::http::transport())
+        Self::new_with_http(config, crate::http::shared::fallback())
     }
 
     /// Creates a new Solana client with a pre-built HTTP transport.
@@ -285,7 +289,7 @@ impl SolanaClient {
     /// * `rpc_url` - The Solana JSON-RPC endpoint URL
     pub fn with_rpc_url(rpc_url: &str) -> Self {
         Self {
-            http: crate::http::transport(),
+            http: crate::http::shared::fallback(),
             rpc_url: rpc_url.to_string(),
             solscan_api_key: None,
         }
@@ -438,7 +442,7 @@ impl SolanaClient {
 
     /// Enriches a balance with a USD value using DexScreener price lookup.
     pub async fn enrich_balance_usd(&self, balance: &mut Balance) {
-        let dex = crate::chains::DexClient::new();
+        let dex = crate::chains::DexClient::new_with_http(self.http.clone());
         if let Some(price) = dex.get_native_token_price("solana").await {
             let lamports: f64 = balance.raw.parse().unwrap_or(0.0);
             let sol = lamports / 10_f64.powi(SOL_DECIMALS as i32);
@@ -783,7 +787,7 @@ impl SolanaClient {
 impl Default for SolanaClient {
     fn default() -> Self {
         Self {
-            http: crate::http::transport(),
+            http: crate::http::shared::fallback(),
             rpc_url: DEFAULT_SOLANA_RPC.to_string(),
             solscan_api_key: None,
         }
@@ -1042,7 +1046,7 @@ mod tests {
     #[test]
     fn test_solana_client_new() {
         let config = ChainsConfig::default();
-        let client = SolanaClient::new(&config);
+        let client = SolanaClient::new_with_http(&config, crate::http::test_transport());
         assert!(client.is_ok());
     }
 
@@ -1052,7 +1056,7 @@ mod tests {
             solana_rpc: Some("https://my-solana-rpc.com".to_string()),
             ..Default::default()
         };
-        let client = SolanaClient::new(&config).unwrap();
+        let client = SolanaClient::new_with_http(&config, crate::http::test_transport()).unwrap();
         assert_eq!(client.rpc_url, "https://my-solana-rpc.com");
     }
 
@@ -1068,7 +1072,7 @@ mod tests {
             ..Default::default()
         };
 
-        let client = SolanaClient::new(&config).unwrap();
+        let client = SolanaClient::new_with_http(&config, crate::http::test_transport()).unwrap();
         assert_eq!(client.solscan_api_key, Some("test-key".to_string()));
     }
 

@@ -25,7 +25,8 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> scope::Result<()> {
-//!     let client = DexClient::new();
+//!     let http = scope::http::build(&scope::Config::default())?.client;
+//!     let client = DexClient::new_with_http(http);
 //!     
 //!     // Fetch token data by address
 //!     let data = client.get_token_data("ethereum", "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").await?;
@@ -359,9 +360,13 @@ struct DexScreenerSearchResponse {
 }
 
 impl DexClient {
-    /// Creates a new DEX client.
+    /// Creates a new DEX client with a transport built from the environment.
+    #[deprecated(
+        since = "0.8.0",
+        note = "pass the transport: use `DexClient::new_with_http`"
+    )]
     pub fn new() -> Self {
-        Self::new_with_http(crate::http::transport())
+        Self::new_with_http(crate::http::shared::fallback())
     }
 
     /// Creates a new DEX client with a pre-built HTTP transport.
@@ -376,7 +381,7 @@ impl DexClient {
     #[cfg(any(test, feature = "test-support"))]
     pub fn with_base_url(base_url: &str) -> Self {
         Self {
-            http: crate::http::transport(),
+            http: crate::http::shared::fallback(),
             base_url: base_url.to_string(),
         }
     }
@@ -1019,7 +1024,7 @@ impl DexClient {
 
 impl Default for DexClient {
     fn default() -> Self {
-        Self::new()
+        Self::new_with_http(crate::http::shared::fallback())
     }
 }
 
@@ -1080,10 +1085,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_dex_client_new_uses_the_shared_transport() {
-        let shared = crate::http::transport();
-        let client = DexClient::new();
-        assert!(std::sync::Arc::ptr_eq(&client.http, &shared));
+    fn test_dex_client_uses_the_given_transport() {
+        let given = crate::http::test_transport();
+        let client = DexClient::new_with_http(given.clone());
+        assert!(std::sync::Arc::ptr_eq(&client.http, &given));
     }
 
     #[test]

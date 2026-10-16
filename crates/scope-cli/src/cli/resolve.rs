@@ -155,11 +155,11 @@ pub(crate) fn venue_candidates_from(
 }
 
 /// Candidates from a DexScreener search, with the CEX ticker fallback when
-/// `fallback` is set and the search finds nothing.
+/// `fallback` (its transport) is set and the search finds nothing.
 pub struct DexCandidates<'a> {
     pub dex: &'a dyn scope::chains::DexDataSource,
     pub out: &'a Output,
-    pub fallback: bool,
+    pub fallback: Option<std::sync::Arc<dyn scope::http::HttpClient>>,
 }
 
 #[async_trait::async_trait]
@@ -171,11 +171,12 @@ impl CandidateSource for DexCandidates<'_> {
             found.retain(|r| chain_for_network(&r.chain) == chain_for_network(chain));
         }
         if found.is_empty()
-            && self.fallback
+            && let Some(http) = &self.fallback
             && let Some(f) = crate::cli::token_pick::cex_fallback(
                 symbol,
                 chain.unwrap_or("ethereum"),
                 None,
+                http.clone(),
                 self.out,
             )
             .await
@@ -189,7 +190,7 @@ impl CandidateSource for DexCandidates<'_> {
         format!(
             "DexScreener on {}{}",
             chain.unwrap_or("all chains"),
-            if self.fallback {
+            if self.fallback.is_some() {
                 " and the CEX ticker fallback"
             } else {
                 ""

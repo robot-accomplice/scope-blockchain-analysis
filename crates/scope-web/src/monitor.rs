@@ -40,11 +40,16 @@ fn default_refresh() -> u64 {
 }
 
 /// The venue's exchange client, or the one unknown-venue error.
-fn exchange_client_for(venue: Option<&str>) -> scope::error::Result<Option<ExchangeClient>> {
+fn exchange_client_for(
+    venue: Option<&str>,
+    http: Arc<dyn scope::http::HttpClient>,
+) -> scope::error::Result<Option<ExchangeClient>> {
     let Some(id) = venue else {
         return Ok(None);
     };
-    VenueRegistry::load()?.create_exchange_client(id).map(Some)
+    VenueRegistry::load()?
+        .create_exchange_client_with_http(id, http)
+        .map(Some)
 }
 
 /// WS /ws/monitor — WebSocket endpoint for live token monitoring.
@@ -71,15 +76,15 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, params: Moni
     // Optionally create an exchange client for CEX data. An unknown venue is
     // the one unknown-venue error, reported on the socket (same frame shape
     // as a DexTokenData error), not silently dropped.
-    let exchange_client: Option<ExchangeClient> = match exchange_client_for(params.venue.as_deref())
-    {
-        Ok(client) => client,
-        Err(e) => {
-            let msg = serde_json::json!({"type": "error", "message": e.to_string()});
-            let _ = socket.send(Message::Text(msg.to_string())).await;
-            return;
-        }
-    };
+    let exchange_client: Option<ExchangeClient> =
+        match exchange_client_for(params.venue.as_deref(), state.factory.http()) {
+            Ok(client) => client,
+            Err(e) => {
+                let msg = serde_json::json!({"type": "error", "message": e.to_string()});
+                let _ = socket.send(Message::Text(msg.to_string())).await;
+                return;
+            }
+        };
 
     let exchange_pair: Option<String> = exchange_client.as_ref().map(|ec| {
         let pair = match params.pair.as_deref() {
@@ -241,7 +246,7 @@ mod tests {
     /// word); now the one unknown-venue error reaches the client.
     #[test]
     fn test_exchange_client_for_unknown_venue_is_a_request_fault() {
-        let err = exchange_client_for(Some("nonexistent_venue_xyz"))
+        let err = exchange_client_for(Some("nonexistent_venue_xyz"), scope::http::test_transport())
             .err()
             .unwrap();
         assert!(
@@ -253,8 +258,16 @@ mod tests {
 
     #[test]
     fn test_exchange_client_for_none_and_known_venue() {
-        assert!(exchange_client_for(None).unwrap().is_none());
-        assert!(exchange_client_for(Some("binance")).unwrap().is_some());
+        assert!(
+            exchange_client_for(None, scope::http::test_transport())
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            exchange_client_for(Some("binance"), scope::http::test_transport())
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]

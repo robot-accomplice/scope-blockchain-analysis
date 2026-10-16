@@ -70,17 +70,22 @@ pub async fn dispatch(
     let http: Arc<dyn HttpClient> = create_http_client(config, out)?;
     // Only the TUI can end with a code other than 0, so it starts here.
     if let Commands::Interactive(args) = command {
-        // The transport is installed once per process, so a reload keeps
-        // it; the chain clients take the new keys.
-        let settings = |config: Config| Settings {
+        let settings = |config: Config, http: Arc<dyn HttpClient>| Settings {
             clients: Box::new(DefaultClientFactory {
                 chains_config: config.chains.clone(),
-                http: http.clone(),
+                http,
             }),
             config,
         };
-        let reload = || source.load().map(settings);
-        let exit = crate::cli::interactive::run(args, settings(config.clone()), &reload).await?;
+        // A reload after `setup` builds the transport again, so transport
+        // settings (proxy, Ghola) apply as well as the chain keys.
+        let reload = || {
+            let config = source.load()?;
+            let http = transport_for_reload(&config, &http, out, &|k| std::env::var(k).ok())?;
+            Ok(settings(config, http))
+        };
+        let first = settings(config.clone(), http.clone());
+        let exit = crate::cli::interactive::run(args, first, &reload).await?;
         return Ok(exit.code);
     }
     let factory = DefaultClientFactory {
@@ -133,7 +138,7 @@ pub async fn dispatch_with(
         }
         Commands::Setup(args) => crate::cli::setup::run(args, config, out).await,
         Commands::Compliance(compliance_cmd) => {
-            dispatch_compliance(compliance_cmd, config, out).await
+            dispatch_compliance(compliance_cmd, config, clients.http(), out).await
         }
         Commands::Market(cmd) => crate::cli::market::run(cmd, config, clients, out).await,
         Commands::TokenHealth(args) => {
@@ -141,13 +146,15 @@ pub async fn dispatch_with(
         }
         Commands::Venues(cmd) => crate::cli::venues::run(cmd, out),
         Commands::Report(cmd) => crate::cli::report::run(cmd, config, clients, out).await,
-        Commands::Discover(args) => crate::cli::discover::run(args, config.output.format, out)
-            .await
-            .map_err(|e| match e {
-                // An I/O error keeps its kind (a closed pipe exits quietly).
-                ScopeError::IoError(_) => e,
-                other => ScopeError::Discovery(other.to_string()),
-            }),
+        Commands::Discover(args) => {
+            crate::cli::discover::run(args, config.output.format, clients.http(), out)
+                .await
+                .map_err(|e| match e {
+                    // An I/O error keeps its kind (a closed pipe exits quietly).
+                    ScopeError::IoError(_) => e,
+                    other => ScopeError::Discovery(other.to_string()),
+                })
+        }
         Commands::Insights(args) => crate::cli::insights::run(args, config, clients, out).await,
         Commands::Contract(ref args) => crate::cli::contract::run(args, config, clients, out).await,
         Commands::Web(_) => Err(ScopeError::Other(
@@ -161,6 +168,7 @@ pub async fn dispatch_with(
 async fn dispatch_compliance(
     cmd: crate::cli::compliance::ComplianceCommands,
     config: &Config,
+    http: Arc<dyn HttpClient>,
     out: &Output,
 ) -> Result<()> {
     use crate::cli::address_book::resolve_address_book_input;
@@ -174,14 +182,14 @@ async fn dispatch_compliance(
                     args.chain = Some(chain);
                 }
             }
-            compliance::handle_risk(args, out).await
+            compliance::handle_risk(args, http, out).await
         }
-        ComplianceCommands::Trace(args) => compliance::handle_trace(args, out).await,
+        ComplianceCommands::Trace(args) => compliance::handle_trace(args, http, out).await,
         ComplianceCommands::Analyze(mut args) => {
             if let Some((addr, _chain)) = resolve_address_book_input(&args.address, config)? {
                 args.address = addr;
             }
-            compliance::handle_analyze(args, out).await
+            compliance::handle_analyze(args, http, out).await
         }
         ComplianceCommands::ComplianceReport(mut args) => {
             if !std::path::Path::new(&args.target).exists()
@@ -189,7 +197,7 @@ async fn dispatch_compliance(
             {
                 args.target = addr;
             }
-            compliance::handle_compliance_report(args, out).await
+            compliance::handle_compliance_report(args, http, out).await
         }
     };
     result.map_err(|e| from_anyhow(e, ScopeError::Compliance))
@@ -208,18 +216,44 @@ fn from_anyhow(e: anyhow::Error, kind: fn(String) -> ScopeError) -> ScopeError {
     }
 }
 
-/// Installs the process transport on the first call (see `scope::http::shared`)
-/// and prints the notices. Later calls return the same transport.
+/// Builds the transport that `config` and the environment select (see
+/// `scope::http::shared`) and prints its notices. Each call builds a new one.
 ///
 /// # Errors
 ///
 /// Returns the error when the transport cannot be built.
 pub fn create_http_client(config: &Config, out: &Output) -> Result<Arc<dyn HttpClient>> {
-    let built = scope::http::init(config)?;
+    create_http_client_with(config, out, &|k| std::env::var(k).ok())
+}
+
+/// [`create_http_client`], reading environment variables through `env`.
+fn create_http_client_with(
+    config: &Config,
+    out: &Output,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<Arc<dyn HttpClient>> {
+    let built = scope::http::shared::build_with(config, env)?;
     for notice in &built.notices {
         note!(out, "{notice}");
     }
     Ok(built.client)
+}
+
+/// The transport for the TUI after `setup` saved `config`: a new one, so
+/// the saved transport settings apply. Replay and record keep `current`:
+/// it counts the responses served and the fixtures written in this run,
+/// and `setup` cannot change the mode.
+fn transport_for_reload(
+    config: &Config,
+    current: &Arc<dyn HttpClient>,
+    out: &Output,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<Arc<dyn HttpClient>> {
+    use scope::http::shared::{Kind, configured_kind_with};
+    match configured_kind_with(config, env) {
+        Kind::Replay | Kind::Record => Ok(current.clone()),
+        Kind::Native | Kind::Ghola => create_http_client_with(config, out, env),
+    }
 }
 
 // ============================================================================
@@ -277,17 +311,41 @@ mod tests {
     }
 
     #[test]
-    fn test_create_http_client_returns_the_installed_transport() {
-        // Two calls must give the same transport: one process, one transport.
-        // Default config only: `init` installs for the whole test binary, and
-        // a non-native transport would reach the mockito tests too.
+    fn test_create_http_client_builds_a_new_transport_each_call() {
+        // Nothing is installed for the process (#59): each caller gets its own.
         let config = Config::default();
         let (out, captured) = Output::capture();
-        let a = create_http_client(&config, &out).unwrap();
-        let b = create_http_client(&config, &out).unwrap();
-        assert!(Arc::ptr_eq(&a, &b));
+        let a = create_http_client_with(&config, &out, &|_| None).unwrap();
+        let b = create_http_client_with(&config, &out, &|_| None).unwrap();
+        assert!(!Arc::ptr_eq(&a, &b));
         // Default config selects native, which has nothing to report.
         assert!(captured.err().is_empty(), "{}", captured.err());
+    }
+
+    #[test]
+    fn test_a_reload_builds_the_transport_again() {
+        // After `setup`, transport settings apply without a restart.
+        let (out, _) = Output::capture();
+        let current = create_http_client_with(&Config::default(), &out, &|_| None).unwrap();
+        let next = transport_for_reload(&Config::default(), &current, &out, &|_| None).unwrap();
+        assert!(!Arc::ptr_eq(&current, &next));
+    }
+
+    #[test]
+    fn test_a_reload_keeps_the_replay_and_record_transport() {
+        // A new recorder would overwrite this run's fixtures, and a new
+        // replayer would serve each fixture from its first response again.
+        let (out, _) = Output::capture();
+        let current = create_http_client_with(&Config::default(), &out, &|_| None).unwrap();
+        for mode in ["replay", "record"] {
+            let env = move |k: &str| match k {
+                "SCOPE_HTTP_MODE" => Some(mode.to_string()),
+                "SCOPE_HTTP_FIXTURES" => Some("unused".to_string()),
+                _ => None,
+            };
+            let next = transport_for_reload(&Config::default(), &current, &out, &env).unwrap();
+            assert!(Arc::ptr_eq(&current, &next), "{mode}");
+        }
     }
 
     /// Selection for a Ghola config, without installing it for the process.

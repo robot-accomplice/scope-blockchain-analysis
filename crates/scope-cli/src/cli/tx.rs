@@ -1003,6 +1003,9 @@ mod tests {
 
     struct MockTxFactory;
     impl ChainClientFactory for MockTxFactory {
+        fn http(&self) -> std::sync::Arc<dyn scope::http::HttpClient> {
+            scope::http::test_transport()
+        }
         fn create_chain_client(&self, _chain: &str) -> scope::error::Result<Box<dyn ChainClient>> {
             Ok(Box::new(MockTxClient))
         }

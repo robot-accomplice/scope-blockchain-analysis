@@ -971,7 +971,8 @@ mod tests {
     #[test]
     fn test_risk_engine_with_data_client() {
         let sources = datasource::DataSources::new("test_key".to_string());
-        let client = datasource::BlockchainDataClient::new(sources);
+        let client =
+            datasource::BlockchainDataClient::new_with_http(sources, crate::http::test_transport());
         let _engine = RiskEngine::with_data_client(client);
         // Just verify it creates without panicking
     }

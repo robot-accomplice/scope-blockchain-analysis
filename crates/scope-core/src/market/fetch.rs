@@ -81,12 +81,34 @@ pub async fn fetch_token_summary(
 
 /// [`fetch_token_summary`] for a venue name: resolves it with
 /// [`MarketVenue::from_name`] (the one unknown-venue error), then fetches.
+#[deprecated(
+    since = "0.8.0",
+    note = "pass the transport: use `fetch_token_summary_by_name_with_http`"
+)]
 pub async fn fetch_token_summary_by_name(
     venue: &str,
     analytics: &TokenAnalytics,
     thresholds: &HealthThresholds,
 ) -> Result<MarketSummary> {
-    fetch_token_summary(&MarketVenue::from_name(venue)?, analytics, thresholds).await
+    fetch_token_summary_by_name_with_http(
+        venue,
+        analytics,
+        thresholds,
+        crate::http::shared::fallback(),
+    )
+    .await
+}
+
+/// [`fetch_token_summary_by_name`], sending a CEX venue's requests through
+/// `http`.
+pub async fn fetch_token_summary_by_name_with_http(
+    venue: &str,
+    analytics: &TokenAnalytics,
+    thresholds: &HealthThresholds,
+    http: std::sync::Arc<dyn crate::http::HttpClient>,
+) -> Result<MarketSummary> {
+    let venue = MarketVenue::from_name_with_http(venue, http)?;
+    fetch_token_summary(&venue, analytics, thresholds).await
 }
 
 fn dex_book_and_volume(
@@ -251,10 +273,15 @@ mod tests {
     async fn fetch_token_summary_by_name_resolves_then_fetches() {
         let a = analytics("ethereum", vec![dex_pair(1_000.0, 10.0)]);
         let t = HealthThresholds::default();
-        assert!(fetch_token_summary_by_name("eth", &a, &t).await.is_ok());
-        let err = fetch_token_summary_by_name("polygon", &a, &t)
-            .await
-            .unwrap_err();
+        assert!(
+            fetch_token_summary_by_name_with_http("eth", &a, &t, crate::http::test_transport())
+                .await
+                .is_ok()
+        );
+        let err =
+            fetch_token_summary_by_name_with_http("polygon", &a, &t, crate::http::test_transport())
+                .await
+                .unwrap_err();
         assert!(matches!(err, ScopeError::InvalidInput(_)), "{err:?}");
         assert!(err.to_string().contains("Unknown venue"), "{err}");
     }
