@@ -259,6 +259,9 @@ pub mod http;
 /// configurable health checks for stablecoin markets.
 pub mod market;
 
+/// The metric catalog: market, token and address key values.
+pub mod metrics;
+
 /// The user's directories, resolved in one place (sandboxed in tests).
 pub mod paths;
 

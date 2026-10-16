@@ -35,7 +35,9 @@ pub mod assets;
 pub mod fetch;
 pub mod health;
 pub mod pair;
-pub mod series;
+/// The metric catalog moved to [`crate::metrics`]; this path stays for one
+/// release (#47, Q6).
+pub use crate::metrics as series;
 pub mod traits;
 pub mod types;
 
