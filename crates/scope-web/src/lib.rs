@@ -114,7 +114,7 @@ async fn serve_ui(uri: axum::http::Uri) -> impl axum::response::IntoResponse {
 ///
 /// This is the main entry point called from the CLI `web` command handler.
 pub async fn start_server(addr: SocketAddr, config: Config, out: &Output) -> anyhow::Result<()> {
-    let built = scope::http::init(&config)?;
+    let built = scope::http::build(&config)?;
     for notice in &built.notices {
         tracing::warn!("{notice}");
     }

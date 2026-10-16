@@ -48,7 +48,7 @@ async fn market_summary(
     state: &AppState,
     req: &MarketRequest,
 ) -> scope::error::Result<MarketSummary> {
-    let venue = MarketVenue::from_name(&req.market_venue)?;
+    let venue = MarketVenue::from_name_with_http(&req.market_venue, state.factory.http())?;
     if let Some(chain) = &req.chain {
         venue.require_chain(chain)?;
     }

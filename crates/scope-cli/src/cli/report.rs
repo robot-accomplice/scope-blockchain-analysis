@@ -84,7 +84,7 @@ async fn run_batch(
     let mut reports = Vec::new();
     let mut risk_assessments: Vec<Option<scope::compliance::risk::RiskAssessment>> = Vec::new();
 
-    let engine = scope::compliance::risk::RiskEngine::from_env();
+    let engine = scope::compliance::risk::RiskEngine::from_env_with_http(clients.http());
 
     for (address, chain) in &targets {
         let short_addr = scope::display::text::abbreviate(address);

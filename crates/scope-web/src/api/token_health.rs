@@ -4,7 +4,7 @@ use crate::AppState;
 use axum::Json;
 use axum::extract::State;
 use axum::response::IntoResponse;
-use scope::market::{HealthOverrides, fetch_token_summary_by_name};
+use scope::market::{HealthOverrides, fetch_token_summary_by_name_with_http};
 use scope_cli::cli::crawl::{self, Period};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -65,7 +65,15 @@ pub async fn handle(
     // is reported in `market_error`; the analytics still return.
     let market_result = if req.with_market {
         let thresholds = state.config.market.health.with_overrides(&req.health);
-        Some(fetch_token_summary_by_name(&req.market_venue, &analytics, &thresholds).await)
+        Some(
+            fetch_token_summary_by_name_with_http(
+                &req.market_venue,
+                &analytics,
+                &thresholds,
+                state.factory.http(),
+            )
+            .await,
+        )
     } else {
         None
     };

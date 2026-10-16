@@ -198,6 +198,7 @@ async fn resolve_token_input(
     args: &CrawlArgs,
     aliases: &mut TokenAliases,
     dex_client: &dyn DexDataSource,
+    http: std::sync::Arc<dyn scope::http::HttpClient>,
     spinner: Option<&Spinner>,
     out: &Output,
 ) -> Result<ResolvedToken> {
@@ -229,7 +230,7 @@ async fn resolve_token_input(
     let source = DexCandidates {
         dex: dex_client,
         out,
-        fallback: true,
+        fallback: Some(http),
     };
     progress::status(spinner, out, &format!("Searching for '{}'...", input));
     let picker = picker_for(out, matches!(args.format, OutputFormat::Json));
@@ -274,8 +275,15 @@ pub async fn fetch_analytics_for_input(
     };
     let mut aliases = TokenAliases::load();
     let dex_client = clients.create_dex_client();
-    let resolved =
-        resolve_token_input(&args, &mut aliases, dex_client.as_ref(), spinner, out).await?;
+    let resolved = resolve_token_input(
+        &args,
+        &mut aliases,
+        dex_client.as_ref(),
+        clients.http(),
+        spinner,
+        out,
+    )
+    .await?;
     let fetching = format!(
         "Fetching analytics for {} on {}...",
         resolved.address, resolved.chain
@@ -323,8 +331,15 @@ pub async fn run(
 
     // Resolve the token input to an address (uses factory's dex client for search)
     let dex_client = clients.create_dex_client();
-    let resolved =
-        resolve_token_input(&args, &mut aliases, dex_client.as_ref(), Some(&sp), out).await?;
+    let resolved = resolve_token_input(
+        &args,
+        &mut aliases,
+        dex_client.as_ref(),
+        clients.http(),
+        Some(&sp),
+        out,
+    )
+    .await?;
 
     tracing::info!(
         token = %resolved.address,
@@ -1239,9 +1254,16 @@ mod tests {
         let mut args = make_test_crawl_args();
         args.token = "USDN".into();
         args.yes = true;
-        let err = resolve_token_input(&args, &mut aliases, &TwoUsdn, None, &quiet())
-            .await
-            .unwrap_err();
+        let err = resolve_token_input(
+            &args,
+            &mut aliases,
+            &TwoUsdn,
+            scope::http::test_transport(),
+            None,
+            &quiet(),
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, ScopeError::AmbiguousToken { .. }), "{err}");
         assert!(err.to_string().contains("bsc 0xB"), "{err}");
     }

@@ -646,6 +646,9 @@ mod tests {
     struct FailingChainClientFactory;
 
     impl ChainClientFactory for FailingChainClientFactory {
+        fn http(&self) -> std::sync::Arc<dyn scope::http::HttpClient> {
+            scope::http::test_transport()
+        }
         fn create_chain_client(&self, chain: &str) -> Result<Box<dyn ChainClient>> {
             Err(ScopeError::Chain(format!("unsupported chain: {}", chain)))
         }

@@ -83,11 +83,21 @@ impl std::fmt::Debug for BlockchainDataClient {
 }
 
 impl BlockchainDataClient {
-    /// Create new client with data sources
+    /// Create new client with data sources and a transport built from the
+    /// environment.
+    #[deprecated(
+        since = "0.8.0",
+        note = "pass the transport: use `BlockchainDataClient::new_with_http`"
+    )]
     pub fn new(sources: DataSources) -> Self {
+        Self::new_with_http(sources, crate::http::shared::fallback())
+    }
+
+    /// Create new client with data sources, sending requests through `http`.
+    pub fn new_with_http(sources: DataSources, http: Arc<dyn crate::http::HttpClient>) -> Self {
         Self {
             sources,
-            http_client: crate::http::transport(),
+            http_client: http,
             base_url: ETHERSCAN_API_BASE.to_string(),
         }
     }
@@ -96,15 +106,25 @@ impl BlockchainDataClient {
     pub fn with_base_url(sources: DataSources, base_url: &str) -> Self {
         Self {
             sources,
-            http_client: crate::http::transport(),
+            http_client: crate::http::shared::fallback(),
             base_url: base_url.to_string(),
         }
     }
 
     /// A client for [`super::etherscan::etherscan_key`], or
     /// `None` when there is no key (then use `RiskEngine::new()`).
+    #[deprecated(
+        since = "0.8.0",
+        note = "pass the transport: use `BlockchainDataClient::from_env_opt_with_http`"
+    )]
     pub fn from_env_opt() -> Option<Self> {
-        super::etherscan::etherscan_key().map(|key| Self::new(DataSources::new(key)))
+        Self::from_env_opt_with_http(crate::http::shared::fallback())
+    }
+
+    /// [`BlockchainDataClient::from_env_opt`], sending requests through `http`.
+    pub fn from_env_opt_with_http(http: Arc<dyn crate::http::HttpClient>) -> Option<Self> {
+        super::etherscan::etherscan_key()
+            .map(|key| Self::new_with_http(DataSources::new(key), http))
     }
 
     /// Fetch transaction history for an address
@@ -563,7 +583,7 @@ mod tests {
     #[test]
     fn test_blockchain_data_client_creation() {
         let sources = DataSources::new("test_key".to_string());
-        let client = BlockchainDataClient::new(sources);
+        let client = BlockchainDataClient::new_with_http(sources, crate::http::test_transport());
         let debug = format!("{:?}", client);
         assert!(debug.contains("BlockchainDataClient"));
         assert!(debug.contains("<dyn HttpClient>"));
@@ -677,7 +697,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_transactions_unsupported_chain() {
         let sources = DataSources::new("test_key".to_string());
-        let client = BlockchainDataClient::new(sources);
+        let client = BlockchainDataClient::new_with_http(sources, crate::http::test_transport());
         let result = client.get_transactions("0xabc", "polygon").await;
         assert!(result.is_err());
         assert!(

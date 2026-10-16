@@ -109,7 +109,9 @@
 //!     let config = Config::load(None)?;
 //!     
 //!     // Create a chain client
-//!     let client = EthereumClient::new(&config.chains)?;
+//!     // Build the HTTP transport once and pass it to every client
+//!     let http = scope::http::build(&config)?.client;
+//!     let client = EthereumClient::new_with_http(&config.chains, http)?;
 //!     
 //!     // Query an address balance (with USD valuation)
 //!     let mut balance = client.get_balance("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2").await?;

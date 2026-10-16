@@ -167,8 +167,12 @@ impl TronClient {
     /// let config = ChainsConfig::default();
     /// let client = TronClient::new(&config).unwrap();
     /// ```
+    #[deprecated(
+        since = "0.8.0",
+        note = "pass the transport: use `TronClient::new_with_http`"
+    )]
     pub fn new(config: &ChainsConfig) -> Result<Self> {
-        Self::new_with_http(config, crate::http::transport())
+        Self::new_with_http(config, crate::http::shared::fallback())
     }
 
     /// Creates a new Tron client with a pre-built HTTP transport.
@@ -193,7 +197,7 @@ impl TronClient {
     /// * `api_url` - The TronGrid API endpoint URL
     pub fn with_api_url(api_url: &str) -> Self {
         Self {
-            http: crate::http::transport(),
+            http: crate::http::shared::fallback(),
             api_url: api_url.to_string(),
             api_key: None,
         }
@@ -677,7 +681,7 @@ impl TronClient {
 impl Default for TronClient {
     fn default() -> Self {
         Self {
-            http: crate::http::transport(),
+            http: crate::http::shared::fallback(),
             api_url: DEFAULT_TRON_API.to_string(),
             api_key: None,
         }
@@ -1010,7 +1014,7 @@ mod tests {
     #[test]
     fn test_tron_client_new() {
         let config = ChainsConfig::default();
-        let client = TronClient::new(&config);
+        let client = TronClient::new_with_http(&config, crate::http::test_transport());
         assert!(client.is_ok());
     }
 
@@ -1020,7 +1024,7 @@ mod tests {
             tron_api: Some("https://my-tron-api.com".to_string()),
             ..Default::default()
         };
-        let client = TronClient::new(&config).unwrap();
+        let client = TronClient::new_with_http(&config, crate::http::test_transport()).unwrap();
         assert_eq!(client.api_url, "https://my-tron-api.com");
     }
 
@@ -1036,7 +1040,7 @@ mod tests {
             ..Default::default()
         };
 
-        let client = TronClient::new(&config).unwrap();
+        let client = TronClient::new_with_http(&config, crate::http::test_transport()).unwrap();
         assert_eq!(client.api_key, Some("test-key".to_string()));
     }
 
@@ -1662,7 +1666,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let client = TronClient::new(&config).unwrap();
+        let client = TronClient::new_with_http(&config, crate::http::test_transport()).unwrap();
         let balance = client.get_balance(VALID_ADDRESS).await.unwrap();
         assert_eq!(balance.symbol, "TRX");
         assert!(balance.formatted.contains("TRX"));
@@ -1729,7 +1733,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let client = TronClient::new(&config).unwrap();
+        let client = TronClient::new_with_http(&config, crate::http::test_transport()).unwrap();
         let balances = client.get_trc20_balances(VALID_ADDRESS).await.unwrap();
         assert_eq!(balances.len(), 1);
     }

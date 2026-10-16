@@ -43,7 +43,8 @@
 //! #[tokio::main]
 //! async fn main() -> scope::Result<()> {
 //!     let config = Config::load(None)?;
-//!     let client = EthereumClient::new(&config.chains)?;
+//!     let http = scope::http::build(&config)?.client;
+//!     let client = EthereumClient::new_with_http(&config.chains, http)?;
 //!     
 //!     let balance = client.get_balance("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2").await?;
 //!     println!("Balance: {} ETH", balance.formatted);
@@ -60,7 +61,8 @@
 //! #[tokio::main]
 //! async fn main() -> scope::Result<()> {
 //!     let config = Config::load(None)?;
-//!     let client = SolanaClient::new(&config.chains)?;
+//!     let http = scope::http::build(&config)?.client;
+//!     let client = SolanaClient::new_with_http(&config.chains, http)?;
 //!     
 //!     let balance = client.get_balance("DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy").await?;
 //!     println!("Balance: {} SOL", balance.formatted);
@@ -77,7 +79,8 @@
 //! #[tokio::main]
 //! async fn main() -> scope::Result<()> {
 //!     let config = Config::load(None)?;
-//!     let client = TronClient::new(&config.chains)?;
+//!     let http = scope::http::build(&config)?.client;
+//!     let client = TronClient::new_with_http(&config.chains, http)?;
 //!     
 //!     let balance = client.get_balance("TDqSquXBgUCLYvYC4XZgrprLK589dkhSCf").await?;
 //!     println!("Balance: {} TRX", balance.formatted);
@@ -250,6 +253,11 @@ pub trait ChainClientFactory: Send + Sync {
 
     /// Creates a DEX data source client.
     fn create_dex_client(&self) -> Box<dyn DexDataSource>;
+
+    /// The HTTP transport for clients this factory does not create itself
+    /// (exchange venues, compliance and contract lookups), so they use the
+    /// same transport as the chain clients.
+    fn http(&self) -> Arc<dyn HttpClient>;
 }
 
 /// Default factory that creates real chain clients from configuration.
@@ -284,6 +292,10 @@ impl ChainClientFactory for DefaultClientFactory {
 
     fn create_dex_client(&self) -> Box<dyn DexDataSource> {
         Box::new(DexClient::new_with_http(self.http.clone()))
+    }
+
+    fn http(&self) -> Arc<dyn HttpClient> {
+        self.http.clone()
     }
 }
 
@@ -2167,6 +2179,12 @@ pub mod mocks {
 
         fn create_dex_client(&self) -> Box<dyn DexDataSource> {
             Box::new(self.mock_dex.clone())
+        }
+
+        /// A native transport: the mocks serve chain and DEX data, and
+        /// anything else (venues, Etherscan) goes to the given URL.
+        fn http(&self) -> Arc<dyn HttpClient> {
+            crate::http::shared::fallback()
         }
     }
 }

@@ -149,16 +149,28 @@ impl VenueRegistry {
     /// An unknown ID is [`ScopeError::InvalidInput`] that lists the registry
     /// venues and names the closest one. DEX venues are not listed: this
     /// lookup cannot serve them (see `MarketVenue::resolve`).
+    #[deprecated(
+        since = "0.8.0",
+        note = "pass the transport: use `VenueRegistry::create_exchange_client_with_http`"
+    )]
     pub fn create_exchange_client(
         &self,
         venue_id: &str,
     ) -> Result<crate::market::exchange::ExchangeClient> {
+        self.create_exchange_client_with_http(venue_id, crate::http::shared::fallback())
+    }
+
+    /// [`VenueRegistry::create_exchange_client`], sending the client's
+    /// requests through `http`.
+    pub fn create_exchange_client_with_http(
+        &self,
+        venue_id: &str,
+        http: std::sync::Arc<dyn crate::http::HttpClient>,
+    ) -> Result<crate::market::exchange::ExchangeClient> {
         let desc = self
             .get(venue_id)
             .ok_or_else(|| unknown_venue(venue_id, &self.list()))?;
-        Ok(crate::market::exchange::ExchangeClient::from_descriptor(
-            desc,
-        ))
+        Ok(crate::market::exchange::ExchangeClient::from_descriptor_with_http(desc, http))
     }
 
     /// Validate a venue descriptor YAML string.
@@ -396,7 +408,10 @@ symbol:
     fn test_create_exchange_client_error_unknown_venue() {
         let registry = VenueRegistry::default();
         let err = registry
-            .create_exchange_client("nonexistent_venue_xyz")
+            .create_exchange_client_with_http(
+                "nonexistent_venue_xyz",
+                crate::http::test_transport(),
+            )
             .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("Unknown venue"));
@@ -406,7 +421,9 @@ symbol:
     #[test]
     fn test_create_exchange_client_error_includes_did_you_mean() {
         let registry = VenueRegistry::default();
-        let err = registry.create_exchange_client("binace").unwrap_err();
+        let err = registry
+            .create_exchange_client_with_http("binace", crate::http::test_transport())
+            .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("Unknown venue"));
         assert!(msg.contains("Did you mean"));
@@ -416,7 +433,9 @@ symbol:
     #[test]
     fn test_create_exchange_client_success() {
         let registry = VenueRegistry::default();
-        let client = registry.create_exchange_client("binance").unwrap();
+        let client = registry
+            .create_exchange_client_with_http("binance", crate::http::test_transport())
+            .unwrap();
         assert_eq!(client.venue_name(), "Binance Spot");
     }
 

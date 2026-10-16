@@ -66,6 +66,8 @@ Changes:
 
 Explicit injection for every client (option B) is deferred to #59, with the reasons there.
 
+**Update (#59, option B done):** `init` and `transport` are removed. `cli::dispatch` and `scope-web::start_server` call `build` and put the transport in `DefaultClientFactory`; every client gets it from there (`ChainClientFactory::http`). The TUI builds a new transport after `setup`, except in replay or record mode.
+
 ### 2.3 What this also fixes
 
 Ghola now covers every request. Today it misses all exchange venue calls, the DEX client in `discover` and in price enrichment, contract and compliance.
