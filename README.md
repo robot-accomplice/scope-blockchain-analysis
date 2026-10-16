@@ -796,7 +796,7 @@ The row under the input shows the usage of the command you type and the next arg
 
 **Repeating view.** A command with `--every` (for example `market summary USDC --venue binance --every 30s --duration 1h`) shows one view that updates in place: the latest report beside its trends (a pass/fail strip with the last failure, and a chart per key value with its threshold line). Below 80 columns the trends sit under the report. `--duration forever` (or `inf`) runs until you press `Esc`; without `--duration`, a run lasts 1 hour. `Esc` stops the run and the view stays; the next key leaves it with one copy of the final report and a summary such as `42 runs · 1 failed (run 16)`.
 
-**Commands that need the terminal.** `setup`, `crawl` with a name or symbol (it asks you to pick a token), and `monitor` run on the plain terminal. The TUI steps aside, runs the command, and comes back by itself when it ends; `Ctrl-C` cancels it. The scrollback shows its output and how long it took. `interactive`, `web` and `completions` do not run in the TUI.
+**Commands that need the terminal.** `setup`, `crawl` with a name or symbol (it asks you to pick a token), and `monitor` run on the plain terminal. The TUI steps aside, runs the command, and comes back by itself when it ends; `Ctrl-C` cancels it. The scrollback shows its output and how long it took. After `setup`, the TUI reads the config again, so a new key works at once. `interactive`, `web` and `completions` do not run in the TUI.
 
 **Files.** The TUI keeps its history in `history.txt` and a log of every submitted line in `tui-events.jsonl` (input, parsed arguments, outcome, error, duration), both in the scope data directory.
 

@@ -6,38 +6,87 @@
 //! code) stay with the caller.
 
 use crate::cli::output::Output;
+use crate::cli::tui::Settings;
 use crate::cli::{Cli, Commands};
 use crate::{note, out};
 use clap::CommandFactory;
 use clap_complete::generate;
 use scope::Config;
 use scope::chains::{ChainClientFactory, DefaultClientFactory};
+use scope::config::OutputFormat;
 use scope::error::{Result, ScopeError};
 use scope::http::HttpClient;
+use std::path::PathBuf;
 use std::sync::Arc;
+
+/// Where the config comes from: the binary reads it this way at start,
+/// and the TUI reads it the same way again after `setup` (#99).
+#[derive(Debug, Clone, Default)]
+pub struct ConfigSource {
+    /// `--config`, when given; else `SCOPE_CONFIG` or the default file.
+    pub path: Option<PathBuf>,
+    /// `--ai`: Markdown output for an agent to read.
+    pub ai: bool,
+}
+
+impl ConfigSource {
+    /// Reads the config and applies the flags.
+    ///
+    /// # Errors
+    ///
+    /// Returns the config file's read or parse error.
+    pub fn load(&self) -> Result<Config> {
+        let mut config = Config::load(self.path.as_deref())?;
+        self.apply(&mut config);
+        Ok(config)
+    }
+
+    /// Applies the flags that override the file (`--ai`).
+    pub fn apply(&self, config: &mut Config) {
+        if self.ai {
+            config.output.format = OutputFormat::Markdown;
+        }
+    }
+}
 
 /// Routes one command to its handler.
 ///
 /// Creates the HTTP transport and client factory, then runs the handler
 /// with `out` as its output. Returns the process exit code: 0, or the
-/// TUI's code (128+N after signal N ended it).
+/// TUI's code (128+N after signal N ended it). `source` says how to read
+/// `config` again; the TUI does so after `setup`.
 ///
 /// # Errors
 ///
 /// Returns the handler's error. `Commands::Web` is an error here: the web
 /// server lives in the `scope-bca` crate, and its binary starts it before
 /// dispatch.
-pub async fn dispatch(command: Commands, config: &Config, out: &Output) -> Result<i32> {
+pub async fn dispatch(
+    command: Commands,
+    source: &ConfigSource,
+    config: &Config,
+    out: &Output,
+) -> Result<i32> {
     let http: Arc<dyn HttpClient> = create_http_client(config, out)?;
+    // Only the TUI can end with a code other than 0, so it starts here.
+    if let Commands::Interactive(args) = command {
+        // The transport is installed once per process, so a reload keeps
+        // it; the chain clients take the new keys.
+        let settings = |config: Config| Settings {
+            clients: Box::new(DefaultClientFactory {
+                chains_config: config.chains.clone(),
+                http: http.clone(),
+            }),
+            config,
+        };
+        let reload = || source.load().map(settings);
+        let exit = crate::cli::interactive::run(args, settings(config.clone()), &reload).await?;
+        return Ok(exit.code);
+    }
     let factory = DefaultClientFactory {
         chains_config: config.chains.clone(),
         http,
     };
-    // Only the TUI can end with a code other than 0, so it starts here.
-    if let Commands::Interactive(args) = command {
-        let exit = crate::cli::interactive::run(args, config, &factory).await?;
-        return Ok(exit.code);
-    }
     dispatch_with(command, config, &factory, out)
         .await
         .map(|()| 0)
@@ -180,6 +229,25 @@ pub fn create_http_client(config: &Config, out: &Output) -> Result<Arc<dyn HttpC
 #[cfg(test)]
 mod tests {
     #[test]
+    fn test_a_config_source_reads_its_file_and_applies_ai() {
+        use super::ConfigSource;
+        use scope::config::OutputFormat;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.yaml");
+        std::fs::write(&path, "output:\n  format: json\n").unwrap();
+        let plain = ConfigSource {
+            path: Some(path.clone()),
+            ai: false,
+        };
+        assert_eq!(plain.load().unwrap().output.format, OutputFormat::Json);
+        let ai = ConfigSource {
+            path: Some(path),
+            ai: true,
+        };
+        assert_eq!(ai.load().unwrap().output.format, OutputFormat::Markdown);
+    }
+
+    #[test]
     fn test_anyhow_io_errors_keep_their_kind() {
         // A closed pipe in `compliance … | head` must still read as a
         // closed pipe, so the CLI exits quietly.
@@ -264,7 +332,14 @@ mod tests {
         // the injected writer, not straight to the process stdout.
         let cli = Cli::try_parse_from(["scope", "completions", "bash"]).unwrap();
         let (o, cap) = Output::capture();
-        dispatch(cli.command, &Config::default(), &o).await.unwrap();
+        dispatch(
+            cli.command,
+            &ConfigSource::default(),
+            &Config::default(),
+            &o,
+        )
+        .await
+        .unwrap();
         assert!(cap.out().contains("_scope()"));
     }
 
@@ -277,9 +352,14 @@ mod tests {
             crate::cli::output::tests::ClosedPipe,
             crate::cli::output::tests::ClosedPipe,
         );
-        let err = dispatch(cli.command, &Config::default(), &o)
-            .await
-            .unwrap_err();
+        let err = dispatch(
+            cli.command,
+            &ConfigSource::default(),
+            &Config::default(),
+            &o,
+        )
+        .await
+        .unwrap_err();
         assert!(
             matches!(err, ScopeError::IoError(ref e) if e.kind() == std::io::ErrorKind::BrokenPipe)
         );
@@ -289,9 +369,14 @@ mod tests {
     async fn test_dispatch_rejects_web() {
         // `web` needs the scope-bca crate; dispatch must fail, not panic.
         let cli = Cli::try_parse_from(["scope", "web"]).unwrap();
-        let err = dispatch(cli.command, &Config::default(), &quiet())
-            .await
-            .unwrap_err();
+        let err = dispatch(
+            cli.command,
+            &ConfigSource::default(),
+            &Config::default(),
+            &quiet(),
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("scope web"));
     }
 

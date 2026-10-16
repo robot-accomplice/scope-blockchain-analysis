@@ -156,6 +156,16 @@ pub fn tui_terminal_ok(
     Err("scope tui needs an interactive terminal; run the command directly, e.g. scope market summary …".to_string())
 }
 
+/// What the TUI's commands run with: the config, and the chain clients
+/// built from it.
+pub struct Settings {
+    pub config: Config,
+    pub clients: Box<dyn ChainClientFactory>,
+}
+
+/// Reads the [`Settings`] again, after `setup` saved new ones (#99).
+pub type Reload<'a> = &'a dyn Fn() -> Result<Settings>;
+
 /// Runs the TUI until the user leaves or a signal ends it.
 ///
 /// # Errors
@@ -163,11 +173,7 @@ pub fn tui_terminal_ok(
 /// Returns an error when the signal handlers cannot be installed, a
 /// terminal I/O error, or the error from saving the history or the
 /// session context on exit.
-pub async fn run(
-    no_banner: bool,
-    config: &Config,
-    clients: &dyn ChainClientFactory,
-) -> Result<TuiExit> {
+pub async fn run(no_banner: bool, settings: Settings, reload: Reload<'_>) -> Result<TuiExit> {
     let signals = signal_stream()?;
     // A second stream gets the same signals (tokio gives each one to
     // every listener). Only `scope tui` installs these handlers; a plain
@@ -187,10 +193,17 @@ pub async fn run(
     let mut state = TuiState::new(
         SessionContext::load(),
         Journal::in_data_dir(),
-        vocab::Vocab::load(config),
+        vocab::Vocab::load(&settings.config),
     );
     welcome(&mut state, no_banner);
-    session(&mut host, &mut state, config, clients, SessionContext::save).await
+    session(
+        &mut host,
+        &mut state,
+        settings,
+        reload,
+        SessionContext::save,
+    )
+    .await
 }
 
 /// Runs the event loop, then restores the terminal and saves, also after
@@ -198,11 +211,11 @@ pub async fn run(
 async fn session<H: Host>(
     host: &mut H,
     state: &mut TuiState,
-    config: &Config,
-    clients: &dyn ChainClientFactory,
+    settings: Settings,
+    reload: Reload<'_>,
     save_ctx: impl FnOnce(&SessionContext) -> Result<()>,
 ) -> Result<TuiExit> {
-    let result = event_loop(host, state, config, clients).await;
+    let result = event_loop(host, state, settings, reload).await;
     // The CLI after the TUI, also after an error or a signal, uses the
     // real width.
     host.set_width(None);
@@ -415,16 +428,25 @@ impl Outside {
 
 type PaneFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + 'a>>;
 
-/// After `setup` in the TUI: the session keeps the config it read at start.
-const SETUP_RESTART_NOTE: &str =
-    "Settings are saved. Leave the TUI (exit) and start it again to use them.";
+/// After `setup` in the TUI: the session read the config again.
+const SETUP_RELOADED_NOTE: &str = "The TUI now uses the saved settings.";
+
+/// After `setup`, when the config could not be read again.
+fn setup_reload_failed_note(e: &ScopeError) -> String {
+    format!(
+        "The settings could not be read again ({e}). Leave the TUI (exit) and start it again to use them."
+    )
+}
 
 async fn event_loop<H: Host>(
     host: &mut H,
     state: &mut TuiState,
-    config: &Config,
-    clients: &dyn ChainClientFactory,
+    settings: Settings,
+    reload: Reload<'_>,
 ) -> Result<TuiExit> {
+    // Each command holds its own handle on the settings, so `setup` can
+    // swap in new ones between commands.
+    let mut settings = std::rc::Rc::new(settings);
     const LEFT: TuiExit = TuiExit { code: 0 };
     // Library warnings between commands land here and join the scrollback.
     let idle_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
@@ -515,14 +537,15 @@ async fn event_loop<H: Host>(
                         pending = None;
                         state.finish(Ending::Cancelled);
                     }
-                    Action::Submit(line) => match state.submit(&line, config) {
+                    Action::Submit(line) => match state.submit(&line, &settings.config) {
                         Plan::Done => {}
                         Plan::Exit => return Ok(LEFT),
                         Plan::Run(inv) => match inv.route {
                             Route::Pane => {
                                 let out = state.start(&line, &inv);
+                                let s = settings.clone();
                                 pending = Some(Box::pin(async move {
-                                    run_invocation(*inv, config, clients, &out).await
+                                    run_invocation(*inv, &s.config, &*s.clients, &out).await
                                 }));
                             }
                             Route::Suspend => {
@@ -530,7 +553,8 @@ async fn event_loop<H: Host>(
                                 leave(host);
                                 let outside = Outside::new(host.suspended_output());
                                 let argv = inv.argv.clone();
-                                let command = run_invocation(*inv, config, clients, &outside.out);
+                                let command =
+                                    run_invocation(*inv, &settings.config, &*settings.clients, &outside.out);
                                 let ended =
                                     run_suspended(host, &line, &argv, &outside, command, state)
                                         .await;
@@ -539,12 +563,20 @@ async fn event_loop<H: Host>(
                                     // restores and saves.
                                     return Ok(exit);
                                 }
+                                if argv.get(1).is_some_and(|c| c == "setup") {
+                                    // Before the screen is taken back, so a
+                                    // notice from the reload shows outside.
+                                    match reload() {
+                                        Ok(new) => {
+                                            state.set_vocab(vocab::Vocab::load(&new.config));
+                                            settings = std::rc::Rc::new(new);
+                                            state.push_note(SETUP_RELOADED_NOTE);
+                                        }
+                                        Err(e) => state.push_note(&setup_reload_failed_note(&e)),
+                                    }
+                                }
                                 host.resume()?;
                                 idle_diag.replace(scope::diag::redirect(idle_buf.clone()));
-                                if argv.get(1).is_some_and(|c| c == "setup") {
-                                    // The clients hold the config read at start.
-                                    state.push_note(SETUP_RESTART_NOTE);
-                                }
                             }
                             Route::Refuse(reason) => {
                                 // exec::plan writes refusals and never
@@ -1045,22 +1077,40 @@ mod tests {
         host: TestHost,
         captured: crate::cli::output::Captured,
     ) -> Driven {
-        drive_host_on(journal, host, captured, &MockClientFactory::new()).await
+        drive_host_on(journal, host, captured, Box::new(MockClientFactory::new())).await
     }
 
-    /// [`drive_host`] with the client factory `clients`.
+    /// Settings with the default config and `clients`.
+    fn settings_with(clients: Box<dyn ChainClientFactory>) -> Settings {
+        Settings {
+            config: Config::default(),
+            clients,
+        }
+    }
+
+    /// [`drive_host`] with the client factory `clients`. A reload after
+    /// `setup` gives the mock factory.
     async fn drive_host_on(
+        journal: Journal,
+        host: TestHost,
+        captured: crate::cli::output::Captured,
+        clients: Box<dyn ChainClientFactory>,
+    ) -> Driven {
+        let reload = || Ok(settings_with(Box::new(MockClientFactory::new())));
+        drive_host_reloading(journal, host, captured, settings_with(clients), &reload).await
+    }
+
+    /// [`drive_host`] with `settings`, and `reload` after `setup`.
+    async fn drive_host_reloading(
         journal: Journal,
         mut host: TestHost,
         captured: crate::cli::output::Captured,
-        clients: &dyn ChainClientFactory,
+        settings: Settings,
+        reload: Reload<'_>,
     ) -> Driven {
         let mut state = TuiState::new(SessionContext::default(), journal, vocab::Vocab::default());
         welcome(&mut state, true);
-        let res = session(&mut host, &mut state, &Config::default(), clients, |_| {
-            Ok(())
-        })
-        .await;
+        let res = session(&mut host, &mut state, settings, reload, |_| Ok(())).await;
         (res, state, host, captured)
     }
 
@@ -1115,7 +1165,7 @@ mod tests {
     async fn drive_pending(events: Vec<io::Result<Event>>, signals: Vec<Signal>) -> Driven {
         let (host, captured) = test_host(events, signals);
         let clients = PendingFactory(MockClientFactory::new());
-        drive_host_on(Journal::default(), host, captured, &clients).await
+        drive_host_on(Journal::default(), host, captured, Box::new(clients)).await
     }
 
     /// Types `lines`, then delivers `signal`.
@@ -1228,19 +1278,97 @@ mod tests {
         assert_eq!(draws.last(), Some(&Some(100)), "set again after Ctrl-Z");
     }
 
+    /// The mock factory, counting the DEX clients it makes.
+    struct CountingFactory(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl ChainClientFactory for CountingFactory {
+        fn create_chain_client(
+            &self,
+            chain: &str,
+        ) -> scope::Result<Box<dyn scope::chains::ChainClient>> {
+            MockClientFactory::new().create_chain_client(chain)
+        }
+        fn create_dex_client(&self) -> Box<dyn scope::chains::DexDataSource> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            MockClientFactory::new().create_dex_client()
+        }
+    }
+
     #[tokio::test]
-    async fn test_setup_in_the_tui_says_to_restart_and_other_commands_do_not() {
-        // The session's clients keep the config read at start: after
-        // `setup`, the user must restart to use a new key (a stale key
+    async fn test_after_setup_the_next_command_uses_the_reloaded_clients() {
+        // #99: a key saved by `setup` works without a restart (a stale key
         // gave "Invalid API Key" right after a successful setup).
         let _lock = DIAG_LOCK.lock().await;
-        let (res, state, _, _) = drive(script(&["setup --key nosuchkey"])).await;
+        let first = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reloaded = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reloads = std::cell::Cell::new(0);
+        let reload = || {
+            reloads.set(reloads.get() + 1);
+            Ok(settings_with(Box::new(CountingFactory(reloaded.clone()))))
+        };
+        let (host, captured) = test_host(script(&["setup --key nosuchkey", "crawl USDC"]), vec![]);
+        let (res, state, _, _) = drive_host_reloading(
+            Journal::default(),
+            host,
+            captured,
+            settings_with(Box::new(CountingFactory(first.clone()))),
+            &reload,
+        )
+        .await;
         res.unwrap();
-        assert!(state.scrollback_text().contains(SETUP_RESTART_NOTE));
+        assert_eq!(reloads.get(), 1, "setup reads the settings once");
+        assert!(state.scrollback_text().contains(SETUP_RELOADED_NOTE));
+        assert_eq!(
+            first.load(Ordering::SeqCst),
+            0,
+            "the old clients are not used"
+        );
+        assert!(
+            reloaded.load(Ordering::SeqCst) > 0,
+            "crawl used the new clients"
+        );
+    }
 
-        let (res, state, _, _) = drive(script(&["crawl USDC"])).await;
+    #[tokio::test]
+    async fn test_a_failed_reload_keeps_the_settings_and_says_to_restart() {
+        let _lock = DIAG_LOCK.lock().await;
+        let reload = || Err(ScopeError::Other("bad yaml".into()));
+        let (host, captured) = test_host(script(&["setup --key nosuchkey"]), vec![]);
+        let (res, state, _, _) = drive_host_reloading(
+            Journal::default(),
+            host,
+            captured,
+            settings_with(Box::new(MockClientFactory::new())),
+            &reload,
+        )
+        .await;
         res.unwrap();
-        assert!(!state.scrollback_text().contains(SETUP_RESTART_NOTE));
+        let text = state.scrollback_text();
+        assert!(text.contains("could not be read again"), "{text}");
+        assert!(text.contains("bad yaml"), "{text}");
+        assert!(!text.contains(SETUP_RELOADED_NOTE), "{text}");
+    }
+
+    #[tokio::test]
+    async fn test_other_commands_do_not_reload() {
+        let _lock = DIAG_LOCK.lock().await;
+        let reloads = std::cell::Cell::new(0);
+        let reload = || {
+            reloads.set(reloads.get() + 1);
+            Ok(settings_with(Box::new(MockClientFactory::new())))
+        };
+        let (host, captured) = test_host(script(&["crawl USDC", "venues list"]), vec![]);
+        let (res, state, _, _) = drive_host_reloading(
+            Journal::default(),
+            host,
+            captured,
+            settings_with(Box::new(MockClientFactory::new())),
+            &reload,
+        )
+        .await;
+        res.unwrap();
+        assert_eq!(reloads.get(), 0);
+        assert!(!state.scrollback_text().contains(SETUP_RELOADED_NOTE));
     }
 
     #[tokio::test]
@@ -1329,8 +1457,9 @@ mod tests {
             panic!("`venues list` did not plan a run")
         };
         let _out = state.start("venues list", &inv);
-        let factory = MockClientFactory::new();
-        let res = session(&mut host, &mut state, &config, &factory, |_| Ok(())).await;
+        let reload = || Ok(settings_with(Box::new(MockClientFactory::new())));
+        let settings = settings_with(Box::new(MockClientFactory::new()));
+        let res = session(&mut host, &mut state, settings, &reload, |_| Ok(())).await;
         assert_eq!(res.unwrap().code, 0);
         assert!(state.running.is_some(), "the tick stayed on");
         assert_eq!(host.stops, 1);

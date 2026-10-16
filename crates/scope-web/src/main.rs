@@ -57,8 +57,8 @@
 use anyhow::Result;
 use clap::Parser;
 use scope::Config;
-use scope::config::OutputFormat;
 use scope::error::ScopeError;
+use scope_cli::cli::dispatch::ConfigSource;
 use scope_cli::cli::errors::display_error;
 use scope_cli::cli::output::Output;
 use scope_cli::cli::prompt;
@@ -151,20 +151,22 @@ async fn run() -> Result<()> {
         Err(e) => fail(&out, e.to_string(), 1),
     }
 
-    // Load configuration
-    let mut config = Config::load(cli.config.as_deref()).unwrap_or_else(|e| {
+    // Load configuration. The TUI reads it the same way after `setup`.
+    let source = ConfigSource {
+        path: cli.config.clone(),
+        ai: cli.ai,
+    };
+    let config = source.load().unwrap_or_else(|e| {
         note!(
             out,
             "⚠ Could not load config, using defaults (use -v for details)"
         );
         tracing::debug!("Failed to load config: {}", e);
-        Config::default()
+        let mut config = Config::default();
+        // --ai forces markdown output to console for agent parsing
+        source.apply(&mut config);
+        config
     });
-
-    // --ai forces markdown output to console for agent parsing
-    if cli.ai {
-        config.output.format = OutputFormat::Markdown;
-    }
 
     // Handle web command early (before setup check and factory creation)
     if let Commands::Web(ref web_args) = cli.command {
@@ -210,15 +212,16 @@ async fn run() -> Result<()> {
             let _ = display_error(&e, &out);
         }
         // Reload config after setup
-        let mut config = Config::load(cli.config.as_deref()).unwrap_or_default();
-        if cli.ai {
-            config.output.format = OutputFormat::Markdown;
-        }
-        return dispatch(cli.command, &config, &out).await;
+        let config = source.load().unwrap_or_else(|_| {
+            let mut config = Config::default();
+            source.apply(&mut config);
+            config
+        });
+        return dispatch(cli.command, &source, &config, &out).await;
     }
 
     // Dispatch the command through the unified handler
-    dispatch(cli.command, &config, &out).await
+    dispatch(cli.command, &source, &config, &out).await
 }
 
 /// Checks if a configuration file exists.
@@ -254,13 +257,18 @@ fn prompt_for_setup(out: &Output) -> bool {
 /// Prints the version line for non-interactive commands, and on failure
 /// prints the error with remediation hints and exits with status 1. Exits
 /// with the TUI's code when a signal ended it.
-async fn dispatch(command: Commands, config: &Config, out: &Output) -> Result<()> {
+async fn dispatch(
+    command: Commands,
+    source: &ConfigSource,
+    config: &Config,
+    out: &Output,
+) -> Result<()> {
     // Print version on stderr for non-interactive commands
     if !command.is_interactive() {
         note!(out, "Scope v{}", scope::VERSION);
     }
 
-    match scope_cli::cli::dispatch::dispatch(command, config, out).await {
+    match scope_cli::cli::dispatch::dispatch(command, source, config, out).await {
         Ok(0) => Ok(()),
         // The TUI ended on a signal (128+N); it already restored the
         // terminal and saved.
