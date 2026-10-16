@@ -1748,7 +1748,7 @@ impl TuiState {
 
         if let Some(Overlay::Choice(ch)) = &self.overlay {
             let frame = f.area();
-            let rows = ch.options.len().min(MENU_ROWS).max(1);
+            let rows = ch.options.len().clamp(1, MENU_ROWS);
             let first = ch.selected.saturating_sub(rows - 1);
             let height = (rows as u16 + 2).min(input.y);
             // Each row is "NN. option"; the borders add two columns.
