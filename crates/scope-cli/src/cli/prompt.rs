@@ -76,6 +76,36 @@ pub fn ask_stdin(out: &Output, question: &str) -> io::Result<String> {
     ask(&mut stdin(), out, question)
 }
 
+/// `ask` on stdin that waits at most `timeout` for the answer. Returns
+/// `None` when no answer came in time.
+///
+/// The read runs on a thread of its own, which stays behind, blocked on
+/// stdin, when the time runs out. Use it only as the process's last
+/// question (the exit question about the Ghola sidecar).
+///
+/// # Errors
+///
+/// Returns the write or read error.
+pub fn ask_timeout(
+    out: &Output,
+    question: &str,
+    timeout: std::time::Duration,
+) -> io::Result<Option<String>> {
+    crate::cli::progress::paused(|| {
+        crate::err!(out, "{question}")?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut answer = String::new();
+            let read = stdin().read_line(&mut answer).map(|_| answer);
+            let _ = tx.send(read);
+        });
+        match rx.recv_timeout(timeout) {
+            Ok(read) => read.map(Some),
+            Err(_) => Ok(None),
+        }
+    })
+}
+
 /// Shows `list` (it ends with a newline), asks `Select <what> (1-<count>): `
 /// and returns the zero-based index of the answer.
 ///

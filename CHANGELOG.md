@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Scope offers to install the Ghola sidecar when `ghola.enabled` is set and none is found. It asks on a terminal (once; a "no" is remembered), in the `setup` wizard, and suggests it in `setup --status`. It downloads the latest `robot-accomplice/ghola` release over HTTPS, checks its SHA-256 against `checksums.txt` before extracting, and installs `ghola` to `~/.scope-bca/bin` (PATH is not changed). With no archive for the system it offers `go install`. `--yes`, JSON/CSV/Markdown output, pipes, the web API and the TUI never install. Scope now starts an installed `ghola --serve` when no sidecar answers, and at exit asks whether to stop it (no answer within 15 s stops it).
+
+### Fixed
+- The Ghola install hint now names `go install github.com/robot-accomplice/ghola/cmd/ghola@latest`.
+
 ### Changed (breaking)
 - scope reads and writes YAML with serde-saphyr (safe Rust) in place of the deprecated serde_yaml, so `unsafe-libyaml` (unmaintained, RUSTSEC-2024-0449) is gone. Files that serde_yaml wrote read the same. In scope-bca-core, `ConfigError::Parse` now holds a `serde_saphyr::Error`, and YAML error messages read differently. (#118)
 - `crawl --yes` no longer selects the first match for an ambiguous symbol. It stops with the candidates; pass `--token <contract>`. `--yes` now skips only the save question.

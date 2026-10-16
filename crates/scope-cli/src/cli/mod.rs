@@ -66,6 +66,7 @@ pub mod discover;
 pub mod dispatch;
 pub mod errors;
 pub mod export;
+pub mod ghola_offer;
 pub mod health_args;
 pub mod insights;
 pub mod interactive;
