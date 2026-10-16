@@ -227,15 +227,18 @@ fn show_status(config: &Config, out: &Output) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Checks whether the `ghola` binary is present on `$PATH`.
+/// Checks whether the `ghola` binary is present on `$PATH`. It looks in
+/// the folders itself: Windows has no `which`, so asking it always said
+/// "not found" there.
 fn which_ghola() -> bool {
-    std::process::Command::new("which")
-        .arg("ghola")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    std::env::var_os("PATH").is_some_and(|path| in_path(&path, "ghola"))
+}
+
+/// True when the program `name` is a file in one of the `path` folders,
+/// with the platform's executable suffix (`ghola.exe` on Windows).
+fn in_path(path: &std::ffi::OsStr, name: &str) -> bool {
+    let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+    std::env::split_paths(path).any(|dir| dir.join(&file).is_file())
 }
 
 /// Gets API key configuration items.
@@ -1528,6 +1531,21 @@ mod tests {
     fn test_which_ghola_returns_bool() {
         // Smoke test: the result depends on the host; the probe must not panic.
         let _ = which_ghola();
+    }
+
+    #[test]
+    fn test_in_path_finds_a_program_in_any_path_folder() {
+        let empty = tempfile::tempdir().unwrap();
+        let with = tempfile::tempdir().unwrap();
+        let program = format!("ghola{}", std::env::consts::EXE_SUFFIX);
+        std::fs::write(with.path().join(&program), "").unwrap();
+        let path = std::env::join_paths([empty.path(), with.path()]).unwrap();
+        assert!(in_path(&path, "ghola"), "found in the second folder");
+        let only_empty = std::env::join_paths([empty.path()]).unwrap();
+        assert!(!in_path(&only_empty, "ghola"));
+        // A folder with the program's name is not the program.
+        std::fs::create_dir(empty.path().join(&program)).unwrap();
+        assert!(!in_path(&only_empty, "ghola"));
     }
 
     #[test]
