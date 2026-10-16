@@ -70,16 +70,9 @@ pub fn route(command: &Commands) -> Route {
         | Commands::Compliance(_)
         | Commands::AddressBook(_)
         | Commands::Export(_)
+        // A crawl by name or symbol asks which token in the pane (#109).
+        | Commands::Crawl(_)
         | Commands::Report(_) => Route::Pane,
-        // A name or symbol search asks the user to pick a token and offers
-        // to save an alias. An address or --yes never prompts.
-        Commands::Crawl(args) => {
-            if args.yes || TokenAliases::is_address(args.token.trim()) {
-                Route::Pane
-            } else {
-                Route::Suspend
-            }
-        }
         // Only --status is free of prompts.
         Commands::Setup(args) => {
             if args.status {
@@ -1350,7 +1343,7 @@ mod tests {
         let mut ctx = SessionContext::default();
         assert_eq!(
             run_of(plan_line("crawl USDC", &mut ctx).0).route,
-            Route::Suspend
+            Route::Pane
         );
         assert_eq!(
             run_of(plan_line("crawl USDC --yes", &mut ctx).0).route,
