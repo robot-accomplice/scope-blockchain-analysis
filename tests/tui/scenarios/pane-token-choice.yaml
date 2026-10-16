@@ -1,0 +1,20 @@
+name: a command in the TUI pane asks which token a symbol means in a list
+tiers: [offline]
+steps:
+  # token-health runs in the pane. USDC names many tokens, so the command
+  # asks in a list inside the TUI instead of stopping with an error.
+  - type: "token-health USDC"
+  - key: Enter
+  - wait_for: { text: "'USDC' matches more than one token\\. Choose one:", timeout: 20s }
+  - expect_screen: { contains: ["1. solana 53EZNaGbfB9f8WiMqHpZX4k5Z7DLoEVA4zbq1Xtk6YkK"] }
+  # Enter takes the first row; the save question is the same list.
+  - key: Enter
+  - wait_for: { text: "Save so USDC always means \\S+ on solana\\?", timeout: 20s }
+  # Row 1 is "No".
+  - key: Enter
+  # The report is the token the list chose (Solana USDC, row 1).
+  - wait_for: { text: "Done in \\d+\\.\\ds", timeout: 20s }
+  - expect_screen: { contains: ["USDC \\(USD Coin\\)", "Liquidity +\\$3\\.96B"] }
+  - expect_journal: { argv_prefix: ["scope", "token-health"], outcome: ok }
+  - key: Ctrl-D
+  - expect_exit: 0
