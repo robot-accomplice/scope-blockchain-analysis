@@ -1,0 +1,2 @@
+# TUI snapshots are compared byte for byte with the screen, which has LF.
+tests/tui/snapshots/** text eol=lf
