@@ -2559,15 +2559,14 @@ mod tests {
             argv: vec![],
         };
         let out = s.start("market summary USDC --every 1s", &inv);
-        let metrics =
-            scope::market::series::summary_metrics(&scope::market::HealthThresholds::default());
+        let metrics = scope::metrics::summary_metrics(&scope::market::HealthThresholds::default());
         for run in 1..=n {
             out.record_run(
                 &metrics,
                 crate::cli::output::RunRecord {
                     run,
                     at: Utc::now(),
-                    sample: scope::market::series::Sample {
+                    sample: scope::metrics::Sample {
                         values: vec![Some(1.0); metrics.len()],
                         healthy: run != fail,
                         failed_checks: vec![format!("spread {run}%")],

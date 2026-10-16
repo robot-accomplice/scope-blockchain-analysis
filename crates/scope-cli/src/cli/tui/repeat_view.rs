@@ -16,7 +16,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph};
-use scope::market::series::{Metric, MetricId, Unit};
+use scope::metrics::{Metric, MetricId, Unit};
 
 /// The pane width from which the snapshot and the trends sit side by side.
 pub(crate) const SIDE_BY_SIDE_MIN_WIDTH: u16 = 80;
@@ -83,11 +83,11 @@ pub(crate) fn final_snapshot(series: &SeriesHook) -> Option<String> {
 /// The series as CSV, in the same columns as `--csv` writes.
 pub(crate) fn series_csv(series: &SeriesHook) -> Option<String> {
     let c = copy(series);
-    let columns = scope::market::series::csv_columns(&c.metrics).ok()?;
-    let mut text = scope::market::series::csv_header(&columns);
+    let columns = scope::metrics::csv_columns(&c.metrics).ok()?;
+    let mut text = scope::metrics::csv_header(&columns);
     for r in &c.runs {
         let time = r.at.format("%Y-%m-%dT%H:%M:%SZ").to_string();
-        text.push_str(&scope::market::series::csv_row(
+        text.push_str(&scope::metrics::csv_row(
             &columns, &c.metrics, &time, r.run, &r.sample,
         ));
     }
@@ -130,6 +130,10 @@ fn format_value(metric: &Metric, value: Option<f64>) -> String {
         Unit::Percent => format!("{v:.3}%"),
         Unit::Quote => scope::display::format::format_large_number(v),
         Unit::Flag => if v != 0.0 { "pass" } else { "fail" }.to_string(),
+        Unit::Usd => format!("${}", scope::display::format::format_large_number(v)),
+        Unit::Count => format!("{v:.0}"),
+        Unit::Native => format!("{v:.6}"),
+        Unit::Score => format!("{v:.1}"),
     }
 }
 
@@ -260,7 +264,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use scope::market::HealthThresholds;
-    use scope::market::series::{Sample, summary_metrics};
+    use scope::metrics::{Sample, summary_metrics};
 
     /// A series of `n` runs; `failed` runs are unhealthy.
     fn series(n: u64, failed: &[u64]) -> SeriesHook {

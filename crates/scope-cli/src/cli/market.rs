@@ -21,11 +21,11 @@ use scope::display::terminal as t;
 use scope::error::{Result, ScopeError};
 use scope::http::HttpClient;
 use scope::market::assets::TokenAddress;
-use scope::market::series;
 use scope::market::{
     DexAnalyticsSource, ExchangeClient, HealthThresholds, MarketSummary, MarketVenue, OrderBook,
     Pair, VENUE_HELP, VenueRegistry,
 };
+use scope::metrics as series;
 use std::sync::Arc;
 use std::time::Duration;
 
