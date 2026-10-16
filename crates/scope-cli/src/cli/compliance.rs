@@ -748,11 +748,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_compliance_report() {
+        // A temp dir: `/tmp` is not a folder on every platform.
+        let dir = tempfile::tempdir().unwrap();
         let args = ComplianceReportArgs {
             target: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
             jurisdiction: Jurisdiction::US,
             report_type: ReportType::Summary,
-            output: "/tmp/test_compliance.json".to_string(),
+            output: dir
+                .path()
+                .join("test_compliance.json")
+                .display()
+                .to_string(),
         };
         let result = handle_compliance_report(args, &quiet()).await;
         assert!(result.is_ok()); // Not yet implemented → prints message
@@ -760,11 +766,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_compliance_report_eu_detailed() {
+        // A temp dir: `/tmp` is not a folder on every platform.
+        let dir = tempfile::tempdir().unwrap();
         let args = ComplianceReportArgs {
             target: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
             jurisdiction: Jurisdiction::EU,
             report_type: ReportType::Detailed,
-            output: "/tmp/test_compliance_eu.json".to_string(),
+            output: dir
+                .path()
+                .join("test_compliance_eu.json")
+                .display()
+                .to_string(),
         };
         let result = handle_compliance_report(args, &quiet()).await;
         assert!(result.is_ok());
@@ -772,11 +784,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_compliance_report_uk_sar() {
+        // A temp dir: `/tmp` is not a folder on every platform.
+        let dir = tempfile::tempdir().unwrap();
         let args = ComplianceReportArgs {
             target: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
             jurisdiction: Jurisdiction::UK,
             report_type: ReportType::SAR,
-            output: "/tmp/test_compliance_uk.json".to_string(),
+            output: dir
+                .path()
+                .join("test_compliance_uk.json")
+                .display()
+                .to_string(),
         };
         let result = handle_compliance_report(args, &quiet()).await;
         assert!(result.is_ok());
@@ -784,11 +802,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_compliance_report_singapore_travel_rule() {
+        // A temp dir: `/tmp` is not a folder on every platform.
+        let dir = tempfile::tempdir().unwrap();
         let args = ComplianceReportArgs {
             target: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
             jurisdiction: Jurisdiction::Singapore,
             report_type: ReportType::TravelRule,
-            output: "/tmp/test_compliance_sg.json".to_string(),
+            output: dir
+                .path()
+                .join("test_compliance_sg.json")
+                .display()
+                .to_string(),
         };
         let result = handle_compliance_report(args, &quiet()).await;
         assert!(result.is_ok());
@@ -796,11 +820,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_compliance_report_switzerland() {
+        // A temp dir: `/tmp` is not a folder on every platform.
+        let dir = tempfile::tempdir().unwrap();
         let args = ComplianceReportArgs {
             target: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
             jurisdiction: Jurisdiction::Switzerland,
             report_type: ReportType::Summary,
-            output: "/tmp/test_compliance_ch.json".to_string(),
+            output: dir
+                .path()
+                .join("test_compliance_ch.json")
+                .display()
+                .to_string(),
         };
         let result = handle_compliance_report(args, &quiet()).await;
         assert!(result.is_ok());

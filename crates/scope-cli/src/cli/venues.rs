@@ -56,7 +56,7 @@ pub enum VenuesCommands {
 
     /// Initialise the user venues directory with built-in descriptors.
     ///
-    /// Copies all built-in venue YAML files to ~/.config/scope/venues/
+    /// Copies all built-in venue YAML files to ~/.scope-bca/venues/
     /// so you can customise them or use them as templates for new venues.
     ///
     /// # Examples
@@ -76,7 +76,7 @@ pub enum VenuesCommands {
     ///
     /// ```text
     /// scope venues validate my-exchange.yaml
-    /// scope venues validate ~/.config/scope/venues/custom.yaml
+    /// scope venues validate ~/.scope-bca/venues/custom.yaml
     /// ```
     Validate(ValidateArgs),
 }
@@ -138,7 +138,7 @@ pub struct InitArgs {
 #[derive(Debug, Args)]
 #[command(after_help = "\x1b[1mExamples:\x1b[0m
   scope venues validate my-exchange.yaml
-  scope venues validate ~/.config/scope/venues/custom.yaml")]
+  scope venues validate ~/.scope-bca/venues/custom.yaml")]
 pub struct ValidateArgs {
     /// Path to the YAML file to validate.
     pub file: std::path::PathBuf,

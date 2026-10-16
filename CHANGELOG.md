@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (breaking)
+- `crawl --yes` no longer selects the first match for an ambiguous symbol. It stops with the candidates; pass `--token <contract>`. `--yes` now skips only the save question.
+- `token-health`, `insights` and `market` on a DEX venue no longer take the first search match. An ambiguous symbol asks in a terminal, or stops with the candidates. The web API also returns this error for an ambiguous symbol.
+- A token search matches exact symbols only (case-insensitive) or an exact contract; a search by name (for example `crawl uniswap`) no longer finds tokens.
+- `market` on a DEX venue and `monitor` look for the symbol on their own chain only. Before, the default chain searched every chain and could report a pool from another chain.
+- A single match is used without the save question; pass `--save` to save it.
+- All scope files are now in one folder, `~/.scope-bca` (`SCOPE_BCA_HOME` moves it): `config.yaml`, `venues/`, `data/` and `state/`. On the first start, scope copies the files from `~/.config/scope` and the platform data folder, and writes `state/migration.jsonl`. The old files are not changed.
+
+### Added
+- One token resolver for every command that takes a symbol: it lists the candidates and asks, saves the choice on request, takes `--token <contract>`, checks saved choices against a CEX venue's coin list, and records each lookup in `state/resolutions.jsonl`.
+- `--duration forever` (or `inf`) runs a repeating command until `Esc` or `Ctrl-C`. (#96)
+
+### Fixed
+- On Windows, a debug build of `scope` no longer overflows its stack on commands such as `completions` and `venues list`: the CLI runs on a thread with an 8 MB stack on every platform.
+- The tests and the TUI harness run on Windows, and CI checks Windows (clippy, tests and the offline TUI scenarios).
+- On Windows, the monitor no longer acts on each key twice (Windows also reports key releases); `l` switched the layout twice.
+- On Windows, Ctrl-C at a prompt of a command the TUI runs outside itself (`setup`, a token choice) cancels the command and returns to the TUI, as on Unix.
+- On Windows, a TUI line keeps its backslashes: `save C:\Users\me\out.json` saves to that path. Quotes still group words; a backslash no longer escapes a character there.
+
 ## [0.7.0] - 2026-10-14
 
 ### Changed (breaking)

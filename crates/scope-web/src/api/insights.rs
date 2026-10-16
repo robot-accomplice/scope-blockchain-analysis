@@ -63,6 +63,7 @@ pub async fn handle(
     // We capture it by running the underlying functions directly
     let args = InsightsArgs {
         target: target_str.clone(),
+        token_contract: None,
         chain: chain_override,
         decode: req.decode,
         trace: req.trace,
@@ -91,7 +92,7 @@ pub async fn handle(
             match scope_cli::cli::address::analyze_address(
                 &addr_args,
                 client.as_ref(),
-                &scope_cli::cli::output::Output::stdio(),
+                &scope_cli::cli::output::Output::stdio().without_prompts(),
             )
             .await
             {
@@ -129,7 +130,7 @@ pub async fn handle(
                 10,
                 state.factory.as_ref(),
                 None,
-                &scope_cli::cli::output::Output::stdio(),
+                &scope_cli::cli::output::Output::stdio().without_prompts(),
             )
             .await
             {

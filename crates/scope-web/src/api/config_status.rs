@@ -367,8 +367,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let fake_home = tmp.path().join("fake_home");
         std::fs::create_dir_all(&fake_home).unwrap();
-        let config_as_file = fake_home.join(".config");
-        std::fs::File::create(&config_as_file).unwrap();
+        // A file where the scope home folder must be: the config folder
+        // cannot be created.
+        let home_as_file = fake_home.join(scope::paths::HOME_DIR_NAME);
+        std::fs::File::create(&home_as_file).unwrap();
 
         let config = Config::default();
         let http: std::sync::Arc<dyn scope::http::HttpClient> =

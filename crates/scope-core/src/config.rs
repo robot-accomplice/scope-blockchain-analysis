@@ -5,7 +5,7 @@
 //!
 //! 1. CLI arguments
 //! 2. Environment variables (`SCOPE_*` prefix)
-//! 3. User config file (`~/.config/scope/config.yaml`)
+//! 3. User config file (`~/.scope-bca/config.yaml`)
 //! 4. Built-in defaults
 //!
 //! ## Configuration File Format
@@ -31,7 +31,7 @@
 //!   color: true
 //!
 //! address_book:
-//!   data_dir: "~/.local/share/scope"
+//!   data_dir: "/Users/me/scope-address-book"  # optional; absolute path
 //!
 //! ghola:
 //!   enabled: false        # route HTTP through Ghola sidecar
@@ -169,7 +169,8 @@ pub struct OutputConfig {
 pub struct AddressBookConfig {
     /// Directory for storing address book data.
     ///
-    /// Defaults to `~/.local/share/scope` on Linux/macOS.
+    /// Defaults to `~/.scope-bca/data` (see [`crate::paths`]). Use an absolute
+    /// path: `~` is not expanded.
     pub data_dir: Option<PathBuf>,
 }
 
@@ -260,7 +261,7 @@ impl Config {
     /// # Arguments
     ///
     /// * `path` - Optional path to a configuration file. If `None`, looks
-    ///   for config at `~/.config/scope/config.yaml`.
+    ///   for config at `~/.scope-bca/config.yaml`.
     ///
     /// # Returns
     ///
@@ -315,52 +316,22 @@ impl Config {
         Ok(config)
     }
 
-    /// Returns the default configuration file path.
-    ///
-    /// Checks multiple locations in order:
-    /// 1. `~/.config/scope/config.yaml` (XDG-style, preferred for CLI tools)
-    /// 2. Platform-specific config dir (e.g., `~/Library/Application Support/` on macOS)
-    ///
-    /// Returns the first location that exists, or the XDG-style path if neither exists.
+    /// Returns the default configuration file path: `<home>/config.yaml`
+    /// (see [`crate::paths`]).
     pub fn default_path() -> PathBuf {
-        // Prefer XDG-style ~/.config/scope/ which is common for CLI tools
-        if let Some(home) = crate::paths::home_dir() {
-            let xdg_path = home.join(".config").join("scope").join("config.yaml");
-            if xdg_path.exists() {
-                return xdg_path;
-            }
-        }
-
-        // Check platform-specific config dir
-        if let Some(config_dir) = crate::paths::config_dir() {
-            let platform_path = config_dir.join("scope").join("config.yaml");
-            if platform_path.exists() {
-                return platform_path;
-            }
-        }
-
-        // Default to XDG-style path for new configs
-        crate::paths::home_dir()
-            .map(|h| h.join(".config").join("scope").join("config.yaml"))
-            .unwrap_or_else(|| PathBuf::from(".").join("scope").join("config.yaml"))
+        crate::paths::config_file()
     }
 
-    /// Returns the configuration file path, if it can be determined.
-    ///
-    /// Returns `Some(path)` for the config file location, or `None` if
-    /// the path cannot be determined (e.g., no home directory).
-    /// Prefers the XDG-style `~/.config/scope/` location.
+    /// Returns the configuration file path that `setup` and `scope web`
+    /// write: `<home>/config.yaml`.
     pub fn config_path() -> Option<PathBuf> {
-        crate::paths::home_dir().map(|h| h.join(".config").join("scope").join("config.yaml"))
+        Some(crate::paths::config_file())
     }
 
-    /// Returns the default data directory for address book storage.
-    ///
-    /// Uses `~/.config/scope/data` on all platforms for consistency.
+    /// Returns the default data directory for address book storage:
+    /// `<home>/data`.
     pub fn default_data_dir() -> PathBuf {
-        crate::paths::home_dir()
-            .map(|h| h.join(".config").join("scope").join("data"))
-            .unwrap_or_else(|| PathBuf::from(".config").join("scope").join("data"))
+        crate::paths::data_dir()
     }
 
     /// Returns the effective data directory, using config or default.
@@ -619,7 +590,7 @@ impl Default for ExportConfig {
 
 /// Monitor-specific configuration.
 ///
-/// Loaded from the `monitor:` section of `~/.config/scope/config.yaml`.
+/// Loaded from the `monitor:` section of `~/.scope-bca/config.yaml`.
 /// All fields have sensible defaults so the section is entirely optional.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -858,9 +829,9 @@ market:
 
     #[test]
     fn test_default_path_is_absolute_or_relative() {
-        let path = Config::default_path();
-        // Should end with expected structure
-        assert!(path.ends_with("scope/config.yaml") || path.ends_with("scope\\config.yaml"));
+        // The config file is in the one scope home.
+        assert_eq!(Config::default_path(), crate::paths::config_file());
+        assert!(Config::default_path().ends_with(".scope-bca/config.yaml"));
     }
 
     #[test]

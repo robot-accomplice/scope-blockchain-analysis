@@ -77,6 +77,7 @@ pub mod progress;
 pub mod prompt;
 pub mod repeat;
 pub mod report;
+pub mod resolve;
 pub(crate) mod screen;
 pub mod setup;
 pub(crate) mod textfit;
@@ -137,7 +138,7 @@ pub struct Cli {
 
     /// Path to configuration file.
     ///
-    /// Overrides the default location (~/.config/scope/config.yaml).
+    /// Overrides the default location (~/.scope-bca/config.yaml).
     #[arg(long, global = true, value_name = "PATH")]
     pub config: Option<PathBuf>,
 

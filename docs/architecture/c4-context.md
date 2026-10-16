@@ -16,7 +16,7 @@ C4Context
     System_Ext(rpc_solana, "Solana RPC", "Solana chain data")
     System_Ext(trongrid, "TronGrid API", "Tron chain data")
     System_Ext(biconomy, "Biconomy API", "CEX-style order book depth")
-    System_Ext(config, "Config File", "~/.config/scope/config.yaml")
+    System_Ext(config, "Config File", "~/.scope-bca/config.yaml")
 
     Rel(analyst, scope, "Runs commands")
     Rel(scope, etherscan, "Balance, txs, holders (API key)")

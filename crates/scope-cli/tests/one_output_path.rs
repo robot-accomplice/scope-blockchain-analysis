@@ -39,6 +39,20 @@ const fn allow(
 
 const ALLOWED: &[Allowed] = &[
     allow(
+        "resolve.rs",
+        "picker_for",
+        "io::stdin()",
+        1,
+        "asks whether stdin is a terminal before a prompt; reads nothing",
+    ),
+    allow(
+        "resolve.rs",
+        "picker_for",
+        "stdout()",
+        1,
+        "asks whether stdout is a terminal before a prompt; writes nothing",
+    ),
+    allow(
         "output.rs",
         "stdio",
         "stdout()",
@@ -85,18 +99,25 @@ const ALLOWED: &[Allowed] = &[
         "stdin",
         "io::stdin()",
         1,
-        "the prompt input off unix, where no cancellable reader exists",
+        "the prompt input off unix and Windows, where no cancellable reader exists",
+    ),
+    allow(
+        "prompt.rs",
+        "new",
+        "io::stdin()",
+        1,
+        "the Windows prompt input when stdin is not a console",
     ),
     allow(
         "web/main.rs",
-        "main",
+        "run",
         "io::stdin()",
         1,
         "asks whether stdin is a terminal before the TUI starts; reads nothing",
     ),
     allow(
         "web/main.rs",
-        "main",
+        "run",
         "stdout()",
         1,
         "asks whether stdout is a terminal before the TUI starts; writes nothing",

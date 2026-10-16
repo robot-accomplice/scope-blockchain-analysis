@@ -53,10 +53,11 @@ async fn market_summary(
         venue.require_chain(chain)?;
     }
     let thresholds = state.config.market.health.with_overrides(&req.health);
-    let out = Output::stdio();
+    let out = Output::stdio().without_prompts();
     let dex = CrawlDexSource {
         factory: state.factory.as_ref(),
         out: &out,
+        token: None,
     };
     fetch_summary(&venue, &Pair::parse(&req.pair), &thresholds, &dex).await
 }

@@ -51,12 +51,12 @@ pub struct Event<'a> {
 }
 
 impl Journal {
-    /// The journal in the scope data directory.
+    /// The journal in the scope state directory.
     pub fn in_data_dir() -> Self {
-        let dir = scope::paths::data_dir().map(|d| d.join("scope"));
+        let dir = scope::paths::state_dir();
         Self {
-            history: dir.as_ref().map(|d| d.join("history.txt")),
-            events: dir.map(|d| d.join("tui-events.jsonl")),
+            history: Some(dir.join("history.txt")),
+            events: Some(dir.join("tui-events.jsonl")),
         }
     }
 
@@ -222,8 +222,8 @@ mod tests {
         // Docs and RCA instructions name these files; keep them stable.
         let j = Journal::in_data_dir();
         if let (Some(h), Some(e)) = (&j.history, &j.events) {
-            assert!(h.ends_with("scope/history.txt"));
-            assert!(e.ends_with("scope/tui-events.jsonl"));
+            assert!(h.ends_with("state/history.txt"));
+            assert!(e.ends_with("state/tui-events.jsonl"));
         }
     }
 

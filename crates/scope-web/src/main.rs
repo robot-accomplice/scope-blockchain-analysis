@@ -78,12 +78,32 @@ fn fail(out: &Output, message: String, code: i32) -> ! {
     std::process::exit(code);
 }
 
-/// Application entry point.
-///
+/// The stack of the thread that runs [`run`]: Linux's default main stack.
+/// The future of `run` holds every command's state, and in a debug build
+/// it overflows Windows' 1 MB main stack.
+const MAIN_STACK_BYTES: usize = 8 * 1024 * 1024;
+
+/// Application entry point: runs [`run`] on a thread with
+/// [`MAIN_STACK_BYTES`] of stack, the same size on every platform.
+fn main() -> Result<()> {
+    std::thread::Builder::new()
+        .name("main".into())
+        .stack_size(MAIN_STACK_BYTES)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime")
+                .block_on(run())
+        })
+        .expect("main thread")
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
 /// Initializes logging, parses CLI arguments, loads configuration,
 /// and dispatches to the appropriate command handler.
-#[tokio::main]
-async fn main() -> Result<()> {
+async fn run() -> Result<()> {
     // Parse CLI arguments
     let cli = Cli::parse();
     let out = Output::stdio();
@@ -117,6 +137,19 @@ async fn main() -> Result<()> {
 
     // Check if this is a setup command (don't prompt for setup if already running setup)
     let is_setup_command = matches!(cli.command, Commands::Setup(_));
+
+    // Copy files from the old locations into ~/.scope-bca, once. The old
+    // files stay (spec: docs/design/2026-10-15-scope-bca-home-design.md).
+    match scope::paths::migration::migrate() {
+        Ok(report) if report.copied > 0 => note!(
+            out,
+            "Moved your scope files to {} (copied {} files; the old files are unchanged).",
+            scope::paths::home().display(),
+            report.copied
+        ),
+        Ok(_) => {}
+        Err(e) => fail(&out, e.to_string(), 1),
+    }
 
     // Load configuration
     let mut config = Config::load(cli.config.as_deref()).unwrap_or_else(|e| {

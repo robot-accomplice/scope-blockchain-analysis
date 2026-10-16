@@ -55,7 +55,7 @@ flowchart TB
 ## Flow Summary
 
 1. **Parse** — CLI args → `Commands` enum (with typo suggestions and `after_help` examples)
-2. **Config** — Load `~/.config/scope/config.yaml`, merge with env
+2. **Config** — Load `~/.scope-bca/config.yaml`, merge with env
 3. **Factory** — Build `DefaultClientFactory` with chain config
 4. **Dispatch** — Match command (ordered by task group), call handler with config + factory
 5. **Progress** — Each handler creates `Spinner` or `StepProgress` for long operations; auto-hides in pipes

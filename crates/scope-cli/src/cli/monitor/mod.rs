@@ -78,7 +78,6 @@ use scope::chains::ChainClientFactory;
 use scope::chains::dex::{DexDataSource, DexTokenData};
 use scope::config::Config;
 use scope::error::{Result, ScopeError};
-use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -120,11 +119,15 @@ use crate::note;
 pub struct MonitorArgs {
     /// Token address or symbol to monitor.
     ///
-    /// Can be a contract address (0x...) or a token symbol/name.
-    /// If a name/symbol is provided, matching tokens will be searched
-    /// and you can select from the results.
+    /// Can be a contract address (0x...) or a token symbol on `--chain`.
+    /// A symbol that names more than one token there lists them so you
+    /// can choose (only exact symbols match).
     /// Use @label to resolve from the address book (e.g., @dai-token).
     pub token: String,
+
+    /// The token's contract: use it and skip the symbol lookup.
+    #[arg(long = "token", value_name = "CONTRACT")]
+    pub token_contract: Option<String>,
 
     /// Target blockchain network.
     ///
@@ -212,7 +215,7 @@ pub async fn run_direct(
     effective_config.monitor = monitor_config;
 
     let start = MonitorStart {
-        token: Some(args.token),
+        token: Some(args.token_contract.unwrap_or(args.token)),
         explicit_pair: args.pair,
         export_file,
         layout_pinned,
@@ -410,6 +413,11 @@ pub(crate) async fn fetch_initial_data(
 
     match (dex, venue) {
         (Ok(data), _) => Ok((data, None)),
+        // An ambiguity or a mismatch is the user's to settle, not a
+        // lookup failure to route around.
+        (Err(e @ (ScopeError::AmbiguousToken { .. } | ScopeError::TokenMismatch { .. })), _) => {
+            Err(e)
+        }
         (Err(dex_err), Some((venue_id, ex))) => {
             let pair = crate::cli::market::venue_pair(ex, token_input);
             note!(
@@ -503,12 +511,9 @@ fn build_exchange_token_data(
     }
 }
 
-/// Resolves a token input (address or symbol) to an address.
-///
-/// Uses the same chain filter logic as the crawl command: when the chain is
-/// "ethereum" (the default), searches ALL chains so that exact symbol matches
-/// on other chains rank above substring matches on ethereum.  Includes a CEX
-/// ticker fallback when DexScreener returns no results.
+/// Resolves a token input (address or symbol) to an address through
+/// [`crate::cli::resolve`]. With `allow_cex_fallback`, a symbol that
+/// DexScreener does not know is looked up on the default CEX venue.
 async fn resolve_token_address(
     input: &str,
     chain: &str,
@@ -516,68 +521,26 @@ async fn resolve_token_address(
     allow_cex_fallback: bool,
     out: &Output,
 ) -> Result<String> {
-    // Check if it's already an address (EVM, Solana, Tron)
-    if scope::tokens::TokenAliases::is_address(input) {
-        return Ok(input.to_string());
-    }
-
-    // Check saved aliases — use chain filter only when explicitly overridden
-    let chain_filter = if chain != "ethereum" {
-        Some(chain)
-    } else {
-        None
+    use crate::cli::resolve::{DexCandidates, ResolveContext, VenueKind, picker_for, resolve};
+    // The monitor fetches its data on `chain`, so only that chain's
+    // tokens are candidates (an all-chains pick was fetched on the wrong
+    // chain).
+    let ctx = ResolveContext {
+        chain: Some(chain.to_string()),
+        venue: VenueKind::Dex,
+        token_flag: None,
+        yes: false,
+        save: false,
     };
-    let aliases = scope::tokens::TokenAliases::load();
-    if let Some(alias) = aliases.get(input, chain_filter) {
-        return Ok(alias.address.clone());
-    }
-
-    // Search by name/symbol — same filter logic as crawl:
-    // "ethereum" (default) → None (all chains), explicit chain → Some(chain)
-    let mut results = dex_client.search_tokens(input, chain_filter).await?;
-
-    // CEX fallback: if DexScreener has no results, try exchange ticker
-    if results.is_empty()
-        && allow_cex_fallback
-        && let Some(fallback) = crate::cli::token_pick::cex_fallback(input, chain, None, out).await
-    {
-        results.push(fallback);
-    }
-
-    if results.is_empty() {
-        return Err(ScopeError::NotFound(format!(
-            "No token found matching '{}' on {} (checked DexScreener and CEX venues)",
-            input, chain
-        )));
-    }
-
-    // If only one result, use it directly
-    if results.len() == 1 {
-        let token = &results[0];
-        crate::cli::token_pick::announce(None, out, token);
-        return Ok(token.address.clone());
-    }
-
-    // Multiple results — prompt user to select
-    let selected = select_token_interactive(&results, out)?;
-    Ok(selected.address.clone())
-}
-
-/// Lets the user pick one of `results`.
-fn select_token_interactive<'a>(
-    results: &'a [scope::chains::dex::TokenSearchResult],
-    out: &Output,
-) -> Result<&'a scope::chains::dex::TokenSearchResult> {
-    select_token_impl(results, &mut crate::cli::prompt::stdin(), out)
-}
-
-/// Testable implementation of token selection with injected input.
-fn select_token_impl<'a>(
-    results: &'a [scope::chains::dex::TokenSearchResult],
-    reader: &mut impl io::BufRead,
-    out: &Output,
-) -> Result<&'a scope::chains::dex::TokenSearchResult> {
-    crate::cli::token_pick::pick_token(reader, None, out, results)
+    let source = DexCandidates {
+        dex: dex_client,
+        out,
+        fallback: allow_cex_fallback,
+    };
+    let picker = picker_for(out, false);
+    let mut aliases = scope::tokens::TokenAliases::load();
+    let r = resolve(input, &ctx, &source, picker.as_ref(), &mut aliases, out).await?;
+    Ok(r.address.unwrap_or_default())
 }
 
 // ============================================================================
@@ -2426,157 +2389,6 @@ mod tests {
     // Token selection / resolve tests
     // ========================================================================
 
-    fn make_monitor_search_results() -> Vec<scope::chains::dex::TokenSearchResult> {
-        vec![
-            scope::chains::dex::TokenSearchResult {
-                symbol: "USDC".to_string(),
-                name: "USD Coin".to_string(),
-                address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
-                chain: "ethereum".to_string(),
-                price_usd: Some(1.0),
-                volume_24h: 1_000_000.0,
-                liquidity_usd: 500_000_000.0,
-                market_cap: Some(30_000_000_000.0),
-            },
-            scope::chains::dex::TokenSearchResult {
-                symbol: "USDC".to_string(),
-                name: "Bridged USD Coin".to_string(),
-                address: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174".to_string(),
-                chain: "ethereum".to_string(),
-                price_usd: Some(0.9998),
-                volume_24h: 500_000.0,
-                liquidity_usd: 100_000_000.0,
-                market_cap: None,
-            },
-            scope::chains::dex::TokenSearchResult {
-                symbol: "USDC".to_string(),
-                name: "A Very Long Token Name That Exceeds The Limit".to_string(),
-                address: "0x1234567890abcdef1234567890abcdef12345678".to_string(),
-                chain: "ethereum".to_string(),
-                price_usd: None,
-                volume_24h: 0.0,
-                liquidity_usd: 50_000.0,
-                market_cap: None,
-            },
-        ]
-    }
-
-    #[test]
-    fn test_select_token_impl_first() {
-        let results = make_monitor_search_results();
-        let input = b"1\n";
-        let mut reader = std::io::Cursor::new(&input[..]);
-        let (out, cap) = crate::cli::output::Output::capture();
-
-        let selected = select_token_impl(&results, &mut reader, &out).unwrap();
-        assert_eq!(selected.name, "USD Coin");
-        assert_eq!(
-            selected.address,
-            "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
-        );
-
-        let output = cap.err();
-        assert!(output.contains("Found 3 matching tokens"));
-        assert!(output.contains("USDC"));
-        assert!(output.contains("0xA0b8…eB48"));
-        assert!(output.contains("Selected:"));
-    }
-
-    #[test]
-    fn test_select_token_impl_second() {
-        let results = make_monitor_search_results();
-        let input = b"2\n";
-        let mut reader = std::io::Cursor::new(&input[..]);
-        let out = crate::cli::output::Output::capture().0;
-
-        let selected = select_token_impl(&results, &mut reader, &out).unwrap();
-        assert_eq!(selected.name, "Bridged USD Coin");
-        assert_eq!(
-            selected.address,
-            "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
-        );
-    }
-
-    #[test]
-    fn test_select_token_impl_shows_address_column() {
-        let results = make_monitor_search_results();
-        let input = b"1\n";
-        let mut reader = std::io::Cursor::new(&input[..]);
-        let (out, cap) = crate::cli::output::Output::capture();
-
-        select_token_impl(&results, &mut reader, &out).unwrap();
-        let output = cap.err();
-
-        // Table header should include Address column
-        assert!(output.contains("Address"));
-        // All three abbreviated addresses should appear
-        assert!(output.contains("0xA0b8…eB48"));
-        assert!(output.contains("0x2791…4174"));
-        assert!(output.contains("0x1234…5678"));
-    }
-
-    #[test]
-    fn test_select_token_impl_truncates_long_name() {
-        let results = make_monitor_search_results();
-        let input = b"3\n";
-        let mut reader = std::io::Cursor::new(&input[..]);
-        let (out, cap) = crate::cli::output::Output::capture();
-
-        let selected = select_token_impl(&results, &mut reader, &out).unwrap();
-        assert_eq!(
-            selected.address,
-            "0x1234567890abcdef1234567890abcdef12345678"
-        );
-
-        let output = cap.err();
-        assert!(output.contains("A Very Long Token N…"));
-    }
-
-    #[test]
-    fn test_select_token_impl_invalid_input() {
-        let results = make_monitor_search_results();
-        let input = b"xyz\n";
-        let mut reader = std::io::Cursor::new(&input[..]);
-        let out = crate::cli::output::Output::capture().0;
-
-        let result = select_token_impl(&results, &mut reader, &out);
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Invalid selection")
-        );
-    }
-
-    #[test]
-    fn test_select_token_impl_out_of_range_zero() {
-        let results = make_monitor_search_results();
-        let input = b"0\n";
-        let mut reader = std::io::Cursor::new(&input[..]);
-        let out = crate::cli::output::Output::capture().0;
-
-        let result = select_token_impl(&results, &mut reader, &out);
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Selection must be between")
-        );
-    }
-
-    #[test]
-    fn test_select_token_impl_out_of_range_high() {
-        let results = make_monitor_search_results();
-        let input = b"99\n";
-        let mut reader = std::io::Cursor::new(&input[..]);
-        let out = crate::cli::output::Output::capture().0;
-
-        let result = select_token_impl(&results, &mut reader, &out);
-        assert!(result.is_err());
-    }
-
     // ============================
     // Phase 4: Layout system tests
     // ============================
@@ -3513,6 +3325,85 @@ capabilities:
             server,
             scope::market::ExchangeClient::from_descriptor(&desc),
         )
+    }
+
+    /// A DEX source whose search finds USDN on ethereum and on bsc.
+    #[derive(Clone)]
+    struct TwoChainDex;
+
+    #[async_trait::async_trait]
+    impl DexDataSource for TwoChainDex {
+        async fn get_token_price(&self, _: &str, _: &str) -> Option<f64> {
+            None
+        }
+        async fn get_native_token_price(&self, _: &str) -> Option<f64> {
+            None
+        }
+        async fn get_token_data(&self, _: &str, _: &str) -> Result<DexTokenData> {
+            Err(ScopeError::NotFound("no data in this fake".into()))
+        }
+        async fn search_tokens(
+            &self,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<Vec<scope::chains::TokenSearchResult>> {
+            let usdn = |chain: &str, address: &str| scope::chains::TokenSearchResult {
+                address: address.into(),
+                symbol: "USDN".into(),
+                name: "USDN".into(),
+                chain: chain.into(),
+                price_usd: Some(1.0),
+                volume_24h: 0.0,
+                liquidity_usd: 1.0,
+                market_cap: None,
+            };
+            Ok(vec![usdn("ethereum", "0xA"), usdn("bsc", "0xB")])
+        }
+    }
+
+    #[tokio::test]
+    async fn test_monitor_resolves_on_its_own_chain() {
+        // Review C2: a bsc token was offered for (and fetched on) ethereum.
+        let address = resolve_token_address(
+            "USDN",
+            "ethereum",
+            &TwoChainDex,
+            false,
+            &Output::capture().0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(address, "0xA");
+    }
+
+    #[tokio::test]
+    async fn test_an_ambiguous_symbol_does_not_fall_back_to_the_venue() {
+        // Review I1: an ambiguity is a choice for the user, not a lookup
+        // failure to route around.
+        let (_server, ex) = mock_venue(200).await;
+        let mut dex = scope::chains::mocks::MockDexSource::new();
+        let usdn = |address: &str| scope::chains::TokenSearchResult {
+            address: address.into(),
+            symbol: "USDN".into(),
+            name: "USDN".into(),
+            chain: "bsc".into(),
+            price_usd: Some(1.0),
+            volume_24h: 0.0,
+            liquidity_usd: 1.0,
+            market_cap: None,
+        };
+        dex.search_results = vec![usdn("0xA"), usdn("0xB")];
+        let err = fetch_initial_data(
+            "USDN",
+            None,
+            "bsc",
+            &dex,
+            Some(("mockvenue", &ex)),
+            &Output::capture().0,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ScopeError::AmbiguousToken { .. }), "{err}");
     }
 
     #[tokio::test]
@@ -5300,156 +5191,6 @@ refresh_seconds: 5
     // Integration tests: select_token_impl
     // ========================================================================
 
-    fn make_search_results() -> Vec<TokenSearchResult> {
-        vec![
-            TokenSearchResult {
-                address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
-                symbol: "USDC".to_string(),
-                name: "USD Coin".to_string(),
-                chain: "ethereum".to_string(),
-                price_usd: Some(1.0),
-                volume_24h: 5_000_000_000.0,
-                liquidity_usd: 2_000_000_000.0,
-                market_cap: Some(32_000_000_000.0),
-            },
-            TokenSearchResult {
-                address: "0xdAC17F958D2ee523a2206206994597C13D831ec7".to_string(),
-                symbol: "USDT".to_string(),
-                name: "Tether USD".to_string(),
-                chain: "ethereum".to_string(),
-                price_usd: Some(1.0),
-                volume_24h: 6_000_000_000.0,
-                liquidity_usd: 3_000_000_000.0,
-                market_cap: Some(83_000_000_000.0),
-            },
-            TokenSearchResult {
-                address: "0x6B175474E89094C44Da98b954EedeAC495271d0F".to_string(),
-                symbol: "DAI".to_string(),
-                name: "Dai Stablecoin".to_string(),
-                chain: "ethereum".to_string(),
-                price_usd: Some(1.0),
-                volume_24h: 200_000_000.0,
-                liquidity_usd: 500_000_000.0,
-                market_cap: Some(5_000_000_000.0),
-            },
-        ]
-    }
-
-    #[test]
-    fn test_select_token_impl_valid_first() {
-        let results = make_search_results();
-        let mut reader = io::Cursor::new(b"1\n");
-        let (out, cap) = crate::cli::output::Output::capture();
-        let selected = select_token_impl(&results, &mut reader, &out).unwrap();
-        assert_eq!(selected.symbol, "USDC");
-        assert_eq!(selected.address, results[0].address);
-        let output = cap.err();
-        assert!(output.contains("Found 3 matching tokens"));
-        assert!(output.contains("Selected: USDC"));
-    }
-
-    #[test]
-    fn test_select_token_impl_valid_last() {
-        let results = make_search_results();
-        let mut reader = io::Cursor::new(b"3\n");
-        let out = crate::cli::output::Output::capture().0;
-        let selected = select_token_impl(&results, &mut reader, &out).unwrap();
-        assert_eq!(selected.symbol, "DAI");
-    }
-
-    #[test]
-    fn test_select_token_impl_valid_middle() {
-        let results = make_search_results();
-        let mut reader = io::Cursor::new(b"2\n");
-        let out = crate::cli::output::Output::capture().0;
-        let selected = select_token_impl(&results, &mut reader, &out).unwrap();
-        assert_eq!(selected.symbol, "USDT");
-    }
-
-    #[test]
-    fn test_select_token_impl_out_of_bounds_zero() {
-        let results = make_search_results();
-        let mut reader = io::Cursor::new(b"0\n");
-        let out = crate::cli::output::Output::capture().0;
-        let result = select_token_impl(&results, &mut reader, &out);
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("Selection must be between 1 and 3"));
-    }
-
-    #[test]
-    fn test_select_token_impl_out_of_bounds_high() {
-        let results = make_search_results();
-        let mut reader = io::Cursor::new(b"99\n");
-        let out = crate::cli::output::Output::capture().0;
-        let result = select_token_impl(&results, &mut reader, &out);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_select_token_impl_non_numeric_input() {
-        let results = make_search_results();
-        let mut reader = io::Cursor::new(b"abc\n");
-        let out = crate::cli::output::Output::capture().0;
-        let result = select_token_impl(&results, &mut reader, &out);
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("Invalid selection"));
-    }
-
-    #[test]
-    fn test_select_token_impl_empty_input() {
-        let results = make_search_results();
-        let mut reader = io::Cursor::new(b"\n");
-        let out = crate::cli::output::Output::capture().0;
-        let result = select_token_impl(&results, &mut reader, &out);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_select_token_impl_long_name_truncation() {
-        let results = vec![TokenSearchResult {
-            address: "0xABCDEF1234567890ABCDEF1234567890ABCDEF12".to_string(),
-            symbol: "LONG".to_string(),
-            name: "A Very Long Token Name That Exceeds Twenty Characters".to_string(),
-            chain: "ethereum".to_string(),
-            price_usd: None,
-            volume_24h: 100.0,
-            liquidity_usd: 50.0,
-            market_cap: None,
-        }];
-        let mut reader = io::Cursor::new(b"1\n");
-        let (out, cap) = crate::cli::output::Output::capture();
-        let selected = select_token_impl(&results, &mut reader, &out).unwrap();
-        assert_eq!(selected.symbol, "LONG");
-        let output = cap.err();
-        // Should have truncated name
-        assert!(output.contains("A Very Long Token N…"));
-        // Should show N/A for price
-        assert!(output.contains("N/A"));
-    }
-
-    #[test]
-    fn test_select_token_impl_output_format() {
-        let results = make_search_results();
-        let mut reader = io::Cursor::new(b"1\n");
-        let (out, cap) = crate::cli::output::Output::capture();
-        let _ = select_token_impl(&results, &mut reader, &out).unwrap();
-        let output = cap.err();
-
-        // Verify table header
-        assert!(output.contains("#"));
-        assert!(output.contains("Symbol"));
-        assert!(output.contains("Name"));
-        assert!(output.contains("Address"));
-        assert!(output.contains("Price"));
-        assert!(output.contains("Liquidity"));
-        // Verify separator line
-        assert!(output.contains("─"));
-        // Verify prompt
-        assert!(output.contains("Select token (1-3):"));
-    }
-
     // ========================================================================
     // Integration tests: MonitorApp with state + fetch combined scenario
     // ========================================================================
@@ -5573,6 +5314,7 @@ refresh_seconds: 5
 
         let args = MonitorArgs {
             token: "USDC".to_string(),
+            token_contract: None,
             chain: "ethereum".to_string(),
             layout: Some(LayoutPreset::ChartFocus),
             refresh: None,
@@ -5596,6 +5338,7 @@ refresh_seconds: 5
         let config = Config::default();
         let args = MonitorArgs {
             token: "PEPE".to_string(),
+            token_contract: None,
             chain: "solana".to_string(),
             layout: Some(LayoutPreset::Compact),
             refresh: Some(2),
@@ -5635,6 +5378,7 @@ refresh_seconds: 5
         let config = Config::default();
         let args = MonitorArgs {
             token: "USDC".to_string(),
+            token_contract: None,
             chain: "ethereum".to_string(),
             layout: None,
             refresh: None,
@@ -5748,6 +5492,7 @@ refresh_seconds: 5
     fn test_monitor_args_with_venue() {
         let args = MonitorArgs {
             token: "BTC".to_string(),
+            token_contract: None,
             chain: "ethereum".to_string(),
             refresh: None,
             layout: None,
@@ -5833,6 +5578,7 @@ refresh_seconds: 5
     fn test_monitor_args_with_pair() {
         let args = MonitorArgs {
             token: "DAI".to_string(),
+            token_contract: None,
             chain: "ethereum".to_string(),
             refresh: None,
             layout: None,
@@ -5850,6 +5596,7 @@ refresh_seconds: 5
     fn test_monitor_args_pair_none_by_default() {
         let args = MonitorArgs {
             token: "BTC".to_string(),
+            token_contract: None,
             chain: "ethereum".to_string(),
             refresh: None,
             layout: None,
@@ -5924,6 +5671,7 @@ refresh_seconds: 5
         // This is a structural test; the runtime validation is in run().
         let args = MonitorArgs {
             token: "DAI".to_string(),
+            token_contract: None,
             chain: "ethereum".to_string(),
             refresh: None,
             layout: None,
@@ -5943,6 +5691,7 @@ refresh_seconds: 5
         let config = Config::default();
         let args = MonitorArgs {
             token: "DAI".to_string(),
+            token_contract: None,
             chain: "ethereum".to_string(),
             layout: None,
             refresh: None,
@@ -6043,7 +5792,7 @@ refresh_seconds: 5
         assert_eq!(address, "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
         assert_eq!(
             cap.err(),
-            "Selected: ZZQT (Zz Quiet Token) on ethereum - $1.5000 at 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48\n"
+            "Using ethereum 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 Zz Quiet Token\n"
         );
         assert_eq!(cap.out(), "", "what a search found is not data");
     }
@@ -6077,74 +5826,6 @@ refresh_seconds: 5
         assert_eq!(result.symbol, "TEST");
         assert!(result.address.is_empty());
         assert_eq!(result.liquidity_usd, 0.0);
-    }
-
-    #[test]
-    fn test_select_token_impl_single_result_pick() {
-        let results = vec![scope::chains::dex::TokenSearchResult {
-            address: "0xabc".to_string(),
-            symbol: "TEST".to_string(),
-            name: "Test Token".to_string(),
-            chain: "ethereum".to_string(),
-            price_usd: Some(1.0),
-            volume_24h: 100.0,
-            liquidity_usd: 1000.0,
-            market_cap: None,
-        }];
-        let input = b"1\n";
-        let out = crate::cli::output::Output::capture().0;
-        let result = select_token_impl(&results, &mut &input[..], &out);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().symbol, "TEST");
-    }
-
-    #[test]
-    fn test_select_token_impl_out_of_range() {
-        let results = vec![scope::chains::dex::TokenSearchResult {
-            address: "0xabc".to_string(),
-            symbol: "TEST".to_string(),
-            name: "Test Token".to_string(),
-            chain: "ethereum".to_string(),
-            price_usd: Some(1.0),
-            volume_24h: 100.0,
-            liquidity_usd: 1000.0,
-            market_cap: None,
-        }];
-        let input = b"0\n";
-        let out = crate::cli::output::Output::capture().0;
-        let result = select_token_impl(&results, &mut &input[..], &out);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_select_token_impl_second_of_two() {
-        let results = vec![
-            scope::chains::dex::TokenSearchResult {
-                address: "0xabc".to_string(),
-                symbol: "TOKEN1".to_string(),
-                name: "Token One".to_string(),
-                chain: "ethereum".to_string(),
-                price_usd: Some(1.0),
-                volume_24h: 100.0,
-                liquidity_usd: 1000.0,
-                market_cap: None,
-            },
-            scope::chains::dex::TokenSearchResult {
-                address: "0xdef".to_string(),
-                symbol: "TOKEN2".to_string(),
-                name: "Token Two".to_string(),
-                chain: "solana".to_string(),
-                price_usd: Some(2.0),
-                volume_24h: 200.0,
-                liquidity_usd: 2000.0,
-                market_cap: None,
-            },
-        ];
-        let input = b"2\n";
-        let out = crate::cli::output::Output::capture().0;
-        let result = select_token_impl(&results, &mut &input[..], &out);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().symbol, "TOKEN2");
     }
 
     // ========================================================================

@@ -103,6 +103,8 @@ pub struct Output {
     hook: Option<ProgressHook>,
     series: Option<SeriesHook>,
     tui: bool,
+    /// False for a server: no command may wait for an answer on stdin.
+    prompts: bool,
 }
 
 impl Output {
@@ -116,10 +118,12 @@ impl Output {
             hook: None,
             series: None,
             tui: false,
+            prompts: true,
         }
     }
 
-    /// Output bound to in-memory buffers, with progress indicators disabled.
+    /// Output bound to in-memory buffers, with progress indicators and
+    /// prompts disabled (nobody can answer a buffer).
     ///
     /// Returns the output and a handle that reads what was written.
     pub fn capture() -> (Self, Captured) {
@@ -138,6 +142,7 @@ impl Output {
             hook: None,
             series: None,
             tui: false,
+            prompts: false,
         };
         (output, captured)
     }
@@ -168,6 +173,7 @@ impl Output {
             hook: Some(ProgressHook::default()),
             series: Some(SeriesHook::default()),
             tui: true,
+            prompts: false,
         };
         (output, captured)
     }
@@ -211,6 +217,7 @@ impl Output {
             hook: None,
             series: None,
             tui: true,
+            prompts: self.prompts,
         };
         (output, captured)
     }
@@ -228,12 +235,25 @@ impl Output {
             hook: None,
             series: None,
             tui: false,
+            prompts: true,
         }
     }
 
     /// True when animated progress indicators may draw on the terminal.
     pub fn progress_enabled(&self) -> bool {
         self.progress
+    }
+
+    /// This output for a server: a question that needs an answer (for
+    /// example which token a symbol means) is an error, never a prompt.
+    pub fn without_prompts(mut self) -> Self {
+        self.prompts = false;
+        self
+    }
+
+    /// True when a command may ask the user on the terminal.
+    pub fn prompts_allowed(&self) -> bool {
+        self.prompts
     }
 
     /// True when this output belongs to the TUI. Error text then gives TUI

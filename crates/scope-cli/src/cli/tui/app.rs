@@ -1178,7 +1178,7 @@ impl TuiState {
             .next()
             .is_some_and(|w| w.eq_ignore_ascii_case("save"))
         {
-            let words = shlex::split(line);
+            let words = exec::split_line(line);
             self.save(line, words.as_ref().map(|w| &w[1..]));
             return Plan::Done;
         }
@@ -1239,7 +1239,7 @@ impl TuiState {
             ))),
             Some(args) => {
                 let args: Vec<&str> = args.iter().map(String::as_str).collect();
-                let home = scope::paths::home_dir();
+                let home = scope::paths::user_home();
                 match std::env::current_dir() {
                     Ok(cwd) => {
                         // `save x.csv` after a repeating run writes its series.
