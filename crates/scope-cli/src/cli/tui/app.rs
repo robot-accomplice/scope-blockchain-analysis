@@ -1334,12 +1334,16 @@ impl TuiState {
     }
 
     /// Starts the grid for `list`. Returns the output the run writes to
-    /// (it asks its questions in the TUI) and the sender for its messages.
+    /// (it asks its questions in the TUI), the sink for its library
+    /// warnings, and the sender for its messages.
     pub fn start_watch(
         &mut self,
         list: scope::watch::Watchlist,
-    ) -> (Output, std::sync::mpsc::Sender<GridMsg>) {
+    ) -> (Output, scope::diag::Sink, std::sync::mpsc::Sender<GridMsg>) {
         let (out, captured) = Output::capture_merged();
+        // The run's own sink: its warnings never join a pane command's
+        // output (the redirect is process-wide).
+        let sink = captured.out_sink();
         let out = out.with_asker(self.asker.clone());
         let (tx, rx) = std::sync::mpsc::channel();
         self.push_note(&format!(
@@ -1353,7 +1357,16 @@ impl TuiState {
         self.grid_rx = Some(rx);
         self.grid_out = Some((out.clone(), captured));
         self.grid_started = Some(Instant::now());
-        (out, tx)
+        (out, sink, tx)
+    }
+
+    /// `setup` saved new settings. A running watchlist keeps the ones it
+    /// started with; the grid says to restart it.
+    pub fn settings_reloaded(&mut self) {
+        if let Some(g) = self.grid.as_mut().filter(|g| g.is_running()) {
+            g.stale = true;
+            self.push_note(grid::STALE_NOTE);
+        }
     }
 
     /// Moves the run's messages into the grid.

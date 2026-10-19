@@ -630,6 +630,7 @@ async fn event_loop<H: Host>(
                                             state.set_vocab(vocab::Vocab::load(&new.config));
                                             settings = std::rc::Rc::new(new);
                                             state.push_note(SETUP_RELOADED_NOTE);
+                                            state.settings_reloaded();
                                         }
                                         Err(e) => state.push_note(&setup_reload_failed_note(&e)),
                                     }
@@ -671,9 +672,11 @@ fn begin_watch(
     }
     // A finished grid makes room for the new one.
     state.close_grid();
-    let (out, tx) = state.start_watch(list.clone());
+    let (out, sink, tx) = state.start_watch(list.clone());
     let s = settings.clone();
-    Some(Box::pin(async move { run_watch(list, &s, &out, tx).await }))
+    Some(Box::pin(scope::diag::scoped(sink, async move {
+        run_watch(list, &s, &out, tx).await
+    })))
 }
 
 /// `monitor <args>` in the TUI: the wizard, filled from the arguments, or
@@ -2379,6 +2382,133 @@ mod tests {
             .unwrap();
         assert!(state.wizard.is_some(), "the wizard is open at the start");
         assert!(screen_text(&host).contains("monitor wizard"));
+    }
+
+    /// A DEX source that writes a library warning on every call, then
+    /// answers as the mock does.
+    struct NoisyDex(scope::chains::mocks::MockDexSource);
+
+    const NOISE: &str = "noisy dex warning";
+
+    #[async_trait::async_trait]
+    impl scope::chains::DexDataSource for NoisyDex {
+        async fn get_token_price(&self, c: &str, a: &str) -> Option<f64> {
+            scope::notice!("{NOISE}");
+            self.0.get_token_price(c, a).await
+        }
+        async fn get_native_token_price(&self, c: &str) -> Option<f64> {
+            scope::notice!("{NOISE}");
+            self.0.get_native_token_price(c).await
+        }
+        async fn get_token_data(
+            &self,
+            c: &str,
+            a: &str,
+        ) -> scope::Result<scope::chains::dex::DexTokenData> {
+            scope::notice!("{NOISE}");
+            self.0.get_token_data(c, a).await
+        }
+        async fn search_tokens(
+            &self,
+            q: &str,
+            c: Option<&str>,
+        ) -> scope::Result<Vec<scope::chains::dex::TokenSearchResult>> {
+            scope::notice!("{NOISE}");
+            self.0.search_tokens(q, c).await
+        }
+    }
+
+    struct NoisyFactory(MockClientFactory);
+
+    impl ChainClientFactory for NoisyFactory {
+        fn http(&self) -> std::sync::Arc<dyn scope::http::HttpClient> {
+            scope::http::test_transport()
+        }
+        fn create_chain_client(
+            &self,
+            chain: &str,
+        ) -> scope::Result<Box<dyn scope::chains::ChainClient>> {
+            self.0.create_chain_client(chain)
+        }
+        fn create_dex_client(&self) -> Box<dyn scope::chains::DexDataSource> {
+            Box::new(NoisyDex(scope::chains::mocks::MockDexSource::new()))
+        }
+    }
+
+    /// A one-target token watchlist that ticks once an hour, in `dir`.
+    fn token_watchlist(dir: &tempfile::TempDir) -> String {
+        let path = dir.path().join("noisy.yaml");
+        std::fs::write(
+            &path,
+            format!("interval: 1h\ntargets:\n  - kind: token\n    id: \"{TOKEN}\"\n    rules: [\"price_usd > 0\"]\n"),
+        )
+        .unwrap();
+        format!(
+            "watch open {}",
+            path.display().to_string().replace('\\', "/")
+        )
+    }
+
+    #[tokio::test]
+    async fn test_a_watchlist_warning_stays_out_of_the_shell_and_comes_with_the_grid() {
+        let _lock = DIAG_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut events = script(&[&token_watchlist(&dir)]);
+        // Back to the shell, where a pane command runs next to the watchlist.
+        events.push(ctrl_key('g'));
+        events.extend(script(&["venues list"]));
+        let (host, captured) = test_host(events, Vec::new());
+        let (res, mut state, _, _) = drive_host_on(
+            Journal::default(),
+            host,
+            captured,
+            Box::new(NoisyFactory(MockClientFactory::new())),
+        )
+        .await;
+        res.unwrap();
+        state.poll_watch();
+        assert!(
+            state.grid.as_ref().is_some_and(|g| g.last.is_some()),
+            "the watchlist ticked"
+        );
+        let shell = state.scrollback_text();
+        assert!(shell.contains("binance"), "venues list ran: {shell}");
+        assert!(
+            !shell.contains(NOISE),
+            "no watchlist warning in the shell: {shell}"
+        );
+        // The run's own output keeps it; closing the grid shows it.
+        state.stop_watch();
+        state.close_grid();
+        assert!(state.scrollback_text().contains(NOISE));
+    }
+
+    #[tokio::test]
+    async fn test_a_setup_reload_says_the_running_watchlist_uses_the_old_settings() {
+        let _lock = DIAG_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut events = script(&[&token_watchlist(&dir)]);
+        events.push(ctrl_key('g'));
+        events.extend(script(&["setup --key nosuchkey"]));
+        let reload = || Ok(settings_with(Box::new(MockClientFactory::new())));
+        let (host, captured) = test_host(events, Vec::new());
+        let (res, state, host, _) = drive_host_reloading(
+            Journal::default(),
+            host,
+            captured,
+            settings_with(Box::new(MockClientFactory::new())),
+            &reload,
+        )
+        .await;
+        res.unwrap();
+        let g = state.grid.as_ref().expect("the grid");
+        assert!(g.stale, "the grid knows");
+        assert!(state.scrollback_text().contains(grid::STALE_NOTE));
+        assert!(
+            screen_text(&host).contains("old settings"),
+            "{}",
+            screen_text(&host)
+        );
     }
 
     #[tokio::test]
