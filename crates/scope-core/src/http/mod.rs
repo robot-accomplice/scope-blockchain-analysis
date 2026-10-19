@@ -22,6 +22,7 @@
 //! adding temporal drift, ghost signing, and chain-aware headers.
 
 pub mod ghola;
+pub mod ghola_install;
 pub mod native;
 pub mod replay;
 pub mod shared;

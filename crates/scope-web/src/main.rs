@@ -60,6 +60,7 @@ use scope::Config;
 use scope::error::ScopeError;
 use scope_cli::cli::dispatch::ConfigSource;
 use scope_cli::cli::errors::display_error;
+use scope_cli::cli::ghola_offer;
 use scope_cli::cli::output::Output;
 use scope_cli::cli::prompt;
 use scope_cli::cli::{Cli, Commands};
@@ -187,9 +188,10 @@ async fn run() -> Result<()> {
 
         // If running as daemon child, skip daemon forking
         if scope_web::is_daemon_child() || !web_args.daemon {
-            return scope_web::start_server(addr, config, &out)
-                .await
-                .map_err(|e| anyhow::anyhow!(e));
+            let served = scope_web::start_server(addr, config, &out).await;
+            // The web server never asks: a sidecar it started stops with it.
+            ghola_offer::finish_sidecar(&out, false);
+            return served.map_err(|e| anyhow::anyhow!(e));
         }
 
         // Fork daemon
@@ -268,16 +270,28 @@ async fn dispatch(
         note!(out, "Scope v{}", scope::VERSION);
     }
 
+    // A Ghola sidecar this run started is stopped at the end, or kept when
+    // the user says so. Only a run that may ask gets the question.
+    let ask =
+        ghola_offer::may_ask(out) && !ghola_offer::scripted(&ghola_offer::process_args(), config);
+
     match scope_cli::cli::dispatch::dispatch(command, source, config, out).await {
-        Ok(0) => Ok(()),
+        Ok(0) => {
+            ghola_offer::finish_sidecar(out, ask);
+            Ok(())
+        }
         // The TUI ended on a signal (128+N); it already restored the
         // terminal and saved.
-        Ok(code) => std::process::exit(code),
+        Ok(code) => {
+            ghola_offer::finish_sidecar(out, false);
+            std::process::exit(code)
+        }
         Err(e) => {
             tracing::debug!("Command failed: {}", e);
             // If stderr itself fails there is no channel left to report on;
             // the non-zero exit status still tells the caller that it failed.
             let _ = display_error(&e, out);
+            ghola_offer::finish_sidecar(out, ask);
             std::process::exit(1);
         }
     }

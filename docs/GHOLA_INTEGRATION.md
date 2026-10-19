@@ -62,17 +62,34 @@ through to every chain client.
 
 ## Installation
 
-### Option 1: Go Install (recommended)
+### Option 1: Let scope install it (recommended)
+
+Run `scope setup`. Its Ghola step asks whether to download ghola. A command run on a
+terminal with `ghola.enabled: true` asks too, once, when no ghola is found.
+
+On a yes, scope downloads the latest release of `robot-accomplice/ghola` from GitHub
+over HTTPS, checks the archive's SHA-256 against the release's `checksums.txt`, and
+only then extracts `ghola` (`ghola.exe` on Windows) to `~/.scope-bca/bin`. It does
+not change PATH; it runs that file by its full path. When the release has no archive
+for your system and `go` is on PATH, it offers `go install` into the same folder.
+
+Scope never installs without asking. `--yes`, JSON / CSV / Markdown output, piped
+output, the web API and the TUI keep the native transport and print these steps.
+
+`checksums.txt` is not signed: the check proves the archive is the one the release
+lists, and HTTPS to GitHub ties the release to its publisher.
+
+### Option 2: Go Install
 
 ```bash
 go install github.com/robot-accomplice/ghola/cmd/ghola@latest
 ```
 
-### Option 2: Download Binary
+### Option 3: Download Binary
 
 Pre-built binaries for Linux, macOS, and Windows are available on the [Releases page](https://github.com/robot-accomplice/ghola/releases).
 
-### Option 3: Build from Source
+### Option 4: Build from Source
 
 ```bash
 git clone https://github.com/robot-accomplice/ghola.git
@@ -118,7 +135,7 @@ Run `scope setup --status` to check whether ghola is detected:
 
 ```text
 ├── Ghola Sidecar
-│  ✓ ghola binary found in PATH
+│  ✓ ghola binary: /usr/local/bin/ghola
 │  ✓ Ghola transport enabled in config
 │  ✓ Stealth mode active (temporal drift + ghost signing)
 │  Buffer size     4096 bytes
@@ -128,19 +145,23 @@ If ghola is not installed:
 
 ```text
 ├── Ghola Sidecar
-│  ✗ ghola binary not found in PATH
-│  ℹ Install: go install github.com/robot-accomplice/ghola@latest
+│  ✗ ghola binary not found (PATH, ~/.scope-bca/bin)
+│  ℹ Install: run 'scope setup' (it offers to download ghola)
 ```
 
 ## How It Works
 
 When `ghola.enabled` is `true` in your config, Scope:
 
-1. Creates a `GholaHttpClient` at startup
-2. Checks if the ghola sidecar is listening on `127.0.0.1:18789`
-3. If not running, attempts to spawn `ghola --serve` automatically
-4. Routes all HTTP requests through the sidecar bridge
-5. Falls back to native HTTP if the sidecar is unavailable
+1. Checks if the ghola sidecar is listening on `127.0.0.1:18789`
+2. If not, starts `ghola --serve` from PATH or `~/.scope-bca/bin` and waits up to 5 seconds for it
+3. Routes all HTTP requests through the sidecar bridge
+4. Falls back to native HTTP if no sidecar answers (and, on a terminal, offers to install ghola when it is missing)
+
+A sidecar that scope started is not left behind silently. At the end of the run scope
+asks `Stop the Ghola sidecar that scope started (pid N)? [Y/n]`; with no answer in 15
+seconds it stops it. Answer `n` to keep it running for later runs. A run that cannot
+ask (scripted output, a pipe, the web server) stops it.
 
 With `ghola.stealth` enabled, every request through the sidecar additionally gets temporal drift jitter and ghost signing applied.
 
@@ -150,6 +171,7 @@ The `buffer_size` setting (default 4096) controls the read buffer for responses 
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| `⚠ Ghola sidecar enabled but unavailable` | Binary not in PATH | `go install github.com/robot-accomplice/ghola/cmd/ghola@latest` |
-| `sidecar did not become ready` | Port 18789 blocked or ghola crash | Check `ghola --serve` manually, verify port availability |
-| Scope works but requests feel slow | Sidecar spawning on each run | Run `ghola --serve` in background: `ghola --serve &` |
+| `⚠ Ghola sidecar enabled but unavailable` | ghola not installed | `scope setup`, or `go install github.com/robot-accomplice/ghola/cmd/ghola@latest` |
+| `did not answer on 127.0.0.1:18789` | Port 18789 blocked or ghola crash | Check `ghola --serve` manually, verify port availability |
+| Scope works but requests feel slow | Sidecar started on each run | Answer `n` at the exit question, or run `ghola --serve &` yourself |
+| No install question any more | You answered no once | Run `scope setup`, or delete `~/.scope-bca/state/ghola-install-declined` |

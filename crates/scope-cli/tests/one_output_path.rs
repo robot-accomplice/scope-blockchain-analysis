@@ -39,6 +39,27 @@ const fn allow(
 
 const ALLOWED: &[Allowed] = &[
     allow(
+        "ghola_offer.rs",
+        "may_ask",
+        "io::stdin()",
+        1,
+        "asks whether stdin is a terminal before the Ghola install question; reads nothing",
+    ),
+    allow(
+        "ghola_offer.rs",
+        "may_ask",
+        "stdout()",
+        1,
+        "asks whether stdout is a terminal before the Ghola install question; writes nothing",
+    ),
+    allow(
+        "ghola_offer.rs",
+        "may_ask",
+        "stderr()",
+        1,
+        "asks whether stderr is a terminal before the Ghola install question; writes nothing",
+    ),
+    allow(
         "resolve.rs",
         "picker_for",
         "io::stdin()",

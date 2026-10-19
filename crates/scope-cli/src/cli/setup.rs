@@ -23,6 +23,7 @@ use crate::{note, outln};
 use clap::Args;
 use scope::config::{Config, OutputFormat};
 use scope::error::{ConfigError, Result, ScopeError};
+use scope::http::ghola_install;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
@@ -159,17 +160,7 @@ fn show_status(config: &Config, out: &Output) -> std::io::Result<()> {
     outln!(out, "{}", t::blank_row())?;
     outln!(out, "{}", t::subsection_header("Ghola Sidecar"))?;
 
-    let ghola_in_path = which_ghola();
-    if ghola_in_path {
-        outln!(out, "{}", t::check_pass("ghola binary found in PATH"))?;
-    } else {
-        outln!(out, "{}", t::check_fail("ghola binary not found in PATH"))?;
-        outln!(
-            out,
-            "{}",
-            t::info_row("Install: go install github.com/robot-accomplice/ghola@latest")
-        )?;
-    }
+    show_ghola_binary(config, ghola_install::find(), out)?;
 
     if config.ghola.enabled {
         outln!(
@@ -227,18 +218,47 @@ fn show_status(config: &Config, out: &Output) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Checks whether the `ghola` binary is present on `$PATH`. It looks in
-/// the folders itself: Windows has no `which`, so asking it always said
-/// "not found" there.
-fn which_ghola() -> bool {
-    std::env::var_os("PATH").is_some_and(|path| in_path(&path, "ghola"))
-}
-
-/// True when the program `name` is a file in one of the `path` folders,
-/// with the platform's executable suffix (`ghola.exe` on Windows).
-fn in_path(path: &std::ffi::OsStr, name: &str) -> bool {
-    let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
-    std::env::split_paths(path).any(|dir| dir.join(&file).is_file())
+/// The status rows for the `ghola` binary (`found` on PATH or in
+/// `~/.scope-bca/bin`). A missing binary gets a suggestion, never an install.
+fn show_ghola_binary(config: &Config, found: Option<PathBuf>, out: &Output) -> std::io::Result<()> {
+    use scope::display::terminal as t;
+    match found {
+        Some(path) => {
+            outln!(
+                out,
+                "{}",
+                t::check_pass(&format!("ghola binary: {}", path.display()))
+            )?;
+            if config.ghola.enabled {
+                outln!(
+                    out,
+                    "{}",
+                    t::info_row("scope starts it (ghola --serve) when no sidecar answers")
+                )?;
+            }
+        }
+        None => {
+            outln!(
+                out,
+                "{}",
+                t::check_fail(&format!(
+                    "ghola binary not found (PATH, {})",
+                    ghola_install::install_dir().display()
+                ))
+            )?;
+            outln!(
+                out,
+                "{}",
+                t::info_row("Install: run 'scope setup' (it offers to download ghola)")
+            )?;
+            outln!(
+                out,
+                "{}",
+                t::info_row(&format!("Or build it: {}", ghola_install::GO_INSTALL))
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// Gets API key configuration items.
@@ -485,7 +505,54 @@ async fn run_setup_wizard(config: &Config, out: &Output) -> Result<()> {
             path: PathBuf::from("~/.scope-bca/config.yaml"),
         })
     })?;
-    run_setup_wizard_impl(&mut crate::cli::prompt::stdin(), out, config, &config_path)
+    let installed = ghola_install::find();
+    let ghola = |reader: &mut dyn BufRead, out: &Output| {
+        crate::cli::ghola_offer::with_local_installer(|installer| {
+            crate::cli::ghola_offer::offer_install(&mut BufReadRef(reader), out, installer)
+        })
+        .unwrap_or_else(|e| {
+            note!(out, "⚠ Could not prepare the ghola download: {e}");
+            Ok(None)
+        })
+    };
+    let step = GholaStep {
+        installed,
+        install: &ghola,
+    };
+    run_setup_wizard_impl(
+        &mut crate::cli::prompt::stdin(),
+        out,
+        config,
+        &config_path,
+        &step,
+    )
+}
+
+/// Asks whether to install Ghola, installs on a yes and returns the binary.
+type InstallOffer = dyn Fn(&mut dyn BufRead, &Output) -> std::io::Result<Option<PathBuf>>;
+
+/// The wizard's Ghola step: the binary found, and the install offer.
+struct GholaStep<'a> {
+    installed: Option<PathBuf>,
+    install: &'a InstallOffer,
+}
+
+/// A `&mut dyn BufRead` as a sized `BufRead`.
+struct BufReadRef<'a>(&'a mut dyn BufRead);
+
+impl std::io::Read for BufReadRef<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+impl BufRead for BufReadRef<'_> {
+    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+        self.0.fill_buf()
+    }
+    fn consume(&mut self, amt: usize) {
+        self.0.consume(amt)
+    }
 }
 
 /// Testable implementation of the setup wizard with injected I/O.
@@ -494,6 +561,7 @@ fn run_setup_wizard_impl(
     out: &Output,
     config: &Config,
     config_path: &Path,
+    ghola: &GholaStep<'_>,
 ) -> Result<()> {
     note!(out);
     note!(
@@ -634,6 +702,36 @@ fn run_setup_wizard_impl(
             changes_made = true;
         }
         _ => {} // Keep default (table)
+    }
+
+    // Step 3: Ghola
+    note!(out);
+    note!(out, "Step 3: Ghola sidecar (optional)");
+    note!(out, "{}", "=".repeat(60));
+    note!(out);
+    note!(
+        out,
+        "Ghola sends scope's HTTP requests through a local sidecar that"
+    );
+    note!(out, "adds timing drift and ghost signing.");
+    note!(out);
+    let binary = match &ghola.installed {
+        Some(path) => {
+            note!(out, "✓ ghola installed: {}", path.display());
+            Some(path.clone())
+        }
+        None => (ghola.install)(reader, out)?,
+    };
+    if binary.is_some() && !config.ghola.enabled {
+        let input = ask(
+            reader,
+            out,
+            "Use Ghola for scope's HTTP requests (ghola.enabled)? [y/N]: ",
+        )?;
+        if matches!(input.trim().to_lowercase().as_str(), "y" | "yes") {
+            new_config.ghola.enabled = true;
+            changes_made = true;
+        }
     }
 
     // Save configuration
@@ -1400,7 +1498,7 @@ mod tests {
         let mut reader = std::io::Cursor::new(&input[..]);
         let (out, cap) = crate::cli::output::Output::capture();
 
-        run_setup_wizard_impl(&mut reader, &out, &config, &config_path).unwrap();
+        run_setup_wizard_impl(&mut reader, &out, &config, &config_path, &no_ghola_step()).unwrap();
 
         let output = cap.err();
         assert!(output.contains("Scope Setup Wizard"));
@@ -1422,7 +1520,7 @@ mod tests {
         let mut reader = std::io::Cursor::new(&input[..]);
         let (out, cap) = crate::cli::output::Output::capture();
 
-        run_setup_wizard_impl(&mut reader, &out, &config, &config_path).unwrap();
+        run_setup_wizard_impl(&mut reader, &out, &config, &config_path, &no_ghola_step()).unwrap();
 
         let output = cap.err();
         assert!(output.contains("Configuration saved"));
@@ -1443,7 +1541,7 @@ mod tests {
         let mut reader = std::io::Cursor::new(&input[..]);
         let (out, cap) = crate::cli::output::Output::capture();
 
-        run_setup_wizard_impl(&mut reader, &out, &config, &config_path).unwrap();
+        run_setup_wizard_impl(&mut reader, &out, &config, &config_path, &no_ghola_step()).unwrap();
 
         let output = cap.err();
         assert!(output.contains("Configuration saved"));
@@ -1462,7 +1560,7 @@ mod tests {
         let mut reader = std::io::Cursor::new(&input[..]);
         let (out, cap) = crate::cli::output::Output::capture();
 
-        run_setup_wizard_impl(&mut reader, &out, &config, &config_path).unwrap();
+        run_setup_wizard_impl(&mut reader, &out, &config, &config_path, &no_ghola_step()).unwrap();
 
         let output = cap.err();
         assert!(output.contains("BSCSCAN API KEY"));
@@ -1486,7 +1584,7 @@ mod tests {
         let mut reader = std::io::Cursor::new(&input[..]);
         let (out, cap) = crate::cli::output::Output::capture();
 
-        run_setup_wizard_impl(&mut reader, &out, &config, &config_path).unwrap();
+        run_setup_wizard_impl(&mut reader, &out, &config, &config_path, &no_ghola_step()).unwrap();
 
         let output = cap.err();
         assert!(output.contains("Etherscan API key already configured"));
@@ -1527,25 +1625,80 @@ mod tests {
         assert!(contents.contains("buffer_size: 4096"));
     }
 
-    #[test]
-    fn test_which_ghola_returns_bool() {
-        // Smoke test: the result depends on the host; the probe must not panic.
-        let _ = which_ghola();
+    /// A wizard Ghola step with no binary that never installs.
+    fn no_ghola_step() -> GholaStep<'static> {
+        GholaStep {
+            installed: None,
+            install: &|reader, _| {
+                let mut line = String::new();
+                reader.read_line(&mut line)?;
+                assert!(
+                    line.trim().is_empty(),
+                    "the test answered yes to the install"
+                );
+                Ok(None)
+            },
+        }
     }
 
     #[test]
-    fn test_in_path_finds_a_program_in_any_path_folder() {
-        let empty = tempfile::tempdir().unwrap();
-        let with = tempfile::tempdir().unwrap();
-        let program = format!("ghola{}", std::env::consts::EXE_SUFFIX);
-        std::fs::write(with.path().join(&program), "").unwrap();
-        let path = std::env::join_paths([empty.path(), with.path()]).unwrap();
-        assert!(in_path(&path, "ghola"), "found in the second folder");
-        let only_empty = std::env::join_paths([empty.path()]).unwrap();
-        assert!(!in_path(&only_empty, "ghola"));
-        // A folder with the program's name is not the program.
-        std::fs::create_dir(empty.path().join(&program)).unwrap();
-        assert!(!in_path(&only_empty, "ghola"));
+    fn test_wizard_installs_ghola_and_enables_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.yaml");
+        let installed = tmp.path().join("ghola");
+        let step = GholaStep {
+            installed: None,
+            install: &|reader, _| {
+                let mut line = String::new();
+                reader.read_line(&mut line)?;
+                assert_eq!(line.trim(), "y");
+                Ok(Some(PathBuf::from("/home/u/.scope-bca/bin/ghola")))
+            },
+        };
+        // etherscan skip, other chains no, format default, install yes, enable yes
+        let mut reader = "\n\n\ny\ny\n".as_bytes();
+        let (out, _cap) = crate::cli::output::Output::capture();
+        run_setup_wizard_impl(&mut reader, &out, &Config::default(), &config_path, &step).unwrap();
+        let config = Config::load(Some(&config_path)).unwrap();
+        assert!(config.ghola.enabled);
+        assert!(!installed.exists());
+    }
+
+    #[test]
+    fn test_wizard_with_ghola_installed_asks_nothing_about_installing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.yaml");
+        let step = GholaStep {
+            installed: Some(PathBuf::from("/usr/local/bin/ghola")),
+            install: &|_, _| panic!("offered an install with ghola installed"),
+        };
+        let mut config = Config::default();
+        config.ghola.enabled = true;
+        let mut reader = "\n\n\n".as_bytes();
+        let (out, cap) = crate::cli::output::Output::capture();
+        run_setup_wizard_impl(&mut reader, &out, &config, &config_path, &step).unwrap();
+        assert!(cap.err().contains("ghola installed: /usr/local/bin/ghola"));
+    }
+
+    #[test]
+    fn test_status_suggests_installing_a_missing_ghola() {
+        let (out, cap) = crate::cli::output::Output::capture();
+        show_ghola_binary(&Config::default(), None, &out).unwrap();
+        let text = cap.out();
+        assert!(text.contains("scope setup"), "{text}");
+        assert!(text.contains("/cmd/ghola@latest"), "{text}");
+        assert!(!text.contains("robot-accomplice/ghola@latest"), "{text}");
+    }
+
+    #[test]
+    fn test_status_names_the_ghola_binary_found() {
+        let (out, cap) = crate::cli::output::Output::capture();
+        let mut config = Config::default();
+        config.ghola.enabled = true;
+        show_ghola_binary(&config, Some(PathBuf::from("/opt/ghola")), &out).unwrap();
+        let text = cap.out();
+        assert!(text.contains("/opt/ghola"), "{text}");
+        assert!(text.contains("--serve"), "{text}");
     }
 
     #[test]

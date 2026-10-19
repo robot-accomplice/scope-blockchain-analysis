@@ -67,7 +67,14 @@ pub async fn dispatch(
     config: &Config,
     out: &Output,
 ) -> Result<i32> {
-    let http: Arc<dyn HttpClient> = create_http_client(config, out)?;
+    // A command run on a terminal may offer to install a missing Ghola.
+    // The TUI, the wizard, the web server and scripted runs never do.
+    use crate::cli::ghola_offer;
+    let offer = !command.is_interactive()
+        && ghola_offer::may_ask(out)
+        && !ghola_offer::scripted(&ghola_offer::process_args(), config);
+    let env = |k: &str| std::env::var(k).ok();
+    let http: Arc<dyn HttpClient> = create_http_client_offering(config, out, &env, offer)?;
     // Only the TUI can end with a code other than 0, so it starts here.
     if let Commands::Interactive(args) = command {
         let settings = |config: Config, http: Arc<dyn HttpClient>| Settings {
@@ -232,7 +239,22 @@ fn create_http_client_with(
     out: &Output,
     env: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Arc<dyn HttpClient>> {
-    let built = scope::http::shared::build_with(config, env)?;
+    create_http_client_offering(config, out, env, false)
+}
+
+/// Builds the transport. With `offer`, when Ghola is enabled but not
+/// installed, it asks whether to install it and, on a yes, builds again
+/// with the new binary (which starts the sidecar).
+fn create_http_client_offering(
+    config: &Config,
+    out: &Output,
+    env: &dyn Fn(&str) -> Option<String>,
+    offer: bool,
+) -> Result<Arc<dyn HttpClient>> {
+    let mut built = scope::http::shared::build_with(config, env)?;
+    if offer && built.ghola_missing && crate::cli::ghola_offer::offer_for_transport(out).is_some() {
+        built = scope::http::shared::build_with(config, env)?;
+    }
     for notice in &built.notices {
         note!(out, "{notice}");
     }

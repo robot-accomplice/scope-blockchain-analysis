@@ -66,6 +66,11 @@ sha2 = "0.10.9"
 hex = "0.4"
 regex = "1"
 
+# Ghola release archives (http/ghola_install.rs): .tar.gz and .zip
+flate2 = "1"
+tar = { version = "0.4", default-features = false }
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
+
 # Terminal coloring
 
 # Terminal size detection (used by display/terminal.rs)
