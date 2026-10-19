@@ -3,7 +3,7 @@ tiers: [offline]
 steps:
   # The monitor takes Ctrl-C as a quit key: it ends with outcome ok, and
   # the TUI comes back without an Enter.
-  - type: "monitor USDC --venue binance --pair USDC_USDT"
+  - type: "monitor USDC --venue binance --pair USDC_USDT --dashboard"
   - key: Enter
   - wait_for: { text: "Key Metrics" }
   # A refresh in --pair mode asks the venue, not DexScreener. A DexScreener

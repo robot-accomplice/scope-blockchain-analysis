@@ -8,8 +8,13 @@
 //! they appear in its output pane instead of over the screen. The binary
 //! also gives [`Stderr`](crate::diag::Stderr) to its tracing subscriber, so log lines follow the
 //! same route.
+//!
+//! [`scoped`](crate::diag::scoped) gives one future its own sink, over the redirect. The TUI
+//! polls a pane command and a watchlist run in one task; each keeps its own
+//! warnings (#47).
 
 use std::fmt;
+use std::future::Future;
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -25,6 +30,20 @@ static SINK: RwLock<Option<Sink>> = RwLock::new(None);
 /// call that produced the warning must not fail because stderr is closed.
 pub fn notice(args: fmt::Arguments<'_>) {
     let _ = Stderr.write_fmt(format_args!("{}\n", args));
+}
+
+tokio::task_local! {
+    /// The sink of the future [`scoped`] runs, while that future is polled.
+    static SCOPED: Sink;
+}
+
+/// Runs `fut` with its diagnostics in `sink`, whatever the redirect is.
+///
+/// The sink holds only while `fut` is polled. So two futures that one task
+/// polls in turn (a TUI pane command and a watchlist run) keep their
+/// warnings apart: the other one's go to the redirect.
+pub fn scoped<F: Future>(sink: Sink, fut: F) -> impl Future<Output = F::Output> {
+    SCOPED.scope(sink, fut)
 }
 
 /// Sends diagnostics to `sink` until the returned guard is dropped.
@@ -59,6 +78,11 @@ pub struct Stderr;
 
 impl Write for Stderr {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if let Ok(written) =
+            SCOPED.try_with(|sink| sink.lock().unwrap_or_else(|p| p.into_inner()).write(buf))
+        {
+            return written;
+        }
         let slot = SINK.read().unwrap_or_else(|p| p.into_inner());
         match slot.as_ref() {
             Some(sink) => sink.lock().unwrap_or_else(|p| p.into_inner()).write(buf),
@@ -67,6 +91,11 @@ impl Write for Stderr {
     }
 
     fn flush(&mut self) -> io::Result<()> {
+        if let Ok(flushed) =
+            SCOPED.try_with(|sink| sink.lock().unwrap_or_else(|p| p.into_inner()).flush())
+        {
+            return flushed;
+        }
         let slot = SINK.read().unwrap_or_else(|p| p.into_inner());
         match slot.as_ref() {
             Some(sink) => sink.lock().unwrap_or_else(|p| p.into_inner()).flush(),
@@ -105,6 +134,56 @@ mod tests {
         let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
         let _g = redirect(buf.clone());
         assert!(w.flush().is_ok());
+    }
+
+    #[test]
+    fn test_a_scoped_future_keeps_its_notices_from_the_redirect() {
+        let _lock = REDIRECT_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // The lock is held outside the runtime, never across an await.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        // One task polls both futures in turn, as the TUI polls a pane
+        // command and a watchlist run.
+        let pane: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let watch: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let _g = redirect(pane.clone());
+        let watching = scoped(watch.clone(), async {
+            for i in 0..3 {
+                notice(format_args!("watch {i}"));
+                tokio::task::yield_now().await;
+            }
+        });
+        let command = async {
+            for i in 0..3 {
+                notice(format_args!("pane {i}"));
+                tokio::task::yield_now().await;
+            }
+        };
+        rt.block_on(async { tokio::join!(watching, command) });
+        let pane = String::from_utf8_lossy(&pane.lock().unwrap()).into_owned();
+        let watch = String::from_utf8_lossy(&watch.lock().unwrap()).into_owned();
+        assert!(
+            watch.contains(
+                "watch 0
+watch 1
+watch 2
+"
+            ),
+            "{watch}"
+        );
+        assert!(!watch.contains("pane"), "{watch}");
+        assert!(
+            pane.contains(
+                "pane 0
+"
+            ) && pane.contains(
+                "pane 2
+"
+            ),
+            "{pane}"
+        );
+        assert!(!pane.contains("watch"), "{pane}");
     }
 
     #[test]

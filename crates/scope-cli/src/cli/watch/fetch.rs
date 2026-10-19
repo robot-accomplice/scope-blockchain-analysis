@@ -296,6 +296,133 @@ mod tests {
         assert!(tick.summaries[0].is_none());
     }
 
+    /// The checks of `market summary <pair> --venue <venue> --format json`
+    /// with `flags`, as (status, message), and its health.
+    async fn summary_checks(
+        venue: &str,
+        flags: &[&str],
+        factory: &MockClientFactory,
+    ) -> (Vec<(String, String)>, bool) {
+        let mut argv = vec!["scope", "market", "summary", "USDC", "--venue", venue];
+        argv.extend(flags);
+        argv.extend(["--format", "json"]);
+        let cli = <crate::cli::Cli as clap::Parser>::try_parse_from(argv).unwrap();
+        let (o, cap) = Output::capture();
+        crate::cli::dispatch::dispatch_with(
+            cli.command,
+            &scope::config::Config::default(),
+            factory,
+            &o,
+        )
+        .await
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&cap.out()).unwrap();
+        let checks = v["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| {
+                (
+                    c["status"].as_str().unwrap().to_string(),
+                    c["message"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        (checks, v["healthy"].as_bool().unwrap())
+    }
+
+    /// #47 acceptance: the monitor wizard's market health preset gives the
+    /// same checks, in the same order and with the same status and health,
+    /// as `market summary` for the same venue and thresholds.
+    #[tokio::test]
+    async fn the_market_health_preset_gives_the_checks_of_market_summary() {
+        // One USDC on the DEX venue's chain, the same for both paths.
+        let mut factory = MockClientFactory::new();
+        factory.mock_dex.search_results = vec![scope::chains::TokenSearchResult {
+            address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+            symbol: "USDC".to_string(),
+            name: "USD Coin".to_string(),
+            chain: "ethereum".to_string(),
+            price_usd: Some(1.0),
+            volume_24h: 1_000_000.0,
+            liquidity_usd: 5_000_000.0,
+            market_cap: None,
+        }];
+        if let Some(td) = factory.mock_dex.token_data.as_mut() {
+            td.address = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string();
+            td.symbol = "USDC".to_string();
+            td.pairs = vec![scope::chains::DexPair {
+                dex_name: "uniswap".into(),
+                pair_address: "0xpool".into(),
+                base_token: "USDC".into(),
+                quote_token: "USDT".into(),
+                price_usd: 1.0,
+                volume_24h: 1_000_000.0,
+                liquidity_usd: 50_000_000.0,
+                liquidity_base: Some(25_000_000.0),
+                price_change_24h: 0.0,
+                buys_24h: 0,
+                sells_24h: 0,
+                buys_6h: 0,
+                sells_6h: 0,
+                buys_1h: 0,
+                sells_1h: 0,
+                pair_created_at: None,
+                url: None,
+            }];
+        }
+        let config = scope::config::Config::default();
+        let src = Sources {
+            config: &config,
+            clients: &factory,
+        };
+        for (flags, overrides) in [
+            (vec![], scope::market::HealthOverrides::default()),
+            (
+                vec!["--max-spread-pct", "0.000001", "--min-depth", "1e15"],
+                scope::market::HealthOverrides {
+                    max_spread_pct: Some(0.000001),
+                    min_depth: Some(1e15),
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let (checks, healthy) = summary_checks("eth", &flags, &factory).await;
+            // The strict thresholds make failures, so both statuses are compared.
+            assert_eq!(healthy, flags.is_empty(), "flags {flags:?}: {checks:?}");
+            let mut t = Target::new(TargetKind::Pair, "USDC");
+            t.venue = Some("eth".into());
+            t.preset = Some(Preset::MarketHealth);
+            t.health = overrides;
+            let tick = tick(&ready(vec![t]), src, &quiet()).await;
+            let row = &tick.snapshot.targets[0];
+            let cells: Vec<(String, String)> = row
+                .cells
+                .iter()
+                .map(|c| (c.status.name().to_string(), c.label.clone()))
+                .collect();
+            let expected: Vec<(String, String)> = checks
+                .iter()
+                .map(|(status, message)| {
+                    let name = message.split_once(':').map_or(message.as_str(), |(n, _)| n);
+                    (status.clone(), name.trim().to_string())
+                })
+                .collect();
+            assert!(!expected.is_empty());
+            assert_eq!(cells, expected, "flags {flags:?}");
+            for (cell, (_, message)) in row.cells.iter().zip(&checks) {
+                if let Some(m) = cell.status.message() {
+                    assert_eq!(m, message, "the same text");
+                }
+            }
+            assert_eq!(
+                row.status == TargetStatus::Breached,
+                !healthy,
+                "flags {flags:?}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn a_failed_source_errors_its_cells_and_the_next_target_still_runs() {
         let factory = MockClientFactory::new();

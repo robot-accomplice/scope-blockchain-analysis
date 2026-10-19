@@ -38,6 +38,9 @@ pub const GRID_LEGEND: &str = "↑↓ select · Enter detail · Ctrl-G shell · 
 pub const DETAIL_LEGEND: &str = "b book · t trades · h holders · r risk · x address · Esc back";
 pub const ENDED_LEGEND: &str = "Esc or Ctrl-G back to the shell · Enter detail";
 
+/// Shown while a run uses the settings from before `setup` saved new ones.
+pub const STALE_NOTE: &str = "The settings changed: this run still uses the old ones. Stop it (Esc) and start it again to use them.";
+
 /// What the run sends the grid.
 #[derive(Debug, Clone)]
 pub enum GridMsg {
@@ -94,6 +97,9 @@ pub struct GridState {
     pub ended: Option<(String, Style)>,
     /// The run's progress (run N of M, next in Ns).
     pub progress: Option<ProgressHook>,
+    /// `setup` saved new settings while the run went on: the run still
+    /// uses the ones it started with.
+    pub stale: bool,
 }
 
 impl GridState {
@@ -113,6 +119,7 @@ impl GridState {
             detail: false,
             ended: None,
             progress,
+            stale: false,
         }
     }
 
@@ -242,8 +249,13 @@ impl GridState {
         } else {
             "watch ended"
         };
+        let old = if self.stale && self.is_running() {
+            " · old settings"
+        } else {
+            ""
+        };
         format!(
-            "{state} {}: {} breached · Ctrl-G grid",
+            "{state} {}: {} breached{old} · Ctrl-G grid",
             self.list.name,
             self.breaches()
         )
@@ -340,7 +352,8 @@ pub fn draw(f: &mut Frame, area: Rect, g: &GridState) {
         );
     let inner = block.inner(area);
     f.render_widget(block, area);
-    let banner_rows = u16::from(g.banner.is_some());
+    let stale = g.stale && g.is_running();
+    let banner_rows = u16::from(g.banner.is_some()) + u16::from(stale);
     let [banner, body, strip, foot, legend] = Layout::vertical([
         Constraint::Length(banner_rows),
         Constraint::Min(1),
@@ -349,14 +362,18 @@ pub fn draw(f: &mut Frame, area: Rect, g: &GridState) {
         Constraint::Length(1),
     ])
     .areas(inner);
+    let mut banners = Vec::new();
     if let Some(text) = &g.banner {
-        f.render_widget(
-            Paragraph::new(Line::styled(
-                format!(" ⚠ {text}"),
-                ERR.add_modifier(Modifier::BOLD),
-            )),
-            banner,
-        );
+        banners.push(Line::styled(
+            format!(" ⚠ {text}"),
+            ERR.add_modifier(Modifier::BOLD),
+        ));
+    }
+    if stale {
+        banners.push(Line::styled(format!(" {STALE_NOTE}"), WARN));
+    }
+    if !banners.is_empty() {
+        f.render_widget(Paragraph::new(banners), banner);
     }
     if g.detail {
         draw_detail(f, body, g);
@@ -757,6 +774,17 @@ mod tests {
             text.contains("error timeout") || text.contains("timeout"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn a_stale_run_says_to_restart_it_until_it_ends() {
+        let mut g = GridState::new(list(), None);
+        tick(&mut g, 1, 0.5);
+        g.stale = true;
+        assert!(screen(&g, 120, 36).contains("The settings changed"));
+        assert!(g.status_part().contains("old settings"));
+        g.end("Stopped.".into(), SECONDARY);
+        assert!(!screen(&g, 120, 36).contains("The settings changed"));
     }
 
     #[test]

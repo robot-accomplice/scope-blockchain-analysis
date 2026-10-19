@@ -28,6 +28,8 @@ pub enum Route {
     Suspend,
     /// Not inside the TUI. The reason tells the user what to do instead.
     Refuse(&'static str),
+    /// `monitor`: opens the monitor wizard in the TUI (#47).
+    Wizard,
 }
 
 /// The commands the TUI does not run, by name, and what to do instead.
@@ -81,8 +83,15 @@ pub fn route(command: &Commands) -> Route {
                 Route::Suspend
             }
         }
-        // The live dashboard draws its own screen (until phase 6 of #47).
-        Commands::Monitor(_) => Route::Suspend,
+        // The monitor wizard (#47). The old dashboard draws its own screen
+        // until it goes (Q1).
+        Commands::Monitor(args) => {
+            if args.watch.dashboard {
+                Route::Suspend
+            } else {
+                Route::Wizard
+            }
+        }
         Commands::Interactive(_) => refused("interactive"),
         Commands::Web(_) => refused("web"),
         Commands::Completions(_) => refused("completions"),
@@ -1503,8 +1512,13 @@ mod tests {
             run_of(plan_line("setup --status", &mut ctx).0).route,
             Route::Pane
         );
+        // The monitor wizard (#47); the old dashboard still runs outside.
         assert_eq!(
             run_of(plan_line("monitor USDC", &mut ctx).0).route,
+            Route::Wizard
+        );
+        assert_eq!(
+            run_of(plan_line("monitor USDC --dashboard", &mut ctx).0).route,
             Route::Suspend
         );
     }

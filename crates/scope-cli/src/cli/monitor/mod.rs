@@ -112,11 +112,12 @@ use crate::note;
 /// ```
 #[derive(Debug, Args)]
 #[command(after_help = "\x1b[1mExamples:\x1b[0m
-  scope monitor USDC
-  scope monitor @dai-token                                \x1b[2m# address book shortcut\x1b[0m
-  scope monitor PEPE --chain ethereum --layout chart-focus
-  scope monitor DAI --venue binance --pair DAI_USDT
-  scope monitor BTC --venue binance --refresh 5 --scale log")]
+  scope monitor USDN --venue weex --every 30s --duration 1h
+  scope monitor DAI --venue binance --pair DAI_USDT --report dai.md
+  scope monitor USDC --venue binance --save stables --yes   \x1b[2m# save, start at once\x1b[0m
+  scope monitor PEPE --chain ethereum                       \x1b[2m# price and volume\x1b[0m
+  scope monitor @dai-token                                  \x1b[2m# address book shortcut\x1b[0m
+  scope monitor BTC --venue binance --layout exchange --dashboard   \x1b[2m# deprecated\x1b[0m")]
 pub struct MonitorArgs {
     /// Token address or symbol to monitor.
     ///
@@ -181,6 +182,57 @@ pub struct MonitorArgs {
     /// Use this when the token is not listed on DexScreener.
     #[arg(long, value_name = "PAIR")]
     pub pair: Option<String>,
+
+    /// The watchlist options: `scope monitor` opens the monitor wizard in
+    /// the TUI with these filled in (#47).
+    #[command(flatten)]
+    pub watch: MonitorWatchArgs,
+}
+
+/// Said when the old dashboard starts (#47, Q1).
+pub const DASHBOARD_DEPRECATED: &str = "The monitor dashboard is deprecated and goes in the next release. `scope monitor` without --dashboard opens the monitor wizard, with health checks, --duration, --csv and --report.";
+
+/// The options of the monitor wizard (#47). The wizard turns the monitor
+/// arguments into a watchlist; these set its timing, outputs and checks.
+#[derive(Debug, Clone, Default, Args)]
+pub struct MonitorWatchArgs {
+    /// Interval between runs, as a duration (30s, 5m). The same as
+    /// `--refresh` in seconds. Default: 60s.
+    #[arg(long, value_name = "INTERVAL", conflicts_with = "refresh")]
+    pub every: Option<String>,
+
+    /// How long the run lasts (10m, 1h, or `forever`). Default: 1h.
+    #[arg(long, value_name = "DURATION")]
+    pub duration: Option<String>,
+
+    /// Write one CSV row per check per run to this path.
+    #[arg(long, value_name = "PATH")]
+    pub csv: Option<PathBuf>,
+
+    /// Write the report to this path when the run ends or is stopped.
+    #[arg(long, value_name = "PATH")]
+    pub report: Option<PathBuf>,
+
+    /// The checks: `market-health` (the default with `--venue`) or `none`.
+    #[arg(long, value_name = "PRESET")]
+    pub preset: Option<String>,
+
+    /// Save the watchlist under this name (`watch open <name>` runs it again).
+    #[arg(long, value_name = "NAME")]
+    pub save: Option<String>,
+
+    /// Start the run at once, without the wizard.
+    #[arg(long)]
+    pub yes: bool,
+
+    /// Open the old dashboard instead of the wizard. Deprecated: it goes in
+    /// the next release.
+    #[arg(long)]
+    pub dashboard: bool,
+
+    /// Health threshold overrides for the market health checks.
+    #[command(flatten)]
+    pub health: crate::cli::health_args::HealthArgs,
 }
 /// Entry point for the top-level `scope monitor` command.
 ///
@@ -193,6 +245,7 @@ pub async fn run_direct(
     clients: &dyn ChainClientFactory,
     out: &Output,
 ) -> Result<()> {
+    crate::note!(out, "{}", DASHBOARD_DEPRECATED);
     // Resolve address book label → address + chain
     if let Some((address, chain)) =
         crate::cli::address_book::resolve_address_book_input(&args.token, config)?
@@ -5350,6 +5403,7 @@ refresh_seconds: 5
             export: None,
             venue: None,
             pair: None,
+            watch: Default::default(),
         };
 
         // Build the effective config the same way run_direct does
@@ -5374,6 +5428,7 @@ refresh_seconds: 5
             export: Some(PathBuf::from("/tmp/test.csv")),
             venue: None,
             pair: None,
+            watch: Default::default(),
         };
 
         let mut mc = config.monitor.clone();
@@ -5414,6 +5469,7 @@ refresh_seconds: 5
             export: None,
             venue: None,
             pair: None,
+            watch: Default::default(),
         };
 
         let mut mc = config.monitor.clone();
@@ -5528,6 +5584,7 @@ refresh_seconds: 5
             export: None,
             venue: Some("binance".to_string()),
             pair: None,
+            watch: Default::default(),
         };
         assert_eq!(args.venue, Some("binance".to_string()));
     }
@@ -5614,6 +5671,7 @@ refresh_seconds: 5
             export: None,
             venue: Some("biconomy".to_string()),
             pair: Some("DAI_USDT".to_string()),
+            watch: Default::default(),
         };
         assert_eq!(args.pair, Some("DAI_USDT".to_string()));
         assert_eq!(args.venue, Some("biconomy".to_string()));
@@ -5632,6 +5690,7 @@ refresh_seconds: 5
             export: None,
             venue: None,
             pair: None,
+            watch: Default::default(),
         };
         assert!(args.pair.is_none());
     }
@@ -5707,6 +5766,7 @@ refresh_seconds: 5
             export: None,
             venue: Some("biconomy".to_string()),
             pair: Some("DAI_USDT".to_string()),
+            watch: Default::default(),
         };
         assert!(args.venue.is_some());
         assert!(args.pair.is_some());
@@ -5727,6 +5787,7 @@ refresh_seconds: 5
             export: None,
             venue: Some("biconomy".to_string()),
             pair: Some("DAI_USDT".to_string()),
+            watch: Default::default(),
         };
 
         // Simulate the config override path from run_direct

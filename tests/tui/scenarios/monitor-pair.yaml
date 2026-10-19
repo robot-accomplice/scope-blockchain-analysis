@@ -6,7 +6,7 @@ steps:
   # Venue-only mode never calls DexScreener. A DexScreener request would be
   # a replay miss ("no fixture"), and its error would show in the header.
   # The venue's own order book and trades fill their panels (#78).
-  - type: "monitor USDC --venue binance --pair USDC_USDT --layout exchange"
+  - type: "monitor USDC --venue binance --pair USDC_USDT --layout exchange --dashboard"
   - key: Enter
   - wait_for: { text: "Order Book \\(binance\\)", timeout: 20s }
   - wait_for: { text: "Recent Trades \\(binance\\)", timeout: 20s }

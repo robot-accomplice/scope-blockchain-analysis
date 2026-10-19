@@ -178,6 +178,21 @@ pub async fn run(
     crate::cli::tui::run(args.no_banner, settings, reload).await
 }
 
+/// `scope monitor <args>`: the TUI, with the monitor wizard filled from the
+/// arguments (#47).
+///
+/// # Errors
+///
+/// As [`run`].
+pub async fn run_monitor(
+    args: crate::cli::monitor::MonitorArgs,
+    settings: crate::cli::tui::Settings,
+    reload: crate::cli::tui::Reload<'_>,
+) -> Result<crate::cli::tui::TuiExit> {
+    let start = Some(crate::cli::Commands::Monitor(args));
+    crate::cli::tui::run_with(true, start, settings, reload).await
+}
+
 // ============================================================================
 // Unit Tests
 // ============================================================================

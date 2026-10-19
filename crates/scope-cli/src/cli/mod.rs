@@ -222,10 +222,12 @@ pub enum Commands {
     #[command(visible_alias = "disc")]
     Discover(discover::DiscoverArgs),
 
-    /// Live token monitor with real-time TUI dashboard.
+    /// Monitor a market, token or address live: the monitor wizard in the TUI.
     ///
-    /// Launches a terminal UI with price/volume charts, buy/sell gauges,
-    /// transaction feed, and more. Shortcut for `scope interactive` + `monitor <token>`.
+    /// Opens the TUI with the monitor wizard filled from the arguments: the
+    /// targets, the checks (market health with a venue), the interval, the
+    /// duration and the outputs. Its run shows each target's pass/fail state
+    /// in a grid. `--dashboard` opens the old dashboard (deprecated).
     #[command(visible_alias = "mon")]
     Monitor(MonitorArgs),
 
