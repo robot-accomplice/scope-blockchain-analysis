@@ -258,7 +258,7 @@ pub fn offer_for_transport(out: &Output) -> Option<PathBuf> {
 }
 
 /// Stops the sidecar this run started, or leaves it running when the user
-/// says so. With `ask`, the user has [`STOP_QUESTION_TIMEOUT`] to answer;
+/// says so. With `ask`, the user has 15 seconds to answer;
 /// no answer stops it. Without `ask` it is stopped.
 ///
 /// Call it last: an unanswered question leaves a thread reading stdin.
