@@ -10,7 +10,7 @@
 use crate::cli::output::{Output, RunRecord};
 use crate::{note, out};
 use scope::error::{Result, ScopeError};
-use scope::market::series::{self, Metric, Sample};
+use scope::metrics::{self as series, Metric, Sample};
 use std::future::Future;
 use std::io::Write as _;
 use std::path::Path;
@@ -90,7 +90,12 @@ where
     F: FnMut(u64) -> Fut,
     Fut: Future<Output = Result<RunOutput<T>>>,
 {
-    let columns = series::csv_columns(metrics).map_err(|e| ScopeError::Other(e.to_string()))?;
+    // The CSV columns, only for a CSV: a caller without one may pass an
+    // empty table (a watchlist writes its own trail).
+    let columns = match csv {
+        Some(_) => series::csv_columns(metrics).map_err(|e| ScopeError::Other(e.to_string()))?,
+        None => Vec::new(),
+    };
     if let Some(path) = csv {
         std::fs::write(path, series::csv_header(&columns))
             .map_err(|e| ScopeError::io_context(e, format!("cannot write {}", path.display())))?;
@@ -173,7 +178,7 @@ fn append(path: &Path, row: &str) -> Result<()> {
 mod tests {
     use super::*;
     use scope::market::HealthThresholds;
-    use scope::market::series::summary_metrics;
+    use scope::metrics::summary_metrics;
 
     fn metrics() -> Vec<Metric> {
         summary_metrics(&HealthThresholds::default())

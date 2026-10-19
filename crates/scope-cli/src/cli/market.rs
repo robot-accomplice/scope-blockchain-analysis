@@ -21,11 +21,11 @@ use scope::display::terminal as t;
 use scope::error::{Result, ScopeError};
 use scope::http::HttpClient;
 use scope::market::assets::TokenAddress;
-use scope::market::series;
 use scope::market::{
     DexAnalyticsSource, ExchangeClient, HealthThresholds, MarketSummary, MarketVenue, OrderBook,
     Pair, VENUE_HELP, VenueRegistry,
 };
+use scope::metrics as series;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,13 +35,11 @@ const PAIR_HELP: &str = "Pair or base symbol. BASE_QUOTE, BASE/QUOTE and BASE-QU
     WETH. A bare base (USDC) uses the venue's default quote.";
 
 /// Default interval between summary runs when in repeat mode (60 seconds).
-pub const DEFAULT_EVERY_SECS: u64 = 60;
-
-/// `--duration` values that run until the user cancels.
-const UNTIL_CANCELLED: [&str; 2] = ["forever", "inf"];
+/// Watchlists use the same default (#47, Q7).
+pub const DEFAULT_EVERY_SECS: u64 = scope::watch::time::DEFAULT_INTERVAL_SECS;
 
 /// Default total duration when in repeat mode (1 hour).
-pub const DEFAULT_DURATION_SECS: u64 = 3600;
+pub const DEFAULT_DURATION_SECS: u64 = scope::watch::time::DEFAULT_DURATION_SECS;
 
 /// Market subcommands.
 #[derive(Debug, Subcommand)]
@@ -322,42 +320,15 @@ impl DexAnalyticsSource for CrawlDexSource<'_> {
 
 /// Parse duration strings like "30s", "5m", "1h", "24h" into seconds.
 fn parse_duration(s: &str) -> Result<u64> {
-    let s = s.trim();
-    if s.is_empty() {
-        return Err(ScopeError::Chain("Empty duration".to_string()));
-    }
-    let (num_str, unit) = s
-        .char_indices()
-        .find(|(_, c)| !c.is_ascii_digit() && *c != '.')
-        .map(|(i, _)| (&s[..i], s[i..].trim()))
-        .unwrap_or((s, "s"));
-
-    let num: f64 = num_str
-        .parse()
-        .map_err(|_| ScopeError::Chain(format!("Invalid duration number: {}", num_str)))?;
-
-    if num <= 0.0 {
-        return Err(ScopeError::Chain("Duration must be positive".to_string()));
-    }
-
-    let secs = match unit.to_lowercase().as_str() {
-        "s" | "sec" | "secs" | "second" | "seconds" => num,
-        "m" | "min" | "mins" | "minute" | "minutes" => num * 60.0,
-        "h" | "hr" | "hrs" | "hour" | "hours" => num * 3600.0,
-        "d" | "day" | "days" => num * 86400.0,
-        _ => {
-            return Err(ScopeError::Chain(format!(
-                "Unknown duration unit: {}",
-                unit
-            )));
-        }
-    };
-
-    Ok(secs as u64)
+    scope::watch::time::parse_duration(s).map_err(ScopeError::Chain)
 }
 
 /// Builds markdown report content for a market summary.
-fn market_summary_to_markdown(summary: &MarketSummary, venue: &str, pair: &str) -> String {
+pub(crate) fn market_summary_to_markdown(
+    summary: &MarketSummary,
+    venue: &str,
+    pair: &str,
+) -> String {
     let mut md = format!(
         "# Market Health Report: {}  \n\
         **Generated:** {}  \n\n",
@@ -571,7 +542,7 @@ fn summary_schedule(args: &SummaryArgs) -> Result<Option<Schedule>> {
 
 /// `--duration forever` or `inf`: run until cancelled (#96).
 fn is_until_cancelled(s: &str) -> bool {
-    UNTIL_CANCELLED.contains(&s.trim().to_ascii_lowercase().as_str())
+    scope::watch::time::is_until_cancelled(s)
 }
 
 async fn run_summary(

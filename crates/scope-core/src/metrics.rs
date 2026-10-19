@@ -1,26 +1,30 @@
-//! Key values of a market summary: one metric table, one reading per run.
+//! The metric catalog: one table of key values, one reading per run.
 //!
-//! [`summary_metrics`] defines the list once. Labels, units, thresholds and
+//! Market metrics are the key values of a market summary. Token and address
+//! metrics are read by watchlists (`scope::watch`). Each [`MetricId`] has one
+//! [`MetricGroup`]; [`describe`] gives its label, unit and threshold.
+//!
+//! [`summary_metrics`] defines the market list once. Labels, units, thresholds and
 //! CSV column names all come from it. [`sample`] reads one [`MarketSummary`]
 //! into values in the same order as the table, and [`csv_columns`] gives the
 //! CSV order of the same table.
 //!
-//! Every value is a field the summary computed once for its health checks
+//! Every market value is a field the summary computed once for its health checks
 //! (spread, top-N depth, health). This module only reads them, so a charted
 //! value and the check that judged it cannot differ.
 //!
 //! The table has no `timestamp` or `run` entry: the CSV writer adds those
 //! two columns in front. This module has no presentation types.
 
-use super::health::HealthThresholds;
-use super::health::MarketSummary;
-use super::types::HealthCheck;
+use crate::market::health::HealthThresholds;
+use crate::market::health::MarketSummary;
+use crate::market::types::HealthCheck;
 
 /// Declares [`MetricId`] and [`MetricId::ALL`] from one list of variants, so
 /// the list of all ids cannot fall out of step with the enum.
 macro_rules! metric_ids {
     ($($(#[$doc:meta])* $name:ident),+ $(,)?) => {
-        /// Identifies one key value of a market summary.
+        /// Identifies one metric of the catalog.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         pub enum MetricId {
             $($(#[$doc])* $name),+
@@ -52,6 +56,54 @@ metric_ids! {
     AskTop10,
     /// `1.0` when [`Sample::healthy`] is true, else `0.0`.
     Healthy,
+    /// Token price in USD.
+    PriceUsd,
+    /// Token price change over 24h, in percent.
+    PriceChange24hPct,
+    /// Token trading volume over 24h, in USD.
+    Volume24h,
+    /// Token liquidity in USD.
+    LiquidityUsd,
+    /// Number of token holders.
+    Holders,
+    /// An address's balance of the chain's native coin.
+    NativeBalance,
+    /// An address's overall risk score, 0 to 10.
+    RiskScore,
+}
+
+/// Where a metric's value comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetricGroup {
+    /// A market summary (order book health).
+    Market,
+    /// Token analytics (DEX data).
+    Token,
+    /// An address analysis or its risk assessment.
+    Address,
+}
+
+impl MetricId {
+    /// The group of this metric.
+    pub fn group(self) -> MetricGroup {
+        use MetricId::*;
+        match self {
+            BestBid | BestAsk | Mid | PegDeviationPct | Spread | SpreadPct | BidDepth
+            | AskDepth | BidTop3 | AskTop3 | BidTop10 | AskTop10 | Healthy => MetricGroup::Market,
+            PriceUsd | PriceChange24hPct | Volume24h | LiquidityUsd | Holders => MetricGroup::Token,
+            NativeBalance | RiskScore => MetricGroup::Address,
+        }
+    }
+
+    /// The metric's name in rules and CSV files (`spread_pct`, `holders`).
+    pub fn name(self) -> &'static str {
+        describe(self, &HealthThresholds::default()).csv_column
+    }
+
+    /// The metric with this name, if any.
+    pub fn from_name(name: &str) -> Option<MetricId> {
+        MetricId::ALL.iter().copied().find(|id| id.name() == name)
+    }
 }
 
 /// The limit a metric is judged against.
@@ -75,6 +127,14 @@ pub enum Unit {
     Quote,
     /// `1.0` or `0.0`.
     Flag,
+    /// An amount in US dollars.
+    Usd,
+    /// A whole number of things (holders).
+    Count,
+    /// An amount of a chain's native coin.
+    Native,
+    /// A score (risk, 0 to 10).
+    Score,
 }
 
 /// One entry of the metric table.
@@ -114,15 +174,18 @@ const LEGACY_CSV_ORDER: [MetricId; 7] = [
     MetricId::Healthy,
 ];
 
-/// The metric table, built from the thresholds in force.
+/// The market metric table, built from the thresholds in force.
 pub fn summary_metrics(thresholds: &HealthThresholds) -> Vec<Metric> {
     MetricId::ALL
         .iter()
+        .filter(|id| id.group() == MetricGroup::Market)
         .map(|id| describe(*id, thresholds))
         .collect()
 }
 
-fn describe(id: MetricId, t: &HealthThresholds) -> Metric {
+/// The catalog entry of `id`. Market thresholds come from `t`; token and
+/// address metrics have no default threshold.
+pub fn describe(id: MetricId, t: &HealthThresholds) -> Metric {
     use MetricId::*;
     use Threshold::{Max, Min, Target};
     let (label, unit, threshold, csv_column) = match id {
@@ -179,6 +242,18 @@ fn describe(id: MetricId, t: &HealthThresholds) -> Metric {
             "ask_top10_depth",
         ),
         Healthy => ("Health", Unit::Flag, None, "healthy"),
+        PriceUsd => ("Price", Unit::Usd, None, "price_usd"),
+        PriceChange24hPct => (
+            "Price change 24h %",
+            Unit::Percent,
+            None,
+            "price_change_24h_pct",
+        ),
+        Volume24h => ("Volume 24h", Unit::Usd, None, "volume_24h"),
+        LiquidityUsd => ("Liquidity", Unit::Usd, None, "liquidity_usd"),
+        Holders => ("Holders", Unit::Count, None, "holders"),
+        NativeBalance => ("Native balance", Unit::Native, None, "native_balance"),
+        RiskScore => ("Risk score", Unit::Score, None, "risk_score"),
     };
     Metric {
         id,
@@ -242,6 +317,8 @@ fn value_of(id: MetricId, s: &MarketSummary, healthy: bool) -> Option<f64> {
         MetricId::BidTop10 => Some(s.top_depth.bid_top10),
         MetricId::AskTop10 => Some(s.top_depth.ask_top10),
         MetricId::Healthy => Some(f64::from(u8::from(healthy))),
+        // A market summary has no token or address values.
+        _ => None,
     }
 }
 
@@ -348,6 +425,57 @@ mod tests {
     fn value(sample: &Sample, metrics: &[Metric], id: MetricId) -> Option<f64> {
         let at = metrics.iter().position(|m| m.id == id).unwrap();
         sample.values[at]
+    }
+
+    #[test]
+    fn summary_metrics_are_the_market_group_only() {
+        let m = summary_metrics(&HealthThresholds::default());
+        assert!(m.iter().all(|m| m.id.group() == MetricGroup::Market));
+        assert_eq!(m.len(), 13, "the market table did not change");
+    }
+
+    #[test]
+    fn every_catalog_entry_has_a_unique_name_that_maps_back() {
+        let mut names = std::collections::HashSet::new();
+        for &id in MetricId::ALL {
+            let m = describe(id, &HealthThresholds::default());
+            assert!(!m.label.is_empty(), "{id:?} has no label");
+            assert!(names.insert(id.name()), "{} appears twice", id.name());
+            assert_eq!(MetricId::from_name(id.name()), Some(id));
+        }
+        assert_eq!(MetricId::from_name("no_such_metric"), None);
+    }
+
+    #[test]
+    fn token_and_address_metrics_have_their_groups_and_no_default_threshold() {
+        use MetricId::*;
+        for id in [
+            PriceUsd,
+            PriceChange24hPct,
+            Volume24h,
+            LiquidityUsd,
+            Holders,
+        ] {
+            assert_eq!(id.group(), MetricGroup::Token, "{id:?}");
+        }
+        for id in [NativeBalance, RiskScore] {
+            assert_eq!(id.group(), MetricGroup::Address, "{id:?}");
+        }
+        for id in [PriceUsd, Holders, NativeBalance, RiskScore] {
+            assert_eq!(describe(id, &HealthThresholds::default()).threshold, None);
+        }
+        assert_eq!(Holders.name(), "holders");
+        assert_eq!(
+            describe(Holders, &HealthThresholds::default()).unit,
+            Unit::Count
+        );
+    }
+
+    #[test]
+    fn a_summary_gives_no_value_for_a_token_metric() {
+        let t = HealthThresholds::default();
+        let metrics = vec![describe(MetricId::PriceUsd, &t)];
+        assert_eq!(sample(&healthy_summary(), &metrics).values, vec![None]);
     }
 
     #[test]

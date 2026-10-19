@@ -34,7 +34,7 @@
 //! note!(out, "Fetching balances..."); // status → stderr
 //! ```
 
-use scope::market::series::{Metric, Sample};
+use scope::metrics::{Metric, Sample};
 use std::collections::VecDeque;
 use std::fmt;
 use std::io::{self, Write};

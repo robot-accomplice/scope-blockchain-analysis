@@ -1,0 +1,22 @@
+name: a command run outside the TUI shows what it wrote in the TUI when it returns
+tiers: [offline]
+steps:
+  # setup --key reads the key on the plain terminal, so it runs outside the
+  # TUI. What it printed there must join the TUI scrollback when the TUI
+  # returns, above the note, and not stay hidden on the main screen.
+  - type: "setup --key etherscan"
+  - key: Enter
+  - wait_for: { text: "Enter etherscan API key:" }
+  - type: "TESTKEY0000000000000000000000002"
+  - key: Enter
+  - wait_for: { text: "Ran outside the TUI: setup --key etherscan \\(ok, \\d+\\.\\ds\\)", timeout: 20s }
+  # The screen is the TUI again: these lines are its scrollback.
+  - expect_screen:
+      contains:
+        - "Configure ETHERSCAN API Key"
+        - "Ethereum Mainnet"
+        - "etherscan API key saved"
+        - "The TUI now uses the saved settings\\."
+  - expect_journal: { argv_prefix: ["scope", "setup"], outcome: ok }
+  - key: Ctrl-D
+  - expect_exit: 0

@@ -87,6 +87,7 @@ pub(crate) mod token_pick;
 pub mod tui;
 pub mod tx;
 pub mod venues;
+pub mod watch;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
