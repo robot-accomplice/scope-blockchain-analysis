@@ -1,16 +1,15 @@
 //! # Shared HTTP transport
 //!
-//! The one place that selects the HTTP transport. `init` builds it from
-//! config and installs it for the process. Clients that do not get a
-//! transport passed in call `transport()`. See the TUI test harness
-//! design, section 2.2.
+//! The one place that selects the HTTP transport. `build` makes it from
+//! config and the environment; the caller passes it to every client it
+//! creates (see `DefaultClientFactory`). Nothing is installed for the
+//! process (#59).
 
 use super::replay::ReplayHttpClient;
 use super::{GholaHttpClient, HttpClient, NativeHttpClient, ghola};
 use crate::config::Config;
 use crate::error::ScopeError;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 /// An RPC URL path segment this long or longer is treated as a secret.
 const MIN_SECRET_SEGMENT_LEN: usize = 16;
@@ -42,19 +41,6 @@ pub struct Built {
     pub kind: Kind,
     pub notices: Vec<String>,
 }
-
-/// The process-wide transport. `fell_back` is set in the same write as the
-/// install, so a concurrent `init` always sees it.
-struct Installed {
-    client: Arc<dyn HttpClient>,
-    kind: Kind,
-    /// True when `transport()` installed native because nothing was installed.
-    fell_back: bool,
-}
-
-static INSTALLED: OnceLock<Installed> = OnceLock::new();
-/// Set once the "not applied" notice has been returned, so it is shown once.
-static NOTICE_SENT: AtomicBool = AtomicBool::new(false);
 
 /// The kind the config and environment select, derived without building a client.
 pub fn configured_kind(config: &Config) -> Kind {
@@ -190,109 +176,24 @@ pub fn secret_values(config: &Config) -> Vec<String> {
     out
 }
 
-/// Builds and installs the transport the first time; later calls return
-/// the installed transport with no notices.
-///
-/// # Errors
-///
-/// Returns an error when the transport cannot be built, or when
-/// `SCOPE_HTTP_MODE` selects replay or record but `transport()` already
-/// installed a different transport (the run must not use the network).
-pub fn init(config: &Config) -> Result<Built, ScopeError> {
-    init_with(config, &|k| std::env::var(k).ok())
-}
-
-/// Like `init`, reading environment variables through `env`.
-pub fn init_with(
-    config: &Config,
-    env: &dyn Fn(&str) -> Option<String>,
-) -> Result<Built, ScopeError> {
-    if let Some(installed) = INSTALLED.get() {
-        let mut notices = Vec::new();
-        let wanted = configured_kind_with(config, env);
-        let mismatch = installed.fell_back && wanted != installed.kind;
-        // A fallen-back recorder was built from the default config, so it
-        // scanned for no configured secrets. Refuse it even when record is
-        // also the wanted mode.
-        if installed.fell_back && wanted == Kind::Record && installed.kind == Kind::Record {
-            return Err(ScopeError::Network(
-                "record mode started before the config was loaded, so secrets from the \
-                 config could not be scanned for; the run stops"
-                    .into(),
-            ));
-        }
-        if mismatch && matches!(wanted, Kind::Replay | Kind::Record) {
-            return Err(ScopeError::Network(format!(
-                "HTTP was used before startup with the {} transport; SCOPE_HTTP_MODE={} \
-                 was not applied, so the run stops",
-                installed.kind.name(),
-                wanted.name()
-            )));
-        }
-        if mismatch && !NOTICE_SENT.swap(true, Ordering::SeqCst) {
-            let msg = format!(
-                "⚠ HTTP was used before startup; the {} transport from config was not applied",
-                wanted.name()
-            );
-            tracing::warn!("{msg}");
-            notices.push(msg);
-        }
-        return Ok(Built {
-            client: installed.client.clone(),
-            kind: installed.kind,
-            notices,
-        });
-    }
-    let built = build_with(config, env)?;
-    let installed = Installed {
-        client: built.client.clone(),
-        kind: built.kind,
-        fell_back: false,
-    };
-    match INSTALLED.set(installed) {
-        Ok(()) => Ok(built),
-        // Another thread installed first: use its transport.
-        Err(_) => init_with(config, env),
-    }
-}
-
-/// The installed transport. If nothing is installed, installs the
-/// transport that the default config and the environment select, so
-/// `SCOPE_HTTP_MODE` applies even before `init`.
+/// A transport for the deprecated constructors that take none: built
+/// fresh from the environment and the default config on each call, so
+/// `SCOPE_HTTP_MODE` still applies. Nothing is installed or shared.
 ///
 /// # Panics
 ///
 /// Panics when that transport cannot be built, for example
 /// `SCOPE_HTTP_MODE=replay` with no `SCOPE_HTTP_FIXTURES`. A replay run must
 /// not go to the network in its place.
-pub fn transport() -> Arc<dyn HttpClient> {
-    transport_with(&|k| std::env::var(k).ok())
-}
-
-/// Like `transport`, reading environment variables through `env`.
-pub fn transport_with(env: &dyn Fn(&str) -> Option<String>) -> Arc<dyn HttpClient> {
-    if let Some(installed) = INSTALLED.get() {
-        return installed.client.clone();
-    }
-    let built = build_with(&Config::default(), env).unwrap_or_else(|e| {
-        panic!("HTTP used before startup, and the transport could not be built: {e}")
+pub(crate) fn fallback() -> Arc<dyn HttpClient> {
+    let built = build(&Config::default()).unwrap_or_else(|e| {
+        panic!("a client was built without a transport, and none could be built: {e}")
     });
     tracing::debug!(
-        "no HTTP transport installed; using {} from the environment and default config",
+        "client built without a transport; using {} from the environment and default config",
         built.kind.name()
     );
-    // If another thread won the race, `get` below returns its transport.
-    let _ = INSTALLED.set(Installed {
-        client: built.client,
-        kind: built.kind,
-        fell_back: true,
-    });
-    INSTALLED.get().expect("installed above").client.clone()
-}
-
-/// The installed transport kind, or `"none"`.
-pub fn describe() -> &'static str {
-    INSTALLED.get().map_or("none", |i| i.kind.name())
+    built.client
 }
 
 #[cfg(test)]

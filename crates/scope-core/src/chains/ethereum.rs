@@ -234,8 +234,12 @@ impl EthereumClient {
     /// let config = ChainsConfig::default();
     /// let client = EthereumClient::new(&config).unwrap();
     /// ```
+    #[deprecated(
+        since = "0.8.0",
+        note = "pass the transport: use `EthereumClient::new_with_http`"
+    )]
     pub fn new(config: &ChainsConfig) -> Result<Self> {
-        Self::new_with_http(config, crate::http::transport())
+        Self::new_with_http(config, crate::http::shared::fallback())
     }
 
     /// Creates a new Ethereum client with an injected HTTP transport.
@@ -260,7 +264,7 @@ impl EthereumClient {
     /// * `base_url` - The base URL for the block explorer API
     pub fn with_base_url(base_url: &str) -> Self {
         Self {
-            http: crate::http::transport(),
+            http: crate::http::shared::fallback(),
             base_url: base_url.to_string(),
             chain_id: None,
             api_key: None,
@@ -309,8 +313,12 @@ impl EthereumClient {
     ///
     /// Uses Etherscan V2 API format which requires an API key for most endpoints.
     /// Get a free API key at <https://etherscan.io/apis>
+    #[deprecated(
+        since = "0.8.0",
+        note = "pass the transport: use `EthereumClient::for_chain_with_http`"
+    )]
     pub fn for_chain(chain: &str, config: &ChainsConfig) -> Result<Self> {
-        Self::for_chain_with_http(chain, config, crate::http::transport())
+        Self::for_chain_with_http(chain, config, crate::http::shared::fallback())
     }
 
     /// Creates a chain-specific client with an injected HTTP transport.
@@ -545,7 +553,7 @@ impl EthereumClient {
 
     /// Enriches a balance with a USD value using DexScreener price lookup.
     pub async fn enrich_balance_usd(&self, balance: &mut Balance) {
-        let dex = crate::chains::DexClient::new();
+        let dex = crate::chains::DexClient::new_with_http(self.http.clone());
         if let Some(price) = dex.get_native_token_price(&self.chain_name).await {
             let amount: f64 =
                 balance.raw.parse().unwrap_or(0.0) / 10_f64.powi(self.native_decimals as i32);
@@ -1294,7 +1302,7 @@ impl EthereumClient {
 impl Default for EthereumClient {
     fn default() -> Self {
         Self {
-            http: crate::http::transport(),
+            http: crate::http::shared::fallback(),
             base_url: ETHERSCAN_V2_API.to_string(),
             chain_id: Some("1".to_string()),
             api_key: None,
@@ -1537,7 +1545,9 @@ mod tests {
     #[test]
     fn test_ethereum_client_for_chain_ethereum() {
         let config = ChainsConfig::default();
-        let client = EthereumClient::for_chain("ethereum", &config).unwrap();
+        let client =
+            EthereumClient::for_chain_with_http("ethereum", &config, crate::http::test_transport())
+                .unwrap();
         assert_eq!(client.chain_name(), "ethereum");
         assert_eq!(client.native_token_symbol(), "ETH");
     }
@@ -1545,7 +1555,9 @@ mod tests {
     #[test]
     fn test_ethereum_client_for_chain_polygon() {
         let config = ChainsConfig::default();
-        let client = EthereumClient::for_chain("polygon", &config).unwrap();
+        let client =
+            EthereumClient::for_chain_with_http("polygon", &config, crate::http::test_transport())
+                .unwrap();
         assert_eq!(client.chain_name(), "polygon");
         assert_eq!(client.native_token_symbol(), "MATIC");
         // V2 API uses unified URL with chainid parameter
@@ -1556,7 +1568,9 @@ mod tests {
     #[test]
     fn test_ethereum_client_for_chain_arbitrum() {
         let config = ChainsConfig::default();
-        let client = EthereumClient::for_chain("arbitrum", &config).unwrap();
+        let client =
+            EthereumClient::for_chain_with_http("arbitrum", &config, crate::http::test_transport())
+                .unwrap();
         assert_eq!(client.chain_name(), "arbitrum");
         // V2 API uses unified URL with chainid parameter
         assert!(client.base_url.contains("etherscan.io/v2"));
@@ -1566,7 +1580,9 @@ mod tests {
     #[test]
     fn test_ethereum_client_for_chain_bsc() {
         let config = ChainsConfig::default();
-        let client = EthereumClient::for_chain("bsc", &config).unwrap();
+        let client =
+            EthereumClient::for_chain_with_http("bsc", &config, crate::http::test_transport())
+                .unwrap();
         assert_eq!(client.chain_name(), "bsc");
         assert_eq!(client.native_token_symbol(), "BNB");
         // V2 API uses unified URL with chainid parameter
@@ -1578,7 +1594,9 @@ mod tests {
     #[test]
     fn test_ethereum_client_for_chain_aegis() {
         let config = ChainsConfig::default();
-        let client = EthereumClient::for_chain("aegis", &config).unwrap();
+        let client =
+            EthereumClient::for_chain_with_http("aegis", &config, crate::http::test_transport())
+                .unwrap();
         assert_eq!(client.chain_name(), "aegis");
         assert_eq!(client.native_token_symbol(), "WRAITH");
         assert_eq!(client.api_type, ApiType::JsonRpc);
@@ -1592,14 +1610,17 @@ mod tests {
             aegis_rpc: Some("https://aegis.example.com:8545".to_string()),
             ..Default::default()
         };
-        let client = EthereumClient::for_chain("aegis", &config).unwrap();
+        let client =
+            EthereumClient::for_chain_with_http("aegis", &config, crate::http::test_transport())
+                .unwrap();
         assert_eq!(client.base_url, "https://aegis.example.com:8545");
     }
 
     #[test]
     fn test_ethereum_client_for_chain_unsupported() {
         let config = ChainsConfig::default();
-        let result = EthereumClient::for_chain("bitcoin", &config);
+        let result =
+            EthereumClient::for_chain_with_http("bitcoin", &config, crate::http::test_transport());
         assert!(result.is_err());
         assert!(
             result
@@ -1612,7 +1633,7 @@ mod tests {
     #[test]
     fn test_ethereum_client_new() {
         let config = ChainsConfig::default();
-        let client = EthereumClient::new(&config);
+        let client = EthereumClient::new_with_http(&config, crate::http::test_transport());
         assert!(client.is_ok());
     }
 
@@ -1628,7 +1649,7 @@ mod tests {
             ..Default::default()
         };
 
-        let client = EthereumClient::new(&config).unwrap();
+        let client = EthereumClient::new_with_http(&config, crate::http::test_transport()).unwrap();
         assert_eq!(client.api_key, Some("test-key".to_string()));
     }
 
@@ -1733,7 +1754,7 @@ mod tests {
             api_keys: keys,
             ..Default::default()
         };
-        let client = EthereumClient::new(&config).unwrap();
+        let client = EthereumClient::new_with_http(&config, crate::http::test_transport()).unwrap();
         let url = client.build_api_url("module=account&action=balance&address=0x123");
         assert!(url.contains("chainid=1"));
         assert!(url.contains("module=account"));
@@ -1827,7 +1848,9 @@ mod tests {
     #[test]
     fn test_ethereum_client_for_chain_optimism() {
         let config = ChainsConfig::default();
-        let client = EthereumClient::for_chain("optimism", &config).unwrap();
+        let client =
+            EthereumClient::for_chain_with_http("optimism", &config, crate::http::test_transport())
+                .unwrap();
         assert_eq!(client.chain_name(), "optimism");
         assert_eq!(client.native_token_symbol(), "ETH");
         assert_eq!(client.chain_id, Some("10".to_string()));
@@ -1836,7 +1859,9 @@ mod tests {
     #[test]
     fn test_ethereum_client_for_chain_base() {
         let config = ChainsConfig::default();
-        let client = EthereumClient::for_chain("base", &config).unwrap();
+        let client =
+            EthereumClient::for_chain_with_http("base", &config, crate::http::test_transport())
+                .unwrap();
         assert_eq!(client.chain_name(), "base");
         assert_eq!(client.native_token_symbol(), "ETH");
         assert_eq!(client.chain_id, Some("8453".to_string()));
@@ -1845,7 +1870,9 @@ mod tests {
     #[test]
     fn test_parse_balance_wei_bsc_client() {
         let config = ChainsConfig::default();
-        let client = EthereumClient::for_chain("bsc", &config).unwrap();
+        let client =
+            EthereumClient::for_chain_with_http("bsc", &config, crate::http::test_transport())
+                .unwrap();
         let balance = client.parse_balance_wei("1000000000000000000").unwrap();
         assert_eq!(balance.symbol, "BNB");
     }

@@ -79,6 +79,7 @@ use scope::chains::dex::{DexDataSource, DexTokenData};
 use scope::config::Config;
 use scope::error::{Result, ScopeError};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::interactive::SessionContext;
@@ -293,7 +294,7 @@ pub async fn run(
 
     // Create exchange client if a venue is configured (from MonitorConfig or CLI)
     let venue = config.monitor.venue.as_deref();
-    let exchange_client = exchange_for_venue(venue)?;
+    let exchange_client = exchange_for_venue(venue, clients.http())?;
 
     let dex_client = clients.create_dex_client();
     let (initial_data, venue_quote) = fetch_initial_data(
@@ -302,6 +303,7 @@ pub async fn run(
         &ctx.chain,
         dex_client.as_ref(),
         venue.zip(exchange_client.as_ref()),
+        clients.http(),
         out,
     )
     .await?;
@@ -368,12 +370,13 @@ pub async fn run(
 /// unknown-venue error (with a suggestion), not a silently dropped option.
 pub(crate) fn exchange_for_venue(
     venue: Option<&str>,
+    http: Arc<dyn scope::http::HttpClient>,
 ) -> Result<Option<scope::market::ExchangeClient>> {
     let Some(id) = venue else {
         return Ok(None);
     };
     scope::market::VenueRegistry::load()?
-        .create_exchange_client(id)
+        .create_exchange_client_with_http(id, http)
         .map(Some)
 }
 
@@ -392,6 +395,7 @@ pub(crate) async fn fetch_initial_data(
     chain: &str,
     dex_client: &dyn DexDataSource,
     venue: Option<(&str, &scope::market::ExchangeClient)>,
+    http: Arc<dyn scope::http::HttpClient>,
     out: &Output,
 ) -> Result<(DexTokenData, Option<(String, scope::market::Ticker)>)> {
     if let Some(pair) = explicit_pair {
@@ -405,8 +409,14 @@ pub(crate) async fn fetch_initial_data(
 
     // With a venue set, the venue is the fallback; skip the Binance probe.
     let dex = async {
-        let address =
-            resolve_token_address(token_input, chain, dex_client, venue.is_none(), out).await?;
+        let address = resolve_token_address(
+            token_input,
+            chain,
+            dex_client,
+            venue.is_none().then_some(http),
+            out,
+        )
+        .await?;
         dex_client.get_token_data(chain, &address).await
     }
     .await;
@@ -512,13 +522,13 @@ fn build_exchange_token_data(
 }
 
 /// Resolves a token input (address or symbol) to an address through
-/// [`crate::cli::resolve`]. With `allow_cex_fallback`, a symbol that
-/// DexScreener does not know is looked up on the default CEX venue.
+/// [`crate::cli::resolve`]. With `cex_fallback` (its transport), a symbol
+/// that DexScreener does not know is looked up on the default CEX venue.
 async fn resolve_token_address(
     input: &str,
     chain: &str,
     dex_client: &dyn DexDataSource,
-    allow_cex_fallback: bool,
+    cex_fallback: Option<Arc<dyn scope::http::HttpClient>>,
     out: &Output,
 ) -> Result<String> {
     use crate::cli::resolve::{DexCandidates, ResolveContext, VenueKind, picker_for, resolve};
@@ -535,7 +545,7 @@ async fn resolve_token_address(
     let source = DexCandidates {
         dex: dex_client,
         out,
-        fallback: allow_cex_fallback,
+        fallback: cex_fallback,
     };
     let picker = picker_for(out, false);
     let mut aliases = scope::tokens::TokenAliases::load();
@@ -3323,7 +3333,10 @@ capabilities:
         let desc: scope::market::VenueDescriptor = serde_saphyr::from_str(&yaml).unwrap();
         (
             server,
-            scope::market::ExchangeClient::from_descriptor(&desc),
+            scope::market::ExchangeClient::from_descriptor_with_http(
+                &desc,
+                scope::http::test_transport(),
+            ),
         )
     }
 
@@ -3364,15 +3377,10 @@ capabilities:
     #[tokio::test]
     async fn test_monitor_resolves_on_its_own_chain() {
         // Review C2: a bsc token was offered for (and fetched on) ethereum.
-        let address = resolve_token_address(
-            "USDN",
-            "ethereum",
-            &TwoChainDex,
-            false,
-            &Output::capture().0,
-        )
-        .await
-        .unwrap();
+        let address =
+            resolve_token_address("USDN", "ethereum", &TwoChainDex, None, &Output::capture().0)
+                .await
+                .unwrap();
         assert_eq!(address, "0xA");
     }
 
@@ -3399,6 +3407,7 @@ capabilities:
             "bsc",
             &dex,
             Some(("mockvenue", &ex)),
+            scope::http::test_transport(),
             &Output::capture().0,
         )
         .await
@@ -3418,6 +3427,7 @@ capabilities:
             "ethereum",
             &BlockedDex,
             Some(("mockvenue", &ex)),
+            scope::http::test_transport(),
             &out,
         )
         .await
@@ -3443,6 +3453,7 @@ capabilities:
             "ethereum",
             &dex,
             Some(("mockvenue", &ex)),
+            scope::http::test_transport(),
             &Output::capture().0,
         )
         .await
@@ -3460,6 +3471,7 @@ capabilities:
             "ethereum",
             &BlockedDex,
             Some(("mockvenue", &ex)),
+            scope::http::test_transport(),
             &Output::capture().0,
         )
         .await
@@ -3490,7 +3502,10 @@ capabilities:
             server.url()
         );
         let desc: scope::market::VenueDescriptor = serde_saphyr::from_str(&yaml).unwrap();
-        let ex = scope::market::ExchangeClient::from_descriptor(&desc);
+        let ex = scope::market::ExchangeClient::from_descriptor_with_http(
+            &desc,
+            scope::http::test_transport(),
+        );
         for input in ["USDN_USDT", "USDN/USDT", "USDNUSDT"] {
             let (data, pair) = fetch_initial_data(
                 "USDN",
@@ -3498,6 +3513,7 @@ capabilities:
                 "ethereum",
                 &BlockedDex,
                 Some(("weexlike", &ex)),
+                scope::http::test_transport(),
                 &Output::capture().0,
             )
             .await
@@ -3521,6 +3537,7 @@ capabilities:
             "ethereum",
             &BlockedDex,
             Some(("mockvenue", &ex)),
+            scope::http::test_transport(),
             &Output::capture().0,
         )
         .await
@@ -3533,13 +3550,23 @@ capabilities:
     fn test_unknown_venue_is_an_error_not_ignored() {
         // `--venue nosuch` used to drop the venue without a word; now it is
         // the one unknown-venue error, with the registry's suggestion.
-        let err = exchange_for_venue(Some("binace")).err().unwrap();
+        let err = exchange_for_venue(Some("binace"), scope::http::test_transport())
+            .err()
+            .unwrap();
         assert!(matches!(err, ScopeError::InvalidInput(_)), "{err:?}");
         let msg = err.to_string();
         assert!(msg.contains("Unknown venue \"binace\""), "{msg}");
         assert!(msg.contains("Did you mean \"binance\""), "{msg}");
-        assert!(exchange_for_venue(None).unwrap().is_none());
-        assert!(exchange_for_venue(Some("binance")).unwrap().is_some());
+        assert!(
+            exchange_for_venue(None, scope::http::test_transport())
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            exchange_for_venue(Some("binance"), scope::http::test_transport())
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
@@ -5755,13 +5782,13 @@ refresh_seconds: 5
     #[tokio::test]
     async fn test_resolve_token_address_with_address_input() {
         use scope::chains::dex::DexClient;
-        let dex = DexClient::new();
+        let dex = DexClient::new_with_http(scope::http::test_transport());
         // EVM address should be returned directly, no DexScreener query
         let result = resolve_token_address(
             "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
             "ethereum",
             &dex,
-            true,
+            Some(scope::http::test_transport()),
             &Output::capture().0,
         )
         .await
@@ -5786,7 +5813,7 @@ refresh_seconds: 5
             market_cap: None,
         }];
         let (out, cap) = Output::capture();
-        let address = resolve_token_address("ZZQT", "ethereum", &dex, false, &out)
+        let address = resolve_token_address("ZZQT", "ethereum", &dex, None, &out)
             .await
             .unwrap();
         assert_eq!(address, "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
@@ -5800,12 +5827,18 @@ refresh_seconds: 5
     #[tokio::test]
     async fn test_resolve_token_address_solana_address() {
         use scope::chains::dex::DexClient;
-        let dex = DexClient::new();
+        let dex = DexClient::new_with_http(scope::http::test_transport());
         // Solana address (base58, 32+ chars) should be returned directly
         let addr = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-        let result = resolve_token_address(addr, "solana", &dex, true, &Output::capture().0)
-            .await
-            .unwrap();
+        let result = resolve_token_address(
+            addr,
+            "solana",
+            &dex,
+            Some(scope::http::test_transport()),
+            &Output::capture().0,
+        )
+        .await
+        .unwrap();
         assert_eq!(result, addr);
     }
 

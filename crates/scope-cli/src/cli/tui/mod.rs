@@ -1145,6 +1145,9 @@ mod tests {
     struct PendingFactory(MockClientFactory);
 
     impl ChainClientFactory for PendingFactory {
+        fn http(&self) -> std::sync::Arc<dyn scope::http::HttpClient> {
+            scope::http::test_transport()
+        }
         fn create_chain_client(
             &self,
             chain: &str,
@@ -1281,6 +1284,9 @@ mod tests {
     struct CountingFactory(Arc<std::sync::atomic::AtomicUsize>);
 
     impl ChainClientFactory for CountingFactory {
+        fn http(&self) -> std::sync::Arc<dyn scope::http::HttpClient> {
+            scope::http::test_transport()
+        }
         fn create_chain_client(
             &self,
             chain: &str,

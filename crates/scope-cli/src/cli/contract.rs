@@ -105,7 +105,7 @@ pub async fn run(
     let spinner = crate::cli::progress::Spinner::new("Analyzing contract...", out);
 
     let client = clients.create_chain_client(&args.chain)?;
-    let http_client = scope::http::transport();
+    let http_client = clients.http();
 
     let analysis = contract::analyze_contract(
         &args.address,

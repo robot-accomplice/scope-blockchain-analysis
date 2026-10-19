@@ -114,20 +114,47 @@ impl MarketVenue {
     /// Resolves a venue name. DEX names win; any other name must be a
     /// registry venue. An unknown name is [`ScopeError::InvalidInput`] that
     /// lists every market venue, DEX venues included.
+    #[deprecated(
+        since = "0.8.0",
+        note = "pass the transport: use `MarketVenue::resolve_with_http`"
+    )]
     pub fn resolve(input: &str, registry: &VenueRegistry) -> Result<Self> {
+        Self::resolve_with_http(input, registry, crate::http::shared::fallback())
+    }
+
+    /// [`MarketVenue::resolve`], sending a CEX venue's requests through `http`.
+    pub fn resolve_with_http(
+        input: &str,
+        registry: &VenueRegistry,
+        http: std::sync::Arc<dyn crate::http::HttpClient>,
+    ) -> Result<Self> {
         if let Some(dex) = DexVenue::parse(input) {
             return Ok(Self::Dex(dex));
         }
         if registry.contains(input) {
-            return Ok(Self::Cex(Box::new(registry.create_exchange_client(input)?)));
+            return Ok(Self::Cex(Box::new(
+                registry.create_exchange_client_with_http(input, http)?,
+            )));
         }
         Err(unknown_venue(input, &Self::ids(registry)))
     }
 
     /// [`MarketVenue::resolve`] against the loaded registry (built-in and
     /// user venues).
+    #[deprecated(
+        since = "0.8.0",
+        note = "pass the transport: use `MarketVenue::from_name_with_http`"
+    )]
     pub fn from_name(input: &str) -> Result<Self> {
-        Self::resolve(input, &VenueRegistry::load()?)
+        Self::from_name_with_http(input, crate::http::shared::fallback())
+    }
+
+    /// [`MarketVenue::from_name`], sending a CEX venue's requests through `http`.
+    pub fn from_name_with_http(
+        input: &str,
+        http: std::sync::Arc<dyn crate::http::HttpClient>,
+    ) -> Result<Self> {
+        Self::resolve_with_http(input, &VenueRegistry::load()?, http)
     }
 
     /// Checks an explicit chain against the venue. A CEX venue reads no
@@ -218,11 +245,13 @@ mod tests {
     fn resolve_sends_dex_names_to_dex_and_others_to_the_registry() {
         let registry = VenueRegistry::load().unwrap();
         assert!(matches!(
-            MarketVenue::resolve("sol", &registry).unwrap(),
+            MarketVenue::resolve_with_http("sol", &registry, crate::http::test_transport())
+                .unwrap(),
             MarketVenue::Dex(DexVenue::Solana)
         ));
         assert!(matches!(
-            MarketVenue::resolve("binance", &registry).unwrap(),
+            MarketVenue::resolve_with_http("binance", &registry, crate::http::test_transport())
+                .unwrap(),
             MarketVenue::Cex(_)
         ));
     }
@@ -230,9 +259,10 @@ mod tests {
     #[test]
     fn an_unknown_venue_is_an_error_that_lists_the_dex_venues() {
         let registry = VenueRegistry::load().unwrap();
-        let err = MarketVenue::resolve("polygon", &registry)
-            .err()
-            .expect("unknown venue must be an error");
+        let err =
+            MarketVenue::resolve_with_http("polygon", &registry, crate::http::test_transport())
+                .err()
+                .expect("unknown venue must be an error");
         let msg = err.to_string();
         assert!(msg.contains("Unknown venue \"polygon\""), "{msg}");
         assert!(msg.contains(", ethereum, solana\n"), "{msg}");
@@ -244,7 +274,10 @@ mod tests {
     #[test]
     fn the_registry_lookup_does_not_suggest_dex_venues() {
         let registry = VenueRegistry::load().unwrap();
-        let err = registry.create_exchange_client("solana").err().unwrap();
+        let err = registry
+            .create_exchange_client_with_http("solana", crate::http::test_transport())
+            .err()
+            .unwrap();
         assert!(matches!(err, ScopeError::InvalidInput(_)), "{err:?}");
         let msg = err.to_string();
         assert!(msg.contains("Unknown venue \"solana\""), "{msg}");
@@ -254,7 +287,10 @@ mod tests {
     #[test]
     fn a_typo_of_a_dex_venue_is_suggested_where_dex_venues_are_valid() {
         let registry = VenueRegistry::load().unwrap();
-        let err = MarketVenue::resolve("solanna", &registry).err().unwrap();
+        let err =
+            MarketVenue::resolve_with_http("solanna", &registry, crate::http::test_transport())
+                .err()
+                .unwrap();
         assert!(err.to_string().contains("Did you mean \"solana\""), "{err}");
     }
 
@@ -294,7 +330,9 @@ mod tests {
     #[test]
     fn a_cex_venue_ignores_the_chain() {
         let registry = VenueRegistry::load().unwrap();
-        let venue = MarketVenue::resolve("binance", &registry).unwrap();
+        let venue =
+            MarketVenue::resolve_with_http("binance", &registry, crate::http::test_transport())
+                .unwrap();
         assert!(venue.require_chain("solana").is_ok());
     }
 }

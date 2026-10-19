@@ -25,10 +25,12 @@ pub(crate) async fn cex_fallback(
     symbol: &str,
     chain: &str,
     spinner: Option<&Spinner>,
+    http: std::sync::Arc<dyn scope::http::HttpClient>,
     out: &Output,
 ) -> Option<TokenSearchResult> {
     let registry = VenueRegistry::load().ok()?;
-    let client = ExchangeClient::from_descriptor(registry.get(scope::market::DEFAULT_VENUE)?);
+    let desc = registry.get(scope::market::DEFAULT_VENUE)?;
+    let client = ExchangeClient::from_descriptor_with_http(desc, http);
     let symbol = symbol.to_uppercase();
     let pair = fallback_pair(&client, &symbol);
     let ticker = client.fetch_ticker(&pair).await.ok()?;
@@ -139,8 +141,10 @@ mod tests {
     #[test]
     fn test_fallback_pair_quotes_the_symbol_once() {
         let registry = VenueRegistry::load().unwrap();
-        let client =
-            ExchangeClient::from_descriptor(registry.get(scope::market::DEFAULT_VENUE).unwrap());
+        let client = ExchangeClient::from_descriptor_with_http(
+            registry.get(scope::market::DEFAULT_VENUE).unwrap(),
+            scope::http::test_transport(),
+        );
         assert_eq!(fallback_pair(&client, "USDC"), "USDCUSDT");
         assert_eq!(fallback_pair(&client, "OP"), "OPUSDT");
     }

@@ -8,7 +8,9 @@ use clap::{Args, ValueEnum};
 use scope::chains::{DexClient, DiscoverToken};
 use scope::config::OutputFormat;
 use scope::error::Result;
+use scope::http::HttpClient;
 use serde::Serialize;
+use std::sync::Arc;
 
 /// Source for token discovery.
 #[derive(Debug, Clone, Copy, ValueEnum, Default)]
@@ -57,8 +59,13 @@ struct DiscoverRow {
 }
 
 /// Run the discover command.
-pub async fn run(args: DiscoverArgs, format: OutputFormat, out: &Output) -> Result<()> {
-    run_with_client(args, format, &DexClient::new(), out).await
+pub async fn run(
+    args: DiscoverArgs,
+    format: OutputFormat,
+    http: Arc<dyn HttpClient>,
+    out: &Output,
+) -> Result<()> {
+    run_with_client(args, format, &DexClient::new_with_http(http), out).await
 }
 
 /// Run the discover command with a provided DEX client (for testing).

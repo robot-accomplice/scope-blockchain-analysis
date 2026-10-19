@@ -40,7 +40,7 @@ pub async fn handle_risk(
     let chain = resolved.chain.unwrap_or(req.chain);
 
     // Build risk engine (with Etherscan key if available)
-    let engine = RiskEngine::from_env();
+    let engine = RiskEngine::from_env_with_http(_state.factory.http());
 
     match engine.assess_address(&address, &chain).await {
         Ok(assessment) => Json(serde_json::json!({

@@ -14,7 +14,7 @@ use scope::config::Config;
 use super::health_args::HealthArgs;
 use scope::display::report;
 use scope::error::{Result, ScopeError};
-use scope::market::{MarketSummary, fetch_token_summary_by_name};
+use scope::market::{MarketSummary, fetch_token_summary_by_name_with_http};
 
 /// Arguments for the token-health command.
 #[derive(Debug, Args)]
@@ -132,7 +132,13 @@ pub async fn run(
     let market_summary = if args.with_market {
         sp.set_message("Fetching market data...");
         let thresholds = args.health.resolve(config);
-        let summary = fetch_token_summary_by_name(&args.venue, &analytics, &thresholds).await;
+        let summary = fetch_token_summary_by_name_with_http(
+            &args.venue,
+            &analytics,
+            &thresholds,
+            clients.http(),
+        )
+        .await;
         match summary {
             Ok(summary) => Some(summary),
             Err(e) => {
@@ -574,19 +580,34 @@ mod tests {
     async fn test_dex_venue_on_another_chain_is_an_error() {
         let analytics = make_test_analytics(true);
         let t = scope::market::HealthThresholds::default();
-        let err = fetch_token_summary_by_name("sol", &analytics, &t)
-            .await
-            .unwrap_err();
+        let err = fetch_token_summary_by_name_with_http(
+            "sol",
+            &analytics,
+            &t,
+            scope::http::test_transport(),
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("reads chain solana"), "{err}");
         assert!(
-            fetch_token_summary_by_name("ETH", &analytics, &t)
-                .await
-                .is_ok()
+            fetch_token_summary_by_name_with_http(
+                "ETH",
+                &analytics,
+                &t,
+                scope::http::test_transport()
+            )
+            .await
+            .is_ok()
         );
         // An unknown name is the one unknown-venue error (a warning here).
-        let err = fetch_token_summary_by_name("polygon", &analytics, &t)
-            .await
-            .unwrap_err();
+        let err = fetch_token_summary_by_name_with_http(
+            "polygon",
+            &analytics,
+            &t,
+            scope::http::test_transport(),
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("Unknown venue"), "{err}");
     }
 

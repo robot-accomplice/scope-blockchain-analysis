@@ -215,10 +215,11 @@ pub async fn run(
             }
 
             // Risk assessment (compliance engine)
-            let risk_assessment = scope::compliance::risk::RiskEngine::from_env()
-                .assess_address(&args.target, chain)
-                .await
-                .ok();
+            let risk_assessment =
+                scope::compliance::risk::RiskEngine::from_env_with_http(clients.http())
+                    .assess_address(&args.target, chain)
+                    .await
+                    .ok();
 
             if let Some(ref risk) = risk_assessment {
                 output.push_str(&risk_line(risk));
@@ -393,7 +394,7 @@ pub async fn run(
                 let thresholds = args.health.resolve(config);
                 if let (Some(desc), Ok(venue)) = (
                     registry.get(venue_id),
-                    MarketVenue::resolve(venue_id, &registry),
+                    MarketVenue::resolve_with_http(venue_id, &registry, clients.http()),
                 ) && let Ok(summary) = fetch_token_summary(&venue, &analytics, &thresholds).await
                 {
                     peg_status = Some(summary.peg_status());
@@ -999,6 +1000,9 @@ mod tests {
     struct MockFactory;
 
     impl ChainClientFactory for MockFactory {
+        fn http(&self) -> std::sync::Arc<dyn scope::http::HttpClient> {
+            scope::http::test_transport()
+        }
         fn create_chain_client(&self, _chain: &str) -> scope::error::Result<Box<dyn ChainClient>> {
             Ok(Box::new(MockChainClient))
         }
@@ -1074,6 +1078,9 @@ mod tests {
     struct MockContractFactory;
 
     impl ChainClientFactory for MockContractFactory {
+        fn http(&self) -> std::sync::Arc<dyn scope::http::HttpClient> {
+            scope::http::test_transport()
+        }
         fn create_chain_client(&self, _chain: &str) -> scope::error::Result<Box<dyn ChainClient>> {
             Ok(Box::new(MockContractClient))
         }
@@ -1275,6 +1282,9 @@ mod tests {
     struct MockTokenFactory;
 
     impl ChainClientFactory for MockTokenFactory {
+        fn http(&self) -> std::sync::Arc<dyn scope::http::HttpClient> {
+            scope::http::test_transport()
+        }
         fn create_chain_client(&self, _chain: &str) -> scope::error::Result<Box<dyn ChainClient>> {
             Ok(Box::new(MockTokenChainClient))
         }

@@ -28,7 +28,13 @@ pub mod shared;
 
 pub use ghola::GholaHttpClient;
 pub use native::NativeHttpClient;
-pub use shared::{Built, init, transport};
+pub use shared::{Built, build};
+
+/// A native transport, for tests that talk to a local mock server.
+#[cfg(any(test, feature = "test-support"))]
+pub fn test_transport() -> std::sync::Arc<dyn HttpClient> {
+    std::sync::Arc::new(NativeHttpClient::new().expect("failed to build the test transport"))
+}
 
 use async_trait::async_trait;
 use std::collections::HashMap;

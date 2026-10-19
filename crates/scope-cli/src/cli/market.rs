@@ -19,12 +19,14 @@ use crate::cli::resolve::{
 };
 use scope::display::terminal as t;
 use scope::error::{Result, ScopeError};
+use scope::http::HttpClient;
 use scope::market::assets::TokenAddress;
 use scope::market::series;
 use scope::market::{
     DexAnalyticsSource, ExchangeClient, HealthThresholds, MarketSummary, MarketVenue, OrderBook,
     Pair, VENUE_HELP, VenueRegistry,
 };
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Help for every market pair argument; the rule is `scope::market::Pair::parse`.
@@ -268,8 +270,8 @@ pub async fn run(
         MarketCommands::Summary(summary_args) => {
             run_summary(summary_args, config, factory, out).await
         }
-        MarketCommands::Ohlc(ohlc_args) => run_ohlc(ohlc_args, out).await,
-        MarketCommands::Trades(trades_args) => run_trades(trades_args, out).await,
+        MarketCommands::Ohlc(ohlc_args) => run_ohlc(ohlc_args, factory.http(), out).await,
+        MarketCommands::Trades(trades_args) => run_trades(trades_args, factory.http(), out).await,
     }
 }
 
@@ -375,7 +377,7 @@ async fn fetch_book_and_volume(
     factory: &dyn ChainClientFactory,
     out: &Output,
 ) -> Result<(OrderBook, Option<f64>)> {
-    let venue = MarketVenue::from_name(&args.venue)?;
+    let venue = MarketVenue::from_name_with_http(&args.venue, factory.http())?;
     if let Some(chain) = &args.chain {
         venue.require_chain(chain)?;
     }
@@ -424,7 +426,7 @@ async fn resolve_market_token(
 ) -> Result<Option<String>> {
     let json = matches!(args.format, SummaryFormat::Json);
     let base = Pair::parse(&args.pair).base;
-    match MarketVenue::from_name(&args.venue)? {
+    match MarketVenue::from_name_with_http(&args.venue, factory.http())? {
         MarketVenue::Dex(dex) => {
             let client = factory.create_dex_client();
             let flag = args.token_contract.clone();
@@ -462,7 +464,7 @@ pub(crate) async fn resolve_dex_token(
     let source = crate::cli::resolve::DexCandidates {
         dex,
         out,
-        fallback: false,
+        fallback: None,
     };
     let picker = picker_for(out, json);
     let mut aliases = scope::tokens::TokenAliases::load();
@@ -478,9 +480,10 @@ async fn check_venue_token(
     chain: Option<String>,
     token_flag: Option<String>,
     json: bool,
+    http: Arc<dyn HttpClient>,
     out: &Output,
 ) -> Result<()> {
-    let Ok(MarketVenue::Cex(client)) = MarketVenue::from_name(venue) else {
+    let Ok(MarketVenue::Cex(client)) = MarketVenue::from_name_with_http(venue, http) else {
         return Ok(());
     };
     let base = Pair::parse(pair).base;
@@ -491,8 +494,12 @@ async fn check_venue_token(
 /// The pair's tokens on the venue (network and contract), when the venue
 /// lists its assets. A failed lookup is noted and gives no lines: the
 /// summary itself does not depend on it.
-async fn token_addresses(args: &SummaryArgs, out: &Output) -> Vec<TokenAddress> {
-    let Ok(MarketVenue::Cex(client)) = MarketVenue::from_name(&args.venue) else {
+async fn token_addresses(
+    args: &SummaryArgs,
+    http: Arc<dyn HttpClient>,
+    out: &Output,
+) -> Vec<TokenAddress> {
+    let Ok(MarketVenue::Cex(client)) = MarketVenue::from_name_with_http(&args.venue, http) else {
         return Vec::new();
     };
     match client.fetch_token_addresses(&Pair::parse(&args.pair)).await {
@@ -582,7 +589,7 @@ async fn run_summary(
         args.token_contract = Some(contract);
     }
     // Once per command: the coin list does not change between runs.
-    let tokens = token_addresses(&args, out).await;
+    let tokens = token_addresses(&args, factory.http(), out).await;
 
     let Some(schedule) = schedule else {
         let (summary, report) =
@@ -629,7 +636,7 @@ async fn run_summary(
 // =============================================================================
 
 /// Execute the `scope market ohlc` command.
-async fn run_ohlc(args: OhlcArgs, out: &Output) -> Result<()> {
+async fn run_ohlc(args: OhlcArgs, http: Arc<dyn HttpClient>, out: &Output) -> Result<()> {
     let json = matches!(args.format, OhlcFormat::Json);
     check_venue_token(
         &args.venue,
@@ -637,10 +644,11 @@ async fn run_ohlc(args: OhlcArgs, out: &Output) -> Result<()> {
         None,
         args.token_contract.clone(),
         json,
+        http.clone(),
         out,
     )
     .await?;
-    let client = VenueRegistry::load()?.create_exchange_client(&args.venue)?;
+    let client = VenueRegistry::load()?.create_exchange_client_with_http(&args.venue, http)?;
     run_ohlc_with(&client, args, out).await
 }
 
@@ -735,7 +743,7 @@ async fn run_ohlc_with(client: &ExchangeClient, args: OhlcArgs, out: &Output) ->
 // =============================================================================
 
 /// Execute the `scope market trades` command.
-async fn run_trades(args: TradesArgs, out: &Output) -> Result<()> {
+async fn run_trades(args: TradesArgs, http: Arc<dyn HttpClient>, out: &Output) -> Result<()> {
     let json = matches!(args.format, OhlcFormat::Json);
     check_venue_token(
         &args.venue,
@@ -743,10 +751,11 @@ async fn run_trades(args: TradesArgs, out: &Output) -> Result<()> {
         None,
         args.token_contract.clone(),
         json,
+        http.clone(),
         out,
     )
     .await?;
-    let client = VenueRegistry::load()?.create_exchange_client(&args.venue)?;
+    let client = VenueRegistry::load()?.create_exchange_client_with_http(&args.venue, http)?;
     run_trades_with(&client, args, out).await
 }
 
@@ -1431,14 +1440,16 @@ capabilities:
         // Verify the registry loads and can create an exchange client for any built-in venue
         let registry = VenueRegistry::load().unwrap();
         assert!(registry.contains("binance"));
-        let client = registry.create_exchange_client("binance");
+        let client =
+            registry.create_exchange_client_with_http("binance", scope::http::test_transport());
         assert!(client.is_ok());
     }
 
     #[test]
     fn test_venue_registry_error_for_unknown() {
         let registry = VenueRegistry::load().unwrap();
-        let result = registry.create_exchange_client("kracken");
+        let result =
+            registry.create_exchange_client_with_http("kracken", scope::http::test_transport());
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("Unknown venue"));
@@ -1535,7 +1546,7 @@ capabilities:
             limit: 10,
             format: OhlcFormat::Text,
         };
-        let result = run_ohlc(args, &quiet()).await;
+        let result = run_ohlc(args, scope::http::test_transport(), &quiet()).await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -1554,7 +1565,7 @@ capabilities:
             limit: 10,
             format: OhlcFormat::Text,
         };
-        let result = run_trades(args, &quiet()).await;
+        let result = run_trades(args, scope::http::test_transport(), &quiet()).await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -1616,7 +1627,7 @@ capabilities:
         desc.base_url = server.url();
         desc.capabilities.assets =
             Some(serde_saphyr::from_str("path: /coins\nresponse: {}\n").unwrap());
-        ExchangeClient::from_descriptor(&desc)
+        ExchangeClient::from_descriptor_with_http(&desc, scope::http::test_transport())
     }
 
     async fn coins(server: &mut mockito::ServerGuard, body: &str) -> mockito::Mock {
