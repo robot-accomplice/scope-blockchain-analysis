@@ -8,6 +8,7 @@
 use super::clip::{self, SaveError};
 use super::exec::{self, Invocation, Plan, Route};
 use super::fit;
+use super::grid::{self, GridAction, GridMsg, GridState};
 use super::journal::{Event, Journal};
 use super::repeat_view::{self, Ended, RepeatView};
 use super::vocab::Vocab;
@@ -211,12 +212,18 @@ pub enum Action {
     /// Put this text on the clipboard (Ctrl-Y). The loop writes the OSC 52
     /// sequence through the host and notes the result.
     Copy(String),
+    /// Stop the running watchlist (Esc in the grid).
+    StopWatch,
 }
 
 /// True when Alt is held (and Ctrl is not).
 fn alt_key(key: &KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::ALT) && !key.modifiers.contains(KeyModifiers::CONTROL)
 }
+
+/// Ctrl-G or `watch` with no grid.
+const NO_GRID_NOTE: &str =
+    "No watchlist runs. Start one with `watch open <name>` (`watch list` lists them).";
 
 /// Marks the selected palette row.
 const PALETTE_MARKER: &str = "> ";
@@ -329,6 +336,17 @@ pub struct TuiState {
     /// The pane width the last search draw used. A resize changes the
     /// rows, so the view moves to the match again.
     search_width: Cell<usize>,
+    /// The watchlist grid, while a watchlist runs or until its finished
+    /// grid is closed (#47).
+    pub grid: Option<GridState>,
+    /// The grid is on screen (in place of the output pane).
+    pub grid_shown: bool,
+    /// The run's messages to the grid.
+    grid_rx: Option<std::sync::mpsc::Receiver<GridMsg>>,
+    /// What the watchlist run wrote (notes, errors), for the scrollback.
+    grid_out: Option<(Output, Captured)>,
+    /// When the watchlist run started.
+    grid_started: Option<Instant>,
 }
 
 impl TuiState {
@@ -363,6 +381,11 @@ impl TuiState {
             asker: crate::cli::output::Asker::default(),
             reveal: Cell::new(false),
             search_width: Cell::new(0),
+            grid: None,
+            grid_shown: false,
+            grid_rx: None,
+            grid_out: None,
+            grid_started: None,
         }
     }
 
@@ -406,6 +429,18 @@ impl TuiState {
                 _ => {}
             }
             return Action::None;
+        }
+        // Ctrl-G shows or hides the grid while there is one (#47).
+        if ctrl && key.code == KeyCode::Char('g') {
+            if self.grid.is_some() {
+                self.grid_shown = !self.grid_shown;
+            } else {
+                self.push_note(NO_GRID_NOTE);
+            }
+            return Action::None;
+        }
+        if self.grid_shown && !self.too_small.get() {
+            return self.grid_key(key);
         }
         // A finished repeating view stays until the next key. That key
         // leaves it and then does its normal job, so typing goes on.
@@ -1190,6 +1225,182 @@ impl TuiState {
         s
     }
 
+    // ---------------------------------------------------------------- grid
+
+    /// A key while the grid is on screen.
+    fn grid_key(&mut self, key: KeyEvent) -> Action {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if ctrl && key.code == KeyCode::Char('d') {
+            return Action::Exit;
+        }
+        let Some(g) = self.grid.as_mut() else {
+            self.grid_shown = false;
+            return Action::None;
+        };
+        // Ctrl-C stops the run, as Esc does.
+        let action = if ctrl && key.code == KeyCode::Char('c') {
+            if g.is_running() {
+                GridAction::Stop
+            } else {
+                GridAction::Close
+            }
+        } else {
+            g.key(key)
+        };
+        match action {
+            GridAction::None => Action::None,
+            GridAction::Shell => {
+                self.grid_shown = false;
+                Action::None
+            }
+            GridAction::Stop => Action::StopWatch,
+            GridAction::Close => {
+                self.close_grid();
+                Action::None
+            }
+            GridAction::Run(line) => {
+                if self.running.is_some() {
+                    self.busy_hint = true;
+                    return Action::None;
+                }
+                self.grid_shown = false;
+                Action::Submit(line)
+            }
+        }
+    }
+
+    /// Whether a watchlist runs now.
+    pub fn watch_running(&self) -> bool {
+        self.grid.as_ref().is_some_and(GridState::is_running)
+    }
+
+    /// Starts the grid for `list`. Returns the output the run writes to
+    /// (it asks its questions in the TUI) and the sender for its messages.
+    pub fn start_watch(
+        &mut self,
+        list: scope::watch::Watchlist,
+    ) -> (Output, std::sync::mpsc::Sender<GridMsg>) {
+        let (out, captured) = Output::capture_merged();
+        let out = out.with_asker(self.asker.clone());
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.push_note(&format!(
+            "Watchlist {} started: {} target(s), every {}. Ctrl-G switches between the grid and the shell.",
+            list.name,
+            list.targets.len(),
+            scope::watch::time::format_duration(list.interval.as_secs())
+        ));
+        self.grid = Some(GridState::new(list, out.progress_hook()));
+        self.grid_shown = true;
+        self.grid_rx = Some(rx);
+        self.grid_out = Some((out.clone(), captured));
+        self.grid_started = Some(Instant::now());
+        (out, tx)
+    }
+
+    /// Moves the run's messages into the grid.
+    pub fn poll_watch(&mut self) {
+        let (Some(rx), Some(g)) = (&self.grid_rx, self.grid.as_mut()) else {
+            return;
+        };
+        while let Ok(msg) = rx.try_recv() {
+            g.apply(msg);
+        }
+    }
+
+    /// Takes the bell the grid asks for (a breach started).
+    pub fn take_bell(&mut self) -> bool {
+        self.grid
+            .as_mut()
+            .is_some_and(|g| std::mem::take(&mut g.bell))
+    }
+
+    fn grid_secs(&self) -> f64 {
+        self.grid_started.map_or(0.0, |t| t.elapsed().as_secs_f64())
+    }
+
+    /// The run ended by itself: done, or failed with `res`'s error.
+    pub fn watch_finished(&mut self, res: scope::error::Result<()>) {
+        self.poll_watch();
+        let secs = self.grid_secs();
+        let (footer, style) = match &res {
+            Ok(()) => (format!("✓ Done in {secs:.1}s."), OK),
+            Err(e) => (
+                format!("✗ Failed in {secs:.1}s: {e}"),
+                ERR.add_modifier(Modifier::BOLD),
+            ),
+        };
+        if let Some((out, _)) = &self.grid_out
+            && let Err(e) = &res
+        {
+            let _ = crate::cli::errors::display_error(e, out);
+        }
+        if let Some(g) = self.grid.as_mut() {
+            g.end(footer, style);
+        }
+        self.grid_rx = None;
+        self.drop_watch_question();
+    }
+
+    /// The user stopped the run: the grid keeps its last tick, and the
+    /// report is written from it when the watchlist has a report path.
+    pub fn stop_watch(&mut self) {
+        self.poll_watch();
+        let secs = self.grid_secs();
+        let mut footer = format!("Stopped after {secs:.1}s.");
+        if let Some(g) = &self.grid {
+            let list = g.ready.as_ref().map_or(&g.list, |r| &r.list);
+            if let (Some(path), Some(last)) = (&list.outputs.report, &g.last) {
+                match crate::cli::watch::run::write_report(path, list, last) {
+                    Ok(()) => footer.push_str(&format!(" Report saved to {}.", path.display())),
+                    Err(e) => footer.push_str(&format!(" The report was not written: {e}")),
+                }
+            }
+        }
+        if let Some(g) = self.grid.as_mut() {
+            g.end(footer, WARN);
+        }
+        self.grid_rx = None;
+        self.drop_watch_question();
+    }
+
+    /// A question the stopped run asked has nobody to answer it.
+    fn drop_watch_question(&mut self) {
+        if self.running.is_none() {
+            if matches!(self.overlay, Some(Overlay::Choice(_))) {
+                self.overlay = None;
+            }
+            self.asker.lock().unwrap_or_else(|e| e.into_inner()).take();
+        }
+    }
+
+    /// Closes a finished grid: the scrollback gets the last snapshot, what
+    /// the run wrote, and a summary.
+    pub fn close_grid(&mut self) {
+        let Some(g) = self.grid.take() else {
+            return;
+        };
+        self.grid_shown = false;
+        if let Some(last) = &g.last {
+            self.push_ansi(&grid::snapshot_text(&last.snapshot));
+        }
+        if let Some((_, captured)) = self.grid_out.take() {
+            self.push_ansi(&captured.out());
+        }
+        self.push_note(&grid::summary(&g));
+        if let Some((footer, style)) = &g.ended {
+            self.push_styled_note(footer, *style);
+        }
+    }
+
+    /// Shows the grid, or says there is none.
+    pub fn show_grid(&mut self) {
+        if self.grid.is_some() {
+            self.grid_shown = true;
+        } else {
+            self.push_note(NO_GRID_NOTE);
+        }
+    }
+
     // ------------------------------------------------------------ commands
 
     /// Plans a submitted line. Session commands and errors finish here; a
@@ -1632,7 +1843,12 @@ impl TuiState {
         self.pane_width.set(inner.width);
         // The matches are found once per draw; the status bar uses them too.
         let view = self.search_view(&live_out);
-        if let Some(repeating) = self.active_view() {
+        if let (true, Some(g)) = (self.grid_shown, &self.grid) {
+            // The watchlist grid takes the pane (#47).
+            grid::draw(f, pane, g);
+            self.last_max_top.set(0);
+            self.last_pane_height.set(inner.height as usize);
+        } else if let Some(repeating) = self.active_view() {
             // A repeating run draws its view, not one report per run.
             let status = if self.running.is_some() {
                 liveness
@@ -1959,11 +2175,16 @@ impl TuiState {
             }
         }
         // Highest priority first: the fit drops from the end.
-        let context = vec![
+        let mut context = vec![
             labeled("chain", ctx.chain.clone()),
             labeled("format", format!("{:?}", ctx.format)),
             limit,
         ];
+        // A watchlist that runs behind the shell says so first.
+        if let (false, Some(g)) = (self.grid_shown, &self.grid) {
+            let style = if g.breaches() > 0 { ERR } else { ACCENT };
+            context.insert(0, vec![Span::styled(g.status_part(), style)]);
+        }
         // The view is clamped to the content when it draws; say so here too.
         let scrolled = self.scroll.get().min(self.last_max_top.get());
         let scrolled = (scrolled > 0).then(|| {

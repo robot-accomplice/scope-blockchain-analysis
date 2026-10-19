@@ -34,6 +34,7 @@ pub mod complete;
 pub mod crash;
 pub mod exec;
 pub mod fit;
+pub mod grid;
 pub mod hint;
 pub mod journal;
 pub mod palette;
@@ -42,7 +43,7 @@ pub mod vocab;
 
 use app::{Action, Ending, TuiState, run_invocation};
 use crossterm::event::{Event, EventStream, KeyEventKind};
-use exec::{Plan, Route};
+use exec::{Plan, Route, WatchCommand};
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use journal::Journal;
@@ -452,6 +453,9 @@ async fn event_loop<H: Host>(
     let idle_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     let mut idle_diag = Some(scope::diag::redirect(idle_buf.clone()));
     let mut pending: Option<PaneFuture<'_>> = None;
+    // A running watchlist (#47). It runs next to the pane command, so the
+    // shell stays usable while the grid ticks.
+    let mut watch_pending: Option<PaneFuture<'_>> = None;
     let mut tick = tokio::time::interval(LIVE_REDRAW);
     // After a stop (Ctrl-Z, then `fg`), fire once, not once per missed
     // tick: the tick arm comes before the keys in the biased select.
@@ -462,6 +466,11 @@ async fn event_loop<H: Host>(
 
     loop {
         drain_into(&idle_buf, state);
+        state.poll_watch();
+        if state.take_bell() {
+            // A new breach: one bell. A failed write only loses the sound.
+            let _ = host.write_raw("\x07");
+        }
         // A question from the running command opens as a list. The live
         // tick wakes the loop while a command runs, so it shows within one.
         state.poll_ask();
@@ -489,7 +498,11 @@ async fn event_loop<H: Host>(
                 pending = None;
                 state.finish(Ending::Finished(res));
             }
-            _ = tick.tick(), if state.running.is_some() => {}
+            res = async { watch_pending.as_mut().expect("guarded by precondition").await }, if watch_pending.is_some() => {
+                watch_pending = None;
+                state.watch_finished(res);
+            }
+            _ = tick.tick(), if state.running.is_some() || state.watch_running() => {}
             Some(sig) = signals.next() => {
                 if let Some(code) = sig.exit_code() {
                     // Drop the command future first: that cancels it.
@@ -531,6 +544,11 @@ async fn event_loop<H: Host>(
                         let result = host.write_raw(&clip::osc52(&text));
                         state.copied(text.lines().count(), result);
                     }
+                    Action::StopWatch => {
+                        // Dropping the future stops the run at its next await.
+                        watch_pending = None;
+                        state.stop_watch();
+                    }
                     Action::Cancel => {
                         // Dropping the future cancels the handler at its
                         // next await point.
@@ -540,6 +558,30 @@ async fn event_loop<H: Host>(
                     Action::Submit(line) => match state.submit(&line, &settings.config) {
                         Plan::Done => {}
                         Plan::Exit => return Ok(LEFT),
+                        Plan::Watch(cmd) => match cmd {
+                            WatchCommand::Open(list) => {
+                                if state.watch_running() {
+                                    state.push_note(WATCH_BUSY_NOTE);
+                                } else {
+                                    // A finished grid makes room for the new one.
+                                    state.close_grid();
+                                    let (out, tx) = state.start_watch(*list.clone());
+                                    let s = settings.clone();
+                                    watch_pending = Some(Box::pin(async move {
+                                        run_watch(*list, &s, &out, tx).await
+                                    }));
+                                }
+                            }
+                            WatchCommand::Stop => {
+                                if state.watch_running() {
+                                    watch_pending = None;
+                                    state.stop_watch();
+                                } else {
+                                    state.push_note("No watchlist runs.");
+                                }
+                            }
+                            WatchCommand::Show => state.show_grid(),
+                        },
                         Plan::Run(inv) => match inv.route {
                             Route::Pane => {
                                 let out = state.start(&line, &inv);
@@ -589,6 +631,36 @@ async fn event_loop<H: Host>(
             }
         }
     }
+}
+
+/// `watch open` while a watchlist runs.
+const WATCH_BUSY_NOTE: &str =
+    "A watchlist runs already. Stop it first (`watch stop`, or Esc in the grid).";
+
+/// Runs a watchlist for the grid: resolves its targets once, then ticks on
+/// its schedule. Each step goes to the grid through `tx`; a closed grid
+/// only drops the messages.
+async fn run_watch(
+    list: scope::watch::Watchlist,
+    settings: &Settings,
+    out: &Output,
+    tx: std::sync::mpsc::Sender<grid::GridMsg>,
+) -> Result<()> {
+    let src = crate::cli::watch::Sources {
+        config: &settings.config,
+        clients: &*settings.clients,
+    };
+    let ready = crate::cli::watch::prepare(&list, src, out).await?;
+    let _ = tx.send(grid::GridMsg::Ready(ready.clone()));
+    crate::cli::watch::run(&ready, src, out, |run, tick, events| {
+        let _ = tx.send(grid::GridMsg::Tick {
+            run,
+            tick: Box::new(tick.clone()),
+            events: events.to_vec(),
+        });
+    })
+    .await
+    .map(|_| ())
 }
 
 /// Gives the terminal back and stops the process (Ctrl-Z, SIGTSTP). When
@@ -2062,6 +2134,95 @@ mod tests {
         host.raw_fails = true;
         let (_, state, _, _) = drive_host(Journal::default(), host, captured).await;
         assert!(state.scrollback_text().contains("Could not copy: tty gone"));
+    }
+
+    #[tokio::test]
+    async fn test_watch_open_runs_the_grid_next_to_the_shell() {
+        let _lock = DIAG_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tokens.yaml");
+        std::fs::write(
+            &path,
+            "name: tokens\ninterval: 1h\ntargets:\n  - kind: token\n    id: \"0x1234567890123456789012345678901234567890\"\n    chain: ethereum\n    rules: [\"price_usd > 0\"]\n",
+        )
+        .unwrap();
+        let line = format!(
+            "watch open {}",
+            path.display().to_string().replace('\\', "/")
+        );
+        let (res, mut state, host, _) = drive(script(&[&line])).await;
+        res.unwrap();
+        state.poll_watch();
+        let g = state.grid.as_ref().expect("the grid opened");
+        assert!(state.grid_shown);
+        assert_eq!(g.list.name, "tokens");
+        assert!(g.ready.is_some(), "the targets were resolved");
+        let last = g.last.as_ref().expect("the first tick came");
+        assert_eq!(
+            last.snapshot.targets[0].status,
+            scope::watch::TargetStatus::Passed
+        );
+        assert!(g.is_running(), "a 1h run goes on");
+        assert!(
+            screen_text(&host).contains("watchlist tokens"),
+            "{}",
+            screen_text(&host)
+        );
+        assert!(state.scrollback_text().contains("Watchlist tokens started"));
+    }
+
+    #[tokio::test]
+    async fn test_esc_in_the_grid_stops_the_run_and_writes_the_report() {
+        let _lock = DIAG_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("w.yaml");
+        let report = dir.path().join("w.md");
+        std::fs::write(
+            &path,
+            format!(
+                "interval: 1h\noutputs:\n  report: '{}'\ntargets:\n  - kind: token\n    id: \"0x1234567890123456789012345678901234567890\"\n    rules: [\"price_usd > 0\"]\n",
+                report.display()
+            ),
+        )
+        .unwrap();
+        let line = format!(
+            "watch open {}",
+            path.display().to_string().replace('\\', "/")
+        );
+        // A second, idle Enter lets the first tick land before Esc.
+        let (res, mut state, _, _) = drive(script(&[&line, "", "<esc>"])).await;
+        res.unwrap();
+        let g = state.grid.as_ref().unwrap();
+        assert!(!g.is_running());
+        let (footer, _) = g.ended.clone().unwrap();
+        assert!(footer.starts_with("Stopped after"), "{footer}");
+        assert!(g.last.is_some(), "the first tick landed before Esc");
+        assert!(footer.contains("Report saved to"), "{footer}");
+        assert!(
+            std::fs::read_to_string(&report)
+                .unwrap()
+                .contains("# Watchlist Report")
+        );
+        // Esc again closes the finished grid into the scrollback.
+        state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(state.grid.is_none() && !state.grid_shown);
+        assert!(
+            state.scrollback_text().contains("watchlist w:"),
+            "{}",
+            state.scrollback_text()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ctrl_g_without_a_grid_says_how_to_start_one() {
+        let _lock = DIAG_LOCK.lock().await;
+        let (res, state, _, _) = drive(vec![Ok(Event::Key(KeyEvent::new(
+            KeyCode::Char('g'),
+            KeyModifiers::CONTROL,
+        )))])
+        .await;
+        res.unwrap();
+        assert!(state.scrollback_text().contains("No watchlist runs"));
     }
 
     #[tokio::test]
