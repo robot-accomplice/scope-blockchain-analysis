@@ -94,7 +94,7 @@ async fn resolve_token(t: &mut Target, src: Sources<'_>, out: &Output) -> Result
     let source = DexCandidates {
         dex: dex.as_ref(),
         out,
-        fallback: true,
+        fallback: Some(src.clients.http()),
     };
     let picker = picker_for(out, false);
     let mut aliases = TokenAliases::load();

@@ -24,8 +24,9 @@
 //! - [`journal`] keeps the history and the event log.
 //!
 //! A command that reads stdin or draws its own screen (the setup wizard,
-//! the live monitor) runs in suspend mode: the TUI gives the terminal back while it runs. What it writes
-//! through its output also joins the scrollback when the TUI returns.
+//! the live monitor) runs in suspend mode: the TUI gives the terminal back
+//! while it runs. What it writes through its output also joins the
+//! scrollback when the TUI returns.
 
 pub mod app;
 pub mod clip;

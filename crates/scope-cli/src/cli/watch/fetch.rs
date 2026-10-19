@@ -132,7 +132,8 @@ async fn read_market(
     out: &Output,
 ) -> Result<MarketSummary, String> {
     let venue_name = t.venue.as_deref().ok_or("no venue")?;
-    let venue = MarketVenue::from_name(venue_name).map_err(|e| e.to_string())?;
+    let venue = MarketVenue::from_name_with_http(venue_name, src.clients.http())
+        .map_err(|e| e.to_string())?;
     let dex = CrawlDexSource {
         factory: src.clients,
         out,
@@ -215,7 +216,9 @@ async fn read_address(t: &Target, src: Sources<'_>, out: &Output) -> SourceResul
         ));
     }
     if needs(MetricId::RiskScore) {
-        let engine = RiskEngine::with_optional_client(BlockchainDataClient::from_env_opt());
+        let engine = RiskEngine::with_optional_client(
+            BlockchainDataClient::from_env_opt_with_http(src.clients.http()),
+        );
         let risk = engine
             .assess_address(&t.id, &chain)
             .await
