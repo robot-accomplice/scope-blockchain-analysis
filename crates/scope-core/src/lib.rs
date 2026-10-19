@@ -261,13 +261,14 @@ pub mod http;
 /// configurable health checks for stablecoin markets.
 pub mod market;
 
-/// The metric catalog: market, token and address key values.
+// The metric catalog: market, token and address key values. The module's
+// own docs link to its items, so it has no outer doc here.
 pub mod metrics;
 
 /// The user's directories, resolved in one place (sandboxed in tests).
 pub mod paths;
 
-/// Watchlists: targets, rules and their evaluation (#47).
+// Watchlists: targets, rules and their evaluation (#47). Docs as above.
 pub mod watch;
 
 /// Library version string.

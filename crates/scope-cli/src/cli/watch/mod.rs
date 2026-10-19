@@ -2,7 +2,7 @@
 //!
 //! The I/O side of [`scope::watch`]: [`fetch`] reads each target's metrics
 //! through the compute functions the CLI commands use (never a printing
-//! handler), and [`run`] repeats the ticks on the watchlist's schedule
+//! handler), and [`run`](mod@run) repeats the ticks on the watchlist's schedule
 //! with the one repeat runner, writes the CSV trail and the report.
 //!
 //! The TUI's monitor wizard and grid drive these functions.

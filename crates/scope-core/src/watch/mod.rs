@@ -6,8 +6,9 @@
 //! #47 and the output of the TUI's monitor wizard.
 //!
 //! This module is pure: types, rule evaluation ([`rule`]), the "market
-//! health" preset ([`preset`]), snapshot comparison ([`diff`]) and the file
-//! format ([`file`]). The fetchers that read the metrics live in scope-cli.
+//! health" preset ([`preset`]), snapshot comparison ([`diff`](mod@diff))
+//! and the file format ([`file`](mod@file)). The fetchers that read the
+//! metrics live in scope-cli.
 
 pub mod diff;
 pub mod file;

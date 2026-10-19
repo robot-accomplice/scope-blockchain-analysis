@@ -38,6 +38,7 @@ pub mod health;
 pub mod pair;
 /// The metric catalog moved to [`crate::metrics`]; this path stays for one
 /// release (#47, Q6).
+#[doc(no_inline)]
 pub use crate::metrics as series;
 pub mod traits;
 pub mod types;
