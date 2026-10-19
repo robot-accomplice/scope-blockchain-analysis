@@ -8,10 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Monitor wizard and watchlists (#47).** `scope monitor <args>` opens the TUI with the monitor wizard, filled from the arguments: targets (pairs, tokens, addresses), checks (the market health preset, with the same results as `market summary`, and rules such as `holders >= 1000`), interval and duration (`--every`, `--duration`, default 60s and 1h), and outputs (`--csv`, one row per check per run; `--report`). Its run shows a grid of each target's pass/fail state, with a detail pane, charts, and keys that run the evidence commands. Ctrl-G switches between the grid and the shell. Watchlists are saved to `~/.scope-bca/watchlists/` (`--save`, Ctrl-S) and run again with `watch open <name>` in the TUI. The health threshold flags of `market summary` work on `monitor`, and `--yes` starts without the wizard.
+- `scope::metrics` (scope-bca-core): one metric catalog, with token and address metrics. `scope::market::series` stays as a re-export for one release.
+- In the TUI, `crawl <symbol>` asks which token in the pane, not on the plain terminal.
 - Scope offers to install the Ghola sidecar when `ghola.enabled` is set and none is found. It asks on a terminal (once; a "no" is remembered), in the `setup` wizard, and suggests it in `setup --status`. It downloads the latest `robot-accomplice/ghola` release over HTTPS, checks its SHA-256 against `checksums.txt` before extracting, and installs `ghola` to `~/.scope-bca/bin` (PATH is not changed). With no archive for the system it offers `go install`. `--yes`, JSON/CSV/Markdown output, pipes, the web API and the TUI never install. Scope now starts an installed `ghola --serve` when no sidecar answers, and at exit asks whether to stop it (no answer within 15 s stops it).
 
 ### Fixed
 - The Ghola install hint now names `go install github.com/robot-accomplice/ghola/cmd/ghola@latest`.
+
+### Deprecated
+- The old monitor dashboard: `scope monitor --dashboard` opens it for one more release. `--layout`, `--scale` and `--color-scheme` work only with it; `--export` is now `--csv`. The price bounds of `monitor.alerts` become watchlist rules; the whale and volume-spike alerts have no metric yet (#122).
 
 ### Changed (breaking)
 - scope reads and writes YAML with serde-saphyr (safe Rust) in place of the deprecated serde_yaml, so `unsafe-libyaml` (unmaintained, RUSTSEC-2024-0449) is gone. Files that serde_yaml wrote read the same. In scope-bca-core, `ConfigError::Parse` now holds a `serde_saphyr::Error`, and YAML error messages read differently. (#118)

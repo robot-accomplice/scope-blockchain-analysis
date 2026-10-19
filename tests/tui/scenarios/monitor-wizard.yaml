@@ -1,0 +1,32 @@
+name: monitor opens the wizard in the TUI, and its run shows the market health checks in the grid (#47)
+tiers: [offline]
+terminal: { cols: 120, rows: 36 }
+masks: ['scope v\d+\.\d+\.\d+\S*']
+steps:
+  # The trigger case of #47, on a recorded venue: the arguments fill the
+  # wizard; nothing runs before Start.
+  - type: "monitor USDC --venue binance --every 2s --duration 6s"
+  - key: Enter
+  - wait_for: { text: "monitor wizard", timeout: 10s }
+  - expect_screen:
+      contains: ["\\[x\\] market health", "pair\\s+USDC @binance|USDC@binance"]
+  # Ctrl-R starts the run; the grid shows one row with the summary's checks.
+  - key: Ctrl-R
+  - wait_for: { text: "watchlist monitor-usdc", timeout: 10s }
+  - wait_for: { text: "run 2 of", timeout: 20s }
+  - expect_screen:
+      contains: ["USDC@binance", "Esc stop the run"]
+      not_contains: ["no fixture"]
+  # The detail lists the checks; Esc goes back to the rows.
+  - key: Enter
+  - wait_for: { text: "b book", timeout: 5s }
+  - key: Esc
+  # Esc stops the run; the grid stays with its footer.
+  - key: Esc
+  - wait_for: { text: "Stopped after", timeout: 10s }
+  # Esc again closes the grid: the last snapshot and the summary go to the
+  # scrollback.
+  - key: Esc
+  - wait_for: { text: "watchlist monitor-usdc: \\d+ run\\(s\\)", timeout: 5s }
+  - key: Ctrl-D
+  - expect_exit: 0

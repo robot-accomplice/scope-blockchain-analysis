@@ -87,7 +87,12 @@ fn with_default(desc: &str, default: impl std::fmt::Display) -> String {
 impl HealthArgs {
     /// Resolves thresholds: these flags over config `market.health`.
     pub fn resolve(&self, config: &Config) -> HealthThresholds {
-        config.market.health.with_overrides(&HealthOverrides {
+        config.market.health.with_overrides(&self.overrides())
+    }
+
+    /// The flags as overrides; an unset flag is `None`.
+    pub fn overrides(&self) -> HealthOverrides {
+        HealthOverrides {
             peg_target: self.peg_target,
             peg_range: self.peg_range,
             min_levels: self.min_levels,
@@ -101,7 +106,7 @@ impl HealthArgs {
             depth_window_pct: self.depth_window_pct,
             min_depth_volume_pct: self.min_depth_volume_pct,
             max_depth_volume_pct: self.max_depth_volume_pct,
-        })
+        }
     }
 }
 

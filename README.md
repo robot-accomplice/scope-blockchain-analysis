@@ -28,7 +28,7 @@ A command-line tool for blockchain data analysis, portfolio tracking, transactio
 - **Address Analysis**: Query balances (with USD valuation), transaction history, and token holdings for blockchain addresses
 - **Transaction Analysis**: Look up and decode blockchain transactions across all supported chains
 - **Token Crawling**: Crawl DEX data for any token -- price, volume, liquidity, holder analysis, and risk scoring with markdown report generation
-- **Live Monitoring**: Real-time TUI dashboard with five layout presets (Dashboard, Chart, Feed, Compact, Exchange), responsive terminal sizing, config-driven widget visibility, price/volume/candlestick charts, price alerts, whale detection, CSV export, and auto-pause on input
+- **Live Monitoring**: The monitor wizard in the TUI builds a watchlist (tokens, pairs, addresses; market health checks and metric rules; interval, duration, CSV and report). Its grid shows each target's pass/fail state live, with the same health results as `market summary`, a detail pane with charts, and keys that open the evidence. Watchlists are saved and run again with `watch open <name>`.
 - **Exchange Venues**: Data-driven CEX integration via YAML descriptors, with 11 built-in venues (Binance, Biconomy, Bitget, Bybit, Coinbase, Crypto.com, Gate.io, HTX, Kraken, MEXC, OKX) with order book, ticker, trades, and OHLC support; add custom venues by dropping a YAML file in `~/.scope-bca/venues/`
 - **Portfolio Management**: Track multiple addresses across chains with labels, tags, and aggregated balance views; `@label` shortcuts work in both CLI and web UI for instant address recall
 - **Compliance & Risk Assessment**: Risk scoring, transaction pattern detection, taint analysis, and compliance reporting
@@ -143,11 +143,10 @@ scope compliance analyze 0xabc... --patterns structuring,layering
 # Token crawling with report generation
 scope crawl 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --chain ethereum
 
-# Live monitor -- launch directly from the command line
-scope monitor USDC                                          # defaults to ethereum
-scope mon PEPE --chain ethereum --layout chart-focus        # short alias with options
-scope monitor USDC --layout exchange                        # exchange-style: order book + chart + trades
-scope monitor USDC --venue binance                           # real exchange OHLC, order book and trades
+# Live monitor -- the monitor wizard in the TUI
+scope monitor USDN --venue weex --every 30s --duration 1h   # market health checks, every 30s for 1h
+scope monitor USDC --venue binance --report usdc.md --yes   # start at once, write a report at the end
+scope mon PEPE --chain ethereum                             # price and volume of a DEX token
 
 # Exchange venues
 scope venues list                                           # show all available venues
@@ -237,8 +236,8 @@ Not sure which command to use? Here's a quick decision tree:
 | Auto-detect input and run everything | `scope insights <target>` |
 | Get token DEX data (price, volume, holders) | `scope crawl <token>` |
 | Token DEX + order book health (stablecoins) | `scope token-health <token> --with-market` |
-| Live real-time dashboard for a token | `scope monitor <token>` |
-| Exchange-style monitor (order book + trades) | `scope monitor <token> --layout exchange` |
+| Watch a market's health live (monitor wizard) | `scope monitor <token> --venue <venue>` |
+| Run a saved watchlist again (in the TUI) | `watch open <name>` |
 | Browse trending/boosted tokens | `scope discover` |
 | Check market peg/depth for a stablecoin | `scope market summary <symbol>` |
 | Fetch OHLC/candlestick data from a venue | `scope market ohlc <symbol> --venue <venue> --interval 1h` |
@@ -796,26 +795,67 @@ The row under the input shows the usage of the command you type and the next arg
 
 **Repeating view.** A command with `--every` (for example `market summary USDC --venue binance --every 30s --duration 1h`) shows one view that updates in place: the latest report beside its trends (a pass/fail strip with the last failure, and a chart per key value with its threshold line). Below 80 columns the trends sit under the report. `--duration forever` (or `inf`) runs until you press `Esc`; without `--duration`, a run lasts 1 hour. `Esc` stops the run and the view stays; the next key leaves it with one copy of the final report and a summary such as `42 runs · 1 failed (run 16)`.
 
-**Commands that need the terminal.** `setup`, `crawl` with a name or symbol (it asks you to pick a token), and `monitor` run on the plain terminal. The TUI steps aside, runs the command, and comes back by itself when it ends; `Ctrl-C` cancels it. The scrollback shows its output and how long it took. After `setup`, the TUI reads the config again, so a new key works at once. `interactive`, `web` and `completions` do not run in the TUI.
+**Commands that need the terminal.** `setup` (except `--status`) and `monitor --dashboard` run on the plain terminal. The TUI steps aside, runs the command, and comes back by itself when it ends; `Ctrl-C` cancels it. The scrollback shows its output and how long it took. After `setup`, the TUI reads the config again, so a new key works at once. `interactive`, `web` and `completions` do not run in the TUI.
 
 **Files.** The TUI keeps its history in `history.txt` and a log of every submitted line in `tui-events.jsonl` (input, parsed arguments, outcome, error, duration), both in the scope data directory.
 
-### Live Monitor
+### Live Monitor (monitor wizard and watchlists)
 
-The monitor launches a real-time TUI dashboard. You can start it two ways:
+`scope monitor` opens the TUI with the **monitor wizard**, filled in from its arguments. `monitor …` in the TUI does the same.
 
 ```bash
-# Direct from the command line
-scope monitor USDC
-scope mon PEPE --chain ethereum --layout chart-focus --refresh 3
-scope monitor USDC --layout exchange    # Exchange-style: order book + chart + trades
-
-# Or from the TUI
-scope tui
-scope:auto> monitor USDC
+scope monitor USDN --venue weex --every 30s --duration 1h
+scope monitor USDC --venue binance --pair USDC_USDT --max-spread-pct 0.5 --csv usdc.csv --report usdc.md
+scope monitor PEPE --chain ethereum          # no venue: price and volume of the token
+scope monitor USDC --venue binance --save stables --yes   # save it, and start without the wizard
 ```
 
-**Direct-command flags:** `--chain` / `-c`, `--layout` / `-l`, `--refresh` / `-r`, `--scale` / `-s`, `--color-scheme`, `--export` / `-e`, `--venue` / `-v`.
+The wizard has four steps (Tab moves between them; Ctrl-R starts, Ctrl-S saves, Esc leaves):
+
+1. **Targets.** `a` adds one: `pair USDC binance`, `token PEPE solana`, or `address 0x… ethereum`. `d` deletes the selected one.
+2. **Metrics.** For each target: the **market health** preset (the checks of `market summary`, with the same thresholds: flag, then config `market.health`, then the default), and the metrics of its kind, each a rule `metric op value`. Space turns one on, `o` changes the operator, Enter edits the value. Market metrics: `mid_price`, `spread_pct`, `bid_depth`, `ask_depth`, the top-3 and top-10 depths, `peg_deviation_pct`. Token metrics: `price_usd`, `price_change_24h_pct`, `volume_24h`, `liquidity_usd`, `holders`. Address metrics: `native_balance`, `risk_score`.
+3. **Timing.** The interval and the duration (default 60s and 1h, as `market summary --every`; `forever` runs until you stop it), with the number of fetches they cost.
+4. **Outputs.** The name, the CSV path (one row per check per run: time, target, metric, value, operator, threshold, status, source, error) and the report path (written when the run ends or you stop it).
+
+**The grid.** The run shows one row per target, breached rows first, with one mark per check (`✓` pass, `!` warn, `✗` fail, `-` n/a, `?` the value could not be read). A breach that starts rings the bell once and shows a banner. Enter opens the detail: each check's value and a chart of its last values. In the detail, `b`, `t`, `h`, `r` and `x` run `market summary`, `market trades`, `crawl`, `compliance risk` or `address` for the target in the shell. **Ctrl-G** switches between the grid and the shell, so other commands run while the grid updates. Esc stops the run; Esc again closes the grid and leaves the last results and a summary in the scrollback.
+
+**Watchlists.** Ctrl-S in the wizard (or `--save <name>`) saves the watchlist to `~/.scope-bca/watchlists/<name>.yaml`. In the TUI, `watch list` lists them, `watch open <name>` (or a `.yaml` path) runs one, and `watch stop` stops the run. A file that is not valid lists every error with its line:
+
+```yaml
+name: stablecoins
+interval: 30s
+duration: 1h              # or forever
+outputs:
+  csv: ./watch.csv
+  report: ./watch.md
+targets:
+  - kind: pair
+    id: USDC
+    venue: binance
+    preset: market health
+    health:
+      max_spread_pct: 0.5
+  - kind: token
+    id: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+    chain: ethereum
+    rules:
+      - holders >= 1000
+      - liquidity_usd > 1000000
+```
+
+**From the old monitor.** `--refresh N` is the interval in seconds; `--export` is now `--csv`. The price bounds of `monitor.alerts` become rules on the price; the whale and volume-spike alerts have no metric yet (#122). `--layout`, `--scale` and `--color-scheme` belong to the old dashboard.
+
+#### The old dashboard (deprecated)
+
+`scope monitor <token> --dashboard` opens the old live dashboard for one more release. It goes in the next one.
+
+```bash
+scope monitor USDC --dashboard
+scope mon PEPE --chain ethereum --layout chart-focus --refresh 3 --dashboard
+scope monitor USDC --layout exchange --dashboard    # Exchange-style: order book + chart + trades
+```
+
+**Dashboard flags:** `--chain` / `-c`, `--layout` / `-l`, `--refresh` / `-r`, `--scale` / `-s`, `--color-scheme`, `--export` / `-e`, `--venue` / `-v`, with `--dashboard`.
 
 Use `--venue binance` (or any CEX venue) to fetch real exchange OHLC data instead of synthetic candles. The time period selector (1m, 5m, 15m, 1h, 4h, 1d) maps directly to the venue's candlestick intervals.
 

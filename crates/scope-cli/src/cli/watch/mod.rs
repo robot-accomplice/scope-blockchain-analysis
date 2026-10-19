@@ -8,6 +8,7 @@
 //! The TUI's monitor wizard and grid drive these functions.
 
 pub mod fetch;
+pub mod monitor;
 pub mod run;
 
 use crate::cli::output::Output;

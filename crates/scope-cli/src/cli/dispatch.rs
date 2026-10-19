@@ -76,7 +76,13 @@ pub async fn dispatch(
     let env = |k: &str| std::env::var(k).ok();
     let http: Arc<dyn HttpClient> = create_http_client_offering(config, out, &env, offer)?;
     // Only the TUI can end with a code other than 0, so it starts here.
-    if let Commands::Interactive(args) = command {
+    // `scope monitor` opens it too, with the monitor wizard (#47).
+    let opens_tui = match &command {
+        Commands::Interactive(_) => true,
+        Commands::Monitor(args) => !args.watch.dashboard,
+        _ => false,
+    };
+    if opens_tui {
         let settings = |config: Config, http: Arc<dyn HttpClient>| Settings {
             clients: Box::new(DefaultClientFactory {
                 chains_config: config.chains.clone(),
@@ -92,7 +98,15 @@ pub async fn dispatch(
             Ok(settings(config, http))
         };
         let first = settings(config.clone(), http.clone());
-        let exit = crate::cli::interactive::run(args, first, &reload).await?;
+        let exit = match command {
+            Commands::Monitor(args) => {
+                crate::cli::interactive::run_monitor(args, first, &reload).await?
+            }
+            Commands::Interactive(args) => {
+                crate::cli::interactive::run(args, first, &reload).await?
+            }
+            _ => unreachable!("opens_tui is true only for these two"),
+        };
         return Ok(exit.code);
     }
     let factory = DefaultClientFactory {

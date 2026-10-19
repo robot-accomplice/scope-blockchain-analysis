@@ -1,5 +1,7 @@
 # Scope Monitor Layout Architecture
 
+> **Deprecated (#47).** This describes the old dashboard, which `scope monitor --dashboard` opens for one more release. `scope monitor` now opens the monitor wizard and the watchlist grid in the TUI: see `docs/design/2026-10-16-tui-parity-design.md`.
+
 ## Layout System Design
 
 Four preset layouts with shared components. Layouts are swappable at runtime via keybindings.

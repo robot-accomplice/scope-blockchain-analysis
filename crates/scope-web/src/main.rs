@@ -117,8 +117,13 @@ async fn run() -> Result<()> {
     }
 
     // The TUI needs a terminal. Check before the config load and the setup
-    // prompt, which read stdin.
-    if matches!(cli.command, Commands::Interactive(_)) {
+    // prompt, which read stdin. `scope monitor` opens the TUI too (#47).
+    let opens_tui = match &cli.command {
+        Commands::Interactive(_) => true,
+        Commands::Monitor(args) => !args.watch.dashboard,
+        _ => false,
+    };
+    if opens_tui {
         let term = std::env::var("TERM").ok();
         if let Err(message) = scope_cli::cli::tui::tui_terminal_ok(
             io::stdin().is_terminal(),

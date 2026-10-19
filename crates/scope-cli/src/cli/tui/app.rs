@@ -12,6 +12,7 @@ use super::grid::{self, GridAction, GridMsg, GridState};
 use super::journal::{Event, Journal};
 use super::repeat_view::{self, Ended, RepeatView};
 use super::vocab::Vocab;
+use super::wizard::{self, WizardAction, WizardState};
 use crate::cli::interactive::SessionContext;
 use crate::cli::output::{Captured, Output, SeriesHook};
 use crate::cli::textfit::{ELLIPSIS, cols, cut_with_ellipsis, draw_note_alone};
@@ -197,7 +198,7 @@ fn common_prefix(items: &[String]) -> String {
 }
 
 /// What the event loop must do after a key.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub enum Action {
     /// Nothing beyond a redraw.
     None,
@@ -214,6 +215,8 @@ pub enum Action {
     Copy(String),
     /// Stop the running watchlist (Esc in the grid).
     StopWatch,
+    /// Start this watchlist in the grid (the wizard's Start).
+    StartWatch(Box<scope::watch::Watchlist>),
 }
 
 /// True when Alt is held (and Ctrl is not).
@@ -347,6 +350,11 @@ pub struct TuiState {
     grid_out: Option<(Output, Captured)>,
     /// When the watchlist run started.
     grid_started: Option<Instant>,
+    /// The monitor wizard, while it is open (#47).
+    pub wizard: Option<WizardState>,
+    /// A command to run when the loop starts: `scope monitor <args>` opens
+    /// the TUI with its wizard (#47).
+    pub start: Option<crate::cli::Commands>,
 }
 
 impl TuiState {
@@ -386,6 +394,8 @@ impl TuiState {
             grid_rx: None,
             grid_out: None,
             grid_started: None,
+            wizard: None,
+            start: None,
         }
     }
 
@@ -429,6 +439,10 @@ impl TuiState {
                 _ => {}
             }
             return Action::None;
+        }
+        // The monitor wizard takes every key while it is open (#47).
+        if self.wizard.is_some() && !self.too_small.get() {
+            return self.wizard_key(key);
         }
         // Ctrl-G shows or hides the grid while there is one (#47).
         if ctrl && key.code == KeyCode::Char('g') {
@@ -1168,7 +1182,7 @@ impl TuiState {
     }
 
     /// Appends a note line in `style`.
-    fn push_styled_note(&mut self, note: &str, style: Style) {
+    pub(crate) fn push_styled_note(&mut self, note: &str, style: Style) {
         self.push_lines(vec![Line::styled(note.to_string(), style)]);
     }
 
@@ -1265,6 +1279,51 @@ impl TuiState {
                 }
                 self.grid_shown = false;
                 Action::Submit(line)
+            }
+        }
+    }
+
+    /// Opens the monitor wizard over `list`, with the notes from the
+    /// arguments.
+    pub fn open_wizard(&mut self, list: scope::watch::Watchlist, notes: Vec<String>) {
+        self.close_overlay();
+        for n in &notes {
+            self.push_note(n);
+        }
+        self.wizard = Some(WizardState::new(
+            list,
+            notes,
+            self.vocab.venues.clone(),
+            scope::paths::watchlists_dir(),
+        ));
+    }
+
+    /// A key while the wizard is open.
+    fn wizard_key(&mut self, key: KeyEvent) -> Action {
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('d') {
+            return Action::Exit;
+        }
+        let Some(w) = self.wizard.as_mut() else {
+            return Action::None;
+        };
+        match w.key(key) {
+            WizardAction::None => Action::None,
+            WizardAction::Leave => {
+                self.wizard = None;
+                self.push_note("Left the monitor wizard.");
+                Action::None
+            }
+            WizardAction::Saved(path) => {
+                let name = w.list.name.clone();
+                self.push_note(&format!(
+                    "Saved the watchlist to {}. `watch open {name}` runs it again.",
+                    path.display()
+                ));
+                Action::None
+            }
+            WizardAction::Start(list) => {
+                self.wizard = None;
+                Action::StartWatch(list)
             }
         }
     }
@@ -1843,7 +1902,11 @@ impl TuiState {
         self.pane_width.set(inner.width);
         // The matches are found once per draw; the status bar uses them too.
         let view = self.search_view(&live_out);
-        if let (true, Some(g)) = (self.grid_shown, &self.grid) {
+        if let Some(w) = &self.wizard {
+            wizard::draw(f, pane, w);
+            self.last_max_top.set(0);
+            self.last_pane_height.set(inner.height as usize);
+        } else if let (true, Some(g)) = (self.grid_shown, &self.grid) {
             // The watchlist grid takes the pane (#47).
             grid::draw(f, pane, g);
             self.last_max_top.set(0);
