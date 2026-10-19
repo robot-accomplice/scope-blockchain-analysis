@@ -217,3 +217,9 @@ For each tick, the check list and the status of path 2 equal the `checks` and `h
 | Q5 | `--every` on more commands? | No. Repeats of other metrics go through watchlists only. |
 | Q6 | Move `scope::market::series` to `scope::metrics`? | Yes, with a re-export from the old path for one release. |
 | Q7 | Wizard defaults for interval and duration? | One set for the CLI and the wizard: `market summary`'s (60s, 1h). |
+
+## 10. Implementation notes
+
+- **Ctrl-G, not Tab, switches between the grid and the shell.** Tab completes in the shell (watchlist plan L), so it cannot also switch screens. The status line shows `watch <name>: N breached · Ctrl-G grid` while the grid is hidden.
+- **The run is a second future in the event loop**, next to the pane command. Shell commands run while the grid ticks. Ticks reach the grid through a channel that the loop drains before each draw.
+- **`watch [list | open <name|file.yaml> | stop]`** is the session command for saved watchlists. The wizard (`monitor …`) starts the same run.

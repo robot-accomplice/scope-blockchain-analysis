@@ -113,6 +113,19 @@ pub enum Plan {
     Exit,
     /// Run a CLI command. Boxed: `Commands` is large.
     Run(Box<Invocation>),
+    /// A `watch` session command for the grid (#47).
+    Watch(WatchCommand),
+}
+
+/// What the `watch` session command asks the TUI to do.
+#[derive(Debug)]
+pub enum WatchCommand {
+    /// Start this watchlist in the grid.
+    Open(Box<scope::watch::Watchlist>),
+    /// Stop the running watchlist.
+    Stop,
+    /// Show the grid.
+    Show,
 }
 
 /// Plans one line of input.
@@ -206,10 +219,70 @@ pub fn plan(
             tokens_command(&rest, &mut TokenAliases::load(), &TokenAliases::save, out)?;
             return Ok(Plan::Done);
         }
+        "watch" => {
+            return watch_command(
+                &rest,
+                &scope::paths::watchlists_dir(),
+                &crate::cli::watch::venue_ids(),
+                out,
+            );
+        }
         _ => {}
     }
 
     parse_cli(words, ctx, config, out)
+}
+
+/// The usage of the `watch` session command.
+const WATCH_USAGE: &str = "Usage: watch [list | open <name|file.yaml> | stop]";
+
+/// Runs the `watch` session command. `dir` holds the saved watchlists;
+/// `venues` are the venue IDs a watchlist may name.
+fn watch_command(
+    rest: &[&str],
+    dir: &std::path::Path,
+    venues: &[String],
+    out: &Output,
+) -> io::Result<Plan> {
+    use scope::watch::file;
+    match rest {
+        [] | ["show"] => Ok(Plan::Watch(WatchCommand::Show)),
+        ["stop"] => Ok(Plan::Watch(WatchCommand::Stop)),
+        ["list"] => {
+            let names = file::list(dir);
+            if names.is_empty() {
+                outln!(out, "No saved watchlists in {}.", dir.display())?;
+            } else {
+                for name in names {
+                    outln!(out, "  {}", name)?;
+                }
+            }
+            Ok(Plan::Done)
+        }
+        ["open", name] => {
+            let is_path = name.ends_with(&format!(".{}", file::EXTENSION))
+                || name.contains(['/', std::path::MAIN_SEPARATOR]);
+            let path = if is_path {
+                std::path::PathBuf::from(name)
+            } else {
+                file::path_in(dir, name)
+            };
+            match file::load(&path, Some(venues)) {
+                Ok(w) => Ok(Plan::Watch(WatchCommand::Open(Box::new(w)))),
+                Err(errors) => {
+                    errln!(out, "{} is not a valid watchlist:", path.display())?;
+                    for e in errors.0 {
+                        errln!(out, "  {}", e)?;
+                    }
+                    Ok(Plan::Done)
+                }
+            }
+        }
+        _ => {
+            errln!(out, "{}", WATCH_USAGE)?;
+            Ok(Plan::Done)
+        }
+    }
 }
 
 /// Parses a CLI command line with the clap definition, after it adds the
@@ -639,6 +712,11 @@ pub(crate) const SESSION_COMMANDS: &[(&str, &str, &str)] = &[
         "tokens",
         "tokens [list|recent|add|remove]",
         "Manage saved token aliases",
+    ),
+    (
+        "watch",
+        "watch [list|open <name>|stop]",
+        "Run a saved watchlist in the grid (Ctrl-G shows it)",
     ),
     (
         "save",
@@ -1334,6 +1412,73 @@ mod tests {
         );
         assert!(matches!(p, Plan::Done));
         assert!(cap.err().contains("no effect inside the TUI"));
+    }
+
+    // ---- watch ----
+
+    fn watch(rest: &[&str], dir: &std::path::Path) -> (Plan, String) {
+        let (o, cap) = Output::capture();
+        let venues = vec!["binance".to_string()];
+        let p = watch_command(rest, dir, &venues, &o).unwrap();
+        (p, format!("{}{}", cap.out(), cap.err()))
+    }
+
+    #[test]
+    fn test_watch_list_open_stop_and_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let (p, text) = watch(&["list"], dir.path());
+        assert!(matches!(p, Plan::Done));
+        assert!(text.contains("No saved watchlists"), "{text}");
+
+        std::fs::write(
+            dir.path().join("stables.yaml"),
+            "targets:\n  - kind: pair\n    id: USDC\n    venue: binance\n    preset: market health\n",
+        )
+        .unwrap();
+        let (_, text) = watch(&["list"], dir.path());
+        assert!(text.contains("  stables"), "{text}");
+        let (p, _) = watch(&["open", "stables"], dir.path());
+        let Plan::Watch(WatchCommand::Open(w)) = p else {
+            panic!("expected open, got {p:?}")
+        };
+        assert_eq!(w.name, "stables");
+        assert_eq!(w.targets.len(), 1);
+
+        assert!(matches!(
+            watch(&["stop"], dir.path()).0,
+            Plan::Watch(WatchCommand::Stop)
+        ));
+        assert!(matches!(
+            watch(&[], dir.path()).0,
+            Plan::Watch(WatchCommand::Show)
+        ));
+        let (p, text) = watch(&["nonsense"], dir.path());
+        assert!(matches!(p, Plan::Done));
+        assert!(text.contains(WATCH_USAGE), "{text}");
+    }
+
+    #[test]
+    fn test_watch_open_of_a_bad_file_lists_every_error_and_starts_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.yaml");
+        std::fs::write(
+            &path,
+            "targets:\n  - kind: pair\n    id: USDC\n    venue: nowhere\n    rules: [\"holdrs > 1\"]\n",
+        )
+        .unwrap();
+        let (p, text) = watch(&["open", path.to_str().unwrap()], dir.path());
+        assert!(matches!(p, Plan::Done));
+        assert!(text.contains("is not a valid watchlist"), "{text}");
+        assert!(text.contains("unknown venue `nowhere`"), "{text}");
+        assert!(text.contains("unknown metric `holdrs`"), "{text}");
+        let (p, text) = watch(&["open", "missing"], dir.path());
+        assert!(matches!(p, Plan::Done));
+        assert!(text.contains("cannot read"), "{text}");
+    }
+
+    #[test]
+    fn test_watch_is_a_session_command_in_help() {
+        assert!(SESSION_COMMANDS.iter().any(|(n, _, _)| *n == "watch"));
     }
 
     // ---- Routing ----
