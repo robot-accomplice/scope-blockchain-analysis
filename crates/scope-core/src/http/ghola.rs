@@ -156,7 +156,7 @@ fn spawned() -> std::sync::MutexGuard<'static, Option<Child>> {
 }
 
 /// Starts `binary --serve` and waits up to `timeout` for the sidecar to
-/// answer on [`SIDECAR_ADDR`]. Returns its PID. The sidecar is kept until
+/// answer on the sidecar's address (`127.0.0.1:18789`). Returns its PID. The sidecar is kept until
 /// [`stop_spawned_sidecar`]; it is not stopped when this process exits.
 ///
 /// It blocks the calling thread while it waits.
