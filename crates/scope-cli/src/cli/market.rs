@@ -6,7 +6,7 @@
 //! Supports one-shot or repeated runs with configurable frequency and duration.
 
 use crate::cli::crawl::{self, Period};
-use crate::cli::output::Output;
+use crate::cli::output::{Output, SummaryView};
 use crate::{note, out, outln};
 use clap::{Args, Subcommand};
 use scope::chains::{ChainClientFactory, TokenAnalytics};
@@ -566,6 +566,10 @@ async fn run_summary(
         let (summary, report) =
             summary_run(&args, factory, &thresholds, &tokens, None, out).await?;
         out!(out, "{report}")?;
+        out.record_view(SummaryView {
+            summary: summary.clone(),
+            venue: args.venue.clone(),
+        });
         return write_report(&args, &summary, out);
     };
 
@@ -587,6 +591,10 @@ async fn run_summary(
             Ok(RunOutput {
                 sample: series::sample(&summary, metrics),
                 snapshot: report,
+                view: Some(SummaryView {
+                    summary: summary.clone(),
+                    venue: args.venue.clone(),
+                }),
                 value: summary,
             })
         }

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **TUI market view (design 2026-10-21).** `market summary` in the TUI shows a compact view: the verdict first, the key values in two columns, the book as one ladder with one size per level and a bar, and the checks in a grid. The repeating view sizes the snapshot to its content and gives the trends the rest: a fixed numbers column, a `┤`, and a chart that fills its track and scrolls; taller charts when there is room; a rule above the footer. Ctrl-Y and `save` keep the CLI text.
+
 ### Changed (breaking)
 - scope reads and writes YAML with serde-saphyr (safe Rust) in place of the deprecated serde_yaml, so `unsafe-libyaml` (unmaintained, RUSTSEC-2024-0449) is gone. Files that serde_yaml wrote read the same. In scope-bca-core, `ConfigError::Parse` now holds a `serde_saphyr::Error`, and YAML error messages read differently. (#118)
 - `crawl --yes` no longer selects the first match for an ambiguous symbol. It stops with the candidates; pass `--token <contract>`. `--yes` now skips only the save question.

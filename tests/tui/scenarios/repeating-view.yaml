@@ -10,6 +10,11 @@ steps:
   - expect_screen:
       contains: ["Trends · run", "Health", "Mid price", "Spread %", "Bid depth"]
       not_contains: ["--- Run #"]
+  # The compact snapshot (2026-10-21 market view): the verdict first, the
+  # book as one ladder, one size per level; the trends with a T bar.
+  - expect_screen:
+      contains: ["USDC/USDT · binance +✓ HEALTHY", "Book · USDT", "mid 1\\.\\d{6} · spread", "Mid price .*┤"]
+      not_contains: ["USDC +\\d+\\.\\d{2} USDT"]
   # Esc stops the run; the view stays with its footer.
   - key: Esc
   - wait_for: { text: "Cancelled after", timeout: 10s }

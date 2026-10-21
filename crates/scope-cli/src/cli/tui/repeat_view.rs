@@ -1,34 +1,38 @@
 //! The repeating view (#58): a command that runs with `--every` draws one
 //! in-place view instead of one report per run.
 //!
-//! Left (or top, when the pane is narrow): the latest snapshot. Right (or
-//! below): the trends, a health strip with the last failure under it, then
-//! one chart per key value, as many as fit. The series comes from the
-//! command's output (`Output::series_hook`); this module only draws it.
+//! Left (or top, when the pane is narrow): the latest snapshot, as wide and
+//! as tall as its content (the compact market view when the run has its
+//! data). Right (or below): the trends, one row per key value with a fixed
+//! numbers column, a T bar and a chart that fills its track. A rule keeps
+//! the footer apart. The series comes from the command's output
+//! (`Output::series_hook`); this module only draws it.
 
 use crate::cli::charts::{HealthStrip, Sparkline};
 use crate::cli::output::{RunRecord, SeriesHook};
-use crate::cli::theme::{ACCENT, SECONDARY};
-use crate::cli::tui::fit;
+use crate::cli::theme::{ACCENT, ERR, SECONDARY};
+use crate::cli::tui::{fit, market_view};
 use ansi_to_tui::IntoText;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Paragraph};
-use scope::metrics::{Metric, MetricId, Unit};
+use ratatui::widgets::Paragraph;
+use scope::metrics::{Metric, MetricId, Threshold, Unit};
 
-/// The pane width from which the snapshot and the trends sit side by side.
-pub(crate) const SIDE_BY_SIDE_MIN_WIDTH: u16 = 80;
+/// Columns of a trends label, its limit and its value.
+const LABEL_COLS: usize = 17;
+const LIMIT_COLS: usize = 9;
+const VALUE_COLS: usize = 10;
 
-/// Rows one chart takes: its label row and its bar row.
-const CHART_ROWS: u16 = 2;
+/// The numbers part of a trends row: a space, the three columns, a space.
+const NUMBERS_COLS: u16 = (1 + LABEL_COLS + LIMIT_COLS + VALUE_COLS + 1) as u16;
 
-/// Rows the health part takes: the strip and the last failure.
-const HEALTH_ROWS: u16 = 2;
+/// The narrowest trends: the numbers, the T bar and 20 chart cells.
+const TRENDS_MIN_WIDTH: u16 = NUMBERS_COLS + 1 + 20;
 
-/// Width of a chart label, so the latest values line up.
-const LABEL_COLS: usize = 18;
+/// The tallest chart, in rows.
+const MAX_CHART_ROWS: u16 = 3;
 
 /// The words that tell the user how to leave a finished view.
 pub(crate) const LEAVE_HINT: &str = "Press any key to leave the view (the key still counts).";
@@ -146,94 +150,274 @@ fn charted(id: MetricId) -> bool {
     )
 }
 
-/// Draws `view` in `area`. `status` goes on the last rows: the run's
-/// progress while it runs, or the footer and the leave hint after.
+/// Draws `view` in `area` (design 2026-10-21). `status` goes on the last
+/// rows, under a rule: the run's progress while it runs, or the footer and
+/// the leave hint after.
 pub(crate) fn draw(f: &mut Frame, area: Rect, view: &RepeatView, status: Vec<Line<'static>>) {
     let c = copy(&view.series);
-    let mut status = status;
+    let mut foot_lines = vec![one_line(status)];
     if let Some(ended) = &view.ended {
-        status.push(Line::styled(ended.text.clone(), ended.style));
-        status.push(Line::styled(LEAVE_HINT, SECONDARY));
+        foot_lines = vec![
+            Line::styled(ended.text.clone(), ended.style),
+            Line::styled(LEAVE_HINT, SECONDARY),
+        ];
     }
-    let status_rows = (status.len() as u16).min(area.height);
+    // J5: a rule keeps the footer off the view above it.
+    let foot_rows = (foot_lines.len() as u16 + 1).min(area.height);
     let [body, foot] =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(status_rows)]).areas(area);
-    f.render_widget(Paragraph::new(Text::from(status)), foot);
-
-    let (snap, trends) = if body.width >= SIDE_BY_SIDE_MIN_WIDTH {
-        let [l, r] = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .areas(body);
-        (l, r)
-    } else {
-        let [t, b] =
-            Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(body);
-        (t, b)
-    };
-    draw_snapshot(f, snap, c.runs.last());
-    draw_trends(f, trends, &c);
+        Layout::vertical([Constraint::Min(0), Constraint::Length(foot_rows)]).areas(area);
+    if foot.height > 0 {
+        let rule = Rect { height: 1, ..foot };
+        f.render_widget(
+            Paragraph::new(Line::styled("─".repeat(foot.width as usize), SECONDARY)),
+            rule,
+        );
+        let rest = Rect {
+            y: foot.y + 1,
+            height: foot.height - 1,
+            ..foot
+        };
+        f.render_widget(Paragraph::new(Text::from(foot_lines)), rest);
+    }
+    let layout = Layout2::new(body, c.runs.last());
+    if let Some(snap) = layout.snap {
+        f.render_widget(Paragraph::new(Text::from(layout.lines.clone())), snap);
+    }
+    if let Some(rule) = layout.rule {
+        let glyph = if layout.side_by_side { "│" } else { "─" };
+        let lines: Vec<Line> = if layout.side_by_side {
+            (0..rule.height)
+                .map(|_| Line::styled(glyph, SECONDARY))
+                .collect()
+        } else {
+            vec![Line::styled(glyph.repeat(rule.width as usize), SECONDARY)]
+        };
+        f.render_widget(Paragraph::new(lines), rule);
+    }
+    draw_trends(f, layout.trends, &c);
 }
 
-fn draw_snapshot(f: &mut Frame, area: Rect, last: Option<&RunRecord>) {
-    let Some(last) = last else {
-        return;
+/// The status lines as one line, the progress before the long command:
+/// `⠙ run 3 of 4 · next in 1s · running market summary … 12s`.
+fn one_line(status: Vec<Line<'static>>) -> Line<'static> {
+    let mut lines = status.into_iter();
+    let Some(first) = lines.next() else {
+        return Line::default();
     };
-    let text = last
-        .snapshot
+    let mut first = first.spans.into_iter();
+    // The first span of the running line is its spinner.
+    let mut spans: Vec<Span<'static>> = first.next().into_iter().collect();
+    for line in lines {
+        spans.push(Span::raw(" "));
+        spans.extend(line.spans);
+        spans.push(Span::styled(" ·", SECONDARY));
+    }
+    spans.extend(first);
+    Line::from(spans)
+}
+
+/// The snapshot of the last run: the compact market view when the run has
+/// its data, else its text report.
+fn snapshot_lines(last: Option<&RunRecord>, size: market_view::Size) -> Vec<Line<'static>> {
+    let Some(last) = last else {
+        return Vec::new();
+    };
+    if let Some(view) = &last.view {
+        return market_view::lines(view, size);
+    }
+    last.snapshot
         .as_str()
         .into_text()
-        .unwrap_or_else(|_| Text::raw(last.snapshot.clone()));
-    let rows = fit::fit(text.lines, area.width as usize);
-    f.render_widget(Paragraph::new(Text::from(rows)), area);
+        .unwrap_or_else(|_| Text::raw(last.snapshot.clone()))
+        .lines
+}
+
+/// Where the snapshot, the rule between and the trends go (J2): the
+/// snapshot is as wide and as tall as its content; the trends get the rest.
+struct Layout2 {
+    lines: Vec<Line<'static>>,
+    snap: Option<Rect>,
+    rule: Option<Rect>,
+    trends: Rect,
+    side_by_side: bool,
+}
+
+impl Layout2 {
+    fn new(body: Rect, last: Option<&RunRecord>) -> Self {
+        let full = snapshot_lines(last, market_view::Size::Full);
+        // One blank column between the snapshot and its rule.
+        let full_width = market_view::width(&full) as u16 + 1;
+        let side_by_side = full_width > 0 && body.width >= full_width + 1 + TRENDS_MIN_WIDTH;
+        if side_by_side {
+            let snap = Rect {
+                width: full_width,
+                height: (full.len() as u16).min(body.height),
+                ..body
+            };
+            let rule = Rect {
+                x: body.x + full_width,
+                width: 1,
+                ..body
+            };
+            let trends = Rect {
+                x: body.x + full_width + 1,
+                width: body.width - full_width - 1,
+                ..body
+            };
+            return Self {
+                lines: full,
+                snap: Some(snap),
+                rule: Some(rule),
+                trends,
+                side_by_side,
+            };
+        }
+        // Stacked: the compact snapshot on top, at its height, but never
+        // more than half the body; a rule; the trends under it.
+        let compact = snapshot_lines(last, market_view::Size::Compact);
+        let lines = fit::fit(compact, body.width as usize);
+        let rows = (lines.len() as u16).min(body.height / 2);
+        if rows == 0 {
+            return Self {
+                lines,
+                snap: None,
+                rule: None,
+                trends: body,
+                side_by_side,
+            };
+        }
+        let snap = Rect {
+            height: rows,
+            ..body
+        };
+        let rule = Rect {
+            y: body.y + rows,
+            height: 1,
+            ..body
+        };
+        let trends = Rect {
+            y: body.y + rows + 1,
+            height: body.height.saturating_sub(rows + 1),
+            ..body
+        };
+        Self {
+            lines,
+            snap: Some(snap),
+            rule: Some(rule),
+            trends,
+            side_by_side,
+        }
+    }
+}
+
+/// The limit of a metric as the trends show it: `≤3.000%`, `≥3.00K`.
+fn limit_text(metric: &Metric) -> String {
+    match metric.threshold {
+        Some(Threshold::Max(v)) => format!("≤{}", format_value(metric, Some(v))),
+        Some(Threshold::Min(v)) => format!("≥{}", format_value(metric, Some(v))),
+        Some(Threshold::Target(v)) => format!("~{}", format_value(metric, Some(v))),
+        None => String::new(),
+    }
+}
+
+/// The numbers part of a trends row, always `NUMBERS_COLS` wide (J3):
+/// the label, the limit and the value, right-aligned so it is never cut.
+fn numbers(label: &str, limit: &str, value: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!(" {:<w$}", cut(label, LABEL_COLS - 1), w = LABEL_COLS),
+            SECONDARY,
+        ),
+        Span::styled(
+            format!("{:<w$}", cut(limit, LIMIT_COLS), w = LIMIT_COLS),
+            SECONDARY,
+        ),
+        Span::raw(format!("{:>w$} ", cut(value, VALUE_COLS), w = VALUE_COLS)),
+    ])
+}
+
+fn cut(text: &str, cols: usize) -> String {
+    if text.chars().count() <= cols {
+        text.to_string()
+    } else {
+        let mut t: String = text.chars().take(cols.saturating_sub(1)).collect();
+        t.push('…');
+        t
+    }
+}
+
+/// The T bar between the numbers and a chart `rows` high (J4): `┤` on the
+/// chart's base row, `│` above it.
+fn tee(f: &mut Frame, x: u16, y: u16, rows: u16) {
+    let lines: Vec<Line> = (0..rows)
+        .map(|r| Line::styled(if r + 1 == rows { "┤" } else { "│" }, SECONDARY))
+        .collect();
+    f.render_widget(Paragraph::new(lines), Rect::new(x, y, 1, rows));
 }
 
 fn draw_trends(f: &mut Frame, area: Rect, c: &Copy) {
     let run = c.runs.last().map_or(0, |r| r.run);
-    let block = Block::new()
-        .borders(Borders::LEFT | Borders::TOP)
-        .border_style(SECONDARY)
-        .title(Line::styled(format!(" Trends · run {run} "), ACCENT));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-    if inner.height < HEALTH_ROWS || inner.width <= LABEL_COLS as u16 {
+    if area.height < 2 || area.width <= NUMBERS_COLS + 2 {
         return;
     }
-    let label = |text: &str| Span::styled(format!("{text:<LABEL_COLS$}"), SECONDARY);
-    let chart_x = inner.x + LABEL_COLS as u16;
-    let chart_w = inner.width - LABEL_COLS as u16;
-
-    // Health: the strip, then the last failure under it.
-    let healthy: Vec<bool> = c.runs.iter().map(|r| r.sample.healthy).collect();
     f.render_widget(
-        Paragraph::new(Line::from(label("Health"))),
-        Rect::new(inner.x, inner.y, LABEL_COLS as u16, 1),
+        Paragraph::new(Line::styled(format!(" Trends · run {run}"), ACCENT)),
+        Rect { height: 1, ..area },
     );
-    f.render_widget(
-        HealthStrip::new(&healthy),
-        Rect::new(chart_x, inner.y, chart_w, 1),
-    );
-    let last_failure = c
-        .runs
+    let chart_x = area.x + NUMBERS_COLS + 1;
+    let chart_w = area.width - NUMBERS_COLS - 1;
+    let charted: Vec<(usize, &Metric)> = c
+        .metrics
         .iter()
-        .rev()
-        .find(|r| !r.sample.healthy)
-        .map(|r| {
-            let why = r
-                .sample
-                .failed_checks
-                .first()
-                .map_or("unhealthy", String::as_str);
-            format!("run {}: {why}", r.run)
-        })
-        .unwrap_or_else(|| "no failed runs".to_string());
-    f.render_widget(
-        Paragraph::new(Line::styled(last_failure, SECONDARY)),
-        Rect::new(inner.x, inner.y + 1, inner.width, 1),
-    );
+        .enumerate()
+        .filter(|(_, m)| charted(m.id))
+        .collect();
+    let last_failure = c.runs.iter().rev().find(|r| !r.sample.healthy);
+    // Rows: the header, health (and its last failure), then the charts.
+    let fixed = 2 + u16::from(last_failure.is_some());
+    let free = area.height.saturating_sub(fixed);
+    // Q5: rows left over after one per metric make the charts taller.
+    let per_chart = match charted.len() as u16 {
+        0 => 1,
+        n => (free / n).clamp(1, MAX_CHART_ROWS),
+    };
 
-    // One chart per key value, while two rows still fit: never overlap.
-    let mut y = inner.y + HEALTH_ROWS;
-    for (i, metric) in c.metrics.iter().enumerate().filter(|(_, m)| charted(m.id)) {
-        if y + CHART_ROWS > inner.bottom() {
+    let mut y = area.y + 1;
+    let healthy: Vec<bool> = c.runs.iter().map(|r| r.sample.healthy).collect();
+    let failed = healthy.iter().filter(|h| !**h).count();
+    let verdict = if failed == 0 {
+        "all ok".to_string()
+    } else {
+        format!("{failed} failed")
+    };
+    f.render_widget(
+        Paragraph::new(numbers("Health", "", &verdict)),
+        Rect::new(area.x, y, NUMBERS_COLS, 1),
+    );
+    tee(f, area.x + NUMBERS_COLS, y, 1);
+    f.render_widget(
+        HealthStrip::new(&healthy).track(),
+        Rect::new(chart_x, y, chart_w, 1),
+    );
+    y += 1;
+    if let Some(r) = last_failure {
+        let why = r
+            .sample
+            .failed_checks
+            .first()
+            .map_or("unhealthy", String::as_str);
+        f.render_widget(
+            Paragraph::new(Line::styled(
+                format!("   last failure: run {}: {why}", r.run),
+                ERR,
+            )),
+            Rect::new(area.x, y, area.width, 1),
+        );
+        y += 1;
+    }
+
+    for (i, metric) in charted {
+        if y + per_chart > area.bottom() {
             break;
         }
         let values: Vec<Option<f64>> = c
@@ -242,18 +426,23 @@ fn draw_trends(f: &mut Frame, area: Rect, c: &Copy) {
             .map(|r| r.sample.values.get(i).copied().flatten())
             .collect();
         let latest = values.last().copied().flatten();
+        let base = y + per_chart - 1;
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                label(metric.label),
-                Span::raw(format_value(metric, latest)),
-            ])),
-            Rect::new(inner.x, y, inner.width, 1),
+            Paragraph::new(numbers(
+                metric.label,
+                &limit_text(metric),
+                &format_value(metric, latest),
+            )),
+            Rect::new(area.x, base, NUMBERS_COLS, 1),
         );
+        tee(f, area.x + NUMBERS_COLS, y, per_chart);
         f.render_widget(
-            Sparkline::new(&values, ACCENT).threshold(metric.threshold),
-            Rect::new(chart_x, y + 1, chart_w, 1),
+            Sparkline::new(&values, ACCENT)
+                .threshold(metric.threshold)
+                .track(),
+            Rect::new(chart_x, y, chart_w, per_chart),
         );
-        y += CHART_ROWS;
+        y += per_chart;
     }
 }
 
@@ -266,8 +455,36 @@ mod tests {
     use scope::market::HealthThresholds;
     use scope::metrics::{Sample, summary_metrics};
 
+    /// The market data of a run: a 20-level book.
+    fn summary_view() -> std::sync::Arc<crate::cli::output::SummaryView> {
+        use scope::market::{BookSource, MarketSummary, OrderBook, OrderBookLevel};
+        let side = |start: f64, step: f64| -> Vec<OrderBookLevel> {
+            (0..20)
+                .map(|i| OrderBookLevel {
+                    price: start + step * f64::from(i),
+                    quantity: 40_000.0,
+                })
+                .collect()
+        };
+        let book = OrderBook {
+            pair: "USDC/USDT".to_string(),
+            source: BookSource::Exchange,
+            bids: side(0.9999, -0.0001),
+            asks: side(1.0001, 0.0001),
+        };
+        std::sync::Arc::new(crate::cli::output::SummaryView {
+            summary: MarketSummary::from_order_book(&book, &HealthThresholds::default(), None),
+            venue: "binance".to_string(),
+        })
+    }
+
     /// A series of `n` runs; `failed` runs are unhealthy.
     fn series(n: u64, failed: &[u64]) -> SeriesHook {
+        series_with(n, failed, false)
+    }
+
+    /// A series of `n` runs, with the market data of each when `data`.
+    fn series_with(n: u64, failed: &[u64], data: bool) -> SeriesHook {
         let metrics = summary_metrics(&HealthThresholds::default());
         let (out, _cap) = Output::capture_merged();
         for run in 1..=n {
@@ -291,6 +508,7 @@ mod tests {
                     at: chrono::Utc::now(),
                     sample,
                     snapshot: format!("Market Summary run {run}\nMid 1.0\n"),
+                    view: data.then(summary_view),
                 },
             );
         }
@@ -315,6 +533,98 @@ mod tests {
         }
     }
 
+    /// A view whose runs carry their market data (the compact snapshot).
+    fn market(n: u64) -> RepeatView {
+        RepeatView {
+            series: series_with(n, &[], true),
+            ended: None,
+            pending: String::new(),
+        }
+    }
+
+    /// The column of the first `┤` in each row that has one.
+    fn tees(rows: &[String]) -> Vec<usize> {
+        rows.iter()
+            .filter_map(|r| r.chars().position(|c| c == '┤'))
+            .collect()
+    }
+
+    #[test]
+    fn test_the_snapshot_is_as_wide_as_its_content_and_the_trends_take_the_rest() {
+        // J2: at 120 and at 160 columns the snapshot keeps its width; the
+        // trends get the extra columns (more history).
+        let at = |w: u16| {
+            let rows = render(&market(3), w, 36);
+            let rule = rows[1].chars().position(|c| c == '│').unwrap();
+            let track = rows.iter().find(|r| r.contains("Mid price")).unwrap();
+            (rule, track.chars().filter(|c| *c == '─').count(), rows)
+        };
+        let (rule_120, track_120, rows) = at(120);
+        let (rule_160, track_160, _) = at(160);
+        assert_eq!(rule_120, rule_160, "the snapshot does not grow");
+        assert!(track_160 > track_120 + 30, "the track does");
+        assert!(
+            rows[0].contains("USDC/USDT · binance"),
+            "{}",
+            rows.join("\n")
+        );
+        assert!(rows[0].contains("✓ HEALTHY"));
+    }
+
+    #[test]
+    fn test_the_numbers_column_has_one_width_and_a_tee_before_each_chart() {
+        // J3, J4: every `┤` is in the same column, whatever the values.
+        for (w, h) in [(120, 36), (160, 48), (79, 24)] {
+            let rows = render(&market(3), w, h);
+            let cols = tees(&rows);
+            assert!(cols.len() >= 4, "{w}x{h}\n{}", rows.join("\n"));
+            assert!(cols.windows(2).all(|p| p[0] == p[1]), "{w}x{h}: {cols:?}");
+        }
+    }
+
+    #[test]
+    fn test_extra_height_makes_the_charts_taller() {
+        // Q5: rows under a `┤` with `│` above it are a chart taller than one.
+        let short = render(&market(3), 120, 24);
+        let tall = render(&market(3), 120, 48);
+        let above = |rows: &[String]| {
+            let col = tees(rows)[0];
+            rows.iter()
+                .filter(|r| r.chars().nth(col) == Some('│'))
+                .count()
+        };
+        assert!(above(&tall) > above(&short), "{}", tall.join("\n"));
+    }
+
+    #[test]
+    fn test_a_rule_keeps_the_footer_off_the_view() {
+        // J5: the row above the status line is a rule across the pane.
+        let rows = render(&market(3), 120, 36);
+        let rule = &rows[34];
+        assert!(rule.chars().all(|c| c == '─'), "{rule}");
+        assert!(rows[35].starts_with("run 3 of 10"));
+    }
+
+    #[test]
+    fn test_narrow_market_view_stacks_the_compact_snapshot_over_the_trends() {
+        let rows = render(&market(3), 79, 24);
+        let text = rows.join("\n");
+        assert!(rows[0].contains("USDC/USDT · binance"), "{text}");
+        assert!(
+            text.contains("Book ask 1.000100"),
+            "the one-line book: {text}"
+        );
+        let rule = rows
+            .iter()
+            .position(|r| r.chars().all(|c| c == '─'))
+            .unwrap();
+        let trends = rows.iter().position(|r| r.contains("Trends")).unwrap();
+        assert!(rule < trends, "{text}");
+        for row in rows.iter().filter(|r| r.contains("depth")) {
+            assert_eq!(row.matches("depth").count(), 1, "{text}");
+        }
+    }
+
     #[test]
     fn test_wide_view_shows_snapshot_beside_the_trends() {
         let rows = render(&view(3, &[2]), 120, 36);
@@ -330,27 +640,31 @@ mod tests {
     }
 
     #[test]
-    fn test_narrow_view_stacks_and_shows_fewer_charts_without_overlap() {
-        let wide = render(&view(3, &[]), 120, 36).join("\n");
-        let narrow_rows = render(&view(3, &[]), 79, 24);
-        let narrow = narrow_rows.join("\n");
-        let charts = |t: &str| t.matches("depth").count() + t.matches("Mid price").count();
-        assert!(charts(&narrow) < charts(&wide), "{narrow}");
-        // Stacked: the snapshot is on top, the trends below it.
+    fn test_a_text_snapshot_is_sized_to_its_content() {
+        // A command without market data shows its text: beside the trends
+        // when they fit next to it, else above them at its own height.
+        let wide = render(&view(3, &[]), 120, 24);
+        assert!(wide[0].starts_with("Market Summary run 3"));
         assert!(
-            narrow_rows[0].starts_with("Market Summary run 3"),
-            "{narrow}"
+            wide[0].contains("Trends · run 3"),
+            "{}",
+            wide.join(
+                "
+"
+            )
         );
+        let narrow = render(&view(3, &[]), 79, 24);
+        let text = narrow.join(
+            "
+",
+        );
+        assert!(narrow[0].starts_with("Market Summary run 3"), "{text}");
         assert!(
-            narrow_rows
-                .iter()
-                .position(|r| r.contains("Trends"))
-                .unwrap()
-                > 1
+            narrow[2].chars().all(|c| c == '─'),
+            "two rows of text, then the rule: {text}"
         );
-        // Every label row has exactly one label: no chart drew over another.
-        for row in narrow_rows.iter().filter(|r| r.contains("depth")) {
-            assert_eq!(row.matches("depth").count(), 1, "{narrow}");
+        for row in narrow.iter().filter(|r| r.contains("depth")) {
+            assert_eq!(row.matches("depth").count(), 1, "{text}");
         }
     }
 

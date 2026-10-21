@@ -1,6 +1,6 @@
 # TUI Market View: Design
 
-- **Status:** draft for Jon's review.
+- **Status:** approved by Jon on 2026-10-21, with the proposed answers to Q1–Q5 (section 6).
 - **Date:** 2026-10-21
 - **Scope:** the repeating view of `market summary --every` (#58), and the market summary snapshot it shows. The grid's detail pane (#47) uses the same parts later.
 - **Standard:** Clean Code and Clean Architecture. Each concern has one source, the adapters are thin, and dependencies point inward.
@@ -179,15 +179,14 @@ At 80×24 the snapshot is its compact form (no ladder bars; the checks in one li
 
 ## 5. Out of scope
 
-- The one-shot `market summary` in the pane (not repeating) still prints the CLI text. Open question Q4.
 - `crawl`, `token-health` and the grid's detail pane. They get their own pass on these parts later.
 
-## 6. Open questions for Jon
+## 6. Decisions (Jon, 2026-10-21)
 
-| # | Question | Proposal |
+| # | Question | Decision |
 |---|---|---|
 | Q1 | Book bars: each level's size, or the cumulative depth? | Each level's size: walls are what a reader looks for. |
-| Q2 | Ladder levels per side? | 5 at 120 columns and up, a one-line book at 80. |
-| Q3 | The track fills from the left, then scrolls (proposed), or the newest run is always at the right edge (today)? | Fill from the left. |
-| Q4 | Should the one-shot `market summary` in the TUI show the compact snapshot too? | Yes: the same renderer. Ctrl-Y and `save` keep the CLI text. |
-| Q5 | Extra height: taller charts (proposed), or more metrics (best bid and ask, absolute spread)? | Taller charts; the extra metrics repeat values already shown. |
+| Q2 | Ladder levels per side? | 5 at 120 columns and up; a one-line book at 80. |
+| Q3 | Track: fill from the left, or newest always at the right edge? | Fill from the left, then scroll. |
+| Q4 | The one-shot `market summary` in the TUI? | It shows the compact snapshot too, from the same renderer. Ctrl-Y and `save` keep the CLI text. |
+| Q5 | Extra height: taller charts, or more metrics? | Taller charts. |
