@@ -190,3 +190,12 @@ At 80×24 the snapshot is its compact form (no ladder bars; the checks in one li
 | Q3 | Track: fill from the left, or newest always at the right edge? | Fill from the left, then scroll. |
 | Q4 | The one-shot `market summary` in the TUI? | It shows the compact snapshot too, from the same renderer. Ctrl-Y and `save` keep the CLI text. |
 | Q5 | Extra height: taller charts, or more metrics? | Taller charts. |
+
+## 7. Implementation notes (2026-10-21, after Jon's review of #132)
+
+- **Each chart has a minimum range** (`Sparkline::min_span`): 10 bps of the price, 0.05 percentage points, 5% of an amount. Noise smaller than that is drawn around the middle of the chart, so a flat series reads flat, not as full and empty bars. A real move still fills the scale.
+- **No value shows twice.** Beside the trends, the snapshot leaves out what they chart (mid, spread, depth, top-3, top-10). The checks grid shows each check's limit (`Spread ≤3%`, `Bid depth ≥3K`), not its value. A check with no limit shows its value (`Bid/Ask ratio 2.21x`).
+- **One bid/ask table** replaces the two-column pairs: best price, slippage for 10K (a sell walks the bids, a buy the asks), depth, top-3 and top-10 depth. The one-shot view shows all rows; beside the trends, only the price and the slippage.
+- **The snapshot fits its rows** (`market_view::fit`). It gives up lines in this order: ladder levels 5 → 3, the checks that did not pass in one line each, ladder levels → 1.
+- **Spare rows go to the charts,** up to 4 rows each. The rows left after an even share go one each to the first charts, so no row stays empty under the last one.
+- **Short limits** (`≤3%`, `≥3K`, `peg 1`), and the health row says `ok` or `N failed`.

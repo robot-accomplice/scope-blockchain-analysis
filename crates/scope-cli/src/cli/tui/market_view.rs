@@ -51,16 +51,75 @@ pub(crate) fn width(lines: &[Line<'_>]) -> usize {
     lines.iter().map(Line::width).max().unwrap_or(0)
 }
 
+/// What the snapshot shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Opts {
+    pub size: Size,
+    /// Book levels per side in the ladder (Full).
+    pub levels: usize,
+    /// The checks that did not pass in one line each, not in full.
+    pub short_problems: bool,
+    /// The trends chart the key values beside it (the repeating view):
+    /// leave them out here, so no value shows twice.
+    pub with_trends: bool,
+}
+
+impl Opts {
+    /// Everything, at `size`.
+    pub(crate) fn of(size: Size) -> Self {
+        Self {
+            size,
+            levels: LADDER_LEVELS,
+            short_problems: size == Size::Compact,
+            with_trends: false,
+        }
+    }
+}
+
 /// The snapshot of `view`, at `size`.
 pub(crate) fn lines(view: &SummaryView, size: Size) -> Vec<Line<'static>> {
+    lines_with(view, Opts::of(size))
+}
+
+/// The snapshot of `view` in at most `rows` lines, when it can: it leaves
+/// out the least needed lines first (fewer ladder levels, then the checks
+/// that did not pass in one line each, then fewer levels again).
+pub(crate) fn fit(view: &SummaryView, base: Opts, rows: usize) -> Vec<Line<'static>> {
+    let mut opts = base;
+    let mut lines = lines_with(view, opts);
+    let steps = [
+        Opts { levels: 3, ..opts },
+        Opts {
+            levels: 3,
+            short_problems: true,
+            ..opts
+        },
+        Opts {
+            levels: 1,
+            short_problems: true,
+            ..opts
+        },
+    ];
+    for step in steps {
+        if lines.len() <= rows {
+            break;
+        }
+        opts = step;
+        lines = lines_with(view, opts);
+    }
+    lines
+}
+
+/// The snapshot of `view` with `opts`.
+pub(crate) fn lines_with(view: &SummaryView, opts: Opts) -> Vec<Line<'static>> {
     let s = &view.summary;
     let quote = quote_of(&s.pair);
-    let mut out = vec![header(s, &view.venue, size)];
-    out.extend(key_values(s, size));
-    match size {
+    let mut out = vec![header(s, &view.venue, opts.size)];
+    out.extend(key_values(s, opts));
+    match opts.size {
         Size::Full => {
             out.push(rule(&format!("Book · {quote}"), FULL_WIDTH));
-            out.extend(ladder(s));
+            out.extend(ladder(s, opts.levels));
             out.push(rule(&checks_title(s), FULL_WIDTH));
             out.extend(checks_grid(s));
         }
@@ -72,7 +131,7 @@ pub(crate) fn lines(view: &SummaryView, size: Size) -> Vec<Line<'static>> {
             ));
         }
     }
-    out.extend(problems(s, size));
+    out.extend(problems(s, opts));
     out
 }
 
@@ -131,7 +190,7 @@ fn signed_pct(v: Option<f64>) -> String {
 }
 
 /// Columns of a key-value label and of the first value.
-const LABEL_COLS: usize = 7;
+const LABEL_COLS: usize = 8;
 const VALUE_COLS: usize = 17;
 
 /// ` Label   value            Label   value`: two pairs in fixed columns.
@@ -148,33 +207,80 @@ fn two(left: (&str, String), right: (&str, String)) -> Line<'static> {
     ])
 }
 
-/// Mid, spread, best prices, depth, volume, execution cost.
-fn key_values(s: &MarketSummary, size: Size) -> Vec<Line<'static>> {
-    let dev = s.mid_price.and_then(|m| s.peg_deviation_pct(m));
-    let mid = format!("{} {}", price(s.mid_price), signed_pct(dev));
-    let mut lines = vec![two(("Mid", mid), ("Spread", pct(s.spread_pct)))];
-    if size == Size::Full {
-        lines.push(two(("Bid", price(s.best_bid)), ("Ask", price(s.best_ask))));
-    }
-    let depth = format!("{} / {}", amount(s.bid_depth), amount(s.ask_depth));
+/// Columns of a side in the bid/ask table.
+const SIDE_COLS: usize = 12;
+
+/// One row of the bid/ask table: a label, the bid value, the ask value.
+fn side_row(label: &str, bid: String, ask: String, style: Style) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!(" {:<w$} ", label, w = LABEL_COLS), SECONDARY),
+        Span::styled(format!("{bid:>w$}", w = SIDE_COLS), style),
+        Span::styled(format!("{ask:>w$}", w = SIDE_COLS), style),
+    ])
+}
+
+/// Mid and spread, volume and execution cost, then a bid/ask table: best
+/// price, depth, top-3 and top-10 depth. With the trends beside it, only
+/// what they do not chart.
+fn key_values(s: &MarketSummary, opts: Opts) -> Vec<Line<'static>> {
+    let full = opts.size == Size::Full;
     let vol = s
         .volume_24h
         .map_or_else(|| "n/a".to_string(), format_large_number);
-    lines.push(two(("Depth", depth), ("Vol 24h", vol)));
-    if size == Size::Full
-        && let (Some(buy), Some(sell)) = (&s.execution_10k_buy, &s.execution_10k_sell)
-    {
-        let side = |e: &scope::market::ExecutionEstimate| {
+    let mut lines = Vec::new();
+    if !opts.with_trends {
+        let dev = s.mid_price.and_then(|m| s.peg_deviation_pct(m));
+        let mid = format!("{} {}", price(s.mid_price), signed_pct(dev));
+        lines.push(two(("Mid", mid), ("Spread", pct(s.spread_pct))));
+    }
+    let label = |text: &str| Span::styled(format!(" {:<w$} ", text, w = LABEL_COLS), SECONDARY);
+    lines.push(Line::from(vec![label("Vol 24h"), Span::raw(vol)]));
+    if !full && !opts.with_trends {
+        let depth = format!("{} / {}", amount(s.bid_depth), amount(s.ask_depth));
+        lines.push(Line::from(vec![label("Depth"), Span::raw(depth)]));
+        return lines;
+    }
+    if !full {
+        return lines;
+    }
+    lines.push(side_row("", "bid".into(), "ask".into(), SECONDARY));
+    lines.push(side_row(
+        "Price",
+        price(s.best_bid),
+        price(s.best_ask),
+        Style::new(),
+    ));
+    // A 10K sell walks the bids; a 10K buy walks the asks.
+    if let (Some(sell), Some(buy)) = (&s.execution_10k_sell, &s.execution_10k_buy) {
+        let slip = |e: &scope::market::ExecutionEstimate| {
             if e.fillable {
-                format!("~{:.2} bps", e.slippage_bps)
+                format!("{:.2} bps", e.slippage_bps)
             } else {
                 "not fillable".to_string()
             }
         };
-        lines.push(Line::from(vec![
-            Span::styled(format!(" {:<w$} ", "Exec 10K", w = LABEL_COLS), SECONDARY),
-            Span::raw(format!("{} buy · {} sell", side(buy), side(sell))),
-        ]));
+        lines.push(side_row("Slip 10K", slip(sell), slip(buy), Style::new()));
+    }
+    if !opts.with_trends {
+        let t = &s.top_depth;
+        lines.push(side_row(
+            "Depth",
+            amount(s.bid_depth),
+            amount(s.ask_depth),
+            Style::new(),
+        ));
+        lines.push(side_row(
+            "Top-3",
+            amount(t.bid_top3),
+            amount(t.ask_top3),
+            Style::new(),
+        ));
+        lines.push(side_row(
+            "Top-10",
+            amount(t.bid_top10),
+            amount(t.ask_top10),
+            Style::new(),
+        ));
     }
     lines
 }
@@ -210,9 +316,9 @@ fn level(l: &OrderBookLevel, max: f64, style: Style, price_cols: usize) -> Line<
 
 /// Asks above (highest first), the mid line, bids below (best first), and
 /// a count of the levels and outliers left out.
-fn ladder(s: &MarketSummary) -> Vec<Line<'static>> {
-    let asks: Vec<&OrderBookLevel> = s.asks.iter().take(LADDER_LEVELS).collect();
-    let bids: Vec<&OrderBookLevel> = s.bids.iter().take(LADDER_LEVELS).collect();
+fn ladder(s: &MarketSummary, levels: usize) -> Vec<Line<'static>> {
+    let asks: Vec<&OrderBookLevel> = s.asks.iter().take(levels).collect();
+    let bids: Vec<&OrderBookLevel> = s.bids.iter().take(levels).collect();
     // One scale for both sides, so a wall on either side reads the same.
     let max = asks
         .iter()
@@ -236,8 +342,8 @@ fn ladder(s: &MarketSummary) -> Vec<Line<'static>> {
     ));
     out.extend(bids.iter().map(|l| level(l, max, OK, price_cols)));
     let mut rest = Vec::new();
-    let more_asks = s.asks.len().saturating_sub(LADDER_LEVELS);
-    let more_bids = s.bids.len().saturating_sub(LADDER_LEVELS);
+    let more_asks = s.asks.len().saturating_sub(levels);
+    let more_bids = s.bids.len().saturating_sub(levels);
     if more_asks > 0 {
         rest.push(format!("+{more_asks} asks"));
     }
@@ -309,6 +415,57 @@ fn glyph(c: &HealthCheck) -> (&'static str, Style) {
     }
 }
 
+/// A check in the grid: its name and its limit (`Spread ≤3%`,
+/// `Bid depth ≥3K`), as the value is in the key values above; a check with
+/// no limit shows its value (`Bid/Ask ratio 2.21x`).
+fn grid_text(c: &HealthCheck) -> String {
+    let message = c.message();
+    let Some((name, rest)) = message.split_once(':') else {
+        return message.to_string();
+    };
+    let name = name
+        .trim()
+        .replace("top-3 depth", "top-3")
+        .replace("top-10 depth", "top-10");
+    match limit_of(rest) {
+        Some(limit) => format!("{name} {limit}"),
+        None => short(c),
+    }
+}
+
+/// `≤3%` for `(max 3.0%)`, `≥3K` for `(min 3000)`, if the text has one.
+fn limit_of(text: &str) -> Option<String> {
+    let (sign, rest) = match text.find("(max ") {
+        Some(i) => ("≤", &text[i + 5..]),
+        None => ("≥", &text[text.find("(min ")? + 5..]),
+    };
+    let word = rest.split([')', ' ']).next()?;
+    let (num, unit) = word.split_at(
+        word.find(|c: char| !(c.is_ascii_digit() || c == '.'))
+            .unwrap_or(word.len()),
+    );
+    let v: f64 = num.parse().ok()?;
+    Some(format!("{sign}{}{unit}", compact_number(v)))
+}
+
+/// A number as short as it reads: `3K`, `2.5K`, `300`, `3`, `0.5`.
+pub(crate) fn compact_number(v: f64) -> String {
+    let trim = |s: String| {
+        if s.contains('.') {
+            s.trim_end_matches('0').trim_end_matches('.').to_string()
+        } else {
+            s
+        }
+    };
+    let (scaled, suffix) = match v.abs() {
+        a if a >= 1e9 => (v / 1e9, "B"),
+        a if a >= 1e6 => (v / 1e6, "M"),
+        a if a >= 1e3 => (v / 1e3, "K"),
+        _ => (v, ""),
+    };
+    format!("{}{suffix}", trim(format!("{scaled:.2}")))
+}
+
 /// A check in a few words: its name and the first word of its value, with
 /// a large number shortened (`Bid depth: 38544484 USDT …` is
 /// `Bid depth 38.54M`).
@@ -372,7 +529,7 @@ fn checks_grid(s: &MarketSummary) -> Vec<Line<'static>> {
             let mut spans = vec![Span::raw(" ")];
             for c in pair {
                 let (g, st) = glyph(c);
-                let text = cut(&short(c), text_cols);
+                let text = cut(&grid_text(c), text_cols);
                 let pad = text_cols.saturating_sub(text.chars().count());
                 spans.push(Span::styled(g, st));
                 spans.push(Span::raw(format!(" {text}{} ", " ".repeat(pad))));
@@ -399,8 +556,8 @@ fn cut(text: &str, cols: usize) -> String {
 
 /// The whole message of every check that did not pass, wrapped to the
 /// snapshot width under its glyph.
-fn problems(s: &MarketSummary, size: Size) -> Vec<Line<'static>> {
-    let width = match size {
+fn problems(s: &MarketSummary, opts: Opts) -> Vec<Line<'static>> {
+    let width = match opts.size {
         Size::Full => FULL_WIDTH,
         Size::Compact => FULL_WIDTH.min(60),
     };
@@ -417,7 +574,7 @@ fn problems(s: &MarketSummary, size: Size) -> Vec<Line<'static>> {
     });
     for c in checks {
         let (g, st) = glyph(c);
-        if size == Size::Compact {
+        if opts.short_problems {
             // One line each in the compact view: the pane is short.
             out.push(Line::from(vec![
                 Span::styled(format!(" {g} "), st),
@@ -547,13 +704,13 @@ mod tests {
     #[test]
     fn one_number_format_for_depths_and_sizes() {
         let t = text(&lines(&view(20, 20, 4_000_000.0), Size::Full));
-        assert!(t.contains("Depth  "), "{t}");
+        assert!(t.contains("Depth "), "{t}");
         assert!(
             t.contains("80.00M / 80.00M USDT") || t.contains("M / "),
             "{t}"
         );
         assert!(!t.contains("3999600"), "no raw large numbers: {t}");
-        assert!(t.contains("Vol 24h 3.71B"), "{t}");
+        assert!(t.contains("Vol 24h  3.71B"), "{t}");
     }
 
     #[test]
@@ -607,6 +764,53 @@ mod tests {
         );
         assert!(t.contains("Checks · "), "{t}");
         assert!(!t.contains("█"), "{t}");
+    }
+
+    #[test]
+    fn with_trends_leaves_out_what_they_chart() {
+        let v = view(20, 20, 40_000.0);
+        let t = text(&lines_with(
+            &v,
+            Opts {
+                with_trends: true,
+                ..Opts::of(Size::Full)
+            },
+        ));
+        assert!(!t.contains("Mid "), "{t}");
+        assert!(!t.contains("Depth "), "{t}");
+        assert!(!t.contains("Top-3 "), "{t}");
+        assert!(t.contains("Price ") && t.contains("Vol 24h"), "{t}");
+        // One-shot: the key values, the top depths too.
+        let t = text(&lines(&v, Size::Full));
+        assert!(
+            t.contains("Mid ") && t.contains("Top-3 ") && t.contains("Top-10 "),
+            "{t}"
+        );
+    }
+
+    #[test]
+    fn the_grid_shows_limits_not_values_shown_above() {
+        let t = text(&lines(&view(20, 20, 40_000.0), Size::Full));
+        assert!(t.contains("✓ Spread ≤3%"), "{t}");
+        assert!(t.contains("✓ Bid depth ≥3K"), "{t}");
+        assert!(t.contains("✓ Bid top-10 ≥2K"), "{t}");
+        assert!(
+            t.contains("✓ Bid/Ask ratio 1.00x"),
+            "a check with no limit shows its value: {t}"
+        );
+        assert_eq!(compact_number(300.0), "300");
+        assert_eq!(compact_number(2500.0), "2.5K");
+        assert_eq!(compact_number(0.5), "0.5");
+    }
+
+    #[test]
+    fn fit_leaves_lines_out_until_it_fits() {
+        let v = view(20, 20, 40_000.0);
+        let all = lines(&v, Size::Full);
+        let fitted = fit(&v, Opts::of(Size::Full), all.len() - 4);
+        assert!(fitted.len() <= all.len() - 4, "{}", text(&fitted));
+        assert!(text(&fitted).contains("✓ HEALTHY"), "the verdict stays");
+        assert_eq!(fit(&v, Opts::of(Size::Full), 100), all, "room: no change");
     }
 
     #[test]

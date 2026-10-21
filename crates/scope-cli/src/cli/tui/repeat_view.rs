@@ -32,7 +32,7 @@ const NUMBERS_COLS: u16 = (1 + LABEL_COLS + LIMIT_COLS + VALUE_COLS + 1) as u16;
 const TRENDS_MIN_WIDTH: u16 = NUMBERS_COLS + 1 + 20;
 
 /// The tallest chart, in rows.
-const MAX_CHART_ROWS: u16 = 3;
+const MAX_CHART_ROWS: u16 = 4;
 
 /// The words that tell the user how to leave a finished view.
 pub(crate) const LEAVE_HINT: &str = "Press any key to leave the view (the key still counts).";
@@ -218,12 +218,22 @@ fn one_line(status: Vec<Line<'static>>) -> Line<'static> {
 
 /// The snapshot of the last run: the compact market view when the run has
 /// its data, else its text report.
-fn snapshot_lines(last: Option<&RunRecord>, size: market_view::Size) -> Vec<Line<'static>> {
+/// The snapshot in at most `rows` lines when it can. The trends chart the
+/// key values, so the market view leaves them out.
+fn snapshot_lines(
+    last: Option<&RunRecord>,
+    size: market_view::Size,
+    rows: usize,
+) -> Vec<Line<'static>> {
     let Some(last) = last else {
         return Vec::new();
     };
     if let Some(view) = &last.view {
-        return market_view::lines(view, size);
+        let opts = market_view::Opts {
+            with_trends: true,
+            ..market_view::Opts::of(size)
+        };
+        return market_view::fit(view, opts, rows);
     }
     last.snapshot
         .as_str()
@@ -244,7 +254,7 @@ struct Layout2 {
 
 impl Layout2 {
     fn new(body: Rect, last: Option<&RunRecord>) -> Self {
-        let full = snapshot_lines(last, market_view::Size::Full);
+        let full = snapshot_lines(last, market_view::Size::Full, body.height as usize);
         // One blank column between the snapshot and its rule.
         let full_width = market_view::width(&full) as u16 + 1;
         let side_by_side = full_width > 0 && body.width >= full_width + 1 + TRENDS_MIN_WIDTH;
@@ -274,7 +284,7 @@ impl Layout2 {
         }
         // Stacked: the compact snapshot on top, at its height, but never
         // more than half the body; a rule; the trends under it.
-        let compact = snapshot_lines(last, market_view::Size::Compact);
+        let compact = snapshot_lines(last, market_view::Size::Compact, (body.height / 2) as usize);
         let lines = fit::fit(compact, body.width as usize);
         let rows = (lines.len() as u16).min(body.height / 2);
         if rows == 0 {
@@ -312,11 +322,39 @@ impl Layout2 {
 
 /// The limit of a metric as the trends show it: `≤3.000%`, `≥3.00K`.
 fn limit_text(metric: &Metric) -> String {
+    let n = |v: f64| {
+        let number = market_view::compact_number(v);
+        match metric.unit {
+            Unit::Percent => format!("{number}%"),
+            _ => number,
+        }
+    };
     match metric.threshold {
-        Some(Threshold::Max(v)) => format!("≤{}", format_value(metric, Some(v))),
-        Some(Threshold::Min(v)) => format!("≥{}", format_value(metric, Some(v))),
-        Some(Threshold::Target(v)) => format!("~{}", format_value(metric, Some(v))),
+        Some(Threshold::Max(v)) => format!("≤{}", n(v)),
+        Some(Threshold::Min(v)) => format!("≥{}", n(v)),
+        Some(Threshold::Target(v)) => format!("peg {}", n(v)),
         None => String::new(),
+    }
+}
+
+/// The smallest range a metric's chart shows, so noise reads as a flat
+/// line: 10 bps of the price, 0.05 percentage points, 5% of an amount.
+fn min_span(metric: &Metric, values: &[Option<f64>]) -> f64 {
+    let latest = values
+        .iter()
+        .rev()
+        .flatten()
+        .next()
+        .copied()
+        .unwrap_or(0.0)
+        .abs();
+    match metric.unit {
+        Unit::Price | Unit::Native => (latest * 0.001).max(1e-9),
+        Unit::Percent => 0.05,
+        Unit::Quote | Unit::Usd => (latest * 0.05).max(1.0),
+        Unit::Count => 1.0,
+        Unit::Score => 0.5,
+        Unit::Flag => 1.0,
     }
 }
 
@@ -377,16 +415,21 @@ fn draw_trends(f: &mut Frame, area: Rect, c: &Copy) {
     let fixed = 2 + u16::from(last_failure.is_some());
     let free = area.height.saturating_sub(fixed);
     // Q5: rows left over after one per metric make the charts taller.
-    let per_chart = match charted.len() as u16 {
-        0 => 1,
-        n => (free / n).clamp(1, MAX_CHART_ROWS),
+    // The rows that stay after an even share go one each to the first
+    // charts, so no row is left empty under the last one.
+    let n = (charted.len() as u16).max(1);
+    let per_chart = (free / n).clamp(1, MAX_CHART_ROWS);
+    let mut extra = if per_chart < MAX_CHART_ROWS {
+        free.saturating_sub(per_chart * n)
+    } else {
+        0
     };
 
     let mut y = area.y + 1;
     let healthy: Vec<bool> = c.runs.iter().map(|r| r.sample.healthy).collect();
     let failed = healthy.iter().filter(|h| !**h).count();
     let verdict = if failed == 0 {
-        "all ok".to_string()
+        "ok".to_string()
     } else {
         format!("{failed} failed")
     };
@@ -417,7 +460,9 @@ fn draw_trends(f: &mut Frame, area: Rect, c: &Copy) {
     }
 
     for (i, metric) in charted {
-        if y + per_chart > area.bottom() {
+        let rows = per_chart + u16::from(extra > 0);
+        extra = extra.saturating_sub(1);
+        if y + rows > area.bottom() {
             break;
         }
         let values: Vec<Option<f64>> = c
@@ -426,7 +471,7 @@ fn draw_trends(f: &mut Frame, area: Rect, c: &Copy) {
             .map(|r| r.sample.values.get(i).copied().flatten())
             .collect();
         let latest = values.last().copied().flatten();
-        let base = y + per_chart - 1;
+        let base = y + rows - 1;
         f.render_widget(
             Paragraph::new(numbers(
                 metric.label,
@@ -435,14 +480,15 @@ fn draw_trends(f: &mut Frame, area: Rect, c: &Copy) {
             )),
             Rect::new(area.x, base, NUMBERS_COLS, 1),
         );
-        tee(f, area.x + NUMBERS_COLS, y, per_chart);
+        tee(f, area.x + NUMBERS_COLS, y, rows);
         f.render_widget(
             Sparkline::new(&values, ACCENT)
                 .threshold(metric.threshold)
+                .min_span(min_span(metric, &values))
                 .track(),
-            Rect::new(chart_x, y, chart_w, per_chart),
+            Rect::new(chart_x, y, chart_w, rows),
         );
-        y += per_chart;
+        y += rows;
     }
 }
 
@@ -594,6 +640,77 @@ mod tests {
                 .count()
         };
         assert!(above(&tall) > above(&short), "{}", tall.join("\n"));
+    }
+
+    /// The left column of a side-by-side render, up to the rule.
+    fn left(rows: &[String]) -> Vec<String> {
+        let col = rows[1].chars().position(|c| c == '│').unwrap();
+        rows.iter().map(|r| r.chars().take(col).collect()).collect()
+    }
+
+    #[test]
+    fn test_no_value_shows_twice_beside_the_trends() {
+        let rows = render(&market(3), 120, 36);
+        let snap = left(&rows).join(
+            "
+",
+        );
+        for charted in ["Mid ", "Spread ", "Depth ", "Top-3 ", "Top-10 "] {
+            assert!(
+                !snap.lines().any(|l| l.trim_start().starts_with(charted)),
+                "{charted} is in the trends: {snap}"
+            );
+        }
+        let text = rows.join(
+            "
+",
+        );
+        assert!(
+            text.contains("Mid price") && text.contains("Bid depth"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn test_the_snapshot_fits_its_rows() {
+        // The last line of the snapshot is on screen at 120×24: it gives
+        // up ladder levels first.
+        let rows = render(&market(3), 120, 24);
+        let snap = left(&rows).join(
+            "
+",
+        );
+        assert!(snap.contains("Checks · "), "{snap}");
+        assert!(snap.contains("mid 1.000000"), "the ladder stays: {snap}");
+        // The body is the pane less the footer's rule and line.
+        let view = summary_view();
+        let opts = market_view::Opts {
+            with_trends: true,
+            ..market_view::Opts::of(market_view::Size::Full)
+        };
+        let fitted = market_view::fit(&view, opts, 22);
+        assert!(fitted.len() <= 22);
+        assert!(fitted.len() < market_view::lines_with(&view, opts).len());
+        let wanted = fitted.last().unwrap().to_string();
+        assert!(
+            snap.contains(wanted.trim()),
+            "the last line is shown: {wanted}
+{snap}"
+        );
+    }
+
+    #[test]
+    fn test_limits_are_short_and_health_says_ok() {
+        let text = render(&market(3), 120, 36).join(
+            "
+",
+        );
+        assert!(text.contains("≤3%"), "{text}");
+        assert!(text.contains("≥3K"), "{text}");
+        assert!(text.contains("peg 1 "), "{text}");
+        assert!(!text.contains("3.000%"), "{text}");
+        let health = text.lines().find(|l| l.contains("Health")).unwrap();
+        assert!(health.contains(" ok ┤"), "{health}");
     }
 
     #[test]

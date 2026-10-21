@@ -32,6 +32,7 @@ pub struct Sparkline<'a> {
     threshold: Option<Threshold>,
     style: Style,
     track: bool,
+    min_span: Option<f64>,
 }
 
 impl<'a> Sparkline<'a> {
@@ -42,7 +43,16 @@ impl<'a> Sparkline<'a> {
             threshold: None,
             style,
             track: false,
+            min_span: None,
         }
+    }
+
+    /// The smallest range the scale shows. A series that moves less than
+    /// `span` is drawn around the middle of the chart, so noise reads as a
+    /// flat line, not as full and empty bars.
+    pub fn min_span(mut self, span: f64) -> Self {
+        self.min_span = Some(span).filter(|s| s.is_finite() && *s > 0.0);
+        self
     }
 
     /// Track mode (#58 market view, J4): the bars fill a `─` track from the
@@ -94,6 +104,13 @@ impl Widget for Sparkline<'_> {
         }
         if !lo.is_finite() {
             return; // no value to draw
+        }
+        if let Some(span) = self.min_span
+            && hi - lo < span
+        {
+            let mid = (lo + hi) / 2.0;
+            lo = mid - span / 2.0;
+            hi = mid + span / 2.0;
         }
         let steps = u32::from(area.height) * STEPS_PER_ROW;
         let range = hi - lo;
@@ -247,6 +264,25 @@ mod tests {
         // The only `─` cells are the empty track on the bottom row.
         assert_eq!(buf[(2, 0)].symbol(), " ");
         assert_eq!(buf[(2, 1)].symbol(), "─");
+    }
+
+    #[test]
+    fn test_noise_under_the_min_span_reads_flat() {
+        // Depth moving 0.1% must not draw full and empty bars.
+        let values = [Some(1000.0), Some(1001.0), Some(1000.5)];
+        let rows = draw(Sparkline::new(&values, Style::new()).min_span(100.0), 3, 1);
+        let heights: Vec<usize> = rows[0]
+            .chars()
+            .map(|c| BARS.iter().position(|b| b.starts_with(c)).unwrap())
+            .collect();
+        assert!(
+            heights.iter().all(|h| (3..=4).contains(h)),
+            "near the middle: {rows:?}"
+        );
+        // A real move larger than the span still fills the scale.
+        let values = [Some(1000.0), Some(1500.0)];
+        let rows = draw(Sparkline::new(&values, Style::new()).min_span(100.0), 2, 1);
+        assert_eq!(rows[0], "▁█", "{rows:?}");
     }
 
     #[test]
