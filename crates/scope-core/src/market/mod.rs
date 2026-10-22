@@ -36,6 +36,7 @@ pub mod assets;
 pub mod fetch;
 pub mod health;
 pub mod pair;
+pub mod patterns;
 /// The metric catalog moved to [`crate::metrics`]; this path stays for one
 /// release (#47, Q6).
 #[doc(no_inline)]
@@ -78,8 +79,9 @@ pub use descriptor::VenueDescriptor;
 pub use exchange::ExchangeClient;
 #[allow(deprecated)]
 pub use fetch::{
-    DexAnalyticsSource, fetch_book_and_volume, fetch_summary, fetch_token_summary,
-    fetch_token_summary_by_name, fetch_token_summary_by_name_with_http, most_liquid,
+    DexAnalyticsSource, fetch_book_and_volume, fetch_pattern_trades, fetch_summary,
+    fetch_token_summary, fetch_token_summary_by_name, fetch_token_summary_by_name_with_http,
+    most_liquid,
 };
 pub use orderbook::{
     BookSide, BookSource, Candle, ExecutionEstimate, ExecutionSide, HealthCheck, HealthOverrides,
