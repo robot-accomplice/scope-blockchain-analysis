@@ -458,6 +458,7 @@ mod tests {
                 HealthCheck::Pass("Bid/Ask ratio: 1.20x".to_string()),
             ],
             healthy: true,
+            bot_patterns: None,
         }
     }
 

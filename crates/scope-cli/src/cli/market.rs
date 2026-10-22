@@ -342,12 +342,18 @@ pub(crate) fn market_summary_to_markdown(
 
 /// Fetches the book and volume for the summary arguments. `--chain`, when
 /// given, must name the DEX venue's chain.
+/// The book, the 24h volume, and the recent trades for the bot-pattern
+/// advisory (or why there are none).
 async fn fetch_book_and_volume(
     args: &SummaryArgs,
     thresholds: &HealthThresholds,
     factory: &dyn ChainClientFactory,
     out: &Output,
-) -> Result<(OrderBook, Option<f64>)> {
+) -> Result<(
+    OrderBook,
+    Option<f64>,
+    std::result::Result<Vec<scope::market::Trade>, String>,
+)> {
     let venue = MarketVenue::from_name_with_http(&args.venue, factory.http())?;
     if let Some(chain) = &args.chain {
         venue.require_chain(chain)?;
@@ -357,7 +363,11 @@ async fn fetch_book_and_volume(
         out,
         token: args.token_contract.clone(),
     };
-    scope::market::fetch_book_and_volume(&venue, &Pair::parse(&args.pair), thresholds, &dex).await
+    let pair = Pair::parse(&args.pair);
+    let (book, volume) =
+        scope::market::fetch_book_and_volume(&venue, &pair, thresholds, &dex).await?;
+    let trades = scope::market::fetch_pattern_trades(&venue, &pair).await;
+    Ok((book, volume, trades))
 }
 
 /// On a CEX venue, proves which token the base symbol is: a saved binding
@@ -492,8 +502,9 @@ async fn summary_run(
     run_num: Option<u64>,
     out: &Output,
 ) -> Result<(MarketSummary, String)> {
-    let (book, volume_24h) = fetch_book_and_volume(args, thresholds, factory, out).await?;
-    let summary = MarketSummary::from_order_book(&book, thresholds, volume_24h);
+    let (book, volume_24h, trades) = fetch_book_and_volume(args, thresholds, factory, out).await?;
+    let mut summary = MarketSummary::from_order_book(&book, thresholds, volume_24h);
+    summary.check_bot_patterns(trades.as_deref().map_err(String::as_str));
     let report = match args.format {
         SummaryFormat::Text => summary.format_text_with_tokens(Some(&args.venue), tokens),
         SummaryFormat::Json => {
@@ -1094,6 +1105,7 @@ capabilities:
             bid_outliers: 0,
             ask_outliers: 0,
             healthy: true,
+            bot_patterns: None,
             checks: vec![HealthCheck::Pass("Spread within range".to_string())],
             execution_10k_buy: None,
             execution_10k_sell: None,
@@ -1129,6 +1141,7 @@ capabilities:
             bid_outliers: 0,
             ask_outliers: 0,
             healthy: false,
+            bot_patterns: None,
             checks: vec![HealthCheck::Fail("No data".to_string())],
             execution_10k_buy: None,
             execution_10k_sell: None,
@@ -1319,6 +1332,7 @@ capabilities:
             bid_outliers: 0,
             ask_outliers: 0,
             healthy: true,
+            bot_patterns: None,
             checks: vec![HealthCheck::Pass("Spread within range".to_string())],
             execution_10k_buy: Some(ExecutionEstimate {
                 notional_usdt: 10_000.0,
@@ -1871,6 +1885,7 @@ capabilities:
             bid_outliers: 0,
             ask_outliers: 0,
             healthy: false,
+            bot_patterns: None,
             checks: vec![
                 HealthCheck::Pass("Spread within range".to_string()),
                 HealthCheck::Fail("Bid depth below minimum".to_string()),
@@ -1906,6 +1921,7 @@ capabilities:
             bid_outliers: 0,
             ask_outliers: 0,
             healthy: true,
+            bot_patterns: None,
             checks: vec![],
             execution_10k_buy: None,
             execution_10k_sell: None,
@@ -2084,6 +2100,7 @@ capabilities:
             bid_outliers: 0,
             ask_outliers: 0,
             healthy: false,
+            bot_patterns: None,
             checks: vec![HealthCheck::Fail("Peg deviation too high".to_string())],
             execution_10k_buy: None,
             execution_10k_sell: None,
@@ -2211,7 +2228,7 @@ capabilities:
     async fn test_dex_book_uses_most_liquid_pair() {
         // The synthetic book must come from the deepest pool, not the first one.
         let factory = dex_factory(&[(1_000.0, 10.0), (50_000.0, 777.0), (2_000.0, 20.0)]);
-        let (book, volume) = fetch_book_and_volume(
+        let (book, volume, trades) = fetch_book_and_volume(
             &dex_args(SummaryFormat::Text),
             &HealthThresholds::default(),
             &factory,
@@ -2220,6 +2237,8 @@ capabilities:
         .await
         .unwrap();
         assert_eq!(volume, Some(777.0));
+        // A DEX pool has no tape: the bot-pattern advisory says so.
+        assert_eq!(trades.unwrap_err(), "a DEX pool has no trade tape here");
         let depth = book.total_depth(scope::market::BookSide::Bid)
             + book.total_depth(scope::market::BookSide::Ask);
         assert!((depth - 50_000.0).abs() < 1.0, "depth {depth}");
@@ -2234,7 +2253,7 @@ capabilities:
         args.venue = "sol".to_string();
         let result =
             fetch_book_and_volume(&args, &HealthThresholds::default(), &factory, &quiet()).await;
-        let (book, volume) = result.unwrap();
+        let (book, volume, _trades) = result.unwrap();
         assert_eq!(volume, Some(777.0));
         assert_eq!(book.pair, "USDC/USD");
     }
@@ -2329,13 +2348,20 @@ capabilities:
             .iter()
             .map(|c| c["status"].as_str().unwrap())
             .collect();
+        // Three book checks, and the bot-pattern advisory: a pool has no
+        // tape, and its curve is an even ladder by design.
         assert_eq!(
             statuses.iter().filter(|s| **s == "n/a").count(),
-            3,
+            4,
             "{:?}",
             statuses
         );
         assert!(!statuses.contains(&"fail"));
+        assert_eq!(
+            v["checks"].as_array().unwrap().last().unwrap()["message"],
+            "Bot patterns: not checked (a DEX pool has no trade tape here)"
+        );
+        assert_eq!(v["bot_patterns"]["book_checked"], false);
     }
 
     #[tokio::test]
