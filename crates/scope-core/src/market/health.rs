@@ -7,7 +7,7 @@ use crate::display::format_large_number;
 use std::ops::Bound;
 
 use super::types::{
-    BookSide, BookSource, ExecutionEstimate, HealthCheck, OrderBook, OrderBookLevel,
+    BookSide, BookSource, ExecutionEstimate, HealthCheck, OrderBook, OrderBookLevel, Trade,
 };
 use serde::{Deserialize, Serialize};
 
@@ -386,6 +386,9 @@ pub struct MarketSummary {
     pub checks: Vec<HealthCheck>,
     /// Overall healthy (no failures).
     pub healthy: bool,
+    /// The bot-pattern advisory, once [`MarketSummary::check_bot_patterns`]
+    /// ran. Its line is also in `checks`; it never fails the summary.
+    pub bot_patterns: Option<super::patterns::BotPatterns>,
 }
 
 impl MarketSummary {
@@ -638,7 +641,20 @@ impl MarketSummary {
             bid_depth,
             checks,
             healthy,
+            bot_patterns: None,
         }
+    }
+
+    /// Adds the bot-pattern advisory: repeated sizes, metronome timing and
+    /// ping-pong in `trades` (the venue's recent tape, or why there is
+    /// none), and ladder quotes in a real exchange book. A finding warns, so
+    /// `healthy` does not change.
+    pub fn check_bot_patterns(&mut self, trades: std::result::Result<&[Trade], &str>) {
+        let book = (self.source == BookSource::Exchange)
+            .then_some((self.bids.as_slice(), self.asks.as_slice()));
+        let found = super::patterns::detect(trades, book);
+        self.checks.push(found.check());
+        self.bot_patterns = Some(found);
     }
 
     /// The one JSON shape for a summary. The web API and both CLI commands
@@ -686,6 +702,7 @@ impl MarketSummary {
             "bids": levels(&self.bids),
             "asks": levels(&self.asks),
             "checks": &self.checks,
+            "bot_patterns": &self.bot_patterns,
         })
     }
 
