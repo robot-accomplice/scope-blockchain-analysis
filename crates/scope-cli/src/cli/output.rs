@@ -73,7 +73,20 @@ pub struct RunRecord {
     pub sample: Sample,
     /// The report the run printed in the CLI.
     pub snapshot: String,
+    /// The run's data, for a screen that draws its own view of it.
+    pub view: Option<Arc<SummaryView>>,
 }
+
+/// A market summary, for a screen that draws it (the TUI's compact view).
+#[derive(Debug, Clone)]
+pub struct SummaryView {
+    pub summary: scope::market::MarketSummary,
+    /// The venue the summary is for.
+    pub venue: String,
+}
+
+/// The view a pane command left for the screen (one-shot `market summary`).
+pub type ViewHook = Arc<Mutex<Option<SummaryView>>>;
 
 /// The runs a screen keeps, oldest first, and the metric table they read in.
 #[derive(Debug, Default)]
@@ -119,6 +132,8 @@ pub struct Output {
     prompts: bool,
     /// The TUI's ask slot, when the TUI pane shows this output.
     asker: Option<Asker>,
+    /// The view slot, when a screen draws the command's data itself.
+    view: Option<ViewHook>,
 }
 
 impl Output {
@@ -134,6 +149,7 @@ impl Output {
             tui: false,
             prompts: true,
             asker: None,
+            view: None,
         }
     }
 
@@ -159,6 +175,7 @@ impl Output {
             tui: false,
             prompts: false,
             asker: None,
+            view: None,
         };
         (output, captured)
     }
@@ -191,6 +208,7 @@ impl Output {
             tui: true,
             prompts: false,
             asker: None,
+            view: Some(ViewHook::default()),
         };
         (output, captured)
     }
@@ -236,6 +254,7 @@ impl Output {
             tui: true,
             prompts: self.prompts,
             asker: None,
+            view: None,
         };
         (output, captured)
     }
@@ -255,6 +274,7 @@ impl Output {
             tui: false,
             prompts: true,
             asker: None,
+            view: None,
         }
     }
 
@@ -303,6 +323,21 @@ impl Output {
     /// pane output has one; the plain CLI output does not.
     pub fn series_hook(&self) -> Option<SeriesHook> {
         self.series.clone()
+    }
+
+    /// The view slot, when a screen draws the command's data (the TUI).
+    pub fn view_hook(&self) -> Option<ViewHook> {
+        self.view.clone()
+    }
+
+    /// Hands the command's data to the screen. Returns false when no screen
+    /// draws it (the CLI); the printed report is then all there is.
+    pub fn record_view(&self, view: SummaryView) -> bool {
+        let Some(slot) = &self.view else {
+            return false;
+        };
+        *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(view);
+        true
     }
 
     /// Hands one run to the screen's series. Returns false when there is no

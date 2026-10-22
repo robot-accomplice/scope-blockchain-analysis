@@ -70,6 +70,8 @@ pub struct RunOutput<T> {
     pub snapshot: String,
     /// The command's own result of the run (for example for `--report`).
     pub value: T,
+    /// The run's data, for a screen that draws its own view of it.
+    pub view: Option<crate::cli::output::SummaryView>,
 }
 
 /// Runs `step` on `schedule` and returns the last run's value.
@@ -133,6 +135,7 @@ where
             at,
             sample: output.sample,
             snapshot: output.snapshot.clone(),
+            view: output.view.map(std::sync::Arc::new),
         };
         if !out.record_run(metrics, record) {
             out!(out, "{}", output.snapshot)?;
@@ -192,6 +195,7 @@ mod tests {
                 failed_checks: vec![],
             },
             snapshot: format!("report {run}\n"),
+            view: None,
             value: run,
         }
     }
@@ -395,6 +399,7 @@ mod tests {
                     at: chrono::Utc::now(),
                     sample: o.sample,
                     snapshot: o.snapshot,
+                    view: None,
                 },
             );
         }

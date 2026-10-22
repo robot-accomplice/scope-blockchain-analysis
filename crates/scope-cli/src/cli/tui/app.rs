@@ -10,6 +10,7 @@ use super::exec::{self, Invocation, Plan, Route};
 use super::fit;
 use super::grid::{self, GridAction, GridMsg, GridState};
 use super::journal::{Event, Journal};
+use super::market_view;
 use super::repeat_view::{self, Ended, RepeatView};
 use super::vocab::Vocab;
 use super::wizard::{self, WizardAction, WizardState};
@@ -1716,7 +1717,7 @@ impl TuiState {
             }
             Ending::Finished(Ok(())) => (format!("✓ Done in {:.1}s.", secs), OK),
         };
-        match run.series.filter(repeat_view::has_runs) {
+        match run.series.clone().filter(repeat_view::has_runs) {
             // A repeating run keeps its view, with the footer, until the next
             // key. Ctrl-Y and save take its final snapshot and its series.
             Some(series) => {
@@ -1734,7 +1735,7 @@ impl TuiState {
             }
             None => {
                 self.keep_copy(&run.captured, &ending);
-                self.push_ansi(&run.captured.out());
+                self.push_output(&run, &ending);
                 self.push_styled_note(&footer, style);
             }
         }
@@ -1747,6 +1748,32 @@ impl TuiState {
             outcome: outcome.into(),
             error,
         });
+    }
+
+    /// Puts a finished pane command's output in the scrollback. A command
+    /// that left its data for the screen (`market summary`) shows the
+    /// compact view in place of its text report; its notes stay. Ctrl-Y and
+    /// `save` still take the text report (`keep_copy`).
+    fn push_output(&mut self, run: &Running, ending: &Ending) {
+        let merged = run.captured.out();
+        let view = run
+            .out
+            .view_hook()
+            .and_then(|h| h.lock().unwrap_or_else(|e| e.into_inner()).take());
+        match view {
+            Some(view) if matches!(ending, Ending::Finished(Ok(()))) => {
+                let data = run.captured.data();
+                let notes = if data.is_empty() {
+                    merged
+                } else {
+                    merged.replacen(&data, "", 1)
+                };
+                let size = market_view::Size::for_width(self.pane_width().unwrap_or(80));
+                self.push_lines(market_view::lines(&view, size));
+                self.push_ansi(&notes);
+            }
+            _ => self.push_ansi(&merged),
+        }
     }
 
     /// Leaves a finished repeating view: the scrollback gets one copy of
@@ -2869,9 +2896,65 @@ mod tests {
                         failed_checks: vec![format!("spread {run}%")],
                     },
                     snapshot: format!("SNAPSHOT {run}\n"),
+                    view: None,
                 },
             );
         }
+    }
+
+    #[test]
+    fn test_a_one_shot_market_summary_shows_the_compact_view_and_copies_the_text() {
+        // Q4 (2026-10-21): the scrollback gets the compact view; Ctrl-Y and
+        // `save` keep the CLI text report. Notes stay.
+        use scope::market::{BookSource, MarketSummary, OrderBook, OrderBookLevel};
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let mut s = state();
+        let inv = Invocation {
+            command: venues_list(),
+            route: Route::Pane,
+            ai: false,
+            argv: vec![],
+        };
+        let out = s.start("market summary USDC --venue binance", &inv);
+        crate::note!(out, "Using the saved token choice");
+        crate::out!(
+            out,
+            "CLI REPORT
+Bid Side — 20 levels
+"
+        )
+        .unwrap();
+        let level = |price: f64| OrderBookLevel {
+            price,
+            quantity: 1000.0,
+        };
+        let book = OrderBook {
+            pair: "USDC/USDT".to_string(),
+            source: BookSource::Exchange,
+            bids: vec![level(0.9999)],
+            asks: vec![level(1.0001)],
+        };
+        assert!(out.record_view(crate::cli::output::SummaryView {
+            summary: MarketSummary::from_order_book(
+                &book,
+                &scope::market::HealthThresholds::default(),
+                None
+            ),
+            venue: "binance".to_string(),
+        }));
+        s.finish(Ending::Finished(Ok(())));
+        let shown = s.scrollback_text();
+        assert!(shown.contains("USDC/USDT · binance"), "{shown}");
+        assert!(!shown.contains("CLI REPORT"), "{shown}");
+        assert!(shown.contains("Using the saved token choice"), "{shown}");
+        assert_eq!(
+            s.last_output.as_deref(),
+            Some(
+                "CLI REPORT
+Bid Side — 20 levels
+"
+            )
+        );
     }
 
     #[test]

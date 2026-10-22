@@ -158,6 +158,7 @@ pub async fn run(
                 failed_checks: failed,
             },
             snapshot: String::new(),
+            view: None,
             value: t,
         })
     })

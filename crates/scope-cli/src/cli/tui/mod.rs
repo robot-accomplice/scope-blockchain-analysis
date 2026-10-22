@@ -37,6 +37,7 @@ pub mod fit;
 pub mod grid;
 pub mod hint;
 pub mod journal;
+pub(crate) mod market_view;
 pub mod palette;
 pub(crate) mod repeat_view;
 pub mod vocab;
