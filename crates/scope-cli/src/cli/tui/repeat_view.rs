@@ -411,8 +411,10 @@ fn draw_trends(f: &mut Frame, area: Rect, c: &Copy) {
         .filter(|(_, m)| charted(m.id))
         .collect();
     let last_failure = c.runs.iter().rev().find(|r| !r.sample.healthy);
-    // Rows: the header, health (and its last failure), then the charts.
-    let fixed = 2 + u16::from(last_failure.is_some());
+    // Rows: the header, health (and its last failure), the charts, then
+    // the time axis under them.
+    let axis = !c.runs.is_empty();
+    let fixed = 2 + u16::from(last_failure.is_some()) + u16::from(axis);
     let free = area.height.saturating_sub(fixed);
     // Q5: rows left over after one per metric make the charts taller.
     // The rows that stay after an even share go one each to the first
@@ -489,6 +491,80 @@ fn draw_trends(f: &mut Frame, area: Rect, c: &Copy) {
             Rect::new(chart_x, y, chart_w, rows),
         );
         y += rows;
+    }
+
+    // The time axis under the charts, in local time: when the runs shown
+    // start, how long they span, and the latest run under its bar.
+    if axis && y < area.bottom() {
+        let now = chrono::Local::now();
+        f.render_widget(
+            Paragraph::new(numbers(&axis_label(now.offset()), "", "")),
+            Rect::new(area.x, y, NUMBERS_COLS, 1),
+        );
+        f.render_widget(
+            Paragraph::new(Line::styled(
+                time_axis(&c.runs, chart_w, &chrono::Local),
+                SECONDARY,
+            )),
+            Rect::new(chart_x, y, chart_w, 1),
+        );
+    }
+}
+
+/// The axis label: the time zone the axis times are in.
+fn axis_label(offset: &impl chrono::Offset) -> String {
+    let secs = offset.fix().local_minus_utc();
+    if secs == 0 {
+        "Time (UTC)".to_string()
+    } else {
+        format!(
+            "Time (UTC{}{:02}:{:02})",
+            if secs < 0 { '-' } else { '+' },
+            secs.abs() / 3600,
+            secs.abs() % 3600 / 60
+        )
+    }
+}
+
+/// A span of time in short form: `45s`, `2m 30s`, `1h 05m`.
+fn short_span(span: chrono::TimeDelta) -> String {
+    let s = span.num_seconds().max(0);
+    match s {
+        0..60 => format!("{s}s"),
+        60..3600 => format!("{}m {:02}s", s / 60, s % 60),
+        _ => format!("{}h {:02}m", s / 3600, s % 3600 / 60),
+    }
+}
+
+/// The time axis under a track `width` cells wide. The track fills from
+/// the left, one cell per run, and scrolls when full, so the axis shows
+/// the newest `width` runs the same way: the first one's clock time at
+/// the left, the latest's ending under its bar, and the span between
+/// them. What does not fit is left out: the span first, then the start.
+fn time_axis<Tz: chrono::TimeZone>(runs: &[RunRecord], width: u16, tz: &Tz) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let shown = &runs[runs.len().saturating_sub(width as usize)..];
+    let (Some(first), Some(last)) = (shown.first(), shown.last()) else {
+        return String::new();
+    };
+    let clock = |r: &RunRecord| r.at.with_timezone(tz).format("%H:%M:%S").to_string();
+    let (start, end) = (clock(first), clock(last));
+    let filled = shown.len();
+    if filled < start.len() + end.len() + 1 {
+        // Only the latest time: ending under the newest bar when it can.
+        let lead = filled.saturating_sub(end.len());
+        return format!("{}{end}", " ".repeat(lead));
+    }
+    let mid = short_span(last.at - first.at);
+    let gap = filled - start.len() - end.len();
+    if gap >= mid.len() + 2 {
+        let left = (gap - mid.len()) / 2;
+        let right = gap - mid.len() - left;
+        format!("{start}{}{mid}{}{end}", " ".repeat(left), " ".repeat(right))
+    } else {
+        format!("{start}{}{end}", " ".repeat(gap))
     }
 }
 
@@ -825,5 +901,109 @@ mod tests {
             "1.50M"
         );
         assert_eq!(format_value(by(MetricId::Mid), None), "n/a");
+    }
+
+    /// `n` runs, `every` seconds apart from 10:00:00 UTC.
+    fn runs_every(n: u64, every: i64) -> Vec<RunRecord> {
+        use chrono::TimeZone;
+        let t0 = chrono::Utc
+            .with_ymd_and_hms(2026, 10, 22, 10, 0, 0)
+            .unwrap();
+        (0..n)
+            .map(|i| RunRecord {
+                run: i + 1,
+                at: t0 + chrono::TimeDelta::seconds(i as i64 * every),
+                sample: Sample {
+                    values: vec![],
+                    healthy: true,
+                    failed_checks: vec![],
+                },
+                snapshot: String::new(),
+                view: None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_the_time_axis_starts_at_the_first_bar_and_ends_under_the_newest() {
+        // 31 runs, 5s apart, on a 40-cell track: they fill cells 0-30.
+        let axis = time_axis(&runs_every(31, 5), 40, &chrono::Utc);
+        assert!(axis.starts_with("10:00:00"), "{axis:?}");
+        assert!(axis.contains(" 2m 30s "), "{axis:?}");
+        assert_eq!(
+            axis.chars().count(),
+            31,
+            "ends under the newest bar: {axis:?}"
+        );
+        assert!(axis.ends_with("10:02:30"), "{axis:?}");
+    }
+
+    #[test]
+    fn test_a_full_track_shows_the_newest_runs_that_fit() {
+        // 100 runs, 60s apart, 30 cells: the newest 30 (runs 71-100).
+        let axis = time_axis(&runs_every(100, 60), 30, &chrono::Utc);
+        assert_eq!(axis, "11:10:00   29m 00s    11:39:00");
+    }
+
+    #[test]
+    fn test_few_runs_show_only_the_latest_time() {
+        // Room for both times needs 17 cells; with fewer, only the latest,
+        // ending under its bar when it can.
+        assert_eq!(time_axis(&runs_every(1, 5), 40, &chrono::Utc), "10:00:00");
+        assert_eq!(time_axis(&runs_every(3, 5), 40, &chrono::Utc), "10:00:10");
+        assert_eq!(
+            time_axis(&runs_every(16, 5), 40, &chrono::Utc),
+            format!("{}10:01:15", " ".repeat(8))
+        );
+        assert_eq!(time_axis(&[], 40, &chrono::Utc), "");
+    }
+
+    #[test]
+    fn test_axis_times_are_in_the_given_zone_and_the_label_names_it() {
+        let cet = chrono::FixedOffset::east_opt(2 * 3600).unwrap();
+        let axis = time_axis(&runs_every(31, 5), 40, &cet);
+        assert!(
+            axis.starts_with("12:00:00") && axis.ends_with("12:02:30"),
+            "{axis:?}"
+        );
+        assert_eq!(
+            axis_label(&chrono::FixedOffset::east_opt(0).unwrap()),
+            "Time (UTC)"
+        );
+        assert_eq!(axis_label(&cet), "Time (UTC+02:00)");
+        let west = chrono::FixedOffset::west_opt(5 * 3600 + 1800).unwrap();
+        assert_eq!(axis_label(&west), "Time (UTC-05:30)");
+    }
+
+    #[test]
+    fn test_short_spans() {
+        let s = |secs| short_span(chrono::TimeDelta::seconds(secs));
+        assert_eq!(s(45), "45s");
+        assert_eq!(s(150), "2m 30s");
+        assert_eq!(s(3_900), "1h 05m");
+    }
+
+    #[test]
+    fn test_the_trends_end_with_the_time_axis_under_the_charts() {
+        let rows = render(&view(3, &[]), 120, 36);
+        let text = rows.join(
+            "
+",
+        );
+        let axis = rows
+            .iter()
+            .position(|r| r.contains("Time (UTC"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "no axis:
+{text}"
+                )
+            });
+        let last_chart = rows.iter().rposition(|r| r.contains('┤')).unwrap();
+        assert!(
+            axis > last_chart,
+            "the axis is under the charts:
+{text}"
+        );
     }
 }
