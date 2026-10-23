@@ -76,6 +76,7 @@ pub async fn read_target(
                         rule: None,
                         value: None,
                         status: RuleStatus::Error(e.clone()),
+                        detail: None,
                     });
                 }
                 market = Some(Err(e));
@@ -115,6 +116,7 @@ pub async fn read_target(
             rule: Some(*rule),
             value,
             status,
+            detail: None,
         });
     }
     TargetReading {

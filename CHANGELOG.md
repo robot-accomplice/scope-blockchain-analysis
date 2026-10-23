@@ -36,6 +36,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The old monitor dashboard: `scope monitor --dashboard` opens it for one more release. `--layout`, `--scale` and `--color-scheme` work only with it; `--export` is now `--csv`. The price bounds of `monitor.alerts` become watchlist rules; the whale and volume-spike alerts have no metric yet (#122).
 
 ### Fixed
+- In a watchlist, a market-health check that passes keeps its value and its text: the CSV has them (`value`, and a new `detail` column) and the detail pane shows them. Before, a passing check showed `-`.
+- In the TUI (watchlist grid, market view, repeating view), a tiny price keeps its digits: PEPE at 0.0000106 read as `0`. Prices follow the one precision rule (`price_decimals`).
 - The Ghola install hint now names `go install github.com/robot-accomplice/ghola/cmd/ghola@latest`.
 - `--token <address>` without `--chain` takes the chain from the address format, as a positional address does. (#108)
 - A saved native coin (a CEX pick with no contract) no longer shows as an empty contract ("your saved token is , but …"); messages say "its native coin". (#108)
