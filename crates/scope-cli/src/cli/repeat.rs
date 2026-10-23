@@ -114,6 +114,7 @@ where
     let mut slot = start;
     let mut run: u64 = 1;
     loop {
+        let began = Clock::now();
         out.update_progress(|p| {
             p.run = run;
             p.next_at = None;
@@ -142,8 +143,11 @@ where
         }
         let last = output.value;
 
-        if let Some(duration) = schedule.duration
-            && start.elapsed() >= duration
+        // The repeat ends after the run that starts at the end, not after
+        // any run that finishes past it: a run that crosses the end is
+        // followed at once by the last run, so the count meets `total()`.
+        if let (Some(duration), Some(end)) = (schedule.duration, end)
+            && began >= end
         {
             note!(
                 out,
@@ -383,6 +387,53 @@ mod tests {
         let cost = |n| Duration::from_millis(if n == 1 { 3_500 } else { 100 });
         let starts = start_times(schedule, cost).await;
         assert_eq!(starts, vec![0, 3_500, 4_500, 5_500, 6_000]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_a_run_that_reaches_the_end_still_gets_the_last_run() {
+        // Every 1 s for 1 s: a first run of 1 s or more used to end the
+        // repeat after one run while `total()` said 2. The last run starts
+        // at the end, or at once when run 1 finishes past it.
+        let schedule = Schedule::new(Duration::from_secs(1), Duration::from_secs(1)).unwrap();
+        for (cost, second) in [(5, 1_000), (999, 1_000), (1_000, 1_000), (2_500, 2_500)] {
+            let starts = start_times(schedule, |n| {
+                Duration::from_millis(if n == 1 { cost } else { 10 })
+            })
+            .await;
+            assert_eq!(starts, vec![0, second], "first run of {cost} ms");
+            assert_eq!(Some(starts.len() as u64), schedule.total());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_a_run_that_crosses_the_end_is_followed_by_one_last_run() {
+        // Every 2 s for 5 s: runs at 0, 2 and 4; run 3 takes 1.5 s and ends
+        // past 5 s, so the last run starts at once and nothing follows it.
+        let schedule = Schedule::new(Duration::from_secs(2), Duration::from_secs(5)).unwrap();
+        let cost = |n| Duration::from_millis(if n == 3 { 1_500 } else { 100 });
+        let starts = start_times(schedule, cost).await;
+        assert_eq!(starts, vec![0, 2_000, 4_000, 5_500]);
+        assert_eq!(Some(starts.len() as u64), schedule.total());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_progress_reaches_the_total_when_a_run_crosses_the_end() {
+        // `run N of M` must end at M = N, not stop one short.
+        let m = metrics();
+        let (out, _cap) = Output::capture_merged();
+        let schedule = Schedule::new(Duration::from_secs(1), Duration::from_secs(1)).unwrap();
+        run(&schedule, &m, None, &out, |n| {
+            let o = output(n, &m);
+            async move {
+                tokio::time::sleep(Duration::from_millis(1_200)).await;
+                Ok(o)
+            }
+        })
+        .await
+        .unwrap();
+        let progress = out.progress_hook().unwrap().lock().unwrap().clone();
+        assert_eq!(progress.total, Some(2));
+        assert_eq!(progress.run, 2);
     }
 
     #[test]
