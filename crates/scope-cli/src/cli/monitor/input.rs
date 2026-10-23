@@ -57,7 +57,7 @@ impl MonitorApp {
         chain_client: Option<Box<dyn ChainClient>>,
         exchange_client: Option<scope::market::ExchangeClient>,
     ) -> Result<Self> {
-        let terminal = screen::enter(screen::Mouse::Capture)?;
+        let terminal = screen::enter()?;
 
         let mut state = MonitorState::new(&initial_data, chain);
         state.apply_config(monitor_config);

@@ -1,8 +1,9 @@
 //! # Screen
 //!
 //! The one owner of the full-screen terminal for the TUI and the monitor.
-//! [`enter`] takes it: raw mode, the alternate screen, bracketed paste and,
-//! for the monitor, mouse capture. [`restore`] gives it back. The first
+//! [`enter`] takes it: raw mode, the alternate screen, bracketed paste and
+//! mouse capture (the TUI's wheel scrolls its output; the monitor reads
+//! clicks). [`restore`] gives it back. The first
 //! [`enter`] installs one panic hook that restores the terminal; later
 //! calls (a TUI resume, a second monitor run) install no more.
 //!
@@ -13,13 +14,6 @@ use scope::error::{Result, ScopeError};
 use std::io::{self, Write};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
-
-/// Whether the screen reports mouse events. Only the monitor uses them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Mouse {
-    Off,
-    Capture,
-}
 
 /// The state of the screen: whether it is held, and whether the restore
 /// hook is in. One process-wide value ([`SCREEN`]); tests make their own.
@@ -48,7 +42,6 @@ impl Lifecycle {
         &self,
         w: &mut impl Write,
         raw_mode: impl FnOnce() -> io::Result<()>,
-        mouse: Mouse,
         install_hook: impl FnOnce(),
     ) -> io::Result<()> {
         self.hook.get_or_init(install_hook);
@@ -56,9 +49,7 @@ impl Lifecycle {
         self.held.store(true, Ordering::SeqCst);
         crossterm::execute!(w, crossterm::terminal::EnterAlternateScreen)?;
         paste_mode(w, true);
-        if mouse == Mouse::Capture {
-            crossterm::execute!(w, crossterm::event::EnableMouseCapture)?;
-        }
+        crossterm::execute!(w, crossterm::event::EnableMouseCapture)?;
         Ok(())
     }
 
@@ -80,12 +71,11 @@ impl Lifecycle {
 ///
 /// [`not_taken`] with the terminal error (no tty, mouse capture refused).
 /// The screen is given back first, so the caller does not have to.
-pub(crate) fn enter(mouse: Mouse) -> Result<ratatui::DefaultTerminal> {
+pub(crate) fn enter() -> Result<ratatui::DefaultTerminal> {
     take_screen(
         &SCREEN,
         &mut io::stdout(),
         crossterm::terminal::enable_raw_mode,
-        mouse,
     )
     .and_then(|()| {
         ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(io::stdout()))
@@ -105,10 +95,9 @@ fn take_screen(
     lifecycle: &Lifecycle,
     w: &mut impl Write,
     raw_mode: impl FnOnce() -> io::Result<()>,
-    mouse: Mouse,
 ) -> Result<()> {
     lifecycle
-        .take(w, raw_mode, mouse, install_restore_hook)
+        .take(w, raw_mode, install_restore_hook)
         .map_err(not_taken)
 }
 
@@ -164,24 +153,16 @@ mod tests {
         // uses its own lifecycle and a counting installer: no real hook.
         let screen = Lifecycle::new();
         let installs = Cell::new(0);
-        for mouse in [Mouse::Off, Mouse::Capture, Mouse::Off, Mouse::Capture] {
+        for _ in 0..4 {
             let mut out = Vec::new();
             screen
-                .take(
-                    &mut out,
-                    || Ok(()),
-                    mouse,
-                    || installs.set(installs.get() + 1),
-                )
+                .take(&mut out, || Ok(()), || installs.set(installs.get() + 1))
                 .unwrap();
             assert!(out.starts_with(ALT_SCREEN_AND_PASTE), "{out:?}");
-            // On Windows crossterm turns the mouse on through the console
-            // API, so no bytes show it.
-            assert_eq!(
-                out.ends_with(MOUSE_ON),
-                mouse == Mouse::Capture && !cfg!(windows),
-                "mouse capture only for the monitor"
-            );
+            // Every take captures the mouse (the TUI's wheel scrolls). On
+            // Windows crossterm turns it on through the console API, so no
+            // bytes show it.
+            assert_eq!(out.ends_with(MOUSE_ON), !cfg!(windows), "{out:?}");
             screen.give_back(&mut Vec::new(), || {});
         }
         assert_eq!(installs.get(), 1);
@@ -191,9 +172,7 @@ mod tests {
     fn test_give_back_acts_once_per_take() {
         let screen = Lifecycle::new();
         let leaves = Cell::new(0);
-        screen
-            .take(&mut Vec::new(), || Ok(()), Mouse::Capture, || {})
-            .unwrap();
+        screen.take(&mut Vec::new(), || Ok(()), || {}).unwrap();
         let mut first = Vec::new();
         screen.give_back(&mut first, || leaves.set(leaves.get() + 1));
         assert!(
@@ -211,13 +190,8 @@ mod tests {
         // The TUI and the monitor show the same words for a terminal
         // they cannot take.
         let screen = Lifecycle::new();
-        let e = take_screen(
-            &screen,
-            &mut Vec::new(),
-            || Err(io::Error::other("no tty")),
-            Mouse::Capture,
-        )
-        .unwrap_err();
+        let e =
+            take_screen(&screen, &mut Vec::new(), || Err(io::Error::other("no tty"))).unwrap_err();
         assert!(matches!(&e, ScopeError::IoError(io) if io.kind() == io::ErrorKind::Other));
         assert_eq!(e.to_string(), "I/O error: cannot take the terminal: no tty");
     }
@@ -227,12 +201,7 @@ mod tests {
         let screen = Lifecycle::new();
         let mut out = Vec::new();
         let e = screen
-            .take(
-                &mut out,
-                || Err(io::Error::other("no tty")),
-                Mouse::Off,
-                || {},
-            )
+            .take(&mut out, || Err(io::Error::other("no tty")), || {})
             .unwrap_err();
         assert_eq!(e.to_string(), "no tty");
         assert!(out.is_empty());
@@ -256,9 +225,7 @@ mod tests {
         // The monitor returns this error to the user; `enter` gives the
         // screen back before it does.
         let screen = Lifecycle::new();
-        let e = screen
-            .take(&mut Refusing, || Ok(()), Mouse::Capture, || {})
-            .unwrap_err();
+        let e = screen.take(&mut Refusing, || Ok(()), || {}).unwrap_err();
         assert_eq!(e.to_string(), "refused");
         let left = Cell::new(false);
         screen.give_back(&mut Vec::new(), || left.set(true));

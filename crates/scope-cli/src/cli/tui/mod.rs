@@ -44,7 +44,7 @@ pub mod vocab;
 pub mod wizard;
 
 use app::{Action, Ending, TuiState, run_invocation};
-use crossterm::event::{Event, EventStream, KeyEventKind};
+use crossterm::event::{Event, EventStream, KeyEventKind, MouseEventKind};
 use exec::{Plan, Route, WatchCommand};
 use futures::StreamExt;
 use futures::stream::BoxStream;
@@ -203,7 +203,9 @@ pub async fn run_with(
     // return an error before `session`, which restores the terminal.
     crash::install_panic_hook();
     let mut host = RealHost {
-        terminal: screen::enter(screen::Mouse::Off)?,
+        // The mouse wheel scrolls the output. Selecting text with the mouse
+        // then takes Shift+drag (Ctrl-Y copies the last output).
+        terminal: screen::enter()?,
         events: None,
         signals,
         on_screen: true,
@@ -379,7 +381,7 @@ impl Host for RealHost {
         self.restore();
     }
     fn resume(&mut self) -> Result<()> {
-        self.terminal = screen::enter(screen::Mouse::Off)?;
+        self.terminal = screen::enter()?;
         self.on_screen = true;
         Ok(())
     }
@@ -447,6 +449,9 @@ impl Outside {
 
 type PaneFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + 'a>>;
 
+/// Rows one notch of the mouse wheel scrolls.
+const WHEEL_ROWS: isize = 3;
+
 /// After `setup` in the TUI: the session read the config again.
 const SETUP_RELOADED_NOTE: &str = "The TUI now uses the saved settings.";
 
@@ -484,6 +489,9 @@ async fn event_loop<H: Host>(
     // True after the TUI stopped itself: the SIGCONT that continues it
     // needs no second set-up.
     let mut cont_expected = false;
+    // True after an event that changed nothing (a mouse move): the screen
+    // is not drawn again for it.
+    let mut unchanged = false;
 
     loop {
         drain_into(&idle_buf, state);
@@ -495,16 +503,18 @@ async fn event_loop<H: Host>(
         // A question from the running command opens as a list. The live
         // tick wakes the loop while a command runs, so it shows within one.
         state.poll_ask();
-        host.terminal()
-            .draw(|f| {
-                state.render(f);
-                crate::cli::plain::finish_frame(f);
-            })
-            // The backend's error type is generic and need not be Send, so
-            // only its text can travel.
-            .map_err(|e| {
-                ScopeError::io_context(io::Error::other(e.to_string()), "terminal draw failed")
-            })?;
+        if !std::mem::take(&mut unchanged) {
+            host.terminal()
+                .draw(|f| {
+                    state.render(f);
+                    crate::cli::plain::finish_frame(f);
+                })
+                // The backend's error type is generic and need not be Send,
+                // so only its text can travel.
+                .map_err(|e| {
+                    ScopeError::io_context(io::Error::other(e.to_string()), "terminal draw failed")
+                })?;
+        }
         // Command output fits the pane. Set after each draw, so it follows
         // a resize and comes back after the TUI leaves the terminal.
         host.set_width(state.pane_width());
@@ -551,6 +561,16 @@ async fn event_loop<H: Host>(
                     Some(Ok(Event::Key(k))) if k.kind == KeyEventKind::Press => k,
                     Some(Ok(Event::Paste(text))) => {
                         state.paste(&text);
+                        continue;
+                    }
+                    // The wheel scrolls the output; a click or a move does
+                    // nothing, and is not worth a redraw.
+                    Some(Ok(Event::Mouse(m))) => {
+                        match m.kind {
+                            MouseEventKind::ScrollUp => state.wheel(WHEEL_ROWS),
+                            MouseEventKind::ScrollDown => state.wheel(-WHEEL_ROWS),
+                            _ => unchanged = true,
+                        }
                         continue;
                     }
                     Some(Ok(_)) => continue,
@@ -1145,6 +1165,51 @@ mod tests {
 
     fn press(code: KeyCode) -> io::Result<Event> {
         Ok(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)))
+    }
+
+    /// A mouse event of `kind` at the top-left cell.
+    fn mouse(kind: MouseEventKind) -> io::Result<Event> {
+        Ok(Event::Mouse(crossterm::event::MouseEvent {
+            kind,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }))
+    }
+
+    #[tokio::test]
+    async fn test_the_wheel_scrolls_and_a_mouse_move_draws_nothing() {
+        let _lock = DIAG_LOCK.lock().await;
+        // `help` is longer than the test screen and opens at its top.
+        let mut events = script(&["help"]);
+        events.push(mouse(MouseEventKind::ScrollDown));
+        let (res, state, host, _) = drive(events).await;
+        res.unwrap();
+        let after_one_notch = host.draws;
+        let scrolled = state.scrolled();
+
+        let mut events = script(&["help"]);
+        events.push(mouse(MouseEventKind::ScrollDown));
+        for _ in 0..20 {
+            events.push(mouse(MouseEventKind::Moved));
+        }
+        let (res, state2, host2, _) = drive(events).await;
+        res.unwrap();
+        assert_eq!(state2.scrolled(), scrolled, "a move scrolls nothing");
+        assert_eq!(host2.draws, after_one_notch, "and draws nothing");
+
+        // Down, down, up: one notch down from the top, as after one.
+        let mut events = script(&["help"]);
+        events.push(mouse(MouseEventKind::ScrollDown));
+        events.push(mouse(MouseEventKind::ScrollDown));
+        events.push(mouse(MouseEventKind::ScrollUp));
+        let (res, state3, _, _) = drive(events).await;
+        res.unwrap();
+        assert_eq!(
+            state3.scrolled(),
+            scrolled,
+            "a notch is {WHEEL_ROWS} rows each way"
+        );
     }
 
     /// Key events that type each line and press Enter. `<esc>` presses Esc.

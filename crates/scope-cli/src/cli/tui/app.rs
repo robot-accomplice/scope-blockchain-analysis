@@ -292,6 +292,10 @@ pub struct TuiState {
     scrollback: Vec<Line<'static>>,
     /// How many lines the view is scrolled up from the bottom.
     scroll: Cell<usize>,
+    /// A scrollback line the next draw puts at the top of the pane (the
+    /// first line of `help`, so it reads from its start). The draw knows
+    /// the fitted rows, so it turns this into a scroll.
+    pin_top: Cell<Option<usize>>,
     /// The last draw was the too-small message. Enter does not run then.
     too_small: Cell<bool>,
     /// The most the view can scroll up, at the last draw. PageUp stops here.
@@ -370,6 +374,7 @@ impl TuiState {
             draft: String::new(),
             scrollback: Vec::new(),
             scroll: Cell::new(0),
+            pin_top: Cell::new(None),
             too_small: Cell::new(false),
             last_max_top: Cell::new(0),
             last_pane_height: Cell::new(0),
@@ -597,6 +602,9 @@ impl TuiState {
                     self.set_input(line);
                 }
             }
+            // Shift-↑/↓ scroll one line; plain ↑/↓ walk the history.
+            KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => self.scroll_lines(1),
+            KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => self.scroll_lines(-1),
             KeyCode::Up => self.history_prev(),
             KeyCode::Down => self.history_next(),
             KeyCode::PageUp => {
@@ -971,6 +979,65 @@ impl TuiState {
     /// top row of one page is the bottom row of the next.
     fn page(&self) -> usize {
         self.last_pane_height.get().saturating_sub(1).max(1)
+    }
+
+    /// The navigation keys for the hint row, most useful first: the row
+    /// shows as many as fit.
+    fn nav_keys(&self) -> Vec<(&'static str, &'static str)> {
+        if self.grid_shown {
+            return vec![("Ctrl-G", "shell"), ("Enter", "detail"), ("Esc", "stop")];
+        }
+        let mut keys = Vec::new();
+        let scrolled = self.scroll.get().min(self.last_max_top.get()) > 0;
+        if scrolled {
+            keys.push(("PgDn/wheel/Shift-↓", "down"));
+            keys.push(("Ctrl-End", "bottom"));
+        } else if self.last_max_top.get() > 0 {
+            keys.push(("PgUp/wheel/Shift-↑", "scroll back"));
+        }
+        if self.grid.is_some() {
+            keys.push(("Ctrl-G", "grid"));
+        }
+        keys.extend([
+            ("↑↓", "history"),
+            ("Tab", "complete"),
+            ("Ctrl-K", "commands"),
+            ("Ctrl-F", "find"),
+            ("Ctrl-R", "search history"),
+            ("help", "all commands"),
+        ]);
+        keys
+    }
+
+    /// Rows the view is scrolled up, for the event-loop tests.
+    #[cfg(test)]
+    pub(crate) fn scrolled(&self) -> usize {
+        self.scroll.get()
+    }
+
+    /// The mouse wheel: scrolls the output `rows` up (negative: down),
+    /// unless the grid or a list has the screen.
+    pub fn wheel(&mut self, rows: isize) {
+        let list_open = matches!(
+            self.overlay,
+            Some(Overlay::Palette(_) | Overlay::Menu(_) | Overlay::Choice(_))
+        );
+        if !self.grid_shown && !list_open {
+            self.scroll_lines(rows);
+        }
+    }
+
+    /// Scrolls the output `rows` up (negative: down), within what the last
+    /// draw showed: Shift-↑/↓ and the mouse wheel.
+    pub fn scroll_lines(&mut self, rows: isize) {
+        let max = self.last_max_top.get();
+        let now = self.scroll.get().min(max);
+        let next = if rows >= 0 {
+            now.saturating_add(rows.unsigned_abs()).min(max)
+        } else {
+            now.saturating_sub(rows.unsigned_abs())
+        };
+        self.scroll.set(next);
     }
 
     /// Picks the first shown column of the input line for a window of
@@ -1520,7 +1587,16 @@ impl TuiState {
                 Plan::Done
             }
         };
+        let start = self.scrollback.len();
         self.push_ansi(&captured.out());
+        // Help is longer than a pane: show it from its first line.
+        let first = line
+            .split_whitespace()
+            .next()
+            .map(exec::session_command_name);
+        if first.as_deref() == Some("help") && self.scrollback.len() > start {
+            self.pin_top.set(Some(start));
+        }
         if !line.trim().is_empty() && !matches!(plan, Plan::Run(_)) {
             self.log(Event {
                 started: started_at,
@@ -1999,6 +2075,16 @@ impl TuiState {
             let max_top = total.saturating_sub(inner.height as usize);
             self.last_max_top.set(max_top);
             self.last_pane_height.set(inner.height as usize);
+            if let Some(line) = self.pin_top.take() {
+                // The rows above the pinned line, fitted as above.
+                let mut above = Vec::new();
+                if self.dropped_lines > 0 {
+                    above.push(Line::raw(""));
+                }
+                above.extend(self.scrollback.iter().take(line).cloned());
+                let row = fit::fit(above, width).len();
+                self.scroll.set(max_top.saturating_sub(row));
+            }
             if let (Some(v), true) = (&view, in_pane_search) {
                 let before = self.search_width.replace(width);
                 let height = inner.height as usize;
@@ -2130,6 +2216,12 @@ impl TuiState {
                 spans.push(Span::styled(next, KEY));
             }
             f.render_widget(Paragraph::new(Line::from(spans)), hint_row);
+        } else if self.overlay.is_none() {
+            // Nothing else needs the row: the keys that move around.
+            f.render_widget(
+                Paragraph::new(nav_hints(&self.nav_keys(), hint_row.width as usize)),
+                hint_row,
+            );
         }
         if let Some(Overlay::Palette(p)) = &self.overlay {
             let area = f.area();
@@ -2342,6 +2434,27 @@ impl TuiState {
 
 /// Styled text: each span carries the theme style of its part.
 type Spans = Vec<Span<'static>>;
+
+/// The hint row's navigation keys, `key what` pairs separated by ` · `,
+/// as many as fit in `width` columns (never a cut pair).
+fn nav_hints(keys: &[(&'static str, &'static str)], width: usize) -> Line<'static> {
+    let mut spans = vec![Span::raw(" ")];
+    let mut used = 1;
+    for (i, (key, what)) in keys.iter().enumerate() {
+        let sep = if i == 0 { "" } else { " · " };
+        let cols = UnicodeWidthStr::width(*key) + 1 + what.len() + sep.len();
+        if used + cols > width {
+            break;
+        }
+        used += cols;
+        if !sep.is_empty() {
+            spans.push(Span::styled(sep, SECONDARY));
+        }
+        spans.push(Span::styled(*key, KEY));
+        spans.push(Span::styled(format!(" {what}"), SECONDARY));
+    }
+    Line::from(spans)
+}
 
 /// The parts of the status bar, in priority order. Each part is built
 /// with its styles, so a change of wording cannot change them.
@@ -3578,6 +3691,80 @@ Bid Side — 20 levels
         let text = screen(&s, 60, 15);
         assert!(text.contains("line 29"), "{text}");
         assert!(!text.contains("scrolled up"), "{text}");
+    }
+
+    #[test]
+    fn test_shift_arrows_scroll_one_line_and_plain_arrows_keep_the_history() {
+        let mut s = scrollable();
+        s.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
+        s.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
+        assert!(screen(&s, 60, 15).contains("scrolled up 2 lines"));
+        s.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+        assert!(screen(&s, 60, 15).contains("scrolled up 1 lines"));
+        // Shift-↓ at the bottom stays there.
+        s.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+        s.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+        assert!(!screen(&s, 60, 15).contains("scrolled up"));
+        // Plain ↑ still walks the history.
+        s.history.push("venues list".into());
+        s.handle_key(key(KeyCode::Up));
+        assert_eq!(s.input, "venues list");
+    }
+
+    #[test]
+    fn test_the_wheel_scrolls_three_lines_and_stops_at_the_top() {
+        let mut s = scrollable();
+        s.wheel(3);
+        assert!(screen(&s, 60, 15).contains("scrolled up 3 lines"));
+        for _ in 0..20 {
+            s.wheel(3);
+        }
+        assert!(screen(&s, 60, 15).contains("scrolled up 22 lines"));
+        s.wheel(-3);
+        assert!(screen(&s, 60, 15).contains("scrolled up 19 lines"));
+        // A list has the wheel to itself: the output does not move.
+        s.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        assert!(matches!(s.overlay, Some(Overlay::Palette(_))));
+        s.wheel(3);
+        assert_eq!(s.scroll.get(), 19);
+    }
+
+    #[test]
+    fn test_help_opens_at_its_first_line() {
+        let mut s = scrollable();
+        let config = scope::config::Config::default();
+        let _ = s.submit("help", &config);
+        let text = screen(&s, 60, 15);
+        assert!(text.contains("Session commands:"), "{text}");
+        assert!(text.contains("scrolled up"), "the rest is below: {text}");
+        // The next draw does not jump back up.
+        s.handle_key(key(KeyCode::PageDown));
+        assert!(!screen(&s, 60, 15).contains("Session commands:"));
+    }
+
+    #[test]
+    fn test_the_hint_row_shows_the_navigation_keys_that_fit() {
+        let mut s = scrollable();
+        let text = screen(&s, 120, 15);
+        assert!(text.contains("PgUp/wheel/Shift-↑ scroll back"), "{text}");
+        assert!(text.contains("↑↓ history"), "{text}");
+        assert!(text.contains("Ctrl-K commands"), "{text}");
+        // Scrolled up, it says how to go back down.
+        s.handle_key(key(KeyCode::PageUp));
+        let text = screen(&s, 120, 15);
+        assert!(text.contains("PgDn/wheel/Shift-↓ down"), "{text}");
+        assert!(text.contains("Ctrl-End bottom"), "{text}");
+        // Narrow: fewer pairs, never a cut one.
+        let line = nav_hints(&s.nav_keys(), 40);
+        let shown: String = line.spans.iter().map(|sp| sp.content.as_ref()).collect();
+        assert!(UnicodeWidthStr::width(shown.as_str()) <= 40, "{shown:?}");
+        assert!(
+            shown.ends_with("down") || shown.ends_with("bottom"),
+            "{shown:?}"
+        );
+        // Typing shows the usage hint instead.
+        type_str(&mut s, "market summary");
+        assert!(!screen(&s, 120, 15).contains("↑↓ history"));
     }
 
     #[test]
