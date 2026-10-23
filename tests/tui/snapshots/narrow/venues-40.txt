@@ -16,5 +16,5 @@ scope:auto> venues list
 ┌scope:auto> ──────────────────────────┐
 │                                      │
 └──────────────────────────────────────┘
-
+ PgDn/wheel/Shift-↓ down
  scrolled <MASK> · PgDn …

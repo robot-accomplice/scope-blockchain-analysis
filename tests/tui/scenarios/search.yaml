@@ -3,7 +3,7 @@ tiers: [offline]
 steps:
   - type: "help"
   - key: Enter
-  - wait_for: { text: "Keys: Enter run", timeout: 10s }
+  - wait_for: { text: "Session commands:", timeout: 10s }
   - type: "ctx"
   - key: Enter
   # Ctrl-F opens the search; typing finds the newest match and marks it.

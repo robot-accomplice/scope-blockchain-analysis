@@ -787,11 +787,11 @@ A flag you type always wins over the context. `address` and `tx` with no target 
 | `Ctrl-U` / `Ctrl-W` / `Alt-K` | Delete to the start, the word before, to the end |
 | `Ctrl-F` or `/` | Search the output; `Ctrl-R` searches the history |
 | `Ctrl-Y` | Copy the last output (needs a terminal that allows OSC 52; `save` works everywhere) |
-| `PgUp` / `PgDn` | Scroll the output |
+| `PgUp` / `PgDn`, mouse wheel, `Shift-↑` / `Shift-↓` | Scroll the output: a page, 3 lines, 1 line. `Ctrl-Home` / `Ctrl-End` jump to the top / bottom. The TUI captures the mouse for the wheel, so select text with `Shift`+drag. |
 | `Esc` / `Ctrl-C` | Cancel the running command (for example a `--every` loop); idle, `Esc` clears the line |
 | `Ctrl-D` | Leave the TUI |
 
-The row under the input shows the usage of the command you type and the next argument it expects, the value a flag needs (with its allowed values), or an unknown flag. The pane keeps the last 5000 lines and says when it dropped older ones.
+The row under the input shows the keys that move around (scroll, history, complete, the palette, find; `Ctrl-G` while a watchlist runs) as many as fit. While you type, it shows the usage of the command and the next argument it expects, the value a flag needs (with its allowed values), or an unknown flag. `help` opens at its first line. The pane keeps the last 5000 lines and says when it dropped older ones.
 
 **Market summary in the TUI.** `market summary` shows a compact view: the verdict on the first line, the key values in two columns, the book as one ladder (asks above the mid, bids below, one size per level in the quote asset, with a bar), and a bid/ask table (best price, slippage for 10K, depth, top-3 and top-10 depth). The checks that passed are in a grid with their limits (`Spread ≤3%`); each other check is spelled out under it. Ctrl-Y and `save` still copy the CLI text report.
 
