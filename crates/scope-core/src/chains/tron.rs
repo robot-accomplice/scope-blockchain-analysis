@@ -2591,4 +2591,524 @@ mod tests {
         assert_eq!(txs[0].value, "0");
         assert_eq!(txs[0].status, None);
     }
+    // ========================================================================
+    // Tronscan and DexScreener (fixed hosts, sent to a mock server)
+    // ========================================================================
+
+    const USDT_CONTRACT: &str = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t";
+
+    /// Sends requests for the fixed Tronscan and DexScreener hosts to a local
+    /// mock server; everything else goes out unchanged.
+    struct ToMockServer {
+        base: String,
+        inner: Arc<dyn HttpClient>,
+    }
+
+    #[async_trait]
+    impl HttpClient for ToMockServer {
+        async fn send(&self, mut req: Request) -> Result<crate::http::Response> {
+            for host in [TRONSCAN_API, "https://api.dexscreener.com"] {
+                if let Some(rest) = req.url.strip_prefix(host) {
+                    req.url = format!("{}{}", self.base, rest);
+                }
+            }
+            self.inner.send(req).await
+        }
+    }
+
+    /// A client whose TronGrid, Tronscan and DexScreener calls all reach `server`.
+    fn mocked_client(server: &mockito::Server, api_key: Option<&str>) -> TronClient {
+        let mut config = ChainsConfig {
+            tron_api: Some(server.url()),
+            ..Default::default()
+        };
+        if let Some(key) = api_key {
+            config
+                .api_keys
+                .insert("tronscan".to_string(), key.to_string());
+        }
+        let http = Arc::new(ToMockServer {
+            base: server.url(),
+            inner: crate::http::test_transport(),
+        });
+        TronClient::new_with_http(&config, http).unwrap()
+    }
+
+    fn trx_balance(raw: &str) -> Balance {
+        Balance {
+            raw: raw.to_string(),
+            formatted: String::new(),
+            decimals: TRX_DECIMALS,
+            symbol: "TRX".to_string(),
+            usd_value: None,
+        }
+    }
+
+    async fn mock_token_info(
+        server: &mut mockito::Server,
+        status: usize,
+        body: &str,
+    ) -> mockito::Mock {
+        server
+            .mock("GET", "/api/token_trc20")
+            .match_query(mockito::Matcher::Any)
+            .with_status(status)
+            .with_body(body)
+            .create_async()
+            .await
+    }
+
+    async fn mock_holders(server: &mut mockito::Server, body: &str) -> mockito::Mock {
+        server
+            .mock("GET", "/api/token_trc20/holders")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_body(body)
+            .create_async()
+            .await
+    }
+
+    async fn mock_dex_search(server: &mut mockito::Server, body: &str) -> mockito::Mock {
+        server
+            .mock("GET", "/latest/dex/search")
+            .match_query(mockito::Matcher::UrlEncoded("q".into(), "TRX USDT".into()))
+            .with_status(200)
+            .with_body(body)
+            .create_async()
+            .await
+    }
+
+    #[tokio::test]
+    async fn test_get_token_info_reads_tronscan_and_sends_the_api_key() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/token_trc20")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("contract".into(), USDT_CONTRACT.into()),
+                mockito::Matcher::UrlEncoded("showAll".into(), "1".into()),
+            ]))
+            .match_header("TRON-PRO-API-KEY", "k1")
+            .with_status(200)
+            .with_body(
+                r#"{"trc20_tokens": [{"symbol": "USDT", "contract_name": "TetherToken", "name": "Tether USD", "decimals": 6}]}"#,
+            )
+            .create_async()
+            .await;
+
+        let client = mocked_client(&server, Some("k1"));
+        let token = client.get_token_info(USDT_CONTRACT).await.unwrap();
+        mock.assert_async().await;
+        assert_eq!(token.contract_address, USDT_CONTRACT);
+        assert_eq!(token.symbol, "USDT");
+        // contract_name wins over name
+        assert_eq!(token.name, "TetherToken");
+        assert_eq!(token.decimals, 6);
+    }
+
+    #[tokio::test]
+    async fn test_get_token_info_falls_back_to_name_then_defaults() {
+        let mut server = mockito::Server::new_async().await;
+        let client = mocked_client(&server, None);
+
+        let _m = mock_token_info(
+            &mut server,
+            200,
+            r#"{"trc20_tokens": [{"name": "Plain Name", "decimals": 18}]}"#,
+        )
+        .await;
+        let token = client.get_token_info(USDT_CONTRACT).await.unwrap();
+        assert_eq!(token.symbol, "UNKNOWN");
+        assert_eq!(token.name, "Plain Name");
+        assert_eq!(token.decimals, 18);
+
+        server.reset();
+        let _m = mock_token_info(&mut server, 200, r#"{"trc20_tokens": [{}]}"#).await;
+        let token = client.get_token_info(USDT_CONTRACT).await.unwrap();
+        assert_eq!(token.symbol, "UNKNOWN");
+        assert_eq!(token.name, "Unknown Token");
+        assert_eq!(token.decimals, 6);
+    }
+
+    #[tokio::test]
+    async fn test_get_token_info_not_found_and_bad_json() {
+        let mut server = mockito::Server::new_async().await;
+        let client = mocked_client(&server, None);
+        for body in [r#"{"trc20_tokens": []}"#, r#"{"other": 1}"#] {
+            server.reset();
+            let _m = mock_token_info(&mut server, 200, body).await;
+            let err = client.get_token_info(USDT_CONTRACT).await.unwrap_err();
+            assert!(matches!(err, ScopeError::NotFound(_)), "{body}: {err}");
+            assert!(err.to_string().contains(USDT_CONTRACT));
+        }
+
+        server.reset();
+        let _m = mock_token_info(&mut server, 200, "<html>not json</html>").await;
+        let err = client.get_token_info(USDT_CONTRACT).await.unwrap_err();
+        assert!(matches!(err, ScopeError::Api(_)), "{err}");
+        assert!(err.to_string().contains("Tronscan"));
+    }
+
+    #[tokio::test]
+    async fn test_get_token_holders_ranks_and_shares_by_fetched_total() {
+        let mut server = mockito::Server::new_async().await;
+        let holders = server
+            .mock("GET", "/api/token_trc20/holders")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("contract_address".into(), USDT_CONTRACT.into()),
+                // The requested 500 is capped at 100.
+                mockito::Matcher::UrlEncoded("limit".into(), "100".into()),
+            ]))
+            .match_header("TRON-PRO-API-KEY", "k2")
+            .with_status(200)
+            .with_body(
+                r#"{"trc20_tokens": [
+                    {"holder_address": "TDqSquXBgUCLYvYC4XZgrprLK589dkhSCf", "balance": "3000000000000000000"},
+                    {"holder_address": "TN3W4H6rK2ce4vX9YnFQHwKENnHjoxb3m9", "balance": "not-a-number"},
+                    {"balance": "500"},
+                    {"holder_address": "TN3W4H6rK2ce4vX9YnFQHwKENnHjoxb3m9", "balance": "1000000000000000000"}
+                ]}"#,
+            )
+            .create_async()
+            .await;
+        let _info = mock_token_info(
+            &mut server,
+            200,
+            r#"{"trc20_tokens": [{"symbol": "BIG", "decimals": 18}]}"#,
+        )
+        .await;
+
+        let client = mocked_client(&server, Some("k2"));
+        let result = client.get_token_holders(USDT_CONTRACT, 500).await.unwrap();
+        holders.assert_async().await;
+
+        // Rows without an address or a numeric balance are dropped; rank keeps
+        // the position in Tronscan's list.
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].address, VALID_ADDRESS);
+        assert_eq!(result[0].rank, 1);
+        assert_eq!(result[0].formatted_balance, "3.000000");
+        assert_eq!(result[1].rank, 4);
+        assert_eq!(result[1].formatted_balance, "1.000000");
+        // The total counts every parseable balance, the address-less row included.
+        let total = 4e18 + 500.0;
+        assert!((result[0].percentage - 3e18 / total * 100.0).abs() < 1e-9);
+        assert!((result[1].percentage - 1e18 / total * 100.0).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn test_get_token_holders_without_token_info_uses_six_decimals() {
+        let mut server = mockito::Server::new_async().await;
+        let _holders = mock_holders(
+            &mut server,
+            r#"{"trc20_tokens": [{"holder_address": "TDqSquXBgUCLYvYC4XZgrprLK589dkhSCf", "balance": "2500000"}]}"#,
+        )
+        .await;
+        let _info = mock_token_info(&mut server, 200, r#"{"trc20_tokens": []}"#).await;
+
+        let client = mocked_client(&server, None);
+        let result = client.get_token_holders(USDT_CONTRACT, 10).await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].formatted_balance, "2.500000");
+        assert!((result[0].percentage - 100.0).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn test_get_token_holders_zero_total_gives_zero_share() {
+        let mut server = mockito::Server::new_async().await;
+        let _holders = mock_holders(
+            &mut server,
+            r#"{"trc20_tokens": [{"holder_address": "TDqSquXBgUCLYvYC4XZgrprLK589dkhSCf", "balance": "0"}]}"#,
+        )
+        .await;
+        let _info =
+            mock_token_info(&mut server, 200, r#"{"trc20_tokens": [{"decimals": 6}]}"#).await;
+
+        let client = mocked_client(&server, None);
+        let result = client.get_token_holders(USDT_CONTRACT, 10).await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].percentage, 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_get_token_holders_empty_and_bad_json() {
+        let mut server = mockito::Server::new_async().await;
+        let client = mocked_client(&server, None);
+        let _holders = mock_holders(&mut server, r#"{"total": 0}"#).await;
+        let _info =
+            mock_token_info(&mut server, 200, r#"{"trc20_tokens": [{"decimals": 6}]}"#).await;
+        assert!(
+            client
+                .get_token_holders(USDT_CONTRACT, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        server.reset();
+        let _holders = mock_holders(&mut server, "{").await;
+        let err = client
+            .get_token_holders(USDT_CONTRACT, 10)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("Tronscan holders"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_get_token_holder_count() {
+        let mut server = mockito::Server::new_async().await;
+        let client = mocked_client(&server, Some("k3"));
+        let mock = server
+            .mock("GET", "/api/token_trc20/holders")
+            .match_query(mockito::Matcher::UrlEncoded("limit".into(), "1".into()))
+            .match_header("TRON-PRO-API-KEY", "k3")
+            .with_status(200)
+            .with_body(r#"{"rangeTotal": 12345, "trc20_tokens": []}"#)
+            .create_async()
+            .await;
+        assert_eq!(
+            client.get_token_holder_count(USDT_CONTRACT).await.unwrap(),
+            12345
+        );
+        mock.assert_async().await;
+
+        server.reset();
+        let _m = mock_holders(&mut server, "{}").await;
+        assert_eq!(
+            client.get_token_holder_count(USDT_CONTRACT).await.unwrap(),
+            0
+        );
+
+        server.reset();
+        let _m = mock_holders(&mut server, "nope").await;
+        let err = client
+            .get_token_holder_count(USDT_CONTRACT)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ScopeError::Api(_)), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_enrich_balance_usd_uses_first_priced_trx_pair() {
+        // The flat `baseTokenSymbol` shape that DexSearchPair parses. (Live
+        // DexScreener nests it as `baseToken.symbol`: see the ignored test below.)
+        let mut server = mockito::Server::new_async().await;
+        let _m = mock_dex_search(
+            &mut server,
+            r#"{"pairs": [
+                {"baseTokenSymbol": "USDT", "priceUsd": "1.00"},
+                {"baseTokenSymbol": "TRX", "priceUsd": "n/a"},
+                {"baseTokenSymbol": "WTRX", "priceUsd": "0.25"},
+                {"baseTokenSymbol": "TRX", "priceUsd": "9.99"}
+            ]}"#,
+        )
+        .await;
+
+        let client = mocked_client(&server, None);
+        let mut balance = trx_balance("4000000"); // 4 TRX
+        client.enrich_balance_usd(&mut balance).await;
+        assert_eq!(balance.usd_value, Some(1.0));
+
+        // Through the trait object too.
+        let chain_client: &dyn ChainClient = &client;
+        let mut balance = trx_balance("2000000");
+        chain_client.enrich_balance_usd(&mut balance).await;
+        assert_eq!(balance.usd_value, Some(0.5));
+    }
+
+    #[tokio::test]
+    async fn test_enrich_balance_usd_leaves_value_unset_without_a_price() {
+        let mut server = mockito::Server::new_async().await;
+        let client = mocked_client(&server, None);
+        for body in [
+            r#"{"pairs": null}"#,
+            r#"{"pairs": [{"baseTokenSymbol": "BTC", "priceUsd": "60000"}]}"#,
+            r#"{"pairs": [{"baseTokenSymbol": "TRX"}]}"#,
+            "garbage",
+        ] {
+            server.reset();
+            let _m = mock_dex_search(&mut server, body).await;
+            let mut balance = trx_balance("1000000");
+            client.enrich_balance_usd(&mut balance).await;
+            assert_eq!(balance.usd_value, None, "{body}");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "bug: DexSearchPair reads a flat baseTokenSymbol, but DexScreener nests baseToken.symbol, so TRX balances never get a USD value"]
+    async fn test_enrich_balance_usd_reads_dexscreener_nested_base_token() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = mock_dex_search(
+            &mut server,
+            r#"{"schemaVersion": "1.0.0", "pairs": [
+                {"chainId": "tron", "baseToken": {"address": "T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb", "name": "Wrapped TRX", "symbol": "WTRX"},
+                 "quoteToken": {"symbol": "USDT"}, "priceUsd": "0.25"}
+            ]}"#,
+        )
+        .await;
+        let client = mocked_client(&server, None);
+        let mut balance = trx_balance("4000000");
+        client.enrich_balance_usd(&mut balance).await;
+        assert_eq!(balance.usd_value, Some(1.0));
+    }
+
+    #[tokio::test]
+    async fn test_chain_client_token_balances_use_tronscan_info_or_placeholder() {
+        let account_body = format!(
+            r#"{{"data": [{{"balance": 0, "address": "{VALID_ADDRESS}", "trc20": [{{"{USDT_CONTRACT}": "1234567"}}]}}], "success": true}}"#
+        );
+        let account_path = format!("/v1/accounts/{VALID_ADDRESS}");
+        let mut server = mockito::Server::new_async().await;
+        let _account = server
+            .mock("GET", account_path.as_str())
+            .with_status(200)
+            .with_body(&account_body)
+            .create_async()
+            .await;
+        let _info = mock_token_info(
+            &mut server,
+            200,
+            r#"{"trc20_tokens": [{"symbol": "USDT", "contract_name": "TetherToken", "decimals": 3}]}"#,
+        )
+        .await;
+
+        let client = mocked_client(&server, None);
+        let chain_client: &dyn ChainClient = &client;
+        let balances = chain_client
+            .get_token_balances(VALID_ADDRESS)
+            .await
+            .unwrap();
+        assert_eq!(balances.len(), 1);
+        assert_eq!(balances[0].token.symbol, "USDT");
+        assert_eq!(balances[0].token.decimals, 3);
+        assert_eq!(balances[0].balance, "1234567");
+        assert_eq!(balances[0].formatted_balance, "1234.567000");
+        assert_eq!(balances[0].usd_value, None);
+
+        // Tronscan is down: a TRC20 placeholder with six decimals.
+        server.reset();
+        let _account = server
+            .mock("GET", account_path.as_str())
+            .with_status(200)
+            .with_body(&account_body)
+            .create_async()
+            .await;
+        let _info = mock_token_info(&mut server, 500, "down").await;
+        let balances = chain_client
+            .get_token_balances(VALID_ADDRESS)
+            .await
+            .unwrap();
+        assert_eq!(balances[0].token.symbol, "TRC20");
+        assert_eq!(balances[0].token.name, "TRC-20 Token");
+        assert_eq!(balances[0].token.contract_address, USDT_CONTRACT);
+        assert_eq!(balances[0].formatted_balance, "1.234567");
+    }
+
+    #[tokio::test]
+    async fn test_chain_client_token_queries_delegate_to_tronscan() {
+        let mut server = mockito::Server::new_async().await;
+        let _holders = mock_holders(
+            &mut server,
+            r#"{"rangeTotal": 7, "trc20_tokens": [{"holder_address": "TDqSquXBgUCLYvYC4XZgrprLK589dkhSCf", "balance": "1"}]}"#,
+        )
+        .await;
+        let _info = mock_token_info(
+            &mut server,
+            200,
+            r#"{"trc20_tokens": [{"symbol": "USDT", "decimals": 6}]}"#,
+        )
+        .await;
+
+        let client = mocked_client(&server, None);
+        let chain_client: &dyn ChainClient = &client;
+        assert_eq!(
+            chain_client
+                .get_token_info(USDT_CONTRACT)
+                .await
+                .unwrap()
+                .symbol,
+            "USDT"
+        );
+        assert_eq!(
+            chain_client
+                .get_token_holders(USDT_CONTRACT, 5)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            chain_client
+                .get_token_holder_count(USDT_CONTRACT)
+                .await
+                .unwrap(),
+            7
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_transaction_and_transactions_send_the_api_key() {
+        let mut server = mockito::Server::new_async().await;
+        let tx = server
+            .mock("GET", format!("/v1/transactions/{VALID_TX_HASH}").as_str())
+            .match_header("TRON-PRO-API-KEY", "k4")
+            .with_status(200)
+            .with_body(format!(
+                r#"{{"data": [{{"txID": "{VALID_TX_HASH}"}}], "success": true}}"#
+            ))
+            .create_async()
+            .await;
+        let txs = server
+            .mock(
+                "GET",
+                format!("/v1/accounts/{VALID_ADDRESS}/transactions").as_str(),
+            )
+            .match_query(mockito::Matcher::UrlEncoded("limit".into(), "3".into()))
+            .match_header("TRON-PRO-API-KEY", "k4")
+            .with_status(200)
+            .with_body(r#"{"data": [], "success": true}"#)
+            .create_async()
+            .await;
+
+        let client = mocked_client(&server, Some("k4"));
+        let got = client.get_transaction(VALID_TX_HASH).await.unwrap();
+        assert_eq!(got.hash, VALID_TX_HASH);
+        assert_eq!(got.from, "");
+        assert_eq!(got.value, "0");
+        assert!(
+            client
+                .get_transactions(VALID_ADDRESS, 3)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        tx.assert_async().await;
+        txs.assert_async().await;
+    }
+
+    #[test]
+    fn test_validate_tron_address_rejects_non_mainnet_prefix() {
+        // A well-formed base58check address with version byte 0x42, not 0x41.
+        // It still starts with 'T' and is 34 characters long.
+        let mut bytes = vec![0x42u8];
+        bytes.extend(0u8..20);
+        let checksum = Sha256::digest(Sha256::digest(&bytes));
+        bytes.extend_from_slice(&checksum[..4]);
+        let address = bs58::encode(&bytes).into_string();
+        assert_eq!(address, "TZJqCCFeCFdJJaGGgNhTbhcLdyjmqUrgFq");
+
+        let err = validate_tron_address(&address).unwrap_err();
+        assert!(err.to_string().contains("prefix"), "{err}");
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn test_deprecated_new_reads_the_config() {
+        let config = ChainsConfig {
+            tron_api: Some("http://127.0.0.1:9".to_string()),
+            ..Default::default()
+        };
+        let client = TronClient::new(&config).unwrap();
+        assert_eq!(client.api_url, "http://127.0.0.1:9");
+        assert!(client.api_key.is_none());
+    }
 }
