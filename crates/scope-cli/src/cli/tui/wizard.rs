@@ -1111,6 +1111,28 @@ mod tests {
     }
 
     #[test]
+    fn a_run_with_no_duration_runs_until_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = wizard(dir.path());
+        w.key(key(KeyCode::Char('a')));
+        typed(&mut w, "pair USDC binance");
+        w.list.duration = None;
+        w.step = Step::Timing;
+        let s = screen(&w, 120, 36);
+        assert!(s.contains("Duration  until stopped"), "{s}");
+        assert!(s.contains("1 fetch(es) per run · until stopped"), "{s}");
+        w.key(key(KeyCode::Down));
+        w.key(key(KeyCode::Enter));
+        assert_eq!(
+            w.edit,
+            Some((EditKind::Duration, "forever".to_string())),
+            "the edit starts from a word the parser takes back"
+        );
+        w.key(key(KeyCode::Enter));
+        assert_eq!((w.list.duration, w.error.as_deref()), (None, None));
+    }
+
+    #[test]
     fn outputs_edit_the_name_and_paths_then_save_and_start() {
         let dir = tempfile::tempdir().unwrap();
         let mut w = wizard(dir.path());
