@@ -220,6 +220,13 @@ pub fn stop_spawned_sidecar() -> Option<u32> {
     Some(child.id())
 }
 
+/// Keeps `child` as the sidecar this process started, so tests elsewhere
+/// (the CLI's exit question) can stop it without a sidecar port.
+#[cfg(any(test, feature = "test-support"))]
+pub fn adopt_sidecar(child: Child) {
+    *spawned() = Some(child);
+}
+
 // ============================================================================
 // Unit Tests
 // ============================================================================
@@ -282,18 +289,128 @@ mod tests {
         assert!(client.is_ok());
     }
 
+    /// Serializes the tests that use the spawned sidecar or its port.
+    static SIDECAR: Mutex<()> = Mutex::new(());
+
+    fn sidecar_lock() -> std::sync::MutexGuard<'static, ()> {
+        SIDECAR.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn test_no_sidecar_is_spawned_by_default() {
+        let _lock = sidecar_lock();
         assert_eq!(spawned_sidecar(), None);
         assert_eq!(stop_spawned_sidecar(), None);
     }
 
     #[test]
     fn test_start_sidecar_reports_a_missing_binary() {
+        let _lock = sidecar_lock();
         let dir = tempfile::tempdir().unwrap();
         let err =
             start_sidecar(&dir.path().join("no-ghola"), Duration::from_millis(50)).unwrap_err();
         assert!(err.to_string().contains("--serve"), "{err}");
+        assert_eq!(spawned_sidecar(), None);
+    }
+
+    /// A process that runs until it is stopped.
+    fn long_running() -> Child {
+        let mut command = if cfg!(windows) {
+            let mut c = Command::new("ping");
+            c.args(["-n", "60", "127.0.0.1"]);
+            c
+        } else {
+            let mut c = Command::new("sleep");
+            c.arg("60");
+            c
+        };
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_an_adopted_sidecar_is_kept_until_stopped() {
+        let _lock = sidecar_lock();
+        let child = long_running();
+        let pid = child.id();
+        adopt_sidecar(child);
+        assert_eq!(spawned_sidecar(), Some(pid));
+        assert_eq!(stop_spawned_sidecar(), Some(pid));
+        assert_eq!(spawned_sidecar(), None);
+        assert_eq!(stop_spawned_sidecar(), None);
+    }
+
+    #[test]
+    fn test_a_sidecar_that_exited_is_forgotten() {
+        let _lock = sidecar_lock();
+        let mut child = long_running();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        adopt_sidecar(child);
+        assert_eq!(spawned_sidecar(), None);
+        assert_eq!(stop_spawned_sidecar(), None);
+    }
+
+    /// An executable `sh` script that stands in for `ghola --serve`.
+    #[cfg(unix)]
+    fn fake_ghola(dir: &Path, body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("ghola");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_start_sidecar_reports_a_sidecar_that_exits() {
+        let _lock = sidecar_lock();
+        if is_bridge_running() {
+            eprintln!("skipped: something answers on {SIDECAR_ADDR}");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let ghola = fake_ghola(dir.path(), "[ \"$1\" = --serve ] && exit 3");
+        let err = start_sidecar(&ghola, Duration::from_secs(10)).unwrap_err();
+        assert!(err.to_string().contains("exited"), "{err}");
+        assert_eq!(spawned_sidecar(), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_start_sidecar_stops_a_sidecar_that_never_answers() {
+        let _lock = sidecar_lock();
+        if is_bridge_running() {
+            eprintln!("skipped: something answers on {SIDECAR_ADDR}");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let ghola = fake_ghola(dir.path(), "exec sleep 60");
+        let started = Instant::now();
+        let err = start_sidecar(&ghola, Duration::from_millis(300)).unwrap_err();
+        assert!(err.to_string().contains("did not answer"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(spawned_sidecar(), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_start_sidecar_keeps_a_sidecar_that_answers() {
+        let _lock = sidecar_lock();
+        // The sidecar's port, held here: the fake answers through it.
+        let Ok(_port) = std::net::TcpListener::bind(SIDECAR_ADDR) else {
+            eprintln!("skipped: {SIDECAR_ADDR} is in use");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let ghola = fake_ghola(dir.path(), "exec sleep 60");
+        let pid = start_sidecar(&ghola, Duration::from_secs(5)).unwrap();
+        assert_eq!(spawned_sidecar(), Some(pid));
+        assert_eq!(stop_spawned_sidecar(), Some(pid));
         assert_eq!(spawned_sidecar(), None);
     }
 

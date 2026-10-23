@@ -224,7 +224,20 @@ fn is_yes(answer: &str) -> bool {
 /// The transport's offer: asks once (a "no" is remembered in the state
 /// folder) and installs on a yes. Returns the installed binary.
 pub fn offer_for_transport(out: &Output) -> Option<PathBuf> {
-    let declined = scope::paths::state_dir().join(DECLINED_FILE);
+    offer_once(out, &scope::paths::state_dir().join(DECLINED_FILE), || {
+        with_local_installer(|installer| {
+            offer_install(&mut crate::cli::prompt::stdin(), out, installer)
+        })
+    })
+}
+
+/// [`offer_for_transport`] with the "no" recorded in `declined` and the
+/// question asked by `ask`.
+fn offer_once(
+    out: &Output,
+    declined: &Path,
+    ask: impl FnOnce() -> Result<std::io::Result<Option<PathBuf>>>,
+) -> Option<PathBuf> {
     if declined.exists() {
         return None;
     }
@@ -232,14 +245,13 @@ pub fn offer_for_transport(out: &Output) -> Option<PathBuf> {
         out,
         "Ghola is enabled (ghola.enabled) but ghola is not installed."
     );
-    let asked = with_local_installer(|installer| {
-        offer_install(&mut crate::cli::prompt::stdin(), out, installer)
-    });
-    match asked {
+    match ask() {
         Ok(Ok(Some(path))) => Some(path),
         Ok(Ok(None)) => {
-            let _ = std::fs::create_dir_all(scope::paths::state_dir())
-                .and_then(|()| std::fs::write(&declined, b""));
+            let _ = declined
+                .parent()
+                .map_or(Ok(()), std::fs::create_dir_all)
+                .and_then(|()| std::fs::write(declined, b""));
             note!(
                 out,
                 "Not asking again. Run `scope setup` to install ghola later."
@@ -263,6 +275,18 @@ pub fn offer_for_transport(out: &Output) -> Option<PathBuf> {
 ///
 /// Call it last: an unanswered question leaves a thread reading stdin.
 pub fn finish_sidecar(out: &Output, ask: bool) {
+    finish_with(out, ask, |question| {
+        ask_timeout(out, question, STOP_QUESTION_TIMEOUT)
+    });
+}
+
+/// [`finish_sidecar`] with the exit question answered by `answer`
+/// (`None`: no answer in time).
+fn finish_with(
+    out: &Output,
+    ask: bool,
+    answer: impl FnOnce(&str) -> std::io::Result<Option<String>>,
+) {
     let Some(pid) = ghola::spawned_sidecar() else {
         return;
     };
@@ -271,7 +295,7 @@ pub fn finish_sidecar(out: &Output, ask: bool) {
             "Stop the Ghola sidecar that scope started (pid {pid})? [Y/n] (stops in {}s): ",
             STOP_QUESTION_TIMEOUT.as_secs()
         );
-        match ask_timeout(out, &question, STOP_QUESTION_TIMEOUT) {
+        match answer(&question) {
             Ok(Some(answer)) => matches!(answer.trim().to_lowercase().as_str(), "n" | "no"),
             Ok(None) => {
                 note!(out);
@@ -425,8 +449,246 @@ mod tests {
 
     #[test]
     fn test_finish_without_a_spawned_sidecar_says_nothing() {
+        let _lock = sidecar_lock();
         let (out, cap) = Output::capture();
         finish_sidecar(&out, true);
         assert!(cap.err().is_empty());
+    }
+
+    #[test]
+    fn test_the_local_installer_uses_this_machine() {
+        let (dir, target, go) =
+            with_local_installer(|i| (i.dir.clone(), i.target, i.go.clone())).unwrap();
+        assert_eq!(dir, ghola_install::install_dir());
+        assert_eq!(target, Target::current());
+        assert_eq!(go, ghola_install::find_go());
+    }
+
+    #[test]
+    fn test_may_ask_needs_prompts_and_a_terminal() {
+        let out = Output::from_writers(std::io::sink(), std::io::sink());
+        let terminal = std::io::stdin().is_terminal()
+            && std::io::stdout().is_terminal()
+            && std::io::stderr().is_terminal();
+        assert_eq!(may_ask(&out), terminal);
+        assert!(!may_ask(&out.without_prompts()));
+    }
+
+    #[test]
+    fn test_process_args_leave_out_the_program() {
+        assert_eq!(process_args().len(), std::env::args().count() - 1);
+    }
+
+    #[test]
+    fn test_a_yes_installs_the_checked_release() {
+        use ghola_install::test_support::{BINARY, release, tar_gz};
+        let dir = tempfile::tempdir().unwrap();
+        let target = Target::from_rust("linux", "x86_64").unwrap();
+        let source = release(target, tar_gz(&[("ghola", BINARY)]), None);
+        let installer = Installer {
+            source: &source,
+            target: Some(target),
+            dir: dir.path().to_path_buf(),
+            go: None,
+            go_install: &no_go,
+        };
+        let (out, cap) = Output::capture();
+        let got = offer_install(&mut "yes\n".as_bytes(), &out, &installer).unwrap();
+        let path = dir.path().join("ghola");
+        assert_eq!(got, Some(path.clone()));
+        assert_eq!(std::fs::read(&path).unwrap(), BINARY);
+        let err = cap.err();
+        assert!(err.contains("Installed ghola v0.6.2"), "{err}");
+        assert!(err.contains("SHA-256 matched"), "{err}");
+    }
+
+    /// An installer with no archive for this machine and `go` on PATH.
+    fn go_only<'a>(
+        source: &'a EmptySource,
+        dir: &Path,
+        go_install: &'a dyn Fn(&Path, &Path) -> Result<PathBuf>,
+    ) -> Installer<'a> {
+        Installer {
+            source,
+            target: None,
+            dir: dir.to_path_buf(),
+            go: Some(PathBuf::from("/usr/bin/go")),
+            go_install,
+        }
+    }
+
+    #[test]
+    fn test_a_no_to_go_install_builds_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = EmptySource::default();
+        let installer = go_only(&source, dir.path(), &no_go);
+        let (out, cap) = Output::capture();
+        let got = offer_install(&mut "y\nn\n".as_bytes(), &out, &installer).unwrap();
+        assert_eq!(got, None);
+        assert!(cap.err().contains("To install ghola yourself"));
+    }
+
+    #[test]
+    fn test_a_failed_go_install_prints_the_steps() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = EmptySource::default();
+        let fails = |_: &Path, _: &Path| -> Result<PathBuf> {
+            Err(ScopeError::Other("go: module not found".into()))
+        };
+        let installer = go_only(&source, dir.path(), &fails);
+        let (out, cap) = Output::capture();
+        let got = offer_install(&mut "y\ny\n".as_bytes(), &out, &installer).unwrap();
+        assert_eq!(got, None);
+        let err = cap.err();
+        assert!(err.contains("Could not build ghola: "), "{err}");
+        assert!(err.contains("go: module not found"), "{err}");
+        assert!(err.contains("To install ghola yourself"), "{err}");
+    }
+
+    #[test]
+    fn test_the_transport_offer_respects_a_recorded_no() {
+        let dir = tempfile::tempdir().unwrap();
+        let declined = dir.path().join(DECLINED_FILE);
+        std::fs::write(&declined, b"").unwrap();
+        let (out, cap) = Output::capture();
+        let got = offer_once(&out, &declined, || panic!("asked again"));
+        assert_eq!(got, None);
+        assert!(cap.err().is_empty());
+    }
+
+    #[test]
+    fn test_a_no_to_the_transport_offer_is_remembered() {
+        let dir = tempfile::tempdir().unwrap();
+        let declined = dir.path().join("state").join(DECLINED_FILE);
+        let (out, cap) = Output::capture();
+        assert_eq!(offer_once(&out, &declined, || Ok(Ok(None))), None);
+        assert!(declined.exists());
+        let err = cap.err();
+        assert!(err.contains("ghola is not installed"), "{err}");
+        assert!(err.contains("Not asking again"), "{err}");
+    }
+
+    #[test]
+    fn test_a_yes_to_the_transport_offer_returns_the_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let declined = dir.path().join(DECLINED_FILE);
+        let binary = dir.path().join("ghola");
+        let (out, _) = Output::capture();
+        let got = offer_once(&out, &declined, || Ok(Ok(Some(binary.clone()))));
+        assert_eq!(got, Some(binary));
+        assert!(!declined.exists());
+    }
+
+    #[test]
+    fn test_a_failed_transport_offer_is_not_taken_as_a_no() {
+        let dir = tempfile::tempdir().unwrap();
+        let declined = dir.path().join(DECLINED_FILE);
+        let (out, cap) = Output::capture();
+        let read_failed = || Ok(Err(std::io::Error::other("stdin closed")));
+        assert_eq!(offer_once(&out, &declined, read_failed), None);
+        let no_client = || Err(ScopeError::Network("no TLS".into()));
+        assert_eq!(offer_once(&out, &declined, no_client), None);
+        assert!(!declined.exists());
+        let err = cap.err();
+        assert!(
+            err.contains("Could not prepare the ghola download: "),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_the_transport_offer_reads_the_state_folder() {
+        let declined = scope::paths::state_dir().join(DECLINED_FILE);
+        std::fs::create_dir_all(scope::paths::state_dir()).unwrap();
+        std::fs::write(&declined, b"").unwrap();
+        let (out, cap) = Output::capture();
+        assert_eq!(offer_for_transport(&out), None);
+        assert!(cap.err().is_empty());
+        std::fs::remove_file(&declined).unwrap();
+    }
+
+    /// Serializes the tests that use the spawned sidecar.
+    static SIDECAR: Mutex<()> = Mutex::new(());
+
+    fn sidecar_lock() -> std::sync::MutexGuard<'static, ()> {
+        SIDECAR.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Adopts a process that runs until it is stopped as the spawned
+    /// sidecar, and returns its PID.
+    fn adopt_running_sidecar() -> u32 {
+        let mut command = if cfg!(windows) {
+            let mut c = std::process::Command::new("ping");
+            c.args(["-n", "60", "127.0.0.1"]);
+            c
+        } else {
+            let mut c = std::process::Command::new("sleep");
+            c.arg("60");
+            c
+        };
+        let child = command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        ghola::adopt_sidecar(child);
+        pid
+    }
+
+    #[test]
+    fn test_finish_without_asking_stops_the_sidecar() {
+        let _lock = sidecar_lock();
+        let pid = adopt_running_sidecar();
+        let (out, cap) = Output::capture();
+        finish_sidecar(&out, false);
+        assert_eq!(ghola::spawned_sidecar(), None);
+        assert!(
+            cap.err()
+                .contains(&format!("Stopped the Ghola sidecar (pid {pid})")),
+            "{}",
+            cap.err()
+        );
+    }
+
+    #[test]
+    fn test_a_no_at_exit_keeps_the_sidecar() {
+        let _lock = sidecar_lock();
+        let pid = adopt_running_sidecar();
+        let (out, cap) = Output::capture();
+        let mut asked = String::new();
+        finish_with(&out, true, |question| {
+            asked = question.to_string();
+            Ok(Some(" No\n".into()))
+        });
+        assert!(asked.contains(&format!("(pid {pid})")), "{asked}");
+        assert!(asked.contains("stops in 15s"), "{asked}");
+        assert_eq!(ghola::spawned_sidecar(), Some(pid));
+        assert!(cap.err().contains("keeps running"), "{}", cap.err());
+        assert_eq!(ghola::stop_spawned_sidecar(), Some(pid));
+    }
+
+    #[test]
+    fn test_any_other_exit_answer_stops_the_sidecar() {
+        let _lock = sidecar_lock();
+        let answers: [fn() -> std::io::Result<Option<String>>; 4] = [
+            || Ok(Some("\n".into())),
+            || Ok(Some("y\n".into())),
+            || Ok(None),
+            || Err(std::io::Error::other("stdin closed")),
+        ];
+        for answer in answers {
+            let pid = adopt_running_sidecar();
+            let (out, cap) = Output::capture();
+            finish_with(&out, true, |_| answer());
+            assert_eq!(ghola::spawned_sidecar(), None);
+            assert!(
+                cap.err()
+                    .contains(&format!("Stopped the Ghola sidecar (pid {pid})")),
+                "{}",
+                cap.err()
+            );
+        }
     }
 }
