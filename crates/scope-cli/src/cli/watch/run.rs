@@ -252,8 +252,11 @@ mod tests {
         );
         t.rules = vec![Rule::parse("price_usd > 0").unwrap()];
         let mut w = Watchlist::new("test");
-        w.interval = Duration::from_millis(10);
-        w.duration = Some(Duration::from_millis(15));
+        // Room for several ticks even when a tick is slow (a coverage build
+        // runs instrumented): 15 ms left room for one, and the test needs
+        // two.
+        w.interval = Duration::from_millis(50);
+        w.duration = Some(Duration::from_millis(500));
         w.outputs.csv = Some(csv.clone());
         w.outputs.report = Some(report.clone());
         w.targets = vec![t];
