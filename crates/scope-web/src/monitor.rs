@@ -486,4 +486,227 @@ mod tests {
         assert_eq!(frame["exchange_ticker"]["last_price"], 100.5);
         assert!(frame.get("exchange_order_book").is_none());
     }
+
+    // ========================================================================
+    // The endpoint over a real socket: the router on a local port, a mock
+    // DEX, and a venue transport that answers from canned replies.
+    // ========================================================================
+
+    use scope::chains::ChainClientFactory;
+    use scope::chains::mocks::MockClientFactory;
+    use scope::http::{HttpClient, Request, Response};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    /// Answers a Binance-shaped venue's book, ticker and trades requests;
+    /// anything else is a 404. Nothing leaves the process.
+    struct CannedVenue;
+
+    impl HttpClient for CannedVenue {
+        fn send<'a, 'b>(
+            &'a self,
+            req: Request,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = scope::error::Result<Response>> + Send + 'b>,
+        >
+        where
+            'a: 'b,
+            Self: 'b,
+        {
+            let body = if req.url.contains("/api/v3/depth") {
+                Some(r#"{"bids":[["0.999","100"]],"asks":[["1.001","200"]]}"#)
+            } else if req.url.contains("/api/v3/ticker/24hr") {
+                Some(
+                    r#"{"lastPrice":"1.0","highPrice":"1.1","lowPrice":"0.9","volume":"10","quoteVolume":"10","priceChangePercent":"0.5","bidPrice":"0.999","askPrice":"1.001"}"#,
+                )
+            } else if req.url.contains("/api/v3/trades") {
+                Some(
+                    r#"[{"id":9,"price":"1.0","qty":"3","quoteQty":"3","time":1700000000000,"isBuyerMaker":false}]"#,
+                )
+            } else {
+                None
+            };
+            Box::pin(async move {
+                Ok(Response {
+                    status_code: if body.is_some() { 200 } else { 404 },
+                    headers: Default::default(),
+                    body: body.unwrap_or_default().to_string(),
+                })
+            })
+        }
+    }
+
+    /// The mock chain and DEX clients, with the canned venue transport.
+    struct TestFactory(MockClientFactory);
+
+    impl ChainClientFactory for TestFactory {
+        fn create_chain_client(
+            &self,
+            chain: &str,
+        ) -> scope::error::Result<Box<dyn scope::chains::ChainClient>> {
+            self.0.create_chain_client(chain)
+        }
+
+        fn create_dex_client(&self) -> Box<dyn DexDataSource> {
+            self.0.create_dex_client()
+        }
+
+        fn http(&self) -> Arc<dyn HttpClient> {
+            Arc::new(CannedVenue)
+        }
+    }
+
+    /// Serves the router on a free local port.
+    async fn serve(mock: MockClientFactory) -> std::net::SocketAddr {
+        let state = Arc::new(crate::AppState::new(
+            scope::config::Config::default(),
+            TestFactory(mock),
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, crate::build_router(state))
+                .await
+                .unwrap()
+        });
+        addr
+    }
+
+    /// A minimal WebSocket client: the handshake, unfragmented frames.
+    struct Client(TcpStream);
+
+    impl Client {
+        async fn connect(addr: std::net::SocketAddr, query: &str) -> Self {
+            let mut s = TcpStream::connect(addr).await.unwrap();
+            let req = format!(
+                "GET /ws/monitor?{query} HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\n\
+                 Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+                 Sec-WebSocket-Version: 13\r\n\r\n"
+            );
+            s.write_all(req.as_bytes()).await.unwrap();
+            // Byte by byte, so no frame byte is read with the headers.
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                head.push(s.read_u8().await.unwrap());
+            }
+            let head = String::from_utf8(head).unwrap();
+            assert!(head.starts_with("HTTP/1.1 101"), "{head}");
+            Self(s)
+        }
+
+        /// The next text frame as JSON, or `None` when the server closed.
+        async fn recv(&mut self) -> Option<serde_json::Value> {
+            let read = async {
+                let mut h = [0u8; 2];
+                if self.0.read_exact(&mut h).await.is_err() {
+                    return None;
+                }
+                let len = match h[1] & 0x7f {
+                    126 => u64::from(self.0.read_u16().await.unwrap()),
+                    127 => self.0.read_u64().await.unwrap(),
+                    n => u64::from(n),
+                };
+                let mut payload = vec![0u8; len as usize];
+                self.0.read_exact(&mut payload).await.unwrap();
+                match h[0] & 0x0f {
+                    1 => Some(serde_json::from_slice(&payload).unwrap()),
+                    8 => None,
+                    op => panic!("unexpected opcode {op}"),
+                }
+            };
+            tokio::time::timeout(Duration::from_secs(10), read)
+                .await
+                .expect("a frame within 10s")
+        }
+
+        /// Sends a masked frame, as a client must.
+        async fn send(&mut self, opcode: u8, payload: &[u8]) {
+            assert!(payload.len() < 126);
+            let mask = [0x12, 0x34, 0x56, 0x78];
+            let mut frame = vec![0x80 | opcode, 0x80 | payload.len() as u8];
+            frame.extend(mask);
+            frame.extend(payload.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
+            self.0.write_all(&frame).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_the_socket_streams_dex_updates_and_answers_a_ping() {
+        let addr = serve(MockClientFactory::new()).await;
+        let mut ws = Client::connect(addr, "token=0xmocktoken&chain=base&refresh=1").await;
+        let hello = ws.recv().await.unwrap();
+        assert_eq!(hello["type"], "connected");
+        assert_eq!(hello["token"], "0xmocktoken");
+        assert_eq!(hello["chain"], "base");
+        assert_eq!(hello["refresh_secs"], 1);
+        assert!(hello["venue"].is_null() && hello["exchange_pair"].is_null());
+
+        let update = ws.recv().await.unwrap();
+        assert_eq!(update["type"], "update", "{update}");
+        assert_eq!(update["token"]["symbol"], "MOCK");
+        assert_eq!(update["price_usd"], 1.0);
+        assert!(update["pairs"].as_array().unwrap().len() <= 5);
+        assert!(
+            update.get("exchange_order_book").is_none(),
+            "no venue asked"
+        );
+
+        // A ping is answered at once, before the next refresh.
+        ws.send(1, br#"{"type":"ping"}"#).await;
+        assert_eq!(ws.recv().await.unwrap()["type"], "pong");
+        // Then the stream goes on.
+        assert_eq!(ws.recv().await.unwrap()["type"], "update");
+        // Another text message is ignored; a close ends the stream.
+        ws.send(1, b"not json").await;
+        ws.send(8, &[]).await;
+        while let Some(frame) = ws.recv().await {
+            assert_eq!(frame["type"], "update", "{frame}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_a_venue_adds_its_book_ticker_and_trades_to_each_update() {
+        let addr = serve(MockClientFactory::new()).await;
+        // With no pair, the token is the base, with the venue's quote.
+        let mut ws = Client::connect(addr, "token=BTC&venue=binance").await;
+        let hello = ws.recv().await.unwrap();
+        assert_eq!(hello["venue"], "binance");
+        assert_eq!(hello["exchange_pair"], "BTCUSDT");
+        let update = ws.recv().await.unwrap();
+        assert_eq!(update["type"], "update", "{update}");
+        assert_eq!(update["exchange_order_book"]["best_bid"], 0.999);
+        assert_eq!(update["exchange_ticker"]["last_price"], 1.0);
+        assert_eq!(update["exchange_trades"][0]["side"], "buy");
+    }
+
+    #[tokio::test]
+    async fn test_a_dex_failure_is_an_error_frame_that_keeps_the_exchange_data() {
+        let mut mock = MockClientFactory::new();
+        mock.mock_dex.token_data = None;
+        let addr = serve(mock).await;
+        let mut ws = Client::connect(addr, "token=ETH&venue=binance&pair=ETH/USDC").await;
+        let hello = ws.recv().await.unwrap();
+        assert_eq!(hello["exchange_pair"], "ETHUSDC", "the asked pair");
+        let frame = ws.recv().await.unwrap();
+        assert_eq!(frame["type"], "error", "{frame}");
+        assert!(
+            frame["message"].as_str().unwrap().contains("No DEX data"),
+            "{frame}"
+        );
+        assert_eq!(frame["exchange_ticker"]["last_price"], 1.0, "{frame}");
+        assert!(frame["exchange_trades"].is_array(), "{frame}");
+    }
+
+    #[tokio::test]
+    async fn test_an_unknown_venue_is_reported_and_the_socket_closes() {
+        let addr = serve(MockClientFactory::new()).await;
+        let mut ws = Client::connect(addr, "token=BTC&venue=nonexistent_venue_xyz").await;
+        let frame = ws.recv().await.unwrap();
+        assert_eq!(frame["type"], "error", "{frame}");
+        assert!(
+            frame["message"].as_str().unwrap().contains("Unknown venue"),
+            "{frame}"
+        );
+        assert!(ws.recv().await.is_none(), "no stream after the error");
+    }
 }

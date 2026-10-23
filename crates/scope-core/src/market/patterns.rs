@@ -696,4 +696,51 @@ mod tests {
         assert!(p.tape_note.unwrap().contains("only 29 recent trades"));
         assert!(p.bot_like_pct.is_none());
     }
+
+    #[test]
+    fn test_each_tape_signal_alone_refuses_a_short_tape() {
+        // detect() checks the length first, but the signals are public and
+        // must not judge a tape too short on their own either: 29 trades of
+        // one size, every 2s, in buy/sell pairs, would trip all three.
+        let t: Vec<Trade> = (0..MIN_TRADES as u64 - 1)
+            .map(|i| {
+                let side = if i % 2 == 0 {
+                    TradeSide::Buy
+                } else {
+                    TradeSide::Sell
+                };
+                trade(i * 2_000, 1.0, 10.0, side)
+            })
+            .collect();
+        assert!(repeated_size(&t).is_none());
+        assert!(metronome(&t).is_none());
+        assert!(ping_pong(&t).is_none());
+    }
+
+    #[test]
+    fn test_a_bid_ladder_is_described_as_a_bid_ladder() {
+        let bids: Vec<_> = (0..9)
+            .map(|i| level(0.999 - i as f64 * 0.001, 250.0))
+            .collect();
+        let found = ladders(&bids, &[]);
+        assert_eq!(found.len(), 1);
+        let d = found[0].describe();
+        assert!(d.starts_with("bid ladder of 9 levels × 250 at "), "{d}");
+    }
+
+    #[test]
+    fn test_a_tape_with_no_volume_gives_the_trade_share_only() {
+        // Zero-price prints have no volume to take a share of, so the
+        // advisory gives the trade share alone.
+        let t: Vec<Trade> = (0..40)
+            .map(|i| trade(1_000 + i * 977, 0.0, 3.0, TradeSide::Buy))
+            .collect();
+        let p = detect(Ok(&t), None);
+        assert_eq!(p.bot_like_pct, Some(100.0));
+        assert_eq!(p.bot_like_volume_pct, None);
+        let crate::market::types::HealthCheck::Warn(m) = p.check() else {
+            panic!("{:?}", p.check())
+        };
+        assert!(m.ends_with("; 100% of sampled trades look bot-made"), "{m}");
+    }
 }
