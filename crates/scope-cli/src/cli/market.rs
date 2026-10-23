@@ -2390,7 +2390,9 @@ capabilities:
         assert!(md.contains(USDC_ADDR), "{md}");
     }
 
-    #[tokio::test]
+    // The paused clock: a slow run on a loaded machine must not change
+    // the count.
+    #[tokio::test(start_paused = true)]
     async fn test_run_summary_repeat_mode_writes_csv_rows_and_report() {
         let dir = tempfile::tempdir().unwrap();
         let csv = dir.path().join("series.csv");
@@ -2427,7 +2429,9 @@ capabilities:
         assert!(report.exists());
     }
 
-    #[tokio::test]
+    // The paused clock: a slow run on a loaded machine must not change
+    // the count.
+    #[tokio::test(start_paused = true)]
     async fn test_run_summary_repeat_publishes_run_progress() {
         // The TUI draws `run N of M` from this hook, so the total must be
         // known at the start and the run number must advance.
