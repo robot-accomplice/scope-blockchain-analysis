@@ -773,4 +773,149 @@ mod tests {
         assert_eq!(input.fd, libc::STDIN_FILENO);
         assert!(std::ptr::eq(input.cancel, &CANCEL));
     }
+    #[test]
+    fn test_fill_buf_returns_a_read_error_as_it_is() {
+        // Only a cancel becomes `Other`; EISDIR comes back unchanged.
+        let flag = AtomicBool::new(false);
+        // SAFETY: a valid NUL-terminated path; the fd is closed below.
+        let fd = unsafe { libc::open(c"/".as_ptr(), libc::O_RDONLY) };
+        assert!(fd >= 0);
+        let r = PromptInput::new(fd, &flag).fill_buf().map(<[u8]>::to_vec);
+        // SAFETY: closes the fd opened above, once.
+        unsafe { libc::close(fd) };
+        assert_eq!(r.unwrap_err().raw_os_error(), Some(libc::EISDIR));
+    }
+
+    extern "C" fn ignore_signal(_: libc::c_int) {}
+
+    #[test]
+    fn test_a_signal_during_the_wait_does_not_end_the_read() {
+        // A signal (SIGWINCH from a resize, say) makes poll fail with
+        // EINTR. The reader must keep waiting, not give up the prompt.
+        // SAFETY: installs a handler that does nothing, without
+        // SA_RESTART, so a blocked poll returns EINTR.
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = ignore_signal as extern "C" fn(libc::c_int) as usize;
+            libc::sigemptyset(&mut action.sa_mask);
+            assert_eq!(
+                libc::sigaction(libc::SIGUSR1, &action, std::ptr::null_mut()),
+                0
+            );
+        }
+        let flag = AtomicBool::new(false);
+        let pipe = Pipe::new();
+        let fd = pipe.0;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let line = std::thread::scope(|s| {
+            let reader = s.spawn(|| {
+                // SAFETY: pthread_self has no preconditions.
+                tx.send(unsafe { libc::pthread_self() }).unwrap();
+                let mut line = String::new();
+                PromptInput::new(fd, &flag)
+                    .read_line(&mut line)
+                    .map(|_| line)
+            });
+            let thread = rx.recv().unwrap();
+            for _ in 0..10 {
+                std::thread::sleep(Duration::from_millis(20));
+                // SAFETY: the reader thread is alive until it reads the
+                // line, which is written only after the last signal.
+                assert_eq!(unsafe { libc::pthread_kill(thread, libc::SIGUSR1) }, 0);
+            }
+            pipe.write(b"still here\n");
+            reader.join().unwrap()
+        });
+        assert_eq!(line.unwrap(), "still here\n");
+    }
+
+    /// Puts a pipe on fd 0 for the test and puts the real stdin back on
+    /// drop. Holds `DIAG_LOCK`, so no other test reads stdin meanwhile.
+    struct PipedStdin {
+        pipe: Pipe,
+        saved: RawFd,
+        _lock: tokio::sync::MutexGuard<'static, ()>,
+    }
+
+    impl PipedStdin {
+        fn new() -> Self {
+            let lock = crate::cli::tui::DIAG_LOCK.blocking_lock();
+            let pipe = Pipe::new();
+            // SAFETY: dup and dup2 on open fds; `saved` is restored and
+            // closed on drop.
+            let saved = unsafe { libc::dup(libc::STDIN_FILENO) };
+            assert!(saved >= 0);
+            assert_eq!(unsafe { libc::dup2(pipe.0, libc::STDIN_FILENO) }, 0);
+            Self {
+                pipe,
+                saved,
+                _lock: lock,
+            }
+        }
+
+        /// Bytes still waiting in the pipe.
+        fn unread(&self) -> usize {
+            let mut n: libc::c_int = 0;
+            // SAFETY: FIONREAD writes one c_int.
+            assert_eq!(
+                unsafe { libc::ioctl(self.pipe.0, libc::FIONREAD, &mut n) },
+                0
+            );
+            n as usize
+        }
+    }
+
+    impl Drop for PipedStdin {
+        fn drop(&mut self) {
+            // SAFETY: restores the stdin saved in `new` and closes the copy.
+            unsafe {
+                libc::dup2(self.saved, libc::STDIN_FILENO);
+                libc::close(self.saved);
+            }
+        }
+    }
+
+    #[test]
+    fn test_ask_stdin_asks_on_the_diagnostic_channel_and_reads_stdin() {
+        let stdin = PipedStdin::new();
+        stdin.pipe.write(b"yes\nnext\n");
+        let (out, cap) = Output::capture();
+        assert_eq!(ask_stdin(&out, "Continue? ").unwrap(), "yes\n");
+        assert_eq!(cap.err(), "Continue? ");
+        assert_eq!(cap.out(), "");
+        assert_eq!(
+            stdin.unread(),
+            5,
+            "the next line is left for the next prompt"
+        );
+    }
+
+    #[test]
+    fn test_ask_timeout_returns_the_answer_or_none_when_time_runs_out() {
+        let stdin = PipedStdin::new();
+        let (out, cap) = Output::capture();
+
+        stdin.pipe.write(b"n\n");
+        let got = ask_timeout(&out, "Stop Ghola? ", Duration::from_secs(5)).unwrap();
+        assert_eq!(got.as_deref(), Some("n\n"));
+        assert_eq!(cap.err(), "Stop Ghola? ");
+
+        let started = Instant::now();
+        let got = ask_timeout(&out, "Again? ", Duration::from_millis(50)).unwrap();
+        assert_eq!(got, None);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "waited too long"
+        );
+        assert_eq!(cap.err(), "Stop Ghola? Again? ");
+
+        // The read left behind takes this line; wait for it before the
+        // real stdin goes back on fd 0.
+        stdin.pipe.write(b"late\n");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while stdin.unread() > 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(stdin.unread(), 0);
+    }
 }
