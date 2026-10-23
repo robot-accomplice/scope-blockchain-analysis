@@ -811,4 +811,212 @@ mod tests {
         tick(&mut g, 1, 3.4);
         assert_eq!(g.status_part(), "watch stables: 1 breached · Ctrl-G grid");
     }
+
+    /// One tick of hand-made rows, with no events.
+    fn tick_rows(g: &mut GridState, run: u64, targets: Vec<TargetSnapshot>) {
+        let summaries = targets.iter().map(|_| None).collect();
+        g.apply(GridMsg::Tick {
+            run,
+            tick: Box::new(Tick {
+                snapshot: Snapshot { targets },
+                summaries,
+            }),
+            events: Vec::new(),
+        });
+    }
+
+    /// The row of `s` that holds `text`.
+    fn line_with<'a>(s: &'a str, text: &str) -> &'a str {
+        s.lines().find(|l| l.contains(text)).unwrap_or("")
+    }
+
+    #[test]
+    fn a_cell_keeps_its_last_values_only() {
+        let mut g = GridState::new(list(), None);
+        for run in 1..=HISTORY as u64 + 10 {
+            tick(&mut g, run, run as f64 / 100.0);
+        }
+        let h = &g.history[&("USDC@binance".to_string(), "spread_pct < 1".to_string())];
+        assert_eq!(h.len(), HISTORY);
+        assert_eq!(h.front(), Some(&Some(0.11)), "the oldest ten are gone");
+        assert_eq!(h.back(), Some(&Some(1.3)));
+    }
+
+    #[test]
+    fn up_and_down_wrap_and_do_nothing_with_no_rows() {
+        let mut g = GridState::new(list(), None);
+        g.key(key(KeyCode::Up));
+        assert_eq!(g.selected, 0, "no rows yet");
+        assert_eq!(g.key(key(KeyCode::Enter)), GridAction::None);
+        assert!(!g.detail, "no row to open");
+        tick(&mut g, 1, 3.4);
+        g.key(key(KeyCode::Up));
+        assert_eq!(g.selected, 2, "up from the first row is the last");
+        g.key(key(KeyCode::Up));
+        assert_eq!(g.selected, 1);
+        g.key(key(KeyCode::Down));
+        g.key(key(KeyCode::Down));
+        assert_eq!(g.selected, 0, "down from the last row is the first");
+    }
+
+    #[test]
+    fn an_ended_run_says_so_in_the_status_part_and_drops_the_old_settings_note() {
+        let mut g = GridState::new(list(), None);
+        tick(&mut g, 1, 3.4);
+        g.stale = true;
+        g.end("Done.".into(), OK);
+        assert!(!g.is_running());
+        assert_eq!(
+            g.status_part(),
+            "watch ended stables: 1 breached · Ctrl-G grid"
+        );
+        let s = screen(&g, 120, 36);
+        assert!(s.contains("Done."), "{s}");
+        assert!(s.contains(ENDED_LEGEND), "{s}");
+    }
+
+    #[test]
+    fn an_id_with_a_space_or_a_quote_is_quoted_in_the_command() {
+        assert_eq!(quote("PEPE"), "PEPE");
+        assert_eq!(quote("MY TOKEN"), "\"MY TOKEN\"");
+        assert_eq!(quote("a\"b"), "\"a\\\"b\"");
+        let mut w = Watchlist::new("odd");
+        let mut t = Target::new(TargetKind::Token, "MY TOKEN");
+        t.chain = Some("solana".into());
+        w.targets = vec![t];
+        let label = w.targets[0].label();
+        let mut g = GridState::new(w, None);
+        tick_rows(
+            &mut g,
+            1,
+            vec![TargetSnapshot::new(
+                label,
+                vec![cell("holders > 1", RuleStatus::Pass, Some(5.0))],
+            )],
+        );
+        g.key(key(KeyCode::Enter));
+        assert_eq!(
+            g.key(key(KeyCode::Char('h'))),
+            GridAction::Run("crawl \"MY TOKEN\" --chain solana".into())
+        );
+    }
+
+    #[test]
+    fn a_warned_row_comes_before_a_passed_one_and_shows_its_warning() {
+        let mut g = GridState::new(list(), None);
+        tick_rows(
+            &mut g,
+            1,
+            vec![
+                TargetSnapshot::new(
+                    "0xabc",
+                    vec![cell("risk_score <= 5", RuleStatus::Pass, Some(2.0))],
+                ),
+                TargetSnapshot::new(
+                    "USDC@binance",
+                    vec![
+                        cell("spread_pct < 1", RuleStatus::Warn("thin book".into()), None),
+                        cell(
+                            "holders > 1",
+                            RuleStatus::NotApplicable("not a token".into()),
+                            None,
+                        ),
+                    ],
+                ),
+            ],
+        );
+        let order: Vec<&str> = g.rows().iter().map(|r| r.target.as_str()).collect();
+        assert_eq!(order, ["USDC@binance", "0xabc"]);
+        assert_eq!(g.breaches(), 0, "a warning is not a breach");
+        let s = screen(&g, 120, 36);
+        let row = line_with(&s, "USDC@binance");
+        assert!(row.contains("warned"), "{row}");
+        assert!(
+            row.contains("!-  thin book"),
+            "one glyph per cell, then why: {row}"
+        );
+        let row = line_with(&s, "0xabc");
+        assert!(row.contains("passed") && row.contains('✓'), "{row}");
+    }
+
+    #[test]
+    fn with_no_rows_it_says_what_it_waits_for() {
+        let mut g = GridState::new(list(), None);
+        assert!(screen(&g, 80, 24).contains("Resolving the targets…"));
+        g.apply(GridMsg::Ready(Ready {
+            list: list(),
+            contracts: vec![None, None, None],
+        }));
+        assert!(screen(&g, 80, 24).contains("Waiting for the first tick…"));
+        // A run that ended before it resolved waits for nothing.
+        let mut g = GridState::new(list(), None);
+        g.end("Stopped.".into(), SECONDARY);
+        assert!(screen(&g, 80, 24).contains("Waiting for the first tick…"));
+    }
+
+    #[test]
+    fn a_cleared_row_is_drawn_dim_for_one_tick() {
+        let mut g = GridState::new(list(), None);
+        tick(&mut g, 1, 3.4);
+        tick(&mut g, 2, 0.5);
+        let dim = |g: &GridState| {
+            let mut t = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            t.draw(|f| draw(f, f.area(), g)).unwrap();
+            let buf = t.backend().buffer().clone();
+            // The rows start under the title; the target name after `> `.
+            (0..24).any(|y| {
+                let row: String = (0..80).map(|x| buf[(x, y)].symbol()).collect();
+                row.contains("USDC@binance")
+                    && buf[(row.find("USDC").unwrap() as u16, y)]
+                        .modifier
+                        .contains(Modifier::DIM)
+            })
+        };
+        assert!(dim(&g), "cleared on this tick");
+        tick(&mut g, 3, 0.5);
+        assert!(!dim(&g), "only once");
+    }
+
+    #[test]
+    fn the_detail_draws_the_threshold_of_each_rule_on_its_chart() {
+        let mut g = GridState::new(list(), None);
+        for run in 1..=3 {
+            let v = run as f64;
+            tick_rows(
+                &mut g,
+                run,
+                vec![TargetSnapshot::new(
+                    "PEPE",
+                    vec![
+                        cell("holders > 10", RuleStatus::Pass, Some(20.0 + v)),
+                        cell("holders == 22", RuleStatus::Pass, Some(20.0 + v)),
+                        cell("holders != 99", RuleStatus::Pass, Some(20.0 + v)),
+                        cell("risk_score <= 5", RuleStatus::Pass, Some(v)),
+                    ],
+                )],
+            );
+        }
+        g.key(key(KeyCode::Enter));
+        let s = screen(&g, 80, 24);
+        let lines: Vec<&str> = s.lines().collect();
+        for label in [
+            "holders > 10",
+            "holders == 22",
+            "holders != 99",
+            "risk_score <= 5",
+        ] {
+            let i = lines.iter().position(|l| l.contains(label)).unwrap();
+            let chart = lines[i + 1];
+            assert!(chart.contains('─'), "{label}: the threshold line\n{s}");
+            assert!(
+                chart.chars().any(|c| ('▁'..='█').contains(&c)),
+                "{label}: the bars\n{s}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_value_that_is_not_a_number_reads_as_such() {
+        assert_eq!(value_text(Some(f64::NAN)), "NaN");
+    }
 }

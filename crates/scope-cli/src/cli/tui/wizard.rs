@@ -910,4 +910,361 @@ mod tests {
         let s = screen(&w, 120, 36);
         assert!(s.contains("1 fetch(es) per run · 61 in all"), "{s}");
     }
+
+    fn clear(w: &mut WizardState) {
+        for _ in 0..40 {
+            w.key(key(KeyCode::Backspace));
+        }
+    }
+
+    #[test]
+    fn targets_step_moves_the_selection_and_enter_opens_its_metrics() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = wizard(dir.path());
+        w.key(key(KeyCode::Down));
+        w.key(key(KeyCode::Enter));
+        assert_eq!((w.step, w.target), (Step::Targets, 0), "no target yet");
+        for t in ["pair USDC binance", "address 0xabc ethereum", "token PEPE"] {
+            w.key(key(KeyCode::Char('a')));
+            typed(&mut w, t);
+        }
+        assert_eq!(w.target, 2, "the new target is selected");
+        w.key(key(KeyCode::Down));
+        assert_eq!(w.target, 0, "down from the last is the first");
+        w.key(key(KeyCode::Up));
+        w.key(key(KeyCode::Up));
+        assert_eq!(w.target, 1);
+        w.row = 3;
+        w.key(key(KeyCode::Enter));
+        assert_eq!((w.step, w.target, w.row), (Step::Metrics, 1, 0));
+    }
+
+    #[test]
+    fn metrics_step_moves_between_rows_and_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = wizard(dir.path());
+        w.step = Step::Metrics;
+        assert!(w.metric_rows().is_empty(), "no target");
+        for code in [KeyCode::Down, KeyCode::Right, KeyCode::Char(' ')] {
+            w.key(key(code));
+        }
+        assert_eq!((w.target, w.row, w.dirty), (0, 0, false));
+        assert!(screen(&w, 80, 24).contains("Add a target first."));
+        w.step = Step::Targets;
+        for t in ["pair USDC binance", "token PEPE"] {
+            w.key(key(KeyCode::Char('a')));
+            typed(&mut w, t);
+        }
+        w.key(key(KeyCode::Tab));
+        let n = w.metric_rows().len();
+        w.key(key(KeyCode::Up));
+        assert_eq!(w.row, n - 1, "up from the first row is the last");
+        w.key(key(KeyCode::Down));
+        assert_eq!(w.row, 0);
+        w.key(key(KeyCode::Down));
+        w.key(key(KeyCode::Right));
+        assert_eq!(
+            (w.target, w.row),
+            (0, 0),
+            "right wraps and starts at the top"
+        );
+        assert_eq!(w.metric_rows()[0], None, "a pair starts with the preset");
+        w.key(key(KeyCode::Down));
+        w.key(key(KeyCode::Left));
+        assert_eq!((w.target, w.row), (1, 0), "left wraps");
+        let s = screen(&w, 120, 36);
+        assert!(s.contains("(2/2)"), "{s}");
+    }
+
+    #[test]
+    fn the_preset_turns_off_and_on_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = wizard(dir.path());
+        w.key(key(KeyCode::Char('a')));
+        typed(&mut w, "pair USDC binance");
+        w.key(key(KeyCode::Tab));
+        w.key(key(KeyCode::Char(' ')));
+        assert_eq!(w.list.targets[0].preset, None);
+        assert!(screen(&w, 120, 36).contains("[ ] market health"));
+        w.key(key(KeyCode::Char(' ')));
+        assert_eq!(w.list.targets[0].preset, Some(Preset::MarketHealth));
+        // `o` and Enter have nothing to change on the preset row.
+        w.key(key(KeyCode::Char('o')));
+        w.key(key(KeyCode::Enter));
+        assert_eq!(w.edit, None);
+    }
+
+    #[test]
+    fn o_goes_through_every_operator_and_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = wizard(dir.path());
+        w.key(key(KeyCode::Char('a')));
+        typed(&mut w, "token PEPE");
+        w.key(key(KeyCode::Tab));
+        w.row = w
+            .metric_rows()
+            .iter()
+            .position(|r| *r == Some(MetricId::Holders))
+            .unwrap();
+        w.key(key(KeyCode::Char('o')));
+        assert!(w.list.targets[0].rules.is_empty(), "no rule to change yet");
+        w.key(key(KeyCode::Char(' ')));
+        let ops: Vec<Op> = (0..6)
+            .map(|_| {
+                w.key(key(KeyCode::Char('o')));
+                w.list.targets[0].rules[0].op
+            })
+            .collect();
+        assert_eq!(ops, [Op::Ge, Op::Eq, Op::Ne, Op::Lt, Op::Le, Op::Gt]);
+    }
+
+    #[test]
+    fn a_value_must_be_a_finite_number() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = wizard(dir.path());
+        w.key(key(KeyCode::Char('a')));
+        typed(&mut w, "token PEPE");
+        w.key(key(KeyCode::Tab));
+        w.row = w
+            .metric_rows()
+            .iter()
+            .position(|r| *r == Some(MetricId::Holders))
+            .unwrap();
+        w.key(key(KeyCode::Char(' ')));
+        for bad in ["lots", "inf", ""] {
+            w.key(key(KeyCode::Enter));
+            clear(&mut w);
+            typed(&mut w, bad);
+            assert_eq!(
+                w.error.as_deref(),
+                Some(format!("`{bad}` is not a number").as_str())
+            );
+            assert_eq!(w.list.targets[0].rules[0].value, 0.0, "unchanged");
+        }
+        w.key(key(KeyCode::Enter));
+        clear(&mut w);
+        typed(&mut w, "1_000");
+        assert_eq!(
+            w.list.targets[0].rules[0].value, 1000.0,
+            "`_` groups digits"
+        );
+    }
+
+    #[test]
+    fn while_typing_ctrl_and_other_keys_do_not_type() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = wizard(dir.path());
+        w.key(key(KeyCode::Char('a')));
+        w.key(key(KeyCode::Char('p')));
+        for k in [ctrl('s'), ctrl('r'), key(KeyCode::Left), key(KeyCode::Tab)] {
+            assert_eq!(w.key(k), WizardAction::None);
+        }
+        assert_eq!(w.edit, Some((EditKind::AddTarget, "p".to_string())));
+        assert_eq!(w.step, Step::Targets);
+        assert_eq!(w.error, None, "Ctrl-S did not try to save");
+        w.key(key(KeyCode::Esc));
+        assert_eq!(w.edit, None, "Esc cancels");
+        assert!(w.list.targets.is_empty());
+    }
+
+    #[test]
+    fn shift_tab_goes_back_and_wraps() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = wizard(dir.path());
+        w.row = 2;
+        w.key(key(KeyCode::BackTab));
+        assert_eq!((w.step, w.row), (Step::Outputs, 0));
+        w.key(key(KeyCode::BackTab));
+        assert_eq!(w.step, Step::Timing);
+        w.key(key(KeyCode::Tab));
+        w.key(key(KeyCode::Tab));
+        assert_eq!(w.step, Step::Targets, "Tab wraps too");
+    }
+
+    #[test]
+    fn the_duration_edit_starts_from_the_current_one_and_counts_the_fetches() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = wizard(dir.path());
+        w.key(key(KeyCode::Char('a')));
+        typed(&mut w, "pair USDC binance");
+        w.list.duration = Some(Duration::from_secs(7200));
+        w.step = Step::Timing;
+        w.key(key(KeyCode::Up));
+        assert_eq!(w.row, 1, "up from the interval is the duration");
+        w.key(key(KeyCode::Enter));
+        assert_eq!(w.edit, Some((EditKind::Duration, format_duration(7200))));
+        clear(&mut w);
+        typed(&mut w, "soon");
+        assert!(w.error.is_some(), "not a duration");
+        assert_eq!(w.list.duration, Some(Duration::from_secs(7200)));
+        w.key(key(KeyCode::Enter));
+        clear(&mut w);
+        typed(&mut w, "30m");
+        assert_eq!(w.list.duration, Some(Duration::from_secs(1800)));
+        let s = screen(&w, 120, 36);
+        assert!(
+            s.contains(&format!("Duration  {}", format_duration(1800))),
+            "{s}"
+        );
+        // Every 60 s for 30 min: 30 runs and the first.
+        assert!(s.contains("1 fetch(es) per run · 31 in all"), "{s}");
+    }
+
+    #[test]
+    fn outputs_edit_the_name_and_paths_then_save_and_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = wizard(dir.path());
+        w.key(key(KeyCode::Char('a')));
+        typed(&mut w, "pair USDC binance");
+        w.step = Step::Outputs;
+        w.key(key(KeyCode::Up));
+        assert_eq!(w.row, 4, "up from Name is Start");
+        w.key(key(KeyCode::Down));
+        assert_eq!(w.row, 0);
+        for bad in ["", "a/b", "c:d"] {
+            w.key(key(KeyCode::Enter));
+            clear(&mut w);
+            typed(&mut w, bad);
+            assert!(
+                w.error.as_deref().unwrap().contains("a name has no"),
+                "{bad:?}"
+            );
+            assert_eq!(w.list.name, "w", "unchanged");
+        }
+        w.key(key(KeyCode::Enter));
+        assert_eq!(w.edit, Some((EditKind::Name, "w".to_string())));
+        clear(&mut w);
+        typed(&mut w, " stables ");
+        assert_eq!(w.list.name, "stables", "trimmed");
+        w.key(key(KeyCode::Down));
+        w.key(key(KeyCode::Enter));
+        typed(&mut w, "out.csv");
+        assert_eq!(w.list.outputs.csv, Some(PathBuf::from("out.csv")));
+        w.key(key(KeyCode::Enter));
+        assert_eq!(w.edit, Some((EditKind::Csv, "out.csv".to_string())));
+        clear(&mut w);
+        w.key(key(KeyCode::Enter));
+        assert_eq!(w.list.outputs.csv, None, "an empty path is no file");
+        w.key(key(KeyCode::Down));
+        w.key(key(KeyCode::Enter));
+        typed(&mut w, "report.md");
+        assert_eq!(w.list.outputs.report, Some(PathBuf::from("report.md")));
+        w.key(key(KeyCode::Enter));
+        clear(&mut w);
+        w.key(key(KeyCode::Enter));
+        assert_eq!(w.list.outputs.report, None);
+        let s = screen(&w, 120, 36);
+        assert!(s.contains(&format!("to {}", w.path().display())), "{s}");
+        w.key(key(KeyCode::Down));
+        let WizardAction::Saved(path) = w.key(key(KeyCode::Enter)) else {
+            panic!("{:?}", w.error)
+        };
+        assert_eq!(path, w.path());
+        assert!(path.exists());
+        assert!(!w.dirty);
+        w.key(key(KeyCode::Down));
+        let WizardAction::Start(list) = w.key(key(KeyCode::Enter)) else {
+            panic!("{:?}", w.error)
+        };
+        assert_eq!(list.name, "stables");
+    }
+
+    #[test]
+    fn add_target_says_how_when_the_line_is_wrong() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = wizard(dir.path());
+        for bad in ["pair", "pair USDC binance extra", "wallet 0xabc"] {
+            w.key(key(KeyCode::Char('a')));
+            typed(&mut w, bad);
+            assert!(
+                w.error.as_deref().unwrap().starts_with("type `pair USDC"),
+                "{bad}: {:?}",
+                w.error
+            );
+        }
+        assert!(w.list.targets.is_empty());
+        // An address's third word is always its chain, even a venue's name;
+        // a token's is its venue when it names one.
+        for line in ["ADDRESS 0xabc binance", "token PEPE WEEX"] {
+            w.key(key(KeyCode::Char('a')));
+            typed(&mut w, line);
+        }
+        let [a, t] = &w.list.targets[..] else {
+            panic!("{:?}", w.list.targets)
+        };
+        assert_eq!(
+            (a.kind, a.chain.as_deref(), a.venue.as_deref()),
+            (TargetKind::Address, Some("binance"), None)
+        );
+        assert_eq!(
+            (t.venue.as_deref(), t.preset),
+            (Some("WEEX"), Some(Preset::MarketHealth))
+        );
+    }
+
+    #[test]
+    fn a_save_that_fails_says_why_and_stays_dirty() {
+        let dir = tempfile::tempdir().unwrap();
+        // The folder is a file: it cannot hold the watchlist.
+        let file = dir.path().join("not-a-folder");
+        std::fs::write(&file, "").unwrap();
+        let mut w = wizard(&file);
+        w.key(key(KeyCode::Char('a')));
+        typed(&mut w, "pair USDC binance");
+        assert_eq!(w.key(ctrl('s')), WizardAction::None);
+        assert!(
+            w.error.as_deref().unwrap().starts_with("Could not save"),
+            "{:?}",
+            w.error
+        );
+        assert!(w.dirty);
+        assert!(screen(&w, 120, 36).contains("Could not save"));
+    }
+
+    #[test]
+    fn draws_the_targets_the_line_being_typed_and_the_question() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = wizard(dir.path());
+        let s = screen(&w, 120, 36);
+        assert!(s.contains("No targets yet: press a to add one."), "{s}");
+        assert!(!s.contains("Ready"), "nothing to start: {s}");
+        for t in ["address 0xabc ethereum", "token PEPE"] {
+            w.key(key(KeyCode::Char('a')));
+            typed(&mut w, t);
+        }
+        w.list.targets[1]
+            .rules
+            .push(default_rule(MetricId::Holders));
+        let s = screen(&w, 120, 36);
+        assert!(s.contains("0xabc on ethereum"), "{s}");
+        assert!(s.contains("PEPE  1 rule(s)"), "{s}");
+        for (kind, label) in [
+            (EditKind::AddTarget, "Add"),
+            (EditKind::Value(MetricId::Holders), "holders value"),
+            (EditKind::Interval, "Interval"),
+            (EditKind::Duration, "Duration"),
+            (EditKind::Name, "Name"),
+            (EditKind::Csv, "CSV"),
+            (EditKind::Report, "Report"),
+        ] {
+            let hint = kind == EditKind::AddTarget;
+            w.edit = Some((kind, "abc".to_string()));
+            let s = screen(&w, 120, 36);
+            assert!(s.contains(&format!(" {label}: abc█")), "{label}\n{s}");
+            assert_eq!(s.contains("Enter adds · Esc cancels"), hint, "{s}");
+        }
+        w.edit = None;
+        w.key(key(KeyCode::Esc));
+        assert!(screen(&w, 120, 36).contains("Leave without saving? [y/N]"));
+        w.key(key(KeyCode::Char('n')));
+        w.dirty = false;
+        let s = screen(&w, 120, 36);
+        assert!(!s.contains("Leave without saving"), "{s}");
+        assert!(!s.contains("Ready"), "the address checks nothing: {s}");
+        w.list.targets[0]
+            .rules
+            .push(default_rule(MetricId::RiskScore));
+        let s = screen(&w, 120, 36);
+        assert!(s.contains("Ready: Ctrl-R starts the run."), "{s}");
+    }
 }
