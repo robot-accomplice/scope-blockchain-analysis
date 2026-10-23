@@ -6956,4 +6956,394 @@ refresh_seconds: 5
             assert_eq!(state.layout, layout);
         }
     }
+    // ---- The dashboard's start (`run_direct`, `run`) up to the terminal ----
+
+    /// A DEX source that knows no token and notes the chain of each lookup.
+    #[derive(Clone, Default)]
+    struct NoPairsDex {
+        chains: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl DexDataSource for NoPairsDex {
+        async fn get_token_price(&self, _: &str, _: &str) -> Option<f64> {
+            None
+        }
+        async fn get_native_token_price(&self, _: &str) -> Option<f64> {
+            None
+        }
+        async fn get_token_data(&self, chain: &str, _: &str) -> Result<DexTokenData> {
+            self.chains.lock().unwrap().push(chain.to_string());
+            Err(ScopeError::NotFound("no pairs for this token".into()))
+        }
+        async fn search_tokens(
+            &self,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<Vec<scope::chains::TokenSearchResult>> {
+            Ok(vec![])
+        }
+    }
+
+    /// A factory whose DEX source is a [`NoPairsDex`], so a run stops
+    /// before it takes the terminal.
+    struct NoPairsFactory {
+        dex: NoPairsDex,
+    }
+
+    impl scope::chains::ChainClientFactory for NoPairsFactory {
+        fn create_chain_client(&self, chain: &str) -> Result<Box<dyn ChainClient>> {
+            Err(ScopeError::Chain(format!("no {chain} client in this test")))
+        }
+        fn create_dex_client(&self) -> Box<dyn DexDataSource> {
+            Box::new(self.dex.clone())
+        }
+        fn http(&self) -> Arc<dyn scope::http::HttpClient> {
+            scope::http::test_transport()
+        }
+    }
+
+    const USDC_ADDRESS: &str = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
+
+    /// A config whose address book is the empty directory `dir`.
+    fn config_with_address_book(dir: &std::path::Path) -> Config {
+        Config {
+            address_book: scope::config::AddressBookConfig {
+                data_dir: Some(dir.to_path_buf()),
+            },
+            ..Default::default()
+        }
+    }
+
+    fn dashboard_args(token: &str) -> MonitorArgs {
+        MonitorArgs {
+            token: token.to_string(),
+            token_contract: None,
+            chain: "ethereum".to_string(),
+            layout: None,
+            refresh: None,
+            scale: None,
+            color_scheme: None,
+            export: None,
+            venue: None,
+            pair: None,
+            watch: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_without_a_token_says_how_to_use_it() {
+        let factory = NoPairsFactory {
+            dex: NoPairsDex::default(),
+        };
+        let start = MonitorStart {
+            token: None,
+            explicit_pair: None,
+            export_file: None,
+            layout_pinned: false,
+        };
+        let (out, cap) = Output::capture();
+        let err = run(
+            start,
+            &SessionContext::default(),
+            &Config::default(),
+            &factory,
+            &out,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("Usage: monitor <token>"), "{err}");
+        assert_eq!(cap.err(), "", "nothing starts");
+        assert!(factory.dex.chains.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_run_with_an_unknown_venue_stops_before_any_lookup() {
+        let factory = NoPairsFactory {
+            dex: NoPairsDex::default(),
+        };
+        let mut config = Config::default();
+        config.monitor.venue = Some("binace".to_string());
+        let start = MonitorStart {
+            token: Some("USDC".to_string()),
+            explicit_pair: None,
+            export_file: None,
+            layout_pinned: false,
+        };
+        let (out, cap) = Output::capture();
+        let err = run(start, &SessionContext::default(), &config, &factory, &out)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ScopeError::InvalidInput(_)), "{err:?}");
+        assert!(
+            err.to_string().contains("Did you mean \"binance\""),
+            "{err}"
+        );
+        let told = cap.err();
+        assert!(told.contains("Starting live monitor for USDC..."), "{told}");
+        assert!(told.contains("Fetching initial data..."), "{told}");
+        assert_eq!(cap.out(), "", "notes are not data");
+        assert!(factory.dex.chains.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_run_without_a_venue_returns_the_dexscreener_error() {
+        // No venue to fall back to: the DEX error is the run's error.
+        let factory = NoPairsFactory {
+            dex: NoPairsDex::default(),
+        };
+        let ctx = SessionContext {
+            chain: "base".to_string(),
+            ..SessionContext::default()
+        };
+        let start = MonitorStart {
+            token: Some(USDC_ADDRESS.to_string()),
+            explicit_pair: None,
+            export_file: None,
+            layout_pinned: true,
+        };
+        let err = run(
+            start,
+            &ctx,
+            &Config::default(),
+            &factory,
+            &Output::capture().0,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ScopeError::NotFound(_)), "{err:?}");
+        assert!(err.to_string().contains("no pairs for this token"), "{err}");
+        assert_eq!(*factory.dex.chains.lock().unwrap(), vec!["base"]);
+    }
+
+    #[tokio::test]
+    async fn test_run_direct_notes_the_deprecation_and_prefers_the_token_contract() {
+        let dir = tempfile::tempdir().unwrap();
+        let factory = NoPairsFactory {
+            dex: NoPairsDex::default(),
+        };
+        let mut args = dashboard_args("USDC");
+        args.token_contract = Some(USDC_ADDRESS.to_string());
+        args.chain = "polygon".to_string();
+        let (out, cap) = Output::capture();
+        let err = run_direct(args, &config_with_address_book(dir.path()), &factory, &out)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no pairs"), "{err}");
+        let told = cap.err();
+        assert!(told.starts_with(DASHBOARD_DEPRECATED), "{told}");
+        assert!(
+            told.contains(&format!("Starting live monitor for {USDC_ADDRESS}...")),
+            "--token wins over the symbol: {told}"
+        );
+        assert_eq!(*factory.dex.chains.lock().unwrap(), vec!["polygon"]);
+    }
+
+    #[tokio::test]
+    async fn test_run_direct_resolves_an_address_book_label_and_its_chain() {
+        use scope::domain::address_book::{AddressBook, WatchedAddress};
+        let dir = tempfile::tempdir().unwrap();
+        let mut book = AddressBook::default();
+        book.add_address(WatchedAddress {
+            address: USDC_ADDRESS.to_string(),
+            label: Some("treasury".to_string()),
+            chain: "arbitrum".to_string(),
+            tags: vec![],
+            added_at: 0,
+        })
+        .unwrap();
+        book.save(&dir.path().to_path_buf()).unwrap();
+        let config = config_with_address_book(dir.path());
+
+        // The default chain gives way to the entry's chain.
+        let factory = NoPairsFactory {
+            dex: NoPairsDex::default(),
+        };
+        let (out, cap) = Output::capture();
+        run_direct(dashboard_args("@treasury"), &config, &factory, &out)
+            .await
+            .unwrap_err();
+        assert!(cap.err().contains(&format!("for {USDC_ADDRESS}...")));
+        assert_eq!(*factory.dex.chains.lock().unwrap(), vec!["arbitrum"]);
+
+        // An explicit --chain is kept.
+        let factory = NoPairsFactory {
+            dex: NoPairsDex::default(),
+        };
+        let mut args = dashboard_args("@treasury");
+        args.chain = "optimism".to_string();
+        run_direct(args, &config, &factory, &Output::capture().0)
+            .await
+            .unwrap_err();
+        assert_eq!(*factory.dex.chains.lock().unwrap(), vec!["optimism"]);
+
+        // An unknown label is an error that lists the labels.
+        let err = run_direct(
+            dashboard_args("@nosuch"),
+            &config,
+            &factory,
+            &Output::capture().0,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("@treasury"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_run_direct_pair_without_venue_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let factory = NoPairsFactory {
+            dex: NoPairsDex::default(),
+        };
+        let mut args = dashboard_args("USDC");
+        args.pair = Some("USDC_USDT".to_string());
+        let err = run_direct(
+            args,
+            &config_with_address_book(dir.path()),
+            &factory,
+            &Output::capture().0,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("--pair requires --venue to be specified"),
+            "{err}"
+        );
+        assert!(
+            factory.dex.chains.lock().unwrap().is_empty(),
+            "no DEX lookup"
+        );
+    }
+
+    #[test]
+    fn test_monitor_config_from_args_applies_each_flag_over_the_config() {
+        let mut config = Config::default();
+        config.monitor.refresh_seconds = 30;
+        config.monitor.venue = Some("okx".to_string());
+        let mut args = dashboard_args("USDC");
+        args.layout = Some(LayoutPreset::Compact);
+        args.refresh = Some(2);
+        args.scale = Some(ScaleMode::Log);
+        args.color_scheme = Some(ColorScheme::BlueOrange);
+        args.venue = Some("kraken".to_string());
+        args.export = Some(PathBuf::from("run.csv"));
+
+        let (mc, export_file, pinned) = monitor_config_from_args(&args, &config);
+        assert_eq!(mc.layout, LayoutPreset::Compact);
+        assert_eq!(mc.refresh_seconds, 2);
+        assert_eq!(mc.scale, ScaleMode::Log);
+        assert_eq!(mc.color_scheme, ColorScheme::BlueOrange);
+        assert_eq!(mc.venue.as_deref(), Some("kraken"));
+        assert_eq!(export_file, Some(PathBuf::from("run.csv")));
+        assert!(pinned);
+
+        // Without flags the config stands.
+        let (mc, export_file, pinned) = monitor_config_from_args(&dashboard_args("USDC"), &config);
+        assert_eq!(mc.refresh_seconds, 30);
+        assert_eq!(mc.venue.as_deref(), Some("okx"));
+        assert_eq!(mc.layout, config.monitor.layout);
+        assert_eq!(export_file, None);
+        assert!(!pinned);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_initial_data_without_a_venue_returns_the_dex_error() {
+        let err = fetch_initial_data(
+            USDC_ADDRESS,
+            None,
+            "ethereum",
+            &BlockedDex,
+            None,
+            scope::http::test_transport(),
+            &Output::capture().0,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ScopeError::Network(_)), "{err:?}");
+    }
+
+    // ---- Venue refresh: OHLC candles, and book and trade errors ----
+
+    /// Two Binance klines: one up, one down.
+    const KLINES: &str = r#"[
+        [1700000000000, "1.00", "1.20", "0.90", "1.10", "100", 1700000059999],
+        [1700000060000, "1.10", "1.15", "1.00", "1.05", "80", 1700000119999]
+    ]"#;
+
+    #[tokio::test]
+    async fn test_fetch_data_takes_venue_candles_and_names_a_failed_trade_fetch() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/api/v3/klines")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("symbol".into(), "USDCUSDT".into()),
+                mockito::Matcher::UrlEncoded("limit".into(), "100".into()),
+            ]))
+            .with_body(KLINES)
+            .create_async()
+            .await;
+        server
+            .mock("GET", "/api/v3/depth")
+            .match_query(mockito::Matcher::Any)
+            .with_body(r#"{"bids":[["0.9991","1234"]],"asks":[["1.0009","4321"]]}"#)
+            .create_async()
+            .await;
+        // No trades endpoint: the trade fetch fails.
+        let mut app = create_test_app(
+            Box::new(MockDexDataSource::new(create_test_token_data())),
+            None,
+        );
+        app.exchange_client = Some(scope::market::testing::venue_at("binance", &server.url()));
+        app.state.venue_pair = Some("USDCUSDT".into());
+        app.fetch_data().await;
+
+        let candles = &app.state.exchange_ohlc;
+        assert_eq!(candles.len(), 2);
+        assert_eq!(candles[0].timestamp, 1_700_000_000.0, "ms to seconds");
+        assert_eq!(
+            (
+                candles[0].open,
+                candles[0].high,
+                candles[0].low,
+                candles[0].close
+            ),
+            (1.0, 1.2, 0.9, 1.1)
+        );
+        assert!(candles[0].is_bullish);
+        assert!(!candles[1].is_bullish);
+        assert_eq!(
+            app.state.order_book.as_ref().unwrap().source,
+            scope::market::BookSource::Exchange
+        );
+        let error = app.state.error_message.as_deref().unwrap();
+        assert!(error.starts_with("binance trades: "), "{error}");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_data_names_a_failed_venue_book_and_keeps_dex_candles() {
+        let mut server = mockito::Server::new_async().await;
+        // No klines and no depth endpoint; trades work.
+        server
+            .mock("GET", "/api/v3/trades")
+            .match_query(mockito::Matcher::Any)
+            .with_body(r#"[{"id":1,"price":"1.0001","qty":"50","quoteQty":"50","time":1700000000000,"isBuyerMaker":false}]"#)
+            .create_async()
+            .await;
+        let mut app = create_test_app(
+            Box::new(MockDexDataSource::new(create_test_token_data())),
+            None,
+        );
+        app.exchange_client = Some(scope::market::testing::venue_at("binance", &server.url()));
+        app.state.venue_pair = Some("USDCUSDT".into());
+        app.fetch_data().await;
+
+        assert!(
+            app.state.exchange_ohlc.is_empty(),
+            "a failed OHLC fetch leaves the candles built from DEX data"
+        );
+        assert_eq!(app.state.recent_trades.len(), 1);
+        let error = app.state.error_message.as_deref().unwrap();
+        assert!(error.starts_with("binance order book: "), "{error}");
+    }
 }
