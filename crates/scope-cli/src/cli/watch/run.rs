@@ -13,7 +13,7 @@ use std::path::Path;
 
 /// The CSV header of a watchlist run (one row per cell per tick).
 pub fn csv_header() -> &'static str {
-    "ts,target,metric,value,op,threshold,status,source,error\n"
+    "ts,target,metric,value,op,threshold,status,source,error,detail\n"
 }
 
 /// The CSV rows of one tick: every cell of every target. `source` is
@@ -51,6 +51,9 @@ pub fn csv_rows(at: &str, snapshot: &Snapshot) -> String {
                 c.status.name(),
                 &source,
                 error,
+                // A preset check's text: it keeps the numbers of a check
+                // that passed, too.
+                c.detail.as_deref().unwrap_or(""),
             ];
             let cells: Vec<String> = fields.iter().map(|f| csv_field(f)).collect();
             rows.push_str(&cells.join(","));
@@ -197,30 +200,45 @@ mod tests {
                     Cell {
                         label: "Spread".into(),
                         rule: None,
-                        value: None,
+                        value: Some(3.4),
                         status: RuleStatus::Fail("Spread: 3.4%, max 3%".into()),
+                        detail: Some("Spread: 3.4%, max 3%".into()),
+                    },
+                    // A passing check keeps its value and text (the 0.8.0
+                    // smoke test found them empty).
+                    Cell {
+                        label: "Bid depth".into(),
+                        rule: None,
+                        value: Some(4200.0),
+                        status: RuleStatus::Pass,
+                        detail: Some("Bid depth: 4200 USDT (min 3000)".into()),
                     },
                     Cell {
                         label: "holders >= 10".into(),
                         rule: Some(Rule::parse("holders >= 10").unwrap()),
                         value: None,
                         status: RuleStatus::Error("timeout, retry".into()),
+                        detail: None,
                     },
                 ],
             )],
         };
         let rows = csv_rows("2026-10-16T12:00:00Z", &snapshot);
         let lines: Vec<&str> = rows.lines().collect();
-        assert_eq!(lines.len(), 2);
+        assert_eq!(lines.len(), 3);
         assert_eq!(
             lines[0],
-            "2026-10-16T12:00:00Z,USDC@binance,Spread,,,,fail,preset,"
+            "2026-10-16T12:00:00Z,USDC@binance,Spread,3.4,,,fail,preset,,\"Spread: 3.4%, max 3%\""
         );
         assert_eq!(
             lines[1],
-            "2026-10-16T12:00:00Z,USDC@binance,holders,,>=,10,error,token,\"timeout, retry\""
+            "2026-10-16T12:00:00Z,USDC@binance,Bid depth,4200,,,pass,preset,,Bid depth: 4200 USDT (min 3000)"
         );
-        assert_eq!(csv_header().split(',').count(), 9);
+        assert_eq!(
+            lines[2],
+            "2026-10-16T12:00:00Z,USDC@binance,holders,,>=,10,error,token,\"timeout, retry\","
+        );
+        assert_eq!(csv_header().split(',').count(), 10);
     }
 
     #[tokio::test]

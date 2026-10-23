@@ -212,6 +212,9 @@ pub struct Cell {
     /// The metric's value, when it has one.
     pub value: Option<f64>,
     pub status: RuleStatus,
+    /// The full text of a preset check (`Spread: 0.02% (max 3%)`), for
+    /// every status: a passing check keeps its numbers too.
+    pub detail: Option<String>,
 }
 
 /// One target's state after a tick.
@@ -323,6 +326,7 @@ mod tests {
             rule: None,
             value: None,
             status,
+            detail: None,
         };
         let row = TargetSnapshot::new(
             "A",

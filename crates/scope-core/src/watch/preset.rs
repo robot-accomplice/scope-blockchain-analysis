@@ -32,11 +32,28 @@ pub fn cells(summary: &MarketSummary) -> Vec<Cell> {
             Cell {
                 label: check_name(message),
                 rule: None,
-                value: None,
+                value: check_value(message),
                 status,
+                detail: Some(message.clone()),
             }
         })
         .collect()
+}
+
+/// A check's measured value: the first number after its name, as its
+/// message gives it (`Bid depth: 4200 USDT (min 3000)` is 4200; the limit
+/// comes after the value). `None` for a check without a colon or a number
+/// (`No sells below peg`).
+fn check_value(message: &str) -> Option<f64> {
+    let (_, rest) = message.split_once(':')?;
+    let start = rest.find(|c: char| c.is_ascii_digit() || c == '-')?;
+    let number: String = rest[start..]
+        .chars()
+        .enumerate()
+        .take_while(|(i, c)| c.is_ascii_digit() || *c == '.' || (*i == 0 && *c == '-'))
+        .map(|(_, c)| c)
+        .collect();
+    number.parse().ok()
 }
 
 /// A check's name: its message up to the first `:` (`Spread: 0.02%` is
@@ -77,6 +94,32 @@ mod tests {
 
     fn summary(book: &OrderBook) -> MarketSummary {
         MarketSummary::from_order_book(book, &HealthThresholds::default(), Some(1_000_000.0))
+    }
+
+    #[test]
+    fn a_check_value_is_the_first_number_after_its_name() {
+        assert_eq!(check_value("Bid/Ask ratio: 1.82x"), Some(1.82));
+        assert_eq!(check_value("Bid depth: 4200 USDT (min 3000)"), Some(4200.0));
+        assert_eq!(check_value("Bid levels: 3 < 10 minimum"), Some(3.0));
+        // The digits in the name (top-3) are not the value.
+        assert_eq!(
+            check_value("Bid top-3 depth: 1250 USDT (min 300)"),
+            Some(1250.0)
+        );
+        assert_eq!(check_value("Peg deviation: -0.12%"), Some(-0.12));
+        assert_eq!(check_value("No sells below peg"), None);
+    }
+
+    #[test]
+    fn a_passing_check_keeps_its_value_and_text() {
+        // The 0.8.0 smoke test: passing checks had no value in the CSV and
+        // "-" in the detail pane.
+        let cells = cells(&summary(&book(400.0)));
+        let depth = cells.iter().find(|c| c.label == "Bid depth").unwrap();
+        assert_eq!(depth.status, RuleStatus::Pass);
+        assert!(depth.value.is_some_and(|v| v > 0.0), "{depth:?}");
+        assert!(depth.detail.as_deref().unwrap().starts_with("Bid depth: "));
+        assert!(cells.iter().all(|c| c.detail.is_some()));
     }
 
     #[test]

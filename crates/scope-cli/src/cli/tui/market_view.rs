@@ -177,8 +177,10 @@ fn amount(v: f64) -> String {
     format_large_number(if v == 0.0 { 0.0 } else { v })
 }
 
+/// A price at the decimals of its size (the one precision rule,
+/// `price_decimals`): a meme coin at 0.00001 keeps its digits, not `0`.
 fn price(v: Option<f64>) -> String {
-    v.map_or_else(|| "n/a".to_string(), |v| format!("{v:.6}"))
+    v.map_or_else(|| "n/a".to_string(), scope::display::format::format_price)
 }
 
 fn pct(v: Option<f64>) -> String {
@@ -297,7 +299,13 @@ fn rule(title: &str, width: usize) -> Line<'static> {
 
 /// One ladder row: price, size in the quote asset, and a bar. `price_cols`
 /// is the widest price of the ladder.
-fn level(l: &OrderBookLevel, max: f64, style: Style, price_cols: usize) -> Line<'static> {
+fn level(
+    l: &OrderBookLevel,
+    max: f64,
+    style: Style,
+    price_cols: usize,
+    decimals: usize,
+) -> Line<'static> {
     let size = l.value();
     let cells = if max > 0.0 {
         ((size / max) * BAR_COLS as f64)
@@ -307,7 +315,7 @@ fn level(l: &OrderBookLevel, max: f64, style: Style, price_cols: usize) -> Line<
         1
     };
     Line::from(vec![
-        Span::raw(format!("  {:>w$.6}", l.price, w = price_cols)),
+        Span::raw(format!("  {:>w$.decimals$}", l.price, w = price_cols)),
         Span::raw(format!(" {:>w$}", amount(size), w = SIZE_COLS)),
         Span::raw(" "),
         Span::styled("█".repeat(cells), style),
@@ -325,22 +333,28 @@ fn ladder(s: &MarketSummary, levels: usize) -> Vec<Line<'static>> {
         .chain(&bids)
         .map(|l| l.value())
         .fold(0.0_f64, f64::max);
+    // One precision for the whole ladder, from the mid, so its rows line up.
+    let decimals = scope::display::format::price_decimals(
+        s.mid_price
+            .or_else(|| asks.first().or(bids.first()).map(|l| l.price))
+            .unwrap_or(1.0),
+    );
     let price_cols = asks
         .iter()
         .chain(&bids)
-        .map(|l| format!("{:.6}", l.price).len())
+        .map(|l| format!("{:.decimals$}", l.price).len())
         .max()
         .unwrap_or(0);
     let mut out: Vec<Line> = asks
         .iter()
         .rev()
-        .map(|l| level(l, max, ERR, price_cols))
+        .map(|l| level(l, max, ERR, price_cols, decimals))
         .collect();
     out.push(rule(
         &format!("mid {} · spread {}", price(s.mid_price), pct(s.spread_pct)),
         FULL_WIDTH,
     ));
-    out.extend(bids.iter().map(|l| level(l, max, OK, price_cols)));
+    out.extend(bids.iter().map(|l| level(l, max, OK, price_cols, decimals)));
     let mut rest = Vec::new();
     let more_asks = s.asks.len().saturating_sub(levels);
     let more_bids = s.bids.len().saturating_sub(levels);

@@ -130,13 +130,13 @@ fn format_value(metric: &Metric, value: Option<f64>) -> String {
         return "n/a".to_string();
     };
     match metric.unit {
-        Unit::Price => format!("{v:.6}"),
+        Unit::Price => scope::display::format::format_price(v),
         Unit::Percent => format!("{v:.3}%"),
         Unit::Quote => scope::display::format::format_large_number(v),
         Unit::Flag => if v != 0.0 { "pass" } else { "fail" }.to_string(),
         Unit::Usd => format!("${}", scope::display::format::format_large_number(v)),
         Unit::Count => format!("{v:.0}"),
-        Unit::Native => format!("{v:.6}"),
+        Unit::Native => scope::display::format::format_price(v),
         Unit::Score => format!("{v:.1}"),
     }
 }
@@ -901,6 +901,12 @@ mod tests {
             "1.50M"
         );
         assert_eq!(format_value(by(MetricId::Mid), None), "n/a");
+        // A meme-coin price keeps its digits (the 0.8.0 smoke test: PEPE
+        // read as 0).
+        assert_eq!(
+            format_value(by(MetricId::Mid), Some(0.0000106)),
+            "0.0000106000"
+        );
     }
 
     /// `n` runs, `every` seconds apart from 10:00:00 UTC.

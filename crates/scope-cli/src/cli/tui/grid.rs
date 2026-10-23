@@ -322,9 +322,15 @@ fn value_text(v: Option<f64>) -> String {
     match v {
         None => "-".to_string(),
         Some(v) if v.abs() >= 10_000.0 => scope::display::format::format_large_number(v),
+        // The decimals of the value's size (`price_decimals`), so a tiny
+        // price keeps its digits: PEPE at 0.0000106 read as `0` before.
         Some(v) => {
-            let s = format!("{v:.4}");
-            s.trim_end_matches('0').trim_end_matches('.').to_string()
+            let s = scope::display::format::format_price(v);
+            if s.contains('.') {
+                s.trim_end_matches('0').trim_end_matches('.').to_string()
+            } else {
+                s
+            }
         }
     }
 }
@@ -487,7 +493,8 @@ fn draw_detail(f: &mut Frame, area: Rect, g: &GridState) {
             Span::styled(format!("{:<34.34} ", c.label), Style::new()),
             Span::styled(format!("{:>12} ", value_text(c.value)), ACCENT),
         ];
-        if let Some(m) = c.status.message() {
+        // A passing check has no status message; its text keeps the numbers.
+        if let Some(m) = c.status.message().or(c.detail.as_deref()) {
             spans.push(Span::styled(m.to_string(), SECONDARY));
         }
         put(f, &mut y, Line::from(spans));
@@ -554,6 +561,16 @@ pub fn snapshot_text(s: &Snapshot) -> String {
 mod tests {
     use super::*;
     use crossterm::event::KeyModifiers;
+
+    #[test]
+    fn test_a_tiny_value_keeps_its_digits() {
+        // The 0.8.0 smoke test: PEPE's price read as 0.
+        assert_eq!(value_text(Some(0.0000106)), "0.0000106");
+        assert_eq!(value_text(Some(1.5)), "1.5");
+        assert_eq!(value_text(Some(42.0)), "42");
+        assert_eq!(value_text(Some(25_000.0)), "25.00K");
+        assert_eq!(value_text(None), "-");
+    }
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use scope::watch::{Cell, Rule, Target};
@@ -568,6 +585,7 @@ mod tests {
             rule: Rule::parse(label).ok(),
             value,
             status,
+            detail: None,
         }
     }
 

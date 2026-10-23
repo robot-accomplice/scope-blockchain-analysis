@@ -107,6 +107,7 @@ mod tests {
                     rule: None,
                     value: None,
                     status,
+                    detail: None,
                 }],
             )],
         }
