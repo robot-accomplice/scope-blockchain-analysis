@@ -1,16 +1,16 @@
 //! # Shared HTTP transport
 //!
-//! The one place that selects the HTTP transport. `init` builds it from
-//! config and installs it for the process. Clients that do not get a
-//! transport passed in call `transport()`. See the TUI test harness
-//! design, section 2.2.
+//! The one place that selects the HTTP transport. `build` makes it from
+//! config and the environment; the caller passes it to every client it
+//! creates (see `DefaultClientFactory`). Nothing is installed for the
+//! process (#59).
 
 use super::replay::ReplayHttpClient;
-use super::{GholaHttpClient, HttpClient, NativeHttpClient, ghola};
+use super::{GholaHttpClient, HttpClient, NativeHttpClient, ghola, ghola_install};
 use crate::config::Config;
 use crate::error::ScopeError;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// An RPC URL path segment this long or longer is treated as a secret.
 const MIN_SECRET_SEGMENT_LEN: usize = 16;
@@ -41,20 +41,36 @@ pub struct Built {
     pub client: Arc<dyn HttpClient>,
     pub kind: Kind,
     pub notices: Vec<String>,
+    /// Ghola is enabled, no sidecar answers and no `ghola` binary was
+    /// found. A caller that may ask the user can offer to install it
+    /// (`ghola_install`) and build again.
+    pub ghola_missing: bool,
 }
 
-/// The process-wide transport. `fell_back` is set in the same write as the
-/// install, so a concurrent `init` always sees it.
-struct Installed {
-    client: Arc<dyn HttpClient>,
-    kind: Kind,
-    /// True when `transport()` installed native because nothing was installed.
-    fell_back: bool,
+/// The local Ghola sidecar, as the build sees it.
+trait Sidecar {
+    /// True when a sidecar answers on `ghola::SIDECAR_ADDR`.
+    fn up(&self) -> bool;
+    /// The `ghola` binary, when one is installed.
+    fn binary(&self) -> Option<PathBuf>;
+    /// Starts `binary --serve` and waits until it answers.
+    fn start(&self, binary: &Path) -> Result<(), ScopeError>;
 }
 
-static INSTALLED: OnceLock<Installed> = OnceLock::new();
-/// Set once the "not applied" notice has been returned, so it is shown once.
-static NOTICE_SENT: AtomicBool = AtomicBool::new(false);
+/// The real sidecar: the probe, `ghola_install::find` and `ghola::start_sidecar`.
+struct LocalSidecar;
+
+impl Sidecar for LocalSidecar {
+    fn up(&self) -> bool {
+        ghola::is_bridge_running()
+    }
+    fn binary(&self) -> Option<PathBuf> {
+        ghola_install::find()
+    }
+    fn start(&self, binary: &Path) -> Result<(), ScopeError> {
+        ghola::start_sidecar(binary, ghola::SPAWN_TIMEOUT).map(|_| ())
+    }
+}
 
 /// The kind the config and environment select, derived without building a client.
 pub fn configured_kind(config: &Config) -> Kind {
@@ -80,20 +96,24 @@ pub fn build(config: &Config) -> Result<Built, ScopeError> {
 ///
 /// Order: replay or record when `SCOPE_HTTP_MODE` is set (with
 /// `SCOPE_HTTP_FIXTURES`), else Ghola when enabled and available, else native.
+///
+/// With Ghola enabled and no sidecar answering, it starts an installed
+/// `ghola --serve` (from PATH or `~/.scope-bca/bin`) and waits for it.
+/// That sidecar keeps running until `ghola::stop_spawned_sidecar`.
 pub fn build_with(
     config: &Config,
     env: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Built, ScopeError> {
-    build_probed(config, env, &ghola::is_bridge_running)
+    build_probed(config, env, &LocalSidecar)
 }
 
-/// [`build_with`] with the Ghola sidecar check injected, so tests do not
-/// depend on a sidecar on the test machine. Ghola is chosen only when
-/// `sidecar_up` says the sidecar answers (#64).
+/// [`build_with`] with the Ghola sidecar injected, so tests do not depend
+/// on a sidecar or a binary on the test machine. Ghola is chosen only when
+/// the sidecar answers, at once or after a start (#64).
 fn build_probed(
     config: &Config,
     env: &dyn Fn(&str) -> Option<String>,
-    sidecar_up: &dyn Fn() -> bool,
+    sidecar: &dyn Sidecar,
 ) -> Result<Built, ScopeError> {
     if let Some(mode) = env("SCOPE_HTTP_MODE") {
         let dir = env("SCOPE_HTTP_FIXTURES")
@@ -106,11 +126,12 @@ fn build_probed(
                 client: Arc::new(ReplayHttpClient::replay(dir)),
                 kind: Kind::Replay,
                 notices: vec![],
+                ghola_missing: false,
             }),
             "record" => {
                 // The normal transport (Ghola or native) does the real requests.
                 // The empty env lookup stops it from selecting record again.
-                let inner = build_probed(config, &|_| None, sidecar_up)?;
+                let inner = build_probed(config, &|_| None, sidecar)?;
                 Ok(Built {
                     client: Arc::new(ReplayHttpClient::record(
                         dir,
@@ -119,6 +140,7 @@ fn build_probed(
                     )),
                     kind: Kind::Record,
                     notices: inner.notices,
+                    ghola_missing: inner.ghola_missing,
                 })
             }
             other => Err(ScopeError::Network(format!(
@@ -127,14 +149,11 @@ fn build_probed(
         };
     }
     let mut notices = Vec::new();
+    let mut ghola_missing = false;
     if config.ghola.enabled {
-        let client = if sidecar_up() {
-            GholaHttpClient::new(config.ghola.stealth, config.ghola.buffer_size)
-        } else {
-            Err(ScopeError::Network(format!(
-                "no sidecar answers on {}",
-                ghola::SIDECAR_ADDR
-            )))
+        let client = match connect_sidecar(sidecar, &mut notices) {
+            Ok(()) => GholaHttpClient::new(config.ghola.stealth, config.ghola.buffer_size),
+            Err(e) => Err(e),
         };
         match client {
             Ok(client) => {
@@ -143,12 +162,19 @@ fn build_probed(
                     client: Arc::new(client),
                     kind: Kind::Ghola,
                     notices,
+                    ghola_missing,
                 });
             }
             Err(e) => {
                 notices.push(format!("⚠ Ghola sidecar enabled but unavailable: {e}"));
-                notices
-                    .push("  Install: go install github.com/robot-accomplice/ghola@latest".into());
+                if sidecar.binary().is_none() {
+                    ghola_missing = true;
+                    notices.extend(
+                        ghola_install::manual_steps()
+                            .iter()
+                            .map(|s| format!("  {s}")),
+                    );
+                }
                 notices.push("  Falling back to native HTTP transport".into());
             }
         }
@@ -157,7 +183,28 @@ fn build_probed(
         client: Arc::new(NativeHttpClient::new()?),
         kind: Kind::Native,
         notices,
+        ghola_missing,
     })
+}
+
+/// Makes sure a sidecar answers: one already running, or an installed
+/// binary started now.
+fn connect_sidecar(sidecar: &dyn Sidecar, notices: &mut Vec<String>) -> Result<(), ScopeError> {
+    if sidecar.up() {
+        return Ok(());
+    }
+    let binary = sidecar.binary().ok_or_else(|| {
+        ScopeError::Network(format!(
+            "no sidecar answers on {} and ghola is not installed",
+            ghola::SIDECAR_ADDR
+        ))
+    })?;
+    sidecar.start(&binary)?;
+    notices.push(format!(
+        "Started the Ghola sidecar ({} --serve)",
+        binary.display()
+    ));
+    Ok(())
 }
 
 /// Values that must never be written to a fixture.
@@ -190,109 +237,24 @@ pub fn secret_values(config: &Config) -> Vec<String> {
     out
 }
 
-/// Builds and installs the transport the first time; later calls return
-/// the installed transport with no notices.
-///
-/// # Errors
-///
-/// Returns an error when the transport cannot be built, or when
-/// `SCOPE_HTTP_MODE` selects replay or record but `transport()` already
-/// installed a different transport (the run must not use the network).
-pub fn init(config: &Config) -> Result<Built, ScopeError> {
-    init_with(config, &|k| std::env::var(k).ok())
-}
-
-/// Like `init`, reading environment variables through `env`.
-pub fn init_with(
-    config: &Config,
-    env: &dyn Fn(&str) -> Option<String>,
-) -> Result<Built, ScopeError> {
-    if let Some(installed) = INSTALLED.get() {
-        let mut notices = Vec::new();
-        let wanted = configured_kind_with(config, env);
-        let mismatch = installed.fell_back && wanted != installed.kind;
-        // A fallen-back recorder was built from the default config, so it
-        // scanned for no configured secrets. Refuse it even when record is
-        // also the wanted mode.
-        if installed.fell_back && wanted == Kind::Record && installed.kind == Kind::Record {
-            return Err(ScopeError::Network(
-                "record mode started before the config was loaded, so secrets from the \
-                 config could not be scanned for; the run stops"
-                    .into(),
-            ));
-        }
-        if mismatch && matches!(wanted, Kind::Replay | Kind::Record) {
-            return Err(ScopeError::Network(format!(
-                "HTTP was used before startup with the {} transport; SCOPE_HTTP_MODE={} \
-                 was not applied, so the run stops",
-                installed.kind.name(),
-                wanted.name()
-            )));
-        }
-        if mismatch && !NOTICE_SENT.swap(true, Ordering::SeqCst) {
-            let msg = format!(
-                "⚠ HTTP was used before startup; the {} transport from config was not applied",
-                wanted.name()
-            );
-            tracing::warn!("{msg}");
-            notices.push(msg);
-        }
-        return Ok(Built {
-            client: installed.client.clone(),
-            kind: installed.kind,
-            notices,
-        });
-    }
-    let built = build_with(config, env)?;
-    let installed = Installed {
-        client: built.client.clone(),
-        kind: built.kind,
-        fell_back: false,
-    };
-    match INSTALLED.set(installed) {
-        Ok(()) => Ok(built),
-        // Another thread installed first: use its transport.
-        Err(_) => init_with(config, env),
-    }
-}
-
-/// The installed transport. If nothing is installed, installs the
-/// transport that the default config and the environment select, so
-/// `SCOPE_HTTP_MODE` applies even before `init`.
+/// A transport for the deprecated constructors that take none: built
+/// fresh from the environment and the default config on each call, so
+/// `SCOPE_HTTP_MODE` still applies. Nothing is installed or shared.
 ///
 /// # Panics
 ///
 /// Panics when that transport cannot be built, for example
 /// `SCOPE_HTTP_MODE=replay` with no `SCOPE_HTTP_FIXTURES`. A replay run must
 /// not go to the network in its place.
-pub fn transport() -> Arc<dyn HttpClient> {
-    transport_with(&|k| std::env::var(k).ok())
-}
-
-/// Like `transport`, reading environment variables through `env`.
-pub fn transport_with(env: &dyn Fn(&str) -> Option<String>) -> Arc<dyn HttpClient> {
-    if let Some(installed) = INSTALLED.get() {
-        return installed.client.clone();
-    }
-    let built = build_with(&Config::default(), env).unwrap_or_else(|e| {
-        panic!("HTTP used before startup, and the transport could not be built: {e}")
+pub(crate) fn fallback() -> Arc<dyn HttpClient> {
+    let built = build(&Config::default()).unwrap_or_else(|e| {
+        panic!("a client was built without a transport, and none could be built: {e}")
     });
     tracing::debug!(
-        "no HTTP transport installed; using {} from the environment and default config",
+        "client built without a transport; using {} from the environment and default config",
         built.kind.name()
     );
-    // If another thread won the race, `get` below returns its transport.
-    let _ = INSTALLED.set(Installed {
-        client: built.client,
-        kind: built.kind,
-        fell_back: true,
-    });
-    INSTALLED.get().expect("installed above").client.clone()
-}
-
-/// The installed transport kind, or `"none"`.
-pub fn describe() -> &'static str {
-    INSTALLED.get().map_or("none", |i| i.kind.name())
+    built.client
 }
 
 #[cfg(test)]
@@ -403,12 +365,67 @@ mod tests {
         config
     }
 
+    /// A sidecar for tests: `up` answers, `binary` is installed, and a
+    /// start succeeds when `starts`. It counts the starts.
+    struct FakeSidecar {
+        up: bool,
+        binary: Option<&'static str>,
+        starts: bool,
+        started: std::cell::Cell<u32>,
+    }
+
+    impl FakeSidecar {
+        fn new(up: bool, binary: Option<&'static str>, starts: bool) -> Self {
+            Self {
+                up,
+                binary,
+                starts,
+                started: std::cell::Cell::new(0),
+            }
+        }
+    }
+
+    impl Sidecar for FakeSidecar {
+        fn up(&self) -> bool {
+            self.up
+        }
+        fn binary(&self) -> Option<PathBuf> {
+            self.binary.map(PathBuf::from)
+        }
+        fn start(&self, _: &Path) -> Result<(), ScopeError> {
+            self.started.set(self.started.get() + 1);
+            if self.starts {
+                Ok(())
+            } else {
+                Err(ScopeError::Network("exited".into()))
+            }
+        }
+    }
+
+    /// Ghola must never be probed or started when it is disabled.
+    struct NoSidecar;
+
+    impl Sidecar for NoSidecar {
+        fn up(&self) -> bool {
+            panic!("probed the sidecar with Ghola disabled")
+        }
+        fn binary(&self) -> Option<PathBuf> {
+            panic!("looked for ghola with Ghola disabled")
+        }
+        fn start(&self, _: &Path) -> Result<(), ScopeError> {
+            panic!("started ghola with Ghola disabled")
+        }
+    }
+
     // #64: an enabled Ghola with no sidecar must not be selected, or every
     // request fails at send time. Native takes over, and the user is told why.
     #[test]
     fn test_build_ghola_enabled_sidecar_down_falls_back_to_native() {
-        let built = build_probed(&ghola_config(), &no_env, &|| false).unwrap();
+        let sidecar = FakeSidecar::new(false, None, false);
+        let built = build_probed(&ghola_config(), &no_env, &sidecar).unwrap();
         assert_eq!(built.kind, Kind::Native);
+        assert!(built.ghola_missing);
+        assert_eq!(sidecar.started.get(), 0);
         assert!(
             built
                 .notices
@@ -416,22 +433,55 @@ mod tests {
                 .any(|n| n.contains(ghola::SIDECAR_ADDR))
         );
         assert!(built.notices.iter().any(|n| n.contains("native")));
+        assert!(
+            built
+                .notices
+                .iter()
+                .any(|n| n.contains("/cmd/ghola@latest")),
+            "{:?}",
+            built.notices
+        );
     }
 
     #[test]
     fn test_build_ghola_enabled_sidecar_up_selects_ghola() {
-        let built = build_probed(&ghola_config(), &no_env, &|| true).unwrap();
+        let sidecar = FakeSidecar::new(true, None, false);
+        let built = build_probed(&ghola_config(), &no_env, &sidecar).unwrap();
         assert_eq!(built.kind, Kind::Ghola);
         assert!(built.notices.is_empty());
+        assert!(!built.ghola_missing);
+        assert_eq!(sidecar.started.get(), 0);
+    }
+
+    #[test]
+    fn test_build_starts_an_installed_sidecar() {
+        let sidecar = FakeSidecar::new(false, Some("/home/u/.scope-bca/bin/ghola"), true);
+        let built = build_probed(&ghola_config(), &no_env, &sidecar).unwrap();
+        assert_eq!(built.kind, Kind::Ghola);
+        assert_eq!(sidecar.started.get(), 1);
+        assert!(!built.ghola_missing);
+        assert!(
+            built.notices.iter().any(|n| n.contains("Started")),
+            "{:?}",
+            built.notices
+        );
+    }
+
+    #[test]
+    fn test_build_falls_back_when_the_installed_sidecar_fails() {
+        let sidecar = FakeSidecar::new(false, Some("/opt/ghola"), false);
+        let built = build_probed(&ghola_config(), &no_env, &sidecar).unwrap();
+        assert_eq!(built.kind, Kind::Native);
+        // It is installed: nothing to offer.
+        assert!(!built.ghola_missing);
+        assert!(built.notices.iter().any(|n| n.contains("exited")));
     }
 
     #[test]
     fn test_build_ghola_disabled_never_probes() {
-        let built = build_probed(&Config::default(), &no_env, &|| {
-            panic!("probed the sidecar with Ghola disabled")
-        })
-        .unwrap();
+        let built = build_probed(&Config::default(), &no_env, &NoSidecar).unwrap();
         assert_eq!(built.kind, Kind::Native);
+        assert!(!built.ghola_missing);
     }
 
     // Record mode wraps the normal transport, so it must use the same probe.
@@ -441,8 +491,10 @@ mod tests {
             ("SCOPE_HTTP_MODE", "record"),
             ("SCOPE_HTTP_FIXTURES", "/tmp/x"),
         ]);
-        let built = build_probed(&ghola_config(), &env, &|| false).unwrap();
+        let sidecar = FakeSidecar::new(false, None, false);
+        let built = build_probed(&ghola_config(), &env, &sidecar).unwrap();
         assert_eq!(built.kind, Kind::Record);
+        assert!(built.ghola_missing);
         assert!(
             built
                 .notices

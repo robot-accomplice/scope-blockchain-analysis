@@ -1,7 +1,7 @@
 //! MonitorApp struct and event handling for the monitor TUI.
 
 use crate::cli::screen;
-use crossterm::event::{Event, KeyCode, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use scope::chains::ChainClient;
 use scope::chains::dex::DexDataSource;
 use scope::error::Result;
@@ -57,7 +57,7 @@ impl MonitorApp {
         chain_client: Option<Box<dyn ChainClient>>,
         exchange_client: Option<scope::market::ExchangeClient>,
     ) -> Result<Self> {
-        let terminal = screen::enter(screen::Mouse::Capture)?;
+        let terminal = screen::enter()?;
 
         let mut state = MonitorState::new(&initial_data, chain);
         state.apply_config(monitor_config);
@@ -105,7 +105,9 @@ impl MonitorApp {
             tokio::select! {
                 maybe_event = event_stream.next() => {
                     match maybe_event {
-                        Some(Ok(Event::Key(key))) => {
+                        // Windows reports key releases too; acting on them
+                        // would apply every key twice.
+                        Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release => {
                             self.handle_key_event(key);
                         }
                         Some(Ok(Event::Resize(_, _))) => {

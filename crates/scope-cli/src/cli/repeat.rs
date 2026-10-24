@@ -10,7 +10,7 @@
 use crate::cli::output::{Output, RunRecord};
 use crate::{note, out};
 use scope::error::{Result, ScopeError};
-use scope::market::series::{self, Metric, Sample};
+use scope::metrics::{self as series, Metric, Sample};
 use std::future::Future;
 use std::io::Write as _;
 use std::path::Path;
@@ -26,13 +26,23 @@ const CSV_TIME_FORMAT: &str = "%Y-%m-%dT%H:%M:%SZ";
 pub struct Schedule {
     /// The time from one run's start to the next.
     pub every: Duration,
-    /// How long the repeat lasts. A last run starts when it ends.
-    pub duration: Duration,
+    /// How long the repeat lasts; a last run starts when it ends. `None`
+    /// runs until the user cancels it (#96).
+    pub duration: Option<Duration>,
 }
 
 impl Schedule {
     /// A schedule; the interval must be positive.
     pub fn new(every: Duration, duration: Duration) -> Result<Self> {
+        Self::with(every, Some(duration))
+    }
+
+    /// A schedule that runs until the user cancels it.
+    pub fn until_cancelled(every: Duration) -> Result<Self> {
+        Self::with(every, None)
+    }
+
+    fn with(every: Duration, duration: Option<Duration>) -> Result<Self> {
         if every.is_zero() {
             return Err(ScopeError::InvalidInput(
                 "Interval must be positive".to_string(),
@@ -43,11 +53,11 @@ impl Schedule {
 
     /// How many runs it makes: one every `every` over `duration`, and a last
     /// one at the end when the span is not a whole number of intervals (the
-    /// final sleep is cut to the time left).
-    pub fn total(&self) -> u64 {
+    /// final sleep is cut to the time left). `None` until cancelled.
+    pub fn total(&self) -> Option<u64> {
         let every = self.every.as_millis().max(1);
-        let total = self.duration.as_millis().div_ceil(every).saturating_add(1);
-        u64::try_from(total).unwrap_or(u64::MAX)
+        let total = self.duration?.as_millis().div_ceil(every).saturating_add(1);
+        Some(u64::try_from(total).unwrap_or(u64::MAX))
     }
 }
 
@@ -60,6 +70,8 @@ pub struct RunOutput<T> {
     pub snapshot: String,
     /// The command's own result of the run (for example for `--report`).
     pub value: T,
+    /// The run's data, for a screen that draws its own view of it.
+    pub view: Option<crate::cli::output::SummaryView>,
 }
 
 /// Runs `step` on `schedule` and returns the last run's value.
@@ -80,23 +92,29 @@ where
     F: FnMut(u64) -> Fut,
     Fut: Future<Output = Result<RunOutput<T>>>,
 {
-    let columns = series::csv_columns(metrics).map_err(|e| ScopeError::Other(e.to_string()))?;
+    // The CSV columns, only for a CSV: a caller without one may pass an
+    // empty table (a watchlist writes its own trail).
+    let columns = match csv {
+        Some(_) => series::csv_columns(metrics).map_err(|e| ScopeError::Other(e.to_string()))?,
+        None => Vec::new(),
+    };
     if let Some(path) = csv {
         std::fs::write(path, series::csv_header(&columns))
             .map_err(|e| ScopeError::io_context(e, format!("cannot write {}", path.display())))?;
     }
     out.update_progress(|p| {
         p.run = 0;
-        p.total = Some(schedule.total());
+        p.total = schedule.total();
         p.next_at = None;
     });
 
     let tui = out.series_hook().is_some();
     let start = Clock::now();
-    let end = start + schedule.duration;
+    let end = schedule.duration.map(|d| start + d);
     let mut slot = start;
     let mut run: u64 = 1;
     loop {
+        let began = Clock::now();
         out.update_progress(|p| {
             p.run = run;
             p.next_at = None;
@@ -118,18 +136,24 @@ where
             at,
             sample: output.sample,
             snapshot: output.snapshot.clone(),
+            view: output.view.map(std::sync::Arc::new),
         };
         if !out.record_run(metrics, record) {
             out!(out, "{}", output.snapshot)?;
         }
         let last = output.value;
 
-        if start.elapsed() >= schedule.duration {
+        // The repeat ends after the run that starts at the end, not after
+        // any run that finishes past it: a run that crosses the end is
+        // followed at once by the last run, so the count meets `total()`.
+        if let (Some(duration), Some(end)) = (schedule.duration, end)
+            && began >= end
+        {
             note!(
                 out,
                 "\nCompleted {} run(s) over {}s.",
                 run,
-                schedule.duration.as_secs()
+                duration.as_secs()
             );
             return Ok(Some(last));
         }
@@ -137,7 +161,10 @@ where
         // Runs start on a fixed grid, so the time a run takes does not push
         // the later ones back. A run that overruns its slot moves the grid
         // instead of starting a burst of catch-up runs.
-        slot = (slot + schedule.every).max(Clock::now()).min(end);
+        slot = (slot + schedule.every).max(Clock::now());
+        if let Some(end) = end {
+            slot = slot.min(end);
+        }
         let pause = slot.saturating_duration_since(Clock::now());
         out.update_progress(|p| p.next_at = Some(Instant::now() + pause));
         tokio::time::sleep_until(slot).await;
@@ -158,7 +185,7 @@ fn append(path: &Path, row: &str) -> Result<()> {
 mod tests {
     use super::*;
     use scope::market::HealthThresholds;
-    use scope::market::series::summary_metrics;
+    use scope::metrics::summary_metrics;
 
     fn metrics() -> Vec<Metric> {
         summary_metrics(&HealthThresholds::default())
@@ -172,6 +199,7 @@ mod tests {
                 failed_checks: vec![],
             },
             snapshot: format!("report {run}\n"),
+            view: None,
             value: run,
         }
     }
@@ -183,9 +211,45 @@ mod tests {
         let s = |every, duration| {
             Schedule::new(Duration::from_secs(every), Duration::from_secs(duration)).unwrap()
         };
-        assert_eq!(s(2, 5).total(), 4);
-        assert_eq!(s(1, 2).total(), 3);
-        assert_eq!(s(2, 1).total(), 2);
+        assert_eq!(s(2, 5).total(), Some(4));
+        assert_eq!(s(1, 2).total(), Some(3));
+        assert_eq!(s(2, 1).total(), Some(2));
+        // Until cancelled: there is no total to show.
+        let open = Schedule::until_cancelled(Duration::from_secs(1)).unwrap();
+        assert_eq!(open.total(), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_until_cancelled_runs_past_any_duration_with_flat_memory() {
+        // #96: a run with no end must go on until the user stops it (here an
+        // error at run 1001, as Esc would), past the 1 h default, and keep
+        // only the newest MAX_SERIES_RUNS runs in memory.
+        let m = metrics();
+        let (out, _cap) = Output::capture_merged();
+        let schedule = Schedule::until_cancelled(Duration::from_secs(30)).unwrap();
+        let stop = 1_001;
+        let result: Result<Option<u64>> = run(&schedule, &m, None, &out, |n| {
+            let o = output(n, &m);
+            async move {
+                if n == stop {
+                    Err(ScopeError::Other("cancelled".into()))
+                } else {
+                    Ok(o)
+                }
+            }
+        })
+        .await;
+        assert!(result.is_err());
+        let progress = out.progress_hook().unwrap().lock().unwrap().clone();
+        assert_eq!(progress.run, stop, "it ran past 1 h (121 runs at 30 s)");
+        assert_eq!(progress.total, None);
+        let series = out.series_hook().unwrap();
+        let series = series.lock().unwrap();
+        assert_eq!(series.runs.len(), crate::cli::output::MAX_SERIES_RUNS);
+        assert_eq!(
+            series.dropped,
+            stop - 1 - crate::cli::output::MAX_SERIES_RUNS as u64
+        );
     }
 
     #[test]
@@ -311,7 +375,7 @@ mod tests {
         let schedule = Schedule::new(Duration::from_secs(30), Duration::from_secs(90)).unwrap();
         let starts = start_times(schedule, |_| Duration::from_millis(750)).await;
         assert_eq!(starts, vec![0, 30_000, 60_000, 90_000]);
-        assert_eq!(starts.len() as u64, schedule.total());
+        assert_eq!(Some(starts.len() as u64), schedule.total());
     }
 
     #[tokio::test(start_paused = true)]
@@ -323,6 +387,53 @@ mod tests {
         let cost = |n| Duration::from_millis(if n == 1 { 3_500 } else { 100 });
         let starts = start_times(schedule, cost).await;
         assert_eq!(starts, vec![0, 3_500, 4_500, 5_500, 6_000]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_a_run_that_reaches_the_end_still_gets_the_last_run() {
+        // Every 1 s for 1 s: a first run of 1 s or more used to end the
+        // repeat after one run while `total()` said 2. The last run starts
+        // at the end, or at once when run 1 finishes past it.
+        let schedule = Schedule::new(Duration::from_secs(1), Duration::from_secs(1)).unwrap();
+        for (cost, second) in [(5, 1_000), (999, 1_000), (1_000, 1_000), (2_500, 2_500)] {
+            let starts = start_times(schedule, |n| {
+                Duration::from_millis(if n == 1 { cost } else { 10 })
+            })
+            .await;
+            assert_eq!(starts, vec![0, second], "first run of {cost} ms");
+            assert_eq!(Some(starts.len() as u64), schedule.total());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_a_run_that_crosses_the_end_is_followed_by_one_last_run() {
+        // Every 2 s for 5 s: runs at 0, 2 and 4; run 3 takes 1.5 s and ends
+        // past 5 s, so the last run starts at once and nothing follows it.
+        let schedule = Schedule::new(Duration::from_secs(2), Duration::from_secs(5)).unwrap();
+        let cost = |n| Duration::from_millis(if n == 3 { 1_500 } else { 100 });
+        let starts = start_times(schedule, cost).await;
+        assert_eq!(starts, vec![0, 2_000, 4_000, 5_500]);
+        assert_eq!(Some(starts.len() as u64), schedule.total());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_progress_reaches_the_total_when_a_run_crosses_the_end() {
+        // `run N of M` must end at M = N, not stop one short.
+        let m = metrics();
+        let (out, _cap) = Output::capture_merged();
+        let schedule = Schedule::new(Duration::from_secs(1), Duration::from_secs(1)).unwrap();
+        run(&schedule, &m, None, &out, |n| {
+            let o = output(n, &m);
+            async move {
+                tokio::time::sleep(Duration::from_millis(1_200)).await;
+                Ok(o)
+            }
+        })
+        .await
+        .unwrap();
+        let progress = out.progress_hook().unwrap().lock().unwrap().clone();
+        assert_eq!(progress.total, Some(2));
+        assert_eq!(progress.run, 2);
     }
 
     #[test]
@@ -339,6 +450,7 @@ mod tests {
                     at: chrono::Utc::now(),
                     sample: o.sample,
                     snapshot: o.snapshot,
+                    view: None,
                 },
             );
         }

@@ -40,8 +40,17 @@ impl RiskEngine {
     }
 
     /// A risk engine with Etherscan data when [`ETHERSCAN_KEY_ENV`] is set.
+    #[deprecated(
+        since = "0.8.0",
+        note = "pass the transport: use `RiskEngine::from_env_with_http`"
+    )]
     pub fn from_env() -> Self {
-        Self::with_optional_client(BlockchainDataClient::from_env_opt())
+        Self::from_env_with_http(crate::http::shared::fallback())
+    }
+
+    /// [`RiskEngine::from_env`], sending Etherscan requests through `http`.
+    pub fn from_env_with_http(http: std::sync::Arc<dyn crate::http::HttpClient>) -> Self {
+        Self::with_optional_client(BlockchainDataClient::from_env_opt_with_http(http))
     }
 }
 
@@ -54,7 +63,10 @@ mod tests {
     fn test_optional_client_picks_the_engine() {
         // Both shapes must build; the data client is used only when given.
         let _basic = RiskEngine::with_optional_client(None);
-        let client = BlockchainDataClient::new(DataSources::new("k".to_string()));
+        let client = BlockchainDataClient::new_with_http(
+            DataSources::new("k".to_string()),
+            crate::http::test_transport(),
+        );
         let _rich = RiskEngine::with_optional_client(Some(client));
         assert_eq!(ETHERSCAN_KEY_ENV, "ETHERSCAN_API_KEY");
     }

@@ -114,7 +114,7 @@ async fn serve_ui(uri: axum::http::Uri) -> impl axum::response::IntoResponse {
 ///
 /// This is the main entry point called from the CLI `web` command handler.
 pub async fn start_server(addr: SocketAddr, config: Config, out: &Output) -> anyhow::Result<()> {
-    let built = scope::http::init(&config)?;
+    let built = scope::http::build(&config)?;
     for notice in &built.notices {
         tracing::warn!("{notice}");
     }
@@ -139,14 +139,34 @@ pub async fn start_server(addr: SocketAddr, config: Config, out: &Output) -> any
 // Daemon management
 // ============================================================================
 
+/// The folder of the daemon's PID and log files.
+pub fn daemon_dir() -> std::path::PathBuf {
+    scope::paths::state_dir()
+}
+
 /// Returns the path to the PID file for the daemon.
 pub fn pid_file_path() -> std::path::PathBuf {
-    Config::default_data_dir().join("scope-web.pid")
+    daemon_dir().join("scope-web.pid")
 }
 
 /// Returns the path to the log file for the daemon.
 pub fn log_file_path() -> std::path::PathBuf {
-    Config::default_data_dir().join("scope-web.log")
+    daemon_dir().join("scope-web.log")
+}
+
+/// Where versions before `~/.scope-bca` (0.7.0 and older) kept the PID
+/// file. The migration does not copy it: a daemon those versions started
+/// is still found here (#106).
+pub fn legacy_pid_file_path() -> Option<std::path::PathBuf> {
+    scope::paths::user_home().map(|h| h.join(".config/scope/data/scope-web.pid"))
+}
+
+/// The PID file to stop: the current one, else an older version's.
+fn pid_file_to_stop(
+    current: std::path::PathBuf,
+    legacy: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    std::iter::once(current).chain(legacy).find(|p| p.exists())
 }
 
 /// Stops a running daemon by reading its PID file and sending SIGTERM.
@@ -156,12 +176,15 @@ pub fn log_file_path() -> std::path::PathBuf {
 ///
 /// The PID file cannot be read or holds no PID.
 pub fn stop_daemon(out: &Output) -> scope::error::Result<()> {
-    let pid_path = pid_file_path();
-    if !pid_path.exists() {
-        note!(out, "No daemon PID file found at {}", pid_path.display());
+    let Some(pid_path) = pid_file_to_stop(pid_file_path(), legacy_pid_file_path()) else {
+        note!(
+            out,
+            "No daemon PID file found at {}",
+            pid_file_path().display()
+        );
         note!(out, "Is the daemon running?");
         return Ok(());
-    }
+    };
 
     let pid_str = std::fs::read_to_string(&pid_path).map_err(|e| {
         scope::error::ScopeError::io_context(e, format!("cannot read {}", pid_path.display()))
@@ -211,8 +234,7 @@ pub fn start_daemon(addr: SocketAddr, config: Config, out: &Output) -> scope::er
 
     let _ = config; // Config reloaded from disk in child
 
-    let data_dir = Config::default_data_dir();
-    std::fs::create_dir_all(&data_dir)?;
+    std::fs::create_dir_all(daemon_dir())?;
 
     let pid_path = pid_file_path();
     let log_path = log_file_path();
@@ -303,6 +325,15 @@ mod tests {
         };
         let state = Arc::new(AppState::new(config, factory));
         let _router = build_router(state);
+    }
+
+    #[test]
+    fn test_the_daemon_creates_the_folder_its_files_go_in() {
+        // Review M1: the PID and log files are in daemon_dir(), the folder
+        // start_daemon creates, so a fresh home can start the daemon.
+        assert_eq!(pid_file_path().parent(), Some(daemon_dir().as_path()));
+        assert_eq!(log_file_path().parent(), Some(daemon_dir().as_path()));
+        assert_eq!(daemon_dir(), scope::paths::state_dir());
     }
 
     #[test]
@@ -490,6 +521,37 @@ mod tests {
     }
 
     #[test]
+    fn test_stop_finds_the_current_pid_file_else_the_old_one() {
+        // #106 1: a daemon that 0.7.0 started keeps its PID file in
+        // ~/.config/scope/data.
+        let d = tempfile::tempdir().unwrap();
+        let current = d.path().join("state/scope-web.pid");
+        let legacy = d.path().join(".config/scope/data/scope-web.pid");
+        assert_eq!(
+            pid_file_to_stop(current.clone(), Some(legacy.clone())),
+            None
+        );
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, "1\n").unwrap();
+        assert_eq!(
+            pid_file_to_stop(current.clone(), Some(legacy.clone())),
+            Some(legacy.clone())
+        );
+        std::fs::create_dir_all(current.parent().unwrap()).unwrap();
+        std::fs::write(&current, "2\n").unwrap();
+        assert_eq!(
+            pid_file_to_stop(current.clone(), Some(legacy)),
+            Some(current),
+            "the current file wins"
+        );
+        assert!(
+            legacy_pid_file_path()
+                .unwrap()
+                .ends_with(".config/scope/data/scope-web.pid")
+        );
+    }
+
+    #[test]
     fn test_log_file_path_in_data_dir() {
         let path = log_file_path();
         assert!(path.ends_with("scope-web.log"));
@@ -520,12 +582,121 @@ mod tests {
         assert_eq!(pid.parent(), log.parent());
     }
 
+    /// One test for every PID file case: they share the PID file path (in
+    /// the test home), so separate tests would race. No process is ever
+    /// signalled: the only PID sent a signal is above every OS's PID limit.
     #[test]
-    fn test_stop_daemon_invoked_no_pid_file() {
-        // Exercise stop_daemon when PID file does not exist (common in tests)
+    fn test_stop_daemon_reads_the_pid_file() {
+        let pid_path = pid_file_path();
+        std::fs::create_dir_all(daemon_dir()).unwrap();
+        let _ = std::fs::remove_file(&pid_path);
+        if let Some(legacy) = legacy_pid_file_path() {
+            let _ = std::fs::remove_file(legacy);
+        }
+
+        // No PID file: nothing to stop, and it says so.
+        let (out, cap) = Output::capture();
+        stop_daemon(&out).unwrap();
+        assert!(
+            cap.err().contains("No daemon PID file found"),
+            "{}",
+            cap.err()
+        );
+        assert!(cap.err().contains("Is the daemon running?"));
+
+        // Not a PID: an error that names the file, which stays.
+        std::fs::write(&pid_path, "not-a-pid\n").unwrap();
         let (out, _) = Output::capture();
-        let result = stop_daemon(&out);
-        assert!(result.is_ok());
+        let err = stop_daemon(&out).unwrap_err();
+        assert!(err.to_string().contains("Invalid PID in"), "{err}");
+        assert!(pid_path.exists());
+        std::fs::remove_file(&pid_path).unwrap();
+
+        // A PID file that cannot be read.
+        std::fs::create_dir(&pid_path).unwrap();
+        let (out, _) = Output::capture();
+        let err = stop_daemon(&out).unwrap_err();
+        assert!(err.to_string().contains("cannot read"), "{err}");
+        std::fs::remove_dir(&pid_path).unwrap();
+
+        // A PID no process can have (Linux allows at most 2^22, macOS
+        // 99998): the stop is reported and the stale file removed.
+        let pid = i32::MAX;
+        std::fs::write(&pid_path, format!("{pid}\n")).unwrap();
+        let (out, cap) = Output::capture();
+        stop_daemon(&out).unwrap();
+        let notes = cap.err();
+        assert!(
+            notes.contains(&format!("Stopping Scope web daemon (PID {pid})")),
+            "{notes}"
+        );
+        #[cfg(unix)]
+        assert!(notes.contains("Failed to stop daemon"), "{notes}");
+        #[cfg(not(unix))]
+        assert!(
+            notes.contains(&format!("Please manually terminate PID {pid}")),
+            "{notes}"
+        );
+        assert!(!pid_path.exists(), "the PID file is removed");
+    }
+
+    /// A free local port (bound, then released).
+    fn free_addr() -> SocketAddr {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_start_server_serves_the_ui_and_says_where() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let addr = free_addr();
+        let (out, cap) = Output::capture();
+        let server = start_server(addr, Config::default(), &out);
+        let client = async {
+            let mut stream = loop {
+                match tokio::net::TcpStream::connect(addr).await {
+                    Ok(s) => break s,
+                    Err(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+                }
+            };
+            stream
+                .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            let mut reply = String::new();
+            stream.read_to_string(&mut reply).await.unwrap();
+            reply
+        };
+        let reply = tokio::select! {
+            r = server => panic!("the server stopped: {r:?}"),
+            reply = tokio::time::timeout(std::time::Duration::from_secs(10), client) => {
+                reply.expect("a reply within 10s")
+            }
+        };
+        assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+        assert!(reply.contains("<!DOCTYPE html>"));
+        assert!(
+            cap.err()
+                .contains(&format!("Scope web server listening on http://{addr}")),
+            "{}",
+            cap.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_start_server_fails_when_the_port_is_taken() {
+        let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = taken.local_addr().unwrap();
+        let (out, _) = Output::capture();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            start_server(addr, Config::default(), &out),
+        )
+        .await
+        .expect("start_server returns");
+        assert!(result.is_err(), "bound twice to {addr}");
     }
 
     // Helper to create the test app state

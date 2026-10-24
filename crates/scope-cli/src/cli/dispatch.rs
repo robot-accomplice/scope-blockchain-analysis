@@ -6,38 +6,113 @@
 //! code) stay with the caller.
 
 use crate::cli::output::Output;
+use crate::cli::tui::Settings;
 use crate::cli::{Cli, Commands};
 use crate::{note, out};
 use clap::CommandFactory;
 use clap_complete::generate;
 use scope::Config;
 use scope::chains::{ChainClientFactory, DefaultClientFactory};
+use scope::config::OutputFormat;
 use scope::error::{Result, ScopeError};
 use scope::http::HttpClient;
+use std::path::PathBuf;
 use std::sync::Arc;
+
+/// Where the config comes from: the binary reads it this way at start,
+/// and the TUI reads it the same way again after `setup` (#99).
+#[derive(Debug, Clone, Default)]
+pub struct ConfigSource {
+    /// `--config`, when given; else `SCOPE_CONFIG` or the default file.
+    pub path: Option<PathBuf>,
+    /// `--ai`: Markdown output for an agent to read.
+    pub ai: bool,
+}
+
+impl ConfigSource {
+    /// Reads the config and applies the flags.
+    ///
+    /// # Errors
+    ///
+    /// Returns the config file's read or parse error.
+    pub fn load(&self) -> Result<Config> {
+        let mut config = Config::load(self.path.as_deref())?;
+        self.apply(&mut config);
+        Ok(config)
+    }
+
+    /// Applies the flags that override the file (`--ai`).
+    pub fn apply(&self, config: &mut Config) {
+        if self.ai {
+            config.output.format = OutputFormat::Markdown;
+        }
+    }
+}
 
 /// Routes one command to its handler.
 ///
 /// Creates the HTTP transport and client factory, then runs the handler
 /// with `out` as its output. Returns the process exit code: 0, or the
-/// TUI's code (128+N after signal N ended it).
+/// TUI's code (128+N after signal N ended it). `source` says how to read
+/// `config` again; the TUI does so after `setup`.
 ///
 /// # Errors
 ///
 /// Returns the handler's error. `Commands::Web` is an error here: the web
 /// server lives in the `scope-bca` crate, and its binary starts it before
 /// dispatch.
-pub async fn dispatch(command: Commands, config: &Config, out: &Output) -> Result<i32> {
-    let http: Arc<dyn HttpClient> = create_http_client(config, out)?;
+pub async fn dispatch(
+    command: Commands,
+    source: &ConfigSource,
+    config: &Config,
+    out: &Output,
+) -> Result<i32> {
+    // A command run on a terminal may offer to install a missing Ghola.
+    // The TUI, the wizard, the web server and scripted runs never do.
+    use crate::cli::ghola_offer;
+    let offer = !command.is_interactive()
+        && ghola_offer::may_ask(out)
+        && !ghola_offer::scripted(&ghola_offer::process_args(), config);
+    let env = |k: &str| std::env::var(k).ok();
+    let http: Arc<dyn HttpClient> = create_http_client_offering(config, out, &env, offer)?;
+    // Only the TUI can end with a code other than 0, so it starts here.
+    // `scope monitor` opens it too, with the monitor wizard (#47).
+    let opens_tui = match &command {
+        Commands::Interactive(_) => true,
+        Commands::Monitor(args) => !args.watch.dashboard,
+        _ => false,
+    };
+    if opens_tui {
+        let settings = |config: Config, http: Arc<dyn HttpClient>| Settings {
+            clients: Box::new(DefaultClientFactory {
+                chains_config: config.chains.clone(),
+                http,
+            }),
+            config,
+        };
+        // A reload after `setup` builds the transport again, so transport
+        // settings (proxy, Ghola) apply as well as the chain keys.
+        let reload = || {
+            let config = source.load()?;
+            let http = transport_for_reload(&config, &http, out, &|k| std::env::var(k).ok())?;
+            Ok(settings(config, http))
+        };
+        let first = settings(config.clone(), http.clone());
+        let exit = match command {
+            Commands::Monitor(args) => {
+                crate::cli::interactive::run_monitor(args, first, &reload).await?
+            }
+            Commands::Interactive(args) => {
+                crate::cli::interactive::run(args, first, &reload).await?
+            }
+            _ => unreachable!("opens_tui is true only for these two"),
+        };
+        return Ok(exit.code);
+    }
     let factory = DefaultClientFactory {
         chains_config: config.chains.clone(),
         http,
     };
-    // Only the TUI can end with a code other than 0, so it starts here.
-    if let Commands::Interactive(args) = command {
-        let exit = crate::cli::interactive::run(args, config, &factory).await?;
-        return Ok(exit.code);
-    }
     dispatch_with(command, config, &factory, out)
         .await
         .map(|()| 0)
@@ -84,7 +159,7 @@ pub async fn dispatch_with(
         }
         Commands::Setup(args) => crate::cli::setup::run(args, config, out).await,
         Commands::Compliance(compliance_cmd) => {
-            dispatch_compliance(compliance_cmd, config, out).await
+            dispatch_compliance(compliance_cmd, config, clients.http(), out).await
         }
         Commands::Market(cmd) => crate::cli::market::run(cmd, config, clients, out).await,
         Commands::TokenHealth(args) => {
@@ -92,13 +167,15 @@ pub async fn dispatch_with(
         }
         Commands::Venues(cmd) => crate::cli::venues::run(cmd, out),
         Commands::Report(cmd) => crate::cli::report::run(cmd, config, clients, out).await,
-        Commands::Discover(args) => crate::cli::discover::run(args, config.output.format, out)
-            .await
-            .map_err(|e| match e {
-                // An I/O error keeps its kind (a closed pipe exits quietly).
-                ScopeError::IoError(_) => e,
-                other => ScopeError::Discovery(other.to_string()),
-            }),
+        Commands::Discover(args) => {
+            crate::cli::discover::run(args, config.output.format, clients.http(), out)
+                .await
+                .map_err(|e| match e {
+                    // An I/O error keeps its kind (a closed pipe exits quietly).
+                    ScopeError::IoError(_) => e,
+                    other => ScopeError::Discovery(other.to_string()),
+                })
+        }
         Commands::Insights(args) => crate::cli::insights::run(args, config, clients, out).await,
         Commands::Contract(ref args) => crate::cli::contract::run(args, config, clients, out).await,
         Commands::Web(_) => Err(ScopeError::Other(
@@ -112,6 +189,7 @@ pub async fn dispatch_with(
 async fn dispatch_compliance(
     cmd: crate::cli::compliance::ComplianceCommands,
     config: &Config,
+    http: Arc<dyn HttpClient>,
     out: &Output,
 ) -> Result<()> {
     use crate::cli::address_book::resolve_address_book_input;
@@ -125,14 +203,14 @@ async fn dispatch_compliance(
                     args.chain = Some(chain);
                 }
             }
-            compliance::handle_risk(args, out).await
+            compliance::handle_risk(args, http, out).await
         }
-        ComplianceCommands::Trace(args) => compliance::handle_trace(args, out).await,
+        ComplianceCommands::Trace(args) => compliance::handle_trace(args, http, out).await,
         ComplianceCommands::Analyze(mut args) => {
             if let Some((addr, _chain)) = resolve_address_book_input(&args.address, config)? {
                 args.address = addr;
             }
-            compliance::handle_analyze(args, out).await
+            compliance::handle_analyze(args, http, out).await
         }
         ComplianceCommands::ComplianceReport(mut args) => {
             if !std::path::Path::new(&args.target).exists()
@@ -140,7 +218,7 @@ async fn dispatch_compliance(
             {
                 args.target = addr;
             }
-            compliance::handle_compliance_report(args, out).await
+            compliance::handle_compliance_report(args, http, out).await
         }
     };
     result.map_err(|e| from_anyhow(e, ScopeError::Compliance))
@@ -159,18 +237,59 @@ fn from_anyhow(e: anyhow::Error, kind: fn(String) -> ScopeError) -> ScopeError {
     }
 }
 
-/// Installs the process transport on the first call (see `scope::http::shared`)
-/// and prints the notices. Later calls return the same transport.
+/// Builds the transport that `config` and the environment select (see
+/// `scope::http::shared`) and prints its notices. Each call builds a new one.
 ///
 /// # Errors
 ///
 /// Returns the error when the transport cannot be built.
 pub fn create_http_client(config: &Config, out: &Output) -> Result<Arc<dyn HttpClient>> {
-    let built = scope::http::init(config)?;
+    create_http_client_with(config, out, &|k| std::env::var(k).ok())
+}
+
+/// [`create_http_client`], reading environment variables through `env`.
+fn create_http_client_with(
+    config: &Config,
+    out: &Output,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<Arc<dyn HttpClient>> {
+    create_http_client_offering(config, out, env, false)
+}
+
+/// Builds the transport. With `offer`, when Ghola is enabled but not
+/// installed, it asks whether to install it and, on a yes, builds again
+/// with the new binary (which starts the sidecar).
+fn create_http_client_offering(
+    config: &Config,
+    out: &Output,
+    env: &dyn Fn(&str) -> Option<String>,
+    offer: bool,
+) -> Result<Arc<dyn HttpClient>> {
+    let mut built = scope::http::shared::build_with(config, env)?;
+    if offer && built.ghola_missing && crate::cli::ghola_offer::offer_for_transport(out).is_some() {
+        built = scope::http::shared::build_with(config, env)?;
+    }
     for notice in &built.notices {
         note!(out, "{notice}");
     }
     Ok(built.client)
+}
+
+/// The transport for the TUI after `setup` saved `config`: a new one, so
+/// the saved transport settings apply. Replay and record keep `current`:
+/// it counts the responses served and the fixtures written in this run,
+/// and `setup` cannot change the mode.
+fn transport_for_reload(
+    config: &Config,
+    current: &Arc<dyn HttpClient>,
+    out: &Output,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<Arc<dyn HttpClient>> {
+    use scope::http::shared::{Kind, configured_kind_with};
+    match configured_kind_with(config, env) {
+        Kind::Replay | Kind::Record => Ok(current.clone()),
+        Kind::Native | Kind::Ghola => create_http_client_with(config, out, env),
+    }
 }
 
 // ============================================================================
@@ -178,7 +297,67 @@ pub fn create_http_client(config: &Config, out: &Output) -> Result<Arc<dyn HttpC
 // ============================================================================
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    /// The mock factory with a transport that never reaches the network:
+    /// every request it is sent misses (a replay of an empty folder). The
+    /// mock's own transport is a real one, which handlers that call
+    /// `clients.http()` (Etherscan with a configured key, venues, discover)
+    /// would use.
+    pub(crate) struct OfflineFactory {
+        pub(crate) mock: scope::chains::mocks::MockClientFactory,
+        http: std::sync::Arc<dyn scope::http::HttpClient>,
+        _fixtures: tempfile::TempDir,
+    }
+
+    impl OfflineFactory {
+        pub(crate) fn new() -> Self {
+            let fixtures = tempfile::tempdir().unwrap();
+            Self {
+                mock: scope::chains::mocks::MockClientFactory::new(),
+                http: std::sync::Arc::new(scope::http::replay::ReplayHttpClient::replay(
+                    fixtures.path().to_path_buf(),
+                )),
+                _fixtures: fixtures,
+            }
+        }
+    }
+
+    impl scope::chains::ChainClientFactory for OfflineFactory {
+        fn create_chain_client(
+            &self,
+            chain: &str,
+        ) -> scope::error::Result<Box<dyn scope::chains::ChainClient>> {
+            self.mock.create_chain_client(chain)
+        }
+
+        fn create_dex_client(&self) -> Box<dyn scope::chains::DexDataSource> {
+            self.mock.create_dex_client()
+        }
+
+        fn http(&self) -> std::sync::Arc<dyn scope::http::HttpClient> {
+            self.http.clone()
+        }
+    }
+
+    #[test]
+    fn test_a_config_source_reads_its_file_and_applies_ai() {
+        use super::ConfigSource;
+        use scope::config::OutputFormat;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.yaml");
+        std::fs::write(&path, "output:\n  format: json\n").unwrap();
+        let plain = ConfigSource {
+            path: Some(path.clone()),
+            ai: false,
+        };
+        assert_eq!(plain.load().unwrap().output.format, OutputFormat::Json);
+        let ai = ConfigSource {
+            path: Some(path),
+            ai: true,
+        };
+        assert_eq!(ai.load().unwrap().output.format, OutputFormat::Markdown);
+    }
+
     #[test]
     fn test_anyhow_io_errors_keep_their_kind() {
         // A closed pipe in `compliance … | head` must still read as a
@@ -209,17 +388,41 @@ mod tests {
     }
 
     #[test]
-    fn test_create_http_client_returns_the_installed_transport() {
-        // Two calls must give the same transport: one process, one transport.
-        // Default config only: `init` installs for the whole test binary, and
-        // a non-native transport would reach the mockito tests too.
+    fn test_create_http_client_builds_a_new_transport_each_call() {
+        // Nothing is installed for the process (#59): each caller gets its own.
         let config = Config::default();
         let (out, captured) = Output::capture();
-        let a = create_http_client(&config, &out).unwrap();
-        let b = create_http_client(&config, &out).unwrap();
-        assert!(Arc::ptr_eq(&a, &b));
+        let a = create_http_client_with(&config, &out, &|_| None).unwrap();
+        let b = create_http_client_with(&config, &out, &|_| None).unwrap();
+        assert!(!Arc::ptr_eq(&a, &b));
         // Default config selects native, which has nothing to report.
         assert!(captured.err().is_empty(), "{}", captured.err());
+    }
+
+    #[test]
+    fn test_a_reload_builds_the_transport_again() {
+        // After `setup`, transport settings apply without a restart.
+        let (out, _) = Output::capture();
+        let current = create_http_client_with(&Config::default(), &out, &|_| None).unwrap();
+        let next = transport_for_reload(&Config::default(), &current, &out, &|_| None).unwrap();
+        assert!(!Arc::ptr_eq(&current, &next));
+    }
+
+    #[test]
+    fn test_a_reload_keeps_the_replay_and_record_transport() {
+        // A new recorder would overwrite this run's fixtures, and a new
+        // replayer would serve each fixture from its first response again.
+        let (out, _) = Output::capture();
+        let current = create_http_client_with(&Config::default(), &out, &|_| None).unwrap();
+        for mode in ["replay", "record"] {
+            let env = move |k: &str| match k {
+                "SCOPE_HTTP_MODE" => Some(mode.to_string()),
+                "SCOPE_HTTP_FIXTURES" => Some("unused".to_string()),
+                _ => None,
+            };
+            let next = transport_for_reload(&Config::default(), &current, &out, &env).unwrap();
+            assert!(Arc::ptr_eq(&current, &next), "{mode}");
+        }
     }
 
     /// Selection for a Ghola config, without installing it for the process.
@@ -264,7 +467,14 @@ mod tests {
         // the injected writer, not straight to the process stdout.
         let cli = Cli::try_parse_from(["scope", "completions", "bash"]).unwrap();
         let (o, cap) = Output::capture();
-        dispatch(cli.command, &Config::default(), &o).await.unwrap();
+        dispatch(
+            cli.command,
+            &ConfigSource::default(),
+            &Config::default(),
+            &o,
+        )
+        .await
+        .unwrap();
         assert!(cap.out().contains("_scope()"));
     }
 
@@ -277,9 +487,14 @@ mod tests {
             crate::cli::output::tests::ClosedPipe,
             crate::cli::output::tests::ClosedPipe,
         );
-        let err = dispatch(cli.command, &Config::default(), &o)
-            .await
-            .unwrap_err();
+        let err = dispatch(
+            cli.command,
+            &ConfigSource::default(),
+            &Config::default(),
+            &o,
+        )
+        .await
+        .unwrap_err();
         assert!(
             matches!(err, ScopeError::IoError(ref e) if e.kind() == std::io::ErrorKind::BrokenPipe)
         );
@@ -289,9 +504,14 @@ mod tests {
     async fn test_dispatch_rejects_web() {
         // `web` needs the scope-bca crate; dispatch must fail, not panic.
         let cli = Cli::try_parse_from(["scope", "web"]).unwrap();
-        let err = dispatch(cli.command, &Config::default(), &quiet())
-            .await
-            .unwrap_err();
+        let err = dispatch(
+            cli.command,
+            &ConfigSource::default(),
+            &Config::default(),
+            &quiet(),
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("scope web"));
     }
 
@@ -372,6 +592,120 @@ mod tests {
 
         let (res, _) = run_line(&["compliance", "risk", "not-an-address"]).await;
         assert!(matches!(res.unwrap_err(), ScopeError::Compliance(_)));
+    }
+
+    /// Runs `scope <args>` through `dispatch_with` on an offline factory.
+    /// Returns the result, stdout and stderr (where notes go).
+    async fn run_offline(args: &[&str], config: &Config) -> (Result<()>, String, String) {
+        let mut argv = vec!["scope"];
+        argv.extend_from_slice(args);
+        let cli = Cli::try_parse_from(argv).unwrap();
+        let (o, cap) = Output::capture();
+        let factory = OfflineFactory::new();
+        let res = dispatch_with(cli.command, config, &factory, &o).await;
+        (res, cap.out(), cap.err())
+    }
+
+    #[tokio::test]
+    async fn test_compliance_resolves_a_saved_label_to_its_address() {
+        // `@label` reads the address book for risk, analyze and the report,
+        // so they look up the saved address, not the label text.
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.address_book.data_dir = Some(dir.path().to_path_buf());
+        let (res, _, _) = run_offline(
+            &["address-book", "add", ADDR, "--label", "treasury"],
+            &config,
+        )
+        .await;
+        res.unwrap();
+        let (res, out, _) = run_offline(&["address-book", "list"], &config).await;
+        res.unwrap();
+        assert!(out.contains("treasury"), "{out}");
+
+        let (res, out, _) = run_offline(
+            &["compliance", "risk", "@treasury", "--format", "json"],
+            &config,
+        )
+        .await;
+        res.unwrap();
+        let v: serde_json::Value = serde_json::from_str(out.trim()).expect(&out);
+        assert_eq!(v["address"], ADDR, "{out}");
+        assert_eq!(v["chain"], "ethereum", "the saved chain: {out}");
+
+        let (res, _, err) = run_offline(&["compliance", "analyze", "@treasury"], &config).await;
+        res.unwrap();
+        assert!(
+            err.contains(&format!("Analyzing patterns for {ADDR}")),
+            "{err}"
+        );
+
+        let report = dir.path().join("report.json");
+        let (res, _, _) = run_offline(
+            &[
+                "compliance",
+                "compliance-report",
+                "@treasury",
+                "--jurisdiction",
+                "us",
+                "--output",
+                report.to_str().unwrap(),
+            ],
+            &config,
+        )
+        .await;
+        res.unwrap();
+        let text = std::fs::read_to_string(&report).unwrap();
+        assert!(text.contains(ADDR), "{text}");
+    }
+
+    #[tokio::test]
+    async fn test_compliance_trace_runs_its_handler() {
+        let hash = "0x0000000000000000000000000000000000000000000000000000000000000001";
+        let (res, _, err) = run_offline(&["compliance", "trace", hash], &Config::default()).await;
+        // With an Etherscan key on the test machine the lookup runs and,
+        // with no fixture to serve, fails as a compliance error; with none
+        // the handler says how to add one.
+        match res {
+            Ok(()) => assert!(
+                err.contains(&format!("Tracing transaction {hash}")),
+                "{err}"
+            ),
+            Err(e) => {
+                assert!(matches!(e, ScopeError::Compliance(_)), "{e:?}");
+                assert!(e.to_string().contains("cannot trace transaction"), "{e}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_discover_failures_are_labelled_as_discovery_errors() {
+        // The offline transport serves nothing, so the listing fails; the
+        // error must say it came from discover.
+        let (res, _, _) = run_offline(&["discover"], &Config::default()).await;
+        let err = res.unwrap_err();
+        assert!(matches!(err, ScopeError::Discovery(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_with_insights_and_contract() {
+        let (res, out, _) = run_offline(&["insights", ADDR], &Config::default()).await;
+        res.unwrap();
+        assert!(!out.trim().is_empty());
+        // The mock chain client reads no code; contract's error comes back
+        // as the chain error it is, not relabelled.
+        let (res, out, _) = run_offline(&["contract", ADDR, "--json"], &Config::default()).await;
+        let err = res.unwrap_err();
+        assert!(matches!(err, ScopeError::Chain(_)), "{err:?}");
+        assert!(out.is_empty(), "no report on a failed analysis: {out}");
+    }
+
+    #[test]
+    fn test_create_http_client_selects_the_configured_transport() {
+        let (out, captured) = Output::capture();
+        let client = create_http_client(&Config::default(), &out);
+        assert!(client.is_ok());
+        assert!(captured.err().is_empty(), "{}", captured.err());
     }
 
     #[tokio::test]

@@ -8,9 +8,12 @@
 use super::clip::{self, SaveError};
 use super::exec::{self, Invocation, Plan, Route};
 use super::fit;
+use super::grid::{self, GridAction, GridMsg, GridState};
 use super::journal::{Event, Journal};
+use super::market_view;
 use super::repeat_view::{self, Ended, RepeatView};
 use super::vocab::Vocab;
+use super::wizard::{self, WizardAction, WizardState};
 use crate::cli::interactive::SessionContext;
 use crate::cli::output::{Captured, Output, SeriesHook};
 use crate::cli::textfit::{ELLIPSIS, cols, cut_with_ellipsis, draw_note_alone};
@@ -66,6 +69,17 @@ pub enum Overlay {
     Search(SearchState),
     /// The Ctrl-R search of the history.
     HistorySearch(HistorySearchState),
+    /// A question a running command asks (which token a symbol means).
+    Choice(ChoiceState),
+}
+
+/// The open question from a running command: a list to choose from.
+pub struct ChoiceState {
+    prompt: String,
+    options: Vec<String>,
+    selected: usize,
+    /// Where the answer goes; `None` once it is sent.
+    reply: Option<tokio::sync::oneshot::Sender<Option<usize>>>,
 }
 
 /// What Esc does in the current state.
@@ -73,6 +87,8 @@ pub enum Overlay {
 enum EscAction {
     ClosePalette,
     CloseMenu,
+    /// Answers the open question with "cancelled".
+    AnswerChoice,
     CloseSearch,
     CloseHistorySearch,
     /// Cancels the running command.
@@ -88,6 +104,7 @@ impl EscAction {
         match self {
             Self::ClosePalette => Some("Esc closes palette"),
             Self::CloseMenu => Some("Esc closes menu"),
+            Self::AnswerChoice => Some("↑↓ Enter chooses · Esc cancels"),
             Self::CloseSearch => Some("Esc closes search"),
             Self::CloseHistorySearch => Some("Esc closes history search"),
             Self::Cancel => Some("Esc cancels"),
@@ -182,7 +199,7 @@ fn common_prefix(items: &[String]) -> String {
 }
 
 /// What the event loop must do after a key.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub enum Action {
     /// Nothing beyond a redraw.
     None,
@@ -197,12 +214,20 @@ pub enum Action {
     /// Put this text on the clipboard (Ctrl-Y). The loop writes the OSC 52
     /// sequence through the host and notes the result.
     Copy(String),
+    /// Stop the running watchlist (Esc in the grid).
+    StopWatch,
+    /// Start this watchlist in the grid (the wizard's Start).
+    StartWatch(Box<scope::watch::Watchlist>),
 }
 
 /// True when Alt is held (and Ctrl is not).
 fn alt_key(key: &KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::ALT) && !key.modifiers.contains(KeyModifiers::CONTROL)
 }
+
+/// Ctrl-G or `watch` with no grid.
+const NO_GRID_NOTE: &str =
+    "No watchlist runs. Start one with `watch open <name>` (`watch list` lists them).";
 
 /// Marks the selected palette row.
 const PALETTE_MARKER: &str = "> ";
@@ -267,6 +292,10 @@ pub struct TuiState {
     scrollback: Vec<Line<'static>>,
     /// How many lines the view is scrolled up from the bottom.
     scroll: Cell<usize>,
+    /// A scrollback line the next draw puts at the top of the pane (the
+    /// first line of `help`, so it reads from its start). The draw knows
+    /// the fitted rows, so it turns this into a scroll.
+    pin_top: Cell<Option<usize>>,
     /// The last draw was the too-small message. Enter does not run then.
     too_small: Cell<bool>,
     /// The most the view can scroll up, at the last draw. PageUp stops here.
@@ -307,12 +336,30 @@ pub struct TuiState {
     vocab: Vocab,
     /// The open completion menu, palette or search, if any.
     pub overlay: Option<Overlay>,
+    /// The slot through which a pane command asks a question.
+    pub(crate) asker: crate::cli::output::Asker,
     /// The view must move to the current search match at the next draw,
     /// which knows the fitted rows.
     reveal: Cell<bool>,
     /// The pane width the last search draw used. A resize changes the
     /// rows, so the view moves to the match again.
     search_width: Cell<usize>,
+    /// The watchlist grid, while a watchlist runs or until its finished
+    /// grid is closed (#47).
+    pub grid: Option<GridState>,
+    /// The grid is on screen (in place of the output pane).
+    pub grid_shown: bool,
+    /// The run's messages to the grid.
+    grid_rx: Option<std::sync::mpsc::Receiver<GridMsg>>,
+    /// What the watchlist run wrote (notes, errors), for the scrollback.
+    grid_out: Option<(Output, Captured)>,
+    /// When the watchlist run started.
+    grid_started: Option<Instant>,
+    /// The monitor wizard, while it is open (#47).
+    pub wizard: Option<WizardState>,
+    /// A command to run when the loop starts: `scope monitor <args>` opens
+    /// the TUI with its wizard (#47).
+    pub start: Option<crate::cli::Commands>,
 }
 
 impl TuiState {
@@ -327,6 +374,7 @@ impl TuiState {
             draft: String::new(),
             scrollback: Vec::new(),
             scroll: Cell::new(0),
+            pin_top: Cell::new(None),
             too_small: Cell::new(false),
             last_max_top: Cell::new(0),
             last_pane_height: Cell::new(0),
@@ -344,14 +392,27 @@ impl TuiState {
             journal,
             vocab,
             overlay: None,
+            asker: crate::cli::output::Asker::default(),
             reveal: Cell::new(false),
             search_width: Cell::new(0),
+            grid: None,
+            grid_shown: false,
+            grid_rx: None,
+            grid_out: None,
+            grid_started: None,
+            wizard: None,
+            start: None,
         }
     }
 
     /// The journal, for saving the history on exit.
     pub fn journal(&self) -> &Journal {
         &self.journal
+    }
+
+    /// Replaces the completion words, after the config was read again.
+    pub fn set_vocab(&mut self, vocab: Vocab) {
+        self.vocab = vocab;
     }
 
     // ---------------------------------------------------------------- keys
@@ -365,6 +426,41 @@ impl TuiState {
         // every mode and keeps the draft and any overlay.
         if ctrl && key.code == KeyCode::Char('z') {
             return Action::Suspend;
+        }
+        // An open question takes every key until it is answered. While the
+        // terminal is too small the list is not drawn, so only Esc (cancel
+        // the question) and Ctrl-C (cancel the command) act.
+        if let Some(Overlay::Choice(ch)) = &mut self.overlay {
+            let n = ch.options.len().max(1);
+            match key.code {
+                KeyCode::Esc => return self.press_esc(),
+                KeyCode::Char('c') if ctrl => return Action::Cancel,
+                _ if self.too_small.get() => {}
+                KeyCode::Down | KeyCode::Tab => ch.selected = (ch.selected + 1) % n,
+                KeyCode::Up | KeyCode::BackTab => ch.selected = (ch.selected + n - 1) % n,
+                KeyCode::Enter => {
+                    let pick = ch.selected;
+                    self.answer_choice(Some(pick));
+                }
+                _ => {}
+            }
+            return Action::None;
+        }
+        // The monitor wizard takes every key while it is open (#47).
+        if self.wizard.is_some() && !self.too_small.get() {
+            return self.wizard_key(key);
+        }
+        // Ctrl-G shows or hides the grid while there is one (#47).
+        if ctrl && key.code == KeyCode::Char('g') {
+            if self.grid.is_some() {
+                self.grid_shown = !self.grid_shown;
+            } else {
+                self.push_note(NO_GRID_NOTE);
+            }
+            return Action::None;
+        }
+        if self.grid_shown && !self.too_small.get() {
+            return self.grid_key(key);
         }
         // A finished repeating view stays until the next key. That key
         // leaves it and then does its normal job, so typing goes on.
@@ -506,6 +602,9 @@ impl TuiState {
                     self.set_input(line);
                 }
             }
+            // Shift-↑/↓ scroll one line; plain ↑/↓ walk the history.
+            KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => self.scroll_lines(1),
+            KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => self.scroll_lines(-1),
             KeyCode::Up => self.history_prev(),
             KeyCode::Down => self.history_next(),
             KeyCode::PageUp => {
@@ -610,7 +709,9 @@ impl TuiState {
             .map(|c| if c == '\t' { ' ' } else { c })
             .filter(|c| !c.is_control() && !BIDI_CONTROLS.iter().any(|r| r.contains(c)))
             .collect();
-        if clean.is_empty() {
+        // An open question keeps the focus: a paste neither answers nor
+        // closes it.
+        if clean.is_empty() || matches!(self.overlay, Some(Overlay::Choice(_))) {
             return;
         }
         // A search keeps the view where it is.
@@ -880,6 +981,65 @@ impl TuiState {
         self.last_pane_height.get().saturating_sub(1).max(1)
     }
 
+    /// The navigation keys for the hint row, most useful first: the row
+    /// shows as many as fit.
+    fn nav_keys(&self) -> Vec<(&'static str, &'static str)> {
+        if self.grid_shown {
+            return vec![("Ctrl-G", "shell"), ("Enter", "detail"), ("Esc", "stop")];
+        }
+        let mut keys = Vec::new();
+        let scrolled = self.scroll.get().min(self.last_max_top.get()) > 0;
+        if scrolled {
+            keys.push(("PgDn/wheel/Shift-↓", "down"));
+            keys.push(("Ctrl-End", "bottom"));
+        } else if self.last_max_top.get() > 0 {
+            keys.push(("PgUp/wheel/Shift-↑", "scroll back"));
+        }
+        if self.grid.is_some() {
+            keys.push(("Ctrl-G", "grid"));
+        }
+        keys.extend([
+            ("↑↓", "history"),
+            ("Tab", "complete"),
+            ("Ctrl-K", "commands"),
+            ("Ctrl-F", "find"),
+            ("Ctrl-R", "search history"),
+            ("help", "all commands"),
+        ]);
+        keys
+    }
+
+    /// Rows the view is scrolled up, for the event-loop tests.
+    #[cfg(test)]
+    pub(crate) fn scrolled(&self) -> usize {
+        self.scroll.get()
+    }
+
+    /// The mouse wheel: scrolls the output `rows` up (negative: down),
+    /// unless the grid or a list has the screen.
+    pub fn wheel(&mut self, rows: isize) {
+        let list_open = matches!(
+            self.overlay,
+            Some(Overlay::Palette(_) | Overlay::Menu(_) | Overlay::Choice(_))
+        );
+        if !self.grid_shown && !list_open {
+            self.scroll_lines(rows);
+        }
+    }
+
+    /// Scrolls the output `rows` up (negative: down), within what the last
+    /// draw showed: Shift-↑/↓ and the mouse wheel.
+    pub fn scroll_lines(&mut self, rows: isize) {
+        let max = self.last_max_top.get();
+        let now = self.scroll.get().min(max);
+        let next = if rows >= 0 {
+            now.saturating_add(rows.unsigned_abs()).min(max)
+        } else {
+            now.saturating_sub(rows.unsigned_abs())
+        };
+        self.scroll.set(next);
+    }
+
     /// Picks the first shown column of the input line for a window of
     /// `width` columns. It moves only when the cursor would leave the
     /// window, and it always sits on a character boundary, so a wide
@@ -1090,7 +1250,7 @@ impl TuiState {
     }
 
     /// Appends a note line in `style`.
-    fn push_styled_note(&mut self, note: &str, style: Style) {
+    pub(crate) fn push_styled_note(&mut self, note: &str, style: Style) {
         self.push_lines(vec![Line::styled(note.to_string(), style)]);
     }
 
@@ -1147,6 +1307,240 @@ impl TuiState {
         s
     }
 
+    // ---------------------------------------------------------------- grid
+
+    /// A key while the grid is on screen.
+    fn grid_key(&mut self, key: KeyEvent) -> Action {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if ctrl && key.code == KeyCode::Char('d') {
+            return Action::Exit;
+        }
+        let Some(g) = self.grid.as_mut() else {
+            self.grid_shown = false;
+            return Action::None;
+        };
+        // Ctrl-C stops the run, as Esc does.
+        let action = if ctrl && key.code == KeyCode::Char('c') {
+            if g.is_running() {
+                GridAction::Stop
+            } else {
+                GridAction::Close
+            }
+        } else {
+            g.key(key)
+        };
+        match action {
+            GridAction::None => Action::None,
+            GridAction::Shell => {
+                self.grid_shown = false;
+                Action::None
+            }
+            GridAction::Stop => Action::StopWatch,
+            GridAction::Close => {
+                self.close_grid();
+                Action::None
+            }
+            GridAction::Run(line) => {
+                if self.running.is_some() {
+                    self.busy_hint = true;
+                    return Action::None;
+                }
+                self.grid_shown = false;
+                Action::Submit(line)
+            }
+        }
+    }
+
+    /// Opens the monitor wizard over `list`, with the notes from the
+    /// arguments.
+    pub fn open_wizard(&mut self, list: scope::watch::Watchlist, notes: Vec<String>) {
+        self.close_overlay();
+        for n in &notes {
+            self.push_note(n);
+        }
+        self.wizard = Some(WizardState::new(
+            list,
+            notes,
+            self.vocab.venues.clone(),
+            scope::paths::watchlists_dir(),
+        ));
+    }
+
+    /// A key while the wizard is open.
+    fn wizard_key(&mut self, key: KeyEvent) -> Action {
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('d') {
+            return Action::Exit;
+        }
+        let Some(w) = self.wizard.as_mut() else {
+            return Action::None;
+        };
+        match w.key(key) {
+            WizardAction::None => Action::None,
+            WizardAction::Leave => {
+                self.wizard = None;
+                self.push_note("Left the monitor wizard.");
+                Action::None
+            }
+            WizardAction::Saved(path) => {
+                let name = w.list.name.clone();
+                self.push_note(&format!(
+                    "Saved the watchlist to {}. `watch open {name}` runs it again.",
+                    path.display()
+                ));
+                Action::None
+            }
+            WizardAction::Start(list) => {
+                self.wizard = None;
+                Action::StartWatch(list)
+            }
+        }
+    }
+
+    /// Whether a watchlist runs now.
+    pub fn watch_running(&self) -> bool {
+        self.grid.as_ref().is_some_and(GridState::is_running)
+    }
+
+    /// Starts the grid for `list`. Returns the output the run writes to
+    /// (it asks its questions in the TUI), the sink for its library
+    /// warnings, and the sender for its messages.
+    pub fn start_watch(
+        &mut self,
+        list: scope::watch::Watchlist,
+    ) -> (Output, scope::diag::Sink, std::sync::mpsc::Sender<GridMsg>) {
+        let (out, captured) = Output::capture_merged();
+        // The run's own sink: its warnings never join a pane command's
+        // output (the redirect is process-wide).
+        let sink = captured.out_sink();
+        let out = out.with_asker(self.asker.clone());
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.push_note(&format!(
+            "Watchlist {} started: {} target(s), every {}. Ctrl-G switches between the grid and the shell.",
+            list.name,
+            list.targets.len(),
+            scope::watch::time::format_duration(list.interval.as_secs())
+        ));
+        self.grid = Some(GridState::new(list, out.progress_hook()));
+        self.grid_shown = true;
+        self.grid_rx = Some(rx);
+        self.grid_out = Some((out.clone(), captured));
+        self.grid_started = Some(Instant::now());
+        (out, sink, tx)
+    }
+
+    /// `setup` saved new settings. A running watchlist keeps the ones it
+    /// started with; the grid says to restart it.
+    pub fn settings_reloaded(&mut self) {
+        if let Some(g) = self.grid.as_mut().filter(|g| g.is_running()) {
+            g.stale = true;
+            self.push_note(grid::STALE_NOTE);
+        }
+    }
+
+    /// Moves the run's messages into the grid.
+    pub fn poll_watch(&mut self) {
+        let (Some(rx), Some(g)) = (&self.grid_rx, self.grid.as_mut()) else {
+            return;
+        };
+        while let Ok(msg) = rx.try_recv() {
+            g.apply(msg);
+        }
+    }
+
+    /// Takes the bell the grid asks for (a breach started).
+    pub fn take_bell(&mut self) -> bool {
+        self.grid
+            .as_mut()
+            .is_some_and(|g| std::mem::take(&mut g.bell))
+    }
+
+    fn grid_secs(&self) -> f64 {
+        self.grid_started.map_or(0.0, |t| t.elapsed().as_secs_f64())
+    }
+
+    /// The run ended by itself: done, or failed with `res`'s error.
+    pub fn watch_finished(&mut self, res: scope::error::Result<()>) {
+        self.poll_watch();
+        let secs = self.grid_secs();
+        let (footer, style) = match &res {
+            Ok(()) => (format!("✓ Done in {secs:.1}s."), OK),
+            Err(e) => (
+                format!("✗ Failed in {secs:.1}s: {e}"),
+                ERR.add_modifier(Modifier::BOLD),
+            ),
+        };
+        if let Some((out, _)) = &self.grid_out
+            && let Err(e) = &res
+        {
+            let _ = crate::cli::errors::display_error(e, out);
+        }
+        if let Some(g) = self.grid.as_mut() {
+            g.end(footer, style);
+        }
+        self.grid_rx = None;
+        self.drop_watch_question();
+    }
+
+    /// The user stopped the run: the grid keeps its last tick, and the
+    /// report is written from it when the watchlist has a report path.
+    pub fn stop_watch(&mut self) {
+        self.poll_watch();
+        let secs = self.grid_secs();
+        let mut footer = format!("Stopped after {secs:.1}s.");
+        if let Some(g) = &self.grid {
+            let list = g.ready.as_ref().map_or(&g.list, |r| &r.list);
+            if let (Some(path), Some(last)) = (&list.outputs.report, &g.last) {
+                match crate::cli::watch::run::write_report(path, list, last) {
+                    Ok(()) => footer.push_str(&format!(" Report saved to {}.", path.display())),
+                    Err(e) => footer.push_str(&format!(" The report was not written: {e}")),
+                }
+            }
+        }
+        if let Some(g) = self.grid.as_mut() {
+            g.end(footer, WARN);
+        }
+        self.grid_rx = None;
+        self.drop_watch_question();
+    }
+
+    /// A question the stopped run asked has nobody to answer it.
+    fn drop_watch_question(&mut self) {
+        if self.running.is_none() {
+            if matches!(self.overlay, Some(Overlay::Choice(_))) {
+                self.overlay = None;
+            }
+            self.asker.lock().unwrap_or_else(|e| e.into_inner()).take();
+        }
+    }
+
+    /// Closes a finished grid: the scrollback gets the last snapshot, what
+    /// the run wrote, and a summary.
+    pub fn close_grid(&mut self) {
+        let Some(g) = self.grid.take() else {
+            return;
+        };
+        self.grid_shown = false;
+        if let Some(last) = &g.last {
+            self.push_ansi(&grid::snapshot_text(&last.snapshot));
+        }
+        if let Some((_, captured)) = self.grid_out.take() {
+            self.push_ansi(&captured.out());
+        }
+        self.push_note(&grid::summary(&g));
+        if let Some((footer, style)) = &g.ended {
+            self.push_styled_note(footer, *style);
+        }
+    }
+
+    /// Shows the grid, or says there is none.
+    pub fn show_grid(&mut self) {
+        if self.grid.is_some() {
+            self.grid_shown = true;
+        } else {
+            self.push_note(NO_GRID_NOTE);
+        }
+    }
+
     // ------------------------------------------------------------ commands
 
     /// Plans a submitted line. Session commands and errors finish here; a
@@ -1178,7 +1572,7 @@ impl TuiState {
             .next()
             .is_some_and(|w| w.eq_ignore_ascii_case("save"))
         {
-            let words = shlex::split(line);
+            let words = exec::split_line(line);
             self.save(line, words.as_ref().map(|w| &w[1..]));
             return Plan::Done;
         }
@@ -1193,7 +1587,16 @@ impl TuiState {
                 Plan::Done
             }
         };
+        let start = self.scrollback.len();
         self.push_ansi(&captured.out());
+        // Help is longer than a pane: show it from its first line.
+        let first = line
+            .split_whitespace()
+            .next()
+            .map(exec::session_command_name);
+        if first.as_deref() == Some("help") && self.scrollback.len() > start {
+            self.pin_top.set(Some(start));
+        }
         if !line.trim().is_empty() && !matches!(plan, Plan::Run(_)) {
             self.log(Event {
                 started: started_at,
@@ -1239,7 +1642,7 @@ impl TuiState {
             ))),
             Some(args) => {
                 let args: Vec<&str> = args.iter().map(String::as_str).collect();
-                let home = scope::paths::home_dir();
+                let home = scope::paths::user_home();
                 match std::env::current_dir() {
                     Ok(cwd) => {
                         // `save x.csv` after a repeating run writes its series.
@@ -1307,6 +1710,8 @@ impl TuiState {
     /// Starts a pane command. Returns the output its handler must write to.
     pub fn start(&mut self, input: &str, inv: &Invocation) -> Output {
         let (out, captured) = Output::capture_merged();
+        // A question the command asks shows as a list in the TUI.
+        let out = out.with_asker(self.asker.clone());
         let diag = scope::diag::redirect(captured.out_sink());
         self.failed = false;
         self.last_series = None;
@@ -1326,7 +1731,41 @@ impl TuiState {
     /// Ends the pane command: moves its output into the scrollback, shows
     /// the error if it failed, and logs the event.
     pub fn finish(&mut self, ending: Ending) {
+        // The command is gone: so is the question it asked.
+        if matches!(self.overlay, Some(Overlay::Choice(_))) {
+            self.overlay = None;
+        }
+        self.asker.lock().unwrap_or_else(|e| e.into_inner()).take();
         self.finish_with(ending);
+    }
+
+    /// Opens the question a running command put in the ask slot, when no
+    /// question is open.
+    pub fn poll_ask(&mut self) {
+        if matches!(self.overlay, Some(Overlay::Choice(_))) {
+            return;
+        }
+        let ask = self.asker.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(ask) = ask {
+            // A search puts back what it moved before the list replaces it.
+            self.close_overlay();
+            self.overlay = Some(Overlay::Choice(ChoiceState {
+                prompt: ask.prompt,
+                options: ask.options,
+                selected: 0,
+                reply: Some(ask.reply),
+            }));
+        }
+    }
+
+    /// Sends `answer` to the command that asked and closes the list.
+    fn answer_choice(&mut self, answer: Option<usize>) {
+        if let Some(Overlay::Choice(mut ch)) = self.overlay.take()
+            && let Some(reply) = ch.reply.take()
+        {
+            // The command may be gone already; then nobody waits.
+            let _ = reply.send(answer);
+        }
     }
 
     /// `finish`. Every footer carries its glyph or words, and its style
@@ -1354,7 +1793,7 @@ impl TuiState {
             }
             Ending::Finished(Ok(())) => (format!("✓ Done in {:.1}s.", secs), OK),
         };
-        match run.series.filter(repeat_view::has_runs) {
+        match run.series.clone().filter(repeat_view::has_runs) {
             // A repeating run keeps its view, with the footer, until the next
             // key. Ctrl-Y and save take its final snapshot and its series.
             Some(series) => {
@@ -1372,7 +1811,7 @@ impl TuiState {
             }
             None => {
                 self.keep_copy(&run.captured, &ending);
-                self.push_ansi(&run.captured.out());
+                self.push_output(&run, &ending);
                 self.push_styled_note(&footer, style);
             }
         }
@@ -1385,6 +1824,32 @@ impl TuiState {
             outcome: outcome.into(),
             error,
         });
+    }
+
+    /// Puts a finished pane command's output in the scrollback. A command
+    /// that left its data for the screen (`market summary`) shows the
+    /// compact view in place of its text report; its notes stay. Ctrl-Y and
+    /// `save` still take the text report (`keep_copy`).
+    fn push_output(&mut self, run: &Running, ending: &Ending) {
+        let merged = run.captured.out();
+        let view = run
+            .out
+            .view_hook()
+            .and_then(|h| h.lock().unwrap_or_else(|e| e.into_inner()).take());
+        match view {
+            Some(view) if matches!(ending, Ending::Finished(Ok(()))) => {
+                let data = run.captured.data();
+                let notes = if data.is_empty() {
+                    merged
+                } else {
+                    merged.replacen(&data, "", 1)
+                };
+                let size = market_view::Size::for_width(self.pane_width().unwrap_or(80));
+                self.push_lines(market_view::lines(&view, size));
+                self.push_ansi(&notes);
+            }
+            _ => self.push_ansi(&merged),
+        }
     }
 
     /// Leaves a finished repeating view: the scrollback gets one copy of
@@ -1553,7 +2018,16 @@ impl TuiState {
         self.pane_width.set(inner.width);
         // The matches are found once per draw; the status bar uses them too.
         let view = self.search_view(&live_out);
-        if let Some(repeating) = self.active_view() {
+        if let Some(w) = &self.wizard {
+            wizard::draw(f, pane, w);
+            self.last_max_top.set(0);
+            self.last_pane_height.set(inner.height as usize);
+        } else if let (true, Some(g)) = (self.grid_shown, &self.grid) {
+            // The watchlist grid takes the pane (#47).
+            grid::draw(f, pane, g);
+            self.last_max_top.set(0);
+            self.last_pane_height.set(inner.height as usize);
+        } else if let Some(repeating) = self.active_view() {
             // A repeating run draws its view, not one report per run.
             let status = if self.running.is_some() {
                 liveness
@@ -1601,6 +2075,16 @@ impl TuiState {
             let max_top = total.saturating_sub(inner.height as usize);
             self.last_max_top.set(max_top);
             self.last_pane_height.set(inner.height as usize);
+            if let Some(line) = self.pin_top.take() {
+                // The rows above the pinned line, fitted as above.
+                let mut above = Vec::new();
+                if self.dropped_lines > 0 {
+                    above.push(Line::raw(""));
+                }
+                above.extend(self.scrollback.iter().take(line).cloned());
+                let row = fit::fit(above, width).len();
+                self.scroll.set(max_top.saturating_sub(row));
+            }
             if let (Some(v), true) = (&view, in_pane_search) {
                 let before = self.search_width.replace(width);
                 let height = inner.height as usize;
@@ -1679,6 +2163,47 @@ impl TuiState {
             f.render_widget(Paragraph::new(lines).block(Block::bordered()), area);
         }
 
+        if let Some(Overlay::Choice(ch)) = &self.overlay {
+            let frame = f.area();
+            // The rows that fit above the input line, inside the borders:
+            // the scroll follows these, so the selection stays in view.
+            let fit = usize::from(input.y.saturating_sub(2)).max(1);
+            let rows = ch.options.len().clamp(1, MENU_ROWS).min(fit);
+            let first = ch.selected.saturating_sub(rows - 1);
+            let height = (rows as u16 + 2).min(input.y);
+            // Each row is "NN. option"; the borders add two columns.
+            const NUMBER_COLS: usize = 4;
+            let widest = ch
+                .options
+                .iter()
+                .map(|o| UnicodeWidthStr::width(o.as_str()) + NUMBER_COLS)
+                .chain([UnicodeWidthStr::width(ch.prompt.as_str())])
+                .max()
+                .unwrap_or(0) as u16;
+            let area = ratatui::layout::Rect {
+                x: input.x,
+                y: input.y.saturating_sub(height),
+                width: (widest + 2).min(frame.width.saturating_sub(input.x)),
+                height,
+            };
+            let shown = ch.options.iter().enumerate().skip(first).take(rows);
+            let lines: Vec<Line> = shown
+                .map(|(i, o)| {
+                    let style = if i == ch.selected {
+                        SELECTED
+                    } else {
+                        Style::new()
+                    };
+                    Line::styled(format!("{:>2}. {o}", i + 1), style)
+                })
+                .collect();
+            f.render_widget(ratatui::widgets::Clear, area);
+            f.render_widget(
+                Paragraph::new(lines).block(Block::bordered().title(ch.prompt.as_str())),
+                area,
+            );
+        }
+
         if self.busy_hint {
             f.render_widget(
                 Paragraph::new(Line::styled(format!(" {}", BUSY_NOTE), WARN)),
@@ -1691,6 +2216,12 @@ impl TuiState {
                 spans.push(Span::styled(next, KEY));
             }
             f.render_widget(Paragraph::new(Line::from(spans)), hint_row);
+        } else if self.overlay.is_none() {
+            // Nothing else needs the row: the keys that move around.
+            f.render_widget(
+                Paragraph::new(nav_hints(&self.nav_keys(), hint_row.width as usize)),
+                hint_row,
+            );
         }
         if let Some(Overlay::Palette(p)) = &self.overlay {
             let area = f.area();
@@ -1791,6 +2322,7 @@ impl TuiState {
     /// and the status bar both read it.
     fn esc_action(&self) -> EscAction {
         match (&self.overlay, &self.running) {
+            (Some(Overlay::Choice(_)), _) => EscAction::AnswerChoice,
             (Some(Overlay::Palette(_)), _) => EscAction::ClosePalette,
             (Some(Overlay::Menu(_)), _) => EscAction::CloseMenu,
             (Some(Overlay::Search(_)), _) => EscAction::CloseSearch,
@@ -1809,6 +2341,7 @@ impl TuiState {
             | EscAction::CloseMenu
             | EscAction::CloseSearch
             | EscAction::CloseHistorySearch => self.close_overlay(),
+            EscAction::AnswerChoice => self.answer_choice(None),
             EscAction::Cancel => return Action::Cancel,
             EscAction::ClearLine => {
                 let line = std::mem::take(&mut self.input);
@@ -1837,11 +2370,16 @@ impl TuiState {
             }
         }
         // Highest priority first: the fit drops from the end.
-        let context = vec![
+        let mut context = vec![
             labeled("chain", ctx.chain.clone()),
             labeled("format", format!("{:?}", ctx.format)),
             limit,
         ];
+        // A watchlist that runs behind the shell says so first.
+        if let (false, Some(g)) = (self.grid_shown, &self.grid) {
+            let style = if g.breaches() > 0 { ERR } else { ACCENT };
+            context.insert(0, vec![Span::styled(g.status_part(), style)]);
+        }
         // The view is clamped to the content when it draws; say so here too.
         let scrolled = self.scroll.get().min(self.last_max_top.get());
         let scrolled = (scrolled > 0).then(|| {
@@ -1896,6 +2434,27 @@ impl TuiState {
 
 /// Styled text: each span carries the theme style of its part.
 type Spans = Vec<Span<'static>>;
+
+/// The hint row's navigation keys, `key what` pairs separated by ` · `,
+/// as many as fit in `width` columns (never a cut pair).
+fn nav_hints(keys: &[(&'static str, &'static str)], width: usize) -> Line<'static> {
+    let mut spans = vec![Span::raw(" ")];
+    let mut used = 1;
+    for (i, (key, what)) in keys.iter().enumerate() {
+        let sep = if i == 0 { "" } else { " · " };
+        let cols = UnicodeWidthStr::width(*key) + 1 + what.len() + sep.len();
+        if used + cols > width {
+            break;
+        }
+        used += cols;
+        if !sep.is_empty() {
+            spans.push(Span::styled(sep, SECONDARY));
+        }
+        spans.push(Span::styled(*key, KEY));
+        spans.push(Span::styled(format!(" {what}"), SECONDARY));
+    }
+    Line::from(spans)
+}
 
 /// The parts of the status bar, in priority order. Each part is built
 /// with its styles, so a change of wording cannot change them.
@@ -2171,6 +2730,111 @@ mod tests {
         )
     }
 
+    fn asked(s: &mut TuiState, options: &[&str]) -> tokio::sync::oneshot::Receiver<Option<usize>> {
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        *s.asker.lock().unwrap() = Some(crate::cli::output::Ask {
+            prompt: "Choose one:".into(),
+            options: options.iter().map(|o| o.to_string()).collect(),
+            reply,
+        });
+        s.poll_ask();
+        rx
+    }
+
+    #[test]
+    fn test_the_choice_list_answers_with_the_selected_row() {
+        let mut s = state();
+        let mut rx = asked(&mut s, &["ethereum 0xA USDN", "bsc 0xB USDN"]);
+        assert!(matches!(s.overlay, Some(Overlay::Choice(_))));
+        s.handle_key(key(KeyCode::Down));
+        s.handle_key(key(KeyCode::Enter));
+        assert_eq!(rx.try_recv().unwrap(), Some(1));
+        assert!(s.overlay.is_none());
+    }
+
+    #[test]
+    fn test_escape_answers_none_and_does_not_cancel_the_command() {
+        let mut s = state();
+        let mut rx = asked(&mut s, &["a", "b"]);
+        assert!(matches!(s.handle_key(key(KeyCode::Esc)), Action::None));
+        assert_eq!(rx.try_recv().unwrap(), None);
+        assert!(s.overlay.is_none());
+    }
+
+    #[test]
+    fn test_cancelling_the_command_closes_the_choice() {
+        // Review focus 1: the command is gone, so is its receiver.
+        let mut s = state();
+        let rx = asked(&mut s, &["a", "b"]);
+        drop(rx);
+        s.finish(Ending::Cancelled);
+        assert!(s.overlay.is_none());
+        assert!(s.asker.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_a_long_choice_scrolls_with_the_selection() {
+        // Review focus 2: 20 options; the 15th must be on screen.
+        let mut s = state();
+        let options: Vec<String> = (1..=20).map(|i| format!("chain{i} 0x{i} T")).collect();
+        let refs: Vec<&str> = options.iter().map(String::as_str).collect();
+        let _rx = asked(&mut s, &refs);
+        for _ in 0..14 {
+            s.handle_key(key(KeyCode::Down));
+        }
+        let text = screen(&s, 100, 30);
+        assert!(text.contains("chain15 0x15 T"), "{text}");
+        assert!(text.contains("Choose one:"), "{text}");
+    }
+
+    #[test]
+    fn test_the_choice_keeps_the_selection_in_view_at_the_smallest_size() {
+        // Review focus 3: at MIN_W x MIN_H only a few rows fit above the
+        // input line; the selected one must be among them.
+        let mut s = state();
+        let options: Vec<String> = (1..=8).map(|i| format!("opt{i}")).collect();
+        let refs: Vec<&str> = options.iter().map(String::as_str).collect();
+        let _rx = asked(&mut s, &refs);
+        for _ in 0..5 {
+            s.handle_key(key(KeyCode::Down));
+        }
+        let text = screen(&s, MIN_W, MIN_H);
+        assert!(text.contains("opt6"), "{text}");
+    }
+
+    #[test]
+    fn test_a_hidden_choice_is_not_answered_by_enter() {
+        let mut s = state();
+        let mut rx = asked(&mut s, &["a", "b"]);
+        let _ = screen(&s, 20, 6); // too small: the list is not drawn
+        s.handle_key(key(KeyCode::Enter));
+        assert!(rx.try_recv().is_err(), "no answer yet");
+        assert!(matches!(s.overlay, Some(Overlay::Choice(_))));
+        s.handle_key(key(KeyCode::Esc));
+        assert_eq!(rx.try_recv().unwrap(), None);
+    }
+
+    #[test]
+    fn test_a_paste_leaves_the_choice_open() {
+        let mut s = state();
+        let mut rx = asked(&mut s, &["a", "b"]);
+        s.paste("USDC");
+        assert!(matches!(s.overlay, Some(Overlay::Choice(_))));
+        assert!(rx.try_recv().is_err(), "no answer yet");
+        assert!(s.input.is_empty());
+    }
+
+    #[test]
+    fn test_a_question_puts_back_the_history_search_draft() {
+        let mut s = state();
+        type_str(&mut s, "draft");
+        s.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert!(matches!(s.overlay, Some(Overlay::HistorySearch(_))));
+        let _rx = asked(&mut s, &["a", "b"]);
+        assert!(matches!(s.overlay, Some(Overlay::Choice(_))));
+        assert_eq!(s.input, "draft");
+    }
+
     fn type_str(s: &mut TuiState, text: &str) {
         for c in text.chars() {
             s.handle_key(key(KeyCode::Char(c)));
@@ -2332,23 +2996,78 @@ mod tests {
             argv: vec![],
         };
         let out = s.start("market summary USDC --every 1s", &inv);
-        let metrics =
-            scope::market::series::summary_metrics(&scope::market::HealthThresholds::default());
+        let metrics = scope::metrics::summary_metrics(&scope::market::HealthThresholds::default());
         for run in 1..=n {
             out.record_run(
                 &metrics,
                 crate::cli::output::RunRecord {
                     run,
                     at: Utc::now(),
-                    sample: scope::market::series::Sample {
+                    sample: scope::metrics::Sample {
                         values: vec![Some(1.0); metrics.len()],
                         healthy: run != fail,
                         failed_checks: vec![format!("spread {run}%")],
                     },
                     snapshot: format!("SNAPSHOT {run}\n"),
+                    view: None,
                 },
             );
         }
+    }
+
+    #[test]
+    fn test_a_one_shot_market_summary_shows_the_compact_view_and_copies_the_text() {
+        // Q4 (2026-10-21): the scrollback gets the compact view; Ctrl-Y and
+        // `save` keep the CLI text report. Notes stay.
+        use scope::market::{BookSource, MarketSummary, OrderBook, OrderBookLevel};
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let mut s = state();
+        let inv = Invocation {
+            command: venues_list(),
+            route: Route::Pane,
+            ai: false,
+            argv: vec![],
+        };
+        let out = s.start("market summary USDC --venue binance", &inv);
+        crate::note!(out, "Using the saved token choice");
+        crate::out!(
+            out,
+            "CLI REPORT
+Bid Side — 20 levels
+"
+        )
+        .unwrap();
+        let level = |price: f64| OrderBookLevel {
+            price,
+            quantity: 1000.0,
+        };
+        let book = OrderBook {
+            pair: "USDC/USDT".to_string(),
+            source: BookSource::Exchange,
+            bids: vec![level(0.9999)],
+            asks: vec![level(1.0001)],
+        };
+        assert!(out.record_view(crate::cli::output::SummaryView {
+            summary: MarketSummary::from_order_book(
+                &book,
+                &scope::market::HealthThresholds::default(),
+                None
+            ),
+            venue: "binance".to_string(),
+        }));
+        s.finish(Ending::Finished(Ok(())));
+        let shown = s.scrollback_text();
+        assert!(shown.contains("USDC/USDT · binance"), "{shown}");
+        assert!(!shown.contains("CLI REPORT"), "{shown}");
+        assert!(shown.contains("Using the saved token choice"), "{shown}");
+        assert_eq!(
+            s.last_output.as_deref(),
+            Some(
+                "CLI REPORT
+Bid Side — 20 levels
+"
+            )
+        );
     }
 
     #[test]
@@ -2972,6 +3691,80 @@ mod tests {
         let text = screen(&s, 60, 15);
         assert!(text.contains("line 29"), "{text}");
         assert!(!text.contains("scrolled up"), "{text}");
+    }
+
+    #[test]
+    fn test_shift_arrows_scroll_one_line_and_plain_arrows_keep_the_history() {
+        let mut s = scrollable();
+        s.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
+        s.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
+        assert!(screen(&s, 60, 15).contains("scrolled up 2 lines"));
+        s.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+        assert!(screen(&s, 60, 15).contains("scrolled up 1 lines"));
+        // Shift-↓ at the bottom stays there.
+        s.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+        s.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+        assert!(!screen(&s, 60, 15).contains("scrolled up"));
+        // Plain ↑ still walks the history.
+        s.history.push("venues list".into());
+        s.handle_key(key(KeyCode::Up));
+        assert_eq!(s.input, "venues list");
+    }
+
+    #[test]
+    fn test_the_wheel_scrolls_three_lines_and_stops_at_the_top() {
+        let mut s = scrollable();
+        s.wheel(3);
+        assert!(screen(&s, 60, 15).contains("scrolled up 3 lines"));
+        for _ in 0..20 {
+            s.wheel(3);
+        }
+        assert!(screen(&s, 60, 15).contains("scrolled up 22 lines"));
+        s.wheel(-3);
+        assert!(screen(&s, 60, 15).contains("scrolled up 19 lines"));
+        // A list has the wheel to itself: the output does not move.
+        s.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        assert!(matches!(s.overlay, Some(Overlay::Palette(_))));
+        s.wheel(3);
+        assert_eq!(s.scroll.get(), 19);
+    }
+
+    #[test]
+    fn test_help_opens_at_its_first_line() {
+        let mut s = scrollable();
+        let config = scope::config::Config::default();
+        let _ = s.submit("help", &config);
+        let text = screen(&s, 60, 15);
+        assert!(text.contains("Session commands:"), "{text}");
+        assert!(text.contains("scrolled up"), "the rest is below: {text}");
+        // The next draw does not jump back up.
+        s.handle_key(key(KeyCode::PageDown));
+        assert!(!screen(&s, 60, 15).contains("Session commands:"));
+    }
+
+    #[test]
+    fn test_the_hint_row_shows_the_navigation_keys_that_fit() {
+        let mut s = scrollable();
+        let text = screen(&s, 120, 15);
+        assert!(text.contains("PgUp/wheel/Shift-↑ scroll back"), "{text}");
+        assert!(text.contains("↑↓ history"), "{text}");
+        assert!(text.contains("Ctrl-K commands"), "{text}");
+        // Scrolled up, it says how to go back down.
+        s.handle_key(key(KeyCode::PageUp));
+        let text = screen(&s, 120, 15);
+        assert!(text.contains("PgDn/wheel/Shift-↓ down"), "{text}");
+        assert!(text.contains("Ctrl-End bottom"), "{text}");
+        // Narrow: fewer pairs, never a cut one.
+        let line = nav_hints(&s.nav_keys(), 40);
+        let shown: String = line.spans.iter().map(|sp| sp.content.as_ref()).collect();
+        assert!(UnicodeWidthStr::width(shown.as_str()) <= 40, "{shown:?}");
+        assert!(
+            shown.ends_with("down") || shown.ends_with("bottom"),
+            "{shown:?}"
+        );
+        // Typing shows the usage hint instead.
+        type_str(&mut s, "market summary");
+        assert!(!screen(&s, 120, 15).contains("↑↓ history"));
     }
 
     #[test]

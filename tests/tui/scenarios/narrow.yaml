@@ -1,8 +1,10 @@
 name: output fits a 40-column pane; wrapped rows keep their gutter
 tiers: [offline]
 terminal: { cols: 40, rows: 20 }
-# The version in the pane title changes with each release.
-masks: ['scope v\d+\.\d+\.\d+\S*']
+# The version in the pane title changes with each release. The scroll
+# count depends on how many rows the temp HOME path in `User dir` wraps
+# to, which differs by OS.
+masks: ['scope v\d+\.\d+\.\d+\S*', 'up \d+ lines']
 steps:
   - type: "venues list"
   - key: Enter

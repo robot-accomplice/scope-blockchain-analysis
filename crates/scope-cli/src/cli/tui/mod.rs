@@ -23,10 +23,10 @@
 //! - [`app`] holds the state and draws the screen.
 //! - [`journal`] keeps the history and the event log.
 //!
-//! A command that reads stdin or draws its own screen (the setup wizard, a
-//! token search with a selection prompt, the live monitor) runs in suspend
-//! mode: the TUI gives the terminal back while it runs. What it writes
-//! through its output also joins the scrollback when the TUI returns.
+//! A command that reads stdin or draws its own screen (the setup wizard,
+//! the live monitor) runs in suspend mode: the TUI gives the terminal back
+//! while it runs. What it writes through its output also joins the
+//! scrollback when the TUI returns.
 
 pub mod app;
 pub mod clip;
@@ -34,15 +34,18 @@ pub mod complete;
 pub mod crash;
 pub mod exec;
 pub mod fit;
+pub mod grid;
 pub mod hint;
 pub mod journal;
+pub(crate) mod market_view;
 pub mod palette;
 pub(crate) mod repeat_view;
 pub mod vocab;
+pub mod wizard;
 
 use app::{Action, Ending, TuiState, run_invocation};
-use crossterm::event::{Event, EventStream, KeyEventKind};
-use exec::{Plan, Route};
+use crossterm::event::{Event, EventStream, KeyEventKind, MouseEventKind};
+use exec::{Plan, Route, WatchCommand};
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use journal::Journal;
@@ -88,8 +91,10 @@ pub struct TuiExit {
     pub code: i32,
 }
 
-/// A process signal the TUI listens for.
+/// A process signal the TUI listens for. Off Unix only Ctrl-C (`Int`)
+/// arrives; the other variants stay so one match covers every platform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) enum Signal {
     Term,
     Hup,
@@ -154,6 +159,16 @@ pub fn tui_terminal_ok(
     Err("scope tui needs an interactive terminal; run the command directly, e.g. scope market summary …".to_string())
 }
 
+/// What the TUI's commands run with: the config, and the chain clients
+/// built from it.
+pub struct Settings {
+    pub config: Config,
+    pub clients: Box<dyn ChainClientFactory>,
+}
+
+/// Reads the [`Settings`] again, after `setup` saved new ones (#99).
+pub type Reload<'a> = &'a dyn Fn() -> Result<Settings>;
+
 /// Runs the TUI until the user leaves or a signal ends it.
 ///
 /// # Errors
@@ -161,10 +176,21 @@ pub fn tui_terminal_ok(
 /// Returns an error when the signal handlers cannot be installed, a
 /// terminal I/O error, or the error from saving the history or the
 /// session context on exit.
-pub async fn run(
+pub async fn run(no_banner: bool, settings: Settings, reload: Reload<'_>) -> Result<TuiExit> {
+    run_with(no_banner, None, settings, reload).await
+}
+
+/// [`run`], then `start` once the loop runs: `scope monitor <args>` opens
+/// the TUI with the monitor wizard (#47).
+///
+/// # Errors
+///
+/// As [`run`].
+pub async fn run_with(
     no_banner: bool,
-    config: &Config,
-    clients: &dyn ChainClientFactory,
+    start: Option<crate::cli::Commands>,
+    settings: Settings,
+    reload: Reload<'_>,
 ) -> Result<TuiExit> {
     let signals = signal_stream()?;
     // A second stream gets the same signals (tokio gives each one to
@@ -177,7 +203,9 @@ pub async fn run(
     // return an error before `session`, which restores the terminal.
     crash::install_panic_hook();
     let mut host = RealHost {
-        terminal: screen::enter(screen::Mouse::Off)?,
+        // The mouse wheel scrolls the output. Selecting text with the mouse
+        // then takes Shift+drag (Ctrl-Y copies the last output).
+        terminal: screen::enter()?,
         events: None,
         signals,
         on_screen: true,
@@ -185,10 +213,18 @@ pub async fn run(
     let mut state = TuiState::new(
         SessionContext::load(),
         Journal::in_data_dir(),
-        vocab::Vocab::load(config),
+        vocab::Vocab::load(&settings.config),
     );
     welcome(&mut state, no_banner);
-    session(&mut host, &mut state, config, clients, SessionContext::save).await
+    state.start = start;
+    session(
+        &mut host,
+        &mut state,
+        settings,
+        reload,
+        SessionContext::save,
+    )
+    .await
 }
 
 /// Runs the event loop, then restores the terminal and saves, also after
@@ -196,11 +232,11 @@ pub async fn run(
 async fn session<H: Host>(
     host: &mut H,
     state: &mut TuiState,
-    config: &Config,
-    clients: &dyn ChainClientFactory,
+    settings: Settings,
+    reload: Reload<'_>,
     save_ctx: impl FnOnce(&SessionContext) -> Result<()>,
 ) -> Result<TuiExit> {
-    let result = event_loop(host, state, config, clients).await;
+    let result = event_loop(host, state, settings, reload).await;
     // The CLI after the TUI, also after an error or a signal, uses the
     // real width.
     host.set_width(None);
@@ -240,8 +276,22 @@ fn signal_stream() -> Result<BoxStream<'static, Signal>> {
     Ok(futures::stream::select_all(streams).boxed())
 }
 
-/// No signal handling off unix.
-#[cfg(not(unix))]
+/// Ctrl-C at the console, as INT. The TUI's raw mode reads Ctrl-C as a
+/// key, so this fires only while a suspend-mode command has the cooked
+/// console. Installing the handler replaces the default, which ends the
+/// process.
+#[cfg(windows)]
+fn signal_stream() -> Result<BoxStream<'static, Signal>> {
+    let mut handler = tokio::signal::windows::ctrl_c()
+        .map_err(|e| ScopeError::io_context(e, "cannot install the Ctrl-C handler"))?;
+    Ok(futures::stream::poll_fn(move |cx| {
+        handler.poll_recv(cx).map(|got| got.map(|()| Signal::Int))
+    })
+    .boxed())
+}
+
+/// No signal handling off unix and Windows.
+#[cfg(not(any(unix, windows)))]
 fn signal_stream() -> Result<BoxStream<'static, Signal>> {
     Ok(futures::stream::pending().boxed())
 }
@@ -331,7 +381,7 @@ impl Host for RealHost {
         self.restore();
     }
     fn resume(&mut self) -> Result<()> {
-        self.terminal = screen::enter(screen::Mouse::Off)?;
+        self.terminal = screen::enter()?;
         self.on_screen = true;
         Ok(())
     }
@@ -399,21 +449,39 @@ impl Outside {
 
 type PaneFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + 'a>>;
 
-/// After `setup` in the TUI: the session keeps the config it read at start.
-const SETUP_RESTART_NOTE: &str =
-    "Settings are saved. Leave the TUI (exit) and start it again to use them.";
+/// Rows one notch of the mouse wheel scrolls.
+const WHEEL_ROWS: isize = 3;
+
+/// After `setup` in the TUI: the session read the config again.
+const SETUP_RELOADED_NOTE: &str = "The TUI now uses the saved settings.";
+
+/// After `setup`, when the config could not be read again.
+fn setup_reload_failed_note(e: &ScopeError) -> String {
+    format!(
+        "The settings could not be read again ({e}). Leave the TUI (exit) and start it again to use them."
+    )
+}
 
 async fn event_loop<H: Host>(
     host: &mut H,
     state: &mut TuiState,
-    config: &Config,
-    clients: &dyn ChainClientFactory,
+    settings: Settings,
+    reload: Reload<'_>,
 ) -> Result<TuiExit> {
+    // Each command holds its own handle on the settings, so `setup` can
+    // swap in new ones between commands.
+    let mut settings = std::rc::Rc::new(settings);
     const LEFT: TuiExit = TuiExit { code: 0 };
     // Library warnings between commands land here and join the scrollback.
     let idle_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     let mut idle_diag = Some(scope::diag::redirect(idle_buf.clone()));
     let mut pending: Option<PaneFuture<'_>> = None;
+    // A running watchlist (#47). It runs next to the pane command, so the
+    // shell stays usable while the grid ticks.
+    let mut watch_pending: Option<PaneFuture<'_>> = None;
+    if let Some(command) = state.start.take() {
+        watch_pending = open_monitor(state, &settings, command);
+    }
     let mut tick = tokio::time::interval(LIVE_REDRAW);
     // After a stop (Ctrl-Z, then `fg`), fire once, not once per missed
     // tick: the tick arm comes before the keys in the biased select.
@@ -421,19 +489,32 @@ async fn event_loop<H: Host>(
     // True after the TUI stopped itself: the SIGCONT that continues it
     // needs no second set-up.
     let mut cont_expected = false;
+    // True after an event that changed nothing (a mouse move): the screen
+    // is not drawn again for it.
+    let mut unchanged = false;
 
     loop {
         drain_into(&idle_buf, state);
-        host.terminal()
-            .draw(|f| {
-                state.render(f);
-                crate::cli::plain::finish_frame(f);
-            })
-            // The backend's error type is generic and need not be Send, so
-            // only its text can travel.
-            .map_err(|e| {
-                ScopeError::io_context(io::Error::other(e.to_string()), "terminal draw failed")
-            })?;
+        state.poll_watch();
+        if state.take_bell() {
+            // A new breach: one bell. A failed write only loses the sound.
+            let _ = host.write_raw("\x07");
+        }
+        // A question from the running command opens as a list. The live
+        // tick wakes the loop while a command runs, so it shows within one.
+        state.poll_ask();
+        if !std::mem::take(&mut unchanged) {
+            host.terminal()
+                .draw(|f| {
+                    state.render(f);
+                    crate::cli::plain::finish_frame(f);
+                })
+                // The backend's error type is generic and need not be Send,
+                // so only its text can travel.
+                .map_err(|e| {
+                    ScopeError::io_context(io::Error::other(e.to_string()), "terminal draw failed")
+                })?;
+        }
         // Command output fits the pane. Set after each draw, so it follows
         // a resize and comes back after the TUI leaves the terminal.
         host.set_width(state.pane_width());
@@ -448,7 +529,11 @@ async fn event_loop<H: Host>(
                 pending = None;
                 state.finish(Ending::Finished(res));
             }
-            _ = tick.tick(), if state.running.is_some() => {}
+            res = async { watch_pending.as_mut().expect("guarded by precondition").await }, if watch_pending.is_some() => {
+                watch_pending = None;
+                state.watch_finished(res);
+            }
+            _ = tick.tick(), if state.running.is_some() || state.watch_running() => {}
             Some(sig) = signals.next() => {
                 if let Some(code) = sig.exit_code() {
                     // Drop the command future first: that cancels it.
@@ -478,6 +563,16 @@ async fn event_loop<H: Host>(
                         state.paste(&text);
                         continue;
                     }
+                    // The wheel scrolls the output; a click or a move does
+                    // nothing, and is not worth a redraw.
+                    Some(Ok(Event::Mouse(m))) => {
+                        match m.kind {
+                            MouseEventKind::ScrollUp => state.wheel(WHEEL_ROWS),
+                            MouseEventKind::ScrollDown => state.wheel(-WHEEL_ROWS),
+                            _ => unchanged = true,
+                        }
+                        continue;
+                    }
                     Some(Ok(_)) => continue,
                     Some(Err(e)) => return Err(ScopeError::IoError(e)),
                     None => return Ok(LEFT),
@@ -490,20 +585,47 @@ async fn event_loop<H: Host>(
                         let result = host.write_raw(&clip::osc52(&text));
                         state.copied(text.lines().count(), result);
                     }
+                    Action::StartWatch(list) => {
+                        if let Some(run) = begin_watch(state, &settings, *list) {
+                            watch_pending = Some(run);
+                        }
+                    }
+                    Action::StopWatch => {
+                        // Dropping the future stops the run at its next await.
+                        watch_pending = None;
+                        state.stop_watch();
+                    }
                     Action::Cancel => {
                         // Dropping the future cancels the handler at its
                         // next await point.
                         pending = None;
                         state.finish(Ending::Cancelled);
                     }
-                    Action::Submit(line) => match state.submit(&line, config) {
+                    Action::Submit(line) => match state.submit(&line, &settings.config) {
                         Plan::Done => {}
                         Plan::Exit => return Ok(LEFT),
+                        Plan::Watch(cmd) => match cmd {
+                            WatchCommand::Open(list) => {
+                                if let Some(run) = begin_watch(state, &settings, *list) {
+                                    watch_pending = Some(run);
+                                }
+                            }
+                            WatchCommand::Stop => {
+                                if state.watch_running() {
+                                    watch_pending = None;
+                                    state.stop_watch();
+                                } else {
+                                    state.push_note("No watchlist runs.");
+                                }
+                            }
+                            WatchCommand::Show => state.show_grid(),
+                        },
                         Plan::Run(inv) => match inv.route {
                             Route::Pane => {
                                 let out = state.start(&line, &inv);
+                                let s = settings.clone();
                                 pending = Some(Box::pin(async move {
-                                    run_invocation(*inv, config, clients, &out).await
+                                    run_invocation(*inv, &s.config, &*s.clients, &out).await
                                 }));
                             }
                             Route::Suspend => {
@@ -511,7 +633,8 @@ async fn event_loop<H: Host>(
                                 leave(host);
                                 let outside = Outside::new(host.suspended_output());
                                 let argv = inv.argv.clone();
-                                let command = run_invocation(*inv, config, clients, &outside.out);
+                                let command =
+                                    run_invocation(*inv, &settings.config, &*settings.clients, &outside.out);
                                 let ended =
                                     run_suspended(host, &line, &argv, &outside, command, state)
                                         .await;
@@ -520,11 +643,25 @@ async fn event_loop<H: Host>(
                                     // restores and saves.
                                     return Ok(exit);
                                 }
+                                if argv.get(1).is_some_and(|c| c == "setup") {
+                                    // Before the screen is taken back, so a
+                                    // notice from the reload shows outside.
+                                    match reload() {
+                                        Ok(new) => {
+                                            state.set_vocab(vocab::Vocab::load(&new.config));
+                                            settings = std::rc::Rc::new(new);
+                                            state.push_note(SETUP_RELOADED_NOTE);
+                                            state.settings_reloaded();
+                                        }
+                                        Err(e) => state.push_note(&setup_reload_failed_note(&e)),
+                                    }
+                                }
                                 host.resume()?;
                                 idle_diag.replace(scope::diag::redirect(idle_buf.clone()));
-                                if argv.get(1).is_some_and(|c| c == "setup") {
-                                    // The clients hold the config read at start.
-                                    state.push_note(SETUP_RESTART_NOTE);
+                            }
+                            Route::Wizard => {
+                                if let Some(run) = open_monitor(state, &settings, inv.command) {
+                                    watch_pending = Some(run);
                                 }
                             }
                             Route::Refuse(reason) => {
@@ -538,6 +675,92 @@ async fn event_loop<H: Host>(
             }
         }
     }
+}
+
+/// `watch open` while a watchlist runs.
+const WATCH_BUSY_NOTE: &str =
+    "A watchlist runs already. Stop it first (`watch stop`, or Esc in the grid).";
+
+/// Starts `list` in the grid, unless a watchlist runs already.
+fn begin_watch(
+    state: &mut TuiState,
+    settings: &std::rc::Rc<Settings>,
+    list: scope::watch::Watchlist,
+) -> Option<PaneFuture<'static>> {
+    if state.watch_running() {
+        state.push_note(WATCH_BUSY_NOTE);
+        return None;
+    }
+    // A finished grid makes room for the new one.
+    state.close_grid();
+    let (out, sink, tx) = state.start_watch(list.clone());
+    let s = settings.clone();
+    Some(Box::pin(scope::diag::scoped(sink, async move {
+        run_watch(list, &s, &out, tx).await
+    })))
+}
+
+/// `monitor <args>` in the TUI: the wizard, filled from the arguments, or
+/// with `--yes` the run at once (and the file first with `--save`).
+fn open_monitor(
+    state: &mut TuiState,
+    settings: &std::rc::Rc<Settings>,
+    command: crate::cli::Commands,
+) -> Option<PaneFuture<'static>> {
+    let crate::cli::Commands::Monitor(args) = command else {
+        return None;
+    };
+    match crate::cli::watch::monitor::watchlist_from_args(&args, &settings.config) {
+        Err(e) => {
+            state.push_styled_note(&format!("monitor: {e}"), crate::cli::theme::ERR);
+            None
+        }
+        Ok((list, notes)) if args.watch.yes => {
+            for n in &notes {
+                state.push_note(n);
+            }
+            if args.watch.save.is_some() {
+                let path = scope::watch::file::path_in(&scope::paths::watchlists_dir(), &list.name);
+                match scope::watch::file::save(&path, &list) {
+                    Ok(()) => {
+                        state.push_note(&format!("Saved the watchlist to {}.", path.display()))
+                    }
+                    Err(e) => state.push_note(&format!("Could not save {}: {e}", path.display())),
+                }
+            }
+            begin_watch(state, settings, list)
+        }
+        Ok((list, notes)) => {
+            state.open_wizard(list, notes);
+            None
+        }
+    }
+}
+
+/// Runs a watchlist for the grid: resolves its targets once, then ticks on
+/// its schedule. Each step goes to the grid through `tx`; a closed grid
+/// only drops the messages.
+async fn run_watch(
+    list: scope::watch::Watchlist,
+    settings: &Settings,
+    out: &Output,
+    tx: std::sync::mpsc::Sender<grid::GridMsg>,
+) -> Result<()> {
+    let src = crate::cli::watch::Sources {
+        config: &settings.config,
+        clients: &*settings.clients,
+    };
+    let ready = crate::cli::watch::prepare(&list, src, out).await?;
+    let _ = tx.send(grid::GridMsg::Ready(ready.clone()));
+    crate::cli::watch::run(&ready, src, out, |run, tick, events| {
+        let _ = tx.send(grid::GridMsg::Tick {
+            run,
+            tick: Box::new(tick.clone()),
+            events: events.to_vec(),
+        });
+    })
+    .await
+    .map(|_| ())
 }
 
 /// Gives the terminal back and stops the process (Ctrl-Z, SIGTSTP). When
@@ -944,6 +1167,51 @@ mod tests {
         Ok(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)))
     }
 
+    /// A mouse event of `kind` at the top-left cell.
+    fn mouse(kind: MouseEventKind) -> io::Result<Event> {
+        Ok(Event::Mouse(crossterm::event::MouseEvent {
+            kind,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }))
+    }
+
+    #[tokio::test]
+    async fn test_the_wheel_scrolls_and_a_mouse_move_draws_nothing() {
+        let _lock = DIAG_LOCK.lock().await;
+        // `help` is longer than the test screen and opens at its top.
+        let mut events = script(&["help"]);
+        events.push(mouse(MouseEventKind::ScrollDown));
+        let (res, state, host, _) = drive(events).await;
+        res.unwrap();
+        let after_one_notch = host.draws;
+        let scrolled = state.scrolled();
+
+        let mut events = script(&["help"]);
+        events.push(mouse(MouseEventKind::ScrollDown));
+        for _ in 0..20 {
+            events.push(mouse(MouseEventKind::Moved));
+        }
+        let (res, state2, host2, _) = drive(events).await;
+        res.unwrap();
+        assert_eq!(state2.scrolled(), scrolled, "a move scrolls nothing");
+        assert_eq!(host2.draws, after_one_notch, "and draws nothing");
+
+        // Down, down, up: one notch down from the top, as after one.
+        let mut events = script(&["help"]);
+        events.push(mouse(MouseEventKind::ScrollDown));
+        events.push(mouse(MouseEventKind::ScrollDown));
+        events.push(mouse(MouseEventKind::ScrollUp));
+        let (res, state3, _, _) = drive(events).await;
+        res.unwrap();
+        assert_eq!(
+            state3.scrolled(),
+            scrolled,
+            "a notch is {WHEEL_ROWS} rows each way"
+        );
+    }
+
     /// Key events that type each line and press Enter. `<esc>` presses Esc.
     fn script(lines: &[&str]) -> Vec<io::Result<Event>> {
         let mut events = Vec::new();
@@ -1026,22 +1294,40 @@ mod tests {
         host: TestHost,
         captured: crate::cli::output::Captured,
     ) -> Driven {
-        drive_host_on(journal, host, captured, &MockClientFactory::new()).await
+        drive_host_on(journal, host, captured, Box::new(MockClientFactory::new())).await
     }
 
-    /// [`drive_host`] with the client factory `clients`.
+    /// Settings with the default config and `clients`.
+    fn settings_with(clients: Box<dyn ChainClientFactory>) -> Settings {
+        Settings {
+            config: Config::default(),
+            clients,
+        }
+    }
+
+    /// [`drive_host`] with the client factory `clients`. A reload after
+    /// `setup` gives the mock factory.
     async fn drive_host_on(
+        journal: Journal,
+        host: TestHost,
+        captured: crate::cli::output::Captured,
+        clients: Box<dyn ChainClientFactory>,
+    ) -> Driven {
+        let reload = || Ok(settings_with(Box::new(MockClientFactory::new())));
+        drive_host_reloading(journal, host, captured, settings_with(clients), &reload).await
+    }
+
+    /// [`drive_host`] with `settings`, and `reload` after `setup`.
+    async fn drive_host_reloading(
         journal: Journal,
         mut host: TestHost,
         captured: crate::cli::output::Captured,
-        clients: &dyn ChainClientFactory,
+        settings: Settings,
+        reload: Reload<'_>,
     ) -> Driven {
         let mut state = TuiState::new(SessionContext::default(), journal, vocab::Vocab::default());
         welcome(&mut state, true);
-        let res = session(&mut host, &mut state, &Config::default(), clients, |_| {
-            Ok(())
-        })
-        .await;
+        let res = session(&mut host, &mut state, settings, reload, |_| Ok(())).await;
         (res, state, host, captured)
     }
 
@@ -1077,6 +1363,9 @@ mod tests {
     struct PendingFactory(MockClientFactory);
 
     impl ChainClientFactory for PendingFactory {
+        fn http(&self) -> std::sync::Arc<dyn scope::http::HttpClient> {
+            scope::http::test_transport()
+        }
         fn create_chain_client(
             &self,
             chain: &str,
@@ -1096,7 +1385,7 @@ mod tests {
     async fn drive_pending(events: Vec<io::Result<Event>>, signals: Vec<Signal>) -> Driven {
         let (host, captured) = test_host(events, signals);
         let clients = PendingFactory(MockClientFactory::new());
-        drive_host_on(Journal::default(), host, captured, &clients).await
+        drive_host_on(Journal::default(), host, captured, Box::new(clients)).await
     }
 
     /// Types `lines`, then delivers `signal`.
@@ -1209,19 +1498,100 @@ mod tests {
         assert_eq!(draws.last(), Some(&Some(100)), "set again after Ctrl-Z");
     }
 
+    /// The mock factory, counting the DEX clients it makes.
+    struct CountingFactory(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl ChainClientFactory for CountingFactory {
+        fn http(&self) -> std::sync::Arc<dyn scope::http::HttpClient> {
+            scope::http::test_transport()
+        }
+        fn create_chain_client(
+            &self,
+            chain: &str,
+        ) -> scope::Result<Box<dyn scope::chains::ChainClient>> {
+            MockClientFactory::new().create_chain_client(chain)
+        }
+        fn create_dex_client(&self) -> Box<dyn scope::chains::DexDataSource> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            MockClientFactory::new().create_dex_client()
+        }
+    }
+
     #[tokio::test]
-    async fn test_setup_in_the_tui_says_to_restart_and_other_commands_do_not() {
-        // The session's clients keep the config read at start: after
-        // `setup`, the user must restart to use a new key (a stale key
+    async fn test_after_setup_the_next_command_uses_the_reloaded_clients() {
+        // #99: a key saved by `setup` works without a restart (a stale key
         // gave "Invalid API Key" right after a successful setup).
         let _lock = DIAG_LOCK.lock().await;
-        let (res, state, _, _) = drive(script(&["setup --key nosuchkey"])).await;
+        let first = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reloaded = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reloads = std::cell::Cell::new(0);
+        let reload = || {
+            reloads.set(reloads.get() + 1);
+            Ok(settings_with(Box::new(CountingFactory(reloaded.clone()))))
+        };
+        let (host, captured) = test_host(script(&["setup --key nosuchkey", "crawl USDC"]), vec![]);
+        let (res, state, _, _) = drive_host_reloading(
+            Journal::default(),
+            host,
+            captured,
+            settings_with(Box::new(CountingFactory(first.clone()))),
+            &reload,
+        )
+        .await;
         res.unwrap();
-        assert!(state.scrollback_text().contains(SETUP_RESTART_NOTE));
+        assert_eq!(reloads.get(), 1, "setup reads the settings once");
+        assert!(state.scrollback_text().contains(SETUP_RELOADED_NOTE));
+        assert_eq!(
+            first.load(Ordering::SeqCst),
+            0,
+            "the old clients are not used"
+        );
+        assert!(
+            reloaded.load(Ordering::SeqCst) > 0,
+            "crawl used the new clients"
+        );
+    }
 
-        let (res, state, _, _) = drive(script(&["crawl USDC"])).await;
+    #[tokio::test]
+    async fn test_a_failed_reload_keeps_the_settings_and_says_to_restart() {
+        let _lock = DIAG_LOCK.lock().await;
+        let reload = || Err(ScopeError::Other("bad yaml".into()));
+        let (host, captured) = test_host(script(&["setup --key nosuchkey"]), vec![]);
+        let (res, state, _, _) = drive_host_reloading(
+            Journal::default(),
+            host,
+            captured,
+            settings_with(Box::new(MockClientFactory::new())),
+            &reload,
+        )
+        .await;
         res.unwrap();
-        assert!(!state.scrollback_text().contains(SETUP_RESTART_NOTE));
+        let text = state.scrollback_text();
+        assert!(text.contains("could not be read again"), "{text}");
+        assert!(text.contains("bad yaml"), "{text}");
+        assert!(!text.contains(SETUP_RELOADED_NOTE), "{text}");
+    }
+
+    #[tokio::test]
+    async fn test_other_commands_do_not_reload() {
+        let _lock = DIAG_LOCK.lock().await;
+        let reloads = std::cell::Cell::new(0);
+        let reload = || {
+            reloads.set(reloads.get() + 1);
+            Ok(settings_with(Box::new(MockClientFactory::new())))
+        };
+        let (host, captured) = test_host(script(&["crawl USDC", "venues list"]), vec![]);
+        let (res, state, _, _) = drive_host_reloading(
+            Journal::default(),
+            host,
+            captured,
+            settings_with(Box::new(MockClientFactory::new())),
+            &reload,
+        )
+        .await;
+        res.unwrap();
+        assert_eq!(reloads.get(), 0);
+        assert!(!state.scrollback_text().contains(SETUP_RELOADED_NOTE));
     }
 
     #[tokio::test]
@@ -1310,8 +1680,9 @@ mod tests {
             panic!("`venues list` did not plan a run")
         };
         let _out = state.start("venues list", &inv);
-        let factory = MockClientFactory::new();
-        let res = session(&mut host, &mut state, &config, &factory, |_| Ok(())).await;
+        let reload = || Ok(settings_with(Box::new(MockClientFactory::new())));
+        let settings = settings_with(Box::new(MockClientFactory::new()));
+        let res = session(&mut host, &mut state, settings, &reload, |_| Ok(())).await;
         assert_eq!(res.unwrap().code, 0);
         assert!(state.running.is_some(), "the tick stayed on");
         assert_eq!(host.stops, 1);
@@ -1818,7 +2189,9 @@ mod tests {
         let file = dir.path().join("one.json");
         let mut events = script(&[
             "venues list --format json",
-            &format!("save {}", file.display()),
+            // Quoted: the line splits by shell rules, where `\` in a
+            // Windows path is an escape.
+            &format!("save '{}'", file.display()),
         ]);
         events.push(ctrl_y_event());
         let (res, state, host, _) = drive(events).await;
@@ -1844,7 +2217,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("two.json");
         std::fs::write(&file, "old").unwrap();
-        let save = format!("save {}", file.display());
+        // Quoted, as above.
+        let save = format!("save '{}'", file.display());
         let journal = Journal::at(dir.path().join("h"), dir.path().join("e.jsonl"));
         let (res, state, _, _) = drive_with(
             journal,
@@ -1905,6 +2279,314 @@ mod tests {
         host.raw_fails = true;
         let (_, state, _, _) = drive_host(Journal::default(), host, captured).await;
         assert!(state.scrollback_text().contains("Could not copy: tty gone"));
+    }
+
+    #[tokio::test]
+    async fn test_watch_open_runs_the_grid_next_to_the_shell() {
+        let _lock = DIAG_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tokens.yaml");
+        std::fs::write(
+            &path,
+            "name: tokens\ninterval: 1h\ntargets:\n  - kind: token\n    id: \"0x1234567890123456789012345678901234567890\"\n    chain: ethereum\n    rules: [\"price_usd > 0\"]\n",
+        )
+        .unwrap();
+        let line = format!(
+            "watch open {}",
+            path.display().to_string().replace('\\', "/")
+        );
+        let (res, mut state, host, _) = drive(script(&[&line])).await;
+        res.unwrap();
+        state.poll_watch();
+        let g = state.grid.as_ref().expect("the grid opened");
+        assert!(state.grid_shown);
+        assert_eq!(g.list.name, "tokens");
+        assert!(g.ready.is_some(), "the targets were resolved");
+        let last = g.last.as_ref().expect("the first tick came");
+        assert_eq!(
+            last.snapshot.targets[0].status,
+            scope::watch::TargetStatus::Passed
+        );
+        assert!(g.is_running(), "a 1h run goes on");
+        assert!(
+            screen_text(&host).contains("watchlist tokens"),
+            "{}",
+            screen_text(&host)
+        );
+        assert!(state.scrollback_text().contains("Watchlist tokens started"));
+    }
+
+    #[tokio::test]
+    async fn test_esc_in_the_grid_stops_the_run_and_writes_the_report() {
+        let _lock = DIAG_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("w.yaml");
+        let report = dir.path().join("w.md");
+        std::fs::write(
+            &path,
+            format!(
+                "interval: 1h\noutputs:\n  report: '{}'\ntargets:\n  - kind: token\n    id: \"0x1234567890123456789012345678901234567890\"\n    rules: [\"price_usd > 0\"]\n",
+                report.display()
+            ),
+        )
+        .unwrap();
+        let line = format!(
+            "watch open {}",
+            path.display().to_string().replace('\\', "/")
+        );
+        // A second, idle Enter lets the first tick land before Esc.
+        let (res, mut state, _, _) = drive(script(&[&line, "", "<esc>"])).await;
+        res.unwrap();
+        let g = state.grid.as_ref().unwrap();
+        assert!(!g.is_running());
+        let (footer, _) = g.ended.clone().unwrap();
+        assert!(footer.starts_with("Stopped after"), "{footer}");
+        assert!(g.last.is_some(), "the first tick landed before Esc");
+        assert!(footer.contains("Report saved to"), "{footer}");
+        assert!(
+            std::fs::read_to_string(&report)
+                .unwrap()
+                .contains("# Watchlist Report")
+        );
+        // Esc again closes the finished grid into the scrollback.
+        state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(state.grid.is_none() && !state.grid_shown);
+        assert!(
+            state.scrollback_text().contains("watchlist w:"),
+            "{}",
+            state.scrollback_text()
+        );
+    }
+
+    const TOKEN: &str = "0x1234567890123456789012345678901234567890";
+
+    fn ctrl_key(c: char) -> io::Result<Event> {
+        Ok(Event::Key(KeyEvent::new(
+            KeyCode::Char(c),
+            KeyModifiers::CONTROL,
+        )))
+    }
+
+    #[tokio::test]
+    async fn test_monitor_opens_the_wizard_filled_from_the_arguments() {
+        let _lock = DIAG_LOCK.lock().await;
+        let (res, state, host, _) = drive(script(&[
+            "monitor USDN --venue weex --every 30s --duration 1h --layout feed",
+        ]))
+        .await;
+        res.unwrap();
+        let w = state.wizard.as_ref().expect("the wizard opened");
+        assert_eq!(w.list.interval, std::time::Duration::from_secs(30));
+        let t = &w.list.targets[0];
+        assert_eq!((t.id.as_str(), t.venue.as_deref()), ("USDN", Some("weex")));
+        assert_eq!(t.preset, Some(scope::watch::Preset::MarketHealth));
+        assert!(state.grid.is_none(), "nothing runs before Start");
+        let screen = screen_text(&host);
+        assert!(screen.contains("monitor wizard"), "{screen}");
+        assert!(screen.contains("[x] market health"), "{screen}");
+        assert!(screen.contains("--layout has no effect"), "{screen}");
+    }
+
+    #[tokio::test]
+    async fn test_ctrl_r_in_the_wizard_starts_the_grid() {
+        let _lock = DIAG_LOCK.lock().await;
+        let mut events = script(&[&format!("monitor {TOKEN} --duration 1h")]);
+        events.push(ctrl_key('r'));
+        let (res, mut state, _, _) = drive(events).await;
+        res.unwrap();
+        state.poll_watch();
+        assert!(state.wizard.is_none());
+        let g = state.grid.as_ref().expect("the run started");
+        assert!(g.is_running());
+        let names: Vec<String> = g.list.targets[0]
+            .rules
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(names, ["price_usd > 0", "volume_24h >= 0"]);
+    }
+
+    #[tokio::test]
+    async fn test_monitor_yes_starts_at_once_and_a_bad_argument_says_why() {
+        let _lock = DIAG_LOCK.lock().await;
+        // The grid takes the keys: Ctrl-G goes back to the shell.
+        let mut events = script(&[&format!("monitor {TOKEN} --yes")]);
+        events.push(ctrl_key('g'));
+        events.extend(script(&["monitor USDC --venue binance --every 0s"]));
+        let (res, mut state, _, _) = drive(events).await;
+        res.unwrap();
+        state.poll_watch();
+        assert!(state.wizard.is_none());
+        assert!(state.grid.as_ref().is_some_and(|g| g.is_running()));
+        assert!(
+            state
+                .scrollback_text()
+                .contains("monitor: --every: Duration must be positive"),
+            "{}",
+            state.scrollback_text()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scope_monitor_opens_the_tui_with_the_wizard() {
+        let _lock = DIAG_LOCK.lock().await;
+        let (mut host, _) = test_host(Vec::new(), Vec::new());
+        let mut state = TuiState::new(
+            SessionContext::default(),
+            Journal::default(),
+            vocab::Vocab::default(),
+        );
+        let cli = <crate::cli::Cli as clap::Parser>::try_parse_from([
+            "scope", "monitor", "USDN", "--venue", "weex",
+        ])
+        .unwrap();
+        state.start = Some(cli.command);
+        let settings = settings_with(Box::new(MockClientFactory::new()));
+        let reload = || Ok(settings_with(Box::new(MockClientFactory::new())));
+        session(&mut host, &mut state, settings, &reload, |_| Ok(()))
+            .await
+            .unwrap();
+        assert!(state.wizard.is_some(), "the wizard is open at the start");
+        assert!(screen_text(&host).contains("monitor wizard"));
+    }
+
+    /// A DEX source that writes a library warning on every call, then
+    /// answers as the mock does.
+    struct NoisyDex(scope::chains::mocks::MockDexSource);
+
+    const NOISE: &str = "noisy dex warning";
+
+    #[async_trait::async_trait]
+    impl scope::chains::DexDataSource for NoisyDex {
+        async fn get_token_price(&self, c: &str, a: &str) -> Option<f64> {
+            scope::notice!("{NOISE}");
+            self.0.get_token_price(c, a).await
+        }
+        async fn get_native_token_price(&self, c: &str) -> Option<f64> {
+            scope::notice!("{NOISE}");
+            self.0.get_native_token_price(c).await
+        }
+        async fn get_token_data(
+            &self,
+            c: &str,
+            a: &str,
+        ) -> scope::Result<scope::chains::dex::DexTokenData> {
+            scope::notice!("{NOISE}");
+            self.0.get_token_data(c, a).await
+        }
+        async fn search_tokens(
+            &self,
+            q: &str,
+            c: Option<&str>,
+        ) -> scope::Result<Vec<scope::chains::dex::TokenSearchResult>> {
+            scope::notice!("{NOISE}");
+            self.0.search_tokens(q, c).await
+        }
+    }
+
+    struct NoisyFactory(MockClientFactory);
+
+    impl ChainClientFactory for NoisyFactory {
+        fn http(&self) -> std::sync::Arc<dyn scope::http::HttpClient> {
+            scope::http::test_transport()
+        }
+        fn create_chain_client(
+            &self,
+            chain: &str,
+        ) -> scope::Result<Box<dyn scope::chains::ChainClient>> {
+            self.0.create_chain_client(chain)
+        }
+        fn create_dex_client(&self) -> Box<dyn scope::chains::DexDataSource> {
+            Box::new(NoisyDex(scope::chains::mocks::MockDexSource::new()))
+        }
+    }
+
+    /// A one-target token watchlist that ticks once an hour, in `dir`.
+    fn token_watchlist(dir: &tempfile::TempDir) -> String {
+        let path = dir.path().join("noisy.yaml");
+        std::fs::write(
+            &path,
+            format!("interval: 1h\ntargets:\n  - kind: token\n    id: \"{TOKEN}\"\n    rules: [\"price_usd > 0\"]\n"),
+        )
+        .unwrap();
+        format!(
+            "watch open {}",
+            path.display().to_string().replace('\\', "/")
+        )
+    }
+
+    #[tokio::test]
+    async fn test_a_watchlist_warning_stays_out_of_the_shell_and_comes_with_the_grid() {
+        let _lock = DIAG_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut events = script(&[&token_watchlist(&dir)]);
+        // Back to the shell, where a pane command runs next to the watchlist.
+        events.push(ctrl_key('g'));
+        events.extend(script(&["venues list"]));
+        let (host, captured) = test_host(events, Vec::new());
+        let (res, mut state, _, _) = drive_host_on(
+            Journal::default(),
+            host,
+            captured,
+            Box::new(NoisyFactory(MockClientFactory::new())),
+        )
+        .await;
+        res.unwrap();
+        state.poll_watch();
+        assert!(
+            state.grid.as_ref().is_some_and(|g| g.last.is_some()),
+            "the watchlist ticked"
+        );
+        let shell = state.scrollback_text();
+        assert!(shell.contains("binance"), "venues list ran: {shell}");
+        assert!(
+            !shell.contains(NOISE),
+            "no watchlist warning in the shell: {shell}"
+        );
+        // The run's own output keeps it; closing the grid shows it.
+        state.stop_watch();
+        state.close_grid();
+        assert!(state.scrollback_text().contains(NOISE));
+    }
+
+    #[tokio::test]
+    async fn test_a_setup_reload_says_the_running_watchlist_uses_the_old_settings() {
+        let _lock = DIAG_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut events = script(&[&token_watchlist(&dir)]);
+        events.push(ctrl_key('g'));
+        events.extend(script(&["setup --key nosuchkey"]));
+        let reload = || Ok(settings_with(Box::new(MockClientFactory::new())));
+        let (host, captured) = test_host(events, Vec::new());
+        let (res, state, host, _) = drive_host_reloading(
+            Journal::default(),
+            host,
+            captured,
+            settings_with(Box::new(MockClientFactory::new())),
+            &reload,
+        )
+        .await;
+        res.unwrap();
+        let g = state.grid.as_ref().expect("the grid");
+        assert!(g.stale, "the grid knows");
+        assert!(state.scrollback_text().contains(grid::STALE_NOTE));
+        assert!(
+            screen_text(&host).contains("old settings"),
+            "{}",
+            screen_text(&host)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ctrl_g_without_a_grid_says_how_to_start_one() {
+        let _lock = DIAG_LOCK.lock().await;
+        let (res, state, _, _) = drive(vec![Ok(Event::Key(KeyEvent::new(
+            KeyCode::Char('g'),
+            KeyModifiers::CONTROL,
+        )))])
+        .await;
+        res.unwrap();
+        assert!(state.scrollback_text().contains("No watchlist runs"));
     }
 
     #[tokio::test]

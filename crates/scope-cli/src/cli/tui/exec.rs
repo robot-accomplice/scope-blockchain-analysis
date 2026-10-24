@@ -28,6 +28,8 @@ pub enum Route {
     Suspend,
     /// Not inside the TUI. The reason tells the user what to do instead.
     Refuse(&'static str),
+    /// `monitor`: opens the monitor wizard in the TUI (#47).
+    Wizard,
 }
 
 /// The commands the TUI does not run, by name, and what to do instead.
@@ -70,16 +72,9 @@ pub fn route(command: &Commands) -> Route {
         | Commands::Compliance(_)
         | Commands::AddressBook(_)
         | Commands::Export(_)
+        // A crawl by name or symbol asks which token in the pane (#109).
+        | Commands::Crawl(_)
         | Commands::Report(_) => Route::Pane,
-        // A name or symbol search asks the user to pick a token and offers
-        // to save an alias. An address or --yes never prompts.
-        Commands::Crawl(args) => {
-            if args.yes || TokenAliases::is_address(args.token.trim()) {
-                Route::Pane
-            } else {
-                Route::Suspend
-            }
-        }
         // Only --status is free of prompts.
         Commands::Setup(args) => {
             if args.status {
@@ -88,8 +83,15 @@ pub fn route(command: &Commands) -> Route {
                 Route::Suspend
             }
         }
-        // The live dashboard draws its own screen (until phase 6 of #47).
-        Commands::Monitor(_) => Route::Suspend,
+        // The monitor wizard (#47). The old dashboard draws its own screen
+        // until it goes (Q1).
+        Commands::Monitor(args) => {
+            if args.watch.dashboard {
+                Route::Suspend
+            } else {
+                Route::Wizard
+            }
+        }
         Commands::Interactive(_) => refused("interactive"),
         Commands::Web(_) => refused("web"),
         Commands::Completions(_) => refused("completions"),
@@ -120,6 +122,19 @@ pub enum Plan {
     Exit,
     /// Run a CLI command. Boxed: `Commands` is large.
     Run(Box<Invocation>),
+    /// A `watch` session command for the grid (#47).
+    Watch(WatchCommand),
+}
+
+/// What the `watch` session command asks the TUI to do.
+#[derive(Debug)]
+pub enum WatchCommand {
+    /// Start this watchlist in the grid.
+    Open(Box<scope::watch::Watchlist>),
+    /// Stop the running watchlist.
+    Stop,
+    /// Show the grid.
+    Show,
 }
 
 /// Plans one line of input.
@@ -136,7 +151,7 @@ pub fn plan(
     config: &Config,
     out: &Output,
 ) -> io::Result<Plan> {
-    let Some(words) = shlex::split(line) else {
+    let Some(words) = split_line(line) else {
         errln!(out, "Unbalanced quotes in: {}", line)?;
         return Ok(Plan::Done);
     };
@@ -213,10 +228,70 @@ pub fn plan(
             tokens_command(&rest, &mut TokenAliases::load(), &TokenAliases::save, out)?;
             return Ok(Plan::Done);
         }
+        "watch" => {
+            return watch_command(
+                &rest,
+                &scope::paths::watchlists_dir(),
+                &crate::cli::watch::venue_ids(),
+                out,
+            );
+        }
         _ => {}
     }
 
     parse_cli(words, ctx, config, out)
+}
+
+/// The usage of the `watch` session command.
+const WATCH_USAGE: &str = "Usage: watch [list | open <name|file.yaml> | stop]";
+
+/// Runs the `watch` session command. `dir` holds the saved watchlists;
+/// `venues` are the venue IDs a watchlist may name.
+fn watch_command(
+    rest: &[&str],
+    dir: &std::path::Path,
+    venues: &[String],
+    out: &Output,
+) -> io::Result<Plan> {
+    use scope::watch::file;
+    match rest {
+        [] | ["show"] => Ok(Plan::Watch(WatchCommand::Show)),
+        ["stop"] => Ok(Plan::Watch(WatchCommand::Stop)),
+        ["list"] => {
+            let names = file::list(dir);
+            if names.is_empty() {
+                outln!(out, "No saved watchlists in {}.", dir.display())?;
+            } else {
+                for name in names {
+                    outln!(out, "  {}", name)?;
+                }
+            }
+            Ok(Plan::Done)
+        }
+        ["open", name] => {
+            let is_path = name.ends_with(&format!(".{}", file::EXTENSION))
+                || name.contains(['/', std::path::MAIN_SEPARATOR]);
+            let path = if is_path {
+                std::path::PathBuf::from(name)
+            } else {
+                file::path_in(dir, name)
+            };
+            match file::load(&path, Some(venues)) {
+                Ok(w) => Ok(Plan::Watch(WatchCommand::Open(Box::new(w)))),
+                Err(errors) => {
+                    errln!(out, "{} is not a valid watchlist:", path.display())?;
+                    for e in errors.0 {
+                        errln!(out, "  {}", e)?;
+                    }
+                    Ok(Plan::Done)
+                }
+            }
+        }
+        _ => {
+            errln!(out, "{}", WATCH_USAGE)?;
+            Ok(Plan::Done)
+        }
+    }
 }
 
 /// Parses a CLI command line with the clap definition, after it adds the
@@ -648,6 +723,11 @@ pub(crate) const SESSION_COMMANDS: &[(&str, &str, &str)] = &[
         "Manage saved token aliases",
     ),
     (
+        "watch",
+        "watch [list|open <name>|stop]",
+        "Run a saved watchlist in the grid (Ctrl-G shows it)",
+    ),
+    (
         "save",
         "save <file> [--force]",
         "Write the last output to a file",
@@ -681,6 +761,46 @@ const SESSION_ALIASES: &[(&str, &str)] = &[
 
 /// The `SESSION_COMMANDS` name for a typed word (any case), or the word
 /// itself when it is not an alias.
+/// Splits a line of input into words; `None` when a quote is not closed.
+///
+/// On unix the rules are the shell's (shlex). On Windows a backslash is
+/// a path separator, so `save C:\Users\me\out.json` keeps its path; see
+/// [`split_backslash_literal`].
+pub(crate) fn split_line(line: &str) -> Option<Vec<String>> {
+    if cfg!(windows) {
+        split_backslash_literal(line)
+    } else {
+        shlex::split(line)
+    }
+}
+
+/// Splits `line` at whitespace outside quotes. Single and double quotes
+/// group words and are removed; a backslash is an ordinary character, so
+/// a quote cannot be escaped (quote it with the other kind). `None` when a
+/// quote is not closed.
+fn split_backslash_literal(line: &str) -> Option<Vec<String>> {
+    let mut words = Vec::new();
+    let mut word: Option<String> = None;
+    let mut quote: Option<char> = None;
+    for c in line.chars() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => word.get_or_insert_default().push(c),
+            None if c == '"' || c == '\'' => {
+                quote = Some(c);
+                word.get_or_insert_default();
+            }
+            None if c.is_whitespace() => words.extend(word.take()),
+            None => word.get_or_insert_default().push(c),
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    words.extend(word);
+    Some(words)
+}
+
 pub(crate) fn session_command_name(word: &str) -> String {
     let word = word.to_lowercase();
     SESSION_ALIASES
@@ -784,6 +904,33 @@ mod tests {
 
     const ADDR: &str = "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2";
     const TX: &str = "0xabc123def456789012345678901234567890123456789012345678901234abcd";
+
+    #[test]
+    fn test_backslash_literal_split_keeps_windows_paths() {
+        let split = |s: &str| split_backslash_literal(s).unwrap();
+        assert_eq!(
+            split(r"save C:\Users\x\f.json"),
+            ["save", r"C:\Users\x\f.json"]
+        );
+        assert_eq!(
+            split(r#"save "C:\My Files\f.json""#),
+            ["save", r"C:\My Files\f.json"]
+        );
+        assert_eq!(split(r"a 'b c'd  e"), ["a", "b cd", "e"]);
+        assert_eq!(split(r#"x "" y"#), ["x", "", "y"]);
+        assert_eq!(split("   "), Vec::<String>::new());
+        assert_eq!(split_backslash_literal(r#"save "C:\x"#), None);
+    }
+
+    #[test]
+    fn test_split_line_uses_the_platform_rules() {
+        let words = split_line(r"save C:\x\f.json").unwrap();
+        if cfg!(windows) {
+            assert_eq!(words, ["save", r"C:\x\f.json"]);
+        } else {
+            assert_eq!(words, ["save", "C:xf.json"]);
+        }
+    }
 
     fn plan_line(line: &str, ctx: &mut SessionContext) -> (Plan, crate::cli::output::Captured) {
         let (o, cap) = Output::capture();
@@ -1276,6 +1423,73 @@ mod tests {
         assert!(cap.err().contains("no effect inside the TUI"));
     }
 
+    // ---- watch ----
+
+    fn watch(rest: &[&str], dir: &std::path::Path) -> (Plan, String) {
+        let (o, cap) = Output::capture();
+        let venues = vec!["binance".to_string()];
+        let p = watch_command(rest, dir, &venues, &o).unwrap();
+        (p, format!("{}{}", cap.out(), cap.err()))
+    }
+
+    #[test]
+    fn test_watch_list_open_stop_and_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let (p, text) = watch(&["list"], dir.path());
+        assert!(matches!(p, Plan::Done));
+        assert!(text.contains("No saved watchlists"), "{text}");
+
+        std::fs::write(
+            dir.path().join("stables.yaml"),
+            "targets:\n  - kind: pair\n    id: USDC\n    venue: binance\n    preset: market health\n",
+        )
+        .unwrap();
+        let (_, text) = watch(&["list"], dir.path());
+        assert!(text.contains("  stables"), "{text}");
+        let (p, _) = watch(&["open", "stables"], dir.path());
+        let Plan::Watch(WatchCommand::Open(w)) = p else {
+            panic!("expected open, got {p:?}")
+        };
+        assert_eq!(w.name, "stables");
+        assert_eq!(w.targets.len(), 1);
+
+        assert!(matches!(
+            watch(&["stop"], dir.path()).0,
+            Plan::Watch(WatchCommand::Stop)
+        ));
+        assert!(matches!(
+            watch(&[], dir.path()).0,
+            Plan::Watch(WatchCommand::Show)
+        ));
+        let (p, text) = watch(&["nonsense"], dir.path());
+        assert!(matches!(p, Plan::Done));
+        assert!(text.contains(WATCH_USAGE), "{text}");
+    }
+
+    #[test]
+    fn test_watch_open_of_a_bad_file_lists_every_error_and_starts_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.yaml");
+        std::fs::write(
+            &path,
+            "targets:\n  - kind: pair\n    id: USDC\n    venue: nowhere\n    rules: [\"holdrs > 1\"]\n",
+        )
+        .unwrap();
+        let (p, text) = watch(&["open", path.to_str().unwrap()], dir.path());
+        assert!(matches!(p, Plan::Done));
+        assert!(text.contains("is not a valid watchlist"), "{text}");
+        assert!(text.contains("unknown venue `nowhere`"), "{text}");
+        assert!(text.contains("unknown metric `holdrs`"), "{text}");
+        let (p, text) = watch(&["open", "missing"], dir.path());
+        assert!(matches!(p, Plan::Done));
+        assert!(text.contains("cannot read"), "{text}");
+    }
+
+    #[test]
+    fn test_watch_is_a_session_command_in_help() {
+        assert!(SESSION_COMMANDS.iter().any(|(n, _, _)| *n == "watch"));
+    }
+
     // ---- Routing ----
 
     #[test]
@@ -1283,7 +1497,7 @@ mod tests {
         let mut ctx = SessionContext::default();
         assert_eq!(
             run_of(plan_line("crawl USDC", &mut ctx).0).route,
-            Route::Suspend
+            Route::Pane
         );
         assert_eq!(
             run_of(plan_line("crawl USDC --yes", &mut ctx).0).route,
@@ -1298,8 +1512,13 @@ mod tests {
             run_of(plan_line("setup --status", &mut ctx).0).route,
             Route::Pane
         );
+        // The monitor wizard (#47); the old dashboard still runs outside.
         assert_eq!(
             run_of(plan_line("monitor USDC", &mut ctx).0).route,
+            Route::Wizard
+        );
+        assert_eq!(
+            run_of(plan_line("monitor USDC --dashboard", &mut ctx).0).route,
             Route::Suspend
         );
     }

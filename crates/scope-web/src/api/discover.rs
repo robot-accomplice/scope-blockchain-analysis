@@ -36,7 +36,7 @@ pub async fn handle(
     State(_state): State<Arc<AppState>>,
     Query(params): Query<DiscoverQuery>,
 ) -> impl IntoResponse {
-    let client = DexClient::new();
+    let client = DexClient::new_with_http(_state.factory.http());
 
     let tokens = match params.source.as_str() {
         "boosts" => client.get_token_boosts().await,

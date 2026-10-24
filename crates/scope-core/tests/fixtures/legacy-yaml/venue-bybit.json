@@ -1,0 +1,94 @@
+{
+  "base_url": "https://api.bybit.com",
+  "capabilities": {
+    "ohlc": {
+      "params": {
+        "category": "spot",
+        "interval": "{interval}",
+        "limit": "{limit}",
+        "symbol": "{pair}"
+      },
+      "path": "/v5/market/kline",
+      "response": {
+        "ohlc_fields": [
+          "open_time",
+          "open",
+          "high",
+          "low",
+          "close",
+          "volume"
+        ],
+        "ohlc_format": "array_of_arrays"
+      },
+      "response_root": "result.list"
+    },
+    "order_book": {
+      "params": {
+        "category": "spot",
+        "limit": "200",
+        "symbol": "{pair}"
+      },
+      "path": "/v5/market/orderbook",
+      "response": {
+        "asks_key": "a",
+        "bids_key": "b",
+        "level_format": "positional"
+      },
+      "response_root": "result"
+    },
+    "ticker": {
+      "params": {
+        "category": "spot",
+        "symbol": "{pair}"
+      },
+      "path": "/v5/market/tickers",
+      "response": {
+        "best_ask": "ask1Price",
+        "best_bid": "bid1Price",
+        "high_24h": "highPrice24h",
+        "last_price": "lastPrice",
+        "low_24h": "lowPrice24h",
+        "quote_volume_24h": "turnover24h",
+        "volume_24h": "volume24h"
+      },
+      "response_root": "result.list.0"
+    },
+    "trades": {
+      "params": {
+        "category": "spot",
+        "limit": "{limit}",
+        "symbol": "{pair}"
+      },
+      "path": "/v5/market/recent-trade",
+      "response": {
+        "id": "execId",
+        "price": "price",
+        "quantity": "size",
+        "side": {
+          "field": "side",
+          "mapping": {
+            "Buy": "buy",
+            "Sell": "sell"
+          }
+        },
+        "timestamp_ms": "time"
+      },
+      "response_root": "result.list"
+    }
+  },
+  "error_envelope": {
+    "code_key": "retCode",
+    "message_key": "retMsg",
+    "ok_codes": [
+      "0"
+    ]
+  },
+  "id": "bybit",
+  "name": "Bybit",
+  "rate_limit_per_sec": 10,
+  "symbol": {
+    "default_quote": "USDT",
+    "template": "{base}{quote}"
+  },
+  "timeout_secs": 15
+}

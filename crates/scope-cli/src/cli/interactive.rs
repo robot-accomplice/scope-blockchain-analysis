@@ -26,8 +26,7 @@
 //! ```
 
 use clap::Args;
-use scope::chains::ChainClientFactory;
-use scope::config::{Config, OutputFormat};
+use scope::config::OutputFormat;
 use scope::error::Result;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -126,7 +125,7 @@ impl fmt::Display for SessionContext {
 impl SessionContext {
     /// Returns the path to the session context file.
     fn context_path() -> Option<PathBuf> {
-        scope::paths::data_dir().map(|p| p.join("scope").join("session.yaml"))
+        Some(scope::paths::state_dir().join("session.yaml"))
     }
 
     /// Loads session context from file, or returns default if not found.
@@ -141,7 +140,7 @@ impl SessionContext {
     pub fn load_from(path: &std::path::Path) -> Self {
         std::fs::read_to_string(path)
             .ok()
-            .and_then(|contents| serde_yaml::from_str(&contents).ok())
+            .and_then(|contents| serde_saphyr::from_str(&contents).ok())
             .unwrap_or_default()
     }
 
@@ -158,24 +157,40 @@ impl SessionContext {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let contents = serde_yaml::to_string(self)
+        let contents = serde_saphyr::to_string(self)
             .map_err(|e| scope::error::ScopeError::Export(e.to_string()))?;
         std::fs::write(path, contents)?;
         Ok(())
     }
 }
 
-/// Opens the unified TUI. Returns how it ended.
+/// Opens the unified TUI with `settings`. `reload` reads them again after
+/// `setup`. Returns how it ended.
 ///
 /// # Errors
 ///
 /// Returns the TUI's terminal or save error.
 pub async fn run(
     args: InteractiveArgs,
-    config: &Config,
-    clients: &dyn ChainClientFactory,
+    settings: crate::cli::tui::Settings,
+    reload: crate::cli::tui::Reload<'_>,
 ) -> Result<crate::cli::tui::TuiExit> {
-    crate::cli::tui::run(args.no_banner, config, clients).await
+    crate::cli::tui::run(args.no_banner, settings, reload).await
+}
+
+/// `scope monitor <args>`: the TUI, with the monitor wizard filled from the
+/// arguments (#47).
+///
+/// # Errors
+///
+/// As [`run`].
+pub async fn run_monitor(
+    args: crate::cli::monitor::MonitorArgs,
+    settings: crate::cli::tui::Settings,
+    reload: crate::cli::tui::Reload<'_>,
+) -> Result<crate::cli::tui::TuiExit> {
+    let start = Some(crate::cli::Commands::Monitor(args));
+    crate::cli::tui::run_with(true, start, settings, reload).await
 }
 
 // ============================================================================
@@ -224,8 +239,8 @@ mod tests {
             limit: 50,
         };
 
-        let yaml = serde_yaml::to_string(&ctx).unwrap();
-        let deserialized: SessionContext = serde_yaml::from_str(&yaml).unwrap();
+        let yaml = serde_saphyr::to_string(&ctx).unwrap();
+        let deserialized: SessionContext = serde_saphyr::from_str(&yaml).unwrap();
         assert_eq!(deserialized.chain, "polygon");
         assert!(!deserialized.is_auto_chain());
         assert_eq!(deserialized.format, OutputFormat::Json);
@@ -267,8 +282,8 @@ mod tests {
             ..Default::default()
         };
 
-        let yaml = serde_yaml::to_string(&ctx).unwrap();
-        let deserialized: SessionContext = serde_yaml::from_str(&yaml).unwrap();
+        let yaml = serde_saphyr::to_string(&ctx).unwrap();
+        let deserialized: SessionContext = serde_saphyr::from_str(&yaml).unwrap();
         assert_eq!(deserialized.chain, "solana");
         assert!(deserialized.include_tokens);
         assert_eq!(deserialized.limit, 25);

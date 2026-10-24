@@ -60,8 +60,9 @@ impl BookSource {
     }
 }
 
-/// One side of an order book.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// One side of an order book. Serializes as `bid` or `ask`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum BookSide {
     Bid,
     Ask,

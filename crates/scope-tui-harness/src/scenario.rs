@@ -147,7 +147,10 @@ pub struct Scenario {
     /// Wait for the alternate screen before running steps.
     #[serde(default = "yes")]
     pub wait_for_paint: bool,
-    #[serde(with = "serde_yaml::with::singleton_map_recursive")]
+    /// Runs on a Unix host only: the scenario tests a Unix-only feature
+    /// (signals, Ctrl-Z, bracketed paste). Elsewhere it is skipped.
+    #[serde(default)]
+    pub unix_only: bool,
     pub steps: Vec<Step>,
 }
 
@@ -196,9 +199,24 @@ pub fn key_bytes(name: &str) -> Result<Vec<u8>> {
     bail!("unknown key name {name:?}")
 }
 
+/// The signal names a scenario may send.
+pub const SIGNAL_NAMES: [&str; 7] = ["TERM", "HUP", "INT", "QUIT", "TSTP", "CONT", "STOP"];
+
+/// Checks a scenario signal name, on every platform.
+fn check_signal_name(name: &str) -> Result<()> {
+    if !SIGNAL_NAMES.contains(&name) {
+        bail!(
+            "unknown signal name {name:?}; use {}",
+            SIGNAL_NAMES.join(", ")
+        );
+    }
+    Ok(())
+}
+
 /// The signal number for a scenario signal name.
 #[cfg(unix)]
 pub fn signal_number(name: &str) -> Result<i32> {
+    check_signal_name(name)?;
     Ok(match name {
         "TERM" => libc::SIGTERM,
         "HUP" => libc::SIGHUP,
@@ -206,14 +224,13 @@ pub fn signal_number(name: &str) -> Result<i32> {
         "QUIT" => libc::SIGQUIT,
         "TSTP" => libc::SIGTSTP,
         "CONT" => libc::SIGCONT,
-        "STOP" => libc::SIGSTOP,
-        _ => bail!("unknown signal name {name:?}; use TERM, HUP, INT, QUIT, TSTP, CONT or STOP"),
+        _ => libc::SIGSTOP,
     })
 }
 
 /// Parses and validates a scenario.
 pub fn parse(yaml: &str) -> Result<Scenario> {
-    let s: Scenario = serde_yaml::from_str(yaml)?;
+    let s: Scenario = serde_saphyr::from_str(yaml)?;
     if s.tiers.is_empty() {
         bail!(
             "scenario {:?} has an empty tiers list; it never runs",
@@ -244,9 +261,14 @@ pub fn parse(yaml: &str) -> Result<Scenario> {
         if let Step::Key(k) = step {
             key_bytes(k)?;
         }
-        #[cfg(unix)]
         if let Step::Signal(n) = step {
-            signal_number(n)?;
+            check_signal_name(n)?;
+            if !s.unix_only {
+                bail!(
+                    "scenario {:?} sends a signal; mark it unix_only: true",
+                    s.name
+                );
+            }
         }
     }
     Ok(s)
@@ -341,12 +363,17 @@ steps:
 
     #[test]
     fn test_signal_step_and_new_keys() {
-        let s = parse("name: x\nenv: {TERM: dumb}\nargs: [tui]\nwait_for_paint: false\nsteps:\n  - signal: TERM\n  - expect_exit: 143\n").unwrap();
+        let s = parse("name: x\nenv: {TERM: dumb}\nargs: [tui]\nwait_for_paint: false\nunix_only: true\nsteps:\n  - signal: TERM\n  - expect_exit: 143\n").unwrap();
         assert_eq!(s.env.get("TERM").map(String::as_str), Some("dumb"));
         assert!(matches!(&s.steps[0], Step::Signal(n) if n == "TERM"));
         assert_eq!(key_bytes("Ctrl-End").unwrap(), b"\x1b[1;5F");
         assert_eq!(key_bytes("Delete").unwrap(), b"\x1b[3~");
-        assert!(parse("name: x\nsteps:\n  - signal: BOGUS\n  - expect_exit: 0\n").is_err());
+        assert!(
+            parse("name: x\nunix_only: true\nsteps:\n  - signal: BOGUS\n  - expect_exit: 0\n")
+                .is_err()
+        );
+        // A signal step needs unix_only, so Windows skips the scenario.
+        assert!(parse("name: x\nsteps:\n  - signal: TERM\n  - expect_exit: 0\n").is_err());
     }
 
     #[test]

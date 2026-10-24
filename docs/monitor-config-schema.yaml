@@ -1,5 +1,5 @@
 # Scope Monitor Configuration Schema
-# Configuration lives in the `monitor:` section of ~/.config/scope/config.yaml
+# Configuration lives in the `monitor:` section of ~/.scope-bca/config.yaml
 
 # ============================================================
 # IMPLEMENTED — These fields are active and used by the monitor

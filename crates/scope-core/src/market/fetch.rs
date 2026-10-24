@@ -8,7 +8,7 @@ use super::analytics::order_book_from_analytics;
 use super::exchange::ExchangeClient;
 use super::health::HealthThresholds;
 use super::pair::Pair;
-use super::types::OrderBook;
+use super::types::{OrderBook, Trade};
 use super::venue::{DexVenue, MarketVenue};
 use crate::chains::{DexPair, TokenAnalytics};
 use crate::error::{Result, ScopeError};
@@ -53,7 +53,8 @@ pub async fn fetch_book_and_volume(
     }
 }
 
-/// Fetches the book and volume, then judges it against `thresholds`.
+/// Fetches the book and volume, then judges it against `thresholds`, with
+/// the bot-pattern advisory from the venue's recent trades.
 pub async fn fetch_summary(
     venue: &MarketVenue,
     pair: &Pair,
@@ -61,9 +62,29 @@ pub async fn fetch_summary(
     dex: &dyn DexAnalyticsSource,
 ) -> Result<MarketSummary> {
     let (book, volume_24h) = fetch_book_and_volume(venue, pair, thresholds, dex).await?;
-    Ok(MarketSummary::from_order_book(
-        &book, thresholds, volume_24h,
-    ))
+    let mut summary = MarketSummary::from_order_book(&book, thresholds, volume_24h);
+    let trades = fetch_pattern_trades(venue, pair).await;
+    summary.check_bot_patterns(trades.as_deref().map_err(String::as_str));
+    Ok(summary)
+}
+
+/// The venue's recent trades for the bot-pattern advisory
+/// ([`super::patterns::TRADE_SAMPLE`] of them). `Err` says why there are
+/// none: the summary shows it, and it never fails the summary.
+pub async fn fetch_pattern_trades(
+    venue: &MarketVenue,
+    pair: &Pair,
+) -> std::result::Result<Vec<Trade>, String> {
+    match venue {
+        MarketVenue::Dex(_) => Err("a DEX pool has no trade tape here".to_string()),
+        MarketVenue::Cex(exchange) if !exchange.has_trade_history() => {
+            Err("the venue gives no trade feed".to_string())
+        }
+        MarketVenue::Cex(exchange) => exchange
+            .fetch_recent_trades(&exchange.venue_symbol(pair), super::patterns::TRADE_SAMPLE)
+            .await
+            .map_err(|e| format!("the trade feed failed: {e}")),
+    }
 }
 
 /// The market summary for a token the caller has already analyzed. The pair
@@ -81,12 +102,34 @@ pub async fn fetch_token_summary(
 
 /// [`fetch_token_summary`] for a venue name: resolves it with
 /// [`MarketVenue::from_name`] (the one unknown-venue error), then fetches.
+#[deprecated(
+    since = "0.8.0",
+    note = "pass the transport: use `fetch_token_summary_by_name_with_http`"
+)]
 pub async fn fetch_token_summary_by_name(
     venue: &str,
     analytics: &TokenAnalytics,
     thresholds: &HealthThresholds,
 ) -> Result<MarketSummary> {
-    fetch_token_summary(&MarketVenue::from_name(venue)?, analytics, thresholds).await
+    fetch_token_summary_by_name_with_http(
+        venue,
+        analytics,
+        thresholds,
+        crate::http::shared::fallback(),
+    )
+    .await
+}
+
+/// [`fetch_token_summary_by_name`], sending a CEX venue's requests through
+/// `http`.
+pub async fn fetch_token_summary_by_name_with_http(
+    venue: &str,
+    analytics: &TokenAnalytics,
+    thresholds: &HealthThresholds,
+    http: std::sync::Arc<dyn crate::http::HttpClient>,
+) -> Result<MarketSummary> {
+    let venue = MarketVenue::from_name_with_http(venue, http)?;
+    fetch_token_summary(&venue, analytics, thresholds).await
 }
 
 fn dex_book_and_volume(
@@ -135,6 +178,91 @@ async fn cex_book_and_volume(
 mod tests {
     use super::*;
     use crate::chains::Token;
+    use crate::market::types::{BookSource, OrderBookLevel};
+
+    /// Binance's trades endpoint on a mock server, with `n` trades of one
+    /// size every 2s: a bot's tape.
+    async fn binance_with_bot_tape(n: usize) -> (mockito::ServerGuard, MarketVenue) {
+        let mut server = mockito::Server::new_async().await;
+        let trades: Vec<String> = (0..n)
+            .map(|i| {
+                format!(
+                    r#"{{"id":{i},"price":"1.0001","qty":"1000.00","quoteQty":"1000.1","time":{},"isBuyerMaker":{}}}"#,
+                    1_700_000_000_000u64 + i as u64 * 2_000,
+                    i % 2 == 0
+                )
+            })
+            .collect();
+        server
+            .mock("GET", mockito::Matcher::Regex(r"^/api/v3/trades.*".into()))
+            .with_header("content-type", "application/json")
+            .with_body(format!("[{}]", trades.join(",")))
+            .create_async()
+            .await;
+        let venue = MarketVenue::Cex(Box::new(crate::market::testing::venue_at(
+            "binance",
+            &server.url(),
+        )));
+        (server, venue)
+    }
+
+    #[tokio::test]
+    async fn test_a_venue_tape_feeds_the_bot_pattern_advisory() {
+        let (_server, venue) = binance_with_bot_tape(60).await;
+        let trades = fetch_pattern_trades(&venue, &Pair::parse("USDC"))
+            .await
+            .unwrap();
+        assert_eq!(trades.len(), 60);
+        let book = OrderBook {
+            pair: "USDC/USDT".into(),
+            source: BookSource::Exchange,
+            bids: vec![OrderBookLevel {
+                price: 0.9999,
+                quantity: 100.0,
+            }],
+            asks: vec![OrderBookLevel {
+                price: 1.0001,
+                quantity: 120.0,
+            }],
+        };
+        let mut summary = MarketSummary::from_order_book(&book, &HealthThresholds::default(), None);
+        let healthy = summary.healthy;
+        summary.check_bot_patterns(Ok(&trades));
+        assert_eq!(
+            summary.healthy, healthy,
+            "an advisory never changes healthy"
+        );
+        let last = summary.checks.last().unwrap();
+        assert_eq!(last.status(), "warn", "{}", last.message());
+        assert!(
+            last.message()
+                .contains("100% of 60 trades are exactly 1000"),
+            "{}",
+            last.message()
+        );
+        assert!(last.message().contains("every 2.0s"), "{}", last.message());
+        let json = summary.to_json();
+        assert_eq!(json["bot_patterns"]["trades_sampled"], 60);
+        assert_eq!(json["bot_patterns"]["findings"][0]["kind"], "repeated_size");
+    }
+
+    #[tokio::test]
+    async fn test_a_failed_trade_feed_is_a_reason_not_an_error() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", mockito::Matcher::Regex(r"^/api/v3/trades.*".into()))
+            .with_status(500)
+            .create_async()
+            .await;
+        let venue = MarketVenue::Cex(Box::new(crate::market::testing::venue_at(
+            "binance",
+            &server.url(),
+        )));
+        let why = fetch_pattern_trades(&venue, &Pair::parse("USDC"))
+            .await
+            .unwrap_err();
+        assert!(why.starts_with("the trade feed failed:"), "{why}");
+    }
 
     fn dex_pair(liquidity_usd: f64, volume_24h: f64) -> DexPair {
         DexPair {
@@ -251,10 +379,15 @@ mod tests {
     async fn fetch_token_summary_by_name_resolves_then_fetches() {
         let a = analytics("ethereum", vec![dex_pair(1_000.0, 10.0)]);
         let t = HealthThresholds::default();
-        assert!(fetch_token_summary_by_name("eth", &a, &t).await.is_ok());
-        let err = fetch_token_summary_by_name("polygon", &a, &t)
-            .await
-            .unwrap_err();
+        assert!(
+            fetch_token_summary_by_name_with_http("eth", &a, &t, crate::http::test_transport())
+                .await
+                .is_ok()
+        );
+        let err =
+            fetch_token_summary_by_name_with_http("polygon", &a, &t, crate::http::test_transport())
+                .await
+                .unwrap_err();
         assert!(matches!(err, ScopeError::InvalidInput(_)), "{err:?}");
         assert!(err.to_string().contains("Unknown venue"), "{err}");
     }

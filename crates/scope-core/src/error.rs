@@ -108,6 +108,44 @@ pub enum ScopeError {
     #[error("Not found: {0}")]
     NotFound(String),
 
+    /// No token matches a symbol in the place that was searched.
+    #[error("No token matches '{input}' ({searched})")]
+    TokenNotFound {
+        /// What the user typed.
+        input: String,
+        /// Where scope looked, for example "DexScreener on ethereum".
+        searched: String,
+    },
+
+    /// A symbol names more than one token and scope cannot ask which one.
+    #[error(
+        "'{input}' matches more than one token:\n  {}\nPass --token <contract>, or run the command in a terminal to choose and save one.",
+        candidates.join("\n  ")
+    )]
+    AmbiguousToken {
+        /// What the user typed.
+        input: String,
+        /// One line for each candidate: chain, contract, name.
+        candidates: Vec<String>,
+    },
+
+    /// A saved binding names a different contract than the venue lists.
+    #[error(
+        "{symbol} on {chain}: your saved token is {saved}, but {venue} lists {venue_contract}. Check which one you mean, then pass --token <contract> or remove the binding (tokens remove {symbol} in the TUI)."
+    )]
+    TokenMismatch {
+        /// The symbol.
+        symbol: String,
+        /// The binding's chain.
+        chain: String,
+        /// The saved contract.
+        saved: String,
+        /// The venue's contract on that chain.
+        venue_contract: String,
+        /// The venue id.
+        venue: String,
+    },
+
     /// The request itself is at fault and the caller can fix it: an unknown
     /// venue, or a chain that a DEX venue does not read. The message is
     /// shown as is.
@@ -193,7 +231,7 @@ pub enum ConfigError {
     Parse {
         /// The underlying YAML parsing error.
         #[source]
-        source: serde_yaml::Error,
+        source: serde_saphyr::Error,
     },
 
     /// Configuration values failed validation.
@@ -226,6 +264,34 @@ pub type Result<T> = std::result::Result<T, ScopeError>;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_token_errors_say_what_to_do() {
+        use super::ScopeError;
+        let e = ScopeError::AmbiguousToken {
+            input: "USDN".into(),
+            candidates: vec!["ethereum 0xeC74 USDN".into(), "bsc 0x55d3 USDN".into()],
+        };
+        let text = e.to_string();
+        assert!(
+            text.contains("ethereum 0xeC74 USDN") && text.contains("bsc 0x55d3 USDN"),
+            "{text}"
+        );
+        assert!(text.contains("--token"), "{text}");
+
+        let e = ScopeError::TokenMismatch {
+            symbol: "USDN".into(),
+            chain: "ethereum".into(),
+            saved: "0xAAA".into(),
+            venue_contract: "0xBBB".into(),
+            venue: "weex".into(),
+        };
+        let text = e.to_string();
+        assert!(
+            text.contains("0xAAA") && text.contains("0xBBB") && text.contains("weex"),
+            "{text}"
+        );
+    }
+
     use super::*;
 
     #[test]

@@ -10,38 +10,13 @@ use crate::cli::progress::{self, Spinner};
 use crate::cli::textfit::{cols, cut_with_ellipsis};
 use scope::chains::dex::TokenSearchResult;
 use scope::display::text::abbreviate;
-use scope::error::Result;
 use scope::market::{ExchangeClient, Pair, VenueRegistry};
-use std::io::BufRead;
 
 /// The quote a fallback pair uses.
 const CEX_FALLBACK_QUOTE: &str = "USDT";
 
 /// The longest token name the list shows whole.
 const NAME_COLS: usize = 20;
-
-/// Shows `results` as a numbered table and returns the one the user picks.
-///
-/// # Errors
-///
-/// The write or read error, or an answer that is not a number in range.
-pub(crate) fn pick_token<'a>(
-    reader: &mut impl BufRead,
-    spinner: Option<&Spinner>,
-    out: &Output,
-    results: &'a [TokenSearchResult],
-) -> Result<&'a TokenSearchResult> {
-    let index = crate::cli::prompt::pick(reader, out, &table(results), "token", results.len())?;
-    let picked = &results[index];
-    announce(spinner, out, picked);
-    Ok(picked)
-}
-
-/// Tells the user which token the command uses (above the spinner when
-/// one draws).
-pub(crate) fn announce(spinner: Option<&Spinner>, out: &Output, token: &TokenSearchResult) {
-    progress::notice(spinner, out, &selected_line(token));
-}
 
 /// Looks `symbol` up on a centralized exchange when DexScreener does not
 /// know it, and tells the user when it finds it. The result has no
@@ -50,10 +25,12 @@ pub(crate) async fn cex_fallback(
     symbol: &str,
     chain: &str,
     spinner: Option<&Spinner>,
+    http: std::sync::Arc<dyn scope::http::HttpClient>,
     out: &Output,
 ) -> Option<TokenSearchResult> {
     let registry = VenueRegistry::load().ok()?;
-    let client = ExchangeClient::from_descriptor(registry.get(scope::market::DEFAULT_VENUE)?);
+    let desc = registry.get(scope::market::DEFAULT_VENUE)?;
+    let client = ExchangeClient::from_descriptor_with_http(desc, http);
     let symbol = symbol.to_uppercase();
     let pair = fallback_pair(&client, &symbol);
     let ticker = client.fetch_ticker(&pair).await.ok()?;
@@ -82,24 +59,6 @@ fn fallback_pair(client: &ExchangeClient, symbol: &str) -> String {
         base: symbol.to_string(),
         quote: Some(CEX_FALLBACK_QUOTE.to_string()),
     })
-}
-
-/// The one line that names the token a command uses: symbol, name, chain,
-/// price and, when there is one, the address.
-pub(crate) fn selected_line(token: &TokenSearchResult) -> String {
-    let at = if token.address.is_empty() {
-        String::new()
-    } else {
-        format!(" at {}", token.address)
-    };
-    format!(
-        "Selected: {} ({}) on {} - {}{}",
-        token.symbol,
-        token.name,
-        token.chain,
-        scope::display::format::format_price_usd(token.price_usd.unwrap_or(0.0)),
-        at
-    )
 }
 
 /// How a column lines up its cells.
@@ -134,25 +93,23 @@ const RULE_COLS: usize = {
     total
 };
 
-/// The header, a rule and one row per result, each line ending in a
-/// newline.
-fn table(results: &[TokenSearchResult]) -> String {
-    let mut list = format!("\nFound {} matching tokens:\n\n", results.len());
+/// The numbered table the resolver's terminal picker shows.
+pub(crate) fn candidate_table(candidates: &[crate::cli::resolve::Candidate]) -> String {
+    let mut list = format!("\nFound {} matching tokens:\n\n", candidates.len());
     list.push_str(&row(COLUMNS.map(|(header, _, _)| header.to_string())));
     list.push_str(&format!("{}\n", "─".repeat(RULE_COLS)));
-    for (i, token) in results.iter().enumerate() {
-        let price = token
-            .price_usd
-            .map(|p| format!("${:.6}", p))
-            .unwrap_or_else(|| "N/A".to_string());
+    let na = || "N/A".to_string();
+    for (i, c) in candidates.iter().enumerate() {
         list.push_str(&row([
             (i + 1).to_string(),
-            token.symbol.clone(),
-            cut_with_ellipsis(&token.name, NAME_COLS),
-            abbreviate(&token.address),
-            token.chain.clone(),
-            price,
-            scope::display::format_large_number(token.liquidity_usd),
+            c.symbol.clone(),
+            cut_with_ellipsis(&c.name, NAME_COLS),
+            c.address.as_deref().map(abbreviate).unwrap_or_default(),
+            c.chain.clone(),
+            c.price_usd.map(|p| format!("${:.6}", p)).unwrap_or_else(na),
+            c.liquidity_usd
+                .map(scope::display::format_large_number)
+                .unwrap_or_else(na),
         ]));
     }
     list
@@ -184,8 +141,10 @@ mod tests {
     #[test]
     fn test_fallback_pair_quotes_the_symbol_once() {
         let registry = VenueRegistry::load().unwrap();
-        let client =
-            ExchangeClient::from_descriptor(registry.get(scope::market::DEFAULT_VENUE).unwrap());
+        let client = ExchangeClient::from_descriptor_with_http(
+            registry.get(scope::market::DEFAULT_VENUE).unwrap(),
+            scope::http::test_transport(),
+        );
         assert_eq!(fallback_pair(&client, "USDC"), "USDCUSDT");
         assert_eq!(fallback_pair(&client, "OP"), "OPUSDT");
     }
@@ -203,36 +162,26 @@ mod tests {
         }
     }
 
+    fn table(results: &[TokenSearchResult]) -> String {
+        let cs: Vec<_> = results
+            .iter()
+            .map(crate::cli::resolve::dex_candidate)
+            .collect();
+        candidate_table(&cs)
+    }
+
     #[test]
-    fn test_pick_token_shows_the_table_on_the_diagnostic_channel() {
-        let results = [
+    fn test_the_candidate_table_abbreviates_addresses_and_cuts_names() {
+        let list = table(&[
             result(
                 "USDC",
                 "USD Coin",
                 "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
             ),
             result("XYZ", "A Very Long Token Name Indeed", "0x1234abcd"),
-        ];
-        let (out, cap) = Output::capture();
-        let picked = pick_token(
-            &mut std::io::Cursor::new(b"2\n".to_vec()),
-            None,
-            &out,
-            &results,
-        )
-        .unwrap();
-        assert_eq!(picked.symbol, "XYZ");
-        let shown = cap.err();
-        assert!(
-            shown.starts_with("\nFound 2 matching tokens:\n\n"),
-            "{shown}"
-        );
-        assert!(shown.contains("0xA0b8…eB48") && shown.contains("A Very Long Token N…"));
-        assert!(
-            shown.ends_with("\nSelect token (1-2): Selected: XYZ (A Very Long Token Name Indeed) on ethereum - $1.000000 at 0x1234abcd\n"),
-            "{shown}"
-        );
-        assert_eq!(cap.out(), "", "the list is not data");
+        ]);
+        assert!(list.starts_with("\nFound 2 matching tokens:\n\n"), "{list}");
+        assert!(list.contains("0xA0b8…eB48") && list.contains("A Very Long Token N…"));
     }
 
     #[test]
@@ -254,19 +203,5 @@ mod tests {
             assert_eq!(address_col(row), first, "{list}");
             assert!(row.contains('…') || row.contains("USD Coin"), "{row}");
         }
-    }
-
-    #[test]
-    fn test_selected_line_names_the_address_only_when_there_is_one() {
-        let mut t = result("USDC", "USD Coin", "0xabc");
-        assert_eq!(
-            selected_line(&t),
-            "Selected: USDC (USD Coin) on ethereum - $1.000000 at 0xabc"
-        );
-        t.address.clear();
-        assert_eq!(
-            selected_line(&t),
-            "Selected: USDC (USD Coin) on ethereum - $1.000000"
-        );
     }
 }

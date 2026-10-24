@@ -5,9 +5,11 @@
 //! (`127.0.0.1:18789`). When stealth mode is enabled, the sidecar
 //! applies temporal drift and ghost signing to every outgoing request.
 //!
-//! The sidecar is an external Go binary. If it is not already running,
-//! [`GholaHttpClient::ensure_ready`] will attempt to spawn it via
-//! `ghola --serve` and wait for the bridge to become reachable.
+//! The sidecar is an external Go binary. When nothing answers on that
+//! address, `http::shared::build` starts it with [`start_sidecar`]
+//! (`<binary> --serve`, the binary found by `ghola_install::find`). The
+//! sidecar it started is kept here until [`stop_spawned_sidecar`] stops it;
+//! the caller decides when (the CLI asks at exit).
 
 use super::{HttpClient, Request, Response};
 use crate::error::ScopeError;
@@ -15,17 +17,19 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::TcpStream;
-use std::process::Command;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
+use std::path::Path;
+use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 pub(crate) const SIDECAR_ADDR: &str = "127.0.0.1:18789";
 const SIDECAR_URL: &str = "http://127.0.0.1:18789";
-const SPAWN_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a started sidecar has to answer.
+pub(crate) const SPAWN_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
-/// PID of the sidecar we spawned (0 means none spawned by us).
-static SIDECAR_PID: AtomicU32 = AtomicU32::new(0);
+/// The sidecar this process started and has not stopped.
+static SPAWNED: Mutex<Option<Child>> = Mutex::new(None);
 
 #[derive(Serialize)]
 struct BridgeRequest {
@@ -95,16 +99,6 @@ impl GholaHttpClient {
             base_url: base_url.to_string(),
         })
     }
-
-    /// Ensures the sidecar is reachable. If not, spawns `ghola --serve`
-    /// and waits for it to become ready. Returns a configured client.
-    pub async fn ensure_ready(stealth: bool, buffer_size: u32) -> Result<Self, ScopeError> {
-        if !is_bridge_running() {
-            spawn_sidecar()?;
-            wait_for_bridge(SPAWN_TIMEOUT).await?;
-        }
-        Self::new(stealth, buffer_size)
-    }
 }
 
 #[async_trait]
@@ -149,17 +143,6 @@ impl HttpClient for GholaHttpClient {
     }
 }
 
-/// Returns `true` if the `ghola` binary is reachable via PATH.
-pub fn ghola_in_path() -> bool {
-    Command::new("ghola")
-        .arg("--help")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
 pub(crate) fn is_bridge_running() -> bool {
     SIDECAR_ADDR
         .parse()
@@ -168,33 +151,80 @@ pub(crate) fn is_bridge_running() -> bool {
         .is_some()
 }
 
-/// What a failed `ghola --serve` spawn says, with where to get ghola.
-const GHOLA_SPAWN_FAILED: &str = "failed to spawn ghola --serve (install it with \
-     `go install github.com/robot-accomplice/ghola/cmd/ghola@latest` or from \
-     https://github.com/robot-accomplice/ghola/releases)";
-
-fn spawn_sidecar() -> Result<(), ScopeError> {
-    let child = Command::new("ghola")
-        .arg("--serve")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| ScopeError::io_context(e, GHOLA_SPAWN_FAILED))?;
-    SIDECAR_PID.store(child.id(), Ordering::Relaxed);
-    Ok(())
+fn spawned() -> std::sync::MutexGuard<'static, Option<Child>> {
+    SPAWNED.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-async fn wait_for_bridge(timeout: Duration) -> Result<(), ScopeError> {
-    let start = std::time::Instant::now();
-    while start.elapsed() < timeout {
+/// Starts `binary --serve` and waits up to `timeout` for the sidecar to
+/// answer on the sidecar's address (`127.0.0.1:18789`). Returns its PID. The sidecar is kept until
+/// [`stop_spawned_sidecar`]; it is not stopped when this process exits.
+///
+/// It blocks the calling thread while it waits.
+///
+/// # Errors
+///
+/// Returns `IoError` when the binary cannot run; `Network` when it exits
+/// or does not answer in time (it is stopped then).
+pub fn start_sidecar(binary: &Path, timeout: Duration) -> Result<u32, ScopeError> {
+    let mut child = Command::new(binary)
+        .arg("--serve")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| {
+            ScopeError::io_context(e, format!("failed to start {} --serve", binary.display()))
+        })?;
+    let start = Instant::now();
+    loop {
         if is_bridge_running() {
-            return Ok(());
+            let pid = child.id();
+            *spawned() = Some(child);
+            return Ok(pid);
         }
-        tokio::time::sleep(POLL_INTERVAL).await;
+        if let Ok(Some(status)) = child.try_wait() {
+            return Err(ScopeError::Network(format!(
+                "{} --serve exited ({status}) before it answered on {SIDECAR_ADDR}",
+                binary.display()
+            )));
+        }
+        if start.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(ScopeError::Network(format!(
+                "the ghola sidecar did not answer on {SIDECAR_ADDR} within {timeout:?}"
+            )));
+        }
+        std::thread::sleep(POLL_INTERVAL);
     }
-    Err(ScopeError::Network(format!(
-        "ghola sidecar did not become ready within {timeout:?}"
-    )))
+}
+
+/// The PID of the sidecar this process started, while it runs.
+pub fn spawned_sidecar() -> Option<u32> {
+    let mut guard = spawned();
+    match guard.as_mut().map(Child::try_wait) {
+        Some(Ok(None)) => guard.as_ref().map(Child::id),
+        _ => {
+            *guard = None;
+            None
+        }
+    }
+}
+
+/// Stops the sidecar this process started. Returns its PID, or `None`
+/// when this process started none.
+pub fn stop_spawned_sidecar() -> Option<u32> {
+    let mut child = spawned().take()?;
+    let _ = child.kill();
+    let _ = child.wait();
+    Some(child.id())
+}
+
+/// Keeps `child` as the sidecar this process started, so tests elsewhere
+/// (the CLI's exit question) can stop it without a sidecar port.
+#[cfg(any(test, feature = "test-support"))]
+pub fn adopt_sidecar(child: Child) {
+    *spawned() = Some(child);
 }
 
 // ============================================================================
@@ -259,9 +289,129 @@ mod tests {
         assert!(client.is_ok());
     }
 
+    /// Serializes the tests that use the spawned sidecar or its port.
+    static SIDECAR: Mutex<()> = Mutex::new(());
+
+    fn sidecar_lock() -> std::sync::MutexGuard<'static, ()> {
+        SIDECAR.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
-    fn test_sidecar_pid_default_zero() {
-        assert_eq!(SIDECAR_PID.load(Ordering::Relaxed), 0);
+    fn test_no_sidecar_is_spawned_by_default() {
+        let _lock = sidecar_lock();
+        assert_eq!(spawned_sidecar(), None);
+        assert_eq!(stop_spawned_sidecar(), None);
+    }
+
+    #[test]
+    fn test_start_sidecar_reports_a_missing_binary() {
+        let _lock = sidecar_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let err =
+            start_sidecar(&dir.path().join("no-ghola"), Duration::from_millis(50)).unwrap_err();
+        assert!(err.to_string().contains("--serve"), "{err}");
+        assert_eq!(spawned_sidecar(), None);
+    }
+
+    /// A process that runs until it is stopped.
+    fn long_running() -> Child {
+        let mut command = if cfg!(windows) {
+            let mut c = Command::new("ping");
+            c.args(["-n", "60", "127.0.0.1"]);
+            c
+        } else {
+            let mut c = Command::new("sleep");
+            c.arg("60");
+            c
+        };
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_an_adopted_sidecar_is_kept_until_stopped() {
+        let _lock = sidecar_lock();
+        let child = long_running();
+        let pid = child.id();
+        adopt_sidecar(child);
+        assert_eq!(spawned_sidecar(), Some(pid));
+        assert_eq!(stop_spawned_sidecar(), Some(pid));
+        assert_eq!(spawned_sidecar(), None);
+        assert_eq!(stop_spawned_sidecar(), None);
+    }
+
+    #[test]
+    fn test_a_sidecar_that_exited_is_forgotten() {
+        let _lock = sidecar_lock();
+        let mut child = long_running();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        adopt_sidecar(child);
+        assert_eq!(spawned_sidecar(), None);
+        assert_eq!(stop_spawned_sidecar(), None);
+    }
+
+    /// An executable `sh` script that stands in for `ghola --serve`.
+    #[cfg(unix)]
+    fn fake_ghola(dir: &Path, body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("ghola");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_start_sidecar_reports_a_sidecar_that_exits() {
+        let _lock = sidecar_lock();
+        if is_bridge_running() {
+            eprintln!("skipped: something answers on {SIDECAR_ADDR}");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let ghola = fake_ghola(dir.path(), "[ \"$1\" = --serve ] && exit 3");
+        let err = start_sidecar(&ghola, Duration::from_secs(10)).unwrap_err();
+        assert!(err.to_string().contains("exited"), "{err}");
+        assert_eq!(spawned_sidecar(), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_start_sidecar_stops_a_sidecar_that_never_answers() {
+        let _lock = sidecar_lock();
+        if is_bridge_running() {
+            eprintln!("skipped: something answers on {SIDECAR_ADDR}");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let ghola = fake_ghola(dir.path(), "exec sleep 60");
+        let started = Instant::now();
+        let err = start_sidecar(&ghola, Duration::from_millis(300)).unwrap_err();
+        assert!(err.to_string().contains("did not answer"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(spawned_sidecar(), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_start_sidecar_keeps_a_sidecar_that_answers() {
+        let _lock = sidecar_lock();
+        // The sidecar's port, held here: the fake answers through it.
+        let Ok(_port) = std::net::TcpListener::bind(SIDECAR_ADDR) else {
+            eprintln!("skipped: {SIDECAR_ADDR} is in use");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let ghola = fake_ghola(dir.path(), "exec sleep 60");
+        let pid = start_sidecar(&ghola, Duration::from_secs(5)).unwrap();
+        assert_eq!(spawned_sidecar(), Some(pid));
+        assert_eq!(stop_spawned_sidecar(), Some(pid));
+        assert_eq!(spawned_sidecar(), None);
     }
 
     #[test]
@@ -314,16 +464,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_wait_for_bridge_completes() {
-        let result = wait_for_bridge(Duration::from_millis(200)).await;
-        // Either succeeds (sidecar running) or fails with timeout
-        match result {
-            Ok(()) => {} // sidecar was already running
-            Err(e) => assert!(e.to_string().contains("did not become ready")),
-        }
-    }
-
-    #[tokio::test]
     async fn test_send_to_mock_sidecar() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
@@ -343,12 +483,6 @@ mod tests {
         assert_eq!(resp.status_code, 200);
         assert_eq!(resp.body, r#"{"result":"ok"}"#);
         mock.assert_async().await;
-    }
-
-    #[test]
-    fn test_ghola_in_path_returns_bool() {
-        // Smoke test: the result depends on the host; the probe must not panic.
-        let _ = ghola_in_path();
     }
 
     #[test]

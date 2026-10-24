@@ -1,0 +1,90 @@
+{
+  "base_url": "https://www.okx.com",
+  "capabilities": {
+    "ohlc": {
+      "params": {
+        "bar": "{interval}",
+        "instId": "{pair}",
+        "limit": "{limit}"
+      },
+      "path": "/api/v5/market/candles",
+      "response": {
+        "ohlc_fields": [
+          "open_time",
+          "open",
+          "high",
+          "low",
+          "close",
+          "volume"
+        ],
+        "ohlc_format": "array_of_arrays"
+      },
+      "response_root": "data"
+    },
+    "order_book": {
+      "params": {
+        "instId": "{pair}",
+        "sz": "100"
+      },
+      "path": "/api/v5/market/books",
+      "response": {
+        "asks_key": "asks",
+        "bids_key": "bids",
+        "level_format": "positional"
+      },
+      "response_root": "data.0"
+    },
+    "ticker": {
+      "params": {
+        "instId": "{pair}"
+      },
+      "path": "/api/v5/market/ticker",
+      "response": {
+        "best_ask": "askPx",
+        "best_bid": "bidPx",
+        "high_24h": "high24h",
+        "last_price": "last",
+        "low_24h": "low24h",
+        "quote_volume_24h": "volCcy24h",
+        "volume_24h": "vol24h"
+      },
+      "response_root": "data.0"
+    },
+    "trades": {
+      "params": {
+        "instId": "{pair}",
+        "limit": "{limit}"
+      },
+      "path": "/api/v5/market/trades",
+      "response": {
+        "id": "tradeId",
+        "price": "px",
+        "quantity": "sz",
+        "side": {
+          "field": "side",
+          "mapping": {
+            "buy": "buy",
+            "sell": "sell"
+          }
+        },
+        "timestamp_ms": "ts"
+      },
+      "response_root": "data"
+    }
+  },
+  "error_envelope": {
+    "code_key": "code",
+    "message_key": "msg",
+    "ok_codes": [
+      "0"
+    ]
+  },
+  "id": "okx",
+  "name": "OKX",
+  "rate_limit_per_sec": 10,
+  "symbol": {
+    "default_quote": "USDT",
+    "template": "{base}-{quote}"
+  },
+  "timeout_secs": 15
+}

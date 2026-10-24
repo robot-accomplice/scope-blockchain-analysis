@@ -1,0 +1,27 @@
+name: After setup saves a key, the TUI uses it without a restart (#99)
+tiers: [offline]
+steps:
+  # setup --status runs in the pane and reports from the TUI's settings.
+  # No key yet: etherscan is in the "Missing API Keys" list.
+  - type: "setup --status"
+  - key: Enter
+  - wait_for: { text: "Run 'scope setup --key <provider>'" }
+  - expect_screen: { contains: ["Missing API Keys", "etherscan\\s+https://"] }
+  # setup --key runs outside the TUI and asks for the key on the terminal.
+  - type: "setup --key etherscan"
+  - key: Enter
+  - wait_for: { text: "Enter etherscan API key:" }
+  - type: "TESTKEY0000000000000000000000001"
+  - key: Enter
+  - wait_for: { text: "etherscan API key saved" }
+  - wait_for: { text: "The TUI now uses the saved settings\\." }
+  - expect_journal: { argv_prefix: ["scope", "setup"], outcome: ok }
+  # The same session now has the key: etherscan is not missing any more.
+  - type: "setup --status"
+  - key: Enter
+  - wait_for: { text: "Run 'scope setup --key <provider>'" }
+  - expect_screen:
+      contains: ["Missing API Keys"]
+      not_contains: ["etherscan\\s+https://"]
+  - key: Ctrl-D
+  - expect_exit: 0

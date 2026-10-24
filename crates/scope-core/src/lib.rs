@@ -109,7 +109,9 @@
 //!     let config = Config::load(None)?;
 //!     
 //!     // Create a chain client
-//!     let client = EthereumClient::new(&config.chains)?;
+//!     // Build the HTTP transport once and pass it to every client
+//!     let http = scope::http::build(&config)?.client;
+//!     let client = EthereumClient::new_with_http(&config.chains, http)?;
 //!     
 //!     // Query an address balance (with USD valuation)
 //!     let mut balance = client.get_balance("0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2").await?;
@@ -132,7 +134,7 @@
 //!
 //! ## Configuration
 //!
-//! Scope reads configuration from `~/.config/scope/config.yaml`:
+//! Scope reads configuration from `~/.scope-bca/config.yaml`:
 //!
 //! ```yaml
 //! chains:
@@ -156,7 +158,7 @@
 //!   color: true
 //!
 //! address_book:
-//!   data_dir: "~/.local/share/scope"
+//!   data_dir: "/Users/me/scope-address-book"  # optional; absolute path
 //! ```
 //!
 //! ## Error Handling
@@ -259,8 +261,15 @@ pub mod http;
 /// configurable health checks for stablecoin markets.
 pub mod market;
 
+// The metric catalog: market, token and address key values. The module's
+// own docs link to its items, so it has no outer doc here.
+pub mod metrics;
+
 /// The user's directories, resolved in one place (sandboxed in tests).
 pub mod paths;
+
+// Watchlists: targets, rules and their evaluation (#47). Docs as above.
+pub mod watch;
 
 /// Library version string.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

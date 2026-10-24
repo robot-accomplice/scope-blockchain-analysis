@@ -53,7 +53,8 @@ pub enum SnapshotResult {
 /// Compares `masked` with `<dir>/<name>.txt`, writing it when missing.
 pub fn compare_snapshot(dir: &Path, name: &str, masked: &str) -> Result<SnapshotResult> {
     let path = dir.join(format!("{name}.txt"));
-    match std::fs::read_to_string(&path) {
+    // A Windows checkout may have turned the file's LF into CRLF.
+    match std::fs::read_to_string(&path).map(|s| s.replace("\r\n", "\n")) {
         Ok(expected) if expected == masked => Ok(SnapshotResult::Match),
         Ok(expected) => Ok(SnapshotResult::Differs {
             expected,
@@ -94,6 +95,16 @@ mod tests {
             mask("age 3 days", &["age \\d+ days".into()]).unwrap(),
             "<MASK>"
         );
+    }
+
+    #[test]
+    fn test_a_crlf_snapshot_matches_the_lf_screen() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("s.txt"), "a\r\nb\r\n").unwrap();
+        assert!(matches!(
+            compare_snapshot(d.path(), "s", "a\nb\n").unwrap(),
+            SnapshotResult::Match
+        ));
     }
 
     #[test]

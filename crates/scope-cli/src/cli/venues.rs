@@ -56,7 +56,7 @@ pub enum VenuesCommands {
 
     /// Initialise the user venues directory with built-in descriptors.
     ///
-    /// Copies all built-in venue YAML files to ~/.config/scope/venues/
+    /// Copies all built-in venue YAML files to ~/.scope-bca/venues/
     /// so you can customise them or use them as templates for new venues.
     ///
     /// # Examples
@@ -76,7 +76,7 @@ pub enum VenuesCommands {
     ///
     /// ```text
     /// scope venues validate my-exchange.yaml
-    /// scope venues validate ~/.config/scope/venues/custom.yaml
+    /// scope venues validate ~/.scope-bca/venues/custom.yaml
     /// ```
     Validate(ValidateArgs),
 }
@@ -138,7 +138,7 @@ pub struct InitArgs {
 #[derive(Debug, Args)]
 #[command(after_help = "\x1b[1mExamples:\x1b[0m
   scope venues validate my-exchange.yaml
-  scope venues validate ~/.config/scope/venues/custom.yaml")]
+  scope venues validate ~/.scope-bca/venues/custom.yaml")]
 pub struct ValidateArgs {
     /// Path to the YAML file to validate.
     pub file: std::path::PathBuf,
@@ -513,8 +513,7 @@ fn run_init_impl(args: InitArgs, dest: std::path::PathBuf, out: &Output) -> Resu
 }
 
 /// Serialize a VenueDescriptor to a readable YAML string.
-/// We use serde_yaml for this since VenueDescriptor doesn't derive Serialize;
-/// instead, we manually build a representation.
+/// VenueDescriptor doesn't derive Serialize, so the YAML is built by hand.
 fn serialize_descriptor_yaml(desc: &VenueDescriptor) -> String {
     // Build a YAML-compatible representation manually
     let mut lines = Vec::new();
@@ -918,7 +917,7 @@ capabilities:
       bids_key: bids
       level_format: positional
 "#;
-        let desc: VenueDescriptor = serde_yaml::from_str(yaml).unwrap();
+        let desc: VenueDescriptor = serde_saphyr::from_str(yaml).unwrap();
         let serialized = serialize_descriptor_yaml(&desc);
         assert!(serialized.contains("roundtrip_test"));
         assert!(serialized.contains("Roundtrip Exchange"));
@@ -987,7 +986,7 @@ capabilities:
           buy: buy
           sell: sell
 "#;
-        let desc: VenueDescriptor = serde_yaml::from_str(yaml).unwrap();
+        let desc: VenueDescriptor = serde_saphyr::from_str(yaml).unwrap();
         let serialized = serialize_descriptor_yaml(&desc);
         assert!(serialized.contains("order_book:"));
         assert!(serialized.contains("ticker:"));
@@ -1018,7 +1017,7 @@ capabilities:
       bids_key: bids
       level_format: positional
 "#;
-        let desc: VenueDescriptor = serde_yaml::from_str(yaml).unwrap();
+        let desc: VenueDescriptor = serde_saphyr::from_str(yaml).unwrap();
         let serialized = serialize_descriptor_yaml(&desc);
         assert!(serialized.contains("method: POST"));
         assert!(serialized.contains("response_root"));
@@ -1050,7 +1049,7 @@ capabilities:
           buy: B
           sell: S
 "#;
-        let desc: VenueDescriptor = serde_yaml::from_str(yaml).unwrap();
+        let desc: VenueDescriptor = serde_saphyr::from_str(yaml).unwrap();
         let serialized = serialize_descriptor_yaml(&desc);
         assert!(serialized.contains("filter:"));
         assert!(serialized.contains("field:"));

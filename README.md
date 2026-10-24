@@ -28,8 +28,8 @@ A command-line tool for blockchain data analysis, portfolio tracking, transactio
 - **Address Analysis**: Query balances (with USD valuation), transaction history, and token holdings for blockchain addresses
 - **Transaction Analysis**: Look up and decode blockchain transactions across all supported chains
 - **Token Crawling**: Crawl DEX data for any token -- price, volume, liquidity, holder analysis, and risk scoring with markdown report generation
-- **Live Monitoring**: Real-time TUI dashboard with five layout presets (Dashboard, Chart, Feed, Compact, Exchange), responsive terminal sizing, config-driven widget visibility, price/volume/candlestick charts, price alerts, whale detection, CSV export, and auto-pause on input
-- **Exchange Venues**: Data-driven CEX integration via YAML descriptors, with 11 built-in venues (Binance, Biconomy, Bitget, Bybit, Coinbase, Crypto.com, Gate.io, HTX, Kraken, MEXC, OKX) with order book, ticker, trades, and OHLC support; add custom venues by dropping a YAML file in `~/.config/scope/venues/`
+- **Live Monitoring**: The monitor wizard in the TUI builds a watchlist (tokens, pairs, addresses; market health checks and metric rules; interval, duration, CSV and report). Its grid shows each target's pass/fail state live, with the same health results as `market summary`, a detail pane with charts, and keys that open the evidence. Watchlists are saved and run again with `watch open <name>`.
+- **Exchange Venues**: Data-driven CEX integration via YAML descriptors, with 11 built-in venues (Binance, Biconomy, Bitget, Bybit, Coinbase, Crypto.com, Gate.io, HTX, Kraken, MEXC, OKX) with order book, ticker, trades, and OHLC support; add custom venues by dropping a YAML file in `~/.scope-bca/venues/`
 - **Portfolio Management**: Track multiple addresses across chains with labels, tags, and aggregated balance views; `@label` shortcuts work in both CLI and web UI for instant address recall
 - **Compliance & Risk Assessment**: Risk scoring, transaction pattern detection, taint analysis, and compliance reporting
 - **Data Export**: Export address history and portfolio data to JSON or CSV with date range filtering
@@ -143,17 +143,16 @@ scope compliance analyze 0xabc... --patterns structuring,layering
 # Token crawling with report generation
 scope crawl 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --chain ethereum
 
-# Live monitor -- launch directly from the command line
-scope monitor USDC                                          # defaults to ethereum
-scope mon PEPE --chain ethereum --layout chart-focus        # short alias with options
-scope monitor USDC --layout exchange                        # exchange-style: order book + chart + trades
-scope monitor USDC --venue binance                           # real exchange OHLC, order book and trades
+# Live monitor -- the monitor wizard in the TUI
+scope monitor USDN --venue weex --every 30s --duration 1h   # market health checks, every 30s for 1h
+scope monitor USDC --venue binance --report usdc.md --yes   # start at once, write a report at the end
+scope mon PEPE --chain ethereum                             # price and volume of a DEX token
 
 # Exchange venues
 scope venues list                                           # show all available venues
 scope ven list --format json                                # machine-readable
 scope venues schema                                         # YAML schema for writing custom venues
-scope venues init                                           # copy built-in descriptors to ~/.config/scope/venues/
+scope venues init                                           # copy built-in descriptors to ~/.scope-bca/venues/
 scope venues validate my-venue.yaml                         # validate a custom descriptor
 
 # Token health (DEX + optional market)
@@ -237,14 +236,14 @@ Not sure which command to use? Here's a quick decision tree:
 | Auto-detect input and run everything | `scope insights <target>` |
 | Get token DEX data (price, volume, holders) | `scope crawl <token>` |
 | Token DEX + order book health (stablecoins) | `scope token-health <token> --with-market` |
-| Live real-time dashboard for a token | `scope monitor <token>` |
-| Exchange-style monitor (order book + trades) | `scope monitor <token> --layout exchange` |
+| Watch a market's health live (monitor wizard) | `scope monitor <token> --venue <venue>` |
+| Run a saved watchlist again (in the TUI) | `watch open <name>` |
 | Browse trending/boosted tokens | `scope discover` |
 | Check market peg/depth for a stablecoin | `scope market summary <symbol>` |
 | Fetch OHLC/candlestick data from a venue | `scope market ohlc <symbol> --venue <venue> --interval 1h` |
 | Fetch recent trades from a venue | `scope market trades <symbol> --venue <venue>` |
 | List available exchange venues | `scope venues list` |
-| Add a custom exchange venue | `scope venues schema` then drop YAML in `~/.config/scope/venues/` |
+| Add a custom exchange venue | `scope venues schema` then drop YAML in `~/.scope-bca/venues/` |
 | Assess compliance risk for an address | `scope compliance risk <addr>` |
 | Manage a portfolio of watched addresses | `scope portfolio add/remove/list/summary` |
 | Export data to JSON/CSV | `scope export --address <addr> --output file.json` |
@@ -275,7 +274,7 @@ Representative output for key commands:
 │  okx               order_book, ticker, trades, ohlc
 ├──────────────────────────────────────────────────
 │  Loaded            11 venues (0 built-in, 11 user)
-│  User dir          ~/.config/scope/venues
+│  User dir          ~/.scope-bca/venues
 └──────────────────────────────────────────────────
 ```
 
@@ -512,7 +511,7 @@ Assessing risk for 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2 on ethereum...
 
 ```text
 ┌─ Scope Configuration Status ──────────────────
-│  Config File        ~/.config/scope/config.yaml
+│  Config File        ~/.scope-bca/config.yaml
 │
 ├── API Keys
 │  ✓ etherscan        configured
@@ -589,7 +588,7 @@ Scope uses **YAML descriptor files** to define CEX API integrations. This data-d
 
 1. Run `scope venues schema` to see the YAML format
 2. Create a YAML file following the schema
-3. Place it in `~/.config/scope/venues/`
+3. Place it in `~/.scope-bca/venues/`
 4. Validate with `scope venues validate my-venue.yaml`
 5. Use it immediately: `scope market summary USDC --venue my-venue`
 
@@ -597,7 +596,7 @@ Or initialise the user directory with all built-in descriptors for reference:
 
 ```bash
 scope venues init
-# Copies all 11 built-in descriptors to ~/.config/scope/venues/
+# Copies all 11 built-in descriptors to ~/.scope-bca/venues/
 # Edit them to customise behaviour or use as templates
 ```
 
@@ -692,12 +691,22 @@ scope crawl USDC --report report.md
 # Disable ASCII charts, output as JSON
 scope crawl USDC --no-charts --format json
 
-# Skip interactive prompts (use first match)
-scope crawl USDC --yes
+# Choose the token by contract (no question); --yes only skips the save question
+scope crawl USDC --token 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --yes
 
 # Save the selected token as an alias for future use
 scope crawl USDC --save
 ```
+
+### Choosing a token
+
+A symbol such as `USDN` can name more than one token. When it does, scope lists the tokens (chain, contract, name) and asks you to choose one. Then it asks whether to save the choice: "Save so USDN always means 0x… on ethereum?". A saved choice is used from then on without a question. On an exchange venue that lists its coins' contracts, scope also checks the saved contract against the venue's, and stops if they differ.
+
+In the TUI, the question is a list: ↑/↓ and Enter choose, Esc cancels.
+
+Without a terminal (a pipe, `--format json`, a script or the web API), scope does not ask. It stops with the list. Pass `--token <contract>` to choose (`crawl`, `token-health`, `insights`, `monitor` and `market summary|ohlc|trades` take it). `--yes` skips only the save question.
+
+Saved choices are in `~/.scope-bca/data/tokens.yaml`. In the TUI, `tokens list` shows them and `tokens remove <SYMBOL>` removes one. Each lookup is recorded in `~/.scope-bca/state/resolutions.jsonl`.
 
 ## Token Discovery
 
@@ -778,34 +787,77 @@ A flag you type always wins over the context. `address` and `tx` with no target 
 | `Ctrl-U` / `Ctrl-W` / `Alt-K` | Delete to the start, the word before, to the end |
 | `Ctrl-F` or `/` | Search the output; `Ctrl-R` searches the history |
 | `Ctrl-Y` | Copy the last output (needs a terminal that allows OSC 52; `save` works everywhere) |
-| `PgUp` / `PgDn` | Scroll the output |
+| `PgUp` / `PgDn`, mouse wheel, `Shift-↑` / `Shift-↓` | Scroll the output: a page, 3 lines, 1 line. `Ctrl-Home` / `Ctrl-End` jump to the top / bottom. The TUI captures the mouse for the wheel, so select text with `Shift`+drag. |
 | `Esc` / `Ctrl-C` | Cancel the running command (for example a `--every` loop); idle, `Esc` clears the line |
 | `Ctrl-D` | Leave the TUI |
 
-The row under the input shows the usage of the command you type and the next argument it expects, the value a flag needs (with its allowed values), or an unknown flag. The pane keeps the last 5000 lines and says when it dropped older ones.
+The row under the input shows the keys that move around (scroll, history, complete, the palette, find; `Ctrl-G` while a watchlist runs) as many as fit. While you type, it shows the usage of the command and the next argument it expects, the value a flag needs (with its allowed values), or an unknown flag. `help` opens at its first line. The pane keeps the last 5000 lines and says when it dropped older ones.
 
-**Repeating view.** A command with `--every` (for example `market summary USDC --venue binance --every 30s --duration 1h`) shows one view that updates in place: the latest report beside its trends (a pass/fail strip with the last failure, and a chart per key value with its threshold line). Below 80 columns the trends sit under the report. `Esc` stops the run and the view stays; the next key leaves it with one copy of the final report and a summary such as `42 runs · 1 failed (run 16)`.
+**Market summary in the TUI.** `market summary` shows a compact view: the verdict on the first line, the key values in two columns, the book as one ladder (asks above the mid, bids below, one size per level in the quote asset, with a bar), and a bid/ask table (best price, slippage for 10K, depth, top-3 and top-10 depth). The checks that passed are in a grid with their limits (`Spread ≤3%`); each other check is spelled out under it. Ctrl-Y and `save` still copy the CLI text report.
 
-**Commands that need the terminal.** `setup`, `crawl` with a name or symbol (it asks you to pick a token), and `monitor` run on the plain terminal. The TUI steps aside, runs the command, and comes back by itself when it ends; `Ctrl-C` cancels it. The scrollback shows its output and how long it took. `interactive`, `web` and `completions` do not run in the TUI.
+**Repeating view.** A command with `--every` (for example `market summary USDC --venue binance --every 30s --duration 1h`) shows one view that updates in place. The snapshot is as wide and as tall as its content; the trends take the rest of the pane. Each trend row has a fixed numbers column (label, limit, latest value), a `┤`, and a chart that fills its track from the left, one cell per run, and then scrolls. A bar outside its limit is red. Each chart has a minimum range, so noise reads as a flat line. Beside the trends, the snapshot leaves out the values they chart, and it drops ladder levels before it would be cut. When there are rows to spare, the charts get taller. When the pane is too narrow for both side by side, the compact snapshot goes on top and the trends below it. A rule keeps the footer (`run 3 of 4 · next in 12s · running …`) apart. `--duration forever` (or `inf`) runs until you press `Esc`; without `--duration`, a run lasts 1 hour. `Esc` stops the run and the view stays; the next key leaves it with one copy of the final report and a summary such as `42 runs · 1 failed (run 16)`.
+
+**Commands that need the terminal.** `setup` (except `--status`) and `monitor --dashboard` run on the plain terminal. The TUI steps aside, runs the command, and comes back by itself when it ends; `Ctrl-C` cancels it. The scrollback shows its output and how long it took. After `setup`, the TUI reads the config again, so a new key works at once. `interactive`, `web` and `completions` do not run in the TUI.
 
 **Files.** The TUI keeps its history in `history.txt` and a log of every submitted line in `tui-events.jsonl` (input, parsed arguments, outcome, error, duration), both in the scope data directory.
 
-### Live Monitor
+### Live Monitor (monitor wizard and watchlists)
 
-The monitor launches a real-time TUI dashboard. You can start it two ways:
+`scope monitor` opens the TUI with the **monitor wizard**, filled in from its arguments. `monitor …` in the TUI does the same.
 
 ```bash
-# Direct from the command line
-scope monitor USDC
-scope mon PEPE --chain ethereum --layout chart-focus --refresh 3
-scope monitor USDC --layout exchange    # Exchange-style: order book + chart + trades
-
-# Or from the TUI
-scope tui
-scope:auto> monitor USDC
+scope monitor USDN --venue weex --every 30s --duration 1h
+scope monitor USDC --venue binance --pair USDC_USDT --max-spread-pct 0.5 --csv usdc.csv --report usdc.md
+scope monitor PEPE --chain ethereum          # no venue: price and volume of the token
+scope monitor USDC --venue binance --save stables --yes   # save it, and start without the wizard
 ```
 
-**Direct-command flags:** `--chain` / `-c`, `--layout` / `-l`, `--refresh` / `-r`, `--scale` / `-s`, `--color-scheme`, `--export` / `-e`, `--venue` / `-v`.
+The wizard has four steps (Tab moves between them; Ctrl-R starts, Ctrl-S saves, Esc leaves):
+
+1. **Targets.** `a` adds one: `pair USDC binance`, `token PEPE solana`, or `address 0x… ethereum`. `d` deletes the selected one.
+2. **Metrics.** For each target: the **market health** preset (the checks of `market summary`, with the same thresholds: flag, then config `market.health`, then the default), and the metrics of its kind, each a rule `metric op value`. Space turns one on, `o` changes the operator, Enter edits the value. Market metrics: `mid_price`, `spread_pct`, `bid_depth`, `ask_depth`, the top-3 and top-10 depths, `peg_deviation_pct`. Token metrics: `price_usd`, `price_change_24h_pct`, `volume_24h`, `liquidity_usd`, `holders`. Address metrics: `native_balance`, `risk_score`.
+3. **Timing.** The interval and the duration (default 60s and 1h, as `market summary --every`; `forever` runs until you stop it), with the number of fetches they cost.
+4. **Outputs.** The name, the CSV path (one row per check per run: time, target, metric, value, operator, threshold, status, source, error) and the report path (written when the run ends or you stop it).
+
+**The grid.** The run shows one row per target, breached rows first, with one mark per check (`✓` pass, `!` warn, `✗` fail, `-` n/a, `?` the value could not be read). A breach that starts rings the bell once and shows a banner. Enter opens the detail: each check's value and a chart of its last values. In the detail, `b`, `t`, `h`, `r` and `x` run `market summary`, `market trades`, `crawl`, `compliance risk` or `address` for the target in the shell. **Ctrl-G** switches between the grid and the shell, so other commands run while the grid updates. Esc stops the run; Esc again closes the grid and leaves the last results and a summary in the scrollback. A run keeps the settings it started with: after `setup` saves a key, the grid says to restart the run to use it.
+
+**Watchlists.** Ctrl-S in the wizard (or `--save <name>`) saves the watchlist to `~/.scope-bca/watchlists/<name>.yaml`. In the TUI, `watch list` lists them, `watch open <name>` (or a `.yaml` path) runs one, and `watch stop` stops the run. A file that is not valid lists every error with its line:
+
+```yaml
+name: stablecoins
+interval: 30s
+duration: 1h              # or forever
+outputs:
+  csv: ./watch.csv
+  report: ./watch.md
+targets:
+  - kind: pair
+    id: USDC
+    venue: binance
+    preset: market health
+    health:
+      max_spread_pct: 0.5
+  - kind: token
+    id: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+    chain: ethereum
+    rules:
+      - holders >= 1000
+      - liquidity_usd > 1000000
+```
+
+**From the old monitor.** `--refresh N` is the interval in seconds; `--export` is now `--csv`. The price bounds of `monitor.alerts` become rules on the price; the whale and volume-spike alerts have no metric yet (#122). `--layout`, `--scale` and `--color-scheme` belong to the old dashboard.
+
+#### The old dashboard (deprecated)
+
+`scope monitor <token> --dashboard` opens the old live dashboard for one more release. It goes in the next one.
+
+```bash
+scope monitor USDC --dashboard
+scope mon PEPE --chain ethereum --layout chart-focus --refresh 3 --dashboard
+scope monitor USDC --layout exchange --dashboard    # Exchange-style: order book + chart + trades
+```
+
+**Dashboard flags:** `--chain` / `-c`, `--layout` / `-l`, `--refresh` / `-r`, `--scale` / `-s`, `--color-scheme`, `--export` / `-e`, `--venue` / `-v`, with `--dashboard`.
 
 Use `--venue binance` (or any CEX venue) to fetch real exchange OHLC data instead of synthetic candles. The time period selector (1m, 5m, 15m, 1h, 4h, 1d) maps directly to the venue's candlestick intervals.
 
@@ -864,7 +916,9 @@ With `--venue`, the Order Book and Recent Trades panels show the venue's real bo
 
 ## Configuration
 
-On first run, Scope detects that no configuration file exists and offers to launch the interactive setup wizard. The wizard walks you through configuring API keys, RPC endpoints, and output preferences, then saves the result to `~/.config/scope/config.yaml`.
+On first run, Scope detects that no configuration file exists and offers to launch the interactive setup wizard. The wizard walks you through configuring API keys, RPC endpoints, and output preferences, then saves the result to `~/.scope-bca/config.yaml`.
+
+All scope files are in one folder, `~/.scope-bca` (set `SCOPE_BCA_HOME` to use another folder): `config.yaml`, `venues/`, `data/` (address book, token aliases) and `state/` (TUI session, history and logs). On the first start after an upgrade, scope copies your files from `~/.config/scope` and the platform data folder into it. It does not change or delete the old files. `~/.scope-bca/state/migration.jsonl` lists each file it copied. Delete the old folders when you no longer need them. If your config sets `address_book.data_dir` (or `portfolio.data_dir`), scope reads the address book from that folder, so the copy in `~/.scope-bca/data` is not used. A leading `~` in `data_dir` is your home folder.
 
 You can revisit the setup wizard at any time without editing the config file directly:
 
@@ -906,7 +960,7 @@ output:
   color: true
 
 portfolio:
-  data_dir: "~/.config/scope/data"
+  data_dir: "~/.scope-bca/data"
 
 # Monitor TUI configuration (all optional, shown with defaults)
 monitor:
@@ -1006,12 +1060,13 @@ The `scope market` command has three subcommands:
 - **Execution**: Simulated 10k USDT buy/sell slippage or "insufficient liquidity"
 - **Order book**: Ask/bid levels with depth (base and quote amounts)
 - **Health checks**: No sells below peg, bid/ask ratio, spread, minimum valid levels, total depth, top-3/top-10 depth per side, and depth/volume (bid + ask depth within ±2% of mid should be 5–10% of 24h volume: below fails, above warns). Every check shows its value and limit. Each check is `pass`, `fail`, `warn` or `n/a`. A `warn` does not make the book unhealthy. An `n/a` check does not apply to the book, is always shown, and does not count against "healthy".
+- **Bot patterns (advisory)**: the summary also reads the venue's last 500 trades and its book for patterns that look machine-made: one exact trade size in 30% or more of the trades, trades at a near-fixed interval (gaps varying by under 10%), buy/sell "ping-pong" pairs of the same size within 5 s and 0.05% in price (the shape of wash trading), and a "ladder" of 8 or more book levels of the same size at even price steps. A pattern **warns, never fails**: market making is legitimate. The line gives the evidence and the bot-like share of the sampled trades, by count and by volume (many tiny bot trades can be little of the volume). It changes no volume figure. A DEX pool, a venue without a trade feed, or a tape under 30 trades gives `n/a` for the trade signals, with the reason. JSON output has the details under `bot_patterns`.
 - **DEX venues** (`eth`, `solana`): there is no real order book, so scope builds a synthetic one from the pool's reserves on the constant-product curve (x·y=k), with one level at each `amm-step-pct` (default 0.1%). Level count and spread are `n/a` for this book: the step sets the level count, and the real spread is the pool fee, which DexScreener does not report. Top-3 and top-10 depth apply; with a 0.1% step they mean depth within ±0.3% and ±1%. When DexScreener does not report the reserves, scope falls back to a single-level estimate and labels the book as such. The output names the book source in every format (`book_source` in JSON: `exchange`, `synthetic_amm` or `synthetic_estimate`). Concentrated-liquidity (v3) pools are treated as constant-product pools, because DexScreener does not supply tick data.
 - **Output**: Text (default) or JSON; see [Output Examples](#output-examples) for sample
 - **Tunable thresholds**: All 13 health-check thresholds are overridable defaults. Built-in defaults: min-levels=10, max-spread-pct=3, min-top3-depth=300, min-top10-depth=2000, min-depth=3000, peg-range=0.001, bid/ask ratio 0.2-5.0x, amm-step-pct=0.1, depth-window-pct=2, min-depth-volume-pct=5, max-depth-volume-pct=10. Order of precedence: CLI flag or web request field > `market.health` in `config.yaml` > built-in default. The same flags work on `market summary`, `token-health --with-market`, and `insights`. The web `/api/market` and `/api/token-health` endpoints accept the same keys (snake_case) in the JSON body.
 
 ```yaml
-# ~/.config/scope/config.yaml — omitted keys keep the built-in default
+# ~/.scope-bca/config.yaml — omitted keys keep the built-in default
 market:
   health:
     min_levels: 10

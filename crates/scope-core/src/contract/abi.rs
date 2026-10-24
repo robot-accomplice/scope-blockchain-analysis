@@ -879,4 +879,118 @@ mod tests {
         assert_eq!(restored.function_name, call.function_name);
         assert_eq!(restored.parameters.len(), 1);
     }
+    /// Answers each request with the body of the first route whose URL
+    /// fragment the request URL contains, and notes every URL. A URL no
+    /// route matches is a transport error.
+    struct Routes {
+        routes: Vec<(&'static str, &'static str)>,
+        urls: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl Routes {
+        fn new(routes: Vec<(&'static str, &'static str)>) -> Self {
+            Self {
+                routes,
+                urls: Default::default(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::http::HttpClient for Routes {
+        async fn send(
+            &self,
+            req: crate::http::Request,
+        ) -> std::result::Result<crate::http::Response, crate::error::ScopeError> {
+            self.urls.lock().unwrap().push(req.url.clone());
+            let (_, body) = self
+                .routes
+                .iter()
+                .find(|(fragment, _)| req.url.contains(fragment))
+                .ok_or_else(|| crate::error::ScopeError::Network("unreachable".into()))?;
+            Ok(crate::http::Response {
+                status_code: 200,
+                headers: Default::default(),
+                body: body.to_string(),
+            })
+        }
+    }
+
+    const OPENCHAIN: &str = "api.openchain.xyz";
+    const FOURBYTE: &str = "4byte.directory";
+
+    #[tokio::test]
+    async fn test_decode_calldata_names_the_function_from_openchain() {
+        let http = Routes::new(vec![(
+            OPENCHAIN,
+            r#"{"ok": true, "result": {"function": {"0xa9059cbb": [{"name": "transfer(address,uint256)"}, {"name": "other()"}]}}}"#,
+        )]);
+        let call = decode_calldata("0xa9059cbb000000", None, &http).await;
+        assert_eq!(call.selector, "0xa9059cbb");
+        assert_eq!(call.signature, "transfer(address,uint256)");
+        assert_eq!(call.function_name, "transfer");
+        assert!(call.parameters.is_empty());
+        assert!(matches!(call.source, DecodeSource::FourByteDirectory));
+        let urls = http.urls.lock().unwrap();
+        assert_eq!(
+            *urls,
+            vec![
+                "https://api.openchain.xyz/signature-database/v1/lookup?function=0xa9059cbb&filter=true"
+            ],
+            "4byte is not asked once OpenChain answers"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_decode_calldata_falls_back_to_4byte_when_openchain_has_nothing() {
+        for openchain in [
+            r#"{"ok": false}"#,
+            r#"{"ok": true, "result": {"function": {"0x095ea7b3": []}}}"#,
+            r#"{"ok": true, "result": {"function": {"0xffffffff": [{"name": "x()"}]}}}"#,
+            r#"{"ok": true, "result": null}"#,
+            "not json",
+        ] {
+            let http = Routes::new(vec![
+                (OPENCHAIN, openchain),
+                (
+                    FOURBYTE,
+                    r#"{"results": [{"text_signature": "approve(address,uint256)"}]}"#,
+                ),
+            ]);
+            let call = decode_calldata("0x095ea7b3", None, &http).await;
+            assert_eq!(call.signature, "approve(address,uint256)", "{openchain}");
+            assert_eq!(call.function_name, "approve");
+            assert!(matches!(call.source, DecodeSource::FourByteDirectory));
+            let urls = http.urls.lock().unwrap();
+            assert_eq!(
+                urls[1],
+                "https://www.4byte.directory/api/v1/signatures/?hex_signature=0x095ea7b3"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_decode_calldata_without_any_lookup_shows_the_raw_selector() {
+        for http in [
+            Routes::new(vec![]),
+            Routes::new(vec![
+                (OPENCHAIN, r#"{"ok": false}"#),
+                (FOURBYTE, r#"{"results": []}"#),
+            ]),
+        ] {
+            let call = decode_calldata("0xdeadbeef01", None, &http).await;
+            assert_eq!(call.selector, "0xdeadbeef");
+            assert_eq!(call.signature, "0xdeadbeef(...)");
+            assert_eq!(call.function_name, "0xdeadbeef");
+            assert!(matches!(call.source, DecodeSource::Unknown));
+            assert_eq!(http.urls.lock().unwrap().len(), 2);
+        }
+    }
+
+    #[test]
+    fn test_decode_abi_value_short_dynamic_type_is_shown_whole() {
+        // "bytes" alone takes the fixed-size branch; "string" is dynamic.
+        assert_eq!(decode_abi_value("abcdef01", "string"), "0xabcdef01");
+        assert_eq!(decode_abi_value("abcdef01", "address[]"), "0xabcdef01");
+    }
 }

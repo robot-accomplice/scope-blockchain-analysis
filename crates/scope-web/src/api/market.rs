@@ -48,15 +48,16 @@ async fn market_summary(
     state: &AppState,
     req: &MarketRequest,
 ) -> scope::error::Result<MarketSummary> {
-    let venue = MarketVenue::from_name(&req.market_venue)?;
+    let venue = MarketVenue::from_name_with_http(&req.market_venue, state.factory.http())?;
     if let Some(chain) = &req.chain {
         venue.require_chain(chain)?;
     }
     let thresholds = state.config.market.health.with_overrides(&req.health);
-    let out = Output::stdio();
+    let out = Output::stdio().without_prompts();
     let dex = CrawlDexSource {
         factory: state.factory.as_ref(),
         out: &out,
+        token: None,
     };
     fetch_summary(&venue, &Pair::parse(&req.pair), &thresholds, &dex).await
 }

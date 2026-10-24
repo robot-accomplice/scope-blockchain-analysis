@@ -57,9 +57,10 @@
 use anyhow::Result;
 use clap::Parser;
 use scope::Config;
-use scope::config::OutputFormat;
 use scope::error::ScopeError;
+use scope_cli::cli::dispatch::ConfigSource;
 use scope_cli::cli::errors::display_error;
+use scope_cli::cli::ghola_offer;
 use scope_cli::cli::output::Output;
 use scope_cli::cli::prompt;
 use scope_cli::cli::{Cli, Commands};
@@ -78,12 +79,32 @@ fn fail(out: &Output, message: String, code: i32) -> ! {
     std::process::exit(code);
 }
 
-/// Application entry point.
-///
+/// The stack of the thread that runs [`run`]: Linux's default main stack.
+/// The future of `run` holds every command's state, and in a debug build
+/// it overflows Windows' 1 MB main stack.
+const MAIN_STACK_BYTES: usize = 8 * 1024 * 1024;
+
+/// Application entry point: runs [`run`] on a thread with
+/// [`MAIN_STACK_BYTES`] of stack, the same size on every platform.
+fn main() -> Result<()> {
+    std::thread::Builder::new()
+        .name("main".into())
+        .stack_size(MAIN_STACK_BYTES)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime")
+                .block_on(run())
+        })
+        .expect("main thread")
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
 /// Initializes logging, parses CLI arguments, loads configuration,
 /// and dispatches to the appropriate command handler.
-#[tokio::main]
-async fn main() -> Result<()> {
+async fn run() -> Result<()> {
     // Parse CLI arguments
     let cli = Cli::parse();
     let out = Output::stdio();
@@ -96,8 +117,13 @@ async fn main() -> Result<()> {
     }
 
     // The TUI needs a terminal. Check before the config load and the setup
-    // prompt, which read stdin.
-    if matches!(cli.command, Commands::Interactive(_)) {
+    // prompt, which read stdin. `scope monitor` opens the TUI too (#47).
+    let opens_tui = match &cli.command {
+        Commands::Interactive(_) => true,
+        Commands::Monitor(args) => !args.watch.dashboard,
+        _ => false,
+    };
+    if opens_tui {
         let term = std::env::var("TERM").ok();
         if let Err(message) = scope_cli::cli::tui::tui_terminal_ok(
             io::stdin().is_terminal(),
@@ -118,20 +144,35 @@ async fn main() -> Result<()> {
     // Check if this is a setup command (don't prompt for setup if already running setup)
     let is_setup_command = matches!(cli.command, Commands::Setup(_));
 
-    // Load configuration
-    let mut config = Config::load(cli.config.as_deref()).unwrap_or_else(|e| {
+    // Copy files from the old locations into ~/.scope-bca, once. The old
+    // files stay (spec: docs/design/2026-10-15-scope-bca-home-design.md).
+    match scope::paths::migration::migrate() {
+        Ok(report) if report.copied > 0 => note!(
+            out,
+            "Moved your scope files to {} (copied {} files; the old files are unchanged).",
+            scope::paths::home().display(),
+            report.copied
+        ),
+        Ok(_) => {}
+        Err(e) => fail(&out, e.to_string(), 1),
+    }
+
+    // Load configuration. The TUI reads it the same way after `setup`.
+    let source = ConfigSource {
+        path: cli.config.clone(),
+        ai: cli.ai,
+    };
+    let config = source.load().unwrap_or_else(|e| {
         note!(
             out,
             "⚠ Could not load config, using defaults (use -v for details)"
         );
         tracing::debug!("Failed to load config: {}", e);
-        Config::default()
+        let mut config = Config::default();
+        // --ai forces markdown output to console for agent parsing
+        source.apply(&mut config);
+        config
     });
-
-    // --ai forces markdown output to console for agent parsing
-    if cli.ai {
-        config.output.format = OutputFormat::Markdown;
-    }
 
     // Handle web command early (before setup check and factory creation)
     if let Commands::Web(ref web_args) = cli.command {
@@ -152,9 +193,10 @@ async fn main() -> Result<()> {
 
         // If running as daemon child, skip daemon forking
         if scope_web::is_daemon_child() || !web_args.daemon {
-            return scope_web::start_server(addr, config, &out)
-                .await
-                .map_err(|e| anyhow::anyhow!(e));
+            let served = scope_web::start_server(addr, config, &out).await;
+            // The web server never asks: a sidecar it started stops with it.
+            ghola_offer::finish_sidecar(&out, false);
+            return served.map_err(|e| anyhow::anyhow!(e));
         }
 
         // Fork daemon
@@ -177,15 +219,16 @@ async fn main() -> Result<()> {
             let _ = display_error(&e, &out);
         }
         // Reload config after setup
-        let mut config = Config::load(cli.config.as_deref()).unwrap_or_default();
-        if cli.ai {
-            config.output.format = OutputFormat::Markdown;
-        }
-        return dispatch(cli.command, &config, &out).await;
+        let config = source.load().unwrap_or_else(|_| {
+            let mut config = Config::default();
+            source.apply(&mut config);
+            config
+        });
+        return dispatch(cli.command, &source, &config, &out).await;
     }
 
     // Dispatch the command through the unified handler
-    dispatch(cli.command, &config, &out).await
+    dispatch(cli.command, &source, &config, &out).await
 }
 
 /// Checks if a configuration file exists.
@@ -221,22 +264,39 @@ fn prompt_for_setup(out: &Output) -> bool {
 /// Prints the version line for non-interactive commands, and on failure
 /// prints the error with remediation hints and exits with status 1. Exits
 /// with the TUI's code when a signal ended it.
-async fn dispatch(command: Commands, config: &Config, out: &Output) -> Result<()> {
+async fn dispatch(
+    command: Commands,
+    source: &ConfigSource,
+    config: &Config,
+    out: &Output,
+) -> Result<()> {
     // Print version on stderr for non-interactive commands
     if !command.is_interactive() {
         note!(out, "Scope v{}", scope::VERSION);
     }
 
-    match scope_cli::cli::dispatch::dispatch(command, config, out).await {
-        Ok(0) => Ok(()),
+    // A Ghola sidecar this run started is stopped at the end, or kept when
+    // the user says so. Only a run that may ask gets the question.
+    let ask =
+        ghola_offer::may_ask(out) && !ghola_offer::scripted(&ghola_offer::process_args(), config);
+
+    match scope_cli::cli::dispatch::dispatch(command, source, config, out).await {
+        Ok(0) => {
+            ghola_offer::finish_sidecar(out, ask);
+            Ok(())
+        }
         // The TUI ended on a signal (128+N); it already restored the
         // terminal and saved.
-        Ok(code) => std::process::exit(code),
+        Ok(code) => {
+            ghola_offer::finish_sidecar(out, false);
+            std::process::exit(code)
+        }
         Err(e) => {
             tracing::debug!("Command failed: {}", e);
             // If stderr itself fails there is no channel left to report on;
             // the non-zero exit status still tells the caller that it failed.
             let _ = display_error(&e, out);
+            ghola_offer::finish_sidecar(out, ask);
             std::process::exit(1);
         }
     }

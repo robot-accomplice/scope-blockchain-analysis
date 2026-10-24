@@ -2,7 +2,7 @@
 
 use crate::scenario::{Scenario, Step, Tier, key_bytes};
 use crate::screen::{SnapshotResult, compare_snapshot, mask};
-use crate::session::{Session, StartOpts, data_dir};
+use crate::session::{Session, StartOpts, state_dir};
 use anyhow::Result;
 use regex::Regex;
 use std::path::{Path, PathBuf};
@@ -38,7 +38,7 @@ const SETTLE: Duration = Duration::from_millis(150);
 const POLL: Duration = Duration::from_millis(100);
 
 fn journal(home: &Path) -> Vec<serde_json::Value> {
-    std::fs::read_to_string(data_dir(home).join("tui-events.jsonl"))
+    std::fs::read_to_string(state_dir(home).join("tui-events.jsonl"))
         .unwrap_or_default()
         .lines()
         .filter_map(|l| serde_json::from_str(l).ok())
@@ -97,7 +97,7 @@ pub fn run_scenario(
     ctx: &RunCtx,
 ) -> Result<(Outcome, Session, tempfile::TempDir)> {
     let home = tempfile::tempdir()?;
-    let cfg_dir = home.path().join(".config/scope");
+    let cfg_dir = home.path().join(".scope-bca");
     std::fs::create_dir_all(&cfg_dir)?;
     std::fs::write(
         cfg_dir.join("config.yaml"),
@@ -180,6 +180,18 @@ fn exited(sess: &mut Session) -> Result<()> {
     }
 }
 
+/// The bytes a `type` step sends. A line feed ends a line at a cooked
+/// prompt: the unix pty has no ICRNL, so the scenarios type `\n`. ConPTY
+/// turns an input LF into Ctrl+J, which does not end a console read; a
+/// console line ends with Enter, a CR.
+fn typed_bytes(text: &str) -> std::borrow::Cow<'_, str> {
+    if cfg!(windows) {
+        text.replace('\n', "\r").into()
+    } else {
+        text.into()
+    }
+}
+
 /// Sends a named signal to the scope process.
 #[cfg(unix)]
 fn send_signal(sess: &Session, name: &str) -> Result<()> {
@@ -217,7 +229,7 @@ fn run_step(
     match step {
         Step::Type(text) => {
             exited(sess)?;
-            sess.send(text.as_bytes())?;
+            sess.send(typed_bytes(text).as_bytes())?;
             sess.pump(SETTLE)?;
         }
         Step::Key(k) => {
@@ -379,10 +391,9 @@ mod tests {
         let p = absolutize(Path::new("tests/tui/fixtures-that-do-not-exist")).unwrap();
         assert!(p.is_absolute());
         assert!(p.starts_with(std::env::current_dir().unwrap()));
-        assert_eq!(
-            absolutize(Path::new("/x/y")).unwrap(),
-            PathBuf::from("/x/y")
-        );
+        // An absolute path on this platform (`/x` has no drive on Windows).
+        let abs = std::env::temp_dir().join("x").join("y");
+        assert_eq!(absolutize(&abs).unwrap(), abs);
     }
 
     #[test]
@@ -397,11 +408,9 @@ mod tests {
         let env = child_env(Tier::Offline, &c).unwrap();
         let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
         assert_eq!(get("SCOPE_HTTP_MODE").as_deref(), Some("record"));
-        assert!(
-            get("SCOPE_HTTP_FIXTURES")
-                .unwrap()
-                .ends_with("tests/tui/fixtures/demo")
-        );
+        // By components, so the separator does not matter.
+        let fx = get("SCOPE_HTTP_FIXTURES").unwrap();
+        assert!(Path::new(&fx).ends_with("tests/tui/fixtures/demo"), "{fx}");
     }
 
     #[test]
@@ -420,7 +429,7 @@ mod tests {
             .unwrap()
             .1;
         assert!(Path::new(fx).is_absolute(), "{fx}");
-        assert!(fx.ends_with("tests/tui/fixtures/demo"), "{fx}");
+        assert!(Path::new(fx).ends_with("tests/tui/fixtures/demo"), "{fx}");
         assert!(child_env(Tier::Live, &c).unwrap().is_empty());
     }
 
@@ -428,7 +437,9 @@ mod tests {
         let bin = std::env::var("SCOPE_BIN")
             .map(PathBuf::from)
             .unwrap_or_else(|_| {
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/scope")
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../target/debug/scope")
+                    .with_extension(std::env::consts::EXE_EXTENSION)
             });
         assert!(
             bin.exists(),
@@ -516,12 +527,13 @@ steps:
     }
 
     #[test]
+    #[cfg(unix)]
     #[ignore = "needs the scope binary: cargo build --bin scope && cargo test -p scope-tui-harness -- --ignored"]
     fn test_signal_step_ends_process() {
         let (c, _keep) = ctx();
         // The signal reaches the process, and scope exits with 128+15 (R1).
         let s = parse(
-            "name: sig\nargs: [tui, --no-banner]\nsteps:\n  - signal: TERM\n  - expect_exit: 143\n",
+            "name: sig\nargs: [tui, --no-banner]\nunix_only: true\nsteps:\n  - signal: TERM\n  - expect_exit: 143\n",
         )
         .unwrap();
         let start = std::time::Instant::now();

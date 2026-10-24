@@ -262,7 +262,7 @@ pub async fn run(
     // Dossier: fetch risk assessment (uses ETHERSCAN_API_KEY for Ethereum)
     let risk_assessment = if args.dossier {
         sp.set_message("Running risk assessment...");
-        let engine = scope::compliance::risk::RiskEngine::from_env();
+        let engine = scope::compliance::risk::RiskEngine::from_env_with_http(clients.http());
         engine.assess_address(&args.address, &args.chain).await.ok()
     } else {
         None

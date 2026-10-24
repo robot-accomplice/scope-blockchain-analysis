@@ -1,7 +1,7 @@
 //! Venue registry: loads and manages venue descriptors.
 //!
 //! Built-in descriptors are embedded at compile time via `include_str!`.
-//! User descriptors in `~/.config/scope/venues/*.yaml` override built-in
+//! User descriptors in `~/.scope-bca/venues/*.yaml` override built-in
 //! venues with the same `id`.
 
 use crate::error::{Result, ScopeError};
@@ -34,7 +34,7 @@ const BUILT_IN_VENUES: &[(&str, &str)] = &[
 /// Registry of all available venue descriptors (built-in + user-defined).
 ///
 /// Built-in venues are compiled into the binary. User venues in
-/// `~/.config/scope/venues/*.yaml` can override or extend them.
+/// `~/.scope-bca/venues/*.yaml` can override or extend them.
 #[derive(Debug, Clone)]
 pub struct VenueRegistry {
     venues: HashMap<String, VenueDescriptor>,
@@ -47,7 +47,7 @@ impl Default for VenueRegistry {
         };
         // Load built-in venues, ignoring parse errors for robustness.
         for (_id, yaml) in BUILT_IN_VENUES {
-            if let Ok(desc) = serde_yaml::from_str::<VenueDescriptor>(yaml) {
+            if let Ok(desc) = serde_saphyr::from_str::<VenueDescriptor>(yaml) {
                 registry.venues.insert(desc.id.clone(), desc);
             }
         }
@@ -78,18 +78,20 @@ impl VenueRegistry {
                     .is_some_and(|ext| ext == "yaml" || ext == "yml")
                 {
                     match std::fs::read_to_string(&path) {
-                        Ok(contents) => match serde_yaml::from_str::<VenueDescriptor>(&contents) {
-                            Ok(desc) => {
-                                registry.venues.insert(desc.id.clone(), desc);
+                        Ok(contents) => {
+                            match serde_saphyr::from_str::<VenueDescriptor>(&contents) {
+                                Ok(desc) => {
+                                    registry.venues.insert(desc.id.clone(), desc);
+                                }
+                                Err(e) => {
+                                    crate::notice!(
+                                        "Warning: failed to parse venue file {}: {}",
+                                        path.display(),
+                                        e
+                                    );
+                                }
                             }
-                            Err(e) => {
-                                crate::notice!(
-                                    "Warning: failed to parse venue file {}: {}",
-                                    path.display(),
-                                    e
-                                );
-                            }
-                        },
+                        }
                         Err(e) => {
                             crate::notice!(
                                 "Warning: failed to read venue file {}: {}",
@@ -137,11 +139,9 @@ impl VenueRegistry {
         closest(input, self.list())
     }
 
-    /// Path to the user venues directory (`~/.config/scope/venues/`).
+    /// Path to the user venues directory (`~/.scope-bca/venues/`).
     pub fn user_venues_dir() -> PathBuf {
-        crate::paths::home_dir()
-            .map(|h| h.join(".config").join("scope").join("venues"))
-            .unwrap_or_else(|| PathBuf::from(".config").join("scope").join("venues"))
+        crate::paths::venues_dir()
     }
 
     /// Create an ExchangeClient for the given venue ID.
@@ -149,21 +149,33 @@ impl VenueRegistry {
     /// An unknown ID is [`ScopeError::InvalidInput`] that lists the registry
     /// venues and names the closest one. DEX venues are not listed: this
     /// lookup cannot serve them (see `MarketVenue::resolve`).
+    #[deprecated(
+        since = "0.8.0",
+        note = "pass the transport: use `VenueRegistry::create_exchange_client_with_http`"
+    )]
     pub fn create_exchange_client(
         &self,
         venue_id: &str,
     ) -> Result<crate::market::exchange::ExchangeClient> {
+        self.create_exchange_client_with_http(venue_id, crate::http::shared::fallback())
+    }
+
+    /// [`VenueRegistry::create_exchange_client`], sending the client's
+    /// requests through `http`.
+    pub fn create_exchange_client_with_http(
+        &self,
+        venue_id: &str,
+        http: std::sync::Arc<dyn crate::http::HttpClient>,
+    ) -> Result<crate::market::exchange::ExchangeClient> {
         let desc = self
             .get(venue_id)
             .ok_or_else(|| unknown_venue(venue_id, &self.list()))?;
-        Ok(crate::market::exchange::ExchangeClient::from_descriptor(
-            desc,
-        ))
+        Ok(crate::market::exchange::ExchangeClient::from_descriptor_with_http(desc, http))
     }
 
     /// Validate a venue descriptor YAML string.
     pub fn validate_yaml(yaml: &str) -> Result<VenueDescriptor> {
-        serde_yaml::from_str(yaml)
+        serde_saphyr::from_str(yaml)
             .map_err(|e| ScopeError::Config(crate::error::ConfigError::Parse { source: e }))
     }
 }
@@ -396,7 +408,10 @@ symbol:
     fn test_create_exchange_client_error_unknown_venue() {
         let registry = VenueRegistry::default();
         let err = registry
-            .create_exchange_client("nonexistent_venue_xyz")
+            .create_exchange_client_with_http(
+                "nonexistent_venue_xyz",
+                crate::http::test_transport(),
+            )
             .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("Unknown venue"));
@@ -406,7 +421,9 @@ symbol:
     #[test]
     fn test_create_exchange_client_error_includes_did_you_mean() {
         let registry = VenueRegistry::default();
-        let err = registry.create_exchange_client("binace").unwrap_err();
+        let err = registry
+            .create_exchange_client_with_http("binace", crate::http::test_transport())
+            .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("Unknown venue"));
         assert!(msg.contains("Did you mean"));
@@ -416,7 +433,9 @@ symbol:
     #[test]
     fn test_create_exchange_client_success() {
         let registry = VenueRegistry::default();
-        let client = registry.create_exchange_client("binance").unwrap();
+        let client = registry
+            .create_exchange_client_with_http("binance", crate::http::test_transport())
+            .unwrap();
         assert_eq!(client.venue_name(), "Binance Spot");
     }
 

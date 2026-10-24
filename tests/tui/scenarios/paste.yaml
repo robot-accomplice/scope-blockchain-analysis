@@ -1,5 +1,7 @@
 name: Bracketed paste joins lines into the input and never runs them
 tiers: [offline]
+# crossterm reads no paste event on Windows: a paste arrives as keys.
+unix_only: true
 steps:
   - wait_for: { text: "scope:auto>" }
   - expect_paste_mode: true

@@ -1,0 +1,59 @@
+chains:
+  ethereum_rpc: https://mainnet.infura.io/v3/YOUR_KEY
+  bsc_rpc: https://bsc-dataseed.binance.org
+  aegis_rpc: null
+  solana_rpc: https://api.mainnet-beta.solana.com
+  tron_api: https://api.trongrid.io
+  api_keys:
+    bscscan: YOUR_API_KEY
+    tronscan: YOUR_API_KEY
+    etherscan: YOUR_API_KEY
+    solscan: YOUR_API_KEY
+output:
+  format: table
+  color: true
+address_book:
+  data_dir: ~/.scope-bca/data
+monitor:
+  layout: dashboard
+  refresh_seconds: 10
+  widgets:
+    price_chart: true
+    volume_chart: true
+    buy_sell_pressure: true
+    metrics_panel: true
+    activity_log: true
+    holder_count: true
+    liquidity_depth: true
+  scale: linear
+  color_scheme: green-red
+  alerts:
+    price_min: null
+    price_max: null
+    whale_min_usd: null
+    volume_spike_threshold_pct: null
+  export:
+    path: null
+  auto_pause_on_input: false
+  venue: null
+ghola:
+  enabled: false
+  stealth: false
+  buffer_size: 4096
+web:
+  auth_token: null
+market:
+  health:
+    peg_target: 1.0
+    peg_range: 0.001
+    min_levels: 10
+    min_depth: 3000.0
+    min_bid_ask_ratio: 0.2
+    max_bid_ask_ratio: 5.0
+    max_spread_pct: 3.0
+    min_top3_depth: 300.0
+    min_top10_depth: 2000.0
+    amm_step_pct: 0.1
+    depth_window_pct: 2.0
+    min_depth_volume_pct: 5.0
+    max_depth_volume_pct: 10.0

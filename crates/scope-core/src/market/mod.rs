@@ -20,7 +20,8 @@
 //! #[tokio::main]
 //! async fn main() -> scope::Result<()> {
 //!     let registry = VenueRegistry::load()?;
-//!     let exchange = registry.create_exchange_client("binance")?;
+//!     let http = scope::http::build(&scope::Config::default())?.client;
+//!     let exchange = registry.create_exchange_client_with_http("binance", http)?;
 //!     let pair = exchange.venue_symbol(&Pair::parse("USDC"));
 //!     let book = exchange.fetch_order_book(&pair).await?;
 //!     let summary = MarketSummary::from_order_book(&book, &HealthThresholds::default(), None);
@@ -35,7 +36,11 @@ pub mod assets;
 pub mod fetch;
 pub mod health;
 pub mod pair;
-pub mod series;
+pub mod patterns;
+/// The metric catalog moved to [`crate::metrics`]; this path stays for one
+/// release (#47, Q6).
+#[doc(no_inline)]
+pub use crate::metrics as series;
 pub mod traits;
 pub mod types;
 
@@ -61,7 +66,7 @@ pub mod testing {
             .unwrap_or_else(|| panic!("no built-in venue {id}"))
             .clone();
         desc.base_url = base_url.to_string();
-        ExchangeClient::from_descriptor(&desc)
+        ExchangeClient::from_descriptor_with_http(&desc, crate::http::test_transport())
     }
 }
 
@@ -72,9 +77,11 @@ pub use configurable_client::ConfigurableExchangeClient;
 pub use default_venue::DEFAULT_VENUE;
 pub use descriptor::VenueDescriptor;
 pub use exchange::ExchangeClient;
+#[allow(deprecated)]
 pub use fetch::{
-    DexAnalyticsSource, fetch_book_and_volume, fetch_summary, fetch_token_summary,
-    fetch_token_summary_by_name, most_liquid,
+    DexAnalyticsSource, fetch_book_and_volume, fetch_pattern_trades, fetch_summary,
+    fetch_token_summary, fetch_token_summary_by_name, fetch_token_summary_by_name_with_http,
+    most_liquid,
 };
 pub use orderbook::{
     BookSide, BookSource, Candle, ExecutionEstimate, ExecutionSide, HealthCheck, HealthOverrides,

@@ -7,6 +7,8 @@ use scope::compliance::datasource::{BlockchainDataClient, analyze_patterns};
 use scope::compliance::etherscan::ETHERSCAN_KEY_ENV;
 use scope::compliance::risk::RiskEngine;
 use scope::display::{OutputFormat, format_risk_report};
+use scope::http::HttpClient;
+use std::sync::Arc;
 
 #[derive(Debug, Subcommand)]
 pub enum ComplianceCommands {
@@ -150,13 +152,17 @@ pub enum ReportType {
 }
 
 /// Handle risk assessment command
-pub async fn handle_risk(args: RiskArgs, out: &Output) -> anyhow::Result<()> {
-    handle_risk_with_client(args, None, out).await
+pub async fn handle_risk(
+    args: RiskArgs,
+    http: Arc<dyn HttpClient>,
+    out: &Output,
+) -> anyhow::Result<()> {
+    handle_risk_with_client(args, etherscan_client(http), out).await
 }
 
-/// `given`, or a client for the Etherscan key when it is set.
-fn etherscan_client(given: Option<BlockchainDataClient>) -> Option<BlockchainDataClient> {
-    given.or_else(BlockchainDataClient::from_env_opt)
+/// A client for the Etherscan key when it is set, sending through `http`.
+fn etherscan_client(http: Arc<dyn HttpClient>) -> Option<BlockchainDataClient> {
+    BlockchainDataClient::from_env_opt_with_http(http)
 }
 
 /// The risk engine, with Etherscan data when there is a client. Tells the
@@ -194,7 +200,7 @@ pub async fn handle_risk_with_client(
         out,
     );
 
-    let engine = risk_engine(etherscan_client(client).as_ref(), Some(&sp), out);
+    let engine = risk_engine(client.as_ref(), Some(&sp), out);
 
     let assessment = engine.assess_address(&args.address, &chain).await?;
     sp.finish("Risk assessment complete.");
@@ -225,8 +231,12 @@ pub async fn handle_risk_with_client(
 }
 
 /// Handle transaction tracing command
-pub async fn handle_trace(args: TraceArgs, out: &Output) -> anyhow::Result<()> {
-    handle_trace_with_client(args, None, out).await
+pub async fn handle_trace(
+    args: TraceArgs,
+    http: Arc<dyn HttpClient>,
+    out: &Output,
+) -> anyhow::Result<()> {
+    handle_trace_with_client(args, etherscan_client(http), out).await
 }
 
 /// Handle transaction tracing with an optional pre-built client (for testability).
@@ -242,7 +252,7 @@ pub async fn handle_trace_with_client(
         note!(out, "Flagging suspicious addresses enabled");
     }
 
-    let resolved_client = etherscan_client(client);
+    let resolved_client = client;
 
     if let Some(client) = resolved_client {
         match client.trace_transaction(&args.tx_hash, args.depth).await {
@@ -272,8 +282,12 @@ pub async fn handle_trace_with_client(
 }
 
 /// Handle pattern analysis command
-pub async fn handle_analyze(args: AnalyzeArgs, out: &Output) -> anyhow::Result<()> {
-    handle_analyze_with_client(args, None, out).await
+pub async fn handle_analyze(
+    args: AnalyzeArgs,
+    http: Arc<dyn HttpClient>,
+    out: &Output,
+) -> anyhow::Result<()> {
+    handle_analyze_with_client(args, etherscan_client(http), out).await
 }
 
 /// Handle pattern analysis with an optional pre-built client (for testability).
@@ -286,7 +300,7 @@ pub async fn handle_analyze_with_client(
     note!(out, "Patterns: {:?}", args.patterns);
     note!(out, "Time range: {}", args.range);
 
-    let resolved_client = etherscan_client(client);
+    let resolved_client = client;
 
     if let Some(client) = resolved_client {
         // Auto-detect chain
@@ -329,6 +343,7 @@ pub async fn handle_analyze_with_client(
 /// Handle compliance report generation
 pub async fn handle_compliance_report(
     args: ComplianceReportArgs,
+    http: Arc<dyn HttpClient>,
     out: &Output,
 ) -> anyhow::Result<()> {
     let addresses = resolve_compliance_targets(&args.target)?;
@@ -344,7 +359,7 @@ pub async fn handle_compliance_report(
         args.jurisdiction
     );
 
-    let client = etherscan_client(None);
+    let client = etherscan_client(http);
     let engine = risk_engine(client.as_ref(), None, out);
 
     let mut risk_assessments = Vec::new();
@@ -633,7 +648,7 @@ mod tests {
             detailed: false,
             output: None,
         };
-        let result = handle_risk(args, &quiet()).await;
+        let result = handle_risk(args, scope::http::test_transport(), &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -647,7 +662,7 @@ mod tests {
             detailed: true,
             output: None,
         };
-        let result = handle_risk(args, &quiet()).await;
+        let result = handle_risk(args, scope::http::test_transport(), &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -663,7 +678,7 @@ mod tests {
             detailed: false,
             output: Some(path.clone()),
         };
-        let result = handle_risk(args, &quiet()).await;
+        let result = handle_risk(args, scope::http::test_transport(), &quiet()).await;
         assert!(result.is_ok());
         assert!(std::path::Path::new(&path).exists());
     }
@@ -681,7 +696,7 @@ mod tests {
             detailed: false,
             output: Some(path_str.clone()),
         };
-        let result = handle_risk(args, &quiet()).await;
+        let result = handle_risk(args, scope::http::test_transport(), &quiet()).await;
         assert!(result.is_ok());
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("Risk") || content.contains("risk"));
@@ -700,7 +715,7 @@ mod tests {
             detailed: false,
             output: Some(path_str.clone()),
         };
-        let result = handle_risk(args, &quiet()).await;
+        let result = handle_risk(args, scope::http::test_transport(), &quiet()).await;
         assert!(result.is_ok());
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("address") || content.contains("chain"));
@@ -716,7 +731,7 @@ mod tests {
             detailed: false,
             output: None,
         };
-        let result = handle_risk(args, &quiet()).await;
+        let result = handle_risk(args, scope::http::test_transport(), &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -729,7 +744,7 @@ mod tests {
             flag_suspicious: true,
             format: OutputFormat::Table,
         };
-        let result = handle_trace(args, &quiet()).await;
+        let result = handle_trace(args, scope::http::test_transport(), &quiet()).await;
         assert!(result.is_ok()); // No API key → prints message, doesn't error
     }
 
@@ -742,67 +757,97 @@ mod tests {
             range: "30d".to_string(),
             format: OutputFormat::Table,
         };
-        let result = handle_analyze(args, &quiet()).await;
+        let result = handle_analyze(args, scope::http::test_transport(), &quiet()).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_handle_compliance_report() {
+        // A temp dir: `/tmp` is not a folder on every platform.
+        let dir = tempfile::tempdir().unwrap();
         let args = ComplianceReportArgs {
             target: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
             jurisdiction: Jurisdiction::US,
             report_type: ReportType::Summary,
-            output: "/tmp/test_compliance.json".to_string(),
+            output: dir
+                .path()
+                .join("test_compliance.json")
+                .display()
+                .to_string(),
         };
-        let result = handle_compliance_report(args, &quiet()).await;
+        let result = handle_compliance_report(args, scope::http::test_transport(), &quiet()).await;
         assert!(result.is_ok()); // Not yet implemented → prints message
     }
 
     #[tokio::test]
     async fn test_handle_compliance_report_eu_detailed() {
+        // A temp dir: `/tmp` is not a folder on every platform.
+        let dir = tempfile::tempdir().unwrap();
         let args = ComplianceReportArgs {
             target: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
             jurisdiction: Jurisdiction::EU,
             report_type: ReportType::Detailed,
-            output: "/tmp/test_compliance_eu.json".to_string(),
+            output: dir
+                .path()
+                .join("test_compliance_eu.json")
+                .display()
+                .to_string(),
         };
-        let result = handle_compliance_report(args, &quiet()).await;
+        let result = handle_compliance_report(args, scope::http::test_transport(), &quiet()).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_handle_compliance_report_uk_sar() {
+        // A temp dir: `/tmp` is not a folder on every platform.
+        let dir = tempfile::tempdir().unwrap();
         let args = ComplianceReportArgs {
             target: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
             jurisdiction: Jurisdiction::UK,
             report_type: ReportType::SAR,
-            output: "/tmp/test_compliance_uk.json".to_string(),
+            output: dir
+                .path()
+                .join("test_compliance_uk.json")
+                .display()
+                .to_string(),
         };
-        let result = handle_compliance_report(args, &quiet()).await;
+        let result = handle_compliance_report(args, scope::http::test_transport(), &quiet()).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_handle_compliance_report_singapore_travel_rule() {
+        // A temp dir: `/tmp` is not a folder on every platform.
+        let dir = tempfile::tempdir().unwrap();
         let args = ComplianceReportArgs {
             target: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
             jurisdiction: Jurisdiction::Singapore,
             report_type: ReportType::TravelRule,
-            output: "/tmp/test_compliance_sg.json".to_string(),
+            output: dir
+                .path()
+                .join("test_compliance_sg.json")
+                .display()
+                .to_string(),
         };
-        let result = handle_compliance_report(args, &quiet()).await;
+        let result = handle_compliance_report(args, scope::http::test_transport(), &quiet()).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_handle_compliance_report_switzerland() {
+        // A temp dir: `/tmp` is not a folder on every platform.
+        let dir = tempfile::tempdir().unwrap();
         let args = ComplianceReportArgs {
             target: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
             jurisdiction: Jurisdiction::Switzerland,
             report_type: ReportType::Summary,
-            output: "/tmp/test_compliance_ch.json".to_string(),
+            output: dir
+                .path()
+                .join("test_compliance_ch.json")
+                .display()
+                .to_string(),
         };
-        let result = handle_compliance_report(args, &quiet()).await;
+        let result = handle_compliance_report(args, scope::http::test_transport(), &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -816,7 +861,7 @@ mod tests {
             detailed: false,
             output: None,
         };
-        let result = handle_risk(args, &quiet()).await;
+        let result = handle_risk(args, scope::http::test_transport(), &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1054,7 +1099,7 @@ mod tests {
             detailed: true,
             output: None,
         };
-        let result = handle_risk(args, &quiet()).await;
+        let result = handle_risk(args, scope::http::test_transport(), &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1067,7 +1112,7 @@ mod tests {
             flag_suspicious: false,
             format: OutputFormat::Json,
         };
-        let result = handle_trace(args, &quiet()).await;
+        let result = handle_trace(args, scope::http::test_transport(), &quiet()).await;
         assert!(result.is_ok());
     }
 
@@ -1086,7 +1131,7 @@ mod tests {
             range: "6m".to_string(),
             format: OutputFormat::Json,
         };
-        let result = handle_analyze(args, &quiet()).await;
+        let result = handle_analyze(args, scope::http::test_transport(), &quiet()).await;
         assert!(result.is_ok());
     }
 

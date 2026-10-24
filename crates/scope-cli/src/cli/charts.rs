@@ -11,7 +11,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::widgets::Widget;
-use scope::market::series::Threshold;
+use scope::metrics::Threshold;
 
 /// Bar glyphs from 1/8 to a full cell.
 const BARS: [&str; 8] = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
@@ -31,6 +31,8 @@ pub struct Sparkline<'a> {
     values: &'a [Option<f64>],
     threshold: Option<Threshold>,
     style: Style,
+    track: bool,
+    min_span: Option<f64>,
 }
 
 impl<'a> Sparkline<'a> {
@@ -40,7 +42,26 @@ impl<'a> Sparkline<'a> {
             values,
             threshold: None,
             style,
+            track: false,
+            min_span: None,
         }
+    }
+
+    /// The smallest range the scale shows. A series that moves less than
+    /// `span` is drawn around the middle of the chart, so noise reads as a
+    /// flat line, not as full and empty bars.
+    pub fn min_span(mut self, span: f64) -> Self {
+        self.min_span = Some(span).filter(|s| s.is_finite() && *s > 0.0);
+        self
+    }
+
+    /// Track mode (#58 market view, J4): the bars fill a `─` track from the
+    /// left, one cell per run, and scroll when it is full. A bar outside the
+    /// threshold (above a `Max`, below a `Min`) is drawn in the error color;
+    /// no threshold line is drawn.
+    pub fn track(mut self) -> Self {
+        self.track = true;
+        self
     }
 
     /// Adds the line of `threshold`, when there is one.
@@ -76,13 +97,20 @@ impl Widget for Sparkline<'_> {
         let (mut lo, mut hi) = known.fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| {
             (lo.min(v), hi.max(v))
         });
-        if let Some(t) = line {
+        if let Some(t) = line.filter(|_| !self.track) {
             // The scale includes the threshold, so its line is on the chart.
             lo = lo.min(t);
             hi = hi.max(t);
         }
         if !lo.is_finite() {
             return; // no value to draw
+        }
+        if let Some(span) = self.min_span
+            && hi - lo < span
+        {
+            let mid = (lo + hi) / 2.0;
+            lo = mid - span / 2.0;
+            hi = mid + span / 2.0;
         }
         let steps = u32::from(area.height) * STEPS_PER_ROW;
         let range = hi - lo;
@@ -94,11 +122,29 @@ impl Widget for Sparkline<'_> {
             let h = ((v - lo) / range * f64::from(steps - 1)).round() as u32 + 1;
             h.min(steps)
         };
-        let x0 = area.right() - shown.len() as u16;
+        let x0 = if self.track {
+            area.left()
+        } else {
+            area.right() - shown.len() as u16
+        };
+        if self.track {
+            // The empty track: what the coming runs will fill.
+            let row = area.bottom() - 1;
+            for x in x0 + shown.len() as u16..area.right() {
+                buf[(x, row)]
+                    .set_symbol(THRESHOLD_GLYPH)
+                    .set_style(SECONDARY);
+            }
+        }
         for (i, value) in shown.iter().enumerate() {
             let x = x0 + i as u16;
             let Some(v) = value.filter(|v| v.is_finite()) else {
                 continue; // a gap
+            };
+            let style = match (self.track, self.threshold) {
+                (true, Some(Threshold::Max(t))) if v > t => ERR,
+                (true, Some(Threshold::Min(t))) if v < t => ERR,
+                _ => self.style,
             };
             let mut left = height_of(v);
             for row in (area.top()..area.bottom()).rev() {
@@ -108,11 +154,11 @@ impl Widget for Sparkline<'_> {
                 let eighths = left.min(STEPS_PER_ROW);
                 buf[(x, row)]
                     .set_symbol(BARS[eighths as usize - 1])
-                    .set_style(self.style);
+                    .set_style(style);
                 left -= eighths;
             }
         }
-        if let Some(t) = line {
+        if let Some(t) = line.filter(|_| !self.track) {
             let rows_up = height_of(t).saturating_sub(1) / STEPS_PER_ROW;
             let row = area.bottom() - 1 - rows_up as u16;
             for x in area.left()..area.right() {
@@ -128,12 +174,19 @@ impl Widget for Sparkline<'_> {
 /// One `✓` or `✗` per run, the newest at the right.
 pub struct HealthStrip<'a> {
     runs: &'a [bool],
+    track: bool,
 }
 
 impl<'a> HealthStrip<'a> {
     /// A strip of `runs` (true = healthy), oldest first.
     pub fn new(runs: &'a [bool]) -> Self {
-        Self { runs }
+        Self { runs, track: false }
+    }
+
+    /// Track mode: from the left over a `─` track, as [`Sparkline::track`].
+    pub fn track(mut self) -> Self {
+        self.track = true;
+        self
     }
 }
 
@@ -143,7 +196,16 @@ impl Widget for HealthStrip<'_> {
             return;
         }
         let shown = newest(self.runs, area.width as usize);
-        let x0 = area.right() - shown.len() as u16;
+        let x0 = if self.track {
+            for x in area.left() + shown.len() as u16..area.right() {
+                buf[(x, area.top())]
+                    .set_symbol(THRESHOLD_GLYPH)
+                    .set_style(SECONDARY);
+            }
+            area.left()
+        } else {
+            area.right() - shown.len() as u16
+        };
         for (i, healthy) in shown.iter().enumerate() {
             let (glyph, style) = if *healthy {
                 (PASS_GLYPH, OK)
@@ -172,6 +234,61 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    #[test]
+    fn test_track_fills_from_the_left_then_scrolls() {
+        let values = [Some(1.0), Some(2.0)];
+        let rows = draw(Sparkline::new(&values, Style::new()).track(), 6, 1);
+        assert_eq!(rows[0], "▁█────", "{rows:?}");
+        let values: Vec<Option<f64>> = (1..=8).map(|v| Some(f64::from(v))).collect();
+        let rows = draw(Sparkline::new(&values, Style::new()).track(), 4, 1);
+        assert!(!rows[0].contains('─'), "a full track scrolls: {rows:?}");
+        assert!(
+            rows[0].ends_with('█'),
+            "the newest at the right edge: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn test_track_colors_a_bar_outside_its_limit_and_draws_no_threshold_line() {
+        let values = [Some(1.0), Some(5.0)];
+        let area = Rect::new(0, 0, 4, 2);
+        let mut buf = Buffer::empty(area);
+        Sparkline::new(&values, OK)
+            .threshold(Some(Threshold::Max(3.0)))
+            .track()
+            .render(area, &mut buf);
+        assert_eq!(buf[(0, 1)].style().fg, OK.fg, "within the limit");
+        assert_eq!(buf[(1, 1)].style().fg, ERR.fg, "above the max");
+        // The only `─` cells are the empty track on the bottom row.
+        assert_eq!(buf[(2, 0)].symbol(), " ");
+        assert_eq!(buf[(2, 1)].symbol(), "─");
+    }
+
+    #[test]
+    fn test_noise_under_the_min_span_reads_flat() {
+        // Depth moving 0.1% must not draw full and empty bars.
+        let values = [Some(1000.0), Some(1001.0), Some(1000.5)];
+        let rows = draw(Sparkline::new(&values, Style::new()).min_span(100.0), 3, 1);
+        let heights: Vec<usize> = rows[0]
+            .chars()
+            .map(|c| BARS.iter().position(|b| b.starts_with(c)).unwrap())
+            .collect();
+        assert!(
+            heights.iter().all(|h| (3..=4).contains(h)),
+            "near the middle: {rows:?}"
+        );
+        // A real move larger than the span still fills the scale.
+        let values = [Some(1000.0), Some(1500.0)];
+        let rows = draw(Sparkline::new(&values, Style::new()).min_span(100.0), 2, 1);
+        assert_eq!(rows[0], "▁█", "{rows:?}");
+    }
+
+    #[test]
+    fn test_health_strip_track_fills_from_the_left() {
+        let rows = draw(HealthStrip::new(&[true, false]).track(), 5, 1);
+        assert_eq!(rows[0], "✓✗───");
     }
 
     #[test]

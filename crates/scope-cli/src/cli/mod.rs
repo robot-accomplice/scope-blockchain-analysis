@@ -66,6 +66,7 @@ pub mod discover;
 pub mod dispatch;
 pub mod errors;
 pub mod export;
+pub mod ghola_offer;
 pub mod health_args;
 pub mod insights;
 pub mod interactive;
@@ -77,6 +78,7 @@ pub mod progress;
 pub mod prompt;
 pub mod repeat;
 pub mod report;
+pub mod resolve;
 pub(crate) mod screen;
 pub mod setup;
 pub(crate) mod textfit;
@@ -86,6 +88,7 @@ pub(crate) mod token_pick;
 pub mod tui;
 pub mod tx;
 pub mod venues;
+pub mod watch;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -137,7 +140,7 @@ pub struct Cli {
 
     /// Path to configuration file.
     ///
-    /// Overrides the default location (~/.config/scope/config.yaml).
+    /// Overrides the default location (~/.scope-bca/config.yaml).
     #[arg(long, global = true, value_name = "PATH")]
     pub config: Option<PathBuf>,
 
@@ -219,10 +222,12 @@ pub enum Commands {
     #[command(visible_alias = "disc")]
     Discover(discover::DiscoverArgs),
 
-    /// Live token monitor with real-time TUI dashboard.
+    /// Monitor a market, token or address live: the monitor wizard in the TUI.
     ///
-    /// Launches a terminal UI with price/volume charts, buy/sell gauges,
-    /// transaction feed, and more. Shortcut for `scope interactive` + `monitor <token>`.
+    /// Opens the TUI with the monitor wizard filled from the arguments: the
+    /// targets, the checks (market health with a venue), the interval, the
+    /// duration and the outputs. Its run shows each target's pass/fail state
+    /// in a grid. `--dashboard` opens the old dashboard (deprecated).
     #[command(visible_alias = "mon")]
     Monitor(MonitorArgs),
 

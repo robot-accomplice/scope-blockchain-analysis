@@ -5,7 +5,7 @@ Dataflow for `scope portfolio` subcommands: add, remove, list, summary.
 ```mermaid
 flowchart TB
     subgraph Storage
-        A[~/.local/share/scope/portfolio.yaml]
+        A[~/.scope-bca/data/address_book.yaml]
         A --> B[Portfolio::load]
         B --> C[Portfolio: addresses]
         C --> D[WatchedAddress: address, label, chain, tags]

@@ -54,6 +54,10 @@ pub struct InsightsArgs {
     /// - Otherwise = token symbol/name (e.g. USDC, WETH)
     pub target: String,
 
+    /// The token's contract: use it and skip the symbol lookup.
+    #[arg(long = "token", value_name = "CONTRACT")]
+    pub token_contract: Option<String>,
+
     /// Override detected chain (ethereum, polygon, solana, tron, etc.).
     #[arg(short, long)]
     pub chain: Option<String>,
@@ -211,10 +215,11 @@ pub async fn run(
             }
 
             // Risk assessment (compliance engine)
-            let risk_assessment = scope::compliance::risk::RiskEngine::from_env()
-                .assess_address(&args.target, chain)
-                .await
-                .ok();
+            let risk_assessment =
+                scope::compliance::risk::RiskEngine::from_env_with_http(clients.http())
+                    .assess_address(&args.target, chain)
+                    .await
+                    .ok();
 
             if let Some(ref risk) = risk_assessment {
                 output.push_str(&risk_line(risk));
@@ -307,7 +312,8 @@ pub async fn run(
         InferredTarget::Token { chain } => {
             output.push_str("## Observations\n\n");
             let analytics = fetch_analytics_for_input(
-                &args.target,
+                // --token: the contract is the input; an address passes through.
+                args.token_contract.as_deref().unwrap_or(&args.target),
                 chain,
                 Period::Hour24,
                 10,
@@ -388,7 +394,7 @@ pub async fn run(
                 let thresholds = args.health.resolve(config);
                 if let (Some(desc), Ok(venue)) = (
                     registry.get(venue_id),
-                    MarketVenue::resolve(venue_id, &registry),
+                    MarketVenue::resolve_with_http(venue_id, &registry, clients.http()),
                 ) && let Ok(summary) = fetch_token_summary(&venue, &analytics, &thresholds).await
                 {
                     peg_status = Some(summary.peg_status());
@@ -994,6 +1000,9 @@ mod tests {
     struct MockFactory;
 
     impl ChainClientFactory for MockFactory {
+        fn http(&self) -> std::sync::Arc<dyn scope::http::HttpClient> {
+            scope::http::test_transport()
+        }
         fn create_chain_client(&self, _chain: &str) -> scope::error::Result<Box<dyn ChainClient>> {
             Ok(Box::new(MockChainClient))
         }
@@ -1069,6 +1078,9 @@ mod tests {
     struct MockContractFactory;
 
     impl ChainClientFactory for MockContractFactory {
+        fn http(&self) -> std::sync::Arc<dyn scope::http::HttpClient> {
+            scope::http::test_transport()
+        }
         fn create_chain_client(&self, _chain: &str) -> scope::error::Result<Box<dyn ChainClient>> {
             Ok(Box::new(MockContractClient))
         }
@@ -1270,6 +1282,9 @@ mod tests {
     struct MockTokenFactory;
 
     impl ChainClientFactory for MockTokenFactory {
+        fn http(&self) -> std::sync::Arc<dyn scope::http::HttpClient> {
+            scope::http::test_transport()
+        }
         fn create_chain_client(&self, _chain: &str) -> scope::error::Result<Box<dyn ChainClient>> {
             Ok(Box::new(MockTokenChainClient))
         }
@@ -1288,6 +1303,7 @@ mod tests {
         let factory = MockFactory;
         let args = InsightsArgs {
             target: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            token_contract: None,
             chain: None,
             decode: false,
             trace: false,
@@ -1303,6 +1319,7 @@ mod tests {
         let factory = MockContractFactory;
         let args = InsightsArgs {
             target: "0xdAC17F958D2ee523a2206206994597C13D831ec7".to_string(),
+            token_contract: None,
             chain: None,
             decode: false,
             trace: false,
@@ -1319,6 +1336,7 @@ mod tests {
         let args = InsightsArgs {
             target: "0xabc123def456789012345678901234567890123456789012345678901234abcd"
                 .to_string(),
+            token_contract: None,
             chain: None,
             decode: false,
             trace: false,
@@ -1335,6 +1353,7 @@ mod tests {
         let args = InsightsArgs {
             target: "0xabc123def456789012345678901234567890123456789012345678901234abcd"
                 .to_string(),
+            token_contract: None,
             chain: Some("ethereum".to_string()),
             decode: true,
             trace: false,
@@ -1350,6 +1369,7 @@ mod tests {
         let factory = MockFactory;
         let args = InsightsArgs {
             target: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            token_contract: None,
             chain: Some("polygon".to_string()),
             decode: false,
             trace: false,
@@ -1365,6 +1385,7 @@ mod tests {
         let factory = MockTokenFactory;
         let args = InsightsArgs {
             target: "TEST".to_string(),
+            token_contract: None,
             chain: Some("ethereum".to_string()),
             decode: false,
             trace: false,
@@ -1385,6 +1406,7 @@ mod tests {
         let factory = MockTokenFactory;
         let args = InsightsArgs {
             target: "0xTEST1234567890123456789012345678901234567".to_string(),
+            token_contract: None,
             chain: Some("ethereum".to_string()),
             decode: false,
             trace: false,
@@ -2130,6 +2152,7 @@ mod tests {
     fn test_insights_args_debug() {
         let args = InsightsArgs {
             target: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            token_contract: None,
             chain: Some("ethereum".to_string()),
             decode: true,
             trace: false,

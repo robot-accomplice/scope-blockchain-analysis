@@ -70,9 +70,14 @@ impl std::fmt::Debug for ConfigurableExchangeClient {
 }
 
 impl ConfigurableExchangeClient {
-    /// Create a new client from a venue descriptor, using the process transport.
+    /// Create a new client from a venue descriptor, with a transport built
+    /// from the environment.
+    #[deprecated(
+        since = "0.8.0",
+        note = "pass the transport: use `ConfigurableExchangeClient::with_http`"
+    )]
     pub fn new(descriptor: VenueDescriptor) -> Self {
-        Self::with_http(descriptor, crate::http::transport())
+        Self::with_http(descriptor, crate::http::shared::fallback())
     }
 
     /// Create a client that sends its requests through `http`.
@@ -862,7 +867,7 @@ mod tests {
     #[test]
     fn test_navigate_root_empty() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let json = serde_json::json!({"price": 42});
         let result = client.navigate_root(&json, None).unwrap();
         assert_eq!(result, &json);
@@ -871,7 +876,7 @@ mod tests {
     #[test]
     fn test_navigate_root_single_key() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let json = serde_json::json!({"result": {"price": 42}});
         let result = client.navigate_root(&json, Some("result")).unwrap();
         assert_eq!(result, &serde_json::json!({"price": 42}));
@@ -880,7 +885,7 @@ mod tests {
     #[test]
     fn test_navigate_root_nested_with_index() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let json = serde_json::json!({"data": [{"price": 42}, {"price": 43}]});
         let result = client.navigate_root(&json, Some("data.0")).unwrap();
         assert_eq!(result, &serde_json::json!({"price": 42}));
@@ -889,7 +894,7 @@ mod tests {
     #[test]
     fn test_navigate_root_wildcard() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let json = serde_json::json!({"result": {"XXBTZUSD": {"a": ["42000.0"]}}});
         let result = client.navigate_root(&json, Some("result.*")).unwrap();
         assert_eq!(result, &serde_json::json!({"a": ["42000.0"]}));
@@ -898,7 +903,7 @@ mod tests {
     #[test]
     fn test_extract_f64_nested() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let data = serde_json::json!({"c": ["42000.5", "1.5"]});
         assert_eq!(client.extract_f64(&data, "c.0"), Some(42000.5));
         assert_eq!(client.extract_f64(&data, "c.1"), Some(1.5));
@@ -907,7 +912,7 @@ mod tests {
     #[test]
     fn test_parse_positional_levels() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let arr = serde_json::json!([["42000.0", "1.5"], ["42001.0", "2.0"]]);
         let mapping = ResponseMapping {
             level_format: Some("positional".to_string()),
@@ -922,7 +927,7 @@ mod tests {
     #[test]
     fn test_parse_object_levels() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let arr = serde_json::json!([
             {"price": "42000.0", "size": "1.5"},
             {"price": "42001.0", "size": "2.0"}
@@ -942,7 +947,7 @@ mod tests {
     #[test]
     fn test_parse_side_mapping() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let data = serde_json::json!({"isBuyerMaker": true});
         let mapping = ResponseMapping {
             side: Some(crate::market::descriptor::SideMapping {
@@ -962,7 +967,7 @@ mod tests {
     #[test]
     fn test_interpolate_json() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let template = serde_json::json!({
             "method": "get-book",
             "params": {"instrument": "{pair}", "depth": "{limit}"}
@@ -980,7 +985,7 @@ mod tests {
     #[test]
     fn test_interpolate_json_array_with_placeholders() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let template = serde_json::json!({
             "pairs": ["{pair}", "limit:{limit}"]
         });
@@ -992,7 +997,7 @@ mod tests {
     #[test]
     fn test_interpolate_json_preserves_primitive_types() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let template = serde_json::json!({
             "flag": true,
             "count": 42,
@@ -1031,7 +1036,8 @@ mod tests {
     #[test]
     fn test_descriptor_accessor() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc.clone());
+        let client =
+            ConfigurableExchangeClient::with_http(desc.clone(), crate::http::test_transport());
         assert_eq!(client.descriptor().id, "test");
         assert_eq!(client.descriptor().name, "Test");
     }
@@ -1039,7 +1045,7 @@ mod tests {
     #[test]
     fn test_format_pair_accessor() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         assert_eq!(client.format_pair("BTC", None), "BTCUSDT");
         assert_eq!(client.format_pair("ETH", Some("USD")), "ETHUSD");
     }
@@ -1047,7 +1053,7 @@ mod tests {
     #[test]
     fn test_navigate_root_empty_string_path() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let json = serde_json::json!({"price": 42});
         let result = client.navigate_root(&json, Some("")).unwrap();
         assert_eq!(result, &json);
@@ -1056,7 +1062,7 @@ mod tests {
     #[test]
     fn test_navigate_root_wildcard_on_non_object_null() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let json = serde_json::json!({"result": null});
         let result = client.navigate_root(&json, Some("result.*"));
         assert!(result.is_err());
@@ -1067,7 +1073,7 @@ mod tests {
     #[test]
     fn test_navigate_root_wildcard_on_non_object_bool() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let json = serde_json::json!({"result": true});
         let result = client.navigate_root(&json, Some("result.*"));
         assert!(result.is_err());
@@ -1078,7 +1084,7 @@ mod tests {
     #[test]
     fn test_navigate_root_wildcard_on_non_object_number() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let json = serde_json::json!({"result": 42});
         let result = client.navigate_root(&json, Some("result.*"));
         assert!(result.is_err());
@@ -1092,7 +1098,7 @@ mod tests {
     #[test]
     fn test_navigate_root_wildcard_on_non_object_string() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let json = serde_json::json!({"result": "not_an_object"});
         let result = client.navigate_root(&json, Some("result.*"));
         assert!(result.is_err());
@@ -1106,7 +1112,7 @@ mod tests {
     #[test]
     fn test_navigate_root_wildcard_on_non_object_array() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let json = serde_json::json!({"result": [1, 2, 3]});
         let result = client.navigate_root(&json, Some("result.*"));
         assert!(result.is_err());
@@ -1117,7 +1123,7 @@ mod tests {
     #[test]
     fn test_navigate_root_wildcard_empty_object() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let json = serde_json::json!({"result": {}});
         let result = client.navigate_root(&json, Some("result.*"));
         assert!(result.is_err());
@@ -1131,7 +1137,7 @@ mod tests {
     #[test]
     fn test_extract_string_from_string() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let data = serde_json::json!({"id": "abc123"});
         assert_eq!(
             client.extract_string(&data, "id").as_deref(),
@@ -1142,7 +1148,7 @@ mod tests {
     #[test]
     fn test_extract_string_from_number() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let data = serde_json::json!({"id": 12345});
         assert_eq!(client.extract_string(&data, "id").as_deref(), Some("12345"));
     }
@@ -1150,7 +1156,7 @@ mod tests {
     #[test]
     fn test_extract_string_from_nested_path() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let data = serde_json::json!({"a": {"b": {"c": ["x", "value"]}}});
         assert_eq!(
             client.extract_string(&data, "a.b.c.1").as_deref(),
@@ -1161,7 +1167,7 @@ mod tests {
     #[test]
     fn test_extract_string_returns_none_for_object() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let data = serde_json::json!({"id": {"nested": "obj"}});
         assert_eq!(client.extract_string(&data, "id"), None);
     }
@@ -1169,7 +1175,7 @@ mod tests {
     #[test]
     fn test_extract_string_returns_none_for_array() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let data = serde_json::json!({"id": [1, 2, 3]});
         assert_eq!(client.extract_string(&data, "id"), None);
     }
@@ -1177,7 +1183,7 @@ mod tests {
     #[test]
     fn test_navigate_field_deeper_path() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let data = serde_json::json!({"level1": {"level2": {"level3": [0, 99.5]}}});
         assert_eq!(
             client.extract_f64(&data, "level1.level2.level3.1"),
@@ -1188,7 +1194,7 @@ mod tests {
     #[test]
     fn test_parse_levels_empty_array() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let arr = serde_json::json!([]);
         let mapping = ResponseMapping::default();
         let levels = client.parse_levels(&arr, &mapping).unwrap();
@@ -1198,7 +1204,7 @@ mod tests {
     #[test]
     fn test_parse_levels_not_array_err() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let not_arr = serde_json::json!({"not": "array"});
         let mapping = ResponseMapping::default();
         let result = client.parse_levels(&not_arr, &mapping);
@@ -1210,7 +1216,7 @@ mod tests {
     #[test]
     fn test_parse_levels_filters_zero_price_and_quantity() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let arr = serde_json::json!([
             ["42000.0", "1.5"],
             ["0.0", "1.0"],
@@ -1230,7 +1236,7 @@ mod tests {
     #[test]
     fn test_parse_levels_object_format_default_fields() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let arr = serde_json::json!([
             {"price": "100.0", "size": "2.0"},
             {"price": "101.0", "size": "3.0"}
@@ -1250,7 +1256,7 @@ mod tests {
     #[test]
     fn test_parse_side_no_mapping_returns_buy() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let data = serde_json::json!({"side": "sell"});
         let mapping = ResponseMapping {
             side: None,
@@ -1262,7 +1268,7 @@ mod tests {
     #[test]
     fn test_parse_side_field_missing_returns_buy() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let data = serde_json::json!({});
         let mapping = ResponseMapping {
             side: Some(crate::market::descriptor::SideMapping {
@@ -1279,7 +1285,7 @@ mod tests {
     #[test]
     fn test_parse_side_string_mapped_to_sell() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let data = serde_json::json!({"side": "ask"});
         let mapping = ResponseMapping {
             side: Some(crate::market::descriptor::SideMapping {
@@ -1299,7 +1305,7 @@ mod tests {
     #[test]
     fn test_parse_side_string_mapped_to_buy() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let data = serde_json::json!({"side": "bid"});
         let mapping = ResponseMapping {
             side: Some(crate::market::descriptor::SideMapping {
@@ -1319,7 +1325,7 @@ mod tests {
     #[test]
     fn test_parse_side_numeric_value() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let data = serde_json::json!({"side": 1});
         let mapping = ResponseMapping {
             side: Some(crate::market::descriptor::SideMapping {
@@ -1339,7 +1345,7 @@ mod tests {
     #[test]
     fn test_parse_side_unknown_value_returns_buy() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let data = serde_json::json!({"side": "unknown"});
         let mapping = ResponseMapping {
             side: Some(crate::market::descriptor::SideMapping {
@@ -1359,7 +1365,7 @@ mod tests {
     #[test]
     fn test_parse_side_non_string_number_bool_returns_buy() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let data = serde_json::json!({"side": [1, 2, 3]});
         let mapping = ResponseMapping {
             side: Some(crate::market::descriptor::SideMapping {
@@ -1501,7 +1507,7 @@ mod tests {
             .await;
 
         let desc = make_http_test_descriptor(&server.url());
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let book = client.fetch_order_book("BTCUSDT").await.unwrap();
         assert_eq!(book.asks.len(), 2);
         assert_eq!(book.bids.len(), 2);
@@ -1536,7 +1542,7 @@ mod tests {
             .await;
 
         let desc = make_http_test_descriptor(&server.url());
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let ticker = client.fetch_ticker("BTCUSDT").await.unwrap();
         assert_eq!(ticker.pair, "BTC/USDT");
         assert_eq!(ticker.last_price, Some(50100.5));
@@ -1571,8 +1577,9 @@ mod tests {
             .await;
         let mut desc = make_http_test_descriptor(&server.url());
         desc.capabilities.assets =
-            Some(serde_yaml::from_str("path: /api/v3/coins\nresponse: {}\n").unwrap());
-        let client = ConfigurableExchangeClient::new(desc.clone());
+            Some(serde_saphyr::from_str("path: /api/v3/coins\nresponse: {}\n").unwrap());
+        let client =
+            ConfigurableExchangeClient::with_http(desc.clone(), crate::http::test_transport());
         let assets = client.fetch_assets().await.unwrap();
         assert_eq!(assets.len(), 2, "an item without a symbol is skipped");
         assert_eq!(
@@ -1582,7 +1589,10 @@ mod tests {
         assert_eq!(assets[1].networks[0].contract, None);
         mock.assert_async().await;
 
-        let exchange = super::super::ExchangeClient::from_descriptor(&desc);
+        let exchange = super::super::ExchangeClient::from_descriptor_with_http(
+            &desc,
+            crate::http::test_transport(),
+        );
         let pair = super::super::Pair::parse("USDN");
         let tokens = exchange
             .fetch_token_addresses(&pair)
@@ -1592,7 +1602,10 @@ mod tests {
         assert_eq!(tokens[0].symbol, "USDN");
         // No assets capability: no lookup at all.
         desc.capabilities.assets = None;
-        let plain = super::super::ExchangeClient::from_descriptor(&desc);
+        let plain = super::super::ExchangeClient::from_descriptor_with_http(
+            &desc,
+            crate::http::test_transport(),
+        );
         assert!(plain.fetch_token_addresses(&pair).await.is_none());
     }
 
@@ -1631,7 +1644,7 @@ mod tests {
             .await;
 
         let desc = make_http_test_descriptor(&server.url());
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let trades = client.fetch_recent_trades("BTCUSDT", 10).await.unwrap();
         assert_eq!(trades.len(), 2);
         assert_eq!(trades[0].price, 50000.0);
@@ -1661,7 +1674,7 @@ mod tests {
             .await;
 
         let desc = make_http_test_descriptor(&server.url());
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let err = client.fetch_order_book("BTCUSDT").await.unwrap_err();
         let err_msg = err.to_string();
         assert!(
@@ -1691,7 +1704,7 @@ mod tests {
             ok_codes: vec!["0".into()],
             message_key: "retMsg".into(),
         });
-        let err = ConfigurableExchangeClient::new(desc)
+        let err = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport())
             .fetch_order_book("ZZQXUSDT")
             .await
             .unwrap_err();
@@ -1721,7 +1734,7 @@ mod tests {
 
         let mut desc = make_http_test_descriptor(&server.url());
         desc.id = "binance".to_string();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let err = client.fetch_order_book("USDTPUSD").await.unwrap_err();
         let err_msg = err.to_string();
 
@@ -1734,7 +1747,7 @@ mod tests {
     #[tokio::test]
     async fn test_fetch_order_book_no_capability() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let err = client.fetch_order_book("BTCUSDT").await.unwrap_err();
         let err_msg = err.to_string();
         assert!(
@@ -1782,7 +1795,7 @@ mod tests {
             },
         });
 
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let book = client.fetch_order_book("BTCUSDT").await.unwrap();
         assert_eq!(book.asks.len(), 1);
         assert_eq!(book.bids.len(), 1);
@@ -1811,7 +1824,7 @@ mod tests {
             .await;
 
         let desc = make_http_test_descriptor(&server.url());
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let err = client.fetch_order_book("BTCUSDT").await.unwrap_err();
         let err_msg = err.to_string();
         assert!(
@@ -1842,7 +1855,7 @@ mod tests {
             .await;
 
         let desc = make_http_test_descriptor(&server.url());
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let err = client.fetch_order_book("BTCUSDT").await.unwrap_err();
         let err_msg = err.to_string();
         assert!(
@@ -1896,7 +1909,7 @@ mod tests {
             },
         });
 
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let ticker = client.fetch_ticker("BTCUSDT").await.unwrap();
         assert_eq!(ticker.pair, "BTC/USDT");
         assert_eq!(ticker.last_price, Some(50100.5));
@@ -1945,7 +1958,7 @@ mod tests {
             },
         });
 
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let err = client.fetch_ticker("BTCUSDT").await.unwrap_err();
         let err_msg = err.to_string();
         assert!(
@@ -1976,7 +1989,7 @@ mod tests {
             .await;
 
         let desc = make_http_test_descriptor(&server.url());
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let err = client.fetch_recent_trades("BTCUSDT", 10).await.unwrap_err();
         let err_msg = err.to_string();
         assert!(
@@ -2028,7 +2041,7 @@ mod tests {
             ..Default::default()
         };
 
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let ticker = client.fetch_ticker("BTCUSDT").await.unwrap();
         assert_eq!(ticker.last_price, Some(50100.5));
         mock.assert_async().await;
@@ -2037,7 +2050,7 @@ mod tests {
     #[tokio::test]
     async fn test_fetch_trades_no_capability() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let err = client.fetch_recent_trades("BTCUSDT", 10).await.unwrap_err();
         let err_msg = err.to_string();
         assert!(
@@ -2050,7 +2063,7 @@ mod tests {
     #[test]
     fn test_navigate_root_index_out_of_bounds() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let json = serde_json::json!({"data": [1, 2]});
         let result = client.navigate_root(&json, Some("data.5"));
         assert!(result.is_err());
@@ -2060,7 +2073,7 @@ mod tests {
     #[test]
     fn test_navigate_root_missing_key() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let json = serde_json::json!({"data": {"nested": 1}});
         let result = client.navigate_root(&json, Some("data.missing_key"));
         assert!(result.is_err());
@@ -2070,7 +2083,7 @@ mod tests {
     #[test]
     fn test_interpolate_json_passthrough() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         assert_eq!(
             client.interpolate_json(&serde_json::json!(42), "BTC", "100"),
             serde_json::json!(42)
@@ -2187,7 +2200,7 @@ mod tests {
             .await;
 
         let desc = make_ohlc_test_descriptor(&server.url());
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let candles = client.fetch_ohlc("BTCUSDT", "1h", 3).await.unwrap();
 
         assert_eq!(candles.len(), 3);
@@ -2286,7 +2299,7 @@ mod tests {
             },
         };
 
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let candles = client.fetch_ohlc("ETHUSDT", "15m", 2).await.unwrap();
 
         assert_eq!(candles.len(), 2);
@@ -2303,7 +2316,7 @@ mod tests {
     #[tokio::test]
     async fn test_fetch_ohlc_no_capability() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let err = client.fetch_ohlc("BTCUSDT", "1h", 100).await.unwrap_err();
         let msg = err.to_string();
         assert!(
@@ -2406,7 +2419,7 @@ mod tests {
             },
         };
 
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let candles = client.fetch_ohlc("BTCUSDT", "1h", 2).await.unwrap();
         assert_eq!(candles.len(), 2);
         assert_eq!(candles[0].open, 50000.0);
@@ -2492,7 +2505,7 @@ mod tests {
             },
         };
 
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let candles = client.fetch_ohlc("BTCUSDT", "15m", 1).await.unwrap();
         assert_eq!(candles.len(), 1);
         mock.assert_async().await;
@@ -2514,7 +2527,7 @@ mod tests {
             .await;
 
         let desc = make_ohlc_test_descriptor(&server.url());
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let err = client.fetch_ohlc("BTCUSDT", "1h", 100).await.unwrap_err();
         let msg = err.to_string();
         assert!(
@@ -2541,7 +2554,7 @@ mod tests {
             .await;
 
         let desc = make_ohlc_test_descriptor(&server.url());
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let candles = client.fetch_ohlc("BTCUSDT", "1d", 10).await.unwrap();
         assert!(candles.is_empty());
         mock.assert_async().await;
@@ -2578,7 +2591,7 @@ mod tests {
             .await;
 
         let desc = make_ohlc_test_descriptor(&server.url());
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let candles = client.fetch_ohlc("BTCUSDT", "1h", 5).await.unwrap();
         // Only the valid inner array should be parsed
         assert_eq!(candles.len(), 1);
@@ -2612,7 +2625,7 @@ mod tests {
         let mut desc = make_ohlc_test_descriptor(&server.url());
         desc.capabilities.ohlc.as_mut().unwrap().response_root = Some("result".to_string());
 
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let candles = client.fetch_ohlc("BTCUSDT", "4h", 2).await.unwrap();
         assert_eq!(candles.len(), 2);
         mock.assert_async().await;
@@ -2621,7 +2634,7 @@ mod tests {
     #[test]
     fn test_interpolate_value_full_with_interval() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let result =
             client.interpolate_value_full("{pair}_{interval}_{limit}", "BTCUSDT", "50", "1h");
         assert_eq!(result, "BTCUSDT_1h_50");
@@ -2630,7 +2643,7 @@ mod tests {
     #[test]
     fn test_interpolate_json_full_with_interval() {
         let desc = make_test_descriptor();
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let template = serde_json::json!({
             "symbol": "{pair}",
             "interval": "{interval}",
@@ -2710,7 +2723,7 @@ mod tests {
             },
         };
 
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let candles = client.fetch_ohlc("BTCUSDT", "1h", 1).await.unwrap();
         assert_eq!(candles.len(), 1);
         assert_eq!(candles[0].open, 50000.0);
@@ -2761,7 +2774,7 @@ mod tests {
             },
         };
 
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let err = client.fetch_ohlc("BTCUSDT", "1h", 100).await.unwrap_err();
         assert!(err.to_string().contains("API error"));
         mock.assert_async().await;
@@ -2783,7 +2796,7 @@ mod tests {
             .await;
 
         let desc = make_ohlc_test_descriptor(&server.url());
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let err = client.fetch_ohlc("BTCUSDT", "1h", 100).await.unwrap_err();
         assert!(err.to_string().contains("API error"));
         mock.assert_async().await;
@@ -2860,7 +2873,7 @@ mod tests {
             },
         };
 
-        let client = ConfigurableExchangeClient::new(desc);
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
         let candles = client.fetch_ohlc("BTCUSDT", "1h", 2).await.unwrap();
         assert_eq!(candles.len(), 2);
         assert_eq!(candles[0].open, 100.0);

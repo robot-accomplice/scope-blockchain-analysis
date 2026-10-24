@@ -23,6 +23,33 @@ pub struct AssetInfo {
     pub networks: Vec<AssetNetwork>,
 }
 
+/// Venue network codes that are not chain names or aliases in
+/// `chains::registry` (which already knows eth, bnb, matic, arb, op, sol,
+/// trx).
+const NETWORK_CODES: [(&str, &str); 5] = [
+    ("erc20", "ethereum"),
+    ("bep20", "bsc"),
+    ("trc20", "tron"),
+    // Avalanche's C-Chain, as venues name it (#108: a saved AVAXC binding
+    // was never found by `--chain avalanche`).
+    ("avaxc", "avalanche"),
+    ("avax-c", "avalanche"),
+];
+
+/// The scope chain for a venue's network name (`ETH`, `ERC20`, `BSC`,
+/// `TRX`, …). An unknown network is its own name in lower case.
+pub fn chain_for_network(network: &str) -> String {
+    let n = network.trim().to_ascii_lowercase();
+    if let Some(chain) = crate::chains::registry::chain(&n) {
+        return chain.id.to_string();
+    }
+    NETWORK_CODES
+        .iter()
+        .find(|(code, _)| *code == n)
+        .map(|(_, chain)| chain.to_string())
+        .unwrap_or(n)
+}
+
 /// The line the report shows for one token of the pair.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TokenAddress {
@@ -124,6 +151,27 @@ mod tests {
         assert_eq!(lines[1].network, "ETH");
         assert_eq!(lines[1].contract.as_deref(), Some(USDT_ETH));
         assert_eq!(lines[1].other_networks, 2);
+    }
+
+    #[test]
+    fn test_venue_network_codes_map_to_scope_chains() {
+        // Review focus 2: a binding saved as `ethereum` must meet a venue's
+        // `ETH` or `ERC20` as the same chain.
+        for (code, chain) in [
+            ("ETH", "ethereum"),
+            ("ERC20", "ethereum"),
+            ("ethereum", "ethereum"),
+            ("BSC", "bsc"),
+            ("BEP20", "bsc"),
+            ("TRX", "tron"),
+            ("TRC20", "tron"),
+            ("SOL", "solana"),
+            ("AVAXC", "avalanche"),
+            ("AVAX-C", "avalanche"),
+        ] {
+            assert_eq!(chain_for_network(code), chain, "{code}");
+        }
+        assert_eq!(chain_for_network("SOMECHAIN"), "somechain");
     }
 
     #[test]

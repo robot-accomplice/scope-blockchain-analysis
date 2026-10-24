@@ -14,7 +14,7 @@ use scope::config::Config;
 use super::health_args::HealthArgs;
 use scope::display::report;
 use scope::error::{Result, ScopeError};
-use scope::market::{MarketSummary, fetch_token_summary_by_name};
+use scope::market::{MarketSummary, fetch_token_summary_by_name_with_http};
 
 /// Arguments for the token-health command.
 #[derive(Debug, Args)]
@@ -67,6 +67,10 @@ pub struct TokenHealthArgs {
     /// Use @label to resolve from the address book (e.g., @dai-token).
     pub token: String,
 
+    /// The token's contract: use it and skip the symbol lookup.
+    #[arg(long = "token", value_name = "CONTRACT")]
+    pub token_contract: Option<String>,
+
     /// Target blockchain network.
     #[arg(short, long, default_value = scope::chains::DEFAULT_CHAIN)]
     pub chain: String,
@@ -113,7 +117,8 @@ pub async fn run(
     // 1. Fetch DEX analytics (crawl)
     let sp = crate::cli::progress::Spinner::new("Fetching token health data...", out);
     let analytics = crawl::fetch_analytics_for_input(
-        &args.token,
+        // --token: the contract is the input; an address passes through.
+        args.token_contract.as_deref().unwrap_or(&args.token),
         &args.chain,
         Period::Hour24,
         10,
@@ -127,7 +132,13 @@ pub async fn run(
     let market_summary = if args.with_market {
         sp.set_message("Fetching market data...");
         let thresholds = args.health.resolve(config);
-        let summary = fetch_token_summary_by_name(&args.venue, &analytics, &thresholds).await;
+        let summary = fetch_token_summary_by_name_with_http(
+            &args.venue,
+            &analytics,
+            &thresholds,
+            clients.http(),
+        )
+        .await;
         match summary {
             Ok(summary) => Some(summary),
             Err(e) => {
@@ -447,6 +458,7 @@ mod tests {
                 HealthCheck::Pass("Bid/Ask ratio: 1.20x".to_string()),
             ],
             healthy: true,
+            bot_patterns: None,
         }
     }
 
@@ -490,6 +502,7 @@ mod tests {
     fn test_token_health_args_debug() {
         let args = TokenHealthArgs {
             token: "USDC".to_string(),
+            token_contract: None,
             chain: "ethereum".to_string(),
             with_market: false,
             venue: "binance".to_string(),
@@ -568,19 +581,34 @@ mod tests {
     async fn test_dex_venue_on_another_chain_is_an_error() {
         let analytics = make_test_analytics(true);
         let t = scope::market::HealthThresholds::default();
-        let err = fetch_token_summary_by_name("sol", &analytics, &t)
-            .await
-            .unwrap_err();
+        let err = fetch_token_summary_by_name_with_http(
+            "sol",
+            &analytics,
+            &t,
+            scope::http::test_transport(),
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("reads chain solana"), "{err}");
         assert!(
-            fetch_token_summary_by_name("ETH", &analytics, &t)
-                .await
-                .is_ok()
+            fetch_token_summary_by_name_with_http(
+                "ETH",
+                &analytics,
+                &t,
+                scope::http::test_transport()
+            )
+            .await
+            .is_ok()
         );
         // An unknown name is the one unknown-venue error (a warning here).
-        let err = fetch_token_summary_by_name("polygon", &analytics, &t)
-            .await
-            .unwrap_err();
+        let err = fetch_token_summary_by_name_with_http(
+            "polygon",
+            &analytics,
+            &t,
+            scope::http::test_transport(),
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("Unknown venue"), "{err}");
     }
 
@@ -692,6 +720,7 @@ mod tests {
         let config = Config::default();
         let args = TokenHealthArgs {
             token: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+            token_contract: None,
             chain: "ethereum".to_string(),
             with_market: false,
             venue: "binance".to_string(),
@@ -715,6 +744,7 @@ mod tests {
         let config = Config::default();
         let args = TokenHealthArgs {
             token: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+            token_contract: None,
             chain: "ethereum".to_string(),
             with_market: false,
             venue: "binance".to_string(),
@@ -734,6 +764,7 @@ mod tests {
         let config = Config::default();
         let args = TokenHealthArgs {
             token: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+            token_contract: None,
             chain: "ethereum".to_string(),
             with_market: false,
             venue: "binance".to_string(),
@@ -773,6 +804,7 @@ mod tests {
         let config = Config::default();
         let args = TokenHealthArgs {
             token: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+            token_contract: None,
             chain: "ethereum".to_string(),
             with_market: true,
             venue: "eth".to_string(),
@@ -787,6 +819,7 @@ mod tests {
     fn dex_market_args(venue: &str) -> TokenHealthArgs {
         TokenHealthArgs {
             token: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+            token_contract: None,
             chain: "ethereum".to_string(),
             with_market: true,
             venue: venue.to_string(),
@@ -963,6 +996,7 @@ mod tests {
         ] {
             let args = TokenHealthArgs {
                 token: "USDC".to_string(),
+                token_contract: None,
                 chain: "ethereum".to_string(),
                 with_market: false,
                 venue: "binance".to_string(),
@@ -981,6 +1015,7 @@ mod tests {
         let config = Config::default();
         let args = TokenHealthArgs {
             token: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+            token_contract: None,
             chain: "ethereum".to_string(),
             with_market: false,
             venue: "binance".to_string(),
@@ -1001,6 +1036,7 @@ mod tests {
         config.output.format = OutputFormat::Markdown;
         let args = TokenHealthArgs {
             token: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
+            token_contract: None,
             chain: "ethereum".to_string(),
             with_market: false,
             venue: "binance".to_string(),

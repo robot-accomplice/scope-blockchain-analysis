@@ -34,7 +34,7 @@
 //! note!(out, "Fetching balances..."); // status → stderr
 //! ```
 
-use scope::market::series::{Metric, Sample};
+use scope::metrics::{Metric, Sample};
 use std::collections::VecDeque;
 use std::fmt;
 use std::io::{self, Write};
@@ -73,7 +73,20 @@ pub struct RunRecord {
     pub sample: Sample,
     /// The report the run printed in the CLI.
     pub snapshot: String,
+    /// The run's data, for a screen that draws its own view of it.
+    pub view: Option<Arc<SummaryView>>,
 }
+
+/// A market summary, for a screen that draws it (the TUI's compact view).
+#[derive(Debug, Clone)]
+pub struct SummaryView {
+    pub summary: scope::market::MarketSummary,
+    /// The venue the summary is for.
+    pub venue: String,
+}
+
+/// The view a pane command left for the screen (one-shot `market summary`).
+pub type ViewHook = Arc<Mutex<Option<SummaryView>>>;
 
 /// The runs a screen keeps, oldest first, and the metric table they read in.
 #[derive(Debug, Default)]
@@ -89,6 +102,18 @@ pub struct Series {
 /// The series shared between a repeating command and the screen.
 pub type SeriesHook = Arc<Mutex<Series>>;
 
+/// A question a command asks the TUI: the TUI shows `options` in a list
+/// and replies with the chosen index, or `None` when the user cancels.
+pub struct Ask {
+    pub prompt: String,
+    pub options: Vec<String>,
+    pub reply: tokio::sync::oneshot::Sender<Option<usize>>,
+}
+
+/// The slot through which a pane command asks the TUI one question at a
+/// time.
+pub type Asker = Arc<Mutex<Option<Ask>>>;
+
 /// The most runs a series keeps. Older runs are dropped.
 pub const MAX_SERIES_RUNS: usize = 500;
 
@@ -103,6 +128,12 @@ pub struct Output {
     hook: Option<ProgressHook>,
     series: Option<SeriesHook>,
     tui: bool,
+    /// False for a server: no command may wait for an answer on stdin.
+    prompts: bool,
+    /// The TUI's ask slot, when the TUI pane shows this output.
+    asker: Option<Asker>,
+    /// The view slot, when a screen draws the command's data itself.
+    view: Option<ViewHook>,
 }
 
 impl Output {
@@ -116,10 +147,14 @@ impl Output {
             hook: None,
             series: None,
             tui: false,
+            prompts: true,
+            asker: None,
+            view: None,
         }
     }
 
-    /// Output bound to in-memory buffers, with progress indicators disabled.
+    /// Output bound to in-memory buffers, with progress indicators and
+    /// prompts disabled (nobody can answer a buffer).
     ///
     /// Returns the output and a handle that reads what was written.
     pub fn capture() -> (Self, Captured) {
@@ -138,6 +173,9 @@ impl Output {
             hook: None,
             series: None,
             tui: false,
+            prompts: false,
+            asker: None,
+            view: None,
         };
         (output, captured)
     }
@@ -168,6 +206,9 @@ impl Output {
             hook: Some(ProgressHook::default()),
             series: Some(SeriesHook::default()),
             tui: true,
+            prompts: false,
+            asker: None,
+            view: Some(ViewHook::default()),
         };
         (output, captured)
     }
@@ -211,6 +252,9 @@ impl Output {
             hook: None,
             series: None,
             tui: true,
+            prompts: self.prompts,
+            asker: None,
+            view: None,
         };
         (output, captured)
     }
@@ -228,12 +272,39 @@ impl Output {
             hook: None,
             series: None,
             tui: false,
+            prompts: true,
+            asker: None,
+            view: None,
         }
     }
 
     /// True when animated progress indicators may draw on the terminal.
     pub fn progress_enabled(&self) -> bool {
         self.progress
+    }
+
+    /// This output for a server: a question that needs an answer (for
+    /// example which token a symbol means) is an error, never a prompt.
+    pub fn without_prompts(mut self) -> Self {
+        self.prompts = false;
+        self
+    }
+
+    /// This output with a slot through which a command asks the TUI a
+    /// question (the pane's list).
+    pub fn with_asker(mut self, asker: Asker) -> Self {
+        self.asker = Some(asker);
+        self
+    }
+
+    /// The ask slot, when a TUI shows this output.
+    pub fn asker(&self) -> Option<Asker> {
+        self.asker.clone()
+    }
+
+    /// True when a command may ask the user on the terminal.
+    pub fn prompts_allowed(&self) -> bool {
+        self.prompts
     }
 
     /// True when this output belongs to the TUI. Error text then gives TUI
@@ -252,6 +323,21 @@ impl Output {
     /// pane output has one; the plain CLI output does not.
     pub fn series_hook(&self) -> Option<SeriesHook> {
         self.series.clone()
+    }
+
+    /// The view slot, when a screen draws the command's data (the TUI).
+    pub fn view_hook(&self) -> Option<ViewHook> {
+        self.view.clone()
+    }
+
+    /// Hands the command's data to the screen. Returns false when no screen
+    /// draws it (the CLI); the printed report is then all there is.
+    pub fn record_view(&self, view: SummaryView) -> bool {
+        let Some(slot) = &self.view else {
+            return false;
+        };
+        *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(view);
+        true
     }
 
     /// Hands one run to the screen's series. Returns false when there is no

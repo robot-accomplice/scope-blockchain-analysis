@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-24
+
+### Changed
+- **TUI market view (design 2026-10-21).** `market summary` in the TUI shows a compact view: the verdict first, the key values in two columns, the book as one ladder with one size per level and a bar, and the checks in a grid. The repeating view sizes the snapshot to its content and gives the trends the rest: a fixed numbers column, a `┤`, and a chart that fills its track and scrolls; taller charts when there is room; a rule above the footer. Ctrl-Y and `save` keep the CLI text.
+
+### Changed (breaking)
+- scope reads and writes YAML with serde-saphyr (safe Rust) in place of the deprecated serde_yaml, so `unsafe-libyaml` (unmaintained, RUSTSEC-2024-0449) is gone. Files that serde_yaml wrote read the same. In scope-bca-core, `ConfigError::Parse` now holds a `serde_saphyr::Error`, and YAML error messages read differently. (#118)
+- `crawl --yes` no longer selects the first match for an ambiguous symbol. It stops with the candidates; pass `--token <contract>`. `--yes` now skips only the save question.
+- `token-health`, `insights` and `market` on a DEX venue no longer take the first search match. An ambiguous symbol asks in a terminal, or stops with the candidates. The web API also returns this error for an ambiguous symbol.
+- A token search matches exact symbols only (case-insensitive) or an exact contract; a search by name (for example `crawl uniswap`) no longer finds tokens.
+- `market` on a DEX venue and `monitor` look for the symbol on their own chain only. Before, the default chain searched every chain and could report a pool from another chain.
+- A single match is used without the save question; pass `--save` to save it.
+- All scope files are now in one folder, `~/.scope-bca` (`SCOPE_BCA_HOME` moves it): `config.yaml`, `venues/`, `data/` and `state/`. On the first start, scope copies the files from `~/.config/scope` and the platform data folder, and writes `state/migration.jsonl`. The old files are not changed.
+- **Library (`scope-bca-core`): the HTTP transport is passed to each client; there is no process-wide transport.** `scope::http::init`, `scope::http::transport` and `scope::http::shared::{init, init_with, transport, transport_with, describe}` are removed: build a transport with `scope::http::build(&config)` and pass its `client`. `ChainClientFactory` has a new required method `http()`, the transport for the clients it does not create itself. New constructors take the transport: `ExchangeClient::from_descriptor_with_http`, `VenueRegistry::create_exchange_client_with_http`, `MarketVenue::{resolve_with_http, from_name_with_http}`, `fetch_token_summary_by_name_with_http`, `BlockchainDataClient::{new_with_http, from_env_opt_with_http}` and `RiskEngine::from_env_with_http`. The constructors without a transport (`DexClient::new`, `EthereumClient::{new, for_chain}`, `SolanaClient::new`, `TronClient::new`, `ConfigurableExchangeClient::new` and the old names of those above) are deprecated and will be removed in the next minor release; each builds its own transport from the environment and the default config. (#59)
+
+### Added
+- In the TUI, the mouse wheel scrolls the output (3 lines), and `Shift-↑` / `Shift-↓` scroll one line; `PgUp` / `PgDn` still scroll a page. The TUI captures the mouse, so selecting text takes `Shift`+drag. The row under the input always shows the navigation keys that fit, and `help` opens at its first line.
+- `market summary` (and the market health checks of `token-health --with-market`, `insights`, the web API and watchlists) reads the venue's recent trades and its book for bot patterns: repeated trade sizes, metronome timing, buy/sell ping-pong and ladder quotes. A pattern is a warning with its evidence and the bot-like share of the trades by count and by volume; it never fails the summary. JSON adds `bot_patterns`.
+- The trends of a repeating view (`market summary --every` and the other `--every` commands in the TUI) end with a time axis: the local clock time of the first run on the track, the latest under its bar, and the span between them.
+- **Monitor wizard and watchlists (#47).** `scope monitor <args>` opens the TUI with the monitor wizard, filled from the arguments: targets (pairs, tokens, addresses), checks (the market health preset, with the same results as `market summary`, and rules such as `holders >= 1000`), interval and duration (`--every`, `--duration`, default 60s and 1h), and outputs (`--csv`, one row per check per run; `--report`). Its run shows a grid of each target's pass/fail state, with a detail pane, charts, and keys that run the evidence commands. Ctrl-G switches between the grid and the shell. Watchlists are saved to `~/.scope-bca/watchlists/` (`--save`, Ctrl-S) and run again with `watch open <name>` in the TUI. The health threshold flags of `market summary` work on `monitor`, and `--yes` starts without the wizard.
+- `scope::metrics` (scope-bca-core): one metric catalog, with token and address metrics. `scope::market::series` stays as a re-export for one release.
+- In the TUI, `crawl <symbol>` asks which token in the pane, not on the plain terminal.
+- Scope offers to install the Ghola sidecar when `ghola.enabled` is set and none is found. It asks on a terminal (once; a "no" is remembered), in the `setup` wizard, and suggests it in `setup --status`. It downloads the latest `robot-accomplice/ghola` release over HTTPS, checks its SHA-256 against `checksums.txt` before extracting, and installs `ghola` to `~/.scope-bca/bin` (PATH is not changed). With no archive for the system it offers `go install`. `--yes`, JSON/CSV/Markdown output, pipes, the web API and the TUI never install. Scope now starts an installed `ghola --serve` when no sidecar answers, and at exit asks whether to stop it (no answer within 15 s stops it).
+- After `setup` in the TUI, the TUI reads the config again, so a new API key or transport setting (proxy, Ghola) works without a restart. A running watchlist keeps the settings it started with until it is started again. (#99)
+- In the TUI, a command asks which token a symbol means in a list (↑/↓, Enter; Esc cancels), instead of stopping.
+- One token resolver for every command that takes a symbol: it lists the candidates and asks, saves the choice on request, takes `--token <contract>`, checks saved choices against a CEX venue's coin list, and records each lookup in `state/resolutions.jsonl`.
+- `--duration forever` (or `inf`) runs a repeating command until `Esc` or `Ctrl-C`. (#96)
+
+### Deprecated
+- The old monitor dashboard: `scope monitor --dashboard` opens it for one more release. `--layout`, `--scale` and `--color-scheme` work only with it; `--export` is now `--csv`. The price bounds of `monitor.alerts` become watchlist rules; the whale and volume-spike alerts have no metric yet (#122).
+
+### Fixed
+- In a watchlist, a market-health check that passes keeps its value and its text: the CSV has them (`value`, and a new `detail` column) and the detail pane shows them. Before, a passing check showed `-`.
+- In the TUI (watchlist grid, market view, repeating view), a tiny price keeps its digits: PEPE at 0.0000106 read as `0`. Prices follow the one precision rule (`price_decimals`).
+- The Ghola install hint now names `go install github.com/robot-accomplice/ghola/cmd/ghola@latest`.
+- `--token <address>` without `--chain` takes the chain from the address format, as a positional address does. (#108)
+- A saved native coin (a CEX pick with no contract) no longer shows as an empty contract ("your saved token is , but …"); messages say "its native coin". (#108)
+- A venue's `AVAXC` network is Avalanche, so `--chain avalanche` finds a token saved from it. (#108)
+- `scope web --stop` also stops a daemon that 0.7.0 or older started (its PID file is in `~/.config/scope/data`). (#106)
+- A leading `~` in `address_book.data_dir` is the home folder; before, scope made a folder named `~`. (#106)
+- On Windows, a debug build of `scope` no longer overflows its stack on commands such as `completions` and `venues list`: the CLI runs on a thread with an 8 MB stack on every platform.
+- The tests and the TUI harness run on Windows, and CI checks Windows (clippy, tests and the offline TUI scenarios).
+- On Windows, `setup --status` finds the `ghola` binary on the PATH. It asked `which`, which Windows lacks, so it said "not found" in a normal PowerShell.
+- On Windows, the monitor no longer acts on each key twice (Windows also reports key releases); `l` switched the layout twice.
+- On Windows, Ctrl-C at a prompt of a command the TUI runs outside itself (`setup`, a token choice) cancels the command and returns to the TUI, as on Unix.
+- On Windows, a TUI line keeps its backslashes: `save C:\Users\me\out.json` saves to that path. Quotes still group words; a backslash no longer escapes a character there.
+
 ## [0.7.0] - 2026-10-14
 
 ### Changed (breaking)
@@ -350,7 +397,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Configuration system with YAML support
 - Support for ERC-20, SPL, and TRC-20 tokens
 
-[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.5.6...v0.6.0
 [0.5.6]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.5.5...v0.5.6

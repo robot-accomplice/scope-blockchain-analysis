@@ -1,6 +1,6 @@
-//! Every HTTP request must use the shared transport (TUI test harness
-//! design, section 2.2). This test fails when production code builds its
-//! own client.
+//! Every HTTP request must use a transport built by `scope::http` (TUI
+//! test harness design, section 2.2), passed to the client that sends it
+//! (#59). This test fails when production code builds its own client.
 
 use std::path::{Path, PathBuf};
 

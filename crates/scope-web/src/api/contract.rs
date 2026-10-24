@@ -44,7 +44,7 @@ pub async fn handle(
             Err(e) => return error_response(status_for(&e), e.to_string()),
         };
 
-    let http_client = scope::http::transport();
+    let http_client = state.factory.http();
 
     match contract::analyze_contract(&address, &chain, client.as_ref(), http_client.as_ref()).await
     {

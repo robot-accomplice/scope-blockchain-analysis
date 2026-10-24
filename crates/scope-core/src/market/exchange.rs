@@ -33,8 +33,21 @@ impl ExchangeClient {
     ///
     /// Each capability that exists in the descriptor gets a
     /// `ConfigurableExchangeClient` implementation wired in.
+    #[deprecated(
+        since = "0.8.0",
+        note = "pass the transport: use `ExchangeClient::from_descriptor_with_http`"
+    )]
     pub fn from_descriptor(desc: &VenueDescriptor) -> Self {
-        let client = ConfigurableExchangeClient::new(desc.clone());
+        Self::from_descriptor_with_http(desc, crate::http::shared::fallback())
+    }
+
+    /// Build an ExchangeClient from a VenueDescriptor whose requests go
+    /// through `http`.
+    pub fn from_descriptor_with_http(
+        desc: &VenueDescriptor,
+        http: std::sync::Arc<dyn crate::http::HttpClient>,
+    ) -> Self {
+        let client = ConfigurableExchangeClient::with_http(desc.clone(), http);
 
         let order_book: Option<Box<dyn OrderBookClient>> = if desc.has_order_book() {
             Some(Box::new(client.clone()))
@@ -146,6 +159,17 @@ impl ExchangeClient {
             .await
     }
 
+    /// Whether the venue lists its coins' contracts (`assets`).
+    pub fn lists_assets(&self) -> bool {
+        self.assets.is_some()
+    }
+
+    /// The venue's coin list, or `None` when the venue has no `assets`
+    /// capability.
+    pub async fn fetch_assets(&self) -> Option<Result<Vec<super::assets::AssetInfo>>> {
+        Some(self.assets.as_ref()?.fetch_assets().await)
+    }
+
     /// The token lines for `pair` from the venue's coin list, or `None`
     /// when the venue has no `assets` capability.
     pub async fn fetch_token_addresses(
@@ -253,7 +277,7 @@ mod tests {
     fn test_exchange_client_from_binance_descriptor() {
         let registry = VenueRegistry::default();
         let desc = registry.get("binance").unwrap();
-        let client = ExchangeClient::from_descriptor(desc);
+        let client = ExchangeClient::from_descriptor_with_http(desc, crate::http::test_transport());
 
         assert_eq!(client.venue_id(), "binance");
         assert_eq!(client.venue_name(), "Binance Spot");
@@ -266,7 +290,7 @@ mod tests {
     fn test_exchange_client_format_pair() {
         let registry = VenueRegistry::default();
         let desc = registry.get("binance").unwrap();
-        let client = ExchangeClient::from_descriptor(desc);
+        let client = ExchangeClient::from_descriptor_with_http(desc, crate::http::test_transport());
         assert_eq!(client.venue_symbol(&Pair::parse("ETH_USD")), "ETHUSD");
         assert_eq!(client.venue_symbol(&Pair::parse("BTC")), "BTCUSDT");
     }
@@ -276,7 +300,10 @@ mod tests {
     #[test]
     fn test_dai_usdc_on_binance_is_daiusdc() {
         let registry = VenueRegistry::default();
-        let client = ExchangeClient::from_descriptor(registry.get("binance").unwrap());
+        let client = ExchangeClient::from_descriptor_with_http(
+            registry.get("binance").unwrap(),
+            crate::http::test_transport(),
+        );
         assert_eq!(client.venue_symbol(&Pair::parse("DAI_USDC")), "DAIUSDC");
     }
 
@@ -285,7 +312,8 @@ mod tests {
         let registry = VenueRegistry::default();
         for venue_id in registry.list() {
             let desc = registry.get(venue_id).unwrap();
-            let client = ExchangeClient::from_descriptor(desc);
+            let client =
+                ExchangeClient::from_descriptor_with_http(desc, crate::http::test_transport());
             assert_eq!(client.venue_id(), venue_id);
             // All built-in venues should have at least order_book
             assert!(
@@ -300,7 +328,7 @@ mod tests {
     fn test_exchange_client_debug() {
         let registry = VenueRegistry::default();
         let desc = registry.get("okx").unwrap();
-        let client = ExchangeClient::from_descriptor(desc);
+        let client = ExchangeClient::from_descriptor_with_http(desc, crate::http::test_transport());
         let debug = format!("{:?}", client);
         assert!(debug.contains("okx"));
         assert!(debug.contains("has_order_book: true"));
@@ -310,14 +338,15 @@ mod tests {
     fn test_exchange_client_has_ohlc_for_binance() {
         let registry = VenueRegistry::default();
         let desc = registry.get("binance").unwrap();
-        let client = ExchangeClient::from_descriptor(desc);
+        let client = ExchangeClient::from_descriptor_with_http(desc, crate::http::test_transport());
         assert!(client.has_ohlc());
     }
 
     #[test]
     fn test_empty_descriptor_has_no_capabilities() {
         let desc = make_empty_descriptor();
-        let client = ExchangeClient::from_descriptor(&desc);
+        let client =
+            ExchangeClient::from_descriptor_with_http(&desc, crate::http::test_transport());
 
         assert!(!client.has_order_book());
         assert!(!client.has_ticker());
@@ -327,7 +356,8 @@ mod tests {
     #[tokio::test]
     async fn test_fetch_order_book_without_capability_returns_error() {
         let desc = make_empty_descriptor();
-        let client = ExchangeClient::from_descriptor(&desc);
+        let client =
+            ExchangeClient::from_descriptor_with_http(&desc, crate::http::test_transport());
 
         let err = client.fetch_order_book("BTCUSDT").await.unwrap_err();
         let msg = err.to_string();
@@ -338,7 +368,8 @@ mod tests {
     #[tokio::test]
     async fn test_fetch_ticker_without_capability_returns_error() {
         let desc = make_empty_descriptor();
-        let client = ExchangeClient::from_descriptor(&desc);
+        let client =
+            ExchangeClient::from_descriptor_with_http(&desc, crate::http::test_transport());
 
         let err = client.fetch_ticker("BTCUSDT").await.unwrap_err();
         let msg = err.to_string();
@@ -349,7 +380,8 @@ mod tests {
     #[tokio::test]
     async fn test_fetch_ohlc_without_capability_returns_error() {
         let desc = make_empty_descriptor();
-        let client = ExchangeClient::from_descriptor(&desc);
+        let client =
+            ExchangeClient::from_descriptor_with_http(&desc, crate::http::test_transport());
 
         let err = client.fetch_ohlc("BTCUSDT", "1h", 100).await.unwrap_err();
         let msg = err.to_string();
@@ -360,7 +392,8 @@ mod tests {
     #[tokio::test]
     async fn test_fetch_recent_trades_without_capability_returns_error() {
         let desc = make_empty_descriptor();
-        let client = ExchangeClient::from_descriptor(&desc);
+        let client =
+            ExchangeClient::from_descriptor_with_http(&desc, crate::http::test_transport());
 
         let err = client.fetch_recent_trades("BTCUSDT", 50).await.unwrap_err();
         let msg = err.to_string();
@@ -371,7 +404,8 @@ mod tests {
     #[tokio::test]
     async fn test_fetch_market_snapshot_empty_descriptor_returns_all_none() {
         let desc = make_empty_descriptor();
-        let client = ExchangeClient::from_descriptor(&desc);
+        let client =
+            ExchangeClient::from_descriptor_with_http(&desc, crate::http::test_transport());
 
         let snapshot = client
             .fetch_market_snapshot("BTCUSDT", DEFAULT_SNAPSHOT_TRADES)

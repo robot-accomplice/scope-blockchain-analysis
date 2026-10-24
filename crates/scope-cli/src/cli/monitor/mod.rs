@@ -78,8 +78,8 @@ use scope::chains::ChainClientFactory;
 use scope::chains::dex::{DexDataSource, DexTokenData};
 use scope::config::Config;
 use scope::error::{Result, ScopeError};
-use std::io;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::interactive::SessionContext;
@@ -112,19 +112,24 @@ use crate::note;
 /// ```
 #[derive(Debug, Args)]
 #[command(after_help = "\x1b[1mExamples:\x1b[0m
-  scope monitor USDC
-  scope monitor @dai-token                                \x1b[2m# address book shortcut\x1b[0m
-  scope monitor PEPE --chain ethereum --layout chart-focus
-  scope monitor DAI --venue binance --pair DAI_USDT
-  scope monitor BTC --venue binance --refresh 5 --scale log")]
+  scope monitor USDN --venue weex --every 30s --duration 1h
+  scope monitor DAI --venue binance --pair DAI_USDT --report dai.md
+  scope monitor USDC --venue binance --save stables --yes   \x1b[2m# save, start at once\x1b[0m
+  scope monitor PEPE --chain ethereum                       \x1b[2m# price and volume\x1b[0m
+  scope monitor @dai-token                                  \x1b[2m# address book shortcut\x1b[0m
+  scope monitor BTC --venue binance --layout exchange --dashboard   \x1b[2m# deprecated\x1b[0m")]
 pub struct MonitorArgs {
     /// Token address or symbol to monitor.
     ///
-    /// Can be a contract address (0x...) or a token symbol/name.
-    /// If a name/symbol is provided, matching tokens will be searched
-    /// and you can select from the results.
+    /// Can be a contract address (0x...) or a token symbol on `--chain`.
+    /// A symbol that names more than one token there lists them so you
+    /// can choose (only exact symbols match).
     /// Use @label to resolve from the address book (e.g., @dai-token).
     pub token: String,
+
+    /// The token's contract: use it and skip the symbol lookup.
+    #[arg(long = "token", value_name = "CONTRACT")]
+    pub token_contract: Option<String>,
 
     /// Target blockchain network.
     ///
@@ -177,6 +182,57 @@ pub struct MonitorArgs {
     /// Use this when the token is not listed on DexScreener.
     #[arg(long, value_name = "PAIR")]
     pub pair: Option<String>,
+
+    /// The watchlist options: `scope monitor` opens the monitor wizard in
+    /// the TUI with these filled in (#47).
+    #[command(flatten)]
+    pub watch: MonitorWatchArgs,
+}
+
+/// Said when the old dashboard starts (#47, Q1).
+pub const DASHBOARD_DEPRECATED: &str = "The monitor dashboard is deprecated and goes in the next release. `scope monitor` without --dashboard opens the monitor wizard, with health checks, --duration, --csv and --report.";
+
+/// The options of the monitor wizard (#47). The wizard turns the monitor
+/// arguments into a watchlist; these set its timing, outputs and checks.
+#[derive(Debug, Clone, Default, Args)]
+pub struct MonitorWatchArgs {
+    /// Interval between runs, as a duration (30s, 5m). The same as
+    /// `--refresh` in seconds. Default: 60s.
+    #[arg(long, value_name = "INTERVAL", conflicts_with = "refresh")]
+    pub every: Option<String>,
+
+    /// How long the run lasts (10m, 1h, or `forever`). Default: 1h.
+    #[arg(long, value_name = "DURATION")]
+    pub duration: Option<String>,
+
+    /// Write one CSV row per check per run to this path.
+    #[arg(long, value_name = "PATH")]
+    pub csv: Option<PathBuf>,
+
+    /// Write the report to this path when the run ends or is stopped.
+    #[arg(long, value_name = "PATH")]
+    pub report: Option<PathBuf>,
+
+    /// The checks: `market-health` (the default with `--venue`) or `none`.
+    #[arg(long, value_name = "PRESET")]
+    pub preset: Option<String>,
+
+    /// Save the watchlist under this name (`watch open <name>` runs it again).
+    #[arg(long, value_name = "NAME")]
+    pub save: Option<String>,
+
+    /// Start the run at once, without the wizard.
+    #[arg(long)]
+    pub yes: bool,
+
+    /// Open the old dashboard instead of the wizard. Deprecated: it goes in
+    /// the next release.
+    #[arg(long)]
+    pub dashboard: bool,
+
+    /// Health threshold overrides for the market health checks.
+    #[command(flatten)]
+    pub health: crate::cli::health_args::HealthArgs,
 }
 /// Entry point for the top-level `scope monitor` command.
 ///
@@ -189,6 +245,7 @@ pub async fn run_direct(
     clients: &dyn ChainClientFactory,
     out: &Output,
 ) -> Result<()> {
+    crate::note!(out, "{}", DASHBOARD_DEPRECATED);
     // Resolve address book label → address + chain
     if let Some((address, chain)) =
         crate::cli::address_book::resolve_address_book_input(&args.token, config)?
@@ -212,7 +269,7 @@ pub async fn run_direct(
     effective_config.monitor = monitor_config;
 
     let start = MonitorStart {
-        token: Some(args.token),
+        token: Some(args.token_contract.unwrap_or(args.token)),
         explicit_pair: args.pair,
         export_file,
         layout_pinned,
@@ -290,7 +347,7 @@ pub async fn run(
 
     // Create exchange client if a venue is configured (from MonitorConfig or CLI)
     let venue = config.monitor.venue.as_deref();
-    let exchange_client = exchange_for_venue(venue)?;
+    let exchange_client = exchange_for_venue(venue, clients.http())?;
 
     let dex_client = clients.create_dex_client();
     let (initial_data, venue_quote) = fetch_initial_data(
@@ -299,6 +356,7 @@ pub async fn run(
         &ctx.chain,
         dex_client.as_ref(),
         venue.zip(exchange_client.as_ref()),
+        clients.http(),
         out,
     )
     .await?;
@@ -365,12 +423,13 @@ pub async fn run(
 /// unknown-venue error (with a suggestion), not a silently dropped option.
 pub(crate) fn exchange_for_venue(
     venue: Option<&str>,
+    http: Arc<dyn scope::http::HttpClient>,
 ) -> Result<Option<scope::market::ExchangeClient>> {
     let Some(id) = venue else {
         return Ok(None);
     };
     scope::market::VenueRegistry::load()?
-        .create_exchange_client(id)
+        .create_exchange_client_with_http(id, http)
         .map(Some)
 }
 
@@ -389,6 +448,7 @@ pub(crate) async fn fetch_initial_data(
     chain: &str,
     dex_client: &dyn DexDataSource,
     venue: Option<(&str, &scope::market::ExchangeClient)>,
+    http: Arc<dyn scope::http::HttpClient>,
     out: &Output,
 ) -> Result<(DexTokenData, Option<(String, scope::market::Ticker)>)> {
     if let Some(pair) = explicit_pair {
@@ -402,14 +462,25 @@ pub(crate) async fn fetch_initial_data(
 
     // With a venue set, the venue is the fallback; skip the Binance probe.
     let dex = async {
-        let address =
-            resolve_token_address(token_input, chain, dex_client, venue.is_none(), out).await?;
+        let address = resolve_token_address(
+            token_input,
+            chain,
+            dex_client,
+            venue.is_none().then_some(http),
+            out,
+        )
+        .await?;
         dex_client.get_token_data(chain, &address).await
     }
     .await;
 
     match (dex, venue) {
         (Ok(data), _) => Ok((data, None)),
+        // An ambiguity or a mismatch is the user's to settle, not a
+        // lookup failure to route around.
+        (Err(e @ (ScopeError::AmbiguousToken { .. } | ScopeError::TokenMismatch { .. })), _) => {
+            Err(e)
+        }
         (Err(dex_err), Some((venue_id, ex))) => {
             let pair = crate::cli::market::venue_pair(ex, token_input);
             note!(
@@ -503,81 +574,36 @@ fn build_exchange_token_data(
     }
 }
 
-/// Resolves a token input (address or symbol) to an address.
-///
-/// Uses the same chain filter logic as the crawl command: when the chain is
-/// "ethereum" (the default), searches ALL chains so that exact symbol matches
-/// on other chains rank above substring matches on ethereum.  Includes a CEX
-/// ticker fallback when DexScreener returns no results.
+/// Resolves a token input (address or symbol) to an address through
+/// [`crate::cli::resolve`]. With `cex_fallback` (its transport), a symbol
+/// that DexScreener does not know is looked up on the default CEX venue.
 async fn resolve_token_address(
     input: &str,
     chain: &str,
     dex_client: &dyn DexDataSource,
-    allow_cex_fallback: bool,
+    cex_fallback: Option<Arc<dyn scope::http::HttpClient>>,
     out: &Output,
 ) -> Result<String> {
-    // Check if it's already an address (EVM, Solana, Tron)
-    if scope::tokens::TokenAliases::is_address(input) {
-        return Ok(input.to_string());
-    }
-
-    // Check saved aliases — use chain filter only when explicitly overridden
-    let chain_filter = if chain != "ethereum" {
-        Some(chain)
-    } else {
-        None
+    use crate::cli::resolve::{DexCandidates, ResolveContext, VenueKind, picker_for, resolve};
+    // The monitor fetches its data on `chain`, so only that chain's
+    // tokens are candidates (an all-chains pick was fetched on the wrong
+    // chain).
+    let ctx = ResolveContext {
+        chain: Some(chain.to_string()),
+        venue: VenueKind::Dex,
+        token_flag: None,
+        yes: false,
+        save: false,
     };
-    let aliases = scope::tokens::TokenAliases::load();
-    if let Some(alias) = aliases.get(input, chain_filter) {
-        return Ok(alias.address.clone());
-    }
-
-    // Search by name/symbol — same filter logic as crawl:
-    // "ethereum" (default) → None (all chains), explicit chain → Some(chain)
-    let mut results = dex_client.search_tokens(input, chain_filter).await?;
-
-    // CEX fallback: if DexScreener has no results, try exchange ticker
-    if results.is_empty()
-        && allow_cex_fallback
-        && let Some(fallback) = crate::cli::token_pick::cex_fallback(input, chain, None, out).await
-    {
-        results.push(fallback);
-    }
-
-    if results.is_empty() {
-        return Err(ScopeError::NotFound(format!(
-            "No token found matching '{}' on {} (checked DexScreener and CEX venues)",
-            input, chain
-        )));
-    }
-
-    // If only one result, use it directly
-    if results.len() == 1 {
-        let token = &results[0];
-        crate::cli::token_pick::announce(None, out, token);
-        return Ok(token.address.clone());
-    }
-
-    // Multiple results — prompt user to select
-    let selected = select_token_interactive(&results, out)?;
-    Ok(selected.address.clone())
-}
-
-/// Lets the user pick one of `results`.
-fn select_token_interactive<'a>(
-    results: &'a [scope::chains::dex::TokenSearchResult],
-    out: &Output,
-) -> Result<&'a scope::chains::dex::TokenSearchResult> {
-    select_token_impl(results, &mut crate::cli::prompt::stdin(), out)
-}
-
-/// Testable implementation of token selection with injected input.
-fn select_token_impl<'a>(
-    results: &'a [scope::chains::dex::TokenSearchResult],
-    reader: &mut impl io::BufRead,
-    out: &Output,
-) -> Result<&'a scope::chains::dex::TokenSearchResult> {
-    crate::cli::token_pick::pick_token(reader, None, out, results)
+    let source = DexCandidates {
+        dex: dex_client,
+        out,
+        fallback: cex_fallback,
+    };
+    let picker = picker_for(out, false);
+    let mut aliases = scope::tokens::TokenAliases::load();
+    let r = resolve(input, &ctx, &source, picker.as_ref(), &mut aliases, out).await?;
+    Ok(r.address.unwrap_or_default())
 }
 
 // ============================================================================
@@ -2426,157 +2452,6 @@ mod tests {
     // Token selection / resolve tests
     // ========================================================================
 
-    fn make_monitor_search_results() -> Vec<scope::chains::dex::TokenSearchResult> {
-        vec![
-            scope::chains::dex::TokenSearchResult {
-                symbol: "USDC".to_string(),
-                name: "USD Coin".to_string(),
-                address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
-                chain: "ethereum".to_string(),
-                price_usd: Some(1.0),
-                volume_24h: 1_000_000.0,
-                liquidity_usd: 500_000_000.0,
-                market_cap: Some(30_000_000_000.0),
-            },
-            scope::chains::dex::TokenSearchResult {
-                symbol: "USDC".to_string(),
-                name: "Bridged USD Coin".to_string(),
-                address: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174".to_string(),
-                chain: "ethereum".to_string(),
-                price_usd: Some(0.9998),
-                volume_24h: 500_000.0,
-                liquidity_usd: 100_000_000.0,
-                market_cap: None,
-            },
-            scope::chains::dex::TokenSearchResult {
-                symbol: "USDC".to_string(),
-                name: "A Very Long Token Name That Exceeds The Limit".to_string(),
-                address: "0x1234567890abcdef1234567890abcdef12345678".to_string(),
-                chain: "ethereum".to_string(),
-                price_usd: None,
-                volume_24h: 0.0,
-                liquidity_usd: 50_000.0,
-                market_cap: None,
-            },
-        ]
-    }
-
-    #[test]
-    fn test_select_token_impl_first() {
-        let results = make_monitor_search_results();
-        let input = b"1\n";
-        let mut reader = std::io::Cursor::new(&input[..]);
-        let (out, cap) = crate::cli::output::Output::capture();
-
-        let selected = select_token_impl(&results, &mut reader, &out).unwrap();
-        assert_eq!(selected.name, "USD Coin");
-        assert_eq!(
-            selected.address,
-            "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
-        );
-
-        let output = cap.err();
-        assert!(output.contains("Found 3 matching tokens"));
-        assert!(output.contains("USDC"));
-        assert!(output.contains("0xA0b8…eB48"));
-        assert!(output.contains("Selected:"));
-    }
-
-    #[test]
-    fn test_select_token_impl_second() {
-        let results = make_monitor_search_results();
-        let input = b"2\n";
-        let mut reader = std::io::Cursor::new(&input[..]);
-        let out = crate::cli::output::Output::capture().0;
-
-        let selected = select_token_impl(&results, &mut reader, &out).unwrap();
-        assert_eq!(selected.name, "Bridged USD Coin");
-        assert_eq!(
-            selected.address,
-            "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
-        );
-    }
-
-    #[test]
-    fn test_select_token_impl_shows_address_column() {
-        let results = make_monitor_search_results();
-        let input = b"1\n";
-        let mut reader = std::io::Cursor::new(&input[..]);
-        let (out, cap) = crate::cli::output::Output::capture();
-
-        select_token_impl(&results, &mut reader, &out).unwrap();
-        let output = cap.err();
-
-        // Table header should include Address column
-        assert!(output.contains("Address"));
-        // All three abbreviated addresses should appear
-        assert!(output.contains("0xA0b8…eB48"));
-        assert!(output.contains("0x2791…4174"));
-        assert!(output.contains("0x1234…5678"));
-    }
-
-    #[test]
-    fn test_select_token_impl_truncates_long_name() {
-        let results = make_monitor_search_results();
-        let input = b"3\n";
-        let mut reader = std::io::Cursor::new(&input[..]);
-        let (out, cap) = crate::cli::output::Output::capture();
-
-        let selected = select_token_impl(&results, &mut reader, &out).unwrap();
-        assert_eq!(
-            selected.address,
-            "0x1234567890abcdef1234567890abcdef12345678"
-        );
-
-        let output = cap.err();
-        assert!(output.contains("A Very Long Token N…"));
-    }
-
-    #[test]
-    fn test_select_token_impl_invalid_input() {
-        let results = make_monitor_search_results();
-        let input = b"xyz\n";
-        let mut reader = std::io::Cursor::new(&input[..]);
-        let out = crate::cli::output::Output::capture().0;
-
-        let result = select_token_impl(&results, &mut reader, &out);
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Invalid selection")
-        );
-    }
-
-    #[test]
-    fn test_select_token_impl_out_of_range_zero() {
-        let results = make_monitor_search_results();
-        let input = b"0\n";
-        let mut reader = std::io::Cursor::new(&input[..]);
-        let out = crate::cli::output::Output::capture().0;
-
-        let result = select_token_impl(&results, &mut reader, &out);
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Selection must be between")
-        );
-    }
-
-    #[test]
-    fn test_select_token_impl_out_of_range_high() {
-        let results = make_monitor_search_results();
-        let input = b"99\n";
-        let mut reader = std::io::Cursor::new(&input[..]);
-        let out = crate::cli::output::Output::capture().0;
-
-        let result = select_token_impl(&results, &mut reader, &out);
-        assert!(result.is_err());
-    }
-
     // ============================
     // Phase 4: Layout system tests
     // ============================
@@ -2946,8 +2821,8 @@ mod tests {
             venue: None,
         };
 
-        let yaml = serde_yaml::to_string(&config).unwrap();
-        let parsed: MonitorConfig = serde_yaml::from_str(&yaml).unwrap();
+        let yaml = serde_saphyr::to_string(&config).unwrap();
+        let parsed: MonitorConfig = serde_saphyr::from_str(&yaml).unwrap();
         assert_eq!(parsed.layout, LayoutPreset::ChartFocus);
         assert_eq!(parsed.refresh_seconds, 5);
         assert!(parsed.widgets.price_chart);
@@ -2969,7 +2844,7 @@ widgets:
   metrics_panel: true
   activity_log: false
 "#;
-        let config: MonitorConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: MonitorConfig = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(config.layout, LayoutPreset::ChartFocus);
         assert_eq!(config.refresh_seconds, 15);
         assert!(!config.widgets.buy_sell_pressure);
@@ -2979,7 +2854,7 @@ widgets:
     #[test]
     fn test_monitor_config_serde_default_missing_fields() {
         let yaml = "layout: feed\n";
-        let config: MonitorConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: MonitorConfig = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(config.layout, LayoutPreset::Feed);
         assert_eq!(config.refresh_seconds, DEFAULT_REFRESH_SECS);
         assert!(config.widgets.price_chart); // defaults
@@ -3270,8 +3145,8 @@ widgets:
             whale_min_usd: Some(10_000.0),
             volume_spike_threshold_pct: Some(50.0),
         };
-        let yaml = serde_yaml::to_string(&config).unwrap();
-        let parsed: AlertConfig = serde_yaml::from_str(&yaml).unwrap();
+        let yaml = serde_saphyr::to_string(&config).unwrap();
+        let parsed: AlertConfig = serde_saphyr::from_str(&yaml).unwrap();
         assert_eq!(parsed.price_min, Some(0.5));
         assert_eq!(parsed.price_max, Some(2.0));
         assert_eq!(parsed.whale_min_usd, Some(10_000.0));
@@ -3508,11 +3383,89 @@ capabilities:
 "#,
             server.url()
         );
-        let desc: scope::market::VenueDescriptor = serde_yaml::from_str(&yaml).unwrap();
+        let desc: scope::market::VenueDescriptor = serde_saphyr::from_str(&yaml).unwrap();
         (
             server,
-            scope::market::ExchangeClient::from_descriptor(&desc),
+            scope::market::ExchangeClient::from_descriptor_with_http(
+                &desc,
+                scope::http::test_transport(),
+            ),
         )
+    }
+
+    /// A DEX source whose search finds USDN on ethereum and on bsc.
+    #[derive(Clone)]
+    struct TwoChainDex;
+
+    #[async_trait::async_trait]
+    impl DexDataSource for TwoChainDex {
+        async fn get_token_price(&self, _: &str, _: &str) -> Option<f64> {
+            None
+        }
+        async fn get_native_token_price(&self, _: &str) -> Option<f64> {
+            None
+        }
+        async fn get_token_data(&self, _: &str, _: &str) -> Result<DexTokenData> {
+            Err(ScopeError::NotFound("no data in this fake".into()))
+        }
+        async fn search_tokens(
+            &self,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<Vec<scope::chains::TokenSearchResult>> {
+            let usdn = |chain: &str, address: &str| scope::chains::TokenSearchResult {
+                address: address.into(),
+                symbol: "USDN".into(),
+                name: "USDN".into(),
+                chain: chain.into(),
+                price_usd: Some(1.0),
+                volume_24h: 0.0,
+                liquidity_usd: 1.0,
+                market_cap: None,
+            };
+            Ok(vec![usdn("ethereum", "0xA"), usdn("bsc", "0xB")])
+        }
+    }
+
+    #[tokio::test]
+    async fn test_monitor_resolves_on_its_own_chain() {
+        // Review C2: a bsc token was offered for (and fetched on) ethereum.
+        let address =
+            resolve_token_address("USDN", "ethereum", &TwoChainDex, None, &Output::capture().0)
+                .await
+                .unwrap();
+        assert_eq!(address, "0xA");
+    }
+
+    #[tokio::test]
+    async fn test_an_ambiguous_symbol_does_not_fall_back_to_the_venue() {
+        // Review I1: an ambiguity is a choice for the user, not a lookup
+        // failure to route around.
+        let (_server, ex) = mock_venue(200).await;
+        let mut dex = scope::chains::mocks::MockDexSource::new();
+        let usdn = |address: &str| scope::chains::TokenSearchResult {
+            address: address.into(),
+            symbol: "USDN".into(),
+            name: "USDN".into(),
+            chain: "bsc".into(),
+            price_usd: Some(1.0),
+            volume_24h: 0.0,
+            liquidity_usd: 1.0,
+            market_cap: None,
+        };
+        dex.search_results = vec![usdn("0xA"), usdn("0xB")];
+        let err = fetch_initial_data(
+            "USDN",
+            None,
+            "bsc",
+            &dex,
+            Some(("mockvenue", &ex)),
+            scope::http::test_transport(),
+            &Output::capture().0,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ScopeError::AmbiguousToken { .. }), "{err}");
     }
 
     #[tokio::test]
@@ -3527,6 +3480,7 @@ capabilities:
             "ethereum",
             &BlockedDex,
             Some(("mockvenue", &ex)),
+            scope::http::test_transport(),
             &out,
         )
         .await
@@ -3552,6 +3506,7 @@ capabilities:
             "ethereum",
             &dex,
             Some(("mockvenue", &ex)),
+            scope::http::test_transport(),
             &Output::capture().0,
         )
         .await
@@ -3569,6 +3524,7 @@ capabilities:
             "ethereum",
             &BlockedDex,
             Some(("mockvenue", &ex)),
+            scope::http::test_transport(),
             &Output::capture().0,
         )
         .await
@@ -3598,8 +3554,11 @@ capabilities:
             "id: weexlike\nname: WEEX-like\nbase_url: {}\nsymbol:\n  template: \"{{base}}{{quote}}\"\n  default_quote: USDT\ncapabilities:\n  ticker:\n    path: /api/v1/ticker\n    params:\n      symbol: \"{{pair}}\"\n    response:\n      last_price: last\n      volume_24h: vol\n",
             server.url()
         );
-        let desc: scope::market::VenueDescriptor = serde_yaml::from_str(&yaml).unwrap();
-        let ex = scope::market::ExchangeClient::from_descriptor(&desc);
+        let desc: scope::market::VenueDescriptor = serde_saphyr::from_str(&yaml).unwrap();
+        let ex = scope::market::ExchangeClient::from_descriptor_with_http(
+            &desc,
+            scope::http::test_transport(),
+        );
         for input in ["USDN_USDT", "USDN/USDT", "USDNUSDT"] {
             let (data, pair) = fetch_initial_data(
                 "USDN",
@@ -3607,6 +3566,7 @@ capabilities:
                 "ethereum",
                 &BlockedDex,
                 Some(("weexlike", &ex)),
+                scope::http::test_transport(),
                 &Output::capture().0,
             )
             .await
@@ -3630,6 +3590,7 @@ capabilities:
             "ethereum",
             &BlockedDex,
             Some(("mockvenue", &ex)),
+            scope::http::test_transport(),
             &Output::capture().0,
         )
         .await
@@ -3642,13 +3603,23 @@ capabilities:
     fn test_unknown_venue_is_an_error_not_ignored() {
         // `--venue nosuch` used to drop the venue without a word; now it is
         // the one unknown-venue error, with the registry's suggestion.
-        let err = exchange_for_venue(Some("binace")).err().unwrap();
+        let err = exchange_for_venue(Some("binace"), scope::http::test_transport())
+            .err()
+            .unwrap();
         assert!(matches!(err, ScopeError::InvalidInput(_)), "{err:?}");
         let msg = err.to_string();
         assert!(msg.contains("Unknown venue \"binace\""), "{msg}");
         assert!(msg.contains("Did you mean \"binance\""), "{msg}");
-        assert!(exchange_for_venue(None).unwrap().is_none());
-        assert!(exchange_for_venue(Some("binance")).unwrap().is_some());
+        assert!(
+            exchange_for_venue(None, scope::http::test_transport())
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            exchange_for_venue(Some("binance"), scope::http::test_transport())
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
@@ -3709,8 +3680,8 @@ capabilities:
         let config = ExportConfig {
             path: Some("./my-exports".to_string()),
         };
-        let yaml = serde_yaml::to_string(&config).unwrap();
-        let parsed: ExportConfig = serde_yaml::from_str(&yaml).unwrap();
+        let yaml = serde_saphyr::to_string(&config).unwrap();
+        let parsed: ExportConfig = serde_saphyr::from_str(&yaml).unwrap();
         assert_eq!(parsed.path, Some("./my-exports".to_string()));
     }
 
@@ -3898,8 +3869,8 @@ capabilities:
             venue: Some("binance".to_string()),
         };
 
-        let yaml = serde_yaml::to_string(&config).unwrap();
-        let parsed: MonitorConfig = serde_yaml::from_str(&yaml).unwrap();
+        let yaml = serde_saphyr::to_string(&config).unwrap();
+        let parsed: MonitorConfig = serde_saphyr::from_str(&yaml).unwrap();
         assert_eq!(parsed.layout, LayoutPreset::Dashboard);
         assert_eq!(parsed.refresh_seconds, 10);
         assert_eq!(parsed.venue, Some("binance".to_string()));
@@ -3916,7 +3887,7 @@ capabilities:
 layout: dashboard
 refresh_seconds: 5
 "#;
-        let config: MonitorConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: MonitorConfig = serde_saphyr::from_str(yaml).unwrap();
         assert!(config.alerts.price_min.is_none());
         assert!(config.export.path.is_none());
         assert!(!config.auto_pause_on_input);
@@ -3962,17 +3933,17 @@ refresh_seconds: 5
     #[test]
     fn test_scale_mode_serde_roundtrip() {
         for mode in &[ScaleMode::Linear, ScaleMode::Log] {
-            let yaml = serde_yaml::to_string(mode).unwrap();
-            let parsed: ScaleMode = serde_yaml::from_str(&yaml).unwrap();
+            let yaml = serde_saphyr::to_string(mode).unwrap();
+            let parsed: ScaleMode = serde_saphyr::from_str(&yaml).unwrap();
             assert_eq!(&parsed, mode);
         }
     }
 
     #[test]
     fn test_scale_mode_serde_kebab_case() {
-        let parsed: ScaleMode = serde_yaml::from_str("linear").unwrap();
+        let parsed: ScaleMode = serde_saphyr::from_str("linear").unwrap();
         assert_eq!(parsed, ScaleMode::Linear);
-        let parsed: ScaleMode = serde_yaml::from_str("log").unwrap();
+        let parsed: ScaleMode = serde_saphyr::from_str("log").unwrap();
         assert_eq!(parsed, ScaleMode::Log);
     }
 
@@ -3995,19 +3966,19 @@ refresh_seconds: 5
             ColorScheme::BlueOrange,
             ColorScheme::Monochrome,
         ] {
-            let yaml = serde_yaml::to_string(scheme).unwrap();
-            let parsed: ColorScheme = serde_yaml::from_str(&yaml).unwrap();
+            let yaml = serde_saphyr::to_string(scheme).unwrap();
+            let parsed: ColorScheme = serde_saphyr::from_str(&yaml).unwrap();
             assert_eq!(&parsed, scheme);
         }
     }
 
     #[test]
     fn test_color_scheme_serde_kebab_case() {
-        let parsed: ColorScheme = serde_yaml::from_str("green-red").unwrap();
+        let parsed: ColorScheme = serde_saphyr::from_str("green-red").unwrap();
         assert_eq!(parsed, ColorScheme::GreenRed);
-        let parsed: ColorScheme = serde_yaml::from_str("blue-orange").unwrap();
+        let parsed: ColorScheme = serde_saphyr::from_str("blue-orange").unwrap();
         assert_eq!(parsed, ColorScheme::BlueOrange);
-        let parsed: ColorScheme = serde_yaml::from_str("monochrome").unwrap();
+        let parsed: ColorScheme = serde_saphyr::from_str("monochrome").unwrap();
         assert_eq!(parsed, ColorScheme::Monochrome);
     }
 
@@ -4075,21 +4046,21 @@ refresh_seconds: 5
             LayoutPreset::Feed,
             LayoutPreset::Compact,
         ] {
-            let yaml = serde_yaml::to_string(preset).unwrap();
-            let parsed: LayoutPreset = serde_yaml::from_str(&yaml).unwrap();
+            let yaml = serde_saphyr::to_string(preset).unwrap();
+            let parsed: LayoutPreset = serde_saphyr::from_str(&yaml).unwrap();
             assert_eq!(&parsed, preset);
         }
     }
 
     #[test]
     fn test_layout_preset_serde_kebab_case() {
-        let parsed: LayoutPreset = serde_yaml::from_str("dashboard").unwrap();
+        let parsed: LayoutPreset = serde_saphyr::from_str("dashboard").unwrap();
         assert_eq!(parsed, LayoutPreset::Dashboard);
-        let parsed: LayoutPreset = serde_yaml::from_str("chart-focus").unwrap();
+        let parsed: LayoutPreset = serde_saphyr::from_str("chart-focus").unwrap();
         assert_eq!(parsed, LayoutPreset::ChartFocus);
-        let parsed: LayoutPreset = serde_yaml::from_str("feed").unwrap();
+        let parsed: LayoutPreset = serde_saphyr::from_str("feed").unwrap();
         assert_eq!(parsed, LayoutPreset::Feed);
-        let parsed: LayoutPreset = serde_yaml::from_str("compact").unwrap();
+        let parsed: LayoutPreset = serde_saphyr::from_str("compact").unwrap();
         assert_eq!(parsed, LayoutPreset::Compact);
     }
 
@@ -4104,8 +4075,8 @@ refresh_seconds: 5
             holder_count: false,
             liquidity_depth: true,
         };
-        let yaml = serde_yaml::to_string(&vis).unwrap();
-        let parsed: WidgetVisibility = serde_yaml::from_str(&yaml).unwrap();
+        let yaml = serde_saphyr::to_string(&vis).unwrap();
+        let parsed: WidgetVisibility = serde_saphyr::from_str(&yaml).unwrap();
         assert!(!parsed.price_chart);
         assert!(parsed.volume_chart);
         assert!(!parsed.buy_sell_pressure);
@@ -5300,156 +5271,6 @@ refresh_seconds: 5
     // Integration tests: select_token_impl
     // ========================================================================
 
-    fn make_search_results() -> Vec<TokenSearchResult> {
-        vec![
-            TokenSearchResult {
-                address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
-                symbol: "USDC".to_string(),
-                name: "USD Coin".to_string(),
-                chain: "ethereum".to_string(),
-                price_usd: Some(1.0),
-                volume_24h: 5_000_000_000.0,
-                liquidity_usd: 2_000_000_000.0,
-                market_cap: Some(32_000_000_000.0),
-            },
-            TokenSearchResult {
-                address: "0xdAC17F958D2ee523a2206206994597C13D831ec7".to_string(),
-                symbol: "USDT".to_string(),
-                name: "Tether USD".to_string(),
-                chain: "ethereum".to_string(),
-                price_usd: Some(1.0),
-                volume_24h: 6_000_000_000.0,
-                liquidity_usd: 3_000_000_000.0,
-                market_cap: Some(83_000_000_000.0),
-            },
-            TokenSearchResult {
-                address: "0x6B175474E89094C44Da98b954EedeAC495271d0F".to_string(),
-                symbol: "DAI".to_string(),
-                name: "Dai Stablecoin".to_string(),
-                chain: "ethereum".to_string(),
-                price_usd: Some(1.0),
-                volume_24h: 200_000_000.0,
-                liquidity_usd: 500_000_000.0,
-                market_cap: Some(5_000_000_000.0),
-            },
-        ]
-    }
-
-    #[test]
-    fn test_select_token_impl_valid_first() {
-        let results = make_search_results();
-        let mut reader = io::Cursor::new(b"1\n");
-        let (out, cap) = crate::cli::output::Output::capture();
-        let selected = select_token_impl(&results, &mut reader, &out).unwrap();
-        assert_eq!(selected.symbol, "USDC");
-        assert_eq!(selected.address, results[0].address);
-        let output = cap.err();
-        assert!(output.contains("Found 3 matching tokens"));
-        assert!(output.contains("Selected: USDC"));
-    }
-
-    #[test]
-    fn test_select_token_impl_valid_last() {
-        let results = make_search_results();
-        let mut reader = io::Cursor::new(b"3\n");
-        let out = crate::cli::output::Output::capture().0;
-        let selected = select_token_impl(&results, &mut reader, &out).unwrap();
-        assert_eq!(selected.symbol, "DAI");
-    }
-
-    #[test]
-    fn test_select_token_impl_valid_middle() {
-        let results = make_search_results();
-        let mut reader = io::Cursor::new(b"2\n");
-        let out = crate::cli::output::Output::capture().0;
-        let selected = select_token_impl(&results, &mut reader, &out).unwrap();
-        assert_eq!(selected.symbol, "USDT");
-    }
-
-    #[test]
-    fn test_select_token_impl_out_of_bounds_zero() {
-        let results = make_search_results();
-        let mut reader = io::Cursor::new(b"0\n");
-        let out = crate::cli::output::Output::capture().0;
-        let result = select_token_impl(&results, &mut reader, &out);
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("Selection must be between 1 and 3"));
-    }
-
-    #[test]
-    fn test_select_token_impl_out_of_bounds_high() {
-        let results = make_search_results();
-        let mut reader = io::Cursor::new(b"99\n");
-        let out = crate::cli::output::Output::capture().0;
-        let result = select_token_impl(&results, &mut reader, &out);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_select_token_impl_non_numeric_input() {
-        let results = make_search_results();
-        let mut reader = io::Cursor::new(b"abc\n");
-        let out = crate::cli::output::Output::capture().0;
-        let result = select_token_impl(&results, &mut reader, &out);
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("Invalid selection"));
-    }
-
-    #[test]
-    fn test_select_token_impl_empty_input() {
-        let results = make_search_results();
-        let mut reader = io::Cursor::new(b"\n");
-        let out = crate::cli::output::Output::capture().0;
-        let result = select_token_impl(&results, &mut reader, &out);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_select_token_impl_long_name_truncation() {
-        let results = vec![TokenSearchResult {
-            address: "0xABCDEF1234567890ABCDEF1234567890ABCDEF12".to_string(),
-            symbol: "LONG".to_string(),
-            name: "A Very Long Token Name That Exceeds Twenty Characters".to_string(),
-            chain: "ethereum".to_string(),
-            price_usd: None,
-            volume_24h: 100.0,
-            liquidity_usd: 50.0,
-            market_cap: None,
-        }];
-        let mut reader = io::Cursor::new(b"1\n");
-        let (out, cap) = crate::cli::output::Output::capture();
-        let selected = select_token_impl(&results, &mut reader, &out).unwrap();
-        assert_eq!(selected.symbol, "LONG");
-        let output = cap.err();
-        // Should have truncated name
-        assert!(output.contains("A Very Long Token N…"));
-        // Should show N/A for price
-        assert!(output.contains("N/A"));
-    }
-
-    #[test]
-    fn test_select_token_impl_output_format() {
-        let results = make_search_results();
-        let mut reader = io::Cursor::new(b"1\n");
-        let (out, cap) = crate::cli::output::Output::capture();
-        let _ = select_token_impl(&results, &mut reader, &out).unwrap();
-        let output = cap.err();
-
-        // Verify table header
-        assert!(output.contains("#"));
-        assert!(output.contains("Symbol"));
-        assert!(output.contains("Name"));
-        assert!(output.contains("Address"));
-        assert!(output.contains("Price"));
-        assert!(output.contains("Liquidity"));
-        // Verify separator line
-        assert!(output.contains("─"));
-        // Verify prompt
-        assert!(output.contains("Select token (1-3):"));
-    }
-
     // ========================================================================
     // Integration tests: MonitorApp with state + fetch combined scenario
     // ========================================================================
@@ -5573,6 +5394,7 @@ refresh_seconds: 5
 
         let args = MonitorArgs {
             token: "USDC".to_string(),
+            token_contract: None,
             chain: "ethereum".to_string(),
             layout: Some(LayoutPreset::ChartFocus),
             refresh: None,
@@ -5581,6 +5403,7 @@ refresh_seconds: 5
             export: None,
             venue: None,
             pair: None,
+            watch: Default::default(),
         };
 
         // Build the effective config the same way run_direct does
@@ -5596,6 +5419,7 @@ refresh_seconds: 5
         let config = Config::default();
         let args = MonitorArgs {
             token: "PEPE".to_string(),
+            token_contract: None,
             chain: "solana".to_string(),
             layout: Some(LayoutPreset::Compact),
             refresh: Some(2),
@@ -5604,6 +5428,7 @@ refresh_seconds: 5
             export: Some(PathBuf::from("/tmp/test.csv")),
             venue: None,
             pair: None,
+            watch: Default::default(),
         };
 
         let mut mc = config.monitor.clone();
@@ -5635,6 +5460,7 @@ refresh_seconds: 5
         let config = Config::default();
         let args = MonitorArgs {
             token: "USDC".to_string(),
+            token_contract: None,
             chain: "ethereum".to_string(),
             layout: None,
             refresh: None,
@@ -5643,6 +5469,7 @@ refresh_seconds: 5
             export: None,
             venue: None,
             pair: None,
+            watch: Default::default(),
         };
 
         let mut mc = config.monitor.clone();
@@ -5748,6 +5575,7 @@ refresh_seconds: 5
     fn test_monitor_args_with_venue() {
         let args = MonitorArgs {
             token: "BTC".to_string(),
+            token_contract: None,
             chain: "ethereum".to_string(),
             refresh: None,
             layout: None,
@@ -5756,6 +5584,7 @@ refresh_seconds: 5
             export: None,
             venue: Some("binance".to_string()),
             pair: None,
+            watch: Default::default(),
         };
         assert_eq!(args.venue, Some("binance".to_string()));
     }
@@ -5833,6 +5662,7 @@ refresh_seconds: 5
     fn test_monitor_args_with_pair() {
         let args = MonitorArgs {
             token: "DAI".to_string(),
+            token_contract: None,
             chain: "ethereum".to_string(),
             refresh: None,
             layout: None,
@@ -5841,6 +5671,7 @@ refresh_seconds: 5
             export: None,
             venue: Some("biconomy".to_string()),
             pair: Some("DAI_USDT".to_string()),
+            watch: Default::default(),
         };
         assert_eq!(args.pair, Some("DAI_USDT".to_string()));
         assert_eq!(args.venue, Some("biconomy".to_string()));
@@ -5850,6 +5681,7 @@ refresh_seconds: 5
     fn test_monitor_args_pair_none_by_default() {
         let args = MonitorArgs {
             token: "BTC".to_string(),
+            token_contract: None,
             chain: "ethereum".to_string(),
             refresh: None,
             layout: None,
@@ -5858,6 +5690,7 @@ refresh_seconds: 5
             export: None,
             venue: None,
             pair: None,
+            watch: Default::default(),
         };
         assert!(args.pair.is_none());
     }
@@ -5924,6 +5757,7 @@ refresh_seconds: 5
         // This is a structural test; the runtime validation is in run().
         let args = MonitorArgs {
             token: "DAI".to_string(),
+            token_contract: None,
             chain: "ethereum".to_string(),
             refresh: None,
             layout: None,
@@ -5932,6 +5766,7 @@ refresh_seconds: 5
             export: None,
             venue: Some("biconomy".to_string()),
             pair: Some("DAI_USDT".to_string()),
+            watch: Default::default(),
         };
         assert!(args.venue.is_some());
         assert!(args.pair.is_some());
@@ -5943,6 +5778,7 @@ refresh_seconds: 5
         let config = Config::default();
         let args = MonitorArgs {
             token: "DAI".to_string(),
+            token_contract: None,
             chain: "ethereum".to_string(),
             layout: None,
             refresh: None,
@@ -5951,6 +5787,7 @@ refresh_seconds: 5
             export: None,
             venue: Some("biconomy".to_string()),
             pair: Some("DAI_USDT".to_string()),
+            watch: Default::default(),
         };
 
         // Simulate the config override path from run_direct
@@ -6006,13 +5843,13 @@ refresh_seconds: 5
     #[tokio::test]
     async fn test_resolve_token_address_with_address_input() {
         use scope::chains::dex::DexClient;
-        let dex = DexClient::new();
+        let dex = DexClient::new_with_http(scope::http::test_transport());
         // EVM address should be returned directly, no DexScreener query
         let result = resolve_token_address(
             "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
             "ethereum",
             &dex,
-            true,
+            Some(scope::http::test_transport()),
             &Output::capture().0,
         )
         .await
@@ -6037,13 +5874,13 @@ refresh_seconds: 5
             market_cap: None,
         }];
         let (out, cap) = Output::capture();
-        let address = resolve_token_address("ZZQT", "ethereum", &dex, false, &out)
+        let address = resolve_token_address("ZZQT", "ethereum", &dex, None, &out)
             .await
             .unwrap();
         assert_eq!(address, "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
         assert_eq!(
             cap.err(),
-            "Selected: ZZQT (Zz Quiet Token) on ethereum - $1.5000 at 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48\n"
+            "Using ethereum 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 Zz Quiet Token\n"
         );
         assert_eq!(cap.out(), "", "what a search found is not data");
     }
@@ -6051,12 +5888,18 @@ refresh_seconds: 5
     #[tokio::test]
     async fn test_resolve_token_address_solana_address() {
         use scope::chains::dex::DexClient;
-        let dex = DexClient::new();
+        let dex = DexClient::new_with_http(scope::http::test_transport());
         // Solana address (base58, 32+ chars) should be returned directly
         let addr = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-        let result = resolve_token_address(addr, "solana", &dex, true, &Output::capture().0)
-            .await
-            .unwrap();
+        let result = resolve_token_address(
+            addr,
+            "solana",
+            &dex,
+            Some(scope::http::test_transport()),
+            &Output::capture().0,
+        )
+        .await
+        .unwrap();
         assert_eq!(result, addr);
     }
 
@@ -6077,74 +5920,6 @@ refresh_seconds: 5
         assert_eq!(result.symbol, "TEST");
         assert!(result.address.is_empty());
         assert_eq!(result.liquidity_usd, 0.0);
-    }
-
-    #[test]
-    fn test_select_token_impl_single_result_pick() {
-        let results = vec![scope::chains::dex::TokenSearchResult {
-            address: "0xabc".to_string(),
-            symbol: "TEST".to_string(),
-            name: "Test Token".to_string(),
-            chain: "ethereum".to_string(),
-            price_usd: Some(1.0),
-            volume_24h: 100.0,
-            liquidity_usd: 1000.0,
-            market_cap: None,
-        }];
-        let input = b"1\n";
-        let out = crate::cli::output::Output::capture().0;
-        let result = select_token_impl(&results, &mut &input[..], &out);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().symbol, "TEST");
-    }
-
-    #[test]
-    fn test_select_token_impl_out_of_range() {
-        let results = vec![scope::chains::dex::TokenSearchResult {
-            address: "0xabc".to_string(),
-            symbol: "TEST".to_string(),
-            name: "Test Token".to_string(),
-            chain: "ethereum".to_string(),
-            price_usd: Some(1.0),
-            volume_24h: 100.0,
-            liquidity_usd: 1000.0,
-            market_cap: None,
-        }];
-        let input = b"0\n";
-        let out = crate::cli::output::Output::capture().0;
-        let result = select_token_impl(&results, &mut &input[..], &out);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_select_token_impl_second_of_two() {
-        let results = vec![
-            scope::chains::dex::TokenSearchResult {
-                address: "0xabc".to_string(),
-                symbol: "TOKEN1".to_string(),
-                name: "Token One".to_string(),
-                chain: "ethereum".to_string(),
-                price_usd: Some(1.0),
-                volume_24h: 100.0,
-                liquidity_usd: 1000.0,
-                market_cap: None,
-            },
-            scope::chains::dex::TokenSearchResult {
-                address: "0xdef".to_string(),
-                symbol: "TOKEN2".to_string(),
-                name: "Token Two".to_string(),
-                chain: "solana".to_string(),
-                price_usd: Some(2.0),
-                volume_24h: 200.0,
-                liquidity_usd: 2000.0,
-                market_cap: None,
-            },
-        ];
-        let input = b"2\n";
-        let out = crate::cli::output::Output::capture().0;
-        let result = select_token_impl(&results, &mut &input[..], &out);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().symbol, "TOKEN2");
     }
 
     // ========================================================================
@@ -6870,7 +6645,7 @@ refresh_seconds: 5
         // hold `layout: dashboard` that the user never chose, so
         // auto-layout still applies.
         let config = Config {
-            monitor: serde_yaml::from_str("layout: exchange\n").unwrap(),
+            monitor: serde_saphyr::from_str("layout: exchange\n").unwrap(),
             ..Default::default()
         };
         assert_eq!(launch(&bare, &config), (LayoutPreset::Exchange, auto));
@@ -7180,5 +6955,395 @@ refresh_seconds: 5
             assert!(text.contains("[q]uit"), "{layout:?}: {text}");
             assert_eq!(state.layout, layout);
         }
+    }
+    // ---- The dashboard's start (`run_direct`, `run`) up to the terminal ----
+
+    /// A DEX source that knows no token and notes the chain of each lookup.
+    #[derive(Clone, Default)]
+    struct NoPairsDex {
+        chains: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl DexDataSource for NoPairsDex {
+        async fn get_token_price(&self, _: &str, _: &str) -> Option<f64> {
+            None
+        }
+        async fn get_native_token_price(&self, _: &str) -> Option<f64> {
+            None
+        }
+        async fn get_token_data(&self, chain: &str, _: &str) -> Result<DexTokenData> {
+            self.chains.lock().unwrap().push(chain.to_string());
+            Err(ScopeError::NotFound("no pairs for this token".into()))
+        }
+        async fn search_tokens(
+            &self,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<Vec<scope::chains::TokenSearchResult>> {
+            Ok(vec![])
+        }
+    }
+
+    /// A factory whose DEX source is a [`NoPairsDex`], so a run stops
+    /// before it takes the terminal.
+    struct NoPairsFactory {
+        dex: NoPairsDex,
+    }
+
+    impl scope::chains::ChainClientFactory for NoPairsFactory {
+        fn create_chain_client(&self, chain: &str) -> Result<Box<dyn ChainClient>> {
+            Err(ScopeError::Chain(format!("no {chain} client in this test")))
+        }
+        fn create_dex_client(&self) -> Box<dyn DexDataSource> {
+            Box::new(self.dex.clone())
+        }
+        fn http(&self) -> Arc<dyn scope::http::HttpClient> {
+            scope::http::test_transport()
+        }
+    }
+
+    const USDC_ADDRESS: &str = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
+
+    /// A config whose address book is the empty directory `dir`.
+    fn config_with_address_book(dir: &std::path::Path) -> Config {
+        Config {
+            address_book: scope::config::AddressBookConfig {
+                data_dir: Some(dir.to_path_buf()),
+            },
+            ..Default::default()
+        }
+    }
+
+    fn dashboard_args(token: &str) -> MonitorArgs {
+        MonitorArgs {
+            token: token.to_string(),
+            token_contract: None,
+            chain: "ethereum".to_string(),
+            layout: None,
+            refresh: None,
+            scale: None,
+            color_scheme: None,
+            export: None,
+            venue: None,
+            pair: None,
+            watch: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_without_a_token_says_how_to_use_it() {
+        let factory = NoPairsFactory {
+            dex: NoPairsDex::default(),
+        };
+        let start = MonitorStart {
+            token: None,
+            explicit_pair: None,
+            export_file: None,
+            layout_pinned: false,
+        };
+        let (out, cap) = Output::capture();
+        let err = run(
+            start,
+            &SessionContext::default(),
+            &Config::default(),
+            &factory,
+            &out,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("Usage: monitor <token>"), "{err}");
+        assert_eq!(cap.err(), "", "nothing starts");
+        assert!(factory.dex.chains.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_run_with_an_unknown_venue_stops_before_any_lookup() {
+        let factory = NoPairsFactory {
+            dex: NoPairsDex::default(),
+        };
+        let mut config = Config::default();
+        config.monitor.venue = Some("binace".to_string());
+        let start = MonitorStart {
+            token: Some("USDC".to_string()),
+            explicit_pair: None,
+            export_file: None,
+            layout_pinned: false,
+        };
+        let (out, cap) = Output::capture();
+        let err = run(start, &SessionContext::default(), &config, &factory, &out)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ScopeError::InvalidInput(_)), "{err:?}");
+        assert!(
+            err.to_string().contains("Did you mean \"binance\""),
+            "{err}"
+        );
+        let told = cap.err();
+        assert!(told.contains("Starting live monitor for USDC..."), "{told}");
+        assert!(told.contains("Fetching initial data..."), "{told}");
+        assert_eq!(cap.out(), "", "notes are not data");
+        assert!(factory.dex.chains.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_run_without_a_venue_returns_the_dexscreener_error() {
+        // No venue to fall back to: the DEX error is the run's error.
+        let factory = NoPairsFactory {
+            dex: NoPairsDex::default(),
+        };
+        let ctx = SessionContext {
+            chain: "base".to_string(),
+            ..SessionContext::default()
+        };
+        let start = MonitorStart {
+            token: Some(USDC_ADDRESS.to_string()),
+            explicit_pair: None,
+            export_file: None,
+            layout_pinned: true,
+        };
+        let err = run(
+            start,
+            &ctx,
+            &Config::default(),
+            &factory,
+            &Output::capture().0,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ScopeError::NotFound(_)), "{err:?}");
+        assert!(err.to_string().contains("no pairs for this token"), "{err}");
+        assert_eq!(*factory.dex.chains.lock().unwrap(), vec!["base"]);
+    }
+
+    #[tokio::test]
+    async fn test_run_direct_notes_the_deprecation_and_prefers_the_token_contract() {
+        let dir = tempfile::tempdir().unwrap();
+        let factory = NoPairsFactory {
+            dex: NoPairsDex::default(),
+        };
+        let mut args = dashboard_args("USDC");
+        args.token_contract = Some(USDC_ADDRESS.to_string());
+        args.chain = "polygon".to_string();
+        let (out, cap) = Output::capture();
+        let err = run_direct(args, &config_with_address_book(dir.path()), &factory, &out)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no pairs"), "{err}");
+        let told = cap.err();
+        assert!(told.starts_with(DASHBOARD_DEPRECATED), "{told}");
+        assert!(
+            told.contains(&format!("Starting live monitor for {USDC_ADDRESS}...")),
+            "--token wins over the symbol: {told}"
+        );
+        assert_eq!(*factory.dex.chains.lock().unwrap(), vec!["polygon"]);
+    }
+
+    #[tokio::test]
+    async fn test_run_direct_resolves_an_address_book_label_and_its_chain() {
+        use scope::domain::address_book::{AddressBook, WatchedAddress};
+        let dir = tempfile::tempdir().unwrap();
+        let mut book = AddressBook::default();
+        book.add_address(WatchedAddress {
+            address: USDC_ADDRESS.to_string(),
+            label: Some("treasury".to_string()),
+            chain: "arbitrum".to_string(),
+            tags: vec![],
+            added_at: 0,
+        })
+        .unwrap();
+        book.save(&dir.path().to_path_buf()).unwrap();
+        let config = config_with_address_book(dir.path());
+
+        // The default chain gives way to the entry's chain.
+        let factory = NoPairsFactory {
+            dex: NoPairsDex::default(),
+        };
+        let (out, cap) = Output::capture();
+        run_direct(dashboard_args("@treasury"), &config, &factory, &out)
+            .await
+            .unwrap_err();
+        assert!(cap.err().contains(&format!("for {USDC_ADDRESS}...")));
+        assert_eq!(*factory.dex.chains.lock().unwrap(), vec!["arbitrum"]);
+
+        // An explicit --chain is kept.
+        let factory = NoPairsFactory {
+            dex: NoPairsDex::default(),
+        };
+        let mut args = dashboard_args("@treasury");
+        args.chain = "optimism".to_string();
+        run_direct(args, &config, &factory, &Output::capture().0)
+            .await
+            .unwrap_err();
+        assert_eq!(*factory.dex.chains.lock().unwrap(), vec!["optimism"]);
+
+        // An unknown label is an error that lists the labels.
+        let err = run_direct(
+            dashboard_args("@nosuch"),
+            &config,
+            &factory,
+            &Output::capture().0,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("@treasury"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_run_direct_pair_without_venue_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let factory = NoPairsFactory {
+            dex: NoPairsDex::default(),
+        };
+        let mut args = dashboard_args("USDC");
+        args.pair = Some("USDC_USDT".to_string());
+        let err = run_direct(
+            args,
+            &config_with_address_book(dir.path()),
+            &factory,
+            &Output::capture().0,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("--pair requires --venue to be specified"),
+            "{err}"
+        );
+        assert!(
+            factory.dex.chains.lock().unwrap().is_empty(),
+            "no DEX lookup"
+        );
+    }
+
+    #[test]
+    fn test_monitor_config_from_args_applies_each_flag_over_the_config() {
+        let mut config = Config::default();
+        config.monitor.refresh_seconds = 30;
+        config.monitor.venue = Some("okx".to_string());
+        let mut args = dashboard_args("USDC");
+        args.layout = Some(LayoutPreset::Compact);
+        args.refresh = Some(2);
+        args.scale = Some(ScaleMode::Log);
+        args.color_scheme = Some(ColorScheme::BlueOrange);
+        args.venue = Some("kraken".to_string());
+        args.export = Some(PathBuf::from("run.csv"));
+
+        let (mc, export_file, pinned) = monitor_config_from_args(&args, &config);
+        assert_eq!(mc.layout, LayoutPreset::Compact);
+        assert_eq!(mc.refresh_seconds, 2);
+        assert_eq!(mc.scale, ScaleMode::Log);
+        assert_eq!(mc.color_scheme, ColorScheme::BlueOrange);
+        assert_eq!(mc.venue.as_deref(), Some("kraken"));
+        assert_eq!(export_file, Some(PathBuf::from("run.csv")));
+        assert!(pinned);
+
+        // Without flags the config stands.
+        let (mc, export_file, pinned) = monitor_config_from_args(&dashboard_args("USDC"), &config);
+        assert_eq!(mc.refresh_seconds, 30);
+        assert_eq!(mc.venue.as_deref(), Some("okx"));
+        assert_eq!(mc.layout, config.monitor.layout);
+        assert_eq!(export_file, None);
+        assert!(!pinned);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_initial_data_without_a_venue_returns_the_dex_error() {
+        let err = fetch_initial_data(
+            USDC_ADDRESS,
+            None,
+            "ethereum",
+            &BlockedDex,
+            None,
+            scope::http::test_transport(),
+            &Output::capture().0,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ScopeError::Network(_)), "{err:?}");
+    }
+
+    // ---- Venue refresh: OHLC candles, and book and trade errors ----
+
+    /// Two Binance klines: one up, one down.
+    const KLINES: &str = r#"[
+        [1700000000000, "1.00", "1.20", "0.90", "1.10", "100", 1700000059999],
+        [1700000060000, "1.10", "1.15", "1.00", "1.05", "80", 1700000119999]
+    ]"#;
+
+    #[tokio::test]
+    async fn test_fetch_data_takes_venue_candles_and_names_a_failed_trade_fetch() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/api/v3/klines")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("symbol".into(), "USDCUSDT".into()),
+                mockito::Matcher::UrlEncoded("limit".into(), "100".into()),
+            ]))
+            .with_body(KLINES)
+            .create_async()
+            .await;
+        server
+            .mock("GET", "/api/v3/depth")
+            .match_query(mockito::Matcher::Any)
+            .with_body(r#"{"bids":[["0.9991","1234"]],"asks":[["1.0009","4321"]]}"#)
+            .create_async()
+            .await;
+        // No trades endpoint: the trade fetch fails.
+        let mut app = create_test_app(
+            Box::new(MockDexDataSource::new(create_test_token_data())),
+            None,
+        );
+        app.exchange_client = Some(scope::market::testing::venue_at("binance", &server.url()));
+        app.state.venue_pair = Some("USDCUSDT".into());
+        app.fetch_data().await;
+
+        let candles = &app.state.exchange_ohlc;
+        assert_eq!(candles.len(), 2);
+        assert_eq!(candles[0].timestamp, 1_700_000_000.0, "ms to seconds");
+        assert_eq!(
+            (
+                candles[0].open,
+                candles[0].high,
+                candles[0].low,
+                candles[0].close
+            ),
+            (1.0, 1.2, 0.9, 1.1)
+        );
+        assert!(candles[0].is_bullish);
+        assert!(!candles[1].is_bullish);
+        assert_eq!(
+            app.state.order_book.as_ref().unwrap().source,
+            scope::market::BookSource::Exchange
+        );
+        let error = app.state.error_message.as_deref().unwrap();
+        assert!(error.starts_with("binance trades: "), "{error}");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_data_names_a_failed_venue_book_and_keeps_dex_candles() {
+        let mut server = mockito::Server::new_async().await;
+        // No klines and no depth endpoint; trades work.
+        server
+            .mock("GET", "/api/v3/trades")
+            .match_query(mockito::Matcher::Any)
+            .with_body(r#"[{"id":1,"price":"1.0001","qty":"50","quoteQty":"50","time":1700000000000,"isBuyerMaker":false}]"#)
+            .create_async()
+            .await;
+        let mut app = create_test_app(
+            Box::new(MockDexDataSource::new(create_test_token_data())),
+            None,
+        );
+        app.exchange_client = Some(scope::market::testing::venue_at("binance", &server.url()));
+        app.state.venue_pair = Some("USDCUSDT".into());
+        app.fetch_data().await;
+
+        assert!(
+            app.state.exchange_ohlc.is_empty(),
+            "a failed OHLC fetch leaves the candles built from DEX data"
+        );
+        assert_eq!(app.state.recent_trades.len(), 1);
+        let error = app.state.error_message.as_deref().unwrap();
+        assert!(error.starts_with("binance order book: "), "{error}");
     }
 }
