@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- The bot-pattern advisory catches bots that trade in bursts and quote a curve, as on USDN/USDT on weex. New signals: **few sizes** (the 3 most common trade sizes make up half the tape), **cadence** (most gaps between trades are one interval of 5 s or more, ±2%, even with long pauses between bursts) and **shaped ladders** (8 or more book levels at one step whose sizes fall or rise level by level, not only equal ones). JSON: findings `few_sizes` and `cadence`; a `ladder` adds `shape` (`even`, `falling`, `rising`) and `last_size`. Ladder steps read to 2 significant digits (`0.01%`).
+
 ### Fixed
+- In the TUI market view, a 10K order the book cannot fill reads `too thin`, which fits its column; `not fillable` ran into the ask column. A value too wide for the bid/ask table is cut instead of pushing the next column out of line.
 - The Linux release binaries are built on Ubuntu 22.04, so they run on glibc 2.35 and newer without the warning ``weak version `GLIBC_2.39' not found``. The release and CI builds fail when a Linux binary needs a newer glibc (`scripts/check-glibc.sh`).
 - With no config file, scope starts the setup wizard only when it can ask: a terminal on every stream and not `--yes`, `--json` or other machine output. Otherwise it runs the command with the defaults and says to run `scope setup`; before, a pipe's empty line answered yes and started the wizard.
 
