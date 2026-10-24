@@ -16,6 +16,10 @@
 //! - **Ladder quotes:** consecutive book levels at even price steps whose
 //!   sizes are equal, or rise or fall level by level (a quoting curve).
 //!
+//! Across the runs of a repeating summary, one more: a **depth cycle**, a
+//! side of the book refilled on a timer and drained between the refills
+//! ([`depth_cycle`]). One run cannot see it.
+//!
 //! The functions are pure: they read trades and levels and fetch nothing.
 
 use super::types::{BookSide, OrderBookLevel, Trade, TradeSide};
@@ -81,6 +85,24 @@ pub const LADDER_SIZE_TOLERANCE: f64 = 0.01;
 /// Price steps of a ladder differ by at most this share of the first step.
 pub const LADDER_STEP_TOLERANCE: f64 = 0.05;
 
+/// A run-to-run rise of at least this share of the depth is a refill.
+pub const CYCLE_JUMP: f64 = 0.25;
+
+/// Fewest whole cycles (refills after the first) that make a depth cycle.
+pub const CYCLE_MIN: usize = 3;
+
+/// Fewest runs between two refills: a depth that jumps every other run is
+/// noise, not a cycle.
+pub const CYCLE_MIN_RUNS: usize = 3;
+
+/// Periods between refills whose standard deviation is under this share of
+/// their mean are a timer.
+pub const CYCLE_MAX_CV: f64 = 0.20;
+
+/// Between refills, at least this share of the run-to-run steps must be
+/// flat or down: the depth drains, it does not grow.
+pub const CYCLE_FALLING_SHARE: f64 = 0.60;
+
 /// How many levels from the top of each side the ladder signal reads.
 pub const LADDER_DEPTH: usize = 25;
 
@@ -143,6 +165,18 @@ pub enum LadderShape {
     Falling,
     /// Each level is larger than or as large as the one before.
     Rising,
+}
+
+/// A side of the book refilled at a near-fixed period and drained between
+/// the refills: a bot quoting on a timer.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DepthCycle {
+    /// Mean time between refills, in milliseconds.
+    pub period_ms: f64,
+    /// Whole cycles seen (refills after the first).
+    pub cycles: usize,
+    /// Coefficient of variation of the periods.
+    pub cv: f64,
 }
 
 /// The bot-pattern result of one summary.
@@ -323,6 +357,42 @@ pub fn cadence(trades: &[Trade]) -> Option<Finding> {
         gap_ms: gaps[i],
         share,
         gaps: gaps.len(),
+    })
+}
+
+/// Depth cycle: in `points` (time in ms, depth), oldest first, a refill (a
+/// rise of [`CYCLE_JUMP`]) at least [`CYCLE_MIN`] + 1 times, at least
+/// [`CYCLE_MIN_RUNS`] runs apart, at a period within [`CYCLE_MAX_CV`], with
+/// the depth flat or falling for [`CYCLE_FALLING_SHARE`] of the steps
+/// between.
+pub fn depth_cycle(points: &[(i64, f64)]) -> Option<DepthCycle> {
+    let refills: Vec<usize> = (1..points.len())
+        .filter(|&i| {
+            let (a, b) = (points[i - 1].1, points[i].1);
+            a > 0.0 && b >= a * (1.0 + CYCLE_JUMP)
+        })
+        .collect();
+    if refills.len() < CYCLE_MIN + 1 || refills.windows(2).any(|w| w[1] - w[0] < CYCLE_MIN_RUNS) {
+        return None;
+    }
+    let periods: Vec<f64> = refills
+        .windows(2)
+        .map(|w| (points[w[1]].0 - points[w[0]].0) as f64)
+        .collect();
+    let (mean, cv) = mean_cv(&periods)?;
+    if cv >= CYCLE_MAX_CV {
+        return None;
+    }
+    let steps: Vec<bool> = refills
+        .windows(2)
+        .flat_map(|w| w[0] + 1..w[1])
+        .map(|i| points[i].1 <= points[i - 1].1 * (1.0 + LADDER_SIZE_TOLERANCE))
+        .collect();
+    let falling = steps.iter().filter(|f| **f).count() as f64 / steps.len() as f64;
+    (falling >= CYCLE_FALLING_SHARE).then_some(DepthCycle {
+        period_ms: mean,
+        cycles: refills.len() - 1,
+        cv,
     })
 }
 
@@ -1203,5 +1273,66 @@ mod tests {
         .map(|(i, &q)| level(1.0001 + i as f64 * 0.0001, q))
         .collect();
         assert!(ladders(&[], &zigzag).is_empty());
+    }
+
+    /// A depth sampled every 30 s: refilled to 3300 every `every` samples,
+    /// drained by a step each run between, as the weex USDN bot does.
+    fn sawtooth(samples: usize, every: usize) -> Vec<(i64, f64)> {
+        (0..samples)
+            .map(|i| {
+                let into = i % every;
+                let depth = (3_300.0 - into as f64 * 250.0).max(500.0);
+                (i as i64 * 30_000 + (i as i64 * 7) % 400, depth)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_a_book_refilled_on_a_timer_is_a_depth_cycle() {
+        // 13 runs a cycle (6.5 min): 8 refills, 7 cycles between them.
+        let c = depth_cycle(&sawtooth(110, 13)).unwrap();
+        assert_eq!(c.cycles, 7);
+        assert!((c.period_ms - 390_000.0).abs() < 1_000.0, "{}", c.period_ms);
+        assert!(c.cv < 0.01, "{}", c.cv);
+        // Three refills are two cycles: not yet.
+        assert!(depth_cycle(&sawtooth(30, 13)).is_none());
+    }
+
+    #[test]
+    fn test_irregular_refills_and_noise_are_not_a_depth_cycle() {
+        // Refills at irregular times.
+        let mut pts = Vec::new();
+        let mut t = 0;
+        for (k, len) in [5, 19, 7, 23, 6, 15, 31].into_iter().enumerate() {
+            for j in 0..len {
+                pts.push((t, 3_000.0 * 0.85f64.powi(j) + k as f64));
+                t += 30_000;
+            }
+        }
+        assert!(depth_cycle(&pts).is_none(), "{:?}", depth_cycle(&pts));
+        // A depth that flips up and down every run is noise.
+        let flip: Vec<(i64, f64)> = (0..60)
+            .map(|i| (i * 30_000, if i % 2 == 0 { 1_000.0 } else { 2_000.0 }))
+            .collect();
+        assert!(depth_cycle(&flip).is_none());
+        // Regular jumps but a depth that grows between them: not a drain.
+        let grow: Vec<(i64, f64)> = (0..100)
+            .map(|i| {
+                let into = (i % 10) as f64;
+                (
+                    i * 30_000,
+                    if into == 0.0 {
+                        5_000.0
+                    } else {
+                        1_000.0 + into * 100.0
+                    },
+                )
+            })
+            .collect();
+        assert!(depth_cycle(&grow).is_none(), "{:?}", depth_cycle(&grow));
+        // A flat book and an empty one.
+        let flat: Vec<(i64, f64)> = (0..100).map(|i| (i * 30_000, 2_000.0)).collect();
+        assert!(depth_cycle(&flat).is_none());
+        assert!(depth_cycle(&[]).is_none());
     }
 }

@@ -10,7 +10,7 @@
 
 use crate::cli::charts::{HealthStrip, Sparkline};
 use crate::cli::output::{RunRecord, SeriesHook};
-use crate::cli::theme::{ACCENT, ERR, SECONDARY};
+use crate::cli::theme::{ACCENT, ERR, SECONDARY, WARN};
 use crate::cli::tui::{fit, market_view};
 use ansi_to_tui::IntoText;
 use ratatui::Frame;
@@ -98,10 +98,51 @@ pub(crate) fn series_csv(series: &SeriesHook) -> Option<String> {
     Some(text)
 }
 
+/// A bot on a timer, read across the runs: `bid and ask depth refill every
+/// 6m 30s (8 cycles)`. One run's book cannot show it; the depth series can.
+fn depth_cycle_note(c: &Copy) -> Option<String> {
+    let side = |id: MetricId| {
+        let i = c.metrics.iter().position(|m| m.id == id)?;
+        let points: Vec<(i64, f64)> = c
+            .runs
+            .iter()
+            .filter_map(|r| Some((r.at.timestamp_millis(), r.sample.values.get(i).copied()??)))
+            .collect();
+        scope::market::patterns::depth_cycle(&points)
+    };
+    let found: Vec<(&str, scope::market::patterns::DepthCycle)> = [
+        ("bid", side(MetricId::BidDepth)),
+        ("ask", side(MetricId::AskDepth)),
+    ]
+    .into_iter()
+    .filter_map(|(name, c)| Some((name, c?)))
+    .collect();
+    let clause = |names: &str, verb: &str, c: &scope::market::patterns::DepthCycle| {
+        let every = short_span(chrono::TimeDelta::milliseconds(c.period_ms.round() as i64));
+        format!("{names} depth {verb} every {every} ({} cycles)", c.cycles)
+    };
+    match found.as_slice() {
+        [] => None,
+        [(name, c)] => Some(clause(name, "refills", c)),
+        // One timer for both sides reads as one clause.
+        [(_, b), (_, a)] if (b.period_ms - a.period_ms).abs() <= b.period_ms * 0.1 => {
+            Some(clause("bid and ask", "refill", b))
+        }
+        [(bn, b), (an, a), ..] => Some(format!(
+            "{}; {}",
+            clause(bn, "refills", b),
+            clause(an, "refills", a)
+        )),
+    }
+}
+
 /// The one-line summary pushed into the scrollback when the user leaves:
-/// `42 runs · 1 failed (run 16)`.
+/// `42 runs · 1 failed (run 16)`, and a bot timer when the depth showed one.
 pub(crate) fn summary(series: &SeriesHook) -> String {
     let c = copy(series);
+    let timer = depth_cycle_note(&c)
+        .map(|n| format!(" · bot timer: {n}"))
+        .unwrap_or_default();
     let total = c.dropped + c.runs.len() as u64;
     let failed: Vec<u64> = c
         .runs
@@ -116,9 +157,9 @@ pub(crate) fn summary(series: &SeriesHook) -> String {
         String::new()
     };
     match failed.last() {
-        None => format!("{total} {runs} · none failed{scope}"),
+        None => format!("{total} {runs} · none failed{scope}{timer}"),
         Some(last) => format!(
-            "{total} {runs} · {} failed{scope} (run {last})",
+            "{total} {runs} · {} failed{scope} (run {last}){timer}",
             failed.len()
         ),
     }
@@ -398,8 +439,12 @@ fn draw_trends(f: &mut Frame, area: Rect, c: &Copy) {
     if area.height < 2 || area.width <= NUMBERS_COLS + 2 {
         return;
     }
+    let mut title = vec![Span::styled(format!(" Trends · run {run}"), ACCENT)];
+    if let Some(note) = depth_cycle_note(c) {
+        title.push(Span::styled(format!("  ! Bot timer: {note}"), WARN));
+    }
     f.render_widget(
-        Paragraph::new(Line::styled(format!(" Trends · run {run}"), ACCENT)),
+        Paragraph::new(Line::from(title)),
         Rect { height: 1, ..area },
     );
     let chart_x = area.x + NUMBERS_COLS + 1;
@@ -1011,6 +1056,111 @@ mod tests {
             axis > last_chart,
             "the axis is under the charts:
 {text}"
+        );
+    }
+
+    /// `n` runs 30 s apart whose bid and ask depth are refilled every
+    /// `every` runs and drained a step a run between (the weex USDN book).
+    fn depth_series(n: u64, every: u64) -> SeriesHook {
+        let metrics = summary_metrics(&HealthThresholds::default());
+        let (out, _cap) = Output::capture_merged();
+        let start = chrono::Utc::now() - chrono::TimeDelta::seconds(30 * n as i64);
+        for run in 1..=n {
+            let depth = 3_300.0 - ((run - 1) % every) as f64 * 250.0;
+            let values = metrics
+                .iter()
+                .map(|m| match m.id {
+                    MetricId::BidDepth | MetricId::AskDepth => Some(depth),
+                    _ => Some(1.0),
+                })
+                .collect();
+            out.record_run(
+                &metrics,
+                RunRecord {
+                    run,
+                    at: start + chrono::TimeDelta::seconds(30 * run as i64),
+                    sample: Sample {
+                        values,
+                        healthy: true,
+                        failed_checks: vec![],
+                    },
+                    snapshot: format!("run {run}\n"),
+                    view: None,
+                },
+            );
+        }
+        out.series_hook().unwrap()
+    }
+
+    #[test]
+    fn test_a_book_refilled_on_a_timer_is_named_in_the_title_and_summary() {
+        let series = depth_series(110, 13);
+        assert_eq!(
+            summary(&series),
+            "110 runs · none failed · bot timer: bid and ask depth refill every 6m 30s (7 cycles)"
+        );
+        let view = RepeatView {
+            series,
+            ..market(1)
+        };
+        let rows = render(&view, 160, 30);
+        let title = rows
+            .iter()
+            .find(|r| r.contains("Trends · run 110"))
+            .unwrap();
+        assert!(
+            title.contains("! Bot timer: bid and ask depth refill every 6m 30s (7 cycles)"),
+            "{title}"
+        );
+        // Too few cycles yet: nothing.
+        assert_eq!(summary(&depth_series(30, 13)), "30 runs · none failed");
+    }
+
+    #[test]
+    fn test_one_side_on_a_timer_or_two_timers_are_told_apart() {
+        let c = |bid_every: u64, ask_every: Option<u64>| {
+            let metrics = summary_metrics(&HealthThresholds::default());
+            let start = chrono::Utc::now();
+            let runs = (0..120u64)
+                .map(|i| {
+                    let saw = |every: u64| 3_300.0 - (i % every) as f64 * 200.0;
+                    RunRecord {
+                        run: i + 1,
+                        at: start + chrono::TimeDelta::seconds(30 * i as i64),
+                        sample: Sample {
+                            values: metrics
+                                .iter()
+                                .map(|m| match m.id {
+                                    MetricId::BidDepth => Some(saw(bid_every)),
+                                    MetricId::AskDepth => {
+                                        Some(ask_every.map_or(2_000.0 + (i % 7) as f64, saw))
+                                    }
+                                    _ => None,
+                                })
+                                .collect(),
+                            healthy: true,
+                            failed_checks: vec![],
+                        },
+                        snapshot: String::new(),
+                        view: None,
+                    }
+                })
+                .collect();
+            depth_cycle_note(&Copy {
+                metrics,
+                runs,
+                dropped: 0,
+            })
+        };
+        assert_eq!(
+            c(10, None).as_deref(),
+            Some("bid depth refills every 5m 00s (10 cycles)")
+        );
+        assert_eq!(
+            c(10, Some(15)).as_deref(),
+            Some(
+                "bid depth refills every 5m 00s (10 cycles); ask depth refills every 7m 30s (6 cycles)"
+            )
         );
     }
 }
