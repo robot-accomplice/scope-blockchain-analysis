@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-10-24
+
 ### Added
 - Releases include a Windows build: `scope-windows-x64.zip` (with `scope.exe`) and its `.sha256`. Every release build the runner can execute is smoke-run (`scope --version`) before it is packaged.
 
@@ -404,7 +406,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Configuration system with YAML support
 - Support for ERC-20, SPL, and TRC-20 tokens
 
-[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.5.6...v0.6.0
