@@ -23,7 +23,7 @@ path = "src/lib.rs"
 [dependencies]
 # Core library (same `use scope::*` import path). The `version` pin is
 # required by crates.io publish and must be bumped with the workspace version.
-scope = { path = "../scope-core", package = "scope-bca-core", version = "0.8.0" }
+scope = { path = "../scope-core", package = "scope-bca-core", version = "0.8.1" }
 
 # CLI framework
 clap = { version = "4.0", features = ["derive", "cargo"] }
@@ -82,7 +82,7 @@ libc = "0.2"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
 
 [dev-dependencies]
-scope = { path = "../scope-core", package = "scope-bca-core", version = "0.8.0", features = ["test-support"] }
+scope = { path = "../scope-core", package = "scope-bca-core", version = "0.8.1", features = ["test-support"] }
 tempfile = "3.10"
 assert_cmd = "2.0"
 predicates = "3.0"
