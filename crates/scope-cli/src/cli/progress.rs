@@ -490,4 +490,41 @@ mod tests {
         );
         sp.finish_and_clear();
     }
+    #[test]
+    fn test_a_drawing_spinner_ends_on_its_warning() {
+        let _lock = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let screen = Screen::default();
+        let sp = drawing_spinner("Checking...", &quiet(), &screen);
+        let from = screen.ops().len();
+        sp.finish_warn("partial data");
+        assert!(
+            drew_since(&screen, from, "⚠ partial data"),
+            "{:?}",
+            screen.ops()
+        );
+        assert_eq!(paused(|| 1), 1, "an ended bar is not paused");
+    }
+
+    #[test]
+    fn test_a_drawing_step_progress_counts_and_ends_on_its_message() {
+        let screen = Screen::default();
+        let bar = ProgressBar::with_draw_target(
+            Some(3),
+            indicatif::ProgressDrawTarget::term_like(Box::new(screen.clone())),
+        );
+        bar.set_style(ProgressStyle::with_template("{pos}/{len} {msg}").unwrap());
+        let steps = StepProgress { bar };
+        steps.inc("first");
+        steps.inc("second");
+        assert_eq!(steps.bar.position(), 2);
+        assert_eq!(steps.bar.message(), "second");
+        // Finishing fills the bar.
+        steps.finish("all done");
+        assert!(steps.bar.is_finished());
+        assert!(
+            drew_since(&screen, 0, "3/3 ✓ all done"),
+            "{:?}",
+            screen.ops()
+        );
+    }
 }
