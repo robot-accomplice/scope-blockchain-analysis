@@ -15,10 +15,12 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
+          # The oldest supported Ubuntu, so the binary runs on its glibc
+          # (2.35) and newer: built on ubuntu-latest it needed 2.39.
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             suffix: linux-x64
-          - os: ubuntu-latest
+          - os: ubuntu-22.04
             target: aarch64-unknown-linux-gnu
             suffix: linux-arm64
             cross: true
@@ -58,6 +60,10 @@ jobs:
         if: ${{ !matrix.cross }}
         shell: bash
         run: ./target/${{ matrix.target }}/release/scope --version
+
+      - name: Check the glibc it needs
+        if: runner.os == 'Linux'
+        run: scripts/check-glibc.sh ./target/${{ matrix.target }}/release/scope
 
       - name: Package
         if: matrix.archive != 'zip'
