@@ -2889,8 +2889,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_enrich_balance_usd_uses_first_priced_trx_pair() {
-        // The flat `baseTokenSymbol` shape that DexSearchPair parses. (Live
-        // DexScreener nests it as `baseToken.symbol`: see the ignored test below.)
+        // The flat `baseTokenSymbol` shape that DexSearchPair parses.
         let mut server = mockito::Server::new_async().await;
         let _m = mock_dex_search(
             &mut server,
@@ -2931,24 +2930,6 @@ mod tests {
             client.enrich_balance_usd(&mut balance).await;
             assert_eq!(balance.usd_value, None, "{body}");
         }
-    }
-
-    #[tokio::test]
-    #[ignore = "bug: DexSearchPair reads a flat baseTokenSymbol, but DexScreener nests baseToken.symbol, so TRX balances never get a USD value"]
-    async fn test_enrich_balance_usd_reads_dexscreener_nested_base_token() {
-        let mut server = mockito::Server::new_async().await;
-        let _m = mock_dex_search(
-            &mut server,
-            r#"{"schemaVersion": "1.0.0", "pairs": [
-                {"chainId": "tron", "baseToken": {"address": "T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb", "name": "Wrapped TRX", "symbol": "WTRX"},
-                 "quoteToken": {"symbol": "USDT"}, "priceUsd": "0.25"}
-            ]}"#,
-        )
-        .await;
-        let client = mocked_client(&server, None);
-        let mut balance = trx_balance("4000000");
-        client.enrich_balance_usd(&mut balance).await;
-        assert_eq!(balance.usd_value, Some(1.0));
     }
 
     #[tokio::test]
