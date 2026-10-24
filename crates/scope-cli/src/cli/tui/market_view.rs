@@ -241,11 +241,14 @@ fn two(left: (&str, String), right: (&str, String)) -> Line<'static> {
 const SIDE_COLS: usize = 12;
 
 /// One row of the bid/ask table: a label, the bid value, the ask value.
+/// A value is cut to leave a blank between the columns, so a long one
+/// never runs into the next or pushes it out of line.
 fn side_row(label: &str, bid: String, ask: String, style: Style) -> Line<'static> {
+    let cell = |v: String| format!("{:>w$}", cut(&v, SIDE_COLS - 1), w = SIDE_COLS);
     Line::from(vec![
         Span::styled(format!(" {:<w$} ", label, w = LABEL_COLS), SECONDARY),
-        Span::styled(format!("{bid:>w$}", w = SIDE_COLS), style),
-        Span::styled(format!("{ask:>w$}", w = SIDE_COLS), style),
+        Span::styled(cell(bid), style),
+        Span::styled(cell(ask), style),
     ])
 }
 
@@ -286,7 +289,8 @@ fn key_values(s: &MarketSummary, opts: Opts) -> Vec<Line<'static>> {
             if e.fillable {
                 format!("{:.2} bps", e.slippage_bps)
             } else {
-                "not fillable".to_string()
+                // Fits the column: `not fillable` ran into the ask.
+                "too thin".to_string()
             }
         };
         lines.push(side_row("Slip 10K", slip(sell), slip(buy), Style::new()));
@@ -785,6 +789,32 @@ mod tests {
             assert_eq!(style_of("Spread"), ERR);
             assert_eq!(style_of("Peg"), SECONDARY);
         }
+    }
+
+    #[test]
+    fn an_unfillable_slip_lines_up_under_bid_and_ask() {
+        let all = lines(&view(2, 2, 1.0), Size::Full);
+        let row = |start: &str| {
+            all.iter()
+                .map(|l| text(std::slice::from_ref(l)))
+                .find(|t| t.trim_start().starts_with(start))
+                .unwrap_or_else(|| panic!("no {start} row"))
+        };
+        let (head, slip) = (row("bid"), row("Slip 10K"));
+        assert_eq!(slip.matches("too thin").count(), 2, "{slip}");
+        // Both columns end where their headers end, with a blank between.
+        assert_eq!(
+            slip.chars().count(),
+            head.chars().count(),
+            "{head}
+{slip}"
+        );
+        assert!(slip.contains("too thin    too thin"), "{slip}");
+        // A value wider than a column is cut, not run into the next.
+        let long = side_row("x", "a".repeat(20), "b".repeat(20), Style::new());
+        let t = text(std::slice::from_ref(&long));
+        assert!(t.contains("a… "), "{t}");
+        assert_eq!(t.chars().count(), 1 + LABEL_COLS + 1 + 2 * SIDE_COLS, "{t}");
     }
 
     #[test]

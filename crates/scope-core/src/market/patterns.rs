@@ -2,16 +2,19 @@
 //! market summary's health advisory.
 //!
 //! Market making is legitimate, so a signal never fails a summary: it warns,
-//! with the evidence, where the tape or the book looks machine-made. Four
+//! with the evidence, where the tape or the book looks machine-made. The
 //! signals:
 //!
 //! - **Repeated sizes:** one exact trade size makes up a large share of the
-//!   tape.
+//!   tape, or a few sizes make up half of it.
 //! - **Metronome timing:** trades come at an almost fixed interval.
+//! - **Cadence:** most gaps between trades are one interval, even when a bot
+//!   trades in bursts with pauses between them (so the gaps as a whole are
+//!   not a metronome).
 //! - **Ping-pong:** a buy and a sell of the same size at nearly the same
 //!   price, seconds apart (the shape of wash trading).
-//! - **Ladder quotes:** consecutive book levels of the same size at even
-//!   price steps.
+//! - **Ladder quotes:** consecutive book levels at even price steps whose
+//!   sizes are equal, or rise or fall level by level (a quoting curve).
 //!
 //! The functions are pure: they read trades and levels and fetch nothing.
 
@@ -27,12 +30,34 @@ pub const MIN_TRADES: usize = 30;
 /// One exact size in at least this share of the trades is a signal.
 pub const REPEATED_SIZE_SHARE: f64 = 0.30;
 
+/// How many sizes the few-sizes signal adds up.
+pub const FEW_SIZES: usize = 3;
+
+/// The [`FEW_SIZES`] most common sizes in at least this share of the trades
+/// are a signal.
+pub const FEW_SIZES_SHARE: f64 = 0.50;
+
+/// A size counts toward the few-sizes signal only with at least this share
+/// of the trades on its own.
+pub const FEW_SIZES_MIN_SHARE: f64 = 0.05;
+
 /// Fewest gaps between trade events the timing signal needs.
 pub const MIN_GAPS: usize = 20;
 
 /// Gaps whose standard deviation is under this share of their mean are a
 /// metronome.
 pub const METRONOME_MAX_CV: f64 = 0.10;
+
+/// Gaps within this share of an interval count as that interval.
+pub const CADENCE_TOLERANCE: f64 = 0.02;
+
+/// Gaps at one interval, as a share of all gaps, at or above this are a
+/// cadence. Random arrivals put at most about 1.5% of gaps in any ±2% band.
+pub const CADENCE_SHARE: f64 = 0.30;
+
+/// Shortest interval the cadence signal judges: some venues print whole
+/// seconds, which would put many short random gaps on one value.
+pub const CADENCE_MIN_GAP_MS: f64 = 5_000.0;
 
 /// A ping-pong pair is at most this far apart in time.
 pub const PING_PONG_WINDOW_MS: u64 = 5_000;
@@ -69,6 +94,13 @@ const SIZE_DECIMALS: f64 = 1e8;
 pub enum Finding {
     /// `count` of `of` trades have the exact size `size` (base units).
     RepeatedSize { size: f64, count: usize, of: usize },
+    /// `count` of `of` trades have one of the exact sizes `sizes`, most
+    /// common first.
+    FewSizes {
+        sizes: Vec<f64>,
+        count: usize,
+        of: usize,
+    },
     /// Gaps between trade events average `mean_gap_ms`, with a coefficient
     /// of variation `cv`, over `gaps` gaps. `dominant_size` is set when the
     /// cadence is that of the repeated-size trades only.
@@ -78,17 +110,39 @@ pub enum Finding {
         gaps: usize,
         dominant_size: Option<f64>,
     },
+    /// `share` of `gaps` gaps between trade events are `gap_ms` apart
+    /// (within [`CADENCE_TOLERANCE`]).
+    Cadence {
+        gap_ms: f64,
+        share: f64,
+        gaps: usize,
+    },
     /// `pairs` buy/sell pairs of the same size, close in time and price,
     /// cover `share` of the trades.
     PingPong { pairs: usize, share: f64 },
-    /// `levels` consecutive `side` levels of about `size` (base units), at
-    /// steps of about `step_pct` percent.
+    /// `levels` consecutive `side` levels at steps of about `step_pct`
+    /// percent, from `size` at the first to `last_size` (base units),
+    /// shaped as `shape`.
     Ladder {
         side: BookSide,
         levels: usize,
+        shape: LadderShape,
         size: f64,
+        last_size: f64,
         step_pct: f64,
     },
+}
+
+/// How a ladder's sizes run, from the best level out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LadderShape {
+    /// One size at every level.
+    Even,
+    /// Each level is smaller than or as large as the one before.
+    Falling,
+    /// Each level is larger than or as large as the one before.
+    Rising,
 }
 
 /// The bot-pattern result of one summary.
@@ -115,18 +169,27 @@ fn size_key(quantity: f64) -> i64 {
     (quantity * SIZE_DECIMALS).round() as i64
 }
 
-/// The most common exact size and the trades that have it.
-fn dominant_size(trades: &[Trade]) -> Option<(f64, Vec<usize>)> {
+/// The exact sizes, most common first, each with the trades that have it.
+fn sizes_by_count(trades: &[Trade]) -> Vec<(f64, Vec<usize>)> {
     let mut by_size: std::collections::HashMap<i64, Vec<usize>> = Default::default();
     for (i, t) in trades.iter().enumerate() {
         if t.quantity > 0.0 {
             by_size.entry(size_key(t.quantity)).or_default().push(i);
         }
     }
-    by_size
-        .into_values()
-        .max_by(|a, b| a.len().cmp(&b.len()).then(b[0].cmp(&a[0])))
+    let mut sizes: Vec<Vec<usize>> = by_size.into_values().collect();
+    // Ties go to the size seen first, so the order does not depend on the
+    // hash order.
+    sizes.sort_by(|a, b| b.len().cmp(&a.len()).then(a[0].cmp(&b[0])));
+    sizes
+        .into_iter()
         .map(|idx| (trades[idx[0]].quantity, idx))
+        .collect()
+}
+
+/// The most common exact size and the trades that have it.
+fn dominant_size(trades: &[Trade]) -> Option<(f64, Vec<usize>)> {
+    sizes_by_count(trades).into_iter().next()
 }
 
 /// Repeated sizes: the dominant size and the trades it covers, when it
@@ -144,6 +207,35 @@ pub fn repeated_size(trades: &[Trade]) -> Option<(Finding, Vec<usize>)> {
         },
         idx,
     ))
+}
+
+/// Few sizes: the [`FEW_SIZES`] most common sizes (each with at least
+/// [`FEW_SIZES_MIN_SHARE`]) cover [`FEW_SIZES_SHARE`] of the trades. A bot
+/// that rotates through a few sizes passes under [`repeated_size`].
+pub fn few_sizes(trades: &[Trade]) -> Option<(Finding, Vec<usize>)> {
+    if trades.len() < MIN_TRADES {
+        return None;
+    }
+    let n = trades.len() as f64;
+    let top: Vec<(f64, Vec<usize>)> = sizes_by_count(trades)
+        .into_iter()
+        .take(FEW_SIZES)
+        .filter(|(_, idx)| idx.len() as f64 / n >= FEW_SIZES_MIN_SHARE)
+        .collect();
+    let idx: Vec<usize> = top
+        .iter()
+        .flat_map(|(_, idx)| idx.iter().copied())
+        .collect();
+    (top.len() > 1 && idx.len() as f64 / n >= FEW_SIZES_SHARE).then(|| {
+        (
+            Finding::FewSizes {
+                sizes: top.iter().map(|(s, _)| *s).collect(),
+                count: idx.len(),
+                of: trades.len(),
+            },
+            idx,
+        )
+    })
 }
 
 /// Gaps between trade events. Trades with the same timestamp are one event:
@@ -193,6 +285,47 @@ pub fn metronome(trades: &[Trade]) -> Option<Finding> {
     })
 }
 
+/// Cadence: the interval (of at least [`CADENCE_MIN_GAP_MS`]) that the most
+/// gaps between trade events are at, within [`CADENCE_TOLERANCE`], when
+/// those gaps are at least [`CADENCE_SHARE`] of all gaps.
+pub fn cadence(trades: &[Trade]) -> Option<Finding> {
+    if trades.len() < MIN_TRADES {
+        return None;
+    }
+    let mut gaps = event_gaps(trades.iter().map(|t| t.timestamp_ms).collect());
+    if gaps.len() < MIN_GAPS {
+        return None;
+    }
+    gaps.sort_by(f64::total_cmp);
+    // For each gap as the interval, the gaps in its band: two pointers over
+    // the sorted gaps.
+    let (mut lo, mut hi) = (0, 0);
+    let mut best: Option<(usize, usize)> = None; // (count, index of the interval)
+    for (i, &g) in gaps.iter().enumerate() {
+        if g < CADENCE_MIN_GAP_MS {
+            continue;
+        }
+        while gaps[lo] < g * (1.0 - CADENCE_TOLERANCE) {
+            lo += 1;
+        }
+        hi = hi.max(i);
+        while hi + 1 < gaps.len() && gaps[hi + 1] <= g * (1.0 + CADENCE_TOLERANCE) {
+            hi += 1;
+        }
+        let count = hi + 1 - lo;
+        if best.is_none_or(|(c, _)| count > c) {
+            best = Some((count, i));
+        }
+    }
+    let (count, i) = best?;
+    let share = count as f64 / gaps.len() as f64;
+    (share >= CADENCE_SHARE).then_some(Finding::Cadence {
+        gap_ms: gaps[i],
+        share,
+        gaps: gaps.len(),
+    })
+}
+
 /// Ping-pong: buy/sell pairs of the same size within
 /// [`PING_PONG_WINDOW_MS`] and [`PING_PONG_PRICE_TOLERANCE_PCT`]. Each trade
 /// is in one pair at most. Returns the finding and the paired trades.
@@ -234,44 +367,72 @@ pub fn ping_pong(trades: &[Trade]) -> Option<(Finding, Vec<usize>)> {
         .then_some((Finding::PingPong { pairs, share }, members))
 }
 
-/// The longest ladder in `levels` (best first): consecutive levels of about
-/// one size at about one price step.
+/// -1, 0 or 1 as `b` is smaller than, about (within
+/// [`LADDER_SIZE_TOLERANCE`]) or larger than `a`.
+fn size_direction(a: f64, b: f64) -> i8 {
+    if (b - a).abs() <= a * LADDER_SIZE_TOLERANCE {
+        0
+    } else if b > a {
+        1
+    } else {
+        -1
+    }
+}
+
+/// The longest ladder in `levels` (best first): consecutive levels at about
+/// one price step whose sizes stay equal or run one way, never both.
 fn ladder_side(levels: &[OrderBookLevel], side: BookSide) -> Option<Finding> {
     let levels: Vec<&OrderBookLevel> = levels
         .iter()
         .filter(|l| l.price > 0.0 && l.quantity > 0.0)
         .take(LADDER_DEPTH)
         .collect();
-    let mut best: Option<(usize, usize)> = None; // (start, length)
+    let mut best: Option<(usize, usize, i8)> = None; // (start, length, direction)
     let mut start = 0;
     while start + 1 < levels.len() {
-        let size = levels[start].quantity;
         let step = (levels[start + 1].price - levels[start].price).abs();
+        let mut dir = 0;
         let mut end = start + 1;
         while end < levels.len() {
-            let same_size = (levels[end].quantity - size).abs() <= size * LADDER_SIZE_TOLERANCE;
             let this_step = (levels[end].price - levels[end - 1].price).abs();
             let same_step = step > 0.0 && (this_step - step).abs() <= step * LADDER_STEP_TOLERANCE;
-            if !(same_size && same_step) {
+            let d = size_direction(levels[end - 1].quantity, levels[end].quantity);
+            if !same_step || (d != 0 && dir != 0 && d != dir) {
                 break;
+            }
+            if d != 0 {
+                dir = d;
             }
             end += 1;
         }
         let len = end - start;
-        if best.is_none_or(|(_, l)| len > l) {
-            best = Some((start, len));
+        if best.is_none_or(|(_, l, _)| len > l) {
+            best = Some((start, len, dir));
         }
-        start = end.max(start + 1);
+        // The level a run ended on can start the next one (the top of a
+        // falling curve after a rising first level).
+        start = (end - 1).max(start + 1);
     }
-    let (s, len) = best?;
+    let (s, len, dir) = best?;
     if len < LADDER_MIN_LEVELS {
         return None;
     }
+    let (first, last) = (levels[s].quantity, levels[s + len - 1].quantity);
+    let even = levels[s..s + len]
+        .iter()
+        .all(|l| size_direction(first, l.quantity) == 0);
+    let shape = match dir {
+        _ if even => LadderShape::Even,
+        1 => LadderShape::Rising,
+        _ => LadderShape::Falling,
+    };
     let step = (levels[s + 1].price - levels[s].price).abs();
     Some(Finding::Ladder {
         side,
         levels: len,
-        size: levels[s].quantity,
+        shape,
+        size: first,
+        last_size: last,
         step_pct: step / levels[s].price * 100.0,
     })
 }
@@ -311,11 +472,13 @@ pub fn detect(
         Ok(t) => {
             sampled = t.len();
             let mut covered = vec![false; t.len()];
-            if let Some((f, idx)) = repeated_size(t) {
+            // A few sizes only when no one size is enough on its own.
+            if let Some((f, idx)) = repeated_size(t).or_else(|| few_sizes(t)) {
                 idx.iter().for_each(|&i| covered[i] = true);
                 findings.push(f);
             }
-            if let Some(f) = metronome(t) {
+            // A cadence only when the gaps are not a metronome already.
+            if let Some(f) = metronome(t).or_else(|| cadence(t)) {
                 findings.push(f);
             }
             if let Some((f, idx)) = ping_pong(t) {
@@ -359,6 +522,21 @@ fn short(v: f64) -> String {
     }
 }
 
+/// A price step in percent, to 2 significant digits: a 1-tick step of
+/// 0.010002% reads `0.01`.
+fn step(pct: f64) -> String {
+    if pct <= 0.0 {
+        return short(pct);
+    }
+    let decimals = (1 - pct.log10().floor() as i32).max(0) as usize;
+    let s = format!("{pct:.decimals$}");
+    if s.contains('.') {
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    } else {
+        s
+    }
+}
+
 impl Finding {
     /// One clause of evidence for the advisory line.
     pub fn describe(&self) -> String {
@@ -383,6 +561,26 @@ impl Finding {
                     cv * 100.0
                 )
             }
+            Finding::FewSizes { sizes, count, of } => format!(
+                "{:.0}% of {of} trades are one of {} sizes: {}",
+                *count as f64 / *of as f64 * 100.0,
+                sizes.len(),
+                sizes
+                    .iter()
+                    .map(|s| short(*s))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Finding::Cadence {
+                gap_ms,
+                share,
+                gaps,
+            } => format!(
+                "{:.0}% of {gaps} gaps between trades are {:.1}s ±{:.0}%",
+                share * 100.0,
+                gap_ms / 1000.0,
+                CADENCE_TOLERANCE * 100.0
+            ),
             Finding::PingPong { pairs, share } => format!(
                 "{pairs} buy/sell ping-pong pairs ({:.0}% of trades)",
                 share * 100.0
@@ -390,17 +588,29 @@ impl Finding {
             Finding::Ladder {
                 side,
                 levels,
+                shape,
                 size,
+                last_size,
                 step_pct,
-            } => format!(
-                "{} ladder of {levels} levels × {} at {}% steps",
-                match side {
+            } => {
+                let side = match side {
                     BookSide::Bid => "bid",
                     BookSide::Ask => "ask",
-                },
-                short(*size),
-                short(*step_pct)
-            ),
+                };
+                let sizes = match shape {
+                    LadderShape::Even => format!("× {}", short(*size)),
+                    LadderShape::Falling => {
+                        format!("falling {} → {}", short(*size), short(*last_size))
+                    }
+                    LadderShape::Rising => {
+                        format!("rising {} → {}", short(*size), short(*last_size))
+                    }
+                };
+                format!(
+                    "{side} ladder of {levels} levels {sizes} at {}% steps",
+                    step(*step_pct)
+                )
+            }
         }
     }
 }
@@ -629,21 +839,27 @@ mod tests {
         let asks: Vec<_> = (0..12)
             .map(|i| level(1.0001 + i as f64 * 0.0001, 5_000.0))
             .collect();
+        // Even steps, but sizes up and down: no ladder.
         let bids: Vec<_> = (0..12)
-            .map(|i| level(0.9999 - i as f64 * 0.0001, 100.0 + i as f64 * 9.0))
+            .map(|i| level(0.9999 - i as f64 * 0.0001, 100.0 + (i * 53 % 211) as f64))
             .collect();
         let found = ladders(&bids, &asks);
         assert_eq!(found.len(), 1);
         let Finding::Ladder {
             side,
             levels,
+            shape,
             size,
             step_pct,
+            ..
         } = &found[0]
         else {
             panic!()
         };
-        assert_eq!((*side, *levels, *size), (BookSide::Ask, 12, 5_000.0));
+        assert_eq!(
+            (*side, *levels, *shape, *size),
+            (BookSide::Ask, 12, LadderShape::Even, 5_000.0)
+        );
         assert!((step_pct - 0.01).abs() < 0.001, "{step_pct}");
         // Seven levels are not a ladder.
         let short_run: Vec<_> = (0..7)
@@ -742,5 +958,250 @@ mod tests {
             panic!("{:?}", p.check())
         };
         assert!(m.ends_with("; 100% of sampled trades look bot-made"), "{m}");
+    }
+
+    /// The USDN/USDT book on weex, read live on 2026-10-24: ten levels a
+    /// side at one tick, sizes falling level by level from the second.
+    fn weex_book() -> (Vec<OrderBookLevel>, Vec<OrderBookLevel>) {
+        let bids = [
+            (0.9999, 410.046),
+            (0.9998, 540.108),
+            (0.9997, 450.135),
+            (0.9996, 370.148),
+            (0.9995, 370.185),
+            (0.9994, 360.2161),
+            (0.9993, 300.2101),
+            (0.9992, 220.1761),
+            (0.9991, 160.1441),
+            (0.9990, 120.1201),
+            (0.0022, 3636.3636),
+        ];
+        let asks = [
+            (1.0001, 427.318),
+            (1.0002, 1349.73),
+            (1.0003, 1209.6371),
+            (1.0004, 1029.5881),
+            (1.0005, 959.5202),
+            (1.0006, 919.4483),
+            (1.0007, 799.4403),
+            (1.0008, 619.5043),
+            (1.0009, 399.6403),
+            (1.0010, 299.7002),
+            (1.0500, 4.8046),
+        ];
+        let side = |l: &[(f64, f64)]| l.iter().map(|&(p, q)| level(p, q)).collect();
+        (side(&bids), side(&asks))
+    }
+
+    /// The USDN/USDT tape on weex, as its bot prints it: every ~29 minutes
+    /// two sells, four buys of one size (498.11 or 68.01) exactly 45 s
+    /// apart, then three shrinking buys, each 45 s after the last.
+    fn weex_tape(cycles: u64) -> Vec<Trade> {
+        let mut t = Vec::new();
+        for c in 0..cycles {
+            let start = 1_000_000 + c * 1_760_000;
+            let burst = if c % 2 == 0 { 498.11 } else { 68.01 };
+            let script = [
+                (0.9999, 500.0, TradeSide::Sell),
+                (0.9999, 60.05 + (c % 3) as f64 * 10.0, TradeSide::Sell),
+                (1.0001, burst, TradeSide::Buy),
+                (1.0001, burst, TradeSide::Buy),
+                (1.0001, burst, TradeSide::Buy),
+                (1.0001, burst, TradeSide::Buy),
+                (1.0001, 300.0 + c as f64 * 7.3, TradeSide::Buy),
+                (1.0001, 60.0 + c as f64 * 1.9, TradeSide::Buy),
+                (1.0001, 12.0 + c as f64 * 0.37, TradeSide::Buy),
+            ];
+            for (k, (price, qty, side)) in script.into_iter().enumerate() {
+                // A few ms of jitter, as the live prints have.
+                let jitter = (c * 7 + k as u64 * 13) % 40;
+                t.push(trade(start + k as u64 * 45_000 + jitter, price, qty, side));
+            }
+        }
+        t
+    }
+
+    #[test]
+    fn test_the_weex_usdn_bot_is_caught_on_the_tape_and_the_book() {
+        let tape = weex_tape(40);
+        let (bids, asks) = weex_book();
+        let p = detect(Ok(&tape), Some((&bids, &asks)));
+        let kinds: Vec<&str> = p
+            .findings
+            .iter()
+            .map(|f| match f {
+                Finding::RepeatedSize { .. } => "repeated",
+                Finding::FewSizes { .. } => "few",
+                Finding::Metronome { .. } => "metronome",
+                Finding::Cadence { .. } => "cadence",
+                Finding::PingPong { .. } => "ping-pong",
+                Finding::Ladder { .. } => "ladder",
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            ["few", "cadence", "ladder", "ladder"],
+            "{:?}",
+            p.findings
+        );
+        let crate::market::types::HealthCheck::Warn(m) = p.check() else {
+            panic!("{:?}", p.check())
+        };
+        assert!(
+            m.contains("trades are one of 3 sizes: 498.11, 68.01, 500"),
+            "{m}"
+        );
+        assert!(m.contains("gaps between trades are 45.0s ±2%"), "{m}");
+        assert!(
+            m.contains("bid ladder of 9 levels falling 540.108 → 120.1201 at 0.01% steps"),
+            "{m}"
+        );
+        assert!(
+            m.contains("ask ladder of 9 levels falling 1350 → 299.7002 at 0.01% steps"),
+            "{m}"
+        );
+    }
+
+    #[test]
+    fn test_a_few_sizes_in_half_the_tape_is_a_signal_one_rare_size_is_not() {
+        let mut t = organic(100);
+        for (i, tr) in t.iter_mut().enumerate() {
+            match i % 10 {
+                0 | 1 => tr.quantity = 498.11,
+                2 | 3 => tr.quantity = 68.01,
+                4 | 5 => tr.quantity = 500.0,
+                _ => {}
+            }
+        }
+        // 20 trades each, 60 in all; no one size reaches 30%.
+        assert!(repeated_size(&t).is_none());
+        let (f, idx) = few_sizes(&t).unwrap();
+        assert_eq!(idx.len(), 60);
+        assert!(
+            matches!(&f, Finding::FewSizes { sizes, count: 60, of: 100 } if sizes == &[498.11, 68.01, 500.0]),
+            "{f:?}"
+        );
+        // 45% is not half.
+        let mut t = organic(100);
+        for (i, tr) in t.iter_mut().enumerate() {
+            if i % 20 < 9 {
+                tr.quantity = if i % 2 == 0 { 498.11 } else { 68.01 };
+            }
+        }
+        assert!(few_sizes(&t).is_none(), "{:?}", few_sizes(&t));
+        assert!(few_sizes(&organic(200)).is_none());
+    }
+
+    #[test]
+    fn test_short_tapes_and_few_gaps_are_not_judged() {
+        let short_tape = weex_tape(3);
+        assert!(short_tape.len() < MIN_TRADES);
+        assert!(few_sizes(&short_tape).is_none());
+        assert!(cadence(&short_tape).is_none());
+        // Enough trades, but printed in fewer than MIN_GAPS + 1 instants.
+        let bunched: Vec<Trade> = (0..60u64)
+            .map(|i| trade((i % 10) * 45_000, 1.0, 5.0 + i as f64, TradeSide::Buy))
+            .collect();
+        assert!(cadence(&bunched).is_none());
+        // Every trade in the same millisecond has no gaps to judge.
+        let same: Vec<Trade> = (0..40)
+            .map(|i| trade(7, 1.0, 5.0 + i as f64, TradeSide::Buy))
+            .collect();
+        assert!(metronome(&same).is_none());
+    }
+
+    #[test]
+    fn test_steps_read_to_two_significant_digits() {
+        assert_eq!(step(0.010002), "0.01");
+        assert_eq!(step(0.123), "0.12");
+        assert_eq!(step(0.5), "0.5");
+        assert_eq!(step(12.3), "12");
+        assert_eq!(step(0.0), "0");
+    }
+
+    #[test]
+    fn test_bursts_at_one_interval_are_a_cadence_but_not_a_metronome() {
+        let t = weex_tape(30);
+        assert!(metronome(&t).is_none());
+        let Some(Finding::Cadence { gap_ms, share, .. }) = cadence(&t) else {
+            panic!("{:?}", cadence(&t))
+        };
+        assert!((gap_ms - 45_000.0).abs() < 50.0, "{gap_ms}");
+        assert!(share > 0.85, "{share}");
+        assert!(cadence(&organic(300)).is_none());
+    }
+
+    #[test]
+    fn test_random_gaps_in_whole_seconds_are_not_a_cadence() {
+        // Gaps of 1 to 40 s, printed in whole seconds, in a fixed mix.
+        let mut ms = 0;
+        let t: Vec<Trade> = (0..400u64)
+            .map(|i| {
+                ms += 1_000 * (1 + (i * 7919 + i * i * 31) % 40);
+                trade(ms, 1.0, 5.0 + i as f64, TradeSide::Buy)
+            })
+            .collect();
+        assert!(cadence(&t).is_none(), "{:?}", cadence(&t));
+        // Short gaps are not judged, however regular in whole seconds.
+        let fast: Vec<Trade> = (0..100u64)
+            .map(|i| {
+                trade(
+                    i * 1_000 + (i % 2) * 2_000,
+                    1.0,
+                    5.0 + i as f64,
+                    TradeSide::Buy,
+                )
+            })
+            .collect();
+        assert!(cadence(&fast).is_none(), "{:?}", cadence(&fast));
+    }
+
+    #[test]
+    fn test_sizes_that_fall_or_rise_level_by_level_are_a_shaped_ladder() {
+        let (bids, asks) = weex_book();
+        let found = ladders(&bids, &asks);
+        assert_eq!(found.len(), 2, "{found:?}");
+        for f in &found {
+            assert!(
+                matches!(
+                    f,
+                    Finding::Ladder {
+                        levels: 9,
+                        shape: LadderShape::Falling,
+                        ..
+                    }
+                ),
+                "{f:?}"
+            );
+        }
+        let rising: Vec<_> = (0..10)
+            .map(|i| level(0.9999 - i as f64 * 0.0001, 100.0 + i as f64 * 25.0))
+            .collect();
+        let found = ladders(&rising, &[]);
+        assert!(
+            matches!(
+                found[..],
+                [Finding::Ladder {
+                    levels: 10,
+                    shape: LadderShape::Rising,
+                    ..
+                }]
+            ),
+            "{found:?}"
+        );
+        assert!(
+            found[0].describe().contains("rising 100 → 325"),
+            "{}",
+            found[0].describe()
+        );
+        // Up then down then up: no ladder of 8.
+        let zigzag: Vec<_> = [
+            100.0, 200.0, 150.0, 300.0, 250.0, 400.0, 350.0, 500.0, 450.0,
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, &q)| level(1.0001 + i as f64 * 0.0001, q))
+        .collect();
+        assert!(ladders(&[], &zigzag).is_empty());
     }
 }

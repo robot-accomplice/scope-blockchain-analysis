@@ -942,6 +942,25 @@ mod tests {
         );
         let row = line_with(&s, "0xabc");
         assert!(row.contains("passed") && row.contains('✓'), "{row}");
+        // The detail: the warning reads in its colour, n/a dimmed.
+        g.key(key(KeyCode::Enter));
+        let mut t = Terminal::new(TestBackend::new(120, 36)).unwrap();
+        t.draw(|f| draw(f, f.area(), &g)).unwrap();
+        let buf = t.backend().buffer().clone();
+        let style_of = |needle: &str| {
+            (0..36u16)
+                .find_map(|y| {
+                    let row: String = (0..120u16).map(|x| buf[(x, y)].symbol()).collect();
+                    let x = row.find(needle)?;
+                    // Columns, not bytes: the glyphs before are multi-byte.
+                    let col = row[..x].chars().count() as u16;
+                    (row.matches(needle).count() == 1 && !row.contains("warned"))
+                        .then(|| buf[(col, y)].style())
+                })
+                .unwrap_or_else(|| panic!("no {needle} in the detail"))
+        };
+        assert_eq!(style_of("thin book").fg, WARN.fg);
+        assert!(style_of("not a token").add_modifier.contains(Modifier::DIM));
     }
 
     #[test]
