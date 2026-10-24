@@ -1093,6 +1093,33 @@ mod tests {
     }
 
     #[test]
+    fn test_short_tapes_and_few_gaps_are_not_judged() {
+        let short_tape = weex_tape(3);
+        assert!(short_tape.len() < MIN_TRADES);
+        assert!(few_sizes(&short_tape).is_none());
+        assert!(cadence(&short_tape).is_none());
+        // Enough trades, but printed in fewer than MIN_GAPS + 1 instants.
+        let bunched: Vec<Trade> = (0..60u64)
+            .map(|i| trade((i % 10) * 45_000, 1.0, 5.0 + i as f64, TradeSide::Buy))
+            .collect();
+        assert!(cadence(&bunched).is_none());
+        // Every trade in the same millisecond has no gaps to judge.
+        let same: Vec<Trade> = (0..40)
+            .map(|i| trade(7, 1.0, 5.0 + i as f64, TradeSide::Buy))
+            .collect();
+        assert!(metronome(&same).is_none());
+    }
+
+    #[test]
+    fn test_steps_read_to_two_significant_digits() {
+        assert_eq!(step(0.010002), "0.01");
+        assert_eq!(step(0.123), "0.12");
+        assert_eq!(step(0.5), "0.5");
+        assert_eq!(step(12.3), "12");
+        assert_eq!(step(0.0), "0");
+    }
+
+    #[test]
     fn test_bursts_at_one_interval_are_a_cadence_but_not_a_metronome() {
         let t = weex_tape(30);
         assert!(metronome(&t).is_none());
