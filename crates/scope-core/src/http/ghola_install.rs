@@ -77,6 +77,8 @@ pub trait ReleaseSource: Send + Sync {
 /// one, is refused.
 pub struct GithubReleases {
     client: reqwest::Client,
+    /// The URLs it fetches, redirects included: [`allowed_url`].
+    allowed: fn(&str) -> bool,
 }
 
 impl GithubReleases {
@@ -86,10 +88,16 @@ impl GithubReleases {
     ///
     /// Returns `Network` when the client cannot be built.
     pub fn new() -> Result<Self, ScopeError> {
-        let redirects = reqwest::redirect::Policy::custom(|attempt| {
+        Self::with_policy(allowed_url, true)
+    }
+
+    /// A source that fetches only the URLs `allowed` accepts, over HTTPS
+    /// only when `https_only`. Tests point it at a local mock server.
+    fn with_policy(allowed: fn(&str) -> bool, https_only: bool) -> Result<Self, ScopeError> {
+        let redirects = reqwest::redirect::Policy::custom(move |attempt| {
             if attempt.previous().len() >= 10 {
                 attempt.error("too many redirects")
-            } else if allowed_url(attempt.url().as_str()) {
+            } else if allowed(attempt.url().as_str()) {
                 attempt.follow()
             } else {
                 let to = attempt.url().to_string();
@@ -97,7 +105,7 @@ impl GithubReleases {
             }
         });
         let client = reqwest::Client::builder()
-            .https_only(true)
+            .https_only(https_only)
             .redirect(redirects)
             .timeout(DOWNLOAD_TIMEOUT)
             .user_agent(concat!("scope-bca/", env!("CARGO_PKG_VERSION")))
@@ -105,14 +113,14 @@ impl GithubReleases {
             .map_err(|e| {
                 ScopeError::Network(format!("failed to build the download client: {e}"))
             })?;
-        Ok(Self { client })
+        Ok(Self { client, allowed })
     }
 }
 
 #[async_trait]
 impl ReleaseSource for GithubReleases {
     async fn fetch(&self, url: &str) -> Result<Vec<u8>, ScopeError> {
-        if !allowed_url(url) {
+        if !(self.allowed)(url) {
             return Err(ScopeError::Network(format!(
                 "refusing to download {url}: not a GitHub HTTPS URL"
             )));
@@ -451,27 +459,25 @@ pub fn manual_steps() -> Vec<String> {
     ]
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// A release served from memory and archive builders, for the tests here
+/// and in the CLI. Nothing in it touches the network.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
+    use super::{CHECKSUMS, LATEST_RELEASE_URL, ReleaseSource, Target};
+    use crate::error::ScopeError;
+    use async_trait::async_trait;
+    use sha2::{Digest, Sha256};
     use std::collections::HashMap;
     use std::io::Write;
     use std::sync::Mutex;
 
-    const LINUX: Target = Target {
-        os: "linux",
-        arch: "amd64",
-    };
-    const WINDOWS: Target = Target {
-        os: "windows",
-        arch: "amd64",
-    };
-    const BINARY: &[u8] = b"\x7fELF fake ghola";
+    /// The binary in the fake archives.
+    pub const BINARY: &[u8] = b"\x7fELF fake ghola";
 
     /// A release served from memory. It records each URL fetched.
-    struct FakeRelease {
-        files: HashMap<String, Vec<u8>>,
-        fetched: Mutex<Vec<String>>,
+    pub struct FakeRelease {
+        pub files: HashMap<String, Vec<u8>>,
+        pub fetched: Mutex<Vec<String>>,
     }
 
     #[async_trait]
@@ -485,11 +491,11 @@ mod tests {
         }
     }
 
-    fn url(file: &str) -> String {
+    pub fn url(file: &str) -> String {
         format!("https://github.com/robot-accomplice/ghola/releases/download/v0.6.2/{file}")
     }
 
-    fn tar_gz(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    pub fn tar_gz(entries: &[(&str, &[u8])]) -> Vec<u8> {
         let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         let mut tar = tar::Builder::new(gz);
         for (name, data) in entries {
@@ -502,7 +508,7 @@ mod tests {
         tar.into_inner().unwrap().finish().unwrap()
     }
 
-    fn zip_of(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    pub fn zip_of(entries: &[(&str, &[u8])]) -> Vec<u8> {
         let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
         for (name, data) in entries {
             zip.start_file(*name, zip::write::SimpleFileOptions::default())
@@ -512,9 +518,9 @@ mod tests {
         zip.finish().unwrap().into_inner()
     }
 
-    /// A v0.6.2 release with `asset` (named for `target`) and a
+    /// A v0.6.2 release with `archive` (named for `target`) and a
     /// `checksums.txt` that gives `listed` as its hash.
-    fn release(target: Target, archive: Vec<u8>, listed: Option<String>) -> FakeRelease {
+    pub fn release(target: Target, archive: Vec<u8>, listed: Option<String>) -> FakeRelease {
         let name = target.asset_name("0.6.2");
         let hash = listed.unwrap_or_else(|| hex::encode(Sha256::digest(&archive)));
         let sums = format!("{}  other.deb\n{hash}  {name}\n", "0".repeat(64));
@@ -538,6 +544,21 @@ mod tests {
             fetched: Mutex::default(),
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::*;
+    use super::*;
+
+    const LINUX: Target = Target {
+        os: "linux",
+        arch: "amd64",
+    };
+    const WINDOWS: Target = Target {
+        os: "windows",
+        arch: "amd64",
+    };
 
     #[test]
     fn test_target_names_match_the_release_assets() {
@@ -733,5 +754,265 @@ mod tests {
         let steps = manual_steps().join("\n");
         assert!(steps.contains("/cmd/ghola@latest"), "{steps}");
         assert!(steps.contains(RELEASES_PAGE), "{steps}");
+    }
+
+    #[tokio::test]
+    async fn test_github_releases_refuses_other_urls_before_any_request() {
+        let source = GithubReleases::new().unwrap();
+        for url in [
+            "https://example.com/ghola.tar.gz",
+            "http://github.com/robot-accomplice/ghola",
+        ] {
+            let err = source.fetch(url).await.unwrap_err();
+            assert!(err.to_string().contains("not a GitHub HTTPS URL"), "{err}");
+        }
+    }
+
+    /// The allow-list for a local mock server: plain HTTP to loopback.
+    fn loopback(url: &str) -> bool {
+        reqwest::Url::parse(url).is_ok_and(|u| u.host_str() == Some("127.0.0.1"))
+    }
+
+    fn local_source() -> GithubReleases {
+        GithubReleases::with_policy(loopback, false).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_fetch_returns_the_body() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/checksums.txt")
+            .with_body("abc  ghola.tar.gz\n")
+            .create_async()
+            .await;
+        let body = local_source()
+            .fetch(&format!("{}/checksums.txt", server.url()))
+            .await
+            .unwrap();
+        assert_eq!(body, b"abc  ghola.tar.gz\n");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_fetch_reports_an_http_error() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/missing")
+            .with_status(404)
+            .create_async()
+            .await;
+        let err = local_source()
+            .fetch(&format!("{}/missing", server.url()))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("HTTP 404"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_follows_an_allowed_redirect() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/download")
+            .with_status(302)
+            .with_header("location", &format!("{}/asset", server.url()))
+            .create_async()
+            .await;
+        let asset = server
+            .mock("GET", "/asset")
+            .with_body("archive")
+            .create_async()
+            .await;
+        let body = local_source()
+            .fetch(&format!("{}/download", server.url()))
+            .await
+            .unwrap();
+        assert_eq!(body, b"archive");
+        asset.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_fetch_refuses_a_redirect_off_the_allow_list() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/download")
+            .with_status(302)
+            .with_header("location", "http://example.invalid/ghola.tar.gz")
+            .create_async()
+            .await;
+        let err = local_source()
+            .fetch(&format!("{}/download", server.url()))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("redirect"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_stops_a_redirect_loop() {
+        let mut server = mockito::Server::new_async().await;
+        let looped = server
+            .mock("GET", "/loop")
+            .with_status(302)
+            .with_header("location", &format!("{}/loop", server.url()))
+            .expect(10)
+            .create_async()
+            .await;
+        let err = local_source()
+            .fetch(&format!("{}/loop", server.url()))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("redirect"), "{err}");
+        looped.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_fetch_reports_an_unreachable_host() {
+        let err = local_source()
+            .fetch("http://127.0.0.1:1/ghola.tar.gz")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("failed"), "{err}");
+    }
+
+    /// Serves one raw HTTP response on a loopback port and returns its URL.
+    async fn serve_once(response: &'static [u8]) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request).await;
+            let _ = stream.write_all(response).await;
+        });
+        format!("http://{addr}/ghola.tar.gz")
+    }
+
+    #[tokio::test]
+    async fn test_fetch_refuses_an_announced_oversize_body() {
+        let url = serve_once(b"HTTP/1.1 200 OK\r\ncontent-length: 200000000\r\n\r\npartial").await;
+        let err = local_source().fetch(&url).await.unwrap_err();
+        assert!(err.to_string().contains("larger than"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_reports_a_truncated_body() {
+        let url = serve_once(b"HTTP/1.1 200 OK\r\ncontent-length: 100\r\n\r\nshort").await;
+        let err = local_source().fetch(&url).await.unwrap_err();
+        assert!(err.to_string().contains("failed"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_a_corrupt_archive_installs_nothing() {
+        for target in [LINUX, WINDOWS] {
+            let dir = tempfile::tempdir().unwrap();
+            let source = release(target, b"not an archive".to_vec(), None);
+            let err = install_latest(&source, target, dir.path())
+                .await
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("unreadable ghola archive"),
+                "{err}"
+            );
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_a_zip_without_ghola_exe_installs_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        // The Unix name is not the Windows binary.
+        let source = release(WINDOWS, zip_of(&[("ghola", BINARY)]), None);
+        let err = install_latest(&source, WINDOWS, dir.path())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no ghola.exe"), "{err}");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_a_failed_write_leaves_no_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        // A folder where the binary goes: the rename into place fails.
+        std::fs::create_dir(dir.path().join("ghola")).unwrap();
+        std::fs::write(dir.path().join("ghola").join("keep"), b"x").unwrap();
+        let source = release(LINUX, tar_gz(&[("ghola", BINARY)]), None);
+        let err = install_latest(&source, LINUX, dir.path())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("cannot install ghola"), "{err}");
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("ghola")]);
+    }
+
+    #[test]
+    fn test_find_go_returns_a_go_program() {
+        if let Some(go) = find_go() {
+            assert!(go.is_file(), "{}", go.display());
+            assert_eq!(go.file_stem(), Some(OsStr::new("go")));
+        }
+    }
+
+    #[test]
+    fn test_go_install_reports_a_missing_go() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = go_install(&dir.path().join("no-go"), &dir.path().join("bin")).unwrap_err();
+        assert!(err.to_string().contains("cannot run"), "{err}");
+    }
+
+    #[test]
+    fn test_go_install_reports_a_folder_it_cannot_create() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file");
+        std::fs::write(&file, b"x").unwrap();
+        let err = go_install(&dir.path().join("go"), &file.join("bin")).unwrap_err();
+        assert!(err.to_string().contains("cannot create"), "{err}");
+    }
+
+    /// An executable `sh` script named `name` in `dir`.
+    #[cfg(unix)]
+    fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_go_install_builds_the_cmd_package_into_the_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let check = format!("[ \"$1 $2\" = \"install {GO_PACKAGE}\" ] || exit 9");
+        let go = script(
+            dir.path(),
+            "go",
+            &format!("{check}\nprintf built > \"$GOBIN/ghola\""),
+        );
+        let bin = dir.path().join("bin");
+        let path = go_install(&go, &bin).unwrap();
+        assert_eq!(path, bin.join("ghola"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"built");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_go_install_reports_a_failed_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let go = script(dir.path(), "go", "exit 3");
+        let err = go_install(&go, &dir.path().join("bin")).unwrap_err();
+        assert!(err.to_string().contains("failed"), "{err}");
+        assert!(err.to_string().contains(GO_INSTALL), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_go_install_reports_a_build_that_wrote_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let go = script(dir.path(), "go", "exit 0");
+        let err = go_install(&go, &dir.path().join("bin")).unwrap_err();
+        assert!(err.to_string().contains("did not write"), "{err}");
     }
 }
