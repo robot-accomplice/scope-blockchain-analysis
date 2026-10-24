@@ -426,6 +426,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn address_rules_read_the_native_balance_and_the_risk_score() {
+        // Offline: with an Etherscan key configured on the test machine the
+        // risk engine would otherwise call out through the transport.
+        let factory = crate::cli::dispatch::tests::OfflineFactory::new();
+        let config = scope::config::Config::default();
+        let src = Sources {
+            config: &config,
+            clients: &factory,
+        };
+        let mut t = Target::new(
+            TargetKind::Address,
+            "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
+        );
+        t.rules = vec![
+            // The mock's balance is formatted "1.0".
+            Rule::parse("native_balance > 0.5").unwrap(),
+            Rule::parse("native_balance < 0.5").unwrap(),
+            Rule::parse("risk_score <= 10").unwrap(),
+        ];
+        let tick = tick(&ready(vec![t]), src, &quiet()).await;
+        let row = &tick.snapshot.targets[0];
+        assert_eq!(row.cells.len(), 3, "{row:?}");
+        assert_eq!(row.cells[0].value, Some(1.0), "{row:?}");
+        assert_eq!(row.cells[0].status, RuleStatus::Pass, "{row:?}");
+        assert!(
+            matches!(row.cells[1].status, RuleStatus::Fail(_)),
+            "{row:?}"
+        );
+        let risk = row.cells[2].value.expect("a risk score");
+        assert!((0.0..=10.0).contains(&risk), "{risk}");
+        assert_eq!(row.cells[2].status, RuleStatus::Pass, "{row:?}");
+        assert_eq!(row.status, TargetStatus::Breached);
+        assert!(tick.summaries[0].is_none(), "no market source was read");
+    }
+
+    #[tokio::test]
+    async fn an_address_on_its_own_chain_reads_its_balance() {
+        let factory = crate::cli::dispatch::tests::OfflineFactory::new();
+        let config = scope::config::Config::default();
+        let src = Sources {
+            config: &config,
+            clients: &factory,
+        };
+        let mut t = Target::new(
+            TargetKind::Address,
+            "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2",
+        );
+        t.chain = Some("polygon".into());
+        t.rules = vec![Rule::parse("native_balance >= 1").unwrap()];
+        let reading = read_target(&t, None, src, &quiet()).await;
+        assert_eq!(reading.row.cells.len(), 1);
+        assert_eq!(reading.row.cells[0].value, Some(1.0));
+        assert_eq!(reading.row.status, TargetStatus::Passed);
+    }
+
+    #[tokio::test]
     async fn a_failed_source_errors_its_cells_and_the_next_target_still_runs() {
         let factory = MockClientFactory::new();
         let config = scope::config::Config::default();

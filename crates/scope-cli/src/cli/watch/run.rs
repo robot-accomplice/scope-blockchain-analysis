@@ -294,6 +294,51 @@ mod tests {
         assert!(md.contains("| price_usd > 0 |"), "{md}");
     }
 
+    #[test]
+    fn the_report_has_a_market_section_per_target_with_a_summary_and_a_venue() {
+        use scope::market::{BookSource, HealthThresholds, MarketSummary, OrderBook};
+        let level = |price, quantity| scope::market::OrderBookLevel { price, quantity };
+        let book = OrderBook {
+            pair: "USDC/USDT".into(),
+            source: BookSource::Exchange,
+            bids: vec![level(0.999, 5_000.0)],
+            asks: vec![level(1.001, 5_000.0)],
+        };
+        let summary = MarketSummary::from_order_book(&book, &HealthThresholds::default(), None);
+        let mut on_venue = Target::new(TargetKind::Pair, "USDC");
+        on_venue.venue = Some("binance".into());
+        // A summary with no venue to name has no section.
+        let no_venue = Target::new(TargetKind::Pair, "DAI");
+        let mut w = Watchlist::new("pegs");
+        w.targets = vec![on_venue, no_venue];
+        let last = Tick {
+            snapshot: Snapshot {
+                targets: vec![TargetSnapshot::new(
+                    "USDC@binance",
+                    vec![Cell {
+                        label: "a|b".into(),
+                        rule: None,
+                        value: None,
+                        status: RuleStatus::Error("x|y".into()),
+                        detail: None,
+                    }],
+                )],
+            },
+            summaries: vec![Some(summary.clone()), Some(summary)],
+        };
+        let md = report_text(&w, &last);
+        assert!(md.starts_with("# Watchlist Report: pegs\n\n"), "{md}");
+        assert_eq!(md.matches("# Market Health Report:").count(), 1, "{md}");
+        let section = md.find("# Market Health Report: USDC").unwrap();
+        assert!(section < md.find("## Last values").unwrap(), "{md}");
+        assert!(!md.contains("Market Health Report: DAI"), "{md}");
+        // A pipe in a label or an error would split the table cell.
+        assert!(
+            md.contains("| USDC@binance | a\\|b | - | error | x\\|y |"),
+            "{md}"
+        );
+    }
+
     #[tokio::test]
     async fn a_report_that_cannot_be_written_is_an_error() {
         let dir = tempfile::tempdir().unwrap();

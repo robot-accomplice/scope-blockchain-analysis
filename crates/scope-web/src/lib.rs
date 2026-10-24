@@ -582,12 +582,121 @@ mod tests {
         assert_eq!(pid.parent(), log.parent());
     }
 
+    /// One test for every PID file case: they share the PID file path (in
+    /// the test home), so separate tests would race. No process is ever
+    /// signalled: the only PID sent a signal is above every OS's PID limit.
     #[test]
-    fn test_stop_daemon_invoked_no_pid_file() {
-        // Exercise stop_daemon when PID file does not exist (common in tests)
+    fn test_stop_daemon_reads_the_pid_file() {
+        let pid_path = pid_file_path();
+        std::fs::create_dir_all(daemon_dir()).unwrap();
+        let _ = std::fs::remove_file(&pid_path);
+        if let Some(legacy) = legacy_pid_file_path() {
+            let _ = std::fs::remove_file(legacy);
+        }
+
+        // No PID file: nothing to stop, and it says so.
+        let (out, cap) = Output::capture();
+        stop_daemon(&out).unwrap();
+        assert!(
+            cap.err().contains("No daemon PID file found"),
+            "{}",
+            cap.err()
+        );
+        assert!(cap.err().contains("Is the daemon running?"));
+
+        // Not a PID: an error that names the file, which stays.
+        std::fs::write(&pid_path, "not-a-pid\n").unwrap();
         let (out, _) = Output::capture();
-        let result = stop_daemon(&out);
-        assert!(result.is_ok());
+        let err = stop_daemon(&out).unwrap_err();
+        assert!(err.to_string().contains("Invalid PID in"), "{err}");
+        assert!(pid_path.exists());
+        std::fs::remove_file(&pid_path).unwrap();
+
+        // A PID file that cannot be read.
+        std::fs::create_dir(&pid_path).unwrap();
+        let (out, _) = Output::capture();
+        let err = stop_daemon(&out).unwrap_err();
+        assert!(err.to_string().contains("cannot read"), "{err}");
+        std::fs::remove_dir(&pid_path).unwrap();
+
+        // A PID no process can have (Linux allows at most 2^22, macOS
+        // 99998): the stop is reported and the stale file removed.
+        let pid = i32::MAX;
+        std::fs::write(&pid_path, format!("{pid}\n")).unwrap();
+        let (out, cap) = Output::capture();
+        stop_daemon(&out).unwrap();
+        let notes = cap.err();
+        assert!(
+            notes.contains(&format!("Stopping Scope web daemon (PID {pid})")),
+            "{notes}"
+        );
+        #[cfg(unix)]
+        assert!(notes.contains("Failed to stop daemon"), "{notes}");
+        #[cfg(not(unix))]
+        assert!(
+            notes.contains(&format!("Please manually terminate PID {pid}")),
+            "{notes}"
+        );
+        assert!(!pid_path.exists(), "the PID file is removed");
+    }
+
+    /// A free local port (bound, then released).
+    fn free_addr() -> SocketAddr {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_start_server_serves_the_ui_and_says_where() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let addr = free_addr();
+        let (out, cap) = Output::capture();
+        let server = start_server(addr, Config::default(), &out);
+        let client = async {
+            let mut stream = loop {
+                match tokio::net::TcpStream::connect(addr).await {
+                    Ok(s) => break s,
+                    Err(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+                }
+            };
+            stream
+                .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            let mut reply = String::new();
+            stream.read_to_string(&mut reply).await.unwrap();
+            reply
+        };
+        let reply = tokio::select! {
+            r = server => panic!("the server stopped: {r:?}"),
+            reply = tokio::time::timeout(std::time::Duration::from_secs(10), client) => {
+                reply.expect("a reply within 10s")
+            }
+        };
+        assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+        assert!(reply.contains("<!DOCTYPE html>"));
+        assert!(
+            cap.err()
+                .contains(&format!("Scope web server listening on http://{addr}")),
+            "{}",
+            cap.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_start_server_fails_when_the_port_is_taken() {
+        let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = taken.local_addr().unwrap();
+        let (out, _) = Output::capture();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            start_server(addr, Config::default(), &out),
+        )
+        .await
+        .expect("start_server returns");
+        assert!(result.is_err(), "bound twice to {addr}");
     }
 
     // Helper to create the test app state

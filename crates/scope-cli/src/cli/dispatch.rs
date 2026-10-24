@@ -297,7 +297,48 @@ fn transport_for_reload(
 // ============================================================================
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    /// The mock factory with a transport that never reaches the network:
+    /// every request it is sent misses (a replay of an empty folder). The
+    /// mock's own transport is a real one, which handlers that call
+    /// `clients.http()` (Etherscan with a configured key, venues, discover)
+    /// would use.
+    pub(crate) struct OfflineFactory {
+        pub(crate) mock: scope::chains::mocks::MockClientFactory,
+        http: std::sync::Arc<dyn scope::http::HttpClient>,
+        _fixtures: tempfile::TempDir,
+    }
+
+    impl OfflineFactory {
+        pub(crate) fn new() -> Self {
+            let fixtures = tempfile::tempdir().unwrap();
+            Self {
+                mock: scope::chains::mocks::MockClientFactory::new(),
+                http: std::sync::Arc::new(scope::http::replay::ReplayHttpClient::replay(
+                    fixtures.path().to_path_buf(),
+                )),
+                _fixtures: fixtures,
+            }
+        }
+    }
+
+    impl scope::chains::ChainClientFactory for OfflineFactory {
+        fn create_chain_client(
+            &self,
+            chain: &str,
+        ) -> scope::error::Result<Box<dyn scope::chains::ChainClient>> {
+            self.mock.create_chain_client(chain)
+        }
+
+        fn create_dex_client(&self) -> Box<dyn scope::chains::DexDataSource> {
+            self.mock.create_dex_client()
+        }
+
+        fn http(&self) -> std::sync::Arc<dyn scope::http::HttpClient> {
+            self.http.clone()
+        }
+    }
+
     #[test]
     fn test_a_config_source_reads_its_file_and_applies_ai() {
         use super::ConfigSource;
@@ -551,6 +592,120 @@ mod tests {
 
         let (res, _) = run_line(&["compliance", "risk", "not-an-address"]).await;
         assert!(matches!(res.unwrap_err(), ScopeError::Compliance(_)));
+    }
+
+    /// Runs `scope <args>` through `dispatch_with` on an offline factory.
+    /// Returns the result, stdout and stderr (where notes go).
+    async fn run_offline(args: &[&str], config: &Config) -> (Result<()>, String, String) {
+        let mut argv = vec!["scope"];
+        argv.extend_from_slice(args);
+        let cli = Cli::try_parse_from(argv).unwrap();
+        let (o, cap) = Output::capture();
+        let factory = OfflineFactory::new();
+        let res = dispatch_with(cli.command, config, &factory, &o).await;
+        (res, cap.out(), cap.err())
+    }
+
+    #[tokio::test]
+    async fn test_compliance_resolves_a_saved_label_to_its_address() {
+        // `@label` reads the address book for risk, analyze and the report,
+        // so they look up the saved address, not the label text.
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.address_book.data_dir = Some(dir.path().to_path_buf());
+        let (res, _, _) = run_offline(
+            &["address-book", "add", ADDR, "--label", "treasury"],
+            &config,
+        )
+        .await;
+        res.unwrap();
+        let (res, out, _) = run_offline(&["address-book", "list"], &config).await;
+        res.unwrap();
+        assert!(out.contains("treasury"), "{out}");
+
+        let (res, out, _) = run_offline(
+            &["compliance", "risk", "@treasury", "--format", "json"],
+            &config,
+        )
+        .await;
+        res.unwrap();
+        let v: serde_json::Value = serde_json::from_str(out.trim()).expect(&out);
+        assert_eq!(v["address"], ADDR, "{out}");
+        assert_eq!(v["chain"], "ethereum", "the saved chain: {out}");
+
+        let (res, _, err) = run_offline(&["compliance", "analyze", "@treasury"], &config).await;
+        res.unwrap();
+        assert!(
+            err.contains(&format!("Analyzing patterns for {ADDR}")),
+            "{err}"
+        );
+
+        let report = dir.path().join("report.json");
+        let (res, _, _) = run_offline(
+            &[
+                "compliance",
+                "compliance-report",
+                "@treasury",
+                "--jurisdiction",
+                "us",
+                "--output",
+                report.to_str().unwrap(),
+            ],
+            &config,
+        )
+        .await;
+        res.unwrap();
+        let text = std::fs::read_to_string(&report).unwrap();
+        assert!(text.contains(ADDR), "{text}");
+    }
+
+    #[tokio::test]
+    async fn test_compliance_trace_runs_its_handler() {
+        let hash = "0x0000000000000000000000000000000000000000000000000000000000000001";
+        let (res, _, err) = run_offline(&["compliance", "trace", hash], &Config::default()).await;
+        // With an Etherscan key on the test machine the lookup runs and,
+        // with no fixture to serve, fails as a compliance error; with none
+        // the handler says how to add one.
+        match res {
+            Ok(()) => assert!(
+                err.contains(&format!("Tracing transaction {hash}")),
+                "{err}"
+            ),
+            Err(e) => {
+                assert!(matches!(e, ScopeError::Compliance(_)), "{e:?}");
+                assert!(e.to_string().contains("cannot trace transaction"), "{e}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_discover_failures_are_labelled_as_discovery_errors() {
+        // The offline transport serves nothing, so the listing fails; the
+        // error must say it came from discover.
+        let (res, _, _) = run_offline(&["discover"], &Config::default()).await;
+        let err = res.unwrap_err();
+        assert!(matches!(err, ScopeError::Discovery(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_with_insights_and_contract() {
+        let (res, out, _) = run_offline(&["insights", ADDR], &Config::default()).await;
+        res.unwrap();
+        assert!(!out.trim().is_empty());
+        // The mock chain client reads no code; contract's error comes back
+        // as the chain error it is, not relabelled.
+        let (res, out, _) = run_offline(&["contract", ADDR, "--json"], &Config::default()).await;
+        let err = res.unwrap_err();
+        assert!(matches!(err, ScopeError::Chain(_)), "{err:?}");
+        assert!(out.is_empty(), "no report on a failed analysis: {out}");
+    }
+
+    #[test]
+    fn test_create_http_client_selects_the_configured_transport() {
+        let (out, captured) = Output::capture();
+        let client = create_http_client(&Config::default(), &out);
+        assert!(client.is_ok());
+        assert!(captured.err().is_empty(), "{}", captured.err());
     }
 
     #[tokio::test]
