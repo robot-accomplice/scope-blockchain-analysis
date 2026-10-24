@@ -444,7 +444,7 @@ fn draw_rows(f: &mut Frame, area: Rect, g: &GridState) {
                 spans.push(Span::styled(glyph, st));
             }
             // The first problem, so the row says why without the detail.
-            if let Some(why) = r
+            if let Some((why, st)) = r
                 .cells
                 .iter()
                 .find(|c| matches!(c.status, RuleStatus::Fail(_)))
@@ -453,9 +453,9 @@ fn draw_rows(f: &mut Frame, area: Rect, g: &GridState) {
                         .iter()
                         .find(|c| matches!(c.status, RuleStatus::Error(_) | RuleStatus::Warn(_)))
                 })
-                .and_then(|c| c.status.message())
+                .and_then(|c| Some((c.status.message()?, status_cell(&c.status).1)))
             {
-                spans.push(Span::styled(format!("  {why}"), SECONDARY));
+                spans.push(Span::styled(format!("  {why}"), st));
             }
             Line::from(spans)
         })
@@ -495,7 +495,12 @@ fn draw_detail(f: &mut Frame, area: Rect, g: &GridState) {
         ];
         // A passing check has no status message; its text keeps the numbers.
         if let Some(m) = c.status.message().or(c.detail.as_deref()) {
-            spans.push(Span::styled(m.to_string(), SECONDARY));
+            // A warning or failure reads in its colour; only n/a is dimmed.
+            let text = match c.status {
+                RuleStatus::Warn(_) | RuleStatus::Fail(_) | RuleStatus::Error(_) => st,
+                _ => SECONDARY,
+            };
+            spans.push(Span::styled(m.to_string(), text));
         }
         put(f, &mut y, Line::from(spans));
         let values: Vec<Option<f64>> = g

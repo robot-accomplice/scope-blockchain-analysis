@@ -3054,6 +3054,7 @@ Bid Side — 20 levels
                 None
             ),
             venue: "binance".to_string(),
+            tokens: Vec::new(),
         }));
         s.finish(Ending::Finished(Ok(())));
         let shown = s.scrollback_text();
