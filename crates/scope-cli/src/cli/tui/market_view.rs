@@ -11,6 +11,7 @@ use crate::cli::theme::{ACCENT, ERR, OK, SECONDARY, WARN};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use scope::display::format::format_large_number;
+use scope::market::assets::TokenAddress;
 use scope::market::{HealthCheck, MarketSummary, OrderBookLevel};
 
 /// The width of the full snapshot, in columns.
@@ -115,6 +116,7 @@ pub(crate) fn lines_with(view: &SummaryView, opts: Opts) -> Vec<Line<'static>> {
     let s = &view.summary;
     let quote = quote_of(&s.pair);
     let mut out = vec![header(s, &view.venue, opts.size)];
+    out.extend(contracts(&view.tokens));
     out.extend(key_values(s, opts));
     match opts.size {
         Size::Full => {
@@ -170,6 +172,32 @@ fn header(s: &MarketSummary, venue: &str, size: Size) -> Line<'static> {
         Span::raw(" ".repeat(gap)),
         Span::styled(verdict, style.add_modifier(Modifier::BOLD)),
     ])
+}
+
+/// The pair's tokens under the header, as the text report lists them: the
+/// token and its network, then the whole contract on its own line (cut, an
+/// address is no use), split at the snapshot width when it is longer.
+fn contracts(tokens: &[TokenAddress]) -> Vec<Line<'static>> {
+    let mut out = Vec::new();
+    for token in tokens {
+        let mut name = format!(" {} on {}", token.symbol, token.network);
+        if token.other_networks > 0 {
+            name.push_str(&format!(" (+{} networks)", token.other_networks));
+        }
+        let Some(contract) = &token.contract else {
+            out.push(Line::from(vec![
+                Span::styled(name, SECONDARY),
+                Span::raw("  native coin"),
+            ]));
+            continue;
+        };
+        out.push(Line::styled(name, SECONDARY));
+        let chars: Vec<char> = contract.chars().collect();
+        for part in chars.chunks(FULL_WIDTH - 3) {
+            out.push(Line::raw(format!("   {}", part.iter().collect::<String>())));
+        }
+    }
+    out
 }
 
 /// An amount in the one large-number format; `-0` reads `0.00`.
@@ -588,11 +616,16 @@ fn problems(s: &MarketSummary, opts: Opts) -> Vec<Line<'static>> {
     });
     for c in checks {
         let (g, st) = glyph(c);
+        // A warning or failure reads in its colour; only n/a is dimmed.
+        let text = match c {
+            HealthCheck::Warn(_) | HealthCheck::Fail(_) => st,
+            _ => SECONDARY,
+        };
         if opts.short_problems {
             // One line each in the compact view: the pane is short.
             out.push(Line::from(vec![
                 Span::styled(format!(" {g} "), st),
-                Span::styled(cut(&short(c), width - 3), SECONDARY),
+                Span::styled(cut(&short(c), width - 3), text),
             ]));
             continue;
         }
@@ -605,7 +638,7 @@ fn problems(s: &MarketSummary, opts: Opts) -> Vec<Line<'static>> {
             };
             out.push(Line::from(vec![
                 Span::styled(lead, st),
-                Span::styled(part, SECONDARY),
+                Span::styled(part, text),
             ]));
         }
     }
@@ -661,6 +694,7 @@ mod tests {
                 Some(3_714_594_299.0),
             ),
             venue: "binance".to_string(),
+            tokens: Vec::new(),
         }
     }
 
@@ -675,6 +709,82 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn the_contracts_are_under_the_header_whole() {
+        let mut v = view(20, 20, 40_000.0);
+        v.tokens = vec![
+            TokenAddress {
+                symbol: "USDC".to_string(),
+                network: "Ethereum".to_string(),
+                contract: Some("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48".to_string()),
+                other_networks: 7,
+            },
+            TokenAddress {
+                symbol: "BTC".to_string(),
+                network: "Bitcoin".to_string(),
+                contract: None,
+                other_networks: 0,
+            },
+        ];
+        for size in [Size::Full, Size::Compact] {
+            let out = lines(&v, size);
+            let t = text(&out[1..4]);
+            assert!(t.contains("USDC on Ethereum (+7 networks)"), "{t}");
+            assert!(
+                t.contains("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"),
+                "{t}"
+            );
+            assert!(t.contains("BTC on Bitcoin  native coin"), "{t}");
+        }
+        // The rows fit stays above the contracts: they are the summary.
+        let fitted = fit(&v, Opts::of(Size::Full), 8);
+        assert!(text(&fitted).contains("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"));
+    }
+
+    #[test]
+    fn a_long_contract_is_split_not_cut() {
+        let long = "0x".to_string() + &"ab".repeat(40) + "::usdc::USDC";
+        let out = contracts(&[TokenAddress {
+            symbol: "USDC".to_string(),
+            network: "Sui".to_string(),
+            contract: Some(long.clone()),
+            other_networks: 0,
+        }]);
+        assert!(width(&out) <= FULL_WIDTH);
+        let joined: String = out[1..]
+            .iter()
+            .map(|l| text(std::slice::from_ref(l)).trim().to_string())
+            .collect();
+        assert_eq!(joined, long);
+    }
+
+    #[test]
+    fn warnings_and_failures_are_in_their_colour_not_dimmed() {
+        let mut v = view(20, 20, 40_000.0);
+        v.summary.checks = vec![
+            HealthCheck::Warn("Bot patterns: a ladder".to_string()),
+            HealthCheck::Fail("Spread: 9%".to_string()),
+            HealthCheck::NotApplicable("Peg: n/a".to_string()),
+        ];
+        for short_problems in [false, true] {
+            let opts = Opts {
+                short_problems,
+                ..Opts::of(Size::Full)
+            };
+            let out = problems(&v.summary, opts);
+            let style_of = |needle: &str| {
+                out.iter()
+                    .flat_map(|l| l.spans.iter())
+                    .find(|s| s.content.contains(needle))
+                    .map(|s| s.style)
+                    .unwrap()
+            };
+            assert_eq!(style_of("Bot"), WARN);
+            assert_eq!(style_of("Spread"), ERR);
+            assert_eq!(style_of("Peg"), SECONDARY);
+        }
     }
 
     #[test]

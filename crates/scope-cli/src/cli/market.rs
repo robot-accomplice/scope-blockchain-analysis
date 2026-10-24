@@ -580,6 +580,7 @@ async fn run_summary(
         out.record_view(SummaryView {
             summary: summary.clone(),
             venue: args.venue.clone(),
+            tokens: tokens.clone(),
         });
         return write_report(&args, &summary, out);
     };
@@ -605,6 +606,7 @@ async fn run_summary(
                 view: Some(SummaryView {
                     summary: summary.clone(),
                     venue: args.venue.clone(),
+                    tokens: tokens.to_vec(),
                 }),
                 value: summary,
             })

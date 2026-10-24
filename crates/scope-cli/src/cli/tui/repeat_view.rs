@@ -597,6 +597,7 @@ mod tests {
         std::sync::Arc::new(crate::cli::output::SummaryView {
             summary: MarketSummary::from_order_book(&book, &HealthThresholds::default(), None),
             venue: "binance".to_string(),
+            tokens: Vec::new(),
         })
     }
 

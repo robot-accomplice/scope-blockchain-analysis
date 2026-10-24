@@ -67,6 +67,15 @@ brew trust --formula robot-accomplice/tap/scope
 brew install robot-accomplice/tap/scope
 ```
 
+Or download a prebuilt binary from the [latest release](https://github.com/robot-accomplice/scope-blockchain-analysis/releases/latest): `scope-windows-x64.zip` for Windows, `scope-linux-x64.tar.gz` / `scope-linux-arm64.tar.gz`, or `scope-macos-x64.tar.gz` / `scope-macos-arm64.tar.gz`. Each has a `.sha256` file next to it. On Windows (PowerShell):
+
+```powershell
+Invoke-WebRequest https://github.com/robot-accomplice/scope-blockchain-analysis/releases/latest/download/scope-windows-x64.zip -OutFile scope.zip
+(Get-FileHash scope.zip -Algorithm SHA256).Hash   # compare with scope-windows-x64.zip.sha256
+Expand-Archive scope.zip -DestinationPath "$env:LOCALAPPDATA\scope"
+# Add $env:LOCALAPPDATA\scope to your PATH, then: scope --version
+```
+
 Or build from source:
 
 ```bash

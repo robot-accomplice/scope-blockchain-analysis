@@ -83,6 +83,8 @@ pub struct SummaryView {
     pub summary: scope::market::MarketSummary,
     /// The venue the summary is for.
     pub venue: String,
+    /// The pair's tokens and their contracts, as the text report lists them.
+    pub tokens: Vec<scope::market::assets::TokenAddress>,
 }
 
 /// The view a pane command left for the screen (one-shot `market summary`).
