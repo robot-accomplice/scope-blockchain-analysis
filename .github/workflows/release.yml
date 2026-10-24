@@ -28,6 +28,10 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             suffix: macos-arm64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            suffix: windows-x64
+            archive: zip
             
     steps:
       - uses: actions/checkout@v6
@@ -48,13 +52,32 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
+      # A binary that does not start is not released. A cross-built one
+      # cannot run on this runner.
+      - name: Smoke run
+        if: ${{ !matrix.cross }}
+        shell: bash
+        run: ./target/${{ matrix.target }}/release/scope --version
+
       - name: Package
+        if: matrix.archive != 'zip'
         shell: bash
         run: |
           cd target/${{ matrix.target }}/release
           tar czvf ../../../scope-${{ matrix.suffix }}.tar.gz scope
           cd ../../..
           shasum -a 256 scope-${{ matrix.suffix }}.tar.gz > scope-${{ matrix.suffix }}.tar.gz.sha256
+
+      # Windows: a .zip with scope.exe, and its SHA-256 in the same
+      # "<hash>  <file>" form as the other targets.
+      - name: Package (zip)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $zip = "scope-${{ matrix.suffix }}.zip"
+          Compress-Archive -Path "target/${{ matrix.target }}/release/scope.exe" -DestinationPath $zip
+          $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
+          Set-Content -NoNewline -Path "$zip.sha256" -Value "$hash  $zip`n"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
@@ -63,6 +86,9 @@ jobs:
           path: |
             ./scope-${{ matrix.suffix }}.tar.gz
             ./scope-${{ matrix.suffix }}.tar.gz.sha256
+            ./scope-${{ matrix.suffix }}.zip
+            ./scope-${{ matrix.suffix }}.zip.sha256
+          if-no-files-found: error
 
   create-release:
     name: Create Release
@@ -84,6 +110,7 @@ jobs:
         with:
           files: |
             ./artifacts/*.tar.gz
+            ./artifacts/*.zip
             ./artifacts/*.sha256
           draft: false
           prerelease: false

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Releases include a Windows build: `scope-windows-x64.zip` (with `scope.exe`) and its `.sha256`. Every release build the runner can execute is smoke-run (`scope --version`) before it is packaged.
+
 ## [0.8.0] - 2026-10-24
 
 ### Changed
