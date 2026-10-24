@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.8.2] - 2026-10-24
 
 ### Added
+- The repeating view (`market summary --every` in the TUI) names a bot on a timer: when the bid or ask depth is refilled at a steady period (rises of 25% or more, at least 4 refills at least 3 runs apart, periods within 20%) and drains between the refills, the Trends title shows `! Bot timer: bid and ask depth refill every 6m 30s (7 cycles)`, and the summary line on leaving the view adds it. One run cannot see this; the depth series can. Library: `scope::market::patterns::depth_cycle`.
+
+### Added
 - The bot-pattern advisory catches bots that trade in bursts and quote a curve, as on USDN/USDT on weex. New signals: **few sizes** (the 3 most common trade sizes make up half the tape), **cadence** (most gaps between trades are one interval of 5 s or more, ±2%, even with long pauses between bursts) and **shaped ladders** (8 or more book levels at one step whose sizes fall or rise level by level, not only equal ones). JSON: findings `few_sizes` and `cadence`; a `ladder` adds `shape` (`even`, `falling`, `rising`) and `last_size`. Ladder steps read to 2 significant digits (`0.01%`).
 
 ### Fixed
