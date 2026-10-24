@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-10-24
+
 ### Added
 - The bot-pattern advisory catches bots that trade in bursts and quote a curve, as on USDN/USDT on weex. New signals: **few sizes** (the 3 most common trade sizes make up half the tape), **cadence** (most gaps between trades are one interval of 5 s or more, ±2%, even with long pauses between bursts) and **shaped ladders** (8 or more book levels at one step whose sizes fall or rise level by level, not only equal ones). JSON: findings `few_sizes` and `cadence`; a `ladder` adds `shape` (`even`, `falling`, `rising`) and `last_size`. Ladder steps read to 2 significant digits (`0.01%`).
 
@@ -414,7 +416,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Configuration system with YAML support
 - Support for ERC-20, SPL, and TRC-20 tokens
 
-[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.2...HEAD
+[0.8.2]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.6.0...v0.7.0
