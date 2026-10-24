@@ -852,4 +852,78 @@ mod tests {
             "No sells below peg"
         );
     }
+
+    #[test]
+    fn the_size_follows_the_width() {
+        assert_eq!(Size::for_width(FULL_WIDTH), Size::Full);
+        assert_eq!(Size::for_width(FULL_WIDTH + 30), Size::Full);
+        assert_eq!(Size::for_width(FULL_WIDTH - 1), Size::Compact);
+        assert_eq!(Size::for_width(0), Size::Compact);
+    }
+
+    #[test]
+    fn a_book_of_zero_sizes_still_draws_one_cell_bars() {
+        // The summary drops empty levels; the ladder must not divide by a
+        // zero largest size when it gets them anyway.
+        let mut v = view(2, 2, 1.0);
+        v.summary.bids = side(0.9999, -0.0001, &[0.0, 0.0]);
+        v.summary.asks = side(1.0001, 0.0001, &[0.0, 0.0]);
+        let t = text(&ladder(&v.summary, 5));
+        for price in ["1.000200", "1.000100", "0.999900", "0.999800"] {
+            let row = t.lines().find(|l| l.contains(price)).expect(&t);
+            assert_eq!(row.matches('█').count(), 1, "{row}");
+        }
+    }
+
+    #[test]
+    fn no_checks_count_as_none() {
+        let mut v = view(20, 20, 40_000.0);
+        v.summary.checks.clear();
+        let t = text(&lines(&v, Size::Compact));
+        assert!(t.contains("Checks · none"), "{t}");
+        let t = text(&lines(&v, Size::Full));
+        assert!(t.contains("Checks · none"), "{t}");
+    }
+
+    #[test]
+    fn problems_list_failures_then_warnings_then_the_rest() {
+        let mut v = view(20, 20, 40_000.0);
+        v.summary.checks = vec![
+            HealthCheck::NotApplicable("Peg: no peg for this pair".into()),
+            HealthCheck::Warn("Ask levels: 4 (min 5)".into()),
+            HealthCheck::Fail("Spread: 4.2% (max 3.0%)".into()),
+            HealthCheck::Pass("Bid depth: 38544484 USDT (min 3000)".into()),
+        ];
+        for size in [Size::Full, Size::Compact] {
+            let t = text(&lines(&v, size));
+            let fail = t.find("✗ Spread").unwrap();
+            let warn = t.find("! Ask levels").unwrap();
+            let na = t.find("– Peg").unwrap();
+            assert!(fail < warn && warn < na, "{size:?}\n{t}");
+            assert!(t.contains("1 failed · 1 warn · 1 pass · 1 n/a"), "{t}");
+        }
+    }
+
+    #[test]
+    fn a_long_text_is_cut_with_an_ellipsis() {
+        assert_eq!(cut("Spread", 6), "Spread");
+        assert_eq!(cut("Spreads", 6), "Sprea…");
+        assert_eq!(cut("ab", 0), "…");
+        // A word longer than a line is cut, not left to run past it.
+        assert_eq!(wrap("a bcdefgh ij", 4), ["a", "bcd…", "ij"]);
+        // A passing check too long for its grid cell.
+        let mut v = view(20, 20, 40_000.0);
+        v.summary.checks = vec![HealthCheck::Pass(
+            "No sells below peg anywhere in the visible book".into(),
+        )];
+        let t = text(&lines(&v, Size::Full));
+        let row = t.lines().find(|l| l.contains("✓ No sells")).unwrap();
+        assert!(row.ends_with('…'), "{row}");
+        assert!(width(&lines(&v, Size::Full)) <= FULL_WIDTH, "{t}");
+    }
+
+    #[test]
+    fn a_number_that_is_not_finite_reads_as_such() {
+        assert_eq!(compact_number(f64::NAN), "NaN");
+    }
 }
