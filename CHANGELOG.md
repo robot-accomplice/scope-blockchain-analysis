@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- The Linux release binaries are built on Ubuntu 22.04, so they run on glibc 2.35 and newer without the warning ``weak version `GLIBC_2.39' not found``. The release and CI builds fail when a Linux binary needs a newer glibc (`scripts/check-glibc.sh`).
+- With no config file, scope starts the setup wizard only when it can ask: a terminal on every stream and not `--yes`, `--json` or other machine output. Otherwise it runs the command with the defaults and says to run `scope setup`; before, a pipe's empty line answered yes and started the wizard.
+
 ## [0.8.1] - 2026-10-24
 
 ### Added

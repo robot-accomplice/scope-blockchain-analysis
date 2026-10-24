@@ -207,8 +207,20 @@ async fn run() -> Result<()> {
         return Ok(());
     }
 
-    // Check if config file exists and prompt for setup if needed
-    if !is_setup_command && !config_file_exists(&cli) && prompt_for_setup(&out) {
+    // With no config file, offer the setup wizard, but only when the run can
+    // ask: a terminal on every stream and not scripted. A pipe or a script
+    // would answer the question with an empty line, which means yes.
+    let first_run = !is_setup_command && !config_file_exists(&cli);
+    let can_ask = first_run
+        && ghola_offer::may_ask(&out)
+        && !ghola_offer::scripted(&ghola_offer::process_args(), &config);
+    if first_run && !can_ask {
+        note!(
+            out,
+            "No configuration file found; using defaults. Run 'scope setup' to configure."
+        );
+    }
+    if can_ask && prompt_for_setup(&out) {
         // Run setup wizard
         let setup_args = scope_cli::cli::setup::SetupArgs {
             status: false,

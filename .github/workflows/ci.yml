@@ -82,12 +82,16 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # Ubuntu 22.04, as the release builds it: the oldest glibc we support.
+        os: [ubuntu-22.04, macos-latest]
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/rust
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release
+      - name: Check the glibc it needs
+        if: runner.os == 'Linux'
+        run: scripts/check-glibc.sh target/release/scope
 
   audit:
     name: Security Audit
