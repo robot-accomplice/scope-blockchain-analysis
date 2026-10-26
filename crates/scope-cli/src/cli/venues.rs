@@ -244,16 +244,34 @@ async fn run_update(
 /// and leaves the example file; the command then runs with what there is.
 pub async fn ensure_catalog(config: &Config, http: &dyn HttpClient, out: &Output) {
     static TRIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    let dest = VenueRegistry::catalog_dir();
-    if !catalog::installed(&dest).is_empty()
-        || TRIED.swap(true, std::sync::atomic::Ordering::SeqCst)
+    ensure_catalog_at(
+        config.market.catalog_url(),
+        http,
+        &VenueRegistry::catalog_dir(),
+        &catalog::example_path(),
+        &TRIED,
+        out,
+    )
+    .await;
+}
+
+/// [`ensure_catalog`] for the catalog `dest`, the `example` file and a
+/// once-per-process `tried` flag.
+async fn ensure_catalog_at(
+    url: &str,
+    http: &dyn HttpClient,
+    dest: &std::path::Path,
+    example: &std::path::Path,
+    tried: &std::sync::atomic::AtomicBool,
+    out: &Output,
+) {
+    if !catalog::installed(dest).is_empty() || tried.swap(true, std::sync::atomic::Ordering::SeqCst)
     {
         return;
     }
-    let example = catalog::example_path();
-    let _ = catalog::write_example(&example);
+    let _ = catalog::write_example(example);
     crate::note!(out, "Fetching the venue catalog (first use)…");
-    match catalog::sync(http, config.market.catalog_url(), &dest).await {
+    match catalog::sync(http, url, dest).await {
         Ok(report) => crate::note!(out, "Venue catalog installed: {}", report.summary()),
         Err(e) => crate::note!(
             out,
@@ -268,12 +286,15 @@ pub async fn ensure_catalog(config: &Config, http: &dyn HttpClient, out: &Output
 // =============================================================================
 
 fn run_list(args: ListArgs, out: &Output) -> Result<()> {
-    let registry = VenueRegistry::load()?;
+    run_list_with(&VenueRegistry::load()?, args, out)
+}
 
+/// [`run_list`] for `registry`.
+fn run_list_with(registry: &VenueRegistry, args: ListArgs, out: &Output) -> Result<()> {
     match args.format {
         ListFormat::Table => {
             outln!(out, "{}", section_header("Available Venues"))?;
-            for listing in MarketVenue::listings(&registry) {
+            for listing in MarketVenue::listings(registry) {
                 let caps = listing.capabilities.join(", ");
                 let detail = match (listing.chain, registry.source(&listing.id)) {
                     (Some(chain), _) => format!("{caps} (DEX on {chain})"),
@@ -326,7 +347,7 @@ fn run_list(args: ListArgs, out: &Output) -> Result<()> {
         }
         ListFormat::Json => {
             // The same list the web serves at /api/venues.
-            let venues = MarketVenue::listings(&registry);
+            let venues = MarketVenue::listings(registry);
             let output = serde_json::json!({
                 "total": venues.len(),
                 "venues": venues,
@@ -1061,5 +1082,120 @@ capabilities: {}
         let text = crate::cli::ansi::strip(&cap.out());
         assert!(text.contains("from the catalog"), "{text}");
         assert!(text.contains("Catalog"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn test_first_use_fetches_the_catalog_once_and_says_so() {
+        let server = catalog_server(WEEX).await;
+        let home = tempfile::tempdir().unwrap();
+        let dest = home.path().join("catalog");
+        let example = home.path().join(catalog::EXAMPLE_FILE);
+        let tried = std::sync::atomic::AtomicBool::new(false);
+        let http = scope::http::test_transport();
+        let url = format!("{}/c", server.url());
+        let (out, cap) = Output::capture();
+        ensure_catalog_at(&url, http.as_ref(), &dest, &example, &tried, &out).await;
+        let notes = cap.err();
+        assert!(
+            notes.contains("Fetching the venue catalog (first use)"),
+            "{notes}"
+        );
+        assert!(notes.contains("1 added (weex)"), "{notes}");
+        assert!(example.exists(), "the example is written");
+        // Installed: nothing more, even with a fresh flag.
+        let (out, cap) = Output::capture();
+        let fresh = std::sync::atomic::AtomicBool::new(false);
+        ensure_catalog_at(&url, http.as_ref(), &dest, &example, &fresh, &out).await;
+        assert!(cap.err().is_empty(), "{}", cap.err());
+    }
+
+    #[tokio::test]
+    async fn test_first_use_offline_says_how_to_get_venues_and_tries_once() {
+        let home = tempfile::tempdir().unwrap();
+        let dest = home.path().join("catalog");
+        let example = home.path().join(catalog::EXAMPLE_FILE);
+        let tried = std::sync::atomic::AtomicBool::new(false);
+        let http = scope::http::test_transport();
+        let (out, cap) = Output::capture();
+        ensure_catalog_at(
+            "http://127.0.0.1:9/none",
+            http.as_ref(),
+            &dest,
+            &example,
+            &tried,
+            &out,
+        )
+        .await;
+        let notes = cap.err();
+        assert!(
+            notes.contains("Could not fetch the venue catalog"),
+            "{notes}"
+        );
+        assert!(notes.contains("scope venues update"), "{notes}");
+        assert!(notes.contains(catalog::EXAMPLE_FILE), "{notes}");
+        // Once a process: the second command does not try again.
+        let (out, cap) = Output::capture();
+        ensure_catalog_at(
+            "http://127.0.0.1:9/none",
+            http.as_ref(),
+            &dest,
+            &example,
+            &tried,
+            &out,
+        )
+        .await;
+        assert!(cap.err().is_empty(), "{}", cap.err());
+    }
+
+    #[tokio::test]
+    async fn test_update_from_an_unreachable_url_fails_and_keeps_the_catalog() {
+        let before = catalog::installed(&VenueRegistry::catalog_dir());
+        let result = run(
+            VenuesCommands::Update(UpdateArgs {
+                url: Some("http://127.0.0.1:9/none".into()),
+            }),
+            &Config::default(),
+            scope::http::test_transport(),
+            &quiet(),
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(catalog::installed(&VenueRegistry::catalog_dir()), before);
+    }
+
+    #[test]
+    fn test_list_with_no_venues_says_how_to_get_them_and_marks_yours() {
+        let (out, cap) = Output::capture();
+        run_list_with(
+            &VenueRegistry::default(),
+            ListArgs {
+                format: ListFormat::Table,
+            },
+            &out,
+        )
+        .unwrap();
+        let text = crate::cli::ansi::strip(&cap.out());
+        assert!(
+            text.contains("0 venues (0 from the catalog, 0 yours)"),
+            "{text}"
+        );
+        assert!(text.contains("No exchange venues yet"), "{text}");
+
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(user.path().join("weex.yaml"), WEEX).unwrap();
+        let registry =
+            VenueRegistry::load_dirs(&VenueRegistry::catalog_dir(), user.path()).unwrap();
+        let (out, cap) = Output::capture();
+        run_list_with(
+            &registry,
+            ListArgs {
+                format: ListFormat::Table,
+            },
+            &out,
+        )
+        .unwrap();
+        let text = crate::cli::ansi::strip(&cap.out());
+        assert!(text.contains("ohlc (yours)"), "{text}");
+        assert!(text.contains(", 1 yours)"), "{text}");
     }
 }

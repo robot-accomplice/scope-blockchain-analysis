@@ -2600,4 +2600,41 @@ capabilities:
             "it did not sleep on"
         );
     }
+
+    fn hourly(n: u64, step_ms: u64) -> Vec<scope::market::Candle> {
+        (0..n)
+            .map(|i| scope::market::Candle {
+                open_time: 1_700_000_000_000 + i * step_ms,
+                open: 1.0,
+                high: 2.0,
+                low: 0.5,
+                close: 1.5,
+                volume: 1.0,
+                close_time: 0,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_more_candles_than_columns_says_the_chart_shows_the_last() {
+        let (out, cap) = Output::capture();
+        write_candle_chart(&hourly(200, 3_600_000), "1h", 60, &out).unwrap();
+        let text = crate::cli::ansi::strip(&cap.out());
+        assert!(
+            text.contains("1h · 200 candles (the chart shows the last"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn test_daily_candles_read_as_dates_and_no_candles_say_so() {
+        let (out, cap) = Output::capture();
+        write_candle_chart(&hourly(40, 86_400_000), "1d", 120, &out).unwrap();
+        let text = crate::cli::ansi::strip(&cap.out());
+        assert!(text.contains("2023-11-"), "dates, no hours: {text}");
+        assert!(!text.contains(":00 "), "{text}");
+        let (out, cap) = Output::capture();
+        write_candle_chart(&[], "1h", 120, &out).unwrap();
+        assert!(cap.out().contains("No candles returned"), "{}", cap.out());
+    }
 }
