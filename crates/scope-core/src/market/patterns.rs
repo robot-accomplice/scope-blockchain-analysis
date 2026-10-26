@@ -1949,4 +1949,38 @@ mod tests {
             .collect();
         assert!(timer(&t).is_none(), "{:?}", timer(&t));
     }
+
+    #[test]
+    fn test_the_timer_needs_a_tape_and_names_one_pause_in_the_singular() {
+        // Too short a tape, and too few distinct instants.
+        assert!(timer(&jittered_tape(10)).is_none());
+        let bunched: Vec<Trade> = (0..60u64)
+            .map(|i| trade((i % 5) * 45_000, 1.0, 5.0 + i as f64, TradeSide::Buy))
+            .collect();
+        assert!(timer(&bunched).is_none());
+        let one = Finding::Timer {
+            low_ms: 30_000.0,
+            median_ms: 45_000.0,
+            high_ms: 60_000.0,
+            cv: 1.2,
+            gaps: 99,
+            share: 0.97,
+            pauses: 1,
+        };
+        assert!(
+            one.detail().ends_with(", in bursts with 1 long pause"),
+            "{}",
+            one.detail()
+        );
+        let none = Finding::Timer {
+            low_ms: 30_000.0,
+            median_ms: 45_000.0,
+            high_ms: 60_000.0,
+            cv: 1.2,
+            gaps: 99,
+            share: 0.97,
+            pauses: 0,
+        };
+        assert!(none.detail().ends_with("(median 45s)"), "{}", none.detail());
+    }
 }

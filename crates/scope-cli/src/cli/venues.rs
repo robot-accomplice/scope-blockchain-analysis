@@ -466,14 +466,32 @@ pub async fn offer_catalog_updates(scripted: bool, out: &Output) {
     let Ok(registry) = VenueRegistry::load() else {
         return;
     };
-    let declined_file = declined_path();
-    let stale = stale_copies(
+    let asked = offer_with(
         &registry,
         &VenueRegistry::catalog_dir(),
-        &read_declined(&declined_file),
-    );
+        &declined_path(),
+        &scope::paths::home(),
+        out,
+    )
+    .await;
+    if asked {
+        ASKED.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// [`offer_catalog_updates`] for `registry`, its catalog folder, the file
+/// of "no" answers and the scope home (where backups go). Returns whether
+/// it asked.
+async fn offer_with(
+    registry: &VenueRegistry,
+    catalog_dir: &std::path::Path,
+    declined_file: &std::path::Path,
+    home: &std::path::Path,
+    out: &Output,
+) -> bool {
+    let stale = stale_copies(registry, catalog_dir, &read_declined(declined_file));
     if stale.is_empty() {
-        return;
+        return false;
     }
     let answer = if let Some(asker) = out.asker() {
         let picker = crate::cli::resolve::TuiPicker { asker };
@@ -490,35 +508,26 @@ pub async fn offer_catalog_updates(scripted: bool, out: &Output) {
         match choice {
             Some(0) => OverrideAnswer::SaveAndReplace,
             Some(2) => OverrideAnswer::Replace,
-            // A cancelled question asks again next time.
-            None => {
-                ASKED.store(true, std::sync::atomic::Ordering::SeqCst);
-                return;
-            }
+            // A cancelled question: nothing changes, and it was asked.
+            None => return true,
             _ => OverrideAnswer::Keep,
         }
     } else {
         if !crate::cli::ghola_offer::may_ask(out) {
-            return;
+            return false;
         }
         let question = format!("{}{OVERRIDE_QUESTION}", override_prompt(&stale));
         match crate::cli::prompt::ask_stdin(out, &question) {
             Ok(a) => parse_override_answer(&a),
-            Err(_) => return,
+            Err(_) => return false,
         }
     };
-    ASKED.store(true, std::sync::atomic::Ordering::SeqCst);
     let stamp = chrono::Local::now().format("%Y-%m-%d-%H%M%S").to_string();
-    match apply_override_answer(
-        answer,
-        &stale,
-        &scope::paths::home(),
-        &stamp,
-        &declined_file,
-    ) {
+    match apply_override_answer(answer, &stale, home, &stamp, declined_file) {
         Ok(done) => crate::note!(out, "{done}"),
         Err(e) => crate::note!(out, "Could not update your venue files: {e}"),
     }
+    true
 }
 
 // =============================================================================
@@ -1604,5 +1613,120 @@ capabilities: {}
         );
         assert!(user.join("weex.yaml").exists());
         assert!(stale_copies(&registry, &catalog_dir, &read_declined(&declined)).is_empty());
+    }
+
+    /// Answers the TUI's next list question with `choice`.
+    fn answer_with(asker: crate::cli::output::Asker, choice: Option<usize>) {
+        tokio::spawn(async move {
+            loop {
+                let ask = asker.lock().unwrap().take();
+                if let Some(ask) = ask {
+                    assert!(
+                        ask.prompt
+                            .contains("New version of the venues catalog found")
+                    );
+                    assert_eq!(ask.options.len(), 3);
+                    let _ = ask.reply.send(choice);
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        });
+    }
+
+    #[tokio::test]
+    async fn test_the_tui_offer_saves_and_replaces_on_yes() {
+        let (home, catalog_dir, user) = stale_setup();
+        let registry = VenueRegistry::load_dirs(&catalog_dir, &user).unwrap();
+        let declined = home.path().join("declined.json");
+        let asker: crate::cli::output::Asker = Default::default();
+        let (out, cap) = Output::capture();
+        let out = out.with_asker(asker.clone());
+        answer_with(asker, Some(0));
+        assert!(offer_with(&registry, &catalog_dir, &declined, home.path(), &out).await);
+        assert!(
+            cap.err().contains("Saved your copies of weex"),
+            "{}",
+            cap.err()
+        );
+        assert!(!user.join("weex.yaml").exists());
+    }
+
+    #[tokio::test]
+    async fn test_the_tui_offer_overwrites_keeps_or_cancels() {
+        // Overwrite.
+        let (home, catalog_dir, user) = stale_setup();
+        let registry = VenueRegistry::load_dirs(&catalog_dir, &user).unwrap();
+        let declined = home.path().join("declined.json");
+        let asker: crate::cli::output::Asker = Default::default();
+        let (out, cap) = Output::capture();
+        let out = out.with_asker(asker.clone());
+        answer_with(asker, Some(2));
+        assert!(offer_with(&registry, &catalog_dir, &declined, home.path(), &out).await);
+        assert!(
+            cap.err().contains("Removed your copies of weex"),
+            "{}",
+            cap.err()
+        );
+
+        // No: kept and recorded.
+        let (home, catalog_dir, user) = stale_setup();
+        let registry = VenueRegistry::load_dirs(&catalog_dir, &user).unwrap();
+        let declined = home.path().join("declined.json");
+        let asker: crate::cli::output::Asker = Default::default();
+        let (out, _) = Output::capture();
+        let out = out.with_asker(asker.clone());
+        answer_with(asker, Some(1));
+        assert!(offer_with(&registry, &catalog_dir, &declined, home.path(), &out).await);
+        assert!(user.join("weex.yaml").exists() && declined.exists());
+
+        // Cancelled: nothing changes.
+        let (home, catalog_dir, user) = stale_setup();
+        let registry = VenueRegistry::load_dirs(&catalog_dir, &user).unwrap();
+        let declined = home.path().join("declined.json");
+        let asker: crate::cli::output::Asker = Default::default();
+        let (out, cap) = Output::capture();
+        let out = out.with_asker(asker.clone());
+        answer_with(asker, None);
+        assert!(offer_with(&registry, &catalog_dir, &declined, home.path(), &out).await);
+        assert!(cap.err().is_empty(), "{}", cap.err());
+        assert!(user.join("weex.yaml").exists() && !declined.exists());
+    }
+
+    #[tokio::test]
+    async fn test_no_offer_without_stale_copies_or_a_way_to_ask() {
+        let (home, catalog_dir, user) = stale_setup();
+        let declined = home.path().join("declined.json");
+        // Nothing stale: the catalog alone.
+        let clean = VenueRegistry::load_dirs(&catalog_dir, &home.path().join("none")).unwrap();
+        let (out, _) = Output::capture();
+        assert!(!offer_with(&clean, &catalog_dir, &declined, home.path(), &out).await);
+        // Stale, but no TUI and no terminal: not asked, nothing changes.
+        let registry = VenueRegistry::load_dirs(&catalog_dir, &user).unwrap();
+        assert!(!offer_with(&registry, &catalog_dir, &declined, home.path(), &out).await);
+        assert!(user.join("weex.yaml").exists());
+        // A scripted run returns before reading anything.
+        offer_catalog_updates(true, &out).await;
+    }
+
+    #[test]
+    fn test_a_failed_move_or_removal_is_an_error_not_a_panic() {
+        let (home, catalog_dir, user) = stale_setup();
+        let registry = VenueRegistry::load_dirs(&catalog_dir, &user).unwrap();
+        let stale = stale_copies(&registry, &catalog_dir, &Default::default());
+        std::fs::remove_file(user.join("weex.yaml")).unwrap();
+        let declined = home.path().join("declined.json");
+        for answer in [OverrideAnswer::SaveAndReplace, OverrideAnswer::Replace] {
+            let err = apply_override_answer(answer, &stale, home.path(), "t", &declined)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("weex.yaml"), "{err}");
+        }
+        // The answers file cannot be written where a folder is.
+        std::fs::create_dir_all(&declined).unwrap();
+        assert!(
+            apply_override_answer(OverrideAnswer::Keep, &stale, home.path(), "t", &declined)
+                .is_err()
+        );
     }
 }

@@ -490,4 +490,20 @@ symbol:
             Some(user.path().join("weex.yaml").as_path())
         );
     }
+
+    #[test]
+    fn test_an_unreadable_venue_file_is_skipped() {
+        let user = tempfile::tempdir().unwrap();
+        // Not UTF-8: reading it as text fails, on every platform.
+        std::fs::write(user.path().join("bad.yaml"), [0xff, 0xfe, 0x00, 0x80]).unwrap();
+        let registry = VenueRegistry::load_dirs(&user.path().join("none"), user.path()).unwrap();
+        assert!(registry.is_empty());
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn test_the_deprecated_constructor_still_resolves() {
+        assert!(catalog().create_exchange_client("binance").is_ok());
+        assert!(catalog().create_exchange_client("nope").is_err());
+    }
 }
