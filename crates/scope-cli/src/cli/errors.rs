@@ -44,15 +44,41 @@ fn display_error_styled(e: &ScopeError, tty: bool, out: &Output) -> std::io::Res
     }
 
     let hint = if causes.iter().any(|c| is_non_tls_reply(c)) {
-        Some(INTERCEPTION_HINT)
+        Some(INTERCEPTION_HINT.to_string())
+    } else if let Some(h) = override_hint(e, &scope::market::VenueRegistry::load) {
+        Some(h)
     } else {
-        error_suggestion(e, out.is_tui())
+        error_suggestion(e, out.is_tui()).map(str::to_string)
     };
     if let Some(hint) = hint {
-        errln!(out, "\n  {}", painter.paint(Role::Secondary, hint))?;
+        errln!(out, "\n  {}", painter.paint(Role::Secondary, &hint))?;
     }
     errln!(out)?;
     Ok(())
+}
+
+/// For a venue's "does not support …" error, how to get the capability
+/// back when the user's own file hides the catalog's: `None` otherwise.
+/// `load` reads the venues (the registry, or a test's).
+fn override_hint(
+    e: &ScopeError,
+    load: &dyn Fn() -> scope::error::Result<scope::market::VenueRegistry>,
+) -> Option<String> {
+    let ScopeError::Venue { venue, message } = e else {
+        return None;
+    };
+    let missing = message.strip_prefix("does not support ")?;
+    let capability = match missing {
+        "order book" => "order_book",
+        "OHLC" => "ohlc",
+        other => other,
+    };
+    let registry = load().ok()?;
+    registry
+        .hidden_capabilities(venue)
+        .contains(&capability)
+        .then(|| registry.override_hint(venue))
+        .flatten()
 }
 
 /// Shown when a TLS handshake got a non-TLS reply.
@@ -421,5 +447,41 @@ mod tests {
         let text = cap.err();
         assert!(text.contains("caused by:"), "{}", text);
         assert!(text.contains('\x1b'), "tty output is styled: {}", text);
+    }
+
+    #[test]
+    fn test_a_missing_capability_your_file_hides_gets_the_override_hint() {
+        let catalog = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        let weex = "id: weex\nname: W\nbase_url: https://w\nsymbol:\n  template: \"{base}{quote}\"\n  default_quote: USDT\ncapabilities:\n  trades:\n    path: /t\n    response:\n      price: p\n      quantity: q\n";
+        let with_ohlc = format!(
+            "{weex}  ohlc:\n    path: /k\n    response:\n      ohlc_format: array_of_arrays\n"
+        );
+        std::fs::write(catalog.path().join("weex.yaml"), with_ohlc).unwrap();
+        std::fs::write(user.path().join("weex.yaml"), weex).unwrap();
+        let (c, u) = (catalog.path().to_path_buf(), user.path().to_path_buf());
+        let load = move || scope::market::VenueRegistry::load_dirs(&c, &u);
+        let e = ScopeError::Venue {
+            venue: "weex".into(),
+            message: "does not support OHLC".into(),
+        };
+        let hint = override_hint(&e, &load).unwrap();
+        assert!(
+            hint.contains("overrides the catalog's weex, which also has ohlc"),
+            "{hint}"
+        );
+        // Another missing capability the catalog lacks too, and other errors.
+        let ticker = ScopeError::Venue {
+            venue: "weex".into(),
+            message: "does not support ticker".into(),
+        };
+        assert!(override_hint(&ticker, &load).is_none());
+        assert!(override_hint(&ScopeError::Other("x".into()), &load).is_none());
+        // The hint shows under the error.
+        let (out, cap) = Output::capture();
+        let shown = override_hint(&e, &load);
+        assert!(shown.is_some());
+        display_error_styled(&e, false, &out).unwrap();
+        assert!(cap.err().contains("does not support OHLC"), "{}", cap.err());
     }
 }

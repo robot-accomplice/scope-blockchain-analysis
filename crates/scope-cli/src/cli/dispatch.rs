@@ -136,6 +136,9 @@ pub async fn dispatch_with(
 ) -> Result<()> {
     if needs_venues(&command) {
         crate::cli::venues::ensure_catalog(config, clients.http().as_ref(), out).await;
+        let scripted =
+            crate::cli::ghola_offer::scripted(&crate::cli::ghola_offer::process_args(), config);
+        crate::cli::venues::offer_catalog_updates(scripted, out).await;
     }
     match command {
         Commands::Completions(args) => {

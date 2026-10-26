@@ -190,7 +190,12 @@ pub async fn run(
         VenuesCommands::Schema(args) => run_schema(args, out),
         VenuesCommands::Update(args) => {
             let url = args.url.as_deref().unwrap_or(config.market.catalog_url());
-            run_update(url, http.as_ref(), &VenueRegistry::catalog_dir(), out).await
+            run_update(url, http.as_ref(), &VenueRegistry::catalog_dir(), out).await?;
+            // A newer catalog may now be hidden by the user's own copies.
+            let scripted =
+                crate::cli::ghola_offer::scripted(&crate::cli::ghola_offer::process_args(), config);
+            offer_catalog_updates(scripted, out).await;
+            Ok(())
         }
         VenuesCommands::Init(args) => {
             if catalog::installed(&VenueRegistry::catalog_dir()).is_empty() {
@@ -282,6 +287,241 @@ async fn ensure_catalog_at(
 }
 
 // =============================================================================
+// Stale copies: your files that hide a newer catalog venue
+// =============================================================================
+
+/// The question, in the user's words.
+const OVERRIDE_QUESTION: &str = "Would you like me to save your existing copies and overwrite? [Y]es/[N]o/[O]verwrite, don't save: ";
+
+/// What to do with the user's copies that hide catalog capabilities.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverrideAnswer {
+    /// Move the copies to a backup folder; the catalog's apply.
+    SaveAndReplace,
+    /// Keep them, and do not ask again until the catalog changes.
+    Keep,
+    /// Remove the copies without a backup; the catalog's apply.
+    Replace,
+}
+
+/// `y`, `n` or `o` (any case, a word starting with one); anything else,
+/// an empty line included, keeps the copies.
+pub fn parse_override_answer(answer: &str) -> OverrideAnswer {
+    match answer.trim().chars().next().map(|c| c.to_ascii_lowercase()) {
+        Some('y') => OverrideAnswer::SaveAndReplace,
+        Some('o') => OverrideAnswer::Replace,
+        _ => OverrideAnswer::Keep,
+    }
+}
+
+/// One of the user's files that hides a newer catalog venue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaleCopy {
+    pub id: String,
+    pub file: std::path::PathBuf,
+    /// What the catalog's version has that the copy lacks.
+    pub hidden: Vec<&'static str>,
+    /// The catalog file's checksum, so a "no" lasts until it changes.
+    pub catalog_sha: String,
+}
+
+/// The user's copies in `registry` that hide catalog capabilities, minus
+/// those already declined for the same catalog version (`declined`).
+pub fn stale_copies(
+    registry: &VenueRegistry,
+    catalog_dir: &std::path::Path,
+    declined: &std::collections::HashMap<String, String>,
+) -> Vec<StaleCopy> {
+    let shas = catalog::installed(catalog_dir);
+    registry
+        .list()
+        .into_iter()
+        .filter_map(|id| {
+            let hidden = registry.hidden_capabilities(id);
+            let file = registry.user_file(id)?.to_path_buf();
+            let catalog_sha = shas.iter().find(|e| e.id == id)?.sha256.clone();
+            (!hidden.is_empty() && declined.get(id) != Some(&catalog_sha)).then(|| StaleCopy {
+                id: id.to_string(),
+                file,
+                hidden,
+                catalog_sha,
+            })
+        })
+        .collect()
+}
+
+/// Where the "no" answers are kept: `{id: catalog sha256}`.
+fn declined_path() -> std::path::PathBuf {
+    scope::paths::state_dir().join("venue-overrides-declined.json")
+}
+
+fn read_declined(path: &std::path::Path) -> std::collections::HashMap<String, String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+/// Carries out `answer` for `stale`: moves the copies to a backup folder
+/// under `home` (named by `stamp`), removes them, or records the "no" in
+/// `declined_file`. Returns what it did, for the user.
+pub fn apply_override_answer(
+    answer: OverrideAnswer,
+    stale: &[StaleCopy],
+    home: &std::path::Path,
+    stamp: &str,
+    declined_file: &std::path::Path,
+) -> Result<String> {
+    let names = stale
+        .iter()
+        .map(|c| c.id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    match answer {
+        OverrideAnswer::SaveAndReplace => {
+            let backup = home.join(format!("venues-backup-{stamp}"));
+            std::fs::create_dir_all(&backup).map_err(|e| {
+                scope::error::ScopeError::io_context(
+                    e,
+                    format!("Cannot create {}", backup.display()),
+                )
+            })?;
+            for c in stale {
+                let to = backup.join(c.file.file_name().unwrap_or_default());
+                std::fs::rename(&c.file, &to).map_err(|e| {
+                    scope::error::ScopeError::io_context(
+                        e,
+                        format!("Cannot move {}", c.file.display()),
+                    )
+                })?;
+            }
+            Ok(format!(
+                "Saved your copies of {names} to {} and switched to the catalog's.",
+                backup.display()
+            ))
+        }
+        OverrideAnswer::Replace => {
+            for c in stale {
+                std::fs::remove_file(&c.file).map_err(|e| {
+                    scope::error::ScopeError::io_context(
+                        e,
+                        format!("Cannot remove {}", c.file.display()),
+                    )
+                })?;
+            }
+            Ok(format!(
+                "Removed your copies of {names}; the catalog's apply."
+            ))
+        }
+        OverrideAnswer::Keep => {
+            let mut declined = read_declined(declined_file);
+            for c in stale {
+                declined.insert(c.id.clone(), c.catalog_sha.clone());
+            }
+            if let Some(dir) = declined_file.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let json = serde_json::to_string_pretty(&declined).unwrap_or_default();
+            std::fs::write(declined_file, json).map_err(|e| {
+                scope::error::ScopeError::io_context(
+                    e,
+                    format!("Cannot write {}", declined_file.display()),
+                )
+            })?;
+            Ok(format!(
+                "Kept your copies of {names}; scope will ask again when the catalog's change."
+            ))
+        }
+    }
+}
+
+/// The question's text: which venues, and what the catalog adds.
+fn override_prompt(stale: &[StaleCopy]) -> String {
+    let lines: Vec<String> = stale
+        .iter()
+        .map(|c| {
+            format!(
+                "  {} ({}): the catalog's also has {}",
+                c.id,
+                c.file.display(),
+                c.hidden.join(", ")
+            )
+        })
+        .collect();
+    format!(
+        "New version of the venues catalog found. Your own venue files hide what it adds:\n{}\n",
+        lines.join("\n")
+    )
+}
+
+/// Before a command that reads venues: when the user's copies hide a newer
+/// catalog venue, ask (once a process) whether to save and replace them,
+/// replace them, or keep them. In the TUI the question is a list; on a
+/// terminal, the `[Y]es/[N]o/[O]verwrite` prompt; scripted runs never ask.
+pub async fn offer_catalog_updates(scripted: bool, out: &Output) {
+    static ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if scripted || ASKED.load(std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let Ok(registry) = VenueRegistry::load() else {
+        return;
+    };
+    let declined_file = declined_path();
+    let stale = stale_copies(
+        &registry,
+        &VenueRegistry::catalog_dir(),
+        &read_declined(&declined_file),
+    );
+    if stale.is_empty() {
+        return;
+    }
+    let answer = if let Some(asker) = out.asker() {
+        let picker = crate::cli::resolve::TuiPicker { asker };
+        let choice = picker
+            .ask(
+                format!("{}Use the catalog's versions?", override_prompt(&stale)),
+                vec![
+                    "Yes: save my copies, then use the catalog's".to_string(),
+                    "No: keep my copies".to_string(),
+                    "Overwrite: use the catalog's, don't save my copies".to_string(),
+                ],
+            )
+            .await;
+        match choice {
+            Some(0) => OverrideAnswer::SaveAndReplace,
+            Some(2) => OverrideAnswer::Replace,
+            // A cancelled question asks again next time.
+            None => {
+                ASKED.store(true, std::sync::atomic::Ordering::SeqCst);
+                return;
+            }
+            _ => OverrideAnswer::Keep,
+        }
+    } else {
+        if !crate::cli::ghola_offer::may_ask(out) {
+            return;
+        }
+        let question = format!("{}{OVERRIDE_QUESTION}", override_prompt(&stale));
+        match crate::cli::prompt::ask_stdin(out, &question) {
+            Ok(a) => parse_override_answer(&a),
+            Err(_) => return,
+        }
+    };
+    ASKED.store(true, std::sync::atomic::Ordering::SeqCst);
+    let stamp = chrono::Local::now().format("%Y-%m-%d-%H%M%S").to_string();
+    match apply_override_answer(
+        answer,
+        &stale,
+        &scope::paths::home(),
+        &stamp,
+        &declined_file,
+    ) {
+        Ok(done) => crate::note!(out, "{done}"),
+        Err(e) => crate::note!(out, "Could not update your venue files: {e}"),
+    }
+}
+
+// =============================================================================
 // List
 // =============================================================================
 
@@ -298,7 +538,15 @@ fn run_list_with(registry: &VenueRegistry, args: ListArgs, out: &Output) -> Resu
                 let caps = listing.capabilities.join(", ");
                 let detail = match (listing.chain, registry.source(&listing.id)) {
                     (Some(chain), _) => format!("{caps} (DEX on {chain})"),
-                    (None, Some(VenueSource::User)) => format!("{caps} (yours)"),
+                    (None, Some(VenueSource::User)) => {
+                        match registry.hidden_capabilities(&listing.id).as_slice() {
+                            [] => format!("{caps} (yours)"),
+                            hidden => format!(
+                                "{caps} (yours; the catalog's also has {})",
+                                hidden.join(", ")
+                            ),
+                        }
+                    }
                     (None, _) => caps,
                 };
                 outln!(out, "{}", kv_row(&listing.id, &detail))?;
@@ -329,6 +577,11 @@ fn run_list_with(registry: &VenueRegistry, args: ListArgs, out: &Output) -> Resu
                     "{}",
                     info_row("No exchange venues yet: run `scope venues update`")
                 )?;
+            }
+            for id in &ids {
+                if let Some(hint) = registry.override_hint(id) {
+                    outln!(out, "{}", info_row(&hint))?;
+                }
             }
             outln!(
                 out,
@@ -1195,7 +1448,161 @@ capabilities: {}
         )
         .unwrap();
         let text = crate::cli::ansi::strip(&cap.out());
-        assert!(text.contains("ohlc (yours)"), "{text}");
+        // This weex describes only candles: it hides the catalog's book,
+        // ticker and trades, and the list says so (wrapped at any width).
+        let words = text
+            .split_whitespace()
+            .filter(|w| *w != "│")
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            words.contains("ohlc (yours; the catalog's also has order_book, ticker, trades)"),
+            "{text}"
+        );
         assert!(text.contains(", 1 yours)"), "{text}");
+    }
+
+    #[test]
+    fn test_list_says_when_your_file_hides_catalog_capabilities() {
+        let user = tempfile::tempdir().unwrap();
+        let without_ohlc = &WEEX[..WEEX.find("  ohlc:").unwrap()];
+        let weex_catalog = tempfile::tempdir().unwrap();
+        std::fs::write(weex_catalog.path().join("weex.yaml"), WEEX).unwrap();
+        std::fs::write(user.path().join("weex.yaml"), without_ohlc).unwrap();
+        let registry = VenueRegistry::load_dirs(weex_catalog.path(), user.path()).unwrap();
+        let (out, cap) = Output::capture();
+        run_list_with(
+            &registry,
+            ListArgs {
+                format: ListFormat::Table,
+            },
+            &out,
+        )
+        .unwrap();
+        let text = crate::cli::ansi::strip(&cap.out());
+        // The hint wraps under the box rail.
+        let words = text
+            .split_whitespace()
+            .filter(|w| *w != "│")
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            words.contains("(yours; the catalog's also has ohlc)"),
+            "{text}"
+        );
+        assert!(
+            words.contains("overrides the catalog's weex, which also has ohlc"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn test_override_answers_parse_like_the_prompt_says() {
+        for (input, want) in [
+            ("y", OverrideAnswer::SaveAndReplace),
+            ("Yes\n", OverrideAnswer::SaveAndReplace),
+            ("o", OverrideAnswer::Replace),
+            (" Overwrite", OverrideAnswer::Replace),
+            ("n", OverrideAnswer::Keep),
+            ("", OverrideAnswer::Keep),
+            ("maybe", OverrideAnswer::Keep),
+        ] {
+            assert_eq!(parse_override_answer(input), want, "{input:?}");
+        }
+    }
+
+    /// A catalog with `weex` (with ohlc) and its index, and a user folder
+    /// with a weex that lacks it.
+    fn stale_setup() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let home = tempfile::tempdir().unwrap();
+        let catalog_dir = home.path().join("venues").join("catalog");
+        let user = home.path().join("venues");
+        std::fs::create_dir_all(&catalog_dir).unwrap();
+        std::fs::write(catalog_dir.join("weex.yaml"), WEEX).unwrap();
+        let index = serde_json::json!({"schema": 1, "venues": [
+            {"id": "weex", "file": "weex.yaml", "sha256": catalog::checksum(WEEX)}
+        ]});
+        std::fs::write(catalog_dir.join("index.json"), index.to_string()).unwrap();
+        std::fs::write(
+            user.join("weex.yaml"),
+            &WEEX[..WEEX.find("  ohlc:").unwrap()],
+        )
+        .unwrap();
+        (home, catalog_dir, user)
+    }
+
+    #[test]
+    fn test_stale_copies_are_found_until_declined_for_that_catalog_version() {
+        let (_home, catalog_dir, user) = stale_setup();
+        let registry = VenueRegistry::load_dirs(&catalog_dir, &user).unwrap();
+        let none = std::collections::HashMap::new();
+        let stale = stale_copies(&registry, &catalog_dir, &none);
+        assert_eq!(stale.len(), 1);
+        assert_eq!(
+            (stale[0].id.as_str(), stale[0].hidden.as_slice()),
+            ("weex", &["ohlc"][..])
+        );
+        assert!(
+            override_prompt(&stale).contains("weex"),
+            "{}",
+            override_prompt(&stale)
+        );
+        // Declined for this catalog version: not asked again.
+        let declined =
+            std::collections::HashMap::from([("weex".to_string(), catalog::checksum(WEEX))]);
+        assert!(stale_copies(&registry, &catalog_dir, &declined).is_empty());
+        // Declined for an older one: asked again.
+        let old = std::collections::HashMap::from([("weex".to_string(), "old".to_string())]);
+        assert_eq!(stale_copies(&registry, &catalog_dir, &old).len(), 1);
+    }
+
+    #[test]
+    fn test_yes_saves_and_replaces_overwrite_removes_no_remembers() {
+        // Yes: the copy moves to a backup; the catalog's applies.
+        let (home, catalog_dir, user) = stale_setup();
+        let registry = VenueRegistry::load_dirs(&catalog_dir, &user).unwrap();
+        let stale = stale_copies(&registry, &catalog_dir, &Default::default());
+        let declined = home.path().join("state").join("declined.json");
+        let done = apply_override_answer(
+            OverrideAnswer::SaveAndReplace,
+            &stale,
+            home.path(),
+            "t",
+            &declined,
+        )
+        .unwrap();
+        assert!(done.contains("Saved your copies of weex"), "{done}");
+        assert!(
+            home.path()
+                .join("venues-backup-t")
+                .join("weex.yaml")
+                .exists()
+        );
+        let after = VenueRegistry::load_dirs(&catalog_dir, &user).unwrap();
+        assert_eq!(after.source("weex"), Some(VenueSource::Catalog));
+        assert!(after.get("weex").unwrap().has_ohlc());
+
+        // Overwrite: removed, no backup.
+        let (home, catalog_dir, user) = stale_setup();
+        let registry = VenueRegistry::load_dirs(&catalog_dir, &user).unwrap();
+        let stale = stale_copies(&registry, &catalog_dir, &Default::default());
+        apply_override_answer(OverrideAnswer::Replace, &stale, home.path(), "t", &declined)
+            .unwrap();
+        assert!(!user.join("weex.yaml").exists());
+        assert!(!home.path().join("venues-backup-t").exists());
+
+        // No: kept, and the answer recorded for this catalog version.
+        let (home, catalog_dir, user) = stale_setup();
+        let registry = VenueRegistry::load_dirs(&catalog_dir, &user).unwrap();
+        let stale = stale_copies(&registry, &catalog_dir, &Default::default());
+        let declined = home.path().join("state").join("declined.json");
+        let done = apply_override_answer(OverrideAnswer::Keep, &stale, home.path(), "t", &declined)
+            .unwrap();
+        assert!(
+            done.contains("ask again when the catalog's change"),
+            "{done}"
+        );
+        assert!(user.join("weex.yaml").exists());
+        assert!(stale_copies(&registry, &catalog_dir, &read_declined(&declined)).is_empty());
     }
 }
