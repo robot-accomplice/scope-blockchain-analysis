@@ -403,6 +403,21 @@ fn blank_row_styled(tty: bool) -> String {
     rail(Painter::new(tty))
 }
 
+/// The painter the row helpers use: color when stdout takes it.
+pub fn painter() -> Painter {
+    Painter::new(color_enabled())
+}
+
+/// A line of a chart inside a section, after the bar: the line is drawn
+/// and painted already, so it is neither wrapped nor painted again.
+///
+/// ```text
+/// │ 82060.9 ┤ ▄█▄
+/// ```
+pub fn chart_row(line: &str) -> String {
+    format!("{} {line}", rail(painter()))
+}
+
 /// An order book level row with price coloring relative to peg.
 pub fn orderbook_level(
     price: f64,
