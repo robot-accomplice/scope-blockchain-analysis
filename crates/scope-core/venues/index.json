@@ -4,7 +4,7 @@
     {
       "id": "biconomy",
       "file": "biconomy.yaml",
-      "sha256": "ada4796b47b0703c82cf37d19b1d1152d4818324c6a30b6c74252a4e92196817"
+      "sha256": "3c5b238b3c50a531c062a4756cdf87e768095c00bdd7305ef8ad8ad32127db65"
     },
     {
       "id": "binance",
@@ -14,47 +14,47 @@
     {
       "id": "bitget",
       "file": "bitget.yaml",
-      "sha256": "25355971fac3953b4f0bd3bb6b491a07eeb9443cf011ac4dfc2c91d1f43e0880"
+      "sha256": "f6f05c37cec0e3a4f5e2e492cb0c2fa7e062cecbdd27228510d28393e7ce38f8"
     },
     {
       "id": "bybit",
       "file": "bybit.yaml",
-      "sha256": "d83897dd1cc429e98fc4108af001ba93ed5f45720afea8fd31c4def3043485c4"
+      "sha256": "e71c18fdfa5bf05d34da06316af21a2e8d76d41c349c6438c80ac545f98428a7"
     },
     {
       "id": "coinbase",
       "file": "coinbase.yaml",
-      "sha256": "c5392019ce933558f2c5e3c24d4e7a0b04a996048cae6858cf9c6bb718723845"
+      "sha256": "f5257e1b08315ba0361dd743b5eabcd7b9e5a38da10c80bc2b85a0e4a6155392"
     },
     {
       "id": "crypto_com",
       "file": "crypto_com.yaml",
-      "sha256": "fe429c71bcf986fb66099bc1e66b17c7246e77e7e86027f69671e9bc5b0a5b81"
+      "sha256": "0bfd7b28774a70dea9813f8e045b0744fc43a48432b32ed146941246f8992aed"
     },
     {
       "id": "gateio",
       "file": "gateio.yaml",
-      "sha256": "ef783ccf02bbf3fb739ccb3f87ab83ca9cf0a4e9728b39c770fe5ca081b48539"
+      "sha256": "dde98b5643cf70b995a119d5b3ea4d98e8c449388333dbe731a82a0737515af9"
     },
     {
       "id": "htx",
       "file": "htx.yaml",
-      "sha256": "f4834f7bd461ddf48e78375f603f4abf52efe2af8c76fad7642644656163ec0f"
+      "sha256": "e3f1283500dc0ea69526dedf0d73437f5b544e2fafbc652d9cebb3a592346b53"
     },
     {
       "id": "kraken",
       "file": "kraken.yaml",
-      "sha256": "33dbc3eb94813759c6a921efbd79ba664290662de6527e1b08aa57987f019b7a"
+      "sha256": "0cca3cc8f5799e7f63c7caf53eb096a22231e2af8e681355cc25414b5e2fdfc4"
     },
     {
       "id": "mexc",
       "file": "mexc.yaml",
-      "sha256": "3599e2d8ba3ce36a01c0629dcae4d5d6806b83cba2dd6c0f89a7ddcf4162fd22"
+      "sha256": "025db5565d5a0b9882ff4ca794d65368ce7c9c8671b897aae1264b154c468957"
     },
     {
       "id": "okx",
       "file": "okx.yaml",
-      "sha256": "19c8d608777aaad8a696db5c6020aaef76ce21177fcea7417ca190fb4c66b866"
+      "sha256": "24012317c8122fd9fb8bcf1eb1cddda6342f4c214b0f466d89e76cc8caac9ae3"
     }
   ]
 }

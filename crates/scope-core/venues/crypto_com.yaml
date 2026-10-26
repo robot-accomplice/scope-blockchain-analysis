@@ -8,15 +8,17 @@ symbol:
   template: "{base}_{quote}"
   default_quote: USDT
 
+error_envelope:
+  code_key: code
+  ok_codes: ["0"]
+  message_key: message
+
 capabilities:
   order_book:
-    method: POST
     path: /public/get-book
-    request_body:
-      method: "public/get-book"
-      params:
-        instrument_name: "{pair}"
-        depth: "100"
+    params:
+      instrument_name: "{pair}"
+      depth: "50"
     response_root: "result.data.0"
     response:
       asks_key: asks
@@ -24,28 +26,24 @@ capabilities:
       level_format: positional
 
   ticker:
-    method: POST
     path: /public/get-tickers
-    request_body:
-      method: "public/get-tickers"
-      params:
-        instrument_name: "{pair}"
+    params:
+      instrument_name: "{pair}"
     response_root: "result.data.0"
     response:
       last_price: a
       high_24h: h
       low_24h: l
       volume_24h: v
+      quote_volume_24h: vv
       best_bid: b
       best_ask: k
 
   trades:
-    method: POST
     path: /public/get-trades
-    request_body:
-      method: "public/get-trades"
-      params:
-        instrument_name: "{pair}"
+    params:
+      instrument_name: "{pair}"
+      count: "{limit}"
     response_root: "result.data"
     response:
       price: p
@@ -55,19 +53,26 @@ capabilities:
       side:
         field: s
         mapping:
+          buy: buy
+          sell: sell
           BUY: buy
           SELL: sell
 
   ohlc:
-    method: POST
     path: /public/get-candlestick
-    request_body:
-      id: 1
-      method: "public/get-candlestick"
-      params:
-        instrument_name: "{pair}"
-        timeframe: "{interval}"
-      nonce: "0"
+    params:
+      instrument_name: "{pair}"
+      timeframe: "{interval}"
+      count: "{limit}"
+    interval_map:
+      "1m": "1m"
+      "5m": "5m"
+      "15m": "15m"
+      "30m": "30m"
+      "1h": "1h"
+      "4h": "4h"
+      "1d": "1D"
+      "1w": "7D"
     response_root: "result.data"
     response:
       ohlc_format: objects

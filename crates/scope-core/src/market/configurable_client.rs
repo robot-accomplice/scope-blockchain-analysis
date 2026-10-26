@@ -236,6 +236,8 @@ impl ConfigurableExchangeClient {
             self.descriptor.base_url,
             self.interpolate_path(&endpoint.path, pair)
         );
+        // Never above what the venue accepts in one request.
+        let limit = limit.map(|l| endpoint.max_limit.map_or(l, |max| l.min(max)));
         let limit_str = limit.unwrap_or(100).to_string();
 
         let mut req = match endpoint.method {
@@ -374,6 +376,11 @@ impl ConfigurableExchangeClient {
     }
 
     /// Extract a string from a JSON value using a field path.
+    /// A timestamp field in milliseconds (see [`value_to_ms`]).
+    fn extract_ms(&self, data: &Value, field_path: &str) -> Option<u64> {
+        value_to_ms(self.navigate_field(data, field_path)?)
+    }
+
     fn extract_string(&self, data: &Value, field_path: &str) -> Option<String> {
         let val = self.navigate_field(data, field_path)?;
         match val {
@@ -610,8 +617,23 @@ impl TradeHistoryClient for ConfigurableExchangeClient {
         let items = arr
             .as_array()
             .ok_or_else(|| venue_error(&self.descriptor.id, "expected array for trades"))?;
-
         let r = &endpoint.response;
+        let grouped: Vec<Value>;
+        let items = match r.nested_items_key.as_deref() {
+            Some(key) => {
+                // `{limit}` counts groups here, so the trades are capped at it.
+                grouped = items
+                    .iter()
+                    .filter_map(|group| group.get(key).and_then(Value::as_array))
+                    .flatten()
+                    .take(limit as usize)
+                    .cloned()
+                    .collect();
+                &grouped
+            }
+            None => items,
+        };
+
         let mut trades = Vec::with_capacity(items.len());
 
         for item in items {
@@ -626,8 +648,7 @@ impl TradeHistoryClient for ConfigurableExchangeClient {
                 let timestamp_ms = r
                     .timestamp_ms
                     .as_ref()
-                    .and_then(|f| self.extract_f64(item, f))
-                    .map(|v| v as u64)
+                    .and_then(|f| self.extract_ms(item, f))
                     .unwrap_or(0);
                 let id = r.id.as_ref().and_then(|f| self.extract_string(item, f));
                 let side = self.parse_side(item, r);
@@ -713,7 +734,9 @@ impl OhlcClient for ConfigurableExchangeClient {
                 let get_f64 = |i: Option<usize>| -> Option<f64> {
                     i.and_then(|idx| arr.get(idx)).and_then(value_to_f64)
                 };
-                let get_u64 = |i: Option<usize>| -> Option<u64> { get_f64(i).map(|v| v as u64) };
+                let get_ms = |i: Option<usize>| -> Option<u64> {
+                    i.and_then(|idx| arr.get(idx)).and_then(value_to_ms)
+                };
 
                 if let (Some(open), Some(high), Some(low), Some(close)) = (
                     get_f64(idx("open")),
@@ -722,13 +745,13 @@ impl OhlcClient for ConfigurableExchangeClient {
                     get_f64(idx("close")),
                 ) {
                     candles.push(Candle {
-                        open_time: get_u64(idx("open_time")).unwrap_or(0),
+                        open_time: get_ms(idx("open_time")).unwrap_or(0),
                         open,
                         high,
                         low,
                         close,
                         volume: get_f64(idx("volume")).unwrap_or(0.0),
-                        close_time: get_u64(idx("close_time")).unwrap_or(0),
+                        close_time: get_ms(idx("close_time")).unwrap_or(0),
                     });
                 }
             }
@@ -744,8 +767,7 @@ impl OhlcClient for ConfigurableExchangeClient {
                     let open_time = r
                         .open_time
                         .as_ref()
-                        .and_then(|f| self.extract_f64(item, f))
-                        .map(|v| v as u64)
+                        .and_then(|f| self.extract_ms(item, f))
                         .unwrap_or(0);
                     let volume = r
                         .ohlc_volume
@@ -755,8 +777,7 @@ impl OhlcClient for ConfigurableExchangeClient {
                     let close_time = r
                         .close_time
                         .as_ref()
-                        .and_then(|f| self.extract_f64(item, f))
-                        .map(|v| v as u64)
+                        .and_then(|f| self.extract_ms(item, f))
                         .unwrap_or(0);
 
                     candles.push(Candle {
@@ -772,6 +793,11 @@ impl OhlcClient for ConfigurableExchangeClient {
             }
         }
 
+        candles.sort_by_key(|c| c.open_time);
+        let keep = (limit as usize).max(1);
+        if candles.len() > keep {
+            candles.drain(..candles.len() - keep);
+        }
         Ok(candles)
     }
 }
@@ -781,6 +807,35 @@ impl OhlcClient for ConfigurableExchangeClient {
 // =============================================================================
 
 /// Convert a JSON value (string or number) to f64.
+/// A venue's timestamp in milliseconds since the epoch, whatever unit it
+/// sends: seconds (Kraken trades, most candles), milliseconds, micro- or
+/// nanoseconds (KuCoin trades), as a number or a numeric string, or an ISO
+/// 8601 date (Coinbase trades). The unit follows from the size: any date
+/// from 1973 to 2286 is unambiguous. `None` for what is not a time.
+pub(crate) fn value_to_ms(val: &Value) -> Option<u64> {
+    if let Value::String(s) = val
+        && s.parse::<f64>().is_err()
+    {
+        return chrono::DateTime::parse_from_rfc3339(s)
+            .ok()
+            .and_then(|d| u64::try_from(d.timestamp_millis()).ok());
+    }
+    let v = value_to_f64(val)?;
+    if !(v > 0.0) {
+        return None;
+    }
+    let ms = if v < 1e11 {
+        v * 1e3
+    } else if v < 1e14 {
+        v
+    } else if v < 1e17 {
+        v / 1e3
+    } else {
+        v / 1e6
+    };
+    Some(ms.round() as u64)
+}
+
 fn value_to_f64(val: &Value) -> Option<f64> {
     match val {
         Value::Number(n) => n.as_f64(),
@@ -804,6 +859,27 @@ fn current_type(val: &Value) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_timestamps_become_milliseconds_whatever_the_unit() {
+        use serde_json::json;
+        let ms = 1_793_017_629_123u64;
+        for v in [
+            json!(1_793_017_629.123),
+            json!("1793017629.123"),
+            json!(1_793_017_629_123u64),
+            json!("1793017629123"),
+            json!(1_793_017_629_123_000u64),
+            json!(1_793_017_629_123_000_000u64),
+            json!("2026-10-26T12:27:09.123Z"),
+            json!("2026-10-26T14:27:09.123+02:00"),
+        ] {
+            assert_eq!(value_to_ms(&v), Some(ms), "{v}");
+        }
+        for v in [json!(0), json!(-5), json!("soon"), json!(null), json!([1])] {
+            assert_eq!(value_to_ms(&v), None, "{v}");
+        }
+    }
 
     #[test]
     fn test_format_display_pair_underscore() {
@@ -1424,6 +1500,7 @@ mod tests {
                     request_body: None,
                     response_root: None,
                     interval_map: std::collections::HashMap::new(),
+                    max_limit: None,
                     response: ResponseMapping {
                         asks_key: Some("asks".to_string()),
                         bids_key: Some("bids".to_string()),
@@ -1440,6 +1517,7 @@ mod tests {
                     request_body: None,
                     response_root: None,
                     interval_map: std::collections::HashMap::new(),
+                    max_limit: None,
                     response: ResponseMapping {
                         last_price: Some("lastPrice".to_string()),
                         high_24h: Some("highPrice".to_string()),
@@ -1463,6 +1541,7 @@ mod tests {
                     request_body: None,
                     response_root: None,
                     interval_map: std::collections::HashMap::new(),
+                    max_limit: None,
                     response: ResponseMapping {
                         price: Some("price".to_string()),
                         quantity: Some("qty".to_string()),
@@ -1787,6 +1866,7 @@ mod tests {
             })),
             response_root: None,
             interval_map: std::collections::HashMap::new(),
+            max_limit: None,
             response: ResponseMapping {
                 asks_key: Some("asks".to_string()),
                 bids_key: Some("bids".to_string()),
@@ -1898,6 +1978,7 @@ mod tests {
             request_body: None,
             response_root: None,
             interval_map: std::collections::HashMap::new(),
+            max_limit: None,
             response: ResponseMapping {
                 filter: Some(FilterConfig {
                     field: "symbol".to_string(),
@@ -1948,6 +2029,7 @@ mod tests {
             request_body: None,
             response_root: None,
             interval_map: std::collections::HashMap::new(),
+            max_limit: None,
             response: ResponseMapping {
                 filter: Some(FilterConfig {
                     field: "symbol".to_string(),
@@ -2135,6 +2217,7 @@ mod tests {
                     request_body: None,
                     response_root: None,
                     interval_map: std::collections::HashMap::new(),
+                    max_limit: None,
                     response: ResponseMapping {
                         ohlc_format: Some("array_of_arrays".to_string()),
                         ohlc_fields: Some(vec![
@@ -2284,6 +2367,7 @@ mod tests {
                     request_body: None,
                     response_root: None,
                     interval_map: std::collections::HashMap::new(),
+                    max_limit: None,
                     response: ResponseMapping {
                         ohlc_format: Some("objects".to_string()),
                         open_time: Some("ts".to_string()),
@@ -2403,6 +2487,7 @@ mod tests {
                     ]
                     .into_iter()
                     .collect(),
+                    max_limit: None,
                     response: ResponseMapping {
                         ohlc_format: Some("array_of_arrays".to_string()),
                         ohlc_fields: Some(vec![
@@ -2489,6 +2574,7 @@ mod tests {
                     interval_map: [("1h".to_string(), "hour".to_string())]
                         .into_iter()
                         .collect(),
+                    max_limit: None,
                     response: ResponseMapping {
                         ohlc_format: Some("array_of_arrays".to_string()),
                         ohlc_fields: Some(vec![
@@ -2706,6 +2792,7 @@ mod tests {
                     })),
                     response_root: None,
                     interval_map: std::collections::HashMap::new(),
+                    max_limit: None,
                     response: ResponseMapping {
                         ohlc_format: Some("array_of_arrays".to_string()),
                         ohlc_fields: Some(vec![
@@ -2766,6 +2853,7 @@ mod tests {
                     request_body: None,
                     response_root: None,
                     interval_map: std::collections::HashMap::new(),
+                    max_limit: None,
                     response: ResponseMapping {
                         ohlc_format: Some("array_of_arrays".to_string()),
                         ..Default::default()
@@ -2857,6 +2945,7 @@ mod tests {
                     request_body: None,
                     response_root: None,
                     interval_map: std::collections::HashMap::new(),
+                    max_limit: None,
                     response: ResponseMapping {
                         items_key: Some("data".to_string()),
                         ohlc_format: Some("objects".to_string()),

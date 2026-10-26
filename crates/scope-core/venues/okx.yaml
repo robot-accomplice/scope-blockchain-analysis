@@ -62,6 +62,11 @@ capabilities:
       instId: "{pair}"
       bar: "{interval}"
       limit: "{limit}"
+    interval_map:
+      "1h": "1H"
+      "4h": "4H"
+      "1d": "1D"
+      "1w": "1W"
     response_root: data
     response:
       ohlc_format: array_of_arrays

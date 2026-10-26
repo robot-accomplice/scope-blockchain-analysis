@@ -58,6 +58,8 @@ capabilities:
       currency_pair: "{pair}"
       interval: "{interval}"
       limit: "{limit}"
+    interval_map:
+      "1w": "7d"
     response:
       ohlc_format: array_of_arrays
       ohlc_fields: [open_time, volume, close, high, low, open]

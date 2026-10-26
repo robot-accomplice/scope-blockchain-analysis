@@ -46,6 +46,8 @@ capabilities:
     params:
       symbol: "{pair}"
       size: "{limit}"
+    # Biconomy errors above 100 ("Market trading cannot exceed 100").
+    max_limit: 100
     response:
       price: price
       quantity: amount

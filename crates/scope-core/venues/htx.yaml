@@ -41,11 +41,15 @@ capabilities:
       best_ask: "ask.0"
 
   trades:
-    path: /market/trade
+    # The history endpoint: /market/trade sends only the last tick.
+    path: /market/history/trade
     params:
       symbol: "{pair}"
-    response_root: "tick.data"
+      size: "{limit}"
+    max_limit: 2000
+    response_root: data
     response:
+      nested_items_key: data
       price: price
       quantity: amount
       timestamp_ms: ts
@@ -62,6 +66,15 @@ capabilities:
       symbol: "{pair}"
       period: "{interval}"
       size: "{limit}"
+    interval_map:
+      "1m": "1min"
+      "5m": "5min"
+      "15m": "15min"
+      "30m": "30min"
+      "1h": "60min"
+      "4h": "4hour"
+      "1d": "1day"
+      "1w": "1week"
     response_root: data
     response:
       ohlc_format: objects

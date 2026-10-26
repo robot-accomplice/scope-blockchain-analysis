@@ -47,9 +47,25 @@ capabilities:
           SELL: sell
 
   ohlc:
-    path: /products/{pair}/candles
+    path: /api/v3/brokerage/market/products/{pair}/candles
     params:
       granularity: "{interval}"
+      limit: "{limit}"
+    interval_map:
+      "1m": "ONE_MINUTE"
+      "5m": "FIVE_MINUTE"
+      "15m": "FIFTEEN_MINUTE"
+      "30m": "THIRTY_MINUTE"
+      "1h": "ONE_HOUR"
+      "2h": "TWO_HOUR"
+      "6h": "SIX_HOUR"
+      "1d": "ONE_DAY"
     response:
-      ohlc_format: array_of_arrays
-      ohlc_fields: [open_time, low, high, open, close, volume]
+      items_key: candles
+      ohlc_format: objects
+      open_time: start
+      open: open
+      high: high
+      low: low
+      close: close
+      ohlc_volume: volume
