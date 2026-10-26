@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-10-26
+
 ### Added
 - Eight more venues in the catalog, each checked live (book, ticker, trades, candles): **WEEX**, **KuCoin**, **BingX**, **XT.COM**, **LBank** (no candles: its API needs a start time), **WhiteBIT**, **Bitstamp** and **Gemini** (USD pairs). Venue descriptors gain `max_limit` (never ask a venue for more than it accepts), `nested_items_key` (trades sent in groups) and `{interval}` / `{limit}` in paths.
 - `market ohlc` draws the candles: one column per candle, sized to the terminal (or the TUI pane), with half-block bodies, wicks, green up and red down candles, a price axis and a time axis. Under the chart, a summary of the window: interval and count, open, high, low, close (with the change) and volume. `--table` adds every candle in a table; `--limit` fetches a set number (by default, as many as the chart fits). Candles are read oldest first whatever order the venue sends them in.
@@ -432,7 +434,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Configuration system with YAML support
 - Support for ERC-20, SPL, and TRC-20 tokens
 
-[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.2...HEAD
+[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.3...HEAD
+[0.8.3]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.7.0...v0.8.0
