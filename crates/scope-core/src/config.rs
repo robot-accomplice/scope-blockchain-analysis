@@ -215,6 +215,20 @@ impl Default for GholaConfig {
 pub struct MarketConfig {
     /// Order book health thresholds. Keys left out keep the built-in default.
     pub health: HealthThresholds,
+    /// Where `scope venues update` fetches the venue catalog from (a folder
+    /// URL holding `index.json`). Unset: the scope repository's catalog.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub venue_catalog_url: Option<String>,
+}
+
+impl MarketConfig {
+    /// The venue catalog's URL: the configured one, else the default.
+    pub fn catalog_url(&self) -> &str {
+        self.venue_catalog_url
+            .as_deref()
+            .filter(|u| !u.trim().is_empty())
+            .unwrap_or(crate::market::catalog::DEFAULT_CATALOG_URL)
+    }
 }
 
 /// Web server configuration.
@@ -1113,5 +1127,24 @@ ghola:
         let yaml = serde_saphyr::to_string(&config).unwrap();
         let deserialized: Config = serde_saphyr::from_str(&yaml).unwrap();
         assert_eq!(config.ghola, deserialized.ghola);
+    }
+
+    #[test]
+    fn test_the_venue_catalog_url_defaults_unless_set() {
+        let mut market = MarketConfig::default();
+        assert_eq!(
+            market.catalog_url(),
+            crate::market::catalog::DEFAULT_CATALOG_URL
+        );
+        market.venue_catalog_url = Some("  ".into());
+        assert_eq!(
+            market.catalog_url(),
+            crate::market::catalog::DEFAULT_CATALOG_URL
+        );
+        market.venue_catalog_url = Some("https://example.com/cat".into());
+        assert_eq!(market.catalog_url(), "https://example.com/cat");
+        let read: Config =
+            serde_saphyr::from_str("market:\n  venue_catalog_url: https://x/c\n").unwrap();
+        assert_eq!(read.market.catalog_url(), "https://x/c");
     }
 }

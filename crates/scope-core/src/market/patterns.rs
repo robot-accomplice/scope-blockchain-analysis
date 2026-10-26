@@ -11,10 +11,20 @@
 //! - **Cadence:** most gaps between trades are one interval, even when a bot
 //!   trades in bursts with pauses between them (so the gaps as a whole are
 //!   not a metronome).
+//! - **Jittered timer:** the gaps are not one interval but stay in a band
+//!   (30–60 s, say), never much shorter: a timer with random jitter. Real
+//!   order flow has many near-zero gaps.
 //! - **Ping-pong:** a buy and a sell of the same size at nearly the same
 //!   price, seconds apart (the shape of wash trading).
 //! - **Ladder quotes:** consecutive book levels at even price steps whose
 //!   sizes are equal, or rise or fall level by level (a quoting curve).
+//! - **Round notionals:** most of a side's levels are whole quote amounts
+//!   (560.00 USDT) though their sizes are not whole: a bot sizes its quotes
+//!   by value; people size orders by quantity.
+//!
+//! Across the runs of a repeating summary, one more: a **depth cycle**, a
+//! side of the book refilled on a timer and drained between the refills
+//! ([`depth_cycle`]). One run cannot see it.
 //!
 //! The functions are pure: they read trades and levels and fetch nothing.
 
@@ -48,6 +58,14 @@ pub const MIN_GAPS: usize = 20;
 /// metronome.
 pub const METRONOME_MAX_CV: f64 = 0.10;
 
+/// Gaps whose standard deviation is under this share of their mean, with
+/// the floor below, are a jittered timer. Real order flow is near 1 or more.
+pub const TIMER_MAX_CV: f64 = 0.35;
+
+/// The 5th-percentile gap at or above this share of the median is a floor:
+/// a timer never fires early. Real order flow puts it near 0.
+pub const TIMER_MIN_FLOOR: f64 = 0.40;
+
 /// Gaps within this share of an interval count as that interval.
 pub const CADENCE_TOLERANCE: f64 = 0.02;
 
@@ -78,8 +96,40 @@ pub const LADDER_MIN_LEVELS: usize = 8;
 /// Levels of a ladder differ in size by at most this share.
 pub const LADDER_SIZE_TOLERANCE: f64 = 0.01;
 
+/// A level at most this much larger (or smaller) than the one before does
+/// not end a falling (or rising) ladder: one bump in a quoting curve.
+pub const LADDER_SHAPE_SLACK: f64 = 0.05;
+
+/// The round-notional signal reads this many levels from the top of a side.
+pub const ROUND_LEVELS: usize = 10;
+
+/// At least this many of those levels with a whole quote amount are a
+/// signal.
+pub const ROUND_MIN_LEVELS: usize = 8;
+
+/// A notional within this of a whole number is whole.
+const ROUND_TOLERANCE: f64 = 0.005;
+
 /// Price steps of a ladder differ by at most this share of the first step.
 pub const LADDER_STEP_TOLERANCE: f64 = 0.05;
+
+/// A run-to-run rise of at least this share of the depth is a refill.
+pub const CYCLE_JUMP: f64 = 0.25;
+
+/// Fewest whole cycles (refills after the first) that make a depth cycle.
+pub const CYCLE_MIN: usize = 3;
+
+/// Fewest runs between two refills: a depth that jumps every other run is
+/// noise, not a cycle.
+pub const CYCLE_MIN_RUNS: usize = 3;
+
+/// Periods between refills whose standard deviation is under this share of
+/// their mean are a timer.
+pub const CYCLE_MAX_CV: f64 = 0.20;
+
+/// Between refills, at least this share of the run-to-run steps must be
+/// flat or down: the depth drains, it does not grow.
+pub const CYCLE_FALLING_SHARE: f64 = 0.60;
 
 /// How many levels from the top of each side the ladder signal reads.
 pub const LADDER_DEPTH: usize = 25;
@@ -117,6 +167,16 @@ pub enum Finding {
         share: f64,
         gaps: usize,
     },
+    /// The gaps between trade events run from `low_ms` (5th percentile) to
+    /// `high_ms` (95th) around `median_ms`, with a coefficient of variation
+    /// `cv`, over `gaps` gaps: a timer with jitter.
+    Timer {
+        low_ms: f64,
+        median_ms: f64,
+        high_ms: f64,
+        cv: f64,
+        gaps: usize,
+    },
     /// `pairs` buy/sell pairs of the same size, close in time and price,
     /// cover `share` of the trades.
     PingPong { pairs: usize, share: f64 },
@@ -131,6 +191,14 @@ pub enum Finding {
         last_size: f64,
         step_pct: f64,
     },
+    /// `levels` of the top `of` `side` levels are whole quote amounts (the
+    /// first few in `examples`) though their sizes are not whole.
+    RoundNotional {
+        side: BookSide,
+        levels: usize,
+        of: usize,
+        examples: Vec<f64>,
+    },
 }
 
 /// How a ladder's sizes run, from the best level out.
@@ -139,10 +207,24 @@ pub enum Finding {
 pub enum LadderShape {
     /// One size at every level.
     Even,
-    /// Each level is smaller than or as large as the one before.
+    /// Each level is smaller than or as large as the one before (or at
+    /// most [`LADDER_SHAPE_SLACK`] larger).
     Falling,
-    /// Each level is larger than or as large as the one before.
+    /// Each level is larger than or as large as the one before (or at most
+    /// [`LADDER_SHAPE_SLACK`] smaller).
     Rising,
+}
+
+/// A side of the book refilled at a near-fixed period and drained between
+/// the refills: a bot quoting on a timer.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DepthCycle {
+    /// Mean time between refills, in milliseconds.
+    pub period_ms: f64,
+    /// Whole cycles seen (refills after the first).
+    pub cycles: usize,
+    /// Coefficient of variation of the periods.
+    pub cv: f64,
 }
 
 /// The bot-pattern result of one summary.
@@ -326,6 +408,68 @@ pub fn cadence(trades: &[Trade]) -> Option<Finding> {
     })
 }
 
+/// Depth cycle: in `points` (time in ms, depth), oldest first, a refill (a
+/// rise of [`CYCLE_JUMP`]) at least [`CYCLE_MIN`] + 1 times, at least
+/// [`CYCLE_MIN_RUNS`] runs apart, at a period within [`CYCLE_MAX_CV`], with
+/// the depth flat or falling for [`CYCLE_FALLING_SHARE`] of the steps
+/// between.
+pub fn depth_cycle(points: &[(i64, f64)]) -> Option<DepthCycle> {
+    let refills: Vec<usize> = (1..points.len())
+        .filter(|&i| {
+            let (a, b) = (points[i - 1].1, points[i].1);
+            a > 0.0 && b >= a * (1.0 + CYCLE_JUMP)
+        })
+        .collect();
+    if refills.len() < CYCLE_MIN + 1 || refills.windows(2).any(|w| w[1] - w[0] < CYCLE_MIN_RUNS) {
+        return None;
+    }
+    let periods: Vec<f64> = refills
+        .windows(2)
+        .map(|w| (points[w[1]].0 - points[w[0]].0) as f64)
+        .collect();
+    let (mean, cv) = mean_cv(&periods)?;
+    if cv >= CYCLE_MAX_CV {
+        return None;
+    }
+    let steps: Vec<bool> = refills
+        .windows(2)
+        .flat_map(|w| w[0] + 1..w[1])
+        .map(|i| points[i].1 <= points[i - 1].1 * (1.0 + LADDER_SIZE_TOLERANCE))
+        .collect();
+    let falling = steps.iter().filter(|f| **f).count() as f64 / steps.len() as f64;
+    (falling >= CYCLE_FALLING_SHARE).then_some(DepthCycle {
+        period_ms: mean,
+        cycles: refills.len() - 1,
+        cv,
+    })
+}
+
+/// Jittered timer: gaps between trade events with a median of at least
+/// [`CADENCE_MIN_GAP_MS`], a coefficient of variation under
+/// [`TIMER_MAX_CV`], and a 5th percentile at least [`TIMER_MIN_FLOOR`] of
+/// the median.
+pub fn timer(trades: &[Trade]) -> Option<Finding> {
+    if trades.len() < MIN_TRADES {
+        return None;
+    }
+    let mut gaps = event_gaps(trades.iter().map(|t| t.timestamp_ms).collect());
+    if gaps.len() < MIN_GAPS {
+        return None;
+    }
+    let (_, cv) = mean_cv(&gaps)?;
+    gaps.sort_by(f64::total_cmp);
+    let at = |q: f64| gaps[((gaps.len() - 1) as f64 * q).round() as usize];
+    let (low, median, high) = (at(0.05), at(0.5), at(0.95));
+    (median >= CADENCE_MIN_GAP_MS && cv < TIMER_MAX_CV && low >= median * TIMER_MIN_FLOOR)
+        .then_some(Finding::Timer {
+            low_ms: low,
+            median_ms: median,
+            high_ms: high,
+            cv,
+            gaps: gaps.len(),
+        })
+}
+
 /// Ping-pong: buy/sell pairs of the same size within
 /// [`PING_PONG_WINDOW_MS`] and [`PING_PONG_PRICE_TOLERANCE_PCT`]. Each trade
 /// is in one pair at most. Returns the finding and the paired trades.
@@ -396,7 +540,12 @@ fn ladder_side(levels: &[OrderBookLevel], side: BookSide) -> Option<Finding> {
         while end < levels.len() {
             let this_step = (levels[end].price - levels[end - 1].price).abs();
             let same_step = step > 0.0 && (this_step - step).abs() <= step * LADDER_STEP_TOLERANCE;
-            let d = size_direction(levels[end - 1].quantity, levels[end].quantity);
+            let (a, b) = (levels[end - 1].quantity, levels[end].quantity);
+            let mut d = size_direction(a, b);
+            // One bump of a few percent against the run does not end it.
+            if d != 0 && dir != 0 && d != dir && (b - a).abs() <= a * LADDER_SHAPE_SLACK {
+                d = 0;
+            }
             if !same_step || (d != 0 && dir != 0 && d != dir) {
                 break;
             }
@@ -435,6 +584,43 @@ fn ladder_side(levels: &[OrderBookLevel], side: BookSide) -> Option<Finding> {
         last_size: last,
         step_pct: step / levels[s].price * 100.0,
     })
+}
+
+/// Round notionals on one side: of the top [`ROUND_LEVELS`] levels, those
+/// whose price × size is a whole quote amount while the size is not whole.
+/// A whole size at a whole price is a person's order, not a sign.
+fn round_notional_side(levels: &[OrderBookLevel], side: BookSide) -> Option<Finding> {
+    let top: Vec<&OrderBookLevel> = levels
+        .iter()
+        .filter(|l| l.price > 0.0 && l.quantity > 0.0)
+        .take(ROUND_LEVELS)
+        .collect();
+    let round: Vec<f64> = top
+        .iter()
+        .filter_map(|l| {
+            let notional = l.price * l.quantity;
+            let whole = (notional - notional.round()).abs() < ROUND_TOLERANCE;
+            let whole_size = (l.quantity - l.quantity.round()).abs() < 1e-9;
+            (whole && !whole_size && notional.round() > 0.0).then_some(notional.round())
+        })
+        .collect();
+    (round.len() >= ROUND_MIN_LEVELS).then(|| Finding::RoundNotional {
+        side,
+        levels: round.len(),
+        of: top.len(),
+        examples: round.into_iter().take(3).collect(),
+    })
+}
+
+/// Round notionals on either side of a real exchange book.
+pub fn round_notionals(bids: &[OrderBookLevel], asks: &[OrderBookLevel]) -> Vec<Finding> {
+    [
+        round_notional_side(bids, BookSide::Bid),
+        round_notional_side(asks, BookSide::Ask),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 /// Ladder quotes on either side of a real exchange book.
@@ -478,7 +664,8 @@ pub fn detect(
                 findings.push(f);
             }
             // A cadence only when the gaps are not a metronome already.
-            if let Some(f) = metronome(t).or_else(|| cadence(t)) {
+            // A jittered timer only when no stricter timing signal fits.
+            if let Some(f) = metronome(t).or_else(|| cadence(t)).or_else(|| timer(t)) {
                 findings.push(f);
             }
             if let Some((f, idx)) = ping_pong(t) {
@@ -495,11 +682,13 @@ pub fn detect(
                 .filter(|(_, c)| **c)
                 .map(|(tr, _)| value(tr))
                 .sum();
-            bot_like_volume_pct = (total > 0.0).then(|| bot / total * 100.0);
+            // `+ 0.0`: an empty f64 sum is -0.0, which would print as `-0.0`.
+            bot_like_volume_pct = (total > 0.0).then(|| bot / total * 100.0 + 0.0);
         }
     }
     if let Some((bids, asks)) = book {
         findings.extend(ladders(bids, asks));
+        findings.extend(round_notionals(bids, asks));
     }
     BotPatterns {
         trades_sampled: sampled,
@@ -538,8 +727,31 @@ fn step(pct: f64) -> String {
 }
 
 impl Finding {
-    /// One clause of evidence for the advisory line.
-    pub fn describe(&self) -> String {
+    /// The short name of the signal: `Jittered timer`, `Bid ladder`.
+    pub fn label(&self) -> String {
+        let side = |side: &BookSide| match side {
+            BookSide::Bid => "Bid",
+            BookSide::Ask => "Ask",
+        };
+        match self {
+            Finding::RepeatedSize { .. } => "Repeated size".to_string(),
+            Finding::FewSizes { .. } => "Few sizes".to_string(),
+            Finding::Metronome { .. } => "Metronome".to_string(),
+            Finding::Cadence { .. } => "Cadence".to_string(),
+            Finding::Timer { .. } => "Jittered timer".to_string(),
+            Finding::PingPong { .. } => "Ping-pong".to_string(),
+            Finding::Ladder { side: s, .. } => format!("{} ladder", side(s)),
+            Finding::RoundNotional { side: s, .. } => format!("{} round notionals", side(s)),
+        }
+    }
+
+    /// True for a signal read in the book, false for one in the trades.
+    pub fn in_book(&self) -> bool {
+        matches!(self, Finding::Ladder { .. } | Finding::RoundNotional { .. })
+    }
+
+    /// The evidence, without the label.
+    pub fn detail(&self) -> String {
         match self {
             Finding::RepeatedSize { size, count, of } => format!(
                 "{:.0}% of {of} trades are exactly {}",
@@ -581,22 +793,43 @@ impl Finding {
                 gap_ms / 1000.0,
                 CADENCE_TOLERANCE * 100.0
             ),
+            Finding::Timer {
+                low_ms,
+                median_ms,
+                high_ms,
+                gaps,
+                ..
+            } => format!(
+                "90% of {gaps} gaps between trades are {:.0}–{:.0}s (median {:.0}s)",
+                low_ms / 1000.0,
+                high_ms / 1000.0,
+                median_ms / 1000.0
+            ),
+            Finding::RoundNotional {
+                levels,
+                of,
+                examples,
+                ..
+            } => format!(
+                "{levels} of {of} levels are whole quote amounts ({}, …)",
+                examples
+                    .iter()
+                    .map(|v| short(*v))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             Finding::PingPong { pairs, share } => format!(
-                "{pairs} buy/sell ping-pong pairs ({:.0}% of trades)",
+                "{pairs} buy/sell pairs of one size, seconds apart ({:.0}% of trades)",
                 share * 100.0
             ),
             Finding::Ladder {
-                side,
                 levels,
                 shape,
                 size,
                 last_size,
                 step_pct,
+                ..
             } => {
-                let side = match side {
-                    BookSide::Bid => "bid",
-                    BookSide::Ask => "ask",
-                };
                 let sizes = match shape {
                     LadderShape::Even => format!("× {}", short(*size)),
                     LadderShape::Falling => {
@@ -606,35 +839,109 @@ impl Finding {
                         format!("rising {} → {}", short(*size), short(*last_size))
                     }
                 };
-                format!(
-                    "{side} ladder of {levels} levels {sizes} at {}% steps",
-                    step(*step_pct)
-                )
+                format!("{levels} levels {sizes} at {}% steps", step(*step_pct))
             }
         }
+    }
+
+    /// The label and the evidence: `Bid ladder: 9 levels falling …`.
+    pub fn describe(&self) -> String {
+        format!("{}: {}", self.label(), self.detail())
     }
 }
 
 impl BotPatterns {
-    /// The health check line. A finding warns; nothing found passes when
-    /// the tape was read; with no tape and no ladder it does not apply.
+    /// The share of the sampled trades, and of their volume, that a
+    /// repeated-size or ping-pong signal marks as bot-made, when any is.
+    pub fn share(&self) -> Option<String> {
+        let p = self.bot_like_pct.filter(|p| *p > 0.0)?;
+        Some(match self.bot_like_volume_pct {
+            Some(v) => format!("{p:.0}% of sampled trades ({v:.1}% of their volume) look bot-made"),
+            None => format!("{p:.0}% of sampled trades look bot-made"),
+        })
+    }
+
+    /// The report section: the signals in the trades, then those in the
+    /// book, one line each under its group, then the share.
+    ///
+    /// ```text
+    /// ├── Bot Patterns · likely market-making bots
+    /// │  Trades            500 sampled
+    /// │  ! Jittered timer         90% of 499 gaps between trades are 32–58s (median 46s)
+    /// │  Book              top levels of each side
+    /// │  ! Bid ladder             9 levels falling 560.112 → 110.1101 at 0.01% steps
+    /// ```
+    pub fn format_text(&self) -> String {
+        use crate::display::terminal as t;
+        let width = self
+            .findings
+            .iter()
+            .map(|f| f.label().chars().count())
+            .max()
+            .unwrap_or(0)
+            + 2;
+        let mut out = t::subsection_header("Bot Patterns · likely market-making bots");
+        out.push('\n');
+        let groups = [
+            ("Trades", false, format!("{} sampled", self.trades_sampled)),
+            ("Book", true, "top levels of each side".to_string()),
+        ];
+        for (name, in_book, about) in groups {
+            let found: Vec<&Finding> = self
+                .findings
+                .iter()
+                .filter(|f| f.in_book() == in_book)
+                .collect();
+            if found.is_empty() {
+                continue;
+            }
+            out.push_str(&t::kv_row(name, &about));
+            out.push('\n');
+            for f in found {
+                out.push_str(&t::labelled_warn(&f.label(), width, &f.detail()));
+                out.push('\n');
+            }
+        }
+        if let Some(note) = self
+            .tape_note
+            .as_ref()
+            .filter(|_| self.findings.iter().all(Finding::in_book))
+        {
+            out.push_str(&t::kv_row("Trades", &format!("not checked ({note})")));
+            out.push('\n');
+        }
+        if let Some(share) = self.share() {
+            out.push_str(&t::kv_row("Bot-like share", &share));
+            out.push('\n');
+        }
+        out
+    }
+
+    /// Every finding on its own line (`label: evidence`), then the share,
+    /// for a report that lists them.
+    pub fn evidence(&self) -> Vec<String> {
+        let mut lines: Vec<String> = self.findings.iter().map(Finding::describe).collect();
+        lines.extend(self.share());
+        lines
+    }
+
+    /// The health check line: a count and the signals' names, short enough
+    /// for a list of checks; the evidence goes in its own section. Nothing
+    /// found passes when the tape was read; with no tape and no book signal
+    /// it does not apply.
     pub fn check(&self) -> super::types::HealthCheck {
         use super::types::HealthCheck;
         if !self.findings.is_empty() {
-            let evidence: Vec<String> = self.findings.iter().map(Finding::describe).collect();
-            let share = match (
-                self.bot_like_pct.filter(|p| *p > 0.0),
-                self.bot_like_volume_pct,
-            ) {
-                (Some(p), Some(v)) => {
-                    format!("; {p:.0}% of sampled trades ({v:.1}% of their volume) look bot-made")
-                }
-                (Some(p), None) => format!("; {p:.0}% of sampled trades look bot-made"),
-                _ => String::new(),
-            };
+            let n = self.findings.len();
+            let names: Vec<String> = self
+                .findings
+                .iter()
+                .map(|f| f.label().to_lowercase())
+                .collect();
             return HealthCheck::Warn(format!(
-                "Bot patterns (likely market-making bots): {}{share}",
-                evidence.join("; ")
+                "Bot patterns: {n} {} of market-making bots ({})",
+                if n == 1 { "sign" } else { "signs" },
+                names.join(", ")
             ));
         }
         let book = if self.book_checked {
@@ -648,7 +955,7 @@ impl BotPatterns {
                 self.trades_sampled
             )),
             Some(why) if self.book_checked => HealthCheck::NotApplicable(format!(
-                "Bot patterns: no ladder in the book; trades not checked ({why})"
+                "Bot patterns: none in the book; trades not checked ({why})"
             )),
             Some(why) => HealthCheck::NotApplicable(format!("Bot patterns: not checked ({why})")),
         }
@@ -685,6 +992,24 @@ mod tests {
                 trade(ms, 1.0 + ((i * 11) % 7) as f64 * 0.0001, qty, side)
             })
             .collect()
+    }
+
+    /// `text` without ANSI colour codes (a test run in a terminal paints).
+    fn plain(text: &str) -> String {
+        let mut out = String::new();
+        let mut chars = text.chars();
+        while let Some(c) = chars.next() {
+            if c == '' {
+                for c in chars.by_ref() {
+                    if c == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
     }
 
     fn level(price: f64, quantity: f64) -> OrderBookLevel {
@@ -825,9 +1150,10 @@ mod tests {
         assert_eq!(p.bot_like_pct, Some(90.0));
         let v = p.bot_like_volume_pct.unwrap();
         assert!(v < 0.05, "{v}");
-        let crate::market::types::HealthCheck::Warn(m) = p.check() else {
+        let crate::market::types::HealthCheck::Warn(_) = p.check() else {
             panic!()
         };
+        let m = p.evidence().join("\n");
         assert!(
             m.contains("90% of sampled trades (0.0% of their volume) look bot-made"),
             "{m}"
@@ -875,13 +1201,13 @@ mod tests {
             tr.quantity = 1000.0;
         }
         let p = detect(Ok(&t), None);
-        let crate::market::types::HealthCheck::Warn(m) = p.check() else {
+        let crate::market::types::HealthCheck::Warn(_) = p.check() else {
             panic!("{:?}", p.check())
         };
+        // The check names the signals; the evidence is one line each.
+        let m = p.evidence().join("\n");
         assert!(
-            m.starts_with(
-                "Bot patterns (likely market-making bots): 50% of 100 trades are exactly 1000"
-            ),
+            m.starts_with("Repeated size: 50% of 100 trades are exactly 1000"),
             "{m}"
         );
         assert!(m.contains("50% of sampled trades ("), "{m}");
@@ -941,7 +1267,7 @@ mod tests {
         let found = ladders(&bids, &[]);
         assert_eq!(found.len(), 1);
         let d = found[0].describe();
-        assert!(d.starts_with("bid ladder of 9 levels × 250 at "), "{d}");
+        assert!(d.starts_with("Bid ladder: 9 levels × 250 at "), "{d}");
     }
 
     #[test]
@@ -954,10 +1280,12 @@ mod tests {
         let p = detect(Ok(&t), None);
         assert_eq!(p.bot_like_pct, Some(100.0));
         assert_eq!(p.bot_like_volume_pct, None);
-        let crate::market::types::HealthCheck::Warn(m) = p.check() else {
+        let crate::market::types::HealthCheck::Warn(_) = p.check() else {
             panic!("{:?}", p.check())
         };
-        assert!(m.ends_with("; 100% of sampled trades look bot-made"), "{m}");
+        // The check names the signals; the evidence is one line each.
+        let m = p.evidence().join("\n");
+        assert!(m.ends_with("\n100% of sampled trades look bot-made"), "{m}");
     }
 
     /// The USDN/USDT book on weex, read live on 2026-10-24: ten levels a
@@ -1034,30 +1362,34 @@ mod tests {
                 Finding::FewSizes { .. } => "few",
                 Finding::Metronome { .. } => "metronome",
                 Finding::Cadence { .. } => "cadence",
+                Finding::Timer { .. } => "timer",
+                Finding::RoundNotional { .. } => "round",
                 Finding::PingPong { .. } => "ping-pong",
                 Finding::Ladder { .. } => "ladder",
             })
             .collect();
         assert_eq!(
             kinds,
-            ["few", "cadence", "ladder", "ladder"],
+            ["few", "cadence", "ladder", "ladder", "round", "round"],
             "{:?}",
             p.findings
         );
-        let crate::market::types::HealthCheck::Warn(m) = p.check() else {
+        let crate::market::types::HealthCheck::Warn(_) = p.check() else {
             panic!("{:?}", p.check())
         };
+        // The check names the signals; the evidence is one line each.
+        let m = p.evidence().join("\n");
         assert!(
             m.contains("trades are one of 3 sizes: 498.11, 68.01, 500"),
             "{m}"
         );
         assert!(m.contains("gaps between trades are 45.0s ±2%"), "{m}");
         assert!(
-            m.contains("bid ladder of 9 levels falling 540.108 → 120.1201 at 0.01% steps"),
+            m.contains("Bid ladder: 9 levels falling 540.108 → 120.1201 at 0.01% steps"),
             "{m}"
         );
         assert!(
-            m.contains("ask ladder of 9 levels falling 1350 → 299.7002 at 0.01% steps"),
+            m.contains("Ask ladder: 9 levels falling 1350 → 299.7002 at 0.01% steps"),
             "{m}"
         );
     }
@@ -1203,5 +1535,334 @@ mod tests {
         .map(|(i, &q)| level(1.0001 + i as f64 * 0.0001, q))
         .collect();
         assert!(ladders(&[], &zigzag).is_empty());
+    }
+
+    /// A depth sampled every 30 s: refilled to 3300 every `every` samples,
+    /// drained by a step each run between, as the weex USDN bot does.
+    fn sawtooth(samples: usize, every: usize) -> Vec<(i64, f64)> {
+        (0..samples)
+            .map(|i| {
+                let into = i % every;
+                let depth = (3_300.0 - into as f64 * 250.0).max(500.0);
+                (i as i64 * 30_000 + (i as i64 * 7) % 400, depth)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_a_book_refilled_on_a_timer_is_a_depth_cycle() {
+        // 13 runs a cycle (6.5 min): 8 refills, 7 cycles between them.
+        let c = depth_cycle(&sawtooth(110, 13)).unwrap();
+        assert_eq!(c.cycles, 7);
+        assert!((c.period_ms - 390_000.0).abs() < 1_000.0, "{}", c.period_ms);
+        assert!(c.cv < 0.01, "{}", c.cv);
+        // Three refills are two cycles: not yet.
+        assert!(depth_cycle(&sawtooth(30, 13)).is_none());
+    }
+
+    #[test]
+    fn test_irregular_refills_and_noise_are_not_a_depth_cycle() {
+        // Refills at irregular times.
+        let mut pts = Vec::new();
+        let mut t = 0;
+        for (k, len) in [5, 19, 7, 23, 6, 15, 31].into_iter().enumerate() {
+            for j in 0..len {
+                pts.push((t, 3_000.0 * 0.85f64.powi(j) + k as f64));
+                t += 30_000;
+            }
+        }
+        assert!(depth_cycle(&pts).is_none(), "{:?}", depth_cycle(&pts));
+        // A depth that flips up and down every run is noise.
+        let flip: Vec<(i64, f64)> = (0..60)
+            .map(|i| (i * 30_000, if i % 2 == 0 { 1_000.0 } else { 2_000.0 }))
+            .collect();
+        assert!(depth_cycle(&flip).is_none());
+        // Regular jumps but a depth that grows between them: not a drain.
+        let grow: Vec<(i64, f64)> = (0..100)
+            .map(|i| {
+                let into = (i % 10) as f64;
+                (
+                    i * 30_000,
+                    if into == 0.0 {
+                        5_000.0
+                    } else {
+                        1_000.0 + into * 100.0
+                    },
+                )
+            })
+            .collect();
+        assert!(depth_cycle(&grow).is_none(), "{:?}", depth_cycle(&grow));
+        // A flat book and an empty one.
+        let flat: Vec<(i64, f64)> = (0..100).map(|i| (i * 30_000, 2_000.0)).collect();
+        assert!(depth_cycle(&flat).is_none());
+        assert!(depth_cycle(&[]).is_none());
+    }
+
+    /// The USDN/USDT book on weex, read live on 2026-10-26: whole USDT
+    /// amounts at every level but the partly filled best bid, and one bump
+    /// (370 → 380) in the falling bids.
+    fn weex_book_oct26() -> (Vec<OrderBookLevel>, Vec<OrderBookLevel>) {
+        let bids = [
+            (0.9999, 389.6396),
+            (0.9998, 560.112),
+            (0.9997, 460.138),
+            (0.9996, 370.148),
+            (0.9995, 380.19),
+            (0.9994, 340.2041),
+            (0.9993, 310.2171),
+            (0.9992, 230.1841),
+            (0.9991, 160.1441),
+            (0.9990, 110.1101),
+            (0.0022, 3636.3636),
+        ];
+        let asks = [
+            (1.0001, 2379.762),
+            (1.0002, 1439.712),
+            (1.0003, 1189.6431),
+            (1.0004, 1009.5962),
+            (1.0005, 989.5052),
+            (1.0006, 919.4483),
+            (1.0007, 769.4614),
+            (1.0008, 579.5363),
+            (1.0009, 399.6403),
+            (1.0010, 309.6903),
+        ];
+        let side = |l: &[(f64, f64)]| l.iter().map(|&(p, q)| level(p, q)).collect();
+        (side(&bids), side(&asks))
+    }
+
+    /// The weex USDN tape on 2026-10-26: a trade every 30–60 s (spread
+    /// evenly, never sooner), every size different, buys and sells in
+    /// blocks.
+    fn jittered_tape(n: u64) -> Vec<Trade> {
+        let mut ms = 1_000_000;
+        (0..n)
+            .map(|i| {
+                ms += 30_000 + (i * 7_919 + i * i * 13) % 30_000;
+                let side = if (i / 9) % 2 == 0 {
+                    TradeSide::Buy
+                } else {
+                    TradeSide::Sell
+                };
+                trade(
+                    ms,
+                    1.0001,
+                    5.0 + (i * 37 % 431) as f64 + i as f64 / 100.0,
+                    side,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_the_oct26_weex_bot_is_caught_by_timer_round_notionals_and_ladders() {
+        let tape = jittered_tape(500);
+        let (bids, asks) = weex_book_oct26();
+        let p = detect(Ok(&tape), Some((&bids, &asks)));
+        let crate::market::types::HealthCheck::Warn(_) = p.check() else {
+            panic!("{:?}", p.check())
+        };
+        // The check names the signals; the evidence is one line each.
+        let m = p.evidence().join("\n");
+        assert!(m.contains("gaps between trades are 3"), "{m}");
+        assert!(m.contains("Jittered timer: 90% of"), "{m}");
+        assert!(
+            m.contains("Bid ladder: 9 levels falling 560.112 → 110.1101"),
+            "{m}"
+        );
+        assert!(
+            m.contains("Ask ladder: 10 levels falling 2380 → 309.6903"),
+            "{m}"
+        );
+        assert!(
+            m.contains(
+                "Bid round notionals: 9 of 10 levels are whole quote amounts (560, 460, 370, …)"
+            ),
+            "{m}"
+        );
+        assert!(
+            m.contains(
+                "Ask round notionals: 10 of 10 levels are whole quote amounts (2380, 1440, 1190, …)"
+            ),
+            "{m}"
+        );
+        // No trade-share claim: a timer marks no one trade as the bot's.
+        assert!(!m.contains("look bot-made"), "{m}");
+        assert_eq!(
+            p.bot_like_volume_pct.map(|v| v.to_string()),
+            Some("0".to_string())
+        );
+    }
+
+    #[test]
+    fn test_a_jittered_timer_is_found_and_real_order_flow_is_not() {
+        let Some(Finding::Timer {
+            low_ms,
+            median_ms,
+            high_ms,
+            cv,
+            ..
+        }) = timer(&jittered_tape(400))
+        else {
+            panic!("{:?}", timer(&jittered_tape(400)))
+        };
+        assert!(
+            low_ms >= 30_000.0 && high_ms <= 60_000.0,
+            "{low_ms} {high_ms}"
+        );
+        assert!((40_000.0..50_000.0).contains(&median_ms), "{median_ms}");
+        assert!(cv < 0.25, "{cv}");
+        // Real order flow: many near-zero gaps and a long tail (gaps that
+        // grow geometrically through each block, as Poisson arrivals do).
+        let mut ms = 0;
+        let poisson: Vec<Trade> = (0..400u64)
+            .map(|i| {
+                ms += [50, 120, 400, 900, 2_500, 6_000, 15_000, 40_000, 110_000]
+                    [(i * 7 % 9) as usize];
+                trade(ms, 1.0, 5.0 + i as f64, TradeSide::Buy)
+            })
+            .collect();
+        assert!(timer(&poisson).is_none(), "{:?}", timer(&poisson));
+        assert!(timer(&organic(300)).is_none());
+        // A jitter band under 5 s is not judged (whole-second stamps).
+        let fast: Vec<Trade> = (0..100u64)
+            .map(|i| {
+                trade(
+                    i * 2_000 + (i % 3) * 500,
+                    1.0,
+                    5.0 + i as f64,
+                    TradeSide::Buy,
+                )
+            })
+            .collect();
+        assert!(timer(&fast).is_none(), "{:?}", timer(&fast));
+    }
+
+    #[test]
+    fn test_round_notionals_need_most_levels_and_sizes_that_are_not_whole() {
+        let (bids, asks) = weex_book_oct26();
+        assert_eq!(round_notionals(&bids, &asks).len(), 2);
+        // Six of ten, as on gate.io USDC/USDT: not enough.
+        let six: Vec<_> = (0..10)
+            .map(|i| {
+                let price = 0.9999 - i as f64 * 0.0001;
+                let qty = if i < 6 {
+                    (300.0 + i as f64 * 10.0) / price
+                } else {
+                    123.4567 + i as f64
+                };
+                level(price, qty)
+            })
+            .collect();
+        assert!(round_notionals(&six, &[]).is_empty());
+        // Whole sizes at a whole price are people's orders.
+        let people: Vec<_> = (0..10)
+            .map(|i| level(1.0, 100.0 + i as f64 * 50.0))
+            .collect();
+        assert!(round_notionals(&[], &people).is_empty());
+    }
+
+    #[test]
+    fn test_one_small_bump_does_not_end_a_shaped_ladder_but_a_big_one_does() {
+        let (bids, _) = weex_book_oct26();
+        let found = ladders(&bids, &[]);
+        assert!(
+            matches!(
+                found[..],
+                [Finding::Ladder {
+                    levels: 9,
+                    shape: LadderShape::Falling,
+                    ..
+                }]
+            ),
+            "{found:?}"
+        );
+        // A 10% bump ends the run: 4 + 6 levels, no ladder of 8.
+        let sizes = [
+            900.0, 800.0, 700.0, 600.0, 660.0, 500.0, 400.0, 300.0, 200.0, 100.0,
+        ];
+        let bumped: Vec<_> = sizes
+            .iter()
+            .enumerate()
+            .map(|(i, &q)| level(0.9999 - i as f64 * 0.0001, q))
+            .collect();
+        assert!(
+            ladders(&bumped, &[]).is_empty(),
+            "{:?}",
+            ladders(&bumped, &[])
+        );
+    }
+
+    #[test]
+    fn test_the_check_names_the_signals_and_the_section_lists_them() {
+        let tape = jittered_tape(500);
+        let (bids, asks) = weex_book_oct26();
+        let p = detect(Ok(&tape), Some((&bids, &asks)));
+        assert_eq!(
+            p.check().message(),
+            "Bot patterns: 5 signs of market-making bots (jittered timer, bid ladder, ask ladder, bid round notionals, ask round notionals)"
+        );
+        let text = plain(&p.format_text());
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(
+            lines
+                .iter()
+                .take(2)
+                .any(|l| l.contains("Bot Patterns · likely market-making bots")),
+            "{text}"
+        );
+        // The trades group, then the book group, one signal a line.
+        let at = |needle: &str| {
+            lines
+                .iter()
+                .position(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("no {needle} in\n{text}"))
+        };
+        assert!(at("Trades") < at("! Jittered timer"), "{text}");
+        assert!(at("! Jittered timer") < at("Book"), "{text}");
+        assert!(at("Book") < at("! Bid ladder"), "{text}");
+        assert!(at("! Bid ladder") < at("! Ask round notionals"), "{text}");
+        assert!(lines[at("Trades")].contains("500 sampled"), "{text}");
+        // The evidence starts in one column after every label.
+        let column = |needle: &str| {
+            let l = lines[at(needle)];
+            l.find(needle).unwrap()
+                + needle.len()
+                + l[l.find(needle).unwrap() + needle.len()..].len()
+                - l[l.find(needle).unwrap() + needle.len()..]
+                    .trim_start()
+                    .len()
+        };
+        assert_eq!(
+            column("! Jittered timer"),
+            column("! Ask round notionals"),
+            "{text}"
+        );
+        // No share line: a timer and the book mark no one trade as bot-made.
+        assert!(!text.contains("Bot-like share"), "{text}");
+    }
+
+    #[test]
+    fn test_a_share_line_follows_trade_signals_and_a_book_only_finding_says_why_no_trades() {
+        let mut t = organic(100);
+        for tr in t.iter_mut().step_by(2) {
+            tr.quantity = 1000.0;
+        }
+        let text = plain(&detect(Ok(&t), None).format_text());
+        assert!(text.contains("! Repeated size"), "{text}");
+        assert!(text.contains("Bot-like share"), "{text}");
+        assert!(text.contains("50% of sampled trades ("), "{text}");
+        assert!(
+            !text.contains("Book "),
+            "no book group without book signals: {text}"
+        );
+        let (bids, asks) = weex_book_oct26();
+        let book_only = detect(Err("the venue has no trade endpoint"), Some((&bids, &asks)));
+        let text = plain(&book_only.format_text());
+        assert!(
+            text.contains("not checked (the venue has no trade endpoint)"),
+            "{text}"
+        );
+        assert!(text.contains("! Bid ladder"), "{text}");
     }
 }

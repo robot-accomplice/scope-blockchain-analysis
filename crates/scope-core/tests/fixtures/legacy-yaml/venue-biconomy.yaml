@@ -1,0 +1,75 @@
+id: biconomy
+name: Biconomy
+base_url: https://api.biconomy.com
+timeout_secs: 15
+rate_limit_per_sec: 10
+
+symbol:
+  template: "{base}_{quote}"
+  default_quote: USDT
+
+headers:
+  X-SITE-ID: "127"
+
+error_envelope:
+  code_key: code
+  ok_codes: ["0"]
+  message_key: message
+
+capabilities:
+  order_book:
+    path: /api/v1/depth
+    params:
+      symbol: "{pair}"
+      size: "100"
+    response:
+      asks_key: asks
+      bids_key: bids
+      level_format: positional
+
+  ticker:
+    path: /api/v1/tickers
+    response:
+      items_key: ticker
+      filter:
+        field: symbol
+        value: "{pair}"
+      last_price: last
+      high_24h: high
+      low_24h: low
+      volume_24h: vol
+      best_bid: buy
+      best_ask: sell
+
+  trades:
+    path: /api/v1/trades
+    params:
+      symbol: "{pair}"
+      size: "{limit}"
+    response:
+      price: price
+      quantity: amount
+      timestamp_ms: timestamp
+      side:
+        field: side
+        mapping:
+          buy: buy
+          sell: sell
+
+  ohlc:
+    path: /api/v1/kline
+    params:
+      symbol: "{pair}"
+      type: "{interval}"
+      size: "{limit}"
+    interval_map:
+      1m: 1min
+      5m: 5min
+      15m: 15min
+      30m: 30min
+      1h: hour
+      4h: hour
+      1d: day
+    response:
+      ohlc_format: array_of_arrays
+      ohlc_fields: [open_time, open, high, low, close, volume]

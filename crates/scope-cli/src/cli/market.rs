@@ -5,6 +5,7 @@
 //! and runs configurable health checks including volume and execution estimates.
 //! Supports one-shot or repeated runs with configurable frequency and duration.
 
+use crate::cli::candles;
 use crate::cli::crawl::{self, Period};
 use crate::cli::output::{Output, SummaryView};
 use crate::{note, out, outln};
@@ -165,18 +166,23 @@ pub enum SummaryFormat {
   scope market ohlc ETH --venue mexc --limit 50 --format json",
     after_long_help = "\x1b[1mExamples:\x1b[0m
 
-  \x1b[1m$ scope market ohlc BTC --limit 5\x1b[0m
+  \x1b[1m$ scope market ohlc BTC\x1b[0m
 
-  OHLC -- BTCUSDT (binance) interval=1h limit=5
-  --------------------------------------------------------
-            Open Time          Open         High          Low        Close         Volume
-  --------------------------------------------------------
-    2026-02-16 09:00  97250.120000  97380.540000  97210.980000  97345.670000        1234.56
-    2026-02-16 08:00  97100.890000  97260.120000  97080.340000  97250.120000        1456.78
-    2026-02-16 07:00  96950.230000  97120.890000  96920.560000  97100.890000        1678.90
-    ...
+  ┌─ OHLC — BTCUSDT (binance) ───────────────────
+  │ 82060.9 ┤  ▄█▄  ╷
+  │         │ █▀ ▀██▄ ▄▄
+  │ 79439.2 ┤      ▀█▀ ▀
+  │           10-23 08:00             10-26 07:00
+  │  Interval          1h · 72 candles
+  │  Open              80512.3
+  │  High              82060.9
+  │  Low               79439.2
+  │  Close             80391.7 (-0.15%)
+  │  Volume            61734.1
+  └──────────────────────────────────────────────
 
-    5 candles returned
+  One column per candle, sized to the terminal (or the TUI pane);
+  --table adds the full table, --limit fetches a set number.
 
   \x1b[1m$ scope market ohlc BTC --format json --limit 2\x1b[0m
 
@@ -210,9 +216,14 @@ pub struct OhlcArgs {
     #[arg(long, default_value = "1h", value_name = "INTERVAL")]
     pub interval: String,
 
-    /// Maximum number of candles to fetch.
-    #[arg(long, default_value = "100", value_name = "LIMIT")]
-    pub limit: u32,
+    /// How many candles to fetch. By default, as many as the chart fits
+    /// in the terminal (or the TUI pane).
+    #[arg(long, value_name = "LIMIT")]
+    pub limit: Option<u32>,
+
+    /// Also print every candle in a table under the chart.
+    #[arg(long)]
+    pub table: bool,
 
     /// Output format.
     #[arg(long, default_value = "text")]
@@ -647,8 +658,15 @@ async fn run_ohlc(args: OhlcArgs, http: Arc<dyn HttpClient>, out: &Output) -> Re
 /// `scope market ohlc` on `client`, the venue that `args.venue` names.
 async fn run_ohlc_with(client: &ExchangeClient, args: OhlcArgs, out: &Output) -> Result<()> {
     let pair = client.venue_symbol(&Pair::parse(&args.pair));
+    let width = t::terminal_width();
+    // The axis is not known before the prices are; ten columns is room for
+    // most of them, and the chart takes the newest that fit.
+    let limit = args.limit.unwrap_or(candles::columns_for(width, 10) as u32);
 
-    let candles = client.fetch_ohlc(&pair, &args.interval, args.limit).await?;
+    let mut candles = client.fetch_ohlc(&pair, &args.interval, limit).await?;
+    // Venues send newest or oldest first; the chart and the table read
+    // oldest first.
+    candles.sort_by_key(|c| c.open_time);
 
     match args.format {
         OhlcFormat::Json => {
@@ -662,71 +680,133 @@ async fn run_ohlc_with(client: &ExchangeClient, args: OhlcArgs, out: &Output) ->
                 "{}",
                 t::section_header(&format!("OHLC — {} ({})", pair, args.venue))
             )?;
-            outln!(out, "{}", t::kv_row("Interval", &args.interval))?;
-            outln!(out, "{}", t::kv_row("Limit", &args.limit.to_string()))?;
-
-            let cols = [
-                t::Col {
-                    label: "Open Time",
-                    width: 19,
-                    align: '>',
-                },
-                t::Col {
-                    label: "Open",
-                    width: 12,
-                    align: '>',
-                },
-                t::Col {
-                    label: "High",
-                    width: 12,
-                    align: '>',
-                },
-                t::Col {
-                    label: "Low",
-                    width: 12,
-                    align: '>',
-                },
-                t::Col {
-                    label: "Close",
-                    width: 12,
-                    align: '>',
-                },
-                t::Col {
-                    label: "Volume",
-                    width: 14,
-                    align: '>',
-                },
-            ];
-            outln!(out, "{}", t::table_header(&cols))?;
-
-            for c in &candles {
-                let dt = chrono::DateTime::from_timestamp_millis(c.open_time as i64)
-                    .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
-                    .unwrap_or_else(|| format!("{}", c.open_time));
-                let open_str = format!("{:.6}", c.open);
-                let high_str = format!("{:.6}", c.high);
-                let low_str = format!("{:.6}", c.low);
-                let close_str = format!("{:.6}", c.close);
-                let volume_str = format!("{:.2}", c.volume);
-                let values = [
-                    dt.as_str(),
-                    open_str.as_str(),
-                    high_str.as_str(),
-                    low_str.as_str(),
-                    close_str.as_str(),
-                    volume_str.as_str(),
-                ];
-                outln!(out, "{}", t::table_row(&cols, &values))?;
+            write_candle_chart(&candles, &args.interval, width, out)?;
+            if args.table {
+                write_candle_table(&candles, out)?;
             }
-
-            outln!(
-                out,
-                "{}",
-                t::info_row(&format!("{} candles returned", candles.len()))
-            )?;
             outln!(out, "{}", t::section_footer())?;
         }
     }
+    Ok(())
+}
+
+/// The chart of the newest candles that fit in `width`, then the summary of
+/// every candle fetched.
+fn write_candle_chart(
+    all: &[scope::market::Candle],
+    interval: &str,
+    width: usize,
+    out: &Output,
+) -> Result<()> {
+    let Some(sum) = candles::summary(all) else {
+        outln!(out, "{}", t::info_row("No candles returned"))?;
+        return Ok(());
+    };
+    let columns = candles::columns_for(width, candles::axis_cols(sum.low, sum.high));
+    let shown = &all[all.len().saturating_sub(columns)..];
+    // Days and longer read as dates; shorter intervals with the hour.
+    let daily = interval.ends_with(['d', 'w', 'M']);
+    let time = |ms: u64| {
+        chrono::DateTime::from_timestamp_millis(ms as i64)
+            .map(|d| {
+                let local = d.with_timezone(&chrono::Local);
+                if daily {
+                    local.format("%Y-%m-%d").to_string()
+                } else {
+                    local.format("%m-%d %H:%M").to_string()
+                }
+            })
+            .unwrap_or_default()
+    };
+    for line in candles::chart(shown, candles::CHART_ROWS, t::painter(), time) {
+        outln!(out, "{}", t::chart_row(&line))?;
+    }
+    let count = if shown.len() < all.len() {
+        format!(
+            "{interval} · {} candles (the chart shows the last {})",
+            all.len(),
+            shown.len()
+        )
+    } else {
+        format!("{interval} · {} candles", all.len())
+    };
+    outln!(out, "{}", t::kv_row("Interval", &count))?;
+    let price = scope::display::format::format_price;
+    outln!(out, "{}", t::kv_row("Open", &price(sum.open)))?;
+    outln!(out, "{}", t::kv_row("High", &price(sum.high)))?;
+    outln!(out, "{}", t::kv_row("Low", &price(sum.low)))?;
+    let close = match sum.change_pct {
+        Some(pct) => format!("{} ({pct:+.2}%)", price(sum.close)),
+        None => price(sum.close),
+    };
+    outln!(out, "{}", t::kv_row("Close", &close))?;
+    outln!(
+        out,
+        "{}",
+        t::kv_row("Volume", &scope::display::format_large_number(sum.volume))
+    )?;
+    Ok(())
+}
+
+/// Every candle in a table (`--table`).
+fn write_candle_table(candles: &[scope::market::Candle], out: &Output) -> Result<()> {
+    let cols = [
+        t::Col {
+            label: "Open Time",
+            width: 19,
+            align: '>',
+        },
+        t::Col {
+            label: "Open",
+            width: 12,
+            align: '>',
+        },
+        t::Col {
+            label: "High",
+            width: 12,
+            align: '>',
+        },
+        t::Col {
+            label: "Low",
+            width: 12,
+            align: '>',
+        },
+        t::Col {
+            label: "Close",
+            width: 12,
+            align: '>',
+        },
+        t::Col {
+            label: "Volume",
+            width: 14,
+            align: '>',
+        },
+    ];
+    outln!(out, "{}", t::table_header(&cols))?;
+    for c in candles {
+        let dt = chrono::DateTime::from_timestamp_millis(c.open_time as i64)
+            .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
+            .unwrap_or_else(|| format!("{}", c.open_time));
+        let open_str = format!("{:.6}", c.open);
+        let high_str = format!("{:.6}", c.high);
+        let low_str = format!("{:.6}", c.low);
+        let close_str = format!("{:.6}", c.close);
+        let volume_str = format!("{:.2}", c.volume);
+        let values = [
+            dt.as_str(),
+            open_str.as_str(),
+            high_str.as_str(),
+            low_str.as_str(),
+            close_str.as_str(),
+            volume_str.as_str(),
+        ];
+        outln!(out, "{}", t::table_row(&cols, &values))?;
+    }
+    outln!(
+        out,
+        "{}",
+        t::info_row(&format!("{} candles returned", candles.len()))
+    )?;
     Ok(())
 }
 
@@ -1223,7 +1303,7 @@ capabilities:
             assert_eq!(args.pair, "USDC");
             assert_eq!(args.venue, "binance");
             assert_eq!(args.interval, "1h");
-            assert_eq!(args.limit, 50);
+            assert_eq!(args.limit, Some(50));
         } else {
             panic!("Expected Market Ohlc command");
         }
@@ -1508,13 +1588,14 @@ capabilities:
             venue: "binance".to_string(),
             token_contract: None,
             interval: "1h".to_string(),
-            limit: 100,
+            limit: Some(100),
+            table: false,
             format: OhlcFormat::Text,
         };
         assert_eq!(args.pair, "BTC");
         assert_eq!(args.venue, "binance");
         assert_eq!(args.interval, "1h");
-        assert_eq!(args.limit, 100);
+        assert_eq!(args.limit, Some(100));
     }
 
     #[test]
@@ -1538,7 +1619,8 @@ capabilities:
             venue: "nonexistent_venue".to_string(),
             token_contract: None,
             interval: "1h".to_string(),
-            limit: 10,
+            limit: Some(10),
+            table: false,
             format: OhlcFormat::Text,
         };
         let result = run_ohlc(args, scope::http::test_transport(), &quiet()).await;
@@ -1577,7 +1659,8 @@ capabilities:
             venue: "nonexistent_test_venue".to_string(),
             token_contract: None,
             interval: "1h".to_string(),
-            limit: 5,
+            limit: Some(5),
+            table: false,
             format: OhlcFormat::Text,
         });
         let http: std::sync::Arc<dyn scope::http::HttpClient> =
@@ -1715,7 +1798,8 @@ capabilities:
             venue: "binance".to_string(),
             token_contract: None,
             interval: "1h".to_string(),
-            limit: 2,
+            limit: Some(2),
+            table: false,
             format,
         }
     }
@@ -1745,7 +1829,7 @@ capabilities:
     }
 
     #[tokio::test]
-    async fn test_ohlc_text_shows_every_candle() {
+    async fn test_ohlc_text_is_a_chart_and_a_summary() {
         let server = serve("/api/v3/klines", KLINES).await;
         let (out, cap) = Output::capture();
         run_ohlc_with(&binance_at(&server), ohlc_args(OhlcFormat::Text), &out)
@@ -1753,9 +1837,50 @@ capabilities:
             .unwrap();
         let text = crate::cli::ansi::strip(&cap.out());
         assert!(text.contains("OHLC — BTCUSDT (binance)"), "{text}");
+        // The chart: price axis and both candles' bodies.
+        assert!(text.contains("2.000000 ┤"), "{text}");
+        assert!(text.contains("0.500000 ┤"), "{text}");
+        assert!(text.contains('█'), "{text}");
+        // The summary of the window: 1.0 → 1.75 is +75%.
+        assert!(text.contains("1h · 2 candles"), "{text}");
+        assert!(text.contains("1.7500 (+75.00%)"), "{text}");
+        assert!(text.contains("1.02K"), "volume 1000.5 + 20.25: {text}");
+        // No table without --table.
+        assert!(!text.contains("candles returned"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn test_ohlc_table_adds_every_candle() {
+        let server = serve("/api/v3/klines", KLINES).await;
+        let (out, cap) = Output::capture();
+        let args = OhlcArgs {
+            table: true,
+            ..ohlc_args(OhlcFormat::Text)
+        };
+        run_ohlc_with(&binance_at(&server), args, &out)
+            .await
+            .unwrap();
+        let text = crate::cli::ansi::strip(&cap.out());
         assert!(text.contains("1.250000"), "{text}");
         assert!(text.contains("1000.50"), "{text}");
         assert!(text.contains("2 candles returned"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn test_ohlc_reads_newest_first_venues_oldest_first() {
+        // The same two candles, newest first (as weex sends them).
+        const REVERSED: &str = r#"[[1700003600000,"1.25","2.0","1.0","1.75","20.25",1700007199999],
+            [1700000000000,"1.0","1.5","0.5","1.25","1000.5",1700003599999]]"#;
+        let server = serve("/api/v3/klines", REVERSED).await;
+        let (out, cap) = Output::capture();
+        run_ohlc_with(&binance_at(&server), ohlc_args(OhlcFormat::Text), &out)
+            .await
+            .unwrap();
+        let text = crate::cli::ansi::strip(&cap.out());
+        assert!(
+            text.contains("1.7500 (+75.00%)"),
+            "open is the oldest: {text}"
+        );
     }
 
     #[tokio::test]
@@ -2031,7 +2156,8 @@ capabilities:
             venue: "binance".to_string(),
             token_contract: None,
             interval: "1h".to_string(),
-            limit: 100,
+            limit: Some(100),
+            table: false,
             format: OhlcFormat::Text,
         });
         assert!(format!("{:?}", ohlc_cmd).contains("Ohlc"));
@@ -2473,5 +2599,42 @@ capabilities:
             started.elapsed() < Duration::from_secs(5),
             "it did not sleep on"
         );
+    }
+
+    fn hourly(n: u64, step_ms: u64) -> Vec<scope::market::Candle> {
+        (0..n)
+            .map(|i| scope::market::Candle {
+                open_time: 1_700_000_000_000 + i * step_ms,
+                open: 1.0,
+                high: 2.0,
+                low: 0.5,
+                close: 1.5,
+                volume: 1.0,
+                close_time: 0,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_more_candles_than_columns_says_the_chart_shows_the_last() {
+        let (out, cap) = Output::capture();
+        write_candle_chart(&hourly(200, 3_600_000), "1h", 60, &out).unwrap();
+        let text = crate::cli::ansi::strip(&cap.out());
+        assert!(
+            text.contains("1h · 200 candles (the chart shows the last"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn test_daily_candles_read_as_dates_and_no_candles_say_so() {
+        let (out, cap) = Output::capture();
+        write_candle_chart(&hourly(40, 86_400_000), "1d", 120, &out).unwrap();
+        let text = crate::cli::ansi::strip(&cap.out());
+        assert!(text.contains("2023-11-"), "dates, no hours: {text}");
+        assert!(!text.contains(":00 "), "{text}");
+        let (out, cap) = Output::capture();
+        write_candle_chart(&[], "1h", 120, &out).unwrap();
+        assert!(cap.out().contains("No candles returned"), "{}", cap.out());
     }
 }

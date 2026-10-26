@@ -317,6 +317,39 @@ fn check_warn_styled(msg: &str, tty: bool) -> String {
     marked_row(p, p.paint_strong(Role::Warn, "!"), Role::Warn, msg)
 }
 
+/// A warning with a name in a column of `label_cols` and its detail after
+/// it, wrapped under the detail: one signal of a list.
+///
+/// ```text
+/// │  ! Bid ladder        9 levels falling 560.112 → 110.1101 at 0.01% steps
+/// │  ! Jittered timer    90% of 499 gaps between trades are 32–58s
+/// ```
+pub fn labelled_warn(label: &str, label_cols: usize, detail: &str) -> String {
+    labelled_warn_styled(label, label_cols, detail, color_enabled())
+}
+
+fn labelled_warn_styled(label: &str, label_cols: usize, detail: &str, tty: bool) -> String {
+    let p = Painter::new(tty);
+    let indent = MARK_PREFIX_COLS + label_cols;
+    let wrapped = wrap_lines(detail, content_width_for(indent));
+    let mut out = format!(
+        "{}  {} {}{}",
+        rail(p),
+        p.paint_strong(Role::Warn, "!"),
+        p.paint(Role::Warn, &format!("{label:<label_cols$}")),
+        wrapped[0]
+    );
+    for line in &wrapped[1..] {
+        out.push_str(&format!(
+            "\n{}  {:indent$}{line}",
+            rail(p),
+            "",
+            indent = indent - 2
+        ));
+    }
+    out
+}
+
 /// Overall status line (healthy / unhealthy).
 pub fn status_line(healthy: bool) -> String {
     status_line_styled(healthy, color_enabled())
@@ -401,6 +434,21 @@ pub fn blank_row() -> String {
 
 fn blank_row_styled(tty: bool) -> String {
     rail(Painter::new(tty))
+}
+
+/// The painter the row helpers use: color when stdout takes it.
+pub fn painter() -> Painter {
+    Painter::new(color_enabled())
+}
+
+/// A line of a chart inside a section, after the bar: the line is drawn
+/// and painted already, so it is neither wrapped nor painted again.
+///
+/// ```text
+/// │ 82060.9 ┤ ▄█▄
+/// ```
+pub fn chart_row(line: &str) -> String {
+    format!("{} {line}", rail(painter()))
 }
 
 /// An order book level row with price coloring relative to peg.

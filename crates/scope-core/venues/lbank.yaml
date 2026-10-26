@@ -1,0 +1,53 @@
+id: lbank
+name: LBank
+base_url: https://api.lbkex.com
+timeout_secs: 15
+rate_limit_per_sec: 10
+
+symbol:
+  template: "{base}_{quote}"
+  default_quote: USDT
+  case: lower
+
+capabilities:
+  order_book:
+    path: /v2/depth.do
+    params:
+      symbol: "{pair}"
+      size: "100"
+    response_root: data
+    response:
+      asks_key: asks
+      bids_key: bids
+      level_format: positional
+
+  ticker:
+    path: /v2/ticker/24hr.do
+    params:
+      symbol: "{pair}"
+    response_root: "data.0.ticker"
+    response:
+      last_price: latest
+      high_24h: high
+      low_24h: low
+      volume_24h: vol
+      quote_volume_24h: turnover
+
+  trades:
+    path: /v2/supplement/trades.do
+    params:
+      symbol: "{pair}"
+      size: "{limit}"
+    max_limit: 600
+    response_root: data
+    response:
+      price: price
+      quantity: qty
+      quote_quantity: quoteQty
+      timestamp_ms: time
+      id: id
+      side:
+        field: isBuyerMaker
+        mapping:
+          "true": sell
+          "false": buy

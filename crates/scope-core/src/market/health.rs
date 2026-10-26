@@ -893,6 +893,16 @@ impl MarketSummary {
             out.push_str(&format!("    ... +{} more levels\n", self.bids.len() - 8));
         }
 
+        // Bot patterns: one line per signal, before the checks so the
+        // verdict stays last.
+        if let Some(found) = self
+            .bot_patterns
+            .as_ref()
+            .filter(|b| !b.findings.is_empty())
+        {
+            out.push_str(&found.format_text());
+        }
+
         // Health checks
         out.push_str(&t::subsection_header("Health Checks"));
         out.push('\n');
@@ -983,6 +993,16 @@ impl MarketSummary {
             md.push_str("\n**Health Checks:**\n");
             for check in &self.checks {
                 md.push_str(&format!("- {} {}\n", check.icon(), check.message()));
+            }
+        }
+        if let Some(found) = self
+            .bot_patterns
+            .as_ref()
+            .filter(|b| !b.findings.is_empty())
+        {
+            md.push_str("\n**Bot Patterns** (likely market-making bots):\n");
+            for line in found.evidence() {
+                md.push_str(&format!("- {line}\n"));
             }
         }
         md
@@ -1931,5 +1951,37 @@ mod tests {
                 .format_text(None)
                 .contains("best prices include")
         );
+    }
+
+    #[test]
+    fn test_markdown_lists_the_bot_patterns_one_a_line() {
+        let book = OrderBook {
+            pair: "USDC/USDT".to_string(),
+            source: crate::market::types::BookSource::Exchange,
+            bids: side(0.9999, -0.0001, &[100.0; 20]),
+            asks: side(1.0001, 0.0001, &[100.0; 20]),
+        };
+        let mut summary = MarketSummary::from_order_book(&book, &HealthThresholds::default(), None);
+        let tape: Vec<Trade> = (0..60u64)
+            .map(|i| Trade {
+                price: 1.0,
+                quantity: 1_000.0,
+                quote_quantity: None,
+                timestamp_ms: i * 2_000,
+                side: crate::market::types::TradeSide::Buy,
+                id: None,
+            })
+            .collect();
+        summary.check_bot_patterns(Ok(&tape));
+        let md = summary.format_markdown(Some("binance"));
+        assert!(
+            md.contains("**Bot Patterns** (likely market-making bots):"),
+            "{md}"
+        );
+        assert!(
+            md.contains("- Repeated size: 100% of 60 trades are exactly 1000"),
+            "{md}"
+        );
+        assert!(md.contains("- Bid ladder: 20 levels × 100"), "{md}");
     }
 }

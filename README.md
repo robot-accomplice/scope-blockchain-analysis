@@ -29,7 +29,7 @@ A command-line tool for blockchain data analysis, portfolio tracking, transactio
 - **Transaction Analysis**: Look up and decode blockchain transactions across all supported chains
 - **Token Crawling**: Crawl DEX data for any token -- price, volume, liquidity, holder analysis, and risk scoring with markdown report generation
 - **Live Monitoring**: The monitor wizard in the TUI builds a watchlist (tokens, pairs, addresses; market health checks and metric rules; interval, duration, CSV and report). Its grid shows each target's pass/fail state live, with the same health results as `market summary`, a detail pane with charts, and keys that open the evidence. Watchlists are saved and run again with `watch open <name>`.
-- **Exchange Venues**: Data-driven CEX integration via YAML descriptors, with 11 built-in venues (Binance, Biconomy, Bitget, Bybit, Coinbase, Crypto.com, Gate.io, HTX, Kraken, MEXC, OKX) with order book, ticker, trades, and OHLC support; add custom venues by dropping a YAML file in `~/.scope-bca/venues/`
+- **Exchange Venues**: Data-driven CEX integration via YAML descriptors from a venue catalog that `scope venues update` syncs (19 exchanges, including Binance, Coinbase, Kraken, OKX, Bybit, KuCoin, Gemini and WEEX) with order book, ticker, trades, and OHLC support; new and fixed venues arrive without a new scope. Add your own by dropping a YAML file in `~/.scope-bca/venues/`
 - **Portfolio Management**: Track multiple addresses across chains with labels, tags, and aggregated balance views; `@label` shortcuts work in both CLI and web UI for instant address recall
 - **Compliance & Risk Assessment**: Risk scoring, transaction pattern detection, taint analysis, and compliance reporting
 - **Data Export**: Export address history and portfolio data to JSON or CSV with date range filtering
@@ -54,12 +54,19 @@ A command-line tool for blockchain data analysis, portfolio tracking, transactio
 
 ## Installation
 
-```bash
-# Install from crates.io
-cargo install scope-bca
+Every [release](https://github.com/robot-accomplice/scope-blockchain-analysis/releases/latest) has prebuilt binaries, each with a `.sha256` file next to it: `scope-windows-x64.zip`, `scope-linux-x64.tar.gz` / `scope-linux-arm64.tar.gz`, and `scope-macos-x64.tar.gz` / `scope-macos-arm64.tar.gz`. Nothing needs to be compiled.
+
+**Windows** (PowerShell): download the zip, check it, and put `scope.exe` on your PATH:
+
+```powershell
+Invoke-WebRequest https://github.com/robot-accomplice/scope-blockchain-analysis/releases/latest/download/scope-windows-x64.zip -OutFile scope.zip
+(Get-FileHash scope.zip -Algorithm SHA256).Hash   # compare with scope-windows-x64.zip.sha256
+Expand-Archive scope.zip -DestinationPath "$env:LOCALAPPDATA\scope"
+[Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path', 'User') + ";$env:LOCALAPPDATA\scope", 'User')
+# Open a new terminal, then: scope --version
 ```
 
-Or install with Homebrew (macOS and Linux, prebuilt binaries):
+**macOS and Linux**: Homebrew installs the prebuilt binary:
 
 ```bash
 # Homebrew loads formulae from a third-party tap only after you trust it
@@ -67,16 +74,19 @@ brew trust --formula robot-accomplice/tap/scope
 brew install robot-accomplice/tap/scope
 ```
 
-Or download a prebuilt binary from the [latest release](https://github.com/robot-accomplice/scope-blockchain-analysis/releases/latest): `scope-windows-x64.zip` for Windows, `scope-linux-x64.tar.gz` / `scope-linux-arm64.tar.gz`, or `scope-macos-x64.tar.gz` / `scope-macos-arm64.tar.gz`. Each has a `.sha256` file next to it. On Windows (PowerShell):
+**With Cargo** (any platform with [Rust](https://rustup.rs)): builds scope from source.
 
-```powershell
-Invoke-WebRequest https://github.com/robot-accomplice/scope-blockchain-analysis/releases/latest/download/scope-windows-x64.zip -OutFile scope.zip
-(Get-FileHash scope.zip -Algorithm SHA256).Hash   # compare with scope-windows-x64.zip.sha256
-Expand-Archive scope.zip -DestinationPath "$env:LOCALAPPDATA\scope"
-# Add $env:LOCALAPPDATA\scope to your PATH, then: scope --version
+```bash
+cargo install scope-bca
 ```
 
-Or build from source:
+On Windows, building needs the Microsoft C++ linker from [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with the C++ workload; without it the build stops with ``linker `link.exe` not found``. Use the zip above, or install the Build Tools first:
+
+```powershell
+winget install Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+```
+
+Or build from a clone:
 
 ```bash
 git clone https://github.com/robot-accomplice/scope-blockchain-analysis.git
@@ -161,7 +171,8 @@ scope mon PEPE --chain ethereum                             # price and volume o
 scope venues list                                           # show all available venues
 scope ven list --format json                                # machine-readable
 scope venues schema                                         # YAML schema for writing custom venues
-scope venues init                                           # copy built-in descriptors to ~/.scope-bca/venues/
+scope venues update                                         # fetch the venue catalog (checksummed)
+scope venues init                                           # copy the catalog's descriptors to ~/.scope-bca/venues/ to customise
 scope venues validate my-venue.yaml                         # validate a custom descriptor
 
 # Token health (DEX + optional market)
@@ -577,21 +588,37 @@ Scope includes a locally-hosted web UI (`scope web`) that provides browser-based
 
 Scope uses **YAML descriptor files** to define CEX API integrations. This data-driven approach means adding a new exchange requires zero code changes, just a YAML file.
 
-### Built-in Venues
+No venue is compiled into scope. The descriptors live in this repository as a **venue catalog** ([`crates/scope-core/venues/`](crates/scope-core/venues/), with an `index.json` of SHA-256 checksums), and scope syncs them into `~/.scope-bca/venues/catalog/`:
+
+- The first command that needs a venue fetches the catalog once.
+- `scope venues update` fetches it again: new and fixed venues, without a new scope. Every file is checked against its checksum, and a failed update leaves the old catalog in place.
+- Your own files in `~/.scope-bca/venues/` override a catalog venue with the same id, and are never touched by an update.
+- Offline with no catalog, scope says how to get one and writes `~/.scope-bca/venues/example.yaml.sample`, a commented template for describing an exchange yourself.
+- To sync from another catalog, set `market.venue_catalog_url` in the config (a folder URL with an `index.json`), or pass `scope venues update --url`.
+
+### Catalog Venues
 
 | Venue | ID | Capabilities |
 |-------|----|-------------|
-| Binance Spot | `binance` | order book, ticker, trades |
-| Biconomy | `biconomy` | order book, ticker, trades |
-| Bitget | `bitget` | order book, ticker, trades |
-| Bybit | `bybit` | order book, ticker, trades |
-| Coinbase | `coinbase` | order book, ticker, trades |
-| Crypto.com | `crypto_com` | order book, ticker, trades |
-| Gate.io | `gateio` | order book, ticker, trades |
-| HTX | `htx` | order book, ticker, trades |
-| Kraken | `kraken` | order book, ticker, trades |
-| MEXC | `mexc` | order book, ticker, trades |
-| OKX | `okx` | order book, ticker, trades |
+| Biconomy | `biconomy` | order book, ticker, trades, OHLC |
+| Binance Spot | `binance` | order book, ticker, trades, OHLC |
+| BingX Spot | `bingx` | order book, ticker, trades, OHLC |
+| Bitget | `bitget` | order book, ticker, trades, OHLC |
+| Bitstamp | `bitstamp` | order book, ticker, trades, OHLC (USD pairs) |
+| Bybit | `bybit` | order book, ticker, trades, OHLC |
+| Coinbase | `coinbase` | order book, ticker, trades, OHLC |
+| Crypto.com | `crypto_com` | order book, ticker, trades, OHLC |
+| Gate.io | `gateio` | order book, ticker, trades, OHLC |
+| Gemini | `gemini` | order book, ticker, trades, OHLC (USD pairs) |
+| HTX | `htx` | order book, ticker, trades, OHLC |
+| Kraken | `kraken` | order book, ticker, trades, OHLC |
+| KuCoin Spot | `kucoin` | order book, ticker, trades, OHLC |
+| LBank | `lbank` | order book, ticker, trades |
+| MEXC | `mexc` | order book, ticker, trades, OHLC |
+| OKX | `okx` | order book, ticker, trades, OHLC |
+| WEEX Spot | `weex` | order book, ticker, trades, OHLC |
+| WhiteBIT | `whitebit` | order book, ticker, trades, OHLC |
+| XT.COM | `xt` | order book, ticker, trades, OHLC |
 
 ### Adding a Custom Venue
 
@@ -601,12 +628,12 @@ Scope uses **YAML descriptor files** to define CEX API integrations. This data-d
 4. Validate with `scope venues validate my-venue.yaml`
 5. Use it immediately: `scope market summary USDC --venue my-venue`
 
-Or initialise the user directory with all built-in descriptors for reference:
+Or start from the commented template, `~/.scope-bca/venues/example.yaml.sample`, or copy the catalog's descriptors to edit:
 
 ```bash
 scope venues init
-# Copies all 11 built-in descriptors to ~/.scope-bca/venues/
-# Edit them to customise behaviour or use as templates
+# Copies the catalog's descriptors, as they are, to ~/.scope-bca/venues/
+# Your copies override the catalog's; delete one to follow the catalog again
 ```
 
 ### Using Venues

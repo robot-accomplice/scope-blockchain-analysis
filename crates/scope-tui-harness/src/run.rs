@@ -91,6 +91,21 @@ fn child_env(tier: Tier, ctx: &RunCtx) -> Result<Vec<(String, String)>> {
     Ok(env)
 }
 
+/// Installs the repo's venue catalog in a scenario's home, as
+/// `scope venues update` would: scope carries no venues, and a scenario
+/// must not depend on fetching them.
+fn seed_catalog(dest: &Path) -> Result<()> {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scope-core/venues");
+    std::fs::create_dir_all(dest)?;
+    for entry in std::fs::read_dir(&repo)? {
+        let path = entry?.path();
+        if path.is_file() {
+            std::fs::copy(&path, dest.join(path.file_name().unwrap()))?;
+        }
+    }
+    Ok(())
+}
+
 pub fn run_scenario(
     s: &Scenario,
     tier: Tier,
@@ -103,6 +118,7 @@ pub fn run_scenario(
         cfg_dir.join("config.yaml"),
         s.config.clone().unwrap_or_else(|| "{}".into()),
     )?;
+    seed_catalog(&cfg_dir.join("venues").join("catalog"))?;
     let mut env = child_env(tier, ctx)?;
     env.extend(s.env.iter().map(|(k, v)| (k.clone(), v.clone())));
     let mut sess = Session::start(&StartOpts {

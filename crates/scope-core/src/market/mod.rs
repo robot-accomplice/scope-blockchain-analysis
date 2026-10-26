@@ -19,7 +19,7 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> scope::Result<()> {
-//!     let registry = VenueRegistry::load()?;
+//!     let registry = VenueRegistry::load()?; // the synced catalog and the user's venues
 //!     let http = scope::http::build(&scope::Config::default())?.client;
 //!     let exchange = registry.create_exchange_client_with_http("binance", http)?;
 //!     let pair = exchange.venue_symbol(&Pair::parse("USDC"));
@@ -45,6 +45,7 @@ pub mod traits;
 pub mod types;
 
 // Data-driven venue system
+pub mod catalog;
 pub mod configurable_client;
 mod default_venue;
 pub mod descriptor;
@@ -52,18 +53,25 @@ pub mod exchange;
 pub mod registry;
 pub mod venue;
 
-/// Test helpers: a built-in venue pointed at a local mock server.
+/// Test helpers: the repo's venue catalog, as a synced one, and a catalog
+/// venue pointed at a local mock server. Release builds carry no venues.
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing {
     use super::{ExchangeClient, VenueRegistry};
 
-    /// The built-in venue `id`, with its real mapping, sending to
-    /// `base_url` (a mockito server) instead of the live API.
+    /// The venues of the repo's catalog (`crates/scope-core/venues/`), read
+    /// from disk as `scope venues update` would install them.
+    pub fn catalog() -> VenueRegistry {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("venues");
+        VenueRegistry::load_dirs(&dir, &dir.join("no-user-venues")).expect("the repo catalog loads")
+    }
+
+    /// The catalog venue `id`, with its real mapping, sending to `base_url`
+    /// (a mockito server) instead of the live API.
     pub fn venue_at(id: &str, base_url: &str) -> ExchangeClient {
-        let mut desc = VenueRegistry::load()
-            .expect("built-in venues load")
+        let mut desc = catalog()
             .get(id)
-            .unwrap_or_else(|| panic!("no built-in venue {id}"))
+            .unwrap_or_else(|| panic!("no catalog venue {id}"))
             .clone();
         desc.base_url = base_url.to_string();
         ExchangeClient::from_descriptor_with_http(&desc, crate::http::test_transport())

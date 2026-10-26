@@ -4,7 +4,8 @@
 //! `tests/fixtures/legacy-yaml/<name>.yaml` is what serde_yaml wrote for a
 //! populated value, and `<name>.json` is what serde_yaml read back from it.
 //! Both were recorded with serde_yaml before the move. A venue's `.json` is
-//! the YAML data model serde_yaml read from the shipped `venues/<id>.yaml`.
+//! the YAML data model serde_yaml read from the venue file as shipped then,
+//! kept as `venue-<id>.yaml`.
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -57,7 +58,26 @@ fn test_an_address_book_reads_the_same() {
 }
 
 #[test]
-fn test_every_shipped_venue_reads_the_same() {
+fn test_the_recorded_venues_read_the_same() {
+    // The venue files as serde_yaml read them when the parser moved; the
+    // catalog has changed since, so the recorded inputs are kept here.
+    let mut seen = 0;
+    for entry in std::fs::read_dir(fixtures()).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_stem().unwrap().to_string_lossy().to_string();
+        if !name.starts_with("venue-") || path.extension().is_none_or(|e| e != "yaml") {
+            continue;
+        }
+        let yaml = std::fs::read_to_string(&path).unwrap();
+        let now: Value = serde_saphyr::from_str(&yaml).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(now, recorded(&name), "{name}");
+        seen += 1;
+    }
+    assert_eq!(seen, 11, "the 11 recorded venues");
+}
+
+#[test]
+fn test_every_catalog_venue_reads_as_a_descriptor() {
     let venues = Path::new(env!("CARGO_MANIFEST_DIR")).join("venues");
     let mut seen = 0;
     for entry in std::fs::read_dir(venues).unwrap() {
@@ -65,14 +85,10 @@ fn test_every_shipped_venue_reads_the_same() {
         if path.extension().is_none_or(|e| e != "yaml") {
             continue;
         }
-        let id = path.file_stem().unwrap().to_string_lossy().to_string();
         let yaml = std::fs::read_to_string(&path).unwrap();
-        let now: Value = serde_saphyr::from_str(&yaml).unwrap_or_else(|e| panic!("{id}: {e}"));
-        assert_eq!(now, recorded(&format!("venue-{id}")), "{id}");
-        // And as the typed descriptor scope loads.
         serde_saphyr::from_str::<scope::market::descriptor::VenueDescriptor>(&yaml)
-            .unwrap_or_else(|e| panic!("{id}: {e}"));
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         seen += 1;
     }
-    assert!(seen >= 11, "only {seen} venues");
+    assert!(seen >= 19, "only {seen} venues");
 }

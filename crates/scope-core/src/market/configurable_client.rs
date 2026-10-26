@@ -168,11 +168,6 @@ impl ConfigurableExchangeClient {
             .await
     }
 
-    /// Interpolate `{pair}` placeholders in a URL path.
-    fn interpolate_path(&self, path: &str, pair: &str) -> String {
-        path.replace("{pair}", pair)
-    }
-
     /// Full interpolation with all supported placeholders.
     fn interpolate_value_full(
         &self,
@@ -231,12 +226,15 @@ impl ConfigurableExchangeClient {
         limit: Option<u32>,
         interval: &str,
     ) -> Result<Value> {
+        // Never above what the venue accepts in one request.
+        let limit = limit.map(|l| endpoint.max_limit.map_or(l, |max| l.min(max)));
+        let limit_str = limit.unwrap_or(100).to_string();
+        // The path takes the placeholders too (Gemini: /v2/candles/{pair}/{interval}).
         let url = format!(
             "{}{}",
             self.descriptor.base_url,
-            self.interpolate_path(&endpoint.path, pair)
+            self.interpolate_value_full(&endpoint.path, pair, &limit_str, interval)
         );
-        let limit_str = limit.unwrap_or(100).to_string();
 
         let mut req = match endpoint.method {
             HttpMethod::GET => {
@@ -374,6 +372,11 @@ impl ConfigurableExchangeClient {
     }
 
     /// Extract a string from a JSON value using a field path.
+    /// A timestamp field in milliseconds (see [`value_to_ms`]).
+    fn extract_ms(&self, data: &Value, field_path: &str) -> Option<u64> {
+        value_to_ms(self.navigate_field(data, field_path)?)
+    }
+
     fn extract_string(&self, data: &Value, field_path: &str) -> Option<String> {
         let val = self.navigate_field(data, field_path)?;
         match val {
@@ -610,8 +613,23 @@ impl TradeHistoryClient for ConfigurableExchangeClient {
         let items = arr
             .as_array()
             .ok_or_else(|| venue_error(&self.descriptor.id, "expected array for trades"))?;
-
         let r = &endpoint.response;
+        let grouped: Vec<Value>;
+        let items = match r.nested_items_key.as_deref() {
+            Some(key) => {
+                // `{limit}` counts groups here, so the trades are capped at it.
+                grouped = items
+                    .iter()
+                    .filter_map(|group| group.get(key).and_then(Value::as_array))
+                    .flatten()
+                    .take(limit as usize)
+                    .cloned()
+                    .collect();
+                &grouped
+            }
+            None => items,
+        };
+
         let mut trades = Vec::with_capacity(items.len());
 
         for item in items {
@@ -626,8 +644,7 @@ impl TradeHistoryClient for ConfigurableExchangeClient {
                 let timestamp_ms = r
                     .timestamp_ms
                     .as_ref()
-                    .and_then(|f| self.extract_f64(item, f))
-                    .map(|v| v as u64)
+                    .and_then(|f| self.extract_ms(item, f))
                     .unwrap_or(0);
                 let id = r.id.as_ref().and_then(|f| self.extract_string(item, f));
                 let side = self.parse_side(item, r);
@@ -643,6 +660,12 @@ impl TradeHistoryClient for ConfigurableExchangeClient {
             }
         }
 
+        // A venue that ignores the limit (Bitstamp sends the last hour):
+        // keep the newest `limit` trades.
+        if trades.len() > limit as usize {
+            trades.sort_by_key(|t| std::cmp::Reverse(t.timestamp_ms));
+            trades.truncate(limit as usize);
+        }
         Ok(trades)
     }
 }
@@ -713,7 +736,9 @@ impl OhlcClient for ConfigurableExchangeClient {
                 let get_f64 = |i: Option<usize>| -> Option<f64> {
                     i.and_then(|idx| arr.get(idx)).and_then(value_to_f64)
                 };
-                let get_u64 = |i: Option<usize>| -> Option<u64> { get_f64(i).map(|v| v as u64) };
+                let get_ms = |i: Option<usize>| -> Option<u64> {
+                    i.and_then(|idx| arr.get(idx)).and_then(value_to_ms)
+                };
 
                 if let (Some(open), Some(high), Some(low), Some(close)) = (
                     get_f64(idx("open")),
@@ -722,13 +747,13 @@ impl OhlcClient for ConfigurableExchangeClient {
                     get_f64(idx("close")),
                 ) {
                     candles.push(Candle {
-                        open_time: get_u64(idx("open_time")).unwrap_or(0),
+                        open_time: get_ms(idx("open_time")).unwrap_or(0),
                         open,
                         high,
                         low,
                         close,
                         volume: get_f64(idx("volume")).unwrap_or(0.0),
-                        close_time: get_u64(idx("close_time")).unwrap_or(0),
+                        close_time: get_ms(idx("close_time")).unwrap_or(0),
                     });
                 }
             }
@@ -744,8 +769,7 @@ impl OhlcClient for ConfigurableExchangeClient {
                     let open_time = r
                         .open_time
                         .as_ref()
-                        .and_then(|f| self.extract_f64(item, f))
-                        .map(|v| v as u64)
+                        .and_then(|f| self.extract_ms(item, f))
                         .unwrap_or(0);
                     let volume = r
                         .ohlc_volume
@@ -755,8 +779,7 @@ impl OhlcClient for ConfigurableExchangeClient {
                     let close_time = r
                         .close_time
                         .as_ref()
-                        .and_then(|f| self.extract_f64(item, f))
-                        .map(|v| v as u64)
+                        .and_then(|f| self.extract_ms(item, f))
                         .unwrap_or(0);
 
                     candles.push(Candle {
@@ -772,6 +795,11 @@ impl OhlcClient for ConfigurableExchangeClient {
             }
         }
 
+        candles.sort_by_key(|c| c.open_time);
+        let keep = (limit as usize).max(1);
+        if candles.len() > keep {
+            candles.drain(..candles.len() - keep);
+        }
         Ok(candles)
     }
 }
@@ -781,6 +809,35 @@ impl OhlcClient for ConfigurableExchangeClient {
 // =============================================================================
 
 /// Convert a JSON value (string or number) to f64.
+/// A venue's timestamp in milliseconds since the epoch, whatever unit it
+/// sends: seconds (Kraken trades, most candles), milliseconds, micro- or
+/// nanoseconds (KuCoin trades), as a number or a numeric string, or an ISO
+/// 8601 date (Coinbase trades). The unit follows from the size: any date
+/// from 1973 to 2286 is unambiguous. `None` for what is not a time.
+pub(crate) fn value_to_ms(val: &Value) -> Option<u64> {
+    if let Value::String(s) = val
+        && s.parse::<f64>().is_err()
+    {
+        return chrono::DateTime::parse_from_rfc3339(s)
+            .ok()
+            .and_then(|d| u64::try_from(d.timestamp_millis()).ok());
+    }
+    let v = value_to_f64(val)?;
+    if v.is_nan() || v <= 0.0 {
+        return None;
+    }
+    let ms = if v < 1e11 {
+        v * 1e3
+    } else if v < 1e14 {
+        v
+    } else if v < 1e17 {
+        v / 1e3
+    } else {
+        v / 1e6
+    };
+    Some(ms.round() as u64)
+}
+
 fn value_to_f64(val: &Value) -> Option<f64> {
     match val {
         Value::Number(n) => n.as_f64(),
@@ -804,6 +861,27 @@ fn current_type(val: &Value) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_timestamps_become_milliseconds_whatever_the_unit() {
+        use serde_json::json;
+        let ms = 1_793_017_629_123u64;
+        for v in [
+            json!(1_793_017_629.123),
+            json!("1793017629.123"),
+            json!(1_793_017_629_123u64),
+            json!("1793017629123"),
+            json!(1_793_017_629_123_000u64),
+            json!(1_793_017_629_123_000_000u64),
+            json!("2026-10-26T12:27:09.123Z"),
+            json!("2026-10-26T14:27:09.123+02:00"),
+        ] {
+            assert_eq!(value_to_ms(&v), Some(ms), "{v}");
+        }
+        for v in [json!(0), json!(-5), json!("soon"), json!(null), json!([1])] {
+            assert_eq!(value_to_ms(&v), None, "{v}");
+        }
+    }
 
     #[test]
     fn test_format_display_pair_underscore() {
@@ -1424,6 +1502,7 @@ mod tests {
                     request_body: None,
                     response_root: None,
                     interval_map: std::collections::HashMap::new(),
+                    max_limit: None,
                     response: ResponseMapping {
                         asks_key: Some("asks".to_string()),
                         bids_key: Some("bids".to_string()),
@@ -1440,6 +1519,7 @@ mod tests {
                     request_body: None,
                     response_root: None,
                     interval_map: std::collections::HashMap::new(),
+                    max_limit: None,
                     response: ResponseMapping {
                         last_price: Some("lastPrice".to_string()),
                         high_24h: Some("highPrice".to_string()),
@@ -1463,6 +1543,7 @@ mod tests {
                     request_body: None,
                     response_root: None,
                     interval_map: std::collections::HashMap::new(),
+                    max_limit: None,
                     response: ResponseMapping {
                         price: Some("price".to_string()),
                         quantity: Some("qty".to_string()),
@@ -1659,6 +1740,118 @@ mod tests {
         mock.assert_async().await;
     }
 
+    /// A client for the YAML `capabilities` block, sending to `base`.
+    fn yaml_client(base: &str, capabilities: &str) -> ConfigurableExchangeClient {
+        let yaml = format!(
+            "id: t\nname: T\nbase_url: {base}\nsymbol:\n  template: \"{{base}}{{quote}}\"\n  default_quote: USDT\ncapabilities:\n{capabilities}"
+        );
+        let desc: VenueDescriptor = serde_saphyr::from_str(&yaml).unwrap();
+        ConfigurableExchangeClient::with_http(desc, crate::http::test_transport())
+    }
+
+    #[tokio::test]
+    async fn test_max_limit_caps_the_request_and_grouped_trades_read_as_one_list() {
+        let mut server = mockito::Server::new_async().await;
+        // HTX's shape: groups of trades under data[].data[]; size capped at 2.
+        let mock = server
+            .mock("GET", "/history")
+            .match_query(mockito::Matcher::UrlEncoded("size".into(), "2".into()))
+            .with_body(
+                serde_json::json!({"data": [
+                    {"data": [
+                        {"price": 1.0, "amount": 5.0, "ts": 1_700_000_000_000u64, "direction": "buy"},
+                        {"price": 1.1, "amount": 6.0, "ts": 1_700_000_001_000u64, "direction": "sell"}
+                    ]},
+                    {"data": [
+                        {"price": 1.2, "amount": 7.0, "ts": 1_700_000_002_000u64, "direction": "buy"}
+                    ]}
+                ]})
+                .to_string(),
+            )
+            .create_async()
+            .await;
+        let client = yaml_client(
+            &server.url(),
+            "  trades:\n    path: /history\n    params:\n      size: \"{limit}\"\n    max_limit: 2\n    response_root: data\n    response:\n      nested_items_key: data\n      price: price\n      quantity: amount\n      timestamp_ms: ts\n      side:\n        field: direction\n        mapping:\n          buy: buy\n          sell: sell\n",
+        );
+        let trades = client.fetch_recent_trades("BTCUSDT", 500).await.unwrap();
+        mock.assert_async().await;
+        // Two groups asked for (the cap), three trades in them, all read.
+        assert_eq!(
+            trades.iter().map(|t| t.quantity).collect::<Vec<_>>(),
+            [5.0, 6.0, 7.0],
+            "{trades:?}"
+        );
+        // Grouped trades never exceed the limit asked for.
+        let few = client.fetch_recent_trades("BTCUSDT", 2).await.unwrap();
+        assert_eq!(few.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_a_venue_that_ignores_the_limit_gives_the_newest_trades() {
+        let mut server = mockito::Server::new_async().await;
+        let body: Vec<serde_json::Value> = (0..10u64)
+            .map(|i| serde_json::json!({"price": "1", "amount": i.to_string(), "date": (1_700_000_000 + i).to_string()}))
+            .collect();
+        server
+            .mock("GET", "/tx")
+            .with_body(serde_json::Value::Array(body).to_string())
+            .create_async()
+            .await;
+        // Bitstamp's shape: times in seconds, no limit parameter.
+        let client = yaml_client(
+            &server.url(),
+            "  trades:\n    path: /tx\n    response:\n      price: price\n      quantity: amount\n      timestamp_ms: date\n",
+        );
+        let trades = client.fetch_recent_trades("BTCUSD", 3).await.unwrap();
+        assert_eq!(trades.len(), 3);
+        assert_eq!(
+            trades[0].timestamp_ms, 1_700_000_009_000,
+            "seconds become ms"
+        );
+        assert_eq!(trades[2].quantity, 7.0);
+    }
+
+    #[tokio::test]
+    async fn test_candles_take_placeholders_in_the_path_and_come_back_oldest_first_at_most_limit() {
+        let mut server = mockito::Server::new_async().await;
+        // Gemini's shape: the interval in the path, every candle, newest first.
+        let rows: Vec<serde_json::Value> = (0..10u64)
+            .rev()
+            .map(|i| {
+                serde_json::json!([
+                    1_700_000_000_000u64 + i * 3_600_000,
+                    1.0,
+                    2.0,
+                    0.5,
+                    1.5,
+                    10.0
+                ])
+            })
+            .collect();
+        let mock = server
+            .mock("GET", "/v2/candles/btcusd/1hr")
+            .with_body(serde_json::Value::Array(rows).to_string())
+            .create_async()
+            .await;
+        let client = yaml_client(
+            &server.url(),
+            "  ohlc:\n    path: /v2/candles/{pair}/{interval}\n    interval_map:\n      \"1h\": \"1hr\"\n    response:\n      ohlc_format: array_of_arrays\n      ohlc_fields: [open_time, open, high, low, close, volume]\n",
+        );
+        let candles = client.fetch_ohlc("btcusd", "1h", 4).await.unwrap();
+        mock.assert_async().await;
+        assert_eq!(candles.len(), 4);
+        let times: Vec<u64> = candles.iter().map(|c| c.open_time).collect();
+        let mut sorted = times.clone();
+        sorted.sort();
+        assert_eq!(times, sorted, "oldest first");
+        assert_eq!(
+            *times.last().unwrap(),
+            1_700_000_000_000 + 9 * 3_600_000,
+            "the newest kept"
+        );
+    }
+
     #[tokio::test]
     async fn test_fetch_order_book_http_error() {
         let mut server = mockito::Server::new_async().await;
@@ -1787,6 +1980,7 @@ mod tests {
             })),
             response_root: None,
             interval_map: std::collections::HashMap::new(),
+            max_limit: None,
             response: ResponseMapping {
                 asks_key: Some("asks".to_string()),
                 bids_key: Some("bids".to_string()),
@@ -1898,6 +2092,7 @@ mod tests {
             request_body: None,
             response_root: None,
             interval_map: std::collections::HashMap::new(),
+            max_limit: None,
             response: ResponseMapping {
                 filter: Some(FilterConfig {
                     field: "symbol".to_string(),
@@ -1948,6 +2143,7 @@ mod tests {
             request_body: None,
             response_root: None,
             interval_map: std::collections::HashMap::new(),
+            max_limit: None,
             response: ResponseMapping {
                 filter: Some(FilterConfig {
                     field: "symbol".to_string(),
@@ -2135,6 +2331,7 @@ mod tests {
                     request_body: None,
                     response_root: None,
                     interval_map: std::collections::HashMap::new(),
+                    max_limit: None,
                     response: ResponseMapping {
                         ohlc_format: Some("array_of_arrays".to_string()),
                         ohlc_fields: Some(vec![
@@ -2284,6 +2481,7 @@ mod tests {
                     request_body: None,
                     response_root: None,
                     interval_map: std::collections::HashMap::new(),
+                    max_limit: None,
                     response: ResponseMapping {
                         ohlc_format: Some("objects".to_string()),
                         open_time: Some("ts".to_string()),
@@ -2403,6 +2601,7 @@ mod tests {
                     ]
                     .into_iter()
                     .collect(),
+                    max_limit: None,
                     response: ResponseMapping {
                         ohlc_format: Some("array_of_arrays".to_string()),
                         ohlc_fields: Some(vec![
@@ -2489,6 +2688,7 @@ mod tests {
                     interval_map: [("1h".to_string(), "hour".to_string())]
                         .into_iter()
                         .collect(),
+                    max_limit: None,
                     response: ResponseMapping {
                         ohlc_format: Some("array_of_arrays".to_string()),
                         ohlc_fields: Some(vec![
@@ -2706,6 +2906,7 @@ mod tests {
                     })),
                     response_root: None,
                     interval_map: std::collections::HashMap::new(),
+                    max_limit: None,
                     response: ResponseMapping {
                         ohlc_format: Some("array_of_arrays".to_string()),
                         ohlc_fields: Some(vec![
@@ -2766,6 +2967,7 @@ mod tests {
                     request_body: None,
                     response_root: None,
                     interval_map: std::collections::HashMap::new(),
+                    max_limit: None,
                     response: ResponseMapping {
                         ohlc_format: Some("array_of_arrays".to_string()),
                         ..Default::default()
@@ -2857,6 +3059,7 @@ mod tests {
                     request_body: None,
                     response_root: None,
                     interval_map: std::collections::HashMap::new(),
+                    max_limit: None,
                     response: ResponseMapping {
                         items_key: Some("data".to_string()),
                         ohlc_format: Some("objects".to_string()),

@@ -75,6 +75,12 @@ pub struct EndpointDescriptor {
     #[serde(default)]
     pub interval_map: HashMap<String, String>,
 
+    /// The most items the venue returns in one request (`{limit}` is never
+    /// above it). For a venue that errors on a bigger limit (Biconomy's
+    /// trades: 100); omit when the venue caps or accepts any limit.
+    #[serde(default)]
+    pub max_limit: Option<u32>,
+
     /// Field mappings for parsing the response.
     pub response: ResponseMapping,
 }
@@ -112,6 +118,10 @@ pub struct ResponseMapping {
     // -- Trade / array fields --
     /// JSON key holding the array of items. Empty or omitted = root is the array.
     pub items_key: Option<String>,
+
+    /// For trades sent in groups (HTX: `data[].data[]`): the key of each
+    /// group's own array of trades, which are read as one list.
+    pub nested_items_key: Option<String>,
 
     /// Filter configuration for endpoints that return data for all pairs.
     pub filter: Option<FilterConfig>,
@@ -451,6 +461,7 @@ mod tests {
                     request_body: None,
                     response_root: None,
                     interval_map: HashMap::new(),
+                    max_limit: None,
                     response: ResponseMapping::default(),
                 }),
                 ticker: Some(EndpointDescriptor {
@@ -460,6 +471,7 @@ mod tests {
                     request_body: None,
                     response_root: None,
                     interval_map: HashMap::new(),
+                    max_limit: None,
                     response: ResponseMapping::default(),
                 }),
                 trades: Some(EndpointDescriptor {
@@ -469,6 +481,7 @@ mod tests {
                     request_body: None,
                     response_root: None,
                     interval_map: HashMap::new(),
+                    max_limit: None,
                     response: ResponseMapping::default(),
                 }),
                 ohlc: None,
@@ -502,6 +515,7 @@ mod tests {
                     request_body: None,
                     response_root: None,
                     interval_map: HashMap::new(),
+                    max_limit: None,
                     response: ResponseMapping::default(),
                 }),
                 ticker: None,
@@ -804,6 +818,7 @@ capabilities:
                     request_body: None,
                     response_root: None,
                     interval_map: HashMap::new(),
+                    max_limit: None,
                     response: ResponseMapping::default(),
                 }),
                 ohlc: None,
@@ -836,6 +851,7 @@ capabilities:
                     request_body: None,
                     response_root: None,
                     interval_map: HashMap::new(),
+                    max_limit: None,
                     response: ResponseMapping::default(),
                 }),
                 ticker: None,
@@ -878,6 +894,7 @@ capabilities:
                     request_body: None,
                     response_root: None,
                     interval_map: HashMap::new(),
+                    max_limit: None,
                     response: ResponseMapping::default(),
                 }),
                 trades: None,
@@ -920,6 +937,7 @@ capabilities:
                     request_body: None,
                     response_root: None,
                     interval_map: HashMap::new(),
+                    max_limit: None,
                     response: ResponseMapping::default(),
                 }),
                 ohlc: None,
@@ -962,6 +980,7 @@ capabilities:
                     request_body: None,
                     response_root: None,
                     interval_map: HashMap::new(),
+                    max_limit: None,
                     response: ResponseMapping::default(),
                 }),
             },
@@ -1110,6 +1129,7 @@ capabilities:
             request_body: None,
             response_root: None,
             interval_map: HashMap::new(),
+            max_limit: None,
             response: ResponseMapping::default(),
         };
         assert!(ep.interval_map.is_empty());

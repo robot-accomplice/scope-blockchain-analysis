@@ -134,7 +134,59 @@ pub(crate) fn lines_with(view: &SummaryView, opts: Opts) -> Vec<Line<'static>> {
         }
     }
     out.extend(problems(s, opts));
+    if opts.size == Size::Full {
+        out.extend(bot_patterns(s));
+    }
     out
+}
+
+/// The bot-pattern signals under their own rule (full view): the name in
+/// a column, the evidence after it and wrapped under itself, then the
+/// share of trades that look bot-made.
+fn bot_patterns(s: &MarketSummary) -> Vec<Line<'static>> {
+    let Some(found) = s.bot_patterns.as_ref().filter(|b| !b.findings.is_empty()) else {
+        return Vec::new();
+    };
+    let label_cols = found
+        .findings
+        .iter()
+        .map(|f| f.label().chars().count())
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let detail_cols = FULL_WIDTH.saturating_sub(3 + label_cols).max(10);
+    let mut out = vec![rule("Bot patterns · likely bots", FULL_WIDTH)];
+    for f in &found.findings {
+        let label = format!("{:<label_cols$}", f.label());
+        for (i, part) in wrap(&f.detail(), detail_cols).into_iter().enumerate() {
+            let lead = if i == 0 {
+                vec![
+                    Span::styled(" ! ", WARN.add_modifier(Modifier::BOLD)),
+                    Span::styled(label.clone(), WARN),
+                ]
+            } else {
+                vec![Span::raw(" ".repeat(3 + label_cols))]
+            };
+            let mut spans = lead;
+            spans.push(Span::raw(part));
+            out.push(Line::from(spans));
+        }
+    }
+    if let Some(share) = found.share() {
+        for part in wrap(&share, FULL_WIDTH - 3) {
+            out.push(Line::from(vec![
+                Span::raw("   "),
+                Span::styled(part, SECONDARY),
+            ]));
+        }
+    }
+    out
+}
+
+/// True for the bot-pattern warning, which the full view shows in its own
+/// section instead of the problems.
+fn is_bot_warning(c: &HealthCheck) -> bool {
+    matches!(c, HealthCheck::Warn(m) if m.starts_with("Bot patterns:"))
 }
 
 /// The quote asset of a pair (`USDC/USDT` gives `USDT`).
@@ -612,6 +664,8 @@ fn problems(s: &MarketSummary, opts: Opts) -> Vec<Line<'static>> {
         .checks
         .iter()
         .filter(|c| !matches!(c, HealthCheck::Pass(_)))
+        // The full view lists the signals in their own section.
+        .filter(|c| opts.size == Size::Compact || !is_bot_warning(c) || s.bot_patterns.is_none())
         .collect();
     checks.sort_by_key(|c| match c {
         HealthCheck::Fail(_) => 0,
@@ -815,6 +869,42 @@ mod tests {
         let t = text(std::slice::from_ref(&long));
         assert!(t.contains("a… "), "{t}");
         assert_eq!(t.chars().count(), 1 + LABEL_COLS + 1 + 2 * SIDE_COLS, "{t}");
+    }
+
+    #[test]
+    fn the_full_view_lists_bot_patterns_in_their_own_section() {
+        let mut v = view(20, 20, 40_000.0);
+        let tape: Vec<scope::market::Trade> = (0..60u64)
+            .map(|i| scope::market::Trade {
+                price: 1.0,
+                quantity: 1_000.0,
+                quote_quantity: None,
+                timestamp_ms: i * 2_000,
+                side: scope::market::TradeSide::Buy,
+                id: None,
+            })
+            .collect();
+        v.summary.check_bot_patterns(Ok(&tape));
+        let full = text(&lines(&v, Size::Full));
+        let rule_at = full.find("Bot patterns · likely bots").expect(&full);
+        let section = &full[rule_at..];
+        assert!(section.contains(" ! Repeated size "), "{full}");
+        assert!(section.contains(" ! Metronome "), "{full}");
+        // The evidence wraps under itself at the snapshot width.
+        let words = section.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            words.contains("100% of 60 trades are exactly 1000"),
+            "{full}"
+        );
+        assert!(section.contains("look bot-made"), "{full}");
+        // Not twice: the problems above skip the bot warning.
+        assert_eq!(full.matches("Bot patterns").count(), 1, "{full}");
+        // Every line stays inside the snapshot.
+        assert!(width(&lines(&v, Size::Full)) <= FULL_WIDTH, "{full}");
+        // The compact view keeps its one problem line.
+        let compact = text(&lines(&v, Size::Compact));
+        assert!(compact.contains("signs of market-making bots"), "{compact}");
+        assert!(!compact.contains("Bot patterns · likely bots"), "{compact}");
     }
 
     #[test]

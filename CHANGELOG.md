@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-10-26
+
+### Added
+- Eight more venues in the catalog, each checked live (book, ticker, trades, candles): **WEEX**, **KuCoin**, **BingX**, **XT.COM**, **LBank** (no candles: its API needs a start time), **WhiteBIT**, **Bitstamp** and **Gemini** (USD pairs). Venue descriptors gain `max_limit` (never ask a venue for more than it accepts), `nested_items_key` (trades sent in groups) and `{interval}` / `{limit}` in paths.
+- `market ohlc` draws the candles: one column per candle, sized to the terminal (or the TUI pane), with half-block bodies, wicks, green up and red down candles, a price axis and a time axis. Under the chart, a summary of the window: interval and count, open, high, low, close (with the change) and volume. `--table` adds every candle in a table; `--limit` fetches a set number (by default, as many as the chart fits). Candles are read oldest first whatever order the venue sends them in.
+- The bot-pattern advisory catches USDN/USDT on weex after its bot changed: a **jittered timer** (trades every 30–60 s, spread out, never sooner; the gaps' CV under 0.35 and their 5th percentile at least 40% of the median, where real order flow is near 1 and 0) and **round notionals** (8 or more of a side's top 10 levels are whole quote amounts though their sizes are not whole). A shaped ladder survives one bump of up to 5% against its direction. JSON: findings `timer` and `round_notional`.
+- The repeating view (`market summary --every` in the TUI) names a bot on a timer: when the bid or ask depth is refilled at a steady period (rises of 25% or more, at least 4 refills at least 3 runs apart, periods within 20%) and drains between the refills, the Trends title shows `! Bot timer: bid and ask depth refill every 6m 30s (7 cycles)`, and the summary line on leaving the view adds it. One run cannot see this; the depth series can. Library: `scope::market::patterns::depth_cycle`.
+
+### Changed
+- **Venues come from a catalog, not the binary.** The venue descriptors are a catalog in the repository (`crates/scope-core/venues/` with an `index.json` of SHA-256s), synced into `~/.scope-bca/venues/catalog/` by the new `scope venues update`, and fetched once by the first command that needs a venue. Each file is checked against its checksum and id, and the catalog folder is swapped in whole, so a failed update keeps the old one. Your files in `~/.scope-bca/venues/` still override a catalog venue. Offline with no catalog, scope says how to get venues and writes `example.yaml.sample`, a commented template. `market.venue_catalog_url` (or `venues update --url`) sets another catalog. `venues list` marks your own venues and shows both folders. Library: `VenueRegistry::default()` is empty; `VenueRegistry::load_from` is replaced by `load_dirs(catalog, user)`; new `scope::market::catalog`.
+- The bot-pattern advisory has its own section in `market summary` (before the health checks), the full TUI market view and `--report`: one signal per line, its name in a column and its evidence after it, grouped into trades and book, then the share of trades that look bot-made. The health-check line names the signals (`Bot patterns: 5 signs of market-making bots (jittered timer, bid ladder, …)`) instead of joining their evidence with `;`. Library: `Finding::label`, `Finding::detail`, `BotPatterns::format_text`, `BotPatterns::evidence`.
+- README: the install section leads with the prebuilt binaries per platform (Windows zip with the PATH step, Homebrew on macOS and Linux). `cargo install` comes after, with the note that on Windows it needs Visual Studio Build Tools (C++).
+
+### Fixed
+- A live audit of the venue catalog fixed every venue: OHLC failed on 8 of 11 (interval names, paths, response roots), Crypto.com failed entirely (its public API is GET now), and trade times in seconds (Kraken, Bitstamp) or ISO dates (Coinbase, read as 0) broke the time axes and the bot-pattern timing. Venue timestamps are now read as milliseconds whatever their unit; HTX reads its trade history instead of the last tick; Biconomy is asked for at most 100 trades; candles come back oldest first and at most the limit asked for; a venue that ignores the trade limit gives its newest trades.
+- `scope venues init` copies the catalog's descriptor files as they are. It re-serialised them before and dropped what its serialiser did not know, such as the `ohlc` capability, so the copies hid OHLC support for every venue.
+- `bot_like_volume_pct` reads `0`, not `-0.0`, when no trade is bot-like.
+
 ## [0.8.2] - 2026-10-24
 
 ### Added
@@ -416,7 +434,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Configuration system with YAML support
 - Support for ERC-20, SPL, and TRC-20 tokens
 
-[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.2...HEAD
+[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.3...HEAD
+[0.8.3]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.7.0...v0.8.0
