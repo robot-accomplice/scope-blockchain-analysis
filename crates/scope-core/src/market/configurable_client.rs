@@ -823,7 +823,7 @@ pub(crate) fn value_to_ms(val: &Value) -> Option<u64> {
             .and_then(|d| u64::try_from(d.timestamp_millis()).ok());
     }
     let v = value_to_f64(val)?;
-    if !(v > 0.0) {
+    if v.is_nan() || v <= 0.0 {
         return None;
     }
     let ms = if v < 1e11 {
