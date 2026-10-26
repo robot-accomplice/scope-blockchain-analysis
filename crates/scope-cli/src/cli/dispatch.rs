@@ -134,6 +134,9 @@ pub async fn dispatch_with(
     clients: &dyn ChainClientFactory,
     out: &Output,
 ) -> Result<()> {
+    if needs_venues(&command) {
+        crate::cli::venues::ensure_catalog(config, clients.http().as_ref(), out).await;
+    }
     match command {
         Commands::Completions(args) => {
             let mut cmd = Cli::command();
@@ -165,7 +168,7 @@ pub async fn dispatch_with(
         Commands::TokenHealth(args) => {
             crate::cli::token_health::run(args, config, clients, out).await
         }
-        Commands::Venues(cmd) => crate::cli::venues::run(cmd, out),
+        Commands::Venues(cmd) => crate::cli::venues::run(cmd, config, clients.http(), out).await,
         Commands::Report(cmd) => crate::cli::report::run(cmd, config, clients, out).await,
         Commands::Discover(args) => {
             crate::cli::discover::run(args, config.output.format, clients.http(), out)
@@ -181,6 +184,20 @@ pub async fn dispatch_with(
         Commands::Web(_) => Err(ScopeError::Other(
             "the web server cannot run from here; start it with `scope web`".into(),
         )),
+    }
+}
+
+/// True for a command that reads the venues, which fetches the catalog on
+/// first use. `venues update` and `venues init` fetch it themselves.
+fn needs_venues(command: &Commands) -> bool {
+    use crate::cli::venues::VenuesCommands;
+    match command {
+        Commands::Market(_)
+        | Commands::Monitor(_)
+        | Commands::TokenHealth(_)
+        | Commands::Insights(_) => true,
+        Commands::Venues(cmd) => matches!(cmd, VenuesCommands::List(_)),
+        _ => false,
     }
 }
 

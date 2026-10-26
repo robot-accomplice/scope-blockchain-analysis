@@ -1,0 +1,60 @@
+{
+  "schema": 1,
+  "venues": [
+    {
+      "id": "biconomy",
+      "file": "biconomy.yaml",
+      "sha256": "ada4796b47b0703c82cf37d19b1d1152d4818324c6a30b6c74252a4e92196817"
+    },
+    {
+      "id": "binance",
+      "file": "binance.yaml",
+      "sha256": "224d716f8236f94efc82b85a6e3f5545341a3e048a4009fd6a11d4245df0c2dc"
+    },
+    {
+      "id": "bitget",
+      "file": "bitget.yaml",
+      "sha256": "25355971fac3953b4f0bd3bb6b491a07eeb9443cf011ac4dfc2c91d1f43e0880"
+    },
+    {
+      "id": "bybit",
+      "file": "bybit.yaml",
+      "sha256": "d83897dd1cc429e98fc4108af001ba93ed5f45720afea8fd31c4def3043485c4"
+    },
+    {
+      "id": "coinbase",
+      "file": "coinbase.yaml",
+      "sha256": "c5392019ce933558f2c5e3c24d4e7a0b04a996048cae6858cf9c6bb718723845"
+    },
+    {
+      "id": "crypto_com",
+      "file": "crypto_com.yaml",
+      "sha256": "fe429c71bcf986fb66099bc1e66b17c7246e77e7e86027f69671e9bc5b0a5b81"
+    },
+    {
+      "id": "gateio",
+      "file": "gateio.yaml",
+      "sha256": "ef783ccf02bbf3fb739ccb3f87ab83ca9cf0a4e9728b39c770fe5ca081b48539"
+    },
+    {
+      "id": "htx",
+      "file": "htx.yaml",
+      "sha256": "f4834f7bd461ddf48e78375f603f4abf52efe2af8c76fad7642644656163ec0f"
+    },
+    {
+      "id": "kraken",
+      "file": "kraken.yaml",
+      "sha256": "33dbc3eb94813759c6a921efbd79ba664290662de6527e1b08aa57987f019b7a"
+    },
+    {
+      "id": "mexc",
+      "file": "mexc.yaml",
+      "sha256": "3599e2d8ba3ce36a01c0629dcae4d5d6806b83cba2dd6c0f89a7ddcf4162fd22"
+    },
+    {
+      "id": "okx",
+      "file": "okx.yaml",
+      "sha256": "19c8d608777aaad8a696db5c6020aaef76ce21177fcea7417ca190fb4c66b866"
+    }
+  ]
+}

@@ -252,7 +252,6 @@ mod tests {
     use super::*;
     use crate::market::descriptor::{CapabilitySet, SymbolCase, SymbolConfig, VenueDescriptor};
     use crate::market::pair::Pair;
-    use crate::market::registry::VenueRegistry;
     use std::collections::HashMap;
 
     fn make_empty_descriptor() -> VenueDescriptor {
@@ -275,7 +274,7 @@ mod tests {
 
     #[test]
     fn test_exchange_client_from_binance_descriptor() {
-        let registry = VenueRegistry::default();
+        let registry = crate::market::testing::catalog();
         let desc = registry.get("binance").unwrap();
         let client = ExchangeClient::from_descriptor_with_http(desc, crate::http::test_transport());
 
@@ -288,7 +287,7 @@ mod tests {
 
     #[test]
     fn test_exchange_client_format_pair() {
-        let registry = VenueRegistry::default();
+        let registry = crate::market::testing::catalog();
         let desc = registry.get("binance").unwrap();
         let client = ExchangeClient::from_descriptor_with_http(desc, crate::http::test_transport());
         assert_eq!(client.venue_symbol(&Pair::parse("ETH_USD")), "ETHUSD");
@@ -299,7 +298,7 @@ mod tests {
     /// `DAI_USDCUSDT`.
     #[test]
     fn test_dai_usdc_on_binance_is_daiusdc() {
-        let registry = VenueRegistry::default();
+        let registry = crate::market::testing::catalog();
         let client = ExchangeClient::from_descriptor_with_http(
             registry.get("binance").unwrap(),
             crate::http::test_transport(),
@@ -309,7 +308,7 @@ mod tests {
 
     #[test]
     fn test_exchange_client_all_venues() {
-        let registry = VenueRegistry::default();
+        let registry = crate::market::testing::catalog();
         for venue_id in registry.list() {
             let desc = registry.get(venue_id).unwrap();
             let client =
@@ -326,7 +325,7 @@ mod tests {
 
     #[test]
     fn test_exchange_client_debug() {
-        let registry = VenueRegistry::default();
+        let registry = crate::market::testing::catalog();
         let desc = registry.get("okx").unwrap();
         let client = ExchangeClient::from_descriptor_with_http(desc, crate::http::test_transport());
         let debug = format!("{:?}", client);
@@ -336,7 +335,7 @@ mod tests {
 
     #[test]
     fn test_exchange_client_has_ohlc_for_binance() {
-        let registry = VenueRegistry::default();
+        let registry = crate::market::testing::catalog();
         let desc = registry.get("binance").unwrap();
         let client = ExchangeClient::from_descriptor_with_http(desc, crate::http::test_transport());
         assert!(client.has_ohlc());
