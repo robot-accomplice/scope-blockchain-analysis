@@ -8,10 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- The bot-pattern advisory catches USDN/USDT on weex after its bot changed: a **jittered timer** (trades every 30–60 s, spread out, never sooner; the gaps' CV under 0.35 and their 5th percentile at least 40% of the median, where real order flow is near 1 and 0) and **round notionals** (8 or more of a side's top 10 levels are whole quote amounts though their sizes are not whole). A shaped ladder survives one bump of up to 5% against its direction. JSON: findings `timer` and `round_notional`.
 - The repeating view (`market summary --every` in the TUI) names a bot on a timer: when the bid or ask depth is refilled at a steady period (rises of 25% or more, at least 4 refills at least 3 runs apart, periods within 20%) and drains between the refills, the Trends title shows `! Bot timer: bid and ask depth refill every 6m 30s (7 cycles)`, and the summary line on leaving the view adds it. One run cannot see this; the depth series can. Library: `scope::market::patterns::depth_cycle`.
 
 ### Changed
 - README: the install section leads with the prebuilt binaries per platform (Windows zip with the PATH step, Homebrew on macOS and Linux). `cargo install` comes after, with the note that on Windows it needs Visual Studio Build Tools (C++).
+
+### Fixed
+- `bot_like_volume_pct` reads `0`, not `-0.0`, when no trade is bot-like.
 
 ## [0.8.2] - 2026-10-24
 
