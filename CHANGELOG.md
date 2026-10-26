@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The repeating view (`market summary --every` in the TUI) names a bot on a timer: when the bid or ask depth is refilled at a steady period (rises of 25% or more, at least 4 refills at least 3 runs apart, periods within 20%) and drains between the refills, the Trends title shows `! Bot timer: bid and ask depth refill every 6m 30s (7 cycles)`, and the summary line on leaving the view adds it. One run cannot see this; the depth series can. Library: `scope::market::patterns::depth_cycle`.
 
 ### Changed
+- The bot-pattern advisory has its own section in `market summary` (before the health checks), the full TUI market view and `--report`: one signal per line, its name in a column and its evidence after it, grouped into trades and book, then the share of trades that look bot-made. The health-check line names the signals (`Bot patterns: 5 signs of market-making bots (jittered timer, bid ladder, …)`) instead of joining their evidence with `;`. Library: `Finding::label`, `Finding::detail`, `BotPatterns::format_text`, `BotPatterns::evidence`.
 - README: the install section leads with the prebuilt binaries per platform (Windows zip with the PATH step, Homebrew on macOS and Linux). `cargo install` comes after, with the note that on Windows it needs Visual Studio Build Tools (C++).
 
 ### Fixed

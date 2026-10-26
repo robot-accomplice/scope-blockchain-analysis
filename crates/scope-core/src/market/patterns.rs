@@ -727,8 +727,31 @@ fn step(pct: f64) -> String {
 }
 
 impl Finding {
-    /// One clause of evidence for the advisory line.
-    pub fn describe(&self) -> String {
+    /// The short name of the signal: `Jittered timer`, `Bid ladder`.
+    pub fn label(&self) -> String {
+        let side = |side: &BookSide| match side {
+            BookSide::Bid => "Bid",
+            BookSide::Ask => "Ask",
+        };
+        match self {
+            Finding::RepeatedSize { .. } => "Repeated size".to_string(),
+            Finding::FewSizes { .. } => "Few sizes".to_string(),
+            Finding::Metronome { .. } => "Metronome".to_string(),
+            Finding::Cadence { .. } => "Cadence".to_string(),
+            Finding::Timer { .. } => "Jittered timer".to_string(),
+            Finding::PingPong { .. } => "Ping-pong".to_string(),
+            Finding::Ladder { side: s, .. } => format!("{} ladder", side(s)),
+            Finding::RoundNotional { side: s, .. } => format!("{} round notionals", side(s)),
+        }
+    }
+
+    /// True for a signal read in the book, false for one in the trades.
+    pub fn in_book(&self) -> bool {
+        matches!(self, Finding::Ladder { .. } | Finding::RoundNotional { .. })
+    }
+
+    /// The evidence, without the label.
+    pub fn detail(&self) -> String {
         match self {
             Finding::RepeatedSize { size, count, of } => format!(
                 "{:.0}% of {of} trades are exactly {}",
@@ -777,22 +800,18 @@ impl Finding {
                 gaps,
                 ..
             } => format!(
-                "90% of {gaps} gaps between trades are {:.0}–{:.0}s (median {:.0}s): a timer with jitter",
+                "90% of {gaps} gaps between trades are {:.0}–{:.0}s (median {:.0}s)",
                 low_ms / 1000.0,
                 high_ms / 1000.0,
                 median_ms / 1000.0
             ),
             Finding::RoundNotional {
-                side,
                 levels,
                 of,
                 examples,
+                ..
             } => format!(
-                "{} book: {levels} of {of} levels are whole quote amounts ({}, …)",
-                match side {
-                    BookSide::Bid => "bid",
-                    BookSide::Ask => "ask",
-                },
+                "{levels} of {of} levels are whole quote amounts ({}, …)",
                 examples
                     .iter()
                     .map(|v| short(*v))
@@ -800,21 +819,17 @@ impl Finding {
                     .join(", ")
             ),
             Finding::PingPong { pairs, share } => format!(
-                "{pairs} buy/sell ping-pong pairs ({:.0}% of trades)",
+                "{pairs} buy/sell pairs of one size, seconds apart ({:.0}% of trades)",
                 share * 100.0
             ),
             Finding::Ladder {
-                side,
                 levels,
                 shape,
                 size,
                 last_size,
                 step_pct,
+                ..
             } => {
-                let side = match side {
-                    BookSide::Bid => "bid",
-                    BookSide::Ask => "ask",
-                };
                 let sizes = match shape {
                     LadderShape::Even => format!("× {}", short(*size)),
                     LadderShape::Falling => {
@@ -824,35 +839,109 @@ impl Finding {
                         format!("rising {} → {}", short(*size), short(*last_size))
                     }
                 };
-                format!(
-                    "{side} ladder of {levels} levels {sizes} at {}% steps",
-                    step(*step_pct)
-                )
+                format!("{levels} levels {sizes} at {}% steps", step(*step_pct))
             }
         }
+    }
+
+    /// The label and the evidence: `Bid ladder: 9 levels falling …`.
+    pub fn describe(&self) -> String {
+        format!("{}: {}", self.label(), self.detail())
     }
 }
 
 impl BotPatterns {
-    /// The health check line. A finding warns; nothing found passes when
-    /// the tape was read; with no tape and no ladder it does not apply.
+    /// The share of the sampled trades, and of their volume, that a
+    /// repeated-size or ping-pong signal marks as bot-made, when any is.
+    pub fn share(&self) -> Option<String> {
+        let p = self.bot_like_pct.filter(|p| *p > 0.0)?;
+        Some(match self.bot_like_volume_pct {
+            Some(v) => format!("{p:.0}% of sampled trades ({v:.1}% of their volume) look bot-made"),
+            None => format!("{p:.0}% of sampled trades look bot-made"),
+        })
+    }
+
+    /// The report section: the signals in the trades, then those in the
+    /// book, one line each under its group, then the share.
+    ///
+    /// ```text
+    /// ├── Bot Patterns · likely market-making bots
+    /// │  Trades            500 sampled
+    /// │  ! Jittered timer         90% of 499 gaps between trades are 32–58s (median 46s)
+    /// │  Book              top levels of each side
+    /// │  ! Bid ladder             9 levels falling 560.112 → 110.1101 at 0.01% steps
+    /// ```
+    pub fn format_text(&self) -> String {
+        use crate::display::terminal as t;
+        let width = self
+            .findings
+            .iter()
+            .map(|f| f.label().chars().count())
+            .max()
+            .unwrap_or(0)
+            + 2;
+        let mut out = t::subsection_header("Bot Patterns · likely market-making bots");
+        out.push('\n');
+        let groups = [
+            ("Trades", false, format!("{} sampled", self.trades_sampled)),
+            ("Book", true, "top levels of each side".to_string()),
+        ];
+        for (name, in_book, about) in groups {
+            let found: Vec<&Finding> = self
+                .findings
+                .iter()
+                .filter(|f| f.in_book() == in_book)
+                .collect();
+            if found.is_empty() {
+                continue;
+            }
+            out.push_str(&t::kv_row(name, &about));
+            out.push('\n');
+            for f in found {
+                out.push_str(&t::labelled_warn(&f.label(), width, &f.detail()));
+                out.push('\n');
+            }
+        }
+        if let Some(note) = self
+            .tape_note
+            .as_ref()
+            .filter(|_| self.findings.iter().all(Finding::in_book))
+        {
+            out.push_str(&t::kv_row("Trades", &format!("not checked ({note})")));
+            out.push('\n');
+        }
+        if let Some(share) = self.share() {
+            out.push_str(&t::kv_row("Bot-like share", &share));
+            out.push('\n');
+        }
+        out
+    }
+
+    /// Every finding on its own line (`label: evidence`), then the share,
+    /// for a report that lists them.
+    pub fn evidence(&self) -> Vec<String> {
+        let mut lines: Vec<String> = self.findings.iter().map(Finding::describe).collect();
+        lines.extend(self.share());
+        lines
+    }
+
+    /// The health check line: a count and the signals' names, short enough
+    /// for a list of checks; the evidence goes in its own section. Nothing
+    /// found passes when the tape was read; with no tape and no book signal
+    /// it does not apply.
     pub fn check(&self) -> super::types::HealthCheck {
         use super::types::HealthCheck;
         if !self.findings.is_empty() {
-            let evidence: Vec<String> = self.findings.iter().map(Finding::describe).collect();
-            let share = match (
-                self.bot_like_pct.filter(|p| *p > 0.0),
-                self.bot_like_volume_pct,
-            ) {
-                (Some(p), Some(v)) => {
-                    format!("; {p:.0}% of sampled trades ({v:.1}% of their volume) look bot-made")
-                }
-                (Some(p), None) => format!("; {p:.0}% of sampled trades look bot-made"),
-                _ => String::new(),
-            };
+            let n = self.findings.len();
+            let names: Vec<String> = self
+                .findings
+                .iter()
+                .map(|f| f.label().to_lowercase())
+                .collect();
             return HealthCheck::Warn(format!(
-                "Bot patterns (likely market-making bots): {}{share}",
-                evidence.join("; ")
+                "Bot patterns: {n} {} of market-making bots ({})",
+                if n == 1 { "sign" } else { "signs" },
+                names.join(", ")
             ));
         }
         let book = if self.book_checked {
@@ -866,7 +955,7 @@ impl BotPatterns {
                 self.trades_sampled
             )),
             Some(why) if self.book_checked => HealthCheck::NotApplicable(format!(
-                "Bot patterns: no ladder in the book; trades not checked ({why})"
+                "Bot patterns: none in the book; trades not checked ({why})"
             )),
             Some(why) => HealthCheck::NotApplicable(format!("Bot patterns: not checked ({why})")),
         }
@@ -903,6 +992,24 @@ mod tests {
                 trade(ms, 1.0 + ((i * 11) % 7) as f64 * 0.0001, qty, side)
             })
             .collect()
+    }
+
+    /// `text` without ANSI colour codes (a test run in a terminal paints).
+    fn plain(text: &str) -> String {
+        let mut out = String::new();
+        let mut chars = text.chars();
+        while let Some(c) = chars.next() {
+            if c == '' {
+                for c in chars.by_ref() {
+                    if c == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
     }
 
     fn level(price: f64, quantity: f64) -> OrderBookLevel {
@@ -1043,9 +1150,10 @@ mod tests {
         assert_eq!(p.bot_like_pct, Some(90.0));
         let v = p.bot_like_volume_pct.unwrap();
         assert!(v < 0.05, "{v}");
-        let crate::market::types::HealthCheck::Warn(m) = p.check() else {
+        let crate::market::types::HealthCheck::Warn(_) = p.check() else {
             panic!()
         };
+        let m = p.evidence().join("\n");
         assert!(
             m.contains("90% of sampled trades (0.0% of their volume) look bot-made"),
             "{m}"
@@ -1093,13 +1201,13 @@ mod tests {
             tr.quantity = 1000.0;
         }
         let p = detect(Ok(&t), None);
-        let crate::market::types::HealthCheck::Warn(m) = p.check() else {
+        let crate::market::types::HealthCheck::Warn(_) = p.check() else {
             panic!("{:?}", p.check())
         };
+        // The check names the signals; the evidence is one line each.
+        let m = p.evidence().join("\n");
         assert!(
-            m.starts_with(
-                "Bot patterns (likely market-making bots): 50% of 100 trades are exactly 1000"
-            ),
+            m.starts_with("Repeated size: 50% of 100 trades are exactly 1000"),
             "{m}"
         );
         assert!(m.contains("50% of sampled trades ("), "{m}");
@@ -1159,7 +1267,7 @@ mod tests {
         let found = ladders(&bids, &[]);
         assert_eq!(found.len(), 1);
         let d = found[0].describe();
-        assert!(d.starts_with("bid ladder of 9 levels × 250 at "), "{d}");
+        assert!(d.starts_with("Bid ladder: 9 levels × 250 at "), "{d}");
     }
 
     #[test]
@@ -1172,10 +1280,12 @@ mod tests {
         let p = detect(Ok(&t), None);
         assert_eq!(p.bot_like_pct, Some(100.0));
         assert_eq!(p.bot_like_volume_pct, None);
-        let crate::market::types::HealthCheck::Warn(m) = p.check() else {
+        let crate::market::types::HealthCheck::Warn(_) = p.check() else {
             panic!("{:?}", p.check())
         };
-        assert!(m.ends_with("; 100% of sampled trades look bot-made"), "{m}");
+        // The check names the signals; the evidence is one line each.
+        let m = p.evidence().join("\n");
+        assert!(m.ends_with("\n100% of sampled trades look bot-made"), "{m}");
     }
 
     /// The USDN/USDT book on weex, read live on 2026-10-24: ten levels a
@@ -1264,20 +1374,22 @@ mod tests {
             "{:?}",
             p.findings
         );
-        let crate::market::types::HealthCheck::Warn(m) = p.check() else {
+        let crate::market::types::HealthCheck::Warn(_) = p.check() else {
             panic!("{:?}", p.check())
         };
+        // The check names the signals; the evidence is one line each.
+        let m = p.evidence().join("\n");
         assert!(
             m.contains("trades are one of 3 sizes: 498.11, 68.01, 500"),
             "{m}"
         );
         assert!(m.contains("gaps between trades are 45.0s ±2%"), "{m}");
         assert!(
-            m.contains("bid ladder of 9 levels falling 540.108 → 120.1201 at 0.01% steps"),
+            m.contains("Bid ladder: 9 levels falling 540.108 → 120.1201 at 0.01% steps"),
             "{m}"
         );
         assert!(
-            m.contains("ask ladder of 9 levels falling 1350 → 299.7002 at 0.01% steps"),
+            m.contains("Ask ladder: 9 levels falling 1350 → 299.7002 at 0.01% steps"),
             "{m}"
         );
     }
@@ -1547,25 +1659,31 @@ mod tests {
         let tape = jittered_tape(500);
         let (bids, asks) = weex_book_oct26();
         let p = detect(Ok(&tape), Some((&bids, &asks)));
-        let crate::market::types::HealthCheck::Warn(m) = p.check() else {
+        let crate::market::types::HealthCheck::Warn(_) = p.check() else {
             panic!("{:?}", p.check())
         };
+        // The check names the signals; the evidence is one line each.
+        let m = p.evidence().join("\n");
         assert!(m.contains("gaps between trades are 3"), "{m}");
-        assert!(m.contains("a timer with jitter"), "{m}");
+        assert!(m.contains("Jittered timer: 90% of"), "{m}");
         assert!(
-            m.contains("bid ladder of 9 levels falling 560.112 → 110.1101"),
+            m.contains("Bid ladder: 9 levels falling 560.112 → 110.1101"),
             "{m}"
         );
         assert!(
-            m.contains("ask ladder of 10 levels falling 2380 → 309.6903"),
+            m.contains("Ask ladder: 10 levels falling 2380 → 309.6903"),
             "{m}"
         );
         assert!(
-            m.contains("bid book: 9 of 10 levels are whole quote amounts (560, 460, 370, …)"),
+            m.contains(
+                "Bid round notionals: 9 of 10 levels are whole quote amounts (560, 460, 370, …)"
+            ),
             "{m}"
         );
         assert!(
-            m.contains("ask book: 10 of 10 levels are whole quote amounts (2380, 1440, 1190, …)"),
+            m.contains(
+                "Ask round notionals: 10 of 10 levels are whole quote amounts (2380, 1440, 1190, …)"
+            ),
             "{m}"
         );
         // No trade-share claim: a timer marks no one trade as the bot's.
@@ -1673,5 +1791,78 @@ mod tests {
             "{:?}",
             ladders(&bumped, &[])
         );
+    }
+
+    #[test]
+    fn test_the_check_names_the_signals_and_the_section_lists_them() {
+        let tape = jittered_tape(500);
+        let (bids, asks) = weex_book_oct26();
+        let p = detect(Ok(&tape), Some((&bids, &asks)));
+        assert_eq!(
+            p.check().message(),
+            "Bot patterns: 5 signs of market-making bots (jittered timer, bid ladder, ask ladder, bid round notionals, ask round notionals)"
+        );
+        let text = plain(&p.format_text());
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(
+            lines
+                .iter()
+                .take(2)
+                .any(|l| l.contains("Bot Patterns · likely market-making bots")),
+            "{text}"
+        );
+        // The trades group, then the book group, one signal a line.
+        let at = |needle: &str| {
+            lines
+                .iter()
+                .position(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("no {needle} in\n{text}"))
+        };
+        assert!(at("Trades") < at("! Jittered timer"), "{text}");
+        assert!(at("! Jittered timer") < at("Book"), "{text}");
+        assert!(at("Book") < at("! Bid ladder"), "{text}");
+        assert!(at("! Bid ladder") < at("! Ask round notionals"), "{text}");
+        assert!(lines[at("Trades")].contains("500 sampled"), "{text}");
+        // The evidence starts in one column after every label.
+        let column = |needle: &str| {
+            let l = lines[at(needle)];
+            l.find(needle).unwrap()
+                + needle.len()
+                + l[l.find(needle).unwrap() + needle.len()..].len()
+                - l[l.find(needle).unwrap() + needle.len()..]
+                    .trim_start()
+                    .len()
+        };
+        assert_eq!(
+            column("! Jittered timer"),
+            column("! Ask round notionals"),
+            "{text}"
+        );
+        // No share line: a timer and the book mark no one trade as bot-made.
+        assert!(!text.contains("Bot-like share"), "{text}");
+    }
+
+    #[test]
+    fn test_a_share_line_follows_trade_signals_and_a_book_only_finding_says_why_no_trades() {
+        let mut t = organic(100);
+        for tr in t.iter_mut().step_by(2) {
+            tr.quantity = 1000.0;
+        }
+        let text = plain(&detect(Ok(&t), None).format_text());
+        assert!(text.contains("! Repeated size"), "{text}");
+        assert!(text.contains("Bot-like share"), "{text}");
+        assert!(text.contains("50% of sampled trades ("), "{text}");
+        assert!(
+            !text.contains("Book "),
+            "no book group without book signals: {text}"
+        );
+        let (bids, asks) = weex_book_oct26();
+        let book_only = detect(Err("the venue has no trade endpoint"), Some((&bids, &asks)));
+        let text = plain(&book_only.format_text());
+        assert!(
+            text.contains("not checked (the venue has no trade endpoint)"),
+            "{text}"
+        );
+        assert!(text.contains("! Bid ladder"), "{text}");
     }
 }
