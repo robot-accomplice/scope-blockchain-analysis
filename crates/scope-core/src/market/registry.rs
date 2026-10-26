@@ -29,6 +29,10 @@ pub enum VenueSource {
 pub struct VenueRegistry {
     venues: HashMap<String, VenueDescriptor>,
     sources: HashMap<String, VenueSource>,
+    /// The catalog descriptors that a user file replaced, by id.
+    overridden: HashMap<String, VenueDescriptor>,
+    /// The user file each user venue came from, by id.
+    user_files: HashMap<String, PathBuf>,
 }
 
 impl VenueRegistry {
@@ -70,8 +74,17 @@ impl VenueRegistry {
             match std::fs::read_to_string(&path) {
                 Ok(contents) => match serde_saphyr::from_str::<VenueDescriptor>(&contents) {
                     Ok(desc) => {
-                        self.sources.insert(desc.id.clone(), source);
-                        self.venues.insert(desc.id.clone(), desc);
+                        let id = desc.id.clone();
+                        if source == VenueSource::User {
+                            self.user_files.insert(id.clone(), path.clone());
+                        }
+                        let previous = self.sources.insert(id.clone(), source);
+                        if let Some(replaced) = self.venues.insert(id.clone(), desc)
+                            && previous == Some(VenueSource::Catalog)
+                            && source == VenueSource::User
+                        {
+                            self.overridden.insert(id, replaced);
+                        }
                     }
                     Err(e) => {
                         crate::notice!(
@@ -95,6 +108,44 @@ impl VenueRegistry {
     /// Where `id`'s descriptor came from, if it is loaded.
     pub fn source(&self, id: &str) -> Option<VenueSource> {
         self.sources.get(id).copied()
+    }
+
+    /// The capabilities of the catalog's `id` that the user file replacing
+    /// it lacks: what the override hides (`["ohlc"]`). Empty when no user
+    /// file replaces `id`, or when it has them all.
+    pub fn hidden_capabilities(&self, id: &str) -> Vec<&'static str> {
+        let (Some(catalog), Some(yours)) = (self.overridden.get(id), self.venues.get(id)) else {
+            return Vec::new();
+        };
+        let have = yours.capability_names();
+        catalog
+            .capability_names()
+            .into_iter()
+            .filter(|c| !have.contains(c))
+            .collect()
+    }
+
+    /// The user file `id` came from, when it is a user venue.
+    pub fn user_file(&self, id: &str) -> Option<&std::path::Path> {
+        self.user_files.get(id).map(PathBuf::as_path)
+    }
+
+    /// How to get the catalog's `id` back when a user file hides some of
+    /// its capabilities: `None` when nothing is hidden.
+    pub fn override_hint(&self, id: &str) -> Option<String> {
+        let hidden = self.hidden_capabilities(id);
+        if hidden.is_empty() {
+            return None;
+        }
+        let file = self
+            .user_file(id)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| format!("{id}.yaml"));
+        Some(format!(
+            "Your venue file {file} overrides the catalog's {id}, which also has {}. \
+             Move your file out of the venues folder to use the catalog's.",
+            hidden.join(", ")
+        ))
     }
 
     /// List all available venue IDs, sorted alphabetically.
@@ -404,5 +455,55 @@ symbol:
                 "{id} formats no pair"
             );
         }
+    }
+
+    #[test]
+    fn test_a_user_file_that_hides_catalog_capabilities_says_so() {
+        let catalog_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("venues");
+        let user = tempfile::tempdir().unwrap();
+        // The user's weex with no ohlc, as written before the catalog had one.
+        let weex = std::fs::read_to_string(catalog_dir.join("weex.yaml")).unwrap();
+        let without_ohlc = &weex[..weex.find("\n  ohlc:").unwrap()];
+        std::fs::write(user.path().join("weex.yaml"), without_ohlc).unwrap();
+        // A full copy of binance hides nothing.
+        std::fs::copy(
+            catalog_dir.join("binance.yaml"),
+            user.path().join("binance.yaml"),
+        )
+        .unwrap();
+
+        let registry = VenueRegistry::load_dirs(&catalog_dir, user.path()).unwrap();
+        assert_eq!(registry.hidden_capabilities("weex"), ["ohlc"]);
+        let hint = registry.override_hint("weex").unwrap();
+        assert!(
+            hint.contains("overrides the catalog's weex, which also has ohlc"),
+            "{hint}"
+        );
+        assert!(hint.contains("weex.yaml"), "{hint}");
+        assert!(registry.hidden_capabilities("binance").is_empty());
+        assert!(registry.override_hint("binance").is_none());
+        // A catalog venue nobody overrides, and an unknown one.
+        assert!(registry.override_hint("kraken").is_none());
+        assert!(registry.override_hint("nope").is_none());
+        assert_eq!(
+            registry.user_file("weex"),
+            Some(user.path().join("weex.yaml").as_path())
+        );
+    }
+
+    #[test]
+    fn test_an_unreadable_venue_file_is_skipped() {
+        let user = tempfile::tempdir().unwrap();
+        // Not UTF-8: reading it as text fails, on every platform.
+        std::fs::write(user.path().join("bad.yaml"), [0xff, 0xfe, 0x00, 0x80]).unwrap();
+        let registry = VenueRegistry::load_dirs(&user.path().join("none"), user.path()).unwrap();
+        assert!(registry.is_empty());
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn test_the_deprecated_constructor_still_resolves() {
+        assert!(catalog().create_exchange_client("binance").is_ok());
+        assert!(catalog().create_exchange_client("nope").is_err());
     }
 }

@@ -286,7 +286,8 @@ pub struct TuiPicker {
 }
 
 impl TuiPicker {
-    async fn ask(&self, prompt: String, options: Vec<String>) -> Option<usize> {
+    /// Asks the TUI `prompt` with `options` in its list; `None` on cancel.
+    pub(crate) async fn ask(&self, prompt: String, options: Vec<String>) -> Option<usize> {
         let (reply, answer) = tokio::sync::oneshot::channel();
         let mut ask = Some(crate::cli::output::Ask {
             prompt,
