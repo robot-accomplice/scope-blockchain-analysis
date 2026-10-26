@@ -11,10 +11,16 @@
 //! - **Cadence:** most gaps between trades are one interval, even when a bot
 //!   trades in bursts with pauses between them (so the gaps as a whole are
 //!   not a metronome).
+//! - **Jittered timer:** the gaps are not one interval but stay in a band
+//!   (30–60 s, say), never much shorter: a timer with random jitter. Real
+//!   order flow has many near-zero gaps.
 //! - **Ping-pong:** a buy and a sell of the same size at nearly the same
 //!   price, seconds apart (the shape of wash trading).
 //! - **Ladder quotes:** consecutive book levels at even price steps whose
 //!   sizes are equal, or rise or fall level by level (a quoting curve).
+//! - **Round notionals:** most of a side's levels are whole quote amounts
+//!   (560.00 USDT) though their sizes are not whole: a bot sizes its quotes
+//!   by value; people size orders by quantity.
 //!
 //! Across the runs of a repeating summary, one more: a **depth cycle**, a
 //! side of the book refilled on a timer and drained between the refills
@@ -52,6 +58,14 @@ pub const MIN_GAPS: usize = 20;
 /// metronome.
 pub const METRONOME_MAX_CV: f64 = 0.10;
 
+/// Gaps whose standard deviation is under this share of their mean, with
+/// the floor below, are a jittered timer. Real order flow is near 1 or more.
+pub const TIMER_MAX_CV: f64 = 0.35;
+
+/// The 5th-percentile gap at or above this share of the median is a floor:
+/// a timer never fires early. Real order flow puts it near 0.
+pub const TIMER_MIN_FLOOR: f64 = 0.40;
+
 /// Gaps within this share of an interval count as that interval.
 pub const CADENCE_TOLERANCE: f64 = 0.02;
 
@@ -81,6 +95,20 @@ pub const LADDER_MIN_LEVELS: usize = 8;
 
 /// Levels of a ladder differ in size by at most this share.
 pub const LADDER_SIZE_TOLERANCE: f64 = 0.01;
+
+/// A level at most this much larger (or smaller) than the one before does
+/// not end a falling (or rising) ladder: one bump in a quoting curve.
+pub const LADDER_SHAPE_SLACK: f64 = 0.05;
+
+/// The round-notional signal reads this many levels from the top of a side.
+pub const ROUND_LEVELS: usize = 10;
+
+/// At least this many of those levels with a whole quote amount are a
+/// signal.
+pub const ROUND_MIN_LEVELS: usize = 8;
+
+/// A notional within this of a whole number is whole.
+const ROUND_TOLERANCE: f64 = 0.005;
 
 /// Price steps of a ladder differ by at most this share of the first step.
 pub const LADDER_STEP_TOLERANCE: f64 = 0.05;
@@ -139,6 +167,16 @@ pub enum Finding {
         share: f64,
         gaps: usize,
     },
+    /// The gaps between trade events run from `low_ms` (5th percentile) to
+    /// `high_ms` (95th) around `median_ms`, with a coefficient of variation
+    /// `cv`, over `gaps` gaps: a timer with jitter.
+    Timer {
+        low_ms: f64,
+        median_ms: f64,
+        high_ms: f64,
+        cv: f64,
+        gaps: usize,
+    },
     /// `pairs` buy/sell pairs of the same size, close in time and price,
     /// cover `share` of the trades.
     PingPong { pairs: usize, share: f64 },
@@ -153,6 +191,14 @@ pub enum Finding {
         last_size: f64,
         step_pct: f64,
     },
+    /// `levels` of the top `of` `side` levels are whole quote amounts (the
+    /// first few in `examples`) though their sizes are not whole.
+    RoundNotional {
+        side: BookSide,
+        levels: usize,
+        of: usize,
+        examples: Vec<f64>,
+    },
 }
 
 /// How a ladder's sizes run, from the best level out.
@@ -161,9 +207,11 @@ pub enum Finding {
 pub enum LadderShape {
     /// One size at every level.
     Even,
-    /// Each level is smaller than or as large as the one before.
+    /// Each level is smaller than or as large as the one before (or at
+    /// most [`LADDER_SHAPE_SLACK`] larger).
     Falling,
-    /// Each level is larger than or as large as the one before.
+    /// Each level is larger than or as large as the one before (or at most
+    /// [`LADDER_SHAPE_SLACK`] smaller).
     Rising,
 }
 
@@ -396,6 +444,32 @@ pub fn depth_cycle(points: &[(i64, f64)]) -> Option<DepthCycle> {
     })
 }
 
+/// Jittered timer: gaps between trade events with a median of at least
+/// [`CADENCE_MIN_GAP_MS`], a coefficient of variation under
+/// [`TIMER_MAX_CV`], and a 5th percentile at least [`TIMER_MIN_FLOOR`] of
+/// the median.
+pub fn timer(trades: &[Trade]) -> Option<Finding> {
+    if trades.len() < MIN_TRADES {
+        return None;
+    }
+    let mut gaps = event_gaps(trades.iter().map(|t| t.timestamp_ms).collect());
+    if gaps.len() < MIN_GAPS {
+        return None;
+    }
+    let (_, cv) = mean_cv(&gaps)?;
+    gaps.sort_by(f64::total_cmp);
+    let at = |q: f64| gaps[((gaps.len() - 1) as f64 * q).round() as usize];
+    let (low, median, high) = (at(0.05), at(0.5), at(0.95));
+    (median >= CADENCE_MIN_GAP_MS && cv < TIMER_MAX_CV && low >= median * TIMER_MIN_FLOOR)
+        .then_some(Finding::Timer {
+            low_ms: low,
+            median_ms: median,
+            high_ms: high,
+            cv,
+            gaps: gaps.len(),
+        })
+}
+
 /// Ping-pong: buy/sell pairs of the same size within
 /// [`PING_PONG_WINDOW_MS`] and [`PING_PONG_PRICE_TOLERANCE_PCT`]. Each trade
 /// is in one pair at most. Returns the finding and the paired trades.
@@ -466,7 +540,12 @@ fn ladder_side(levels: &[OrderBookLevel], side: BookSide) -> Option<Finding> {
         while end < levels.len() {
             let this_step = (levels[end].price - levels[end - 1].price).abs();
             let same_step = step > 0.0 && (this_step - step).abs() <= step * LADDER_STEP_TOLERANCE;
-            let d = size_direction(levels[end - 1].quantity, levels[end].quantity);
+            let (a, b) = (levels[end - 1].quantity, levels[end].quantity);
+            let mut d = size_direction(a, b);
+            // One bump of a few percent against the run does not end it.
+            if d != 0 && dir != 0 && d != dir && (b - a).abs() <= a * LADDER_SHAPE_SLACK {
+                d = 0;
+            }
             if !same_step || (d != 0 && dir != 0 && d != dir) {
                 break;
             }
@@ -505,6 +584,43 @@ fn ladder_side(levels: &[OrderBookLevel], side: BookSide) -> Option<Finding> {
         last_size: last,
         step_pct: step / levels[s].price * 100.0,
     })
+}
+
+/// Round notionals on one side: of the top [`ROUND_LEVELS`] levels, those
+/// whose price × size is a whole quote amount while the size is not whole.
+/// A whole size at a whole price is a person's order, not a sign.
+fn round_notional_side(levels: &[OrderBookLevel], side: BookSide) -> Option<Finding> {
+    let top: Vec<&OrderBookLevel> = levels
+        .iter()
+        .filter(|l| l.price > 0.0 && l.quantity > 0.0)
+        .take(ROUND_LEVELS)
+        .collect();
+    let round: Vec<f64> = top
+        .iter()
+        .filter_map(|l| {
+            let notional = l.price * l.quantity;
+            let whole = (notional - notional.round()).abs() < ROUND_TOLERANCE;
+            let whole_size = (l.quantity - l.quantity.round()).abs() < 1e-9;
+            (whole && !whole_size && notional.round() > 0.0).then_some(notional.round())
+        })
+        .collect();
+    (round.len() >= ROUND_MIN_LEVELS).then(|| Finding::RoundNotional {
+        side,
+        levels: round.len(),
+        of: top.len(),
+        examples: round.into_iter().take(3).collect(),
+    })
+}
+
+/// Round notionals on either side of a real exchange book.
+pub fn round_notionals(bids: &[OrderBookLevel], asks: &[OrderBookLevel]) -> Vec<Finding> {
+    [
+        round_notional_side(bids, BookSide::Bid),
+        round_notional_side(asks, BookSide::Ask),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 /// Ladder quotes on either side of a real exchange book.
@@ -548,7 +664,8 @@ pub fn detect(
                 findings.push(f);
             }
             // A cadence only when the gaps are not a metronome already.
-            if let Some(f) = metronome(t).or_else(|| cadence(t)) {
+            // A jittered timer only when no stricter timing signal fits.
+            if let Some(f) = metronome(t).or_else(|| cadence(t)).or_else(|| timer(t)) {
                 findings.push(f);
             }
             if let Some((f, idx)) = ping_pong(t) {
@@ -565,11 +682,13 @@ pub fn detect(
                 .filter(|(_, c)| **c)
                 .map(|(tr, _)| value(tr))
                 .sum();
-            bot_like_volume_pct = (total > 0.0).then(|| bot / total * 100.0);
+            // `+ 0.0`: an empty f64 sum is -0.0, which would print as `-0.0`.
+            bot_like_volume_pct = (total > 0.0).then(|| bot / total * 100.0 + 0.0);
         }
     }
     if let Some((bids, asks)) = book {
         findings.extend(ladders(bids, asks));
+        findings.extend(round_notionals(bids, asks));
     }
     BotPatterns {
         trades_sampled: sampled,
@@ -650,6 +769,35 @@ impl Finding {
                 share * 100.0,
                 gap_ms / 1000.0,
                 CADENCE_TOLERANCE * 100.0
+            ),
+            Finding::Timer {
+                low_ms,
+                median_ms,
+                high_ms,
+                gaps,
+                ..
+            } => format!(
+                "90% of {gaps} gaps between trades are {:.0}–{:.0}s (median {:.0}s): a timer with jitter",
+                low_ms / 1000.0,
+                high_ms / 1000.0,
+                median_ms / 1000.0
+            ),
+            Finding::RoundNotional {
+                side,
+                levels,
+                of,
+                examples,
+            } => format!(
+                "{} book: {levels} of {of} levels are whole quote amounts ({}, …)",
+                match side {
+                    BookSide::Bid => "bid",
+                    BookSide::Ask => "ask",
+                },
+                examples
+                    .iter()
+                    .map(|v| short(*v))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
             Finding::PingPong { pairs, share } => format!(
                 "{pairs} buy/sell ping-pong pairs ({:.0}% of trades)",
@@ -1104,13 +1252,15 @@ mod tests {
                 Finding::FewSizes { .. } => "few",
                 Finding::Metronome { .. } => "metronome",
                 Finding::Cadence { .. } => "cadence",
+                Finding::Timer { .. } => "timer",
+                Finding::RoundNotional { .. } => "round",
                 Finding::PingPong { .. } => "ping-pong",
                 Finding::Ladder { .. } => "ladder",
             })
             .collect();
         assert_eq!(
             kinds,
-            ["few", "cadence", "ladder", "ladder"],
+            ["few", "cadence", "ladder", "ladder", "round", "round"],
             "{:?}",
             p.findings
         );
@@ -1334,5 +1484,194 @@ mod tests {
         let flat: Vec<(i64, f64)> = (0..100).map(|i| (i * 30_000, 2_000.0)).collect();
         assert!(depth_cycle(&flat).is_none());
         assert!(depth_cycle(&[]).is_none());
+    }
+
+    /// The USDN/USDT book on weex, read live on 2026-10-26: whole USDT
+    /// amounts at every level but the partly filled best bid, and one bump
+    /// (370 → 380) in the falling bids.
+    fn weex_book_oct26() -> (Vec<OrderBookLevel>, Vec<OrderBookLevel>) {
+        let bids = [
+            (0.9999, 389.6396),
+            (0.9998, 560.112),
+            (0.9997, 460.138),
+            (0.9996, 370.148),
+            (0.9995, 380.19),
+            (0.9994, 340.2041),
+            (0.9993, 310.2171),
+            (0.9992, 230.1841),
+            (0.9991, 160.1441),
+            (0.9990, 110.1101),
+            (0.0022, 3636.3636),
+        ];
+        let asks = [
+            (1.0001, 2379.762),
+            (1.0002, 1439.712),
+            (1.0003, 1189.6431),
+            (1.0004, 1009.5962),
+            (1.0005, 989.5052),
+            (1.0006, 919.4483),
+            (1.0007, 769.4614),
+            (1.0008, 579.5363),
+            (1.0009, 399.6403),
+            (1.0010, 309.6903),
+        ];
+        let side = |l: &[(f64, f64)]| l.iter().map(|&(p, q)| level(p, q)).collect();
+        (side(&bids), side(&asks))
+    }
+
+    /// The weex USDN tape on 2026-10-26: a trade every 30–60 s (spread
+    /// evenly, never sooner), every size different, buys and sells in
+    /// blocks.
+    fn jittered_tape(n: u64) -> Vec<Trade> {
+        let mut ms = 1_000_000;
+        (0..n)
+            .map(|i| {
+                ms += 30_000 + (i * 7_919 + i * i * 13) % 30_000;
+                let side = if (i / 9) % 2 == 0 {
+                    TradeSide::Buy
+                } else {
+                    TradeSide::Sell
+                };
+                trade(
+                    ms,
+                    1.0001,
+                    5.0 + (i * 37 % 431) as f64 + i as f64 / 100.0,
+                    side,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_the_oct26_weex_bot_is_caught_by_timer_round_notionals_and_ladders() {
+        let tape = jittered_tape(500);
+        let (bids, asks) = weex_book_oct26();
+        let p = detect(Ok(&tape), Some((&bids, &asks)));
+        let crate::market::types::HealthCheck::Warn(m) = p.check() else {
+            panic!("{:?}", p.check())
+        };
+        assert!(m.contains("gaps between trades are 3"), "{m}");
+        assert!(m.contains("a timer with jitter"), "{m}");
+        assert!(
+            m.contains("bid ladder of 9 levels falling 560.112 → 110.1101"),
+            "{m}"
+        );
+        assert!(
+            m.contains("ask ladder of 10 levels falling 2380 → 309.6903"),
+            "{m}"
+        );
+        assert!(
+            m.contains("bid book: 9 of 10 levels are whole quote amounts (560, 460, 370, …)"),
+            "{m}"
+        );
+        assert!(
+            m.contains("ask book: 10 of 10 levels are whole quote amounts (2380, 1440, 1190, …)"),
+            "{m}"
+        );
+        // No trade-share claim: a timer marks no one trade as the bot's.
+        assert!(!m.contains("look bot-made"), "{m}");
+        assert_eq!(
+            p.bot_like_volume_pct.map(|v| v.to_string()),
+            Some("0".to_string())
+        );
+    }
+
+    #[test]
+    fn test_a_jittered_timer_is_found_and_real_order_flow_is_not() {
+        let Some(Finding::Timer {
+            low_ms,
+            median_ms,
+            high_ms,
+            cv,
+            ..
+        }) = timer(&jittered_tape(400))
+        else {
+            panic!("{:?}", timer(&jittered_tape(400)))
+        };
+        assert!(
+            low_ms >= 30_000.0 && high_ms <= 60_000.0,
+            "{low_ms} {high_ms}"
+        );
+        assert!((40_000.0..50_000.0).contains(&median_ms), "{median_ms}");
+        assert!(cv < 0.25, "{cv}");
+        // Real order flow: many near-zero gaps and a long tail (gaps that
+        // grow geometrically through each block, as Poisson arrivals do).
+        let mut ms = 0;
+        let poisson: Vec<Trade> = (0..400u64)
+            .map(|i| {
+                ms += [50, 120, 400, 900, 2_500, 6_000, 15_000, 40_000, 110_000]
+                    [(i * 7 % 9) as usize];
+                trade(ms, 1.0, 5.0 + i as f64, TradeSide::Buy)
+            })
+            .collect();
+        assert!(timer(&poisson).is_none(), "{:?}", timer(&poisson));
+        assert!(timer(&organic(300)).is_none());
+        // A jitter band under 5 s is not judged (whole-second stamps).
+        let fast: Vec<Trade> = (0..100u64)
+            .map(|i| {
+                trade(
+                    i * 2_000 + (i % 3) * 500,
+                    1.0,
+                    5.0 + i as f64,
+                    TradeSide::Buy,
+                )
+            })
+            .collect();
+        assert!(timer(&fast).is_none(), "{:?}", timer(&fast));
+    }
+
+    #[test]
+    fn test_round_notionals_need_most_levels_and_sizes_that_are_not_whole() {
+        let (bids, asks) = weex_book_oct26();
+        assert_eq!(round_notionals(&bids, &asks).len(), 2);
+        // Six of ten, as on gate.io USDC/USDT: not enough.
+        let six: Vec<_> = (0..10)
+            .map(|i| {
+                let price = 0.9999 - i as f64 * 0.0001;
+                let qty = if i < 6 {
+                    (300.0 + i as f64 * 10.0) / price
+                } else {
+                    123.4567 + i as f64
+                };
+                level(price, qty)
+            })
+            .collect();
+        assert!(round_notionals(&six, &[]).is_empty());
+        // Whole sizes at a whole price are people's orders.
+        let people: Vec<_> = (0..10)
+            .map(|i| level(1.0, 100.0 + i as f64 * 50.0))
+            .collect();
+        assert!(round_notionals(&[], &people).is_empty());
+    }
+
+    #[test]
+    fn test_one_small_bump_does_not_end_a_shaped_ladder_but_a_big_one_does() {
+        let (bids, _) = weex_book_oct26();
+        let found = ladders(&bids, &[]);
+        assert!(
+            matches!(
+                found[..],
+                [Finding::Ladder {
+                    levels: 9,
+                    shape: LadderShape::Falling,
+                    ..
+                }]
+            ),
+            "{found:?}"
+        );
+        // A 10% bump ends the run: 4 + 6 levels, no ladder of 8.
+        let sizes = [
+            900.0, 800.0, 700.0, 600.0, 660.0, 500.0, 400.0, 300.0, 200.0, 100.0,
+        ];
+        let bumped: Vec<_> = sizes
+            .iter()
+            .enumerate()
+            .map(|(i, &q)| level(0.9999 - i as f64 * 0.0001, q))
+            .collect();
+        assert!(
+            ladders(&bumped, &[]).is_empty(),
+            "{:?}",
+            ladders(&bumped, &[])
+        );
     }
 }
