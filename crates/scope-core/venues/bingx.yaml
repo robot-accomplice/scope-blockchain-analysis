@@ -1,0 +1,69 @@
+id: bingx
+name: BingX Spot
+base_url: https://open-api.bingx.com
+timeout_secs: 15
+rate_limit_per_sec: 10
+
+symbol:
+  template: "{base}-{quote}"
+  default_quote: USDT
+
+error_envelope:
+  code_key: code
+  ok_codes: ["0"]
+  message_key: msg
+
+capabilities:
+  order_book:
+    path: /openApi/spot/v1/market/depth
+    params:
+      symbol: "{pair}"
+      limit: "100"
+    response_root: data
+    response:
+      asks_key: asks
+      bids_key: bids
+      level_format: positional
+
+  ticker:
+    path: /openApi/spot/v1/ticker/24hr
+    params:
+      symbol: "{pair}"
+    response_root: "data.0"
+    response:
+      last_price: lastPrice
+      high_24h: highPrice
+      low_24h: lowPrice
+      volume_24h: volume
+      quote_volume_24h: quoteVolume
+      best_bid: bidPrice
+      best_ask: askPrice
+
+  trades:
+    path: /openApi/spot/v1/market/trades
+    params:
+      symbol: "{pair}"
+      limit: "{limit}"
+    max_limit: 100
+    response_root: data
+    response:
+      price: price
+      quantity: qty
+      timestamp_ms: time
+      id: id
+      side:
+        field: buyerMaker
+        mapping:
+          "true": sell
+          "false": buy
+
+  ohlc:
+    path: /openApi/spot/v2/market/kline
+    params:
+      symbol: "{pair}"
+      interval: "{interval}"
+      limit: "{limit}"
+    response_root: data
+    response:
+      ohlc_format: array_of_arrays
+      ohlc_fields: [open_time, open, high, low, close, volume, close_time]

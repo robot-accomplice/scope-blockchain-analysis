@@ -1,0 +1,68 @@
+id: bitstamp
+name: Bitstamp
+base_url: https://www.bitstamp.net/api/v2
+timeout_secs: 15
+rate_limit_per_sec: 8
+
+symbol:
+  template: "{base}{quote}"
+  default_quote: USD
+  case: lower
+
+capabilities:
+  order_book:
+    path: /order_book/{pair}/
+    response:
+      asks_key: asks
+      bids_key: bids
+      level_format: positional
+
+  ticker:
+    path: /ticker/{pair}/
+    response:
+      last_price: last
+      high_24h: high
+      low_24h: low
+      volume_24h: volume
+      best_bid: bid
+      best_ask: ask
+
+  trades:
+    # The trades of the last hour; times in seconds; type 0 is a buy.
+    path: /transactions/{pair}/
+    params:
+      time: hour
+    response:
+      price: price
+      quantity: amount
+      timestamp_ms: date
+      id: tid
+      side:
+        field: type
+        mapping:
+          "0": buy
+          "1": sell
+
+  ohlc:
+    path: /ohlc/{pair}/
+    params:
+      step: "{interval}"
+      limit: "{limit}"
+    max_limit: 1000
+    interval_map:
+      "1m": "60"
+      "5m": "300"
+      "15m": "900"
+      "30m": "1800"
+      "1h": "3600"
+      "4h": "14400"
+      "1d": "86400"
+    response_root: "data.ohlc"
+    response:
+      ohlc_format: objects
+      open_time: timestamp
+      open: open
+      high: high
+      low: low
+      close: close
+      ohlc_volume: volume
