@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- The jittered-timer signal catches a timer bot that rests between bursts (USDN/USDT on weex, evening of 2026-10-26: trades every 30–60 s, then 7–25 minute pauses). It judges the share of gaps within ±50% of the median gap (at least 70%; random arrivals give about 35%) instead of the spread of all gaps, which a few long pauses blow up. The evidence names the pauses: `96% of 499 gaps between trades are 31–62s (median 45s), in bursts with 17 long pauses`. JSON: a `timer` finding adds `share` and `pauses`.
+
 ## [0.8.3] - 2026-10-26
 
 ### Added

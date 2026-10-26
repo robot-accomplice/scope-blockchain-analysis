@@ -58,9 +58,14 @@ pub const MIN_GAPS: usize = 20;
 /// metronome.
 pub const METRONOME_MAX_CV: f64 = 0.10;
 
-/// Gaps whose standard deviation is under this share of their mean, with
-/// the floor below, are a jittered timer. Real order flow is near 1 or more.
-pub const TIMER_MAX_CV: f64 = 0.35;
+/// At least this share of the gaps within [`TIMER_BAND`] of the median gap,
+/// with the floor below, is a jittered timer. Random arrivals put about 35%
+/// there. A share, not the gaps' spread: a bot that pauses between bursts
+/// has a few long gaps that blow the spread up but leave the share.
+pub const TIMER_BAND_SHARE: f64 = 0.70;
+
+/// The band around the median gap that a jittered timer stays in: ±50%.
+pub const TIMER_BAND: f64 = 0.50;
 
 /// The 5th-percentile gap at or above this share of the median is a floor:
 /// a timer never fires early. Real order flow puts it near 0.
@@ -167,15 +172,18 @@ pub enum Finding {
         share: f64,
         gaps: usize,
     },
-    /// The gaps between trade events run from `low_ms` (5th percentile) to
-    /// `high_ms` (95th) around `median_ms`, with a coefficient of variation
-    /// `cv`, over `gaps` gaps: a timer with jitter.
+    /// `share` of `gaps` gaps between trade events run from `low_ms` to
+    /// `high_ms` around `median_ms` (a timer with jitter); `pauses` gaps are
+    /// far longer (the bot resting between bursts). `cv` is the spread of
+    /// all the gaps.
     Timer {
         low_ms: f64,
         median_ms: f64,
         high_ms: f64,
         cv: f64,
         gaps: usize,
+        share: f64,
+        pauses: usize,
     },
     /// `pairs` buy/sell pairs of the same size, close in time and price,
     /// cover `share` of the trades.
@@ -459,14 +467,26 @@ pub fn timer(trades: &[Trade]) -> Option<Finding> {
     let (_, cv) = mean_cv(&gaps)?;
     gaps.sort_by(f64::total_cmp);
     let at = |q: f64| gaps[((gaps.len() - 1) as f64 * q).round() as usize];
-    let (low, median, high) = (at(0.05), at(0.5), at(0.95));
-    (median >= CADENCE_MIN_GAP_MS && cv < TIMER_MAX_CV && low >= median * TIMER_MIN_FLOOR)
-        .then_some(Finding::Timer {
-            low_ms: low,
+    let (floor, median) = (at(0.05), at(0.5));
+    let band: Vec<f64> = gaps
+        .iter()
+        .copied()
+        .filter(|g| (g - median).abs() <= median * TIMER_BAND)
+        .collect();
+    let share = band.len() as f64 / gaps.len() as f64;
+    (median >= CADENCE_MIN_GAP_MS && share >= TIMER_BAND_SHARE && floor >= median * TIMER_MIN_FLOOR)
+        .then(|| Finding::Timer {
+            // The band's own range: what the timer's gaps are.
+            low_ms: band[0],
             median_ms: median,
-            high_ms: high,
+            high_ms: band[band.len() - 1],
             cv,
             gaps: gaps.len(),
+            share,
+            pauses: gaps
+                .iter()
+                .filter(|g| **g > median * (1.0 + TIMER_BAND) * 4.0)
+                .count(),
         })
 }
 
@@ -798,12 +818,20 @@ impl Finding {
                 median_ms,
                 high_ms,
                 gaps,
+                share,
+                pauses,
                 ..
             } => format!(
-                "90% of {gaps} gaps between trades are {:.0}–{:.0}s (median {:.0}s)",
+                "{:.0}% of {gaps} gaps between trades are {:.0}–{:.0}s (median {:.0}s){}",
+                share * 100.0,
                 low_ms / 1000.0,
                 high_ms / 1000.0,
-                median_ms / 1000.0
+                median_ms / 1000.0,
+                match pauses {
+                    0 => String::new(),
+                    1 => ", in bursts with 1 long pause".to_string(),
+                    n => format!(", in bursts with {n} long pauses"),
+                }
             ),
             Finding::RoundNotional {
                 levels,
@@ -1664,8 +1692,11 @@ mod tests {
         };
         // The check names the signals; the evidence is one line each.
         let m = p.evidence().join("\n");
-        assert!(m.contains("gaps between trades are 3"), "{m}");
-        assert!(m.contains("Jittered timer: 90% of"), "{m}");
+        assert!(
+            m.contains("100% of 499 gaps between trades are 30–60s"),
+            "{m}"
+        );
+        assert!(m.contains("Jittered timer: 100% of"), "{m}");
         assert!(
             m.contains("Bid ladder: 9 levels falling 560.112 → 110.1101"),
             "{m}"
@@ -1864,5 +1895,58 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("! Bid ladder"), "{text}");
+    }
+
+    /// The weex USDN tape on the evening of 2026-10-26: the same 30–60 s
+    /// jittered timer, but in bursts of nine with an 18–25 minute pause.
+    fn bursts_with_pauses(n: u64) -> Vec<Trade> {
+        let mut ms = 1_000_000;
+        (0..n)
+            .map(|i| {
+                ms += if i % 9 == 8 {
+                    1_080_000 + (i * 7_919) % 420_000
+                } else {
+                    30_000 + (i * 7_919 + i * i * 13) % 30_000
+                };
+                trade(
+                    ms,
+                    1.0001,
+                    5.0 + (i * 37 % 431) as f64 + i as f64 / 100.0,
+                    TradeSide::Buy,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_a_timer_that_pauses_between_bursts_is_still_a_timer() {
+        let t = bursts_with_pauses(500);
+        let Some(
+            f @ Finding::Timer {
+                share, pauses, cv, ..
+            },
+        ) = timer(&t)
+        else {
+            panic!("{:?}", timer(&t))
+        };
+        assert!(cv > 1.0, "the pauses blow the spread up: {cv}");
+        assert!(share > 0.85, "{share}");
+        assert!(pauses >= 50, "{pauses}");
+        assert!(f.detail().contains("in bursts with"), "{}", f.detail());
+    }
+
+    #[test]
+    fn test_random_arrivals_with_a_long_median_gap_are_not_a_timer() {
+        // Exponential gaps (mean 60 s) from evenly spread quantiles: a quiet
+        // market where real orders arrive at random.
+        let mut ms = 0u64;
+        let t: Vec<Trade> = (0..500u64)
+            .map(|i| {
+                let u = ((i as f64 + 0.5) * 0.618_034) % 1.0;
+                ms += (-(1.0 - u).ln() * 60_000.0) as u64 + 1;
+                trade(ms, 1.0, 5.0 + i as f64, TradeSide::Buy)
+            })
+            .collect();
+        assert!(timer(&t).is_none(), "{:?}", timer(&t));
     }
 }
