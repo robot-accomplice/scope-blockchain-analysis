@@ -453,9 +453,9 @@ pub fn depth_cycle(points: &[(i64, f64)]) -> Option<DepthCycle> {
 }
 
 /// Jittered timer: gaps between trade events with a median of at least
-/// [`CADENCE_MIN_GAP_MS`], a coefficient of variation under
-/// [`TIMER_MAX_CV`], and a 5th percentile at least [`TIMER_MIN_FLOOR`] of
-/// the median.
+/// [`CADENCE_MIN_GAP_MS`], at least [`TIMER_BAND_SHARE`] of them within
+/// [`TIMER_BAND`] of the median, and a 5th percentile at least
+/// [`TIMER_MIN_FLOOR`] of the median.
 pub fn timer(trades: &[Trade]) -> Option<Finding> {
     if trades.len() < MIN_TRADES {
         return None;
