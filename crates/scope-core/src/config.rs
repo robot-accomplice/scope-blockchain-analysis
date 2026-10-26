@@ -215,6 +215,20 @@ impl Default for GholaConfig {
 pub struct MarketConfig {
     /// Order book health thresholds. Keys left out keep the built-in default.
     pub health: HealthThresholds,
+    /// Where `scope venues update` fetches the venue catalog from (a folder
+    /// URL holding `index.json`). Unset: the scope repository's catalog.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub venue_catalog_url: Option<String>,
+}
+
+impl MarketConfig {
+    /// The venue catalog's URL: the configured one, else the default.
+    pub fn catalog_url(&self) -> &str {
+        self.venue_catalog_url
+            .as_deref()
+            .filter(|u| !u.trim().is_empty())
+            .unwrap_or(crate::market::catalog::DEFAULT_CATALOG_URL)
+    }
 }
 
 /// Web server configuration.

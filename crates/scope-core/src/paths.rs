@@ -120,9 +120,30 @@ fn sandbox() -> PathBuf {
             // may have left its files here, such as a saved token choice
             // that made a later run's ambiguous token resolve.
             let _ = std::fs::remove_dir_all(&dir);
+            seed_catalog(&dir.join(HOME_DIR_NAME).join("venues").join("catalog"));
             dir
         })
         .clone()
+}
+
+/// Installs the repo's venue catalog in a fresh sandbox, as
+/// `scope venues update` would: no venue is compiled in, and the code under
+/// test reads the catalog from the scope home like a user's install.
+#[cfg(any(test, feature = "test-support"))]
+fn seed_catalog(dest: &std::path::Path) {
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("venues");
+    let Ok(entries) = std::fs::read_dir(&repo) else {
+        return;
+    };
+    if std::fs::create_dir_all(dest).is_err() {
+        return;
+    }
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() {
+            let _ = std::fs::copy(&path, dest.join(entry.file_name()));
+        }
+    }
 }
 
 #[cfg(test)]

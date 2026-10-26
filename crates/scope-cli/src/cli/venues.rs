@@ -6,11 +6,16 @@
 use crate::cli::output::Output;
 use crate::outln;
 use clap::{Args, Subcommand};
+use scope::config::Config;
 use scope::display::terminal::{
-    check_fail, check_pass, kv_row, section_footer, section_header, separator,
+    check_fail, check_pass, info_row, kv_row, section_footer, section_header, separator,
 };
 use scope::error::Result;
-use scope::market::{MarketVenue, VenueDescriptor, VenueRegistry};
+use scope::http::HttpClient;
+use scope::market::catalog;
+use scope::market::registry::VenueSource;
+use scope::market::{MarketVenue, VenueRegistry};
+use std::sync::Arc;
 
 /// Venue management subcommands.
 ///
@@ -30,8 +35,9 @@ use scope::market::{MarketVenue, VenueDescriptor, VenueRegistry};
 pub enum VenuesCommands {
     /// List all available exchange venues and their capabilities.
     ///
-    /// Shows built-in and user-defined CEX venues with their supported
-    /// API capabilities (order_book, ticker, trades), then the DEX venues.
+    /// Shows the catalog's and your own CEX venues with their supported
+    /// API capabilities (order_book, ticker, trades, ohlc), then the DEX
+    /// venues.
     ///
     /// # Examples
     ///
@@ -54,10 +60,26 @@ pub enum VenuesCommands {
     /// ```
     Schema(SchemaArgs),
 
-    /// Initialise the user venues directory with built-in descriptors.
+    /// Fetch the venue catalog: new and fixed venues without a new scope.
     ///
-    /// Copies all built-in venue YAML files to ~/.scope-bca/venues/
-    /// so you can customise them or use them as templates for new venues.
+    /// Downloads the catalog index and every venue file, checks each
+    /// against its SHA-256, and replaces ~/.scope-bca/venues/catalog/.
+    /// Your own files in ~/.scope-bca/venues/ are not touched and still
+    /// override a catalog venue with the same id.
+    ///
+    /// # Examples
+    ///
+    /// ```text
+    /// scope venues update
+    /// scope venues update --url https://example.com/my-catalog
+    /// ```
+    Update(UpdateArgs),
+
+    /// Copy the catalog's venue files into your venues folder to customise.
+    ///
+    /// Copies each catalog YAML file as it is to ~/.scope-bca/venues/,
+    /// where your copy overrides the catalog's. Fetches the catalog first
+    /// if it is not there.
     ///
     /// # Examples
     ///
@@ -79,6 +101,18 @@ pub enum VenuesCommands {
     /// scope venues validate ~/.scope-bca/venues/custom.yaml
     /// ```
     Validate(ValidateArgs),
+}
+
+/// Arguments for `scope venues update`.
+#[derive(Debug, Args)]
+#[command(after_help = "\x1b[1mExamples:\x1b[0m
+  scope venues update
+  scope venues update --url https://example.com/my-catalog")]
+pub struct UpdateArgs {
+    /// Fetch from this catalog folder URL (holding index.json) instead of
+    /// the configured one (`market.venue_catalog_url`).
+    #[arg(long, value_name = "URL")]
+    pub url: Option<String>,
 }
 
 /// Arguments for `scope venues list`.
@@ -145,12 +179,87 @@ pub struct ValidateArgs {
 }
 
 /// Run the venues command.
-pub fn run(cmd: VenuesCommands, out: &Output) -> Result<()> {
+pub async fn run(
+    cmd: VenuesCommands,
+    config: &Config,
+    http: Arc<dyn HttpClient>,
+    out: &Output,
+) -> Result<()> {
     match cmd {
         VenuesCommands::List(args) => run_list(args, out),
         VenuesCommands::Schema(args) => run_schema(args, out),
-        VenuesCommands::Init(args) => run_init(args, out),
+        VenuesCommands::Update(args) => {
+            let url = args.url.as_deref().unwrap_or(config.market.catalog_url());
+            run_update(url, http.as_ref(), &VenueRegistry::catalog_dir(), out).await
+        }
+        VenuesCommands::Init(args) => {
+            if catalog::installed(&VenueRegistry::catalog_dir()).is_empty() {
+                run_update(
+                    config.market.catalog_url(),
+                    http.as_ref(),
+                    &VenueRegistry::catalog_dir(),
+                    out,
+                )
+                .await?;
+            }
+            run_init(args, out)
+        }
         VenuesCommands::Validate(args) => run_validate(args, out),
+    }
+}
+
+// =============================================================================
+// Update
+// =============================================================================
+
+/// Syncs the catalog from `url` into `dest` and reports what changed. The
+/// example file goes next to the user's venues either way.
+async fn run_update(
+    url: &str,
+    http: &dyn HttpClient,
+    dest: &std::path::Path,
+    out: &Output,
+) -> Result<()> {
+    let example = catalog::example_path();
+    let _ = catalog::write_example(&example);
+    let report = catalog::sync(http, url, dest).await?;
+    outln!(out, "{}", section_header("Venue Catalog"))?;
+    outln!(out, "{}", kv_row("Updated", &report.summary()))?;
+    outln!(out, "{}", kv_row("From", url))?;
+    outln!(out, "{}", kv_row("Catalog", &dest.display().to_string()))?;
+    outln!(
+        out,
+        "{}",
+        kv_row(
+            "Your venues",
+            &VenueRegistry::user_venues_dir().display().to_string()
+        )
+    )?;
+    outln!(out, "{}", section_footer())?;
+    Ok(())
+}
+
+/// Before a command that needs venues: when no catalog is installed, fetch
+/// it once (first use), saying so. Offline, it says how to get venues later
+/// and leaves the example file; the command then runs with what there is.
+pub async fn ensure_catalog(config: &Config, http: &dyn HttpClient, out: &Output) {
+    static TRIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let dest = VenueRegistry::catalog_dir();
+    if !catalog::installed(&dest).is_empty()
+        || TRIED.swap(true, std::sync::atomic::Ordering::SeqCst)
+    {
+        return;
+    }
+    let example = catalog::example_path();
+    let _ = catalog::write_example(&example);
+    crate::note!(out, "Fetching the venue catalog (first use)…");
+    match catalog::sync(http, config.market.catalog_url(), &dest).await {
+        Ok(report) => crate::note!(out, "Venue catalog installed: {}", report.summary()),
+        Err(e) => crate::note!(
+            out,
+            "Could not fetch the venue catalog ({e}). Run `scope venues update` when online, or describe an exchange yourself: see {}",
+            example.display()
+        ),
     }
 }
 
@@ -166,32 +275,52 @@ fn run_list(args: ListArgs, out: &Output) -> Result<()> {
             outln!(out, "{}", section_header("Available Venues"))?;
             for listing in MarketVenue::listings(&registry) {
                 let caps = listing.capabilities.join(", ");
-                let detail = match listing.chain {
-                    Some(chain) => format!("{caps} (DEX on {chain})"),
-                    None => caps,
+                let detail = match (listing.chain, registry.source(&listing.id)) {
+                    (Some(chain), _) => format!("{caps} (DEX on {chain})"),
+                    (None, Some(VenueSource::User)) => format!("{caps} (yours)"),
+                    (None, _) => caps,
                 };
                 outln!(out, "{}", kv_row(&listing.id, &detail))?;
             }
             outln!(out, "{}", separator())?;
             let user_dir = VenueRegistry::user_venues_dir();
-            let user_count = count_user_venues(&user_dir);
-            let total = registry.len();
-            let built_in = total - user_count;
+            let ids = registry.list();
+            let yours = ids
+                .iter()
+                .filter(|id| registry.source(id) == Some(VenueSource::User))
+                .count();
             outln!(
                 out,
                 "{}",
                 kv_row(
                     "Loaded",
                     &format!(
-                        "{} venues ({} built-in, {} user)",
-                        total, built_in, user_count
+                        "{} venues ({} from the catalog, {} yours)",
+                        ids.len(),
+                        ids.len() - yours,
+                        yours
                     )
+                )
+            )?;
+            if ids.is_empty() {
+                outln!(
+                    out,
+                    "{}",
+                    info_row("No exchange venues yet: run `scope venues update`")
+                )?;
+            }
+            outln!(
+                out,
+                "{}",
+                kv_row(
+                    "Catalog",
+                    &VenueRegistry::catalog_dir().display().to_string()
                 )
             )?;
             outln!(
                 out,
                 "{}",
-                kv_row("User dir", &user_dir.display().to_string())
+                kv_row("Your venues", &user_dir.display().to_string())
             )?;
             outln!(out, "{}", section_footer())?;
         }
@@ -202,32 +331,13 @@ fn run_list(args: ListArgs, out: &Output) -> Result<()> {
                 "total": venues.len(),
                 "venues": venues,
                 "user_venues_dir": VenueRegistry::user_venues_dir().display().to_string(),
+                "catalog_dir": VenueRegistry::catalog_dir().display().to_string(),
             });
             outln!(out, "{}", serde_json::to_string_pretty(&output).unwrap())?;
         }
     }
 
     Ok(())
-}
-
-/// Count YAML files in the user venues directory.
-fn count_user_venues(dir: &std::path::Path) -> usize {
-    if !dir.exists() {
-        return 0;
-    }
-    std::fs::read_dir(dir)
-        .map(|entries| {
-            entries
-                .filter_map(|e| e.ok())
-                .filter(|e| {
-                    e.path()
-                        .extension()
-                        .map(|ext| ext == "yaml" || ext == "yml")
-                        .unwrap_or(false)
-                })
-                .count()
-        })
-        .unwrap_or(0)
 }
 
 // =============================================================================
@@ -458,13 +568,29 @@ fn run_init_impl(args: InitArgs, dest: std::path::PathBuf, out: &Output) -> Resu
         outln!(out, "Created {}", dest.display())?;
     }
 
-    // Get built-in venues to copy
-    let registry = VenueRegistry::load()?;
+    // The catalog's files, copied as they are: a re-serialised copy lost
+    // what the serialiser did not know (the `ohlc` capability).
+    let source = VenueRegistry::catalog_dir();
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&source)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|ext| ext == "yaml"))
+                .collect()
+        })
+        .unwrap_or_default();
+    files.sort();
+    if files.is_empty() {
+        return Err(scope::error::ScopeError::InvalidInput(
+            "The venue catalog is not installed: run `scope venues update` first.".into(),
+        ));
+    }
     let mut copied = 0;
     let mut skipped = 0;
 
-    for id in registry.list() {
-        let filename = format!("{}.yaml", id);
+    for path in files {
+        let filename = path.file_name().unwrap().to_string_lossy().into_owned();
         let target = dest.join(&filename);
 
         if target.exists() && !args.force {
@@ -477,23 +603,11 @@ fn run_init_impl(args: InitArgs, dest: std::path::PathBuf, out: &Output) -> Resu
             continue;
         }
 
-        // Get the YAML content from the embedded built-in data
-        if let Some(desc) = registry.get(id) {
-            // Re-serialise the descriptor to YAML for the user's copy
-            let yaml = format!(
-                "# {name} venue descriptor\n# Auto-generated by `scope venues init`\n\n{content}",
-                name = desc.name,
-                content = serialize_descriptor_yaml(desc),
-            );
-            std::fs::write(&target, yaml).map_err(|e| {
-                scope::error::ScopeError::io_context(
-                    e,
-                    format!("Failed to write {}", target.display()),
-                )
-            })?;
-            copied += 1;
-            outln!(out, "  {}", check_pass(&filename))?;
-        }
+        std::fs::copy(&path, &target).map_err(|e| {
+            scope::error::ScopeError::io_context(e, format!("Failed to write {}", target.display()))
+        })?;
+        copied += 1;
+        outln!(out, "  {}", check_pass(&filename))?;
     }
 
     outln!(out)?;
@@ -510,152 +624,6 @@ fn run_init_impl(args: InitArgs, dest: std::path::PathBuf, out: &Output) -> Resu
     outln!(out, "{}", section_footer())?;
 
     Ok(())
-}
-
-/// Serialize a VenueDescriptor to a readable YAML string.
-/// VenueDescriptor doesn't derive Serialize, so the YAML is built by hand.
-fn serialize_descriptor_yaml(desc: &VenueDescriptor) -> String {
-    // Build a YAML-compatible representation manually
-    let mut lines = Vec::new();
-    lines.push(format!("id: {}", desc.id));
-    lines.push(format!("name: \"{}\"", desc.name));
-    lines.push(format!("base_url: \"{}\"", desc.base_url));
-
-    lines.push("symbol:".to_string());
-    lines.push(format!("  template: \"{}\"", desc.symbol.template));
-    lines.push(format!("  default_quote: {}", desc.symbol.default_quote));
-    let case_str = match desc.symbol.case {
-        scope::market::descriptor::SymbolCase::Upper => "upper",
-        scope::market::descriptor::SymbolCase::Lower => "lower",
-    };
-    lines.push(format!("  case: {}", case_str));
-
-    lines.push("capabilities:".to_string());
-
-    if let Some(ref ep) = desc.capabilities.order_book {
-        lines.push("  order_book:".to_string());
-        append_endpoint_yaml(&mut lines, ep, "    ");
-    }
-    if let Some(ref ep) = desc.capabilities.ticker {
-        lines.push("  ticker:".to_string());
-        append_endpoint_yaml(&mut lines, ep, "    ");
-    }
-    if let Some(ref ep) = desc.capabilities.trades {
-        lines.push("  trades:".to_string());
-        append_endpoint_yaml(&mut lines, ep, "    ");
-    }
-
-    lines.join("\n")
-}
-
-fn append_endpoint_yaml(
-    lines: &mut Vec<String>,
-    ep: &scope::market::descriptor::EndpointDescriptor,
-    indent: &str,
-) {
-    let method = match ep.method {
-        scope::market::descriptor::HttpMethod::GET => "GET",
-        scope::market::descriptor::HttpMethod::POST => "POST",
-    };
-    if method != "GET" {
-        lines.push(format!("{indent}method: {method}"));
-    }
-    lines.push(format!("{indent}path: \"{}\"", ep.path));
-
-    if !ep.params.is_empty() {
-        lines.push(format!("{indent}params:"));
-        let mut params: Vec<_> = ep.params.iter().collect();
-        params.sort_by_key(|(k, _)| (*k).clone());
-        for (k, v) in params {
-            lines.push(format!("{indent}  {k}: \"{v}\""));
-        }
-    }
-
-    if let Some(ref body) = ep.request_body {
-        lines.push(format!(
-            "{indent}request_body: {}",
-            serde_json::to_string(body).unwrap_or_default()
-        ));
-    }
-
-    if let Some(ref root) = ep.response_root {
-        lines.push(format!("{indent}response_root: \"{}\"", root));
-    }
-
-    lines.push(format!("{indent}response:"));
-    let r = &ep.response;
-    let resp_indent = format!("{indent}  ");
-    if let Some(ref v) = r.asks_key {
-        lines.push(format!("{resp_indent}asks_key: {v}"));
-    }
-    if let Some(ref v) = r.bids_key {
-        lines.push(format!("{resp_indent}bids_key: {v}"));
-    }
-    if let Some(ref v) = r.level_format {
-        lines.push(format!("{resp_indent}level_format: {v}"));
-    }
-    if let Some(ref v) = r.level_price_field {
-        lines.push(format!("{resp_indent}level_price_field: {v}"));
-    }
-    if let Some(ref v) = r.level_size_field {
-        lines.push(format!("{resp_indent}level_size_field: {v}"));
-    }
-    if let Some(ref v) = r.last_price {
-        lines.push(format!("{resp_indent}last_price: {v}"));
-    }
-    if let Some(ref v) = r.high_24h {
-        lines.push(format!("{resp_indent}high_24h: {v}"));
-    }
-    if let Some(ref v) = r.low_24h {
-        lines.push(format!("{resp_indent}low_24h: {v}"));
-    }
-    if let Some(ref v) = r.volume_24h {
-        lines.push(format!("{resp_indent}volume_24h: {v}"));
-    }
-    if let Some(ref v) = r.quote_volume_24h {
-        lines.push(format!("{resp_indent}quote_volume_24h: {v}"));
-    }
-    if let Some(ref v) = r.best_bid {
-        lines.push(format!("{resp_indent}best_bid: {v}"));
-    }
-    if let Some(ref v) = r.best_ask {
-        lines.push(format!("{resp_indent}best_ask: {v}"));
-    }
-    if let Some(ref v) = r.items_key {
-        lines.push(format!("{resp_indent}items_key: {v}"));
-    }
-    if let Some(ref f) = r.filter {
-        lines.push(format!("{resp_indent}filter:"));
-        lines.push(format!("{resp_indent}  field: \"{}\"", f.field));
-        lines.push(format!("{resp_indent}  value: \"{}\"", f.value));
-    }
-    if let Some(ref v) = r.price {
-        lines.push(format!("{resp_indent}price: {v}"));
-    }
-    if let Some(ref v) = r.quantity {
-        lines.push(format!("{resp_indent}quantity: {v}"));
-    }
-    if let Some(ref v) = r.quote_quantity {
-        lines.push(format!("{resp_indent}quote_quantity: {v}"));
-    }
-    if let Some(ref v) = r.timestamp_ms {
-        lines.push(format!("{resp_indent}timestamp_ms: {v}"));
-    }
-    if let Some(ref v) = r.id {
-        lines.push(format!("{resp_indent}id: {v}"));
-    }
-    if let Some(ref sm) = r.side {
-        lines.push(format!("{resp_indent}side:"));
-        lines.push(format!("{resp_indent}  field: \"{}\"", sm.field));
-        if !sm.mapping.is_empty() {
-            lines.push(format!("{resp_indent}  mapping:"));
-            let mut entries: Vec<_> = sm.mapping.iter().collect();
-            entries.sort_by_key(|(k, _)| (*k).clone());
-            for (k, v) in entries {
-                lines.push(format!("{resp_indent}    \"{k}\": \"{v}\""));
-            }
-        }
-    }
 }
 
 // =============================================================================
@@ -883,49 +851,6 @@ capabilities:
     }
 
     #[test]
-    fn test_count_user_venues_nonexistent() {
-        let count = count_user_venues(std::path::Path::new("/tmp/nonexistent_dir_test"));
-        assert_eq!(count, 0);
-    }
-
-    #[test]
-    fn test_count_user_venues_with_files() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.yaml"), "").unwrap();
-        std::fs::write(dir.path().join("b.yml"), "").unwrap();
-        std::fs::write(dir.path().join("c.txt"), "").unwrap();
-        assert_eq!(count_user_venues(dir.path()), 2);
-    }
-
-    #[test]
-    fn test_serialize_descriptor_yaml_roundtrip() {
-        let yaml = r#"
-id: roundtrip_test
-name: Roundtrip Exchange
-base_url: https://api.roundtrip.com
-symbol:
-  template: "{base}_{quote}"
-  default_quote: USDT
-  case: lower
-capabilities:
-  order_book:
-    path: /api/depth
-    params:
-      symbol: "{pair}"
-    response:
-      asks_key: asks
-      bids_key: bids
-      level_format: positional
-"#;
-        let desc: VenueDescriptor = serde_saphyr::from_str(yaml).unwrap();
-        let serialized = serialize_descriptor_yaml(&desc);
-        assert!(serialized.contains("roundtrip_test"));
-        assert!(serialized.contains("Roundtrip Exchange"));
-        assert!(serialized.contains("/api/depth"));
-        assert!(serialized.contains("case: lower"));
-    }
-
-    #[test]
     fn test_run_init_to_temp_dir() {
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().to_path_buf();
@@ -942,119 +867,6 @@ capabilities:
             let content = std::fs::read_to_string(&target).unwrap();
             assert!(content.contains(&format!("id: {}", id)));
         }
-    }
-
-    #[test]
-    fn test_serialize_full_descriptor() {
-        let yaml = r#"
-id: full_caps
-name: Full Capabilities Exchange
-base_url: https://api.full.com
-symbol:
-  template: "{base}{quote}"
-  default_quote: USDT
-capabilities:
-  order_book:
-    path: /api/depth
-    params:
-      symbol: "{pair}"
-    response:
-      asks_key: asks
-      bids_key: bids
-      level_format: positional
-  ticker:
-    path: /api/ticker
-    params:
-      symbol: "{pair}"
-    response:
-      last_price: lastPrice
-      high_24h: high
-      low_24h: low
-  trades:
-    path: /api/trades
-    params:
-      symbol: "{pair}"
-      limit: "{limit}"
-    response:
-      items_key: data
-      price: price
-      quantity: qty
-      timestamp_ms: time
-      side:
-        field: side
-        mapping:
-          buy: buy
-          sell: sell
-"#;
-        let desc: VenueDescriptor = serde_saphyr::from_str(yaml).unwrap();
-        let serialized = serialize_descriptor_yaml(&desc);
-        assert!(serialized.contains("order_book:"));
-        assert!(serialized.contains("ticker:"));
-        assert!(serialized.contains("trades:"));
-        assert!(serialized.contains("asks_key"));
-        assert!(serialized.contains("last_price"));
-        assert!(serialized.contains("items_key"));
-    }
-
-    #[test]
-    fn test_serialize_descriptor_with_post_and_request_body() {
-        let yaml = r#"
-id: post_venue
-name: POST Exchange
-base_url: https://api.post.com
-symbol:
-  template: "{base}{quote}"
-  default_quote: USDT
-capabilities:
-  order_book:
-    method: POST
-    path: /api/depth
-    request_body: {"symbol":"{{pair}}"}
-    response_root: result
-    params: {}
-    response:
-      asks_key: asks
-      bids_key: bids
-      level_format: positional
-"#;
-        let desc: VenueDescriptor = serde_saphyr::from_str(yaml).unwrap();
-        let serialized = serialize_descriptor_yaml(&desc);
-        assert!(serialized.contains("method: POST"));
-        assert!(serialized.contains("response_root"));
-        assert!(serialized.contains("request_body"));
-    }
-
-    #[test]
-    fn test_serialize_descriptor_with_filter_and_side() {
-        let yaml = r#"
-id: filter_venue
-name: Filter Exchange
-base_url: https://api.filter.com
-symbol:
-  template: "{base}{quote}"
-  default_quote: USDT
-capabilities:
-  trades:
-    path: /api/trades
-    params:
-      symbol: "{pair}"
-    response:
-      items_key: trades
-      filter:
-        field: symbol
-        value: "{pair}"
-      side:
-        field: side
-        mapping:
-          buy: B
-          sell: S
-"#;
-        let desc: VenueDescriptor = serde_saphyr::from_str(yaml).unwrap();
-        let serialized = serialize_descriptor_yaml(&desc);
-        assert!(serialized.contains("filter:"));
-        assert!(serialized.contains("field:"));
-        assert!(serialized.contains("side:"));
-        assert!(serialized.contains("mapping:"));
     }
 
     #[test]
@@ -1142,21 +954,112 @@ capabilities: {}
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn test_run_venues_command_routes_to_subcommands() {
+    #[tokio::test]
+    async fn test_run_venues_command_routes_to_subcommands() {
+        let config = Config::default();
+        let http = scope::http::test_transport();
         let result = run(
             VenuesCommands::List(ListArgs {
                 format: ListFormat::Table,
             }),
+            &config,
+            http.clone(),
             &quiet(),
-        );
+        )
+        .await;
         assert!(result.is_ok());
         let result = run(
             VenuesCommands::Schema(SchemaArgs {
                 format: SchemaFormat::Text,
             }),
+            &config,
+            http,
             &quiet(),
-        );
+        )
+        .await;
         assert!(result.is_ok());
+    }
+
+    /// A catalog served by a local server: `index.json` and one venue.
+    async fn catalog_server(venue: &str) -> mockito::ServerGuard {
+        let mut server = mockito::Server::new_async().await;
+        let index = serde_json::json!({
+            "schema": 1,
+            "venues": [{"id": "weex", "file": "weex.yaml", "sha256": catalog::checksum(venue)}],
+        });
+        server
+            .mock("GET", "/c/index.json")
+            .with_body(index.to_string())
+            .create_async()
+            .await;
+        server
+            .mock("GET", "/c/weex.yaml")
+            .with_body(venue)
+            .create_async()
+            .await;
+        server
+    }
+
+    const WEEX: &str = "id: weex\nname: WEEX Spot\nbase_url: https://api-spot.weex.com\nsymbol:\n  template: \"{base}{quote}\"\n  default_quote: USDT\ncapabilities:\n  ohlc:\n    path: /api/v3/market/klines\n    response:\n      ohlc_format: array_of_arrays\n      ohlc_fields: [open_time, open, high, low, close, volume, close_time]\n";
+
+    #[tokio::test]
+    async fn test_update_installs_the_catalog_and_reports_it() {
+        let server = catalog_server(WEEX).await;
+        let home = tempfile::tempdir().unwrap();
+        let dest = home.path().join("catalog");
+        let (out, cap) = Output::capture();
+        run_update(
+            &format!("{}/c", server.url()),
+            scope::http::test_transport().as_ref(),
+            &dest,
+            &out,
+        )
+        .await
+        .unwrap();
+        let text = crate::cli::ansi::strip(&cap.out());
+        assert!(
+            text.contains("1 venues: 1 added (weex), 0 updated, 0 removed"),
+            "{text}"
+        );
+        let registry = VenueRegistry::load_dirs(&dest, &home.path().join("none")).unwrap();
+        // The file is the catalog's, byte for byte: nothing is re-serialised.
+        assert_eq!(
+            std::fs::read_to_string(dest.join("weex.yaml")).unwrap(),
+            WEEX
+        );
+        assert!(registry.get("weex").unwrap().capabilities.ohlc.is_some());
+    }
+
+    #[test]
+    fn test_init_copies_the_catalog_files_verbatim() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("venues");
+        run_init_impl(InitArgs { force: false }, dest.clone(), &quiet()).unwrap();
+        let catalog = VenueRegistry::catalog_dir();
+        for name in ["binance.yaml", "kraken.yaml"] {
+            assert_eq!(
+                std::fs::read(dest.join(name)).unwrap(),
+                std::fs::read(catalog.join(name)).unwrap(),
+                "{name} is copied as it is"
+            );
+        }
+        // ohlc survives, which the old re-serialised copies lost.
+        let copied = VenueRegistry::load_dirs(&dir.path().join("none"), &dest).unwrap();
+        assert!(copied.get("binance").unwrap().capabilities.ohlc.is_some());
+    }
+
+    #[test]
+    fn test_list_marks_your_own_venues() {
+        let (out, cap) = Output::capture();
+        run_list(
+            ListArgs {
+                format: ListFormat::Table,
+            },
+            &out,
+        )
+        .unwrap();
+        let text = crate::cli::ansi::strip(&cap.out());
+        assert!(text.contains("from the catalog"), "{text}");
+        assert!(text.contains("Catalog"), "{text}");
     }
 }
