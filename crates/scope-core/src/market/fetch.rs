@@ -234,13 +234,16 @@ mod tests {
         );
         let last = summary.checks.last().unwrap();
         assert_eq!(last.status(), "warn", "{}", last.message());
-        assert!(
-            last.message()
-                .contains("100% of 60 trades are exactly 1000"),
-            "{}",
-            last.message()
+        assert_eq!(
+            last.message(),
+            "Bot patterns: 3 signs of market-making bots (repeated size, metronome, ping-pong)"
         );
-        assert!(last.message().contains("every 2.0s"), "{}", last.message());
+        let evidence = summary.bot_patterns.as_ref().unwrap().evidence().join("\n");
+        assert!(
+            evidence.contains("Repeated size: 100% of 60 trades are exactly 1000"),
+            "{evidence}"
+        );
+        assert!(evidence.contains("every 2.0s"), "{evidence}");
         let json = summary.to_json();
         assert_eq!(json["bot_patterns"]["trades_sampled"], 60);
         assert_eq!(json["bot_patterns"]["findings"][0]["kind"], "repeated_size");

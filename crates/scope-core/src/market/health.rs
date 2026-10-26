@@ -893,6 +893,16 @@ impl MarketSummary {
             out.push_str(&format!("    ... +{} more levels\n", self.bids.len() - 8));
         }
 
+        // Bot patterns: one line per signal, before the checks so the
+        // verdict stays last.
+        if let Some(found) = self
+            .bot_patterns
+            .as_ref()
+            .filter(|b| !b.findings.is_empty())
+        {
+            out.push_str(&found.format_text());
+        }
+
         // Health checks
         out.push_str(&t::subsection_header("Health Checks"));
         out.push('\n');
@@ -983,6 +993,16 @@ impl MarketSummary {
             md.push_str("\n**Health Checks:**\n");
             for check in &self.checks {
                 md.push_str(&format!("- {} {}\n", check.icon(), check.message()));
+            }
+        }
+        if let Some(found) = self
+            .bot_patterns
+            .as_ref()
+            .filter(|b| !b.findings.is_empty())
+        {
+            md.push_str("\n**Bot Patterns** (likely market-making bots):\n");
+            for line in found.evidence() {
+                md.push_str(&format!("- {line}\n"));
             }
         }
         md
