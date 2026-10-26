@@ -54,12 +54,19 @@ A command-line tool for blockchain data analysis, portfolio tracking, transactio
 
 ## Installation
 
-```bash
-# Install from crates.io
-cargo install scope-bca
+Every [release](https://github.com/robot-accomplice/scope-blockchain-analysis/releases/latest) has prebuilt binaries, each with a `.sha256` file next to it: `scope-windows-x64.zip`, `scope-linux-x64.tar.gz` / `scope-linux-arm64.tar.gz`, and `scope-macos-x64.tar.gz` / `scope-macos-arm64.tar.gz`. Nothing needs to be compiled.
+
+**Windows** (PowerShell): download the zip, check it, and put `scope.exe` on your PATH:
+
+```powershell
+Invoke-WebRequest https://github.com/robot-accomplice/scope-blockchain-analysis/releases/latest/download/scope-windows-x64.zip -OutFile scope.zip
+(Get-FileHash scope.zip -Algorithm SHA256).Hash   # compare with scope-windows-x64.zip.sha256
+Expand-Archive scope.zip -DestinationPath "$env:LOCALAPPDATA\scope"
+[Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path', 'User') + ";$env:LOCALAPPDATA\scope", 'User')
+# Open a new terminal, then: scope --version
 ```
 
-Or install with Homebrew (macOS and Linux, prebuilt binaries):
+**macOS and Linux**: Homebrew installs the prebuilt binary:
 
 ```bash
 # Homebrew loads formulae from a third-party tap only after you trust it
@@ -67,16 +74,19 @@ brew trust --formula robot-accomplice/tap/scope
 brew install robot-accomplice/tap/scope
 ```
 
-Or download a prebuilt binary from the [latest release](https://github.com/robot-accomplice/scope-blockchain-analysis/releases/latest): `scope-windows-x64.zip` for Windows, `scope-linux-x64.tar.gz` / `scope-linux-arm64.tar.gz`, or `scope-macos-x64.tar.gz` / `scope-macos-arm64.tar.gz`. Each has a `.sha256` file next to it. On Windows (PowerShell):
+**With Cargo** (any platform with [Rust](https://rustup.rs)): builds scope from source.
 
-```powershell
-Invoke-WebRequest https://github.com/robot-accomplice/scope-blockchain-analysis/releases/latest/download/scope-windows-x64.zip -OutFile scope.zip
-(Get-FileHash scope.zip -Algorithm SHA256).Hash   # compare with scope-windows-x64.zip.sha256
-Expand-Archive scope.zip -DestinationPath "$env:LOCALAPPDATA\scope"
-# Add $env:LOCALAPPDATA\scope to your PATH, then: scope --version
+```bash
+cargo install scope-bca
 ```
 
-Or build from source:
+On Windows, building needs the Microsoft C++ linker from [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with the C++ workload; without it the build stops with ``linker `link.exe` not found``. Use the zip above, or install the Build Tools first:
+
+```powershell
+winget install Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+```
+
+Or build from a clone:
 
 ```bash
 git clone https://github.com/robot-accomplice/scope-blockchain-analysis.git
