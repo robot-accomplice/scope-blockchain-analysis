@@ -1,0 +1,75 @@
+id: kucoin
+name: KuCoin Spot
+base_url: https://api.kucoin.com
+timeout_secs: 15
+rate_limit_per_sec: 10
+
+symbol:
+  template: "{base}-{quote}"
+  default_quote: USDT
+
+error_envelope:
+  code_key: code
+  ok_codes: ["200000"]
+  message_key: msg
+
+capabilities:
+  order_book:
+    path: /api/v1/market/orderbook/level2_100
+    params:
+      symbol: "{pair}"
+    response_root: data
+    response:
+      asks_key: asks
+      bids_key: bids
+      level_format: positional
+
+  ticker:
+    path: /api/v1/market/stats
+    params:
+      symbol: "{pair}"
+    response_root: data
+    response:
+      last_price: last
+      high_24h: high
+      low_24h: low
+      volume_24h: vol
+      quote_volume_24h: volValue
+      best_bid: buy
+      best_ask: sell
+
+  trades:
+    # The last 100 trades; times in nanoseconds.
+    path: /api/v1/market/histories
+    params:
+      symbol: "{pair}"
+    response_root: data
+    response:
+      price: price
+      quantity: size
+      timestamp_ms: time
+      id: tradeId
+      side:
+        field: side
+        mapping:
+          buy: buy
+          sell: sell
+
+  ohlc:
+    path: /api/v1/market/candles
+    params:
+      symbol: "{pair}"
+      type: "{interval}"
+    interval_map:
+      "1m": "1min"
+      "5m": "5min"
+      "15m": "15min"
+      "30m": "30min"
+      "1h": "1hour"
+      "4h": "4hour"
+      "1d": "1day"
+      "1w": "1week"
+    response_root: data
+    response:
+      ohlc_format: array_of_arrays
+      ohlc_fields: [open_time, open, close, high, low, volume]

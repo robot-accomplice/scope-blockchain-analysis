@@ -1,0 +1,74 @@
+id: xt
+name: XT.COM
+base_url: https://sapi.xt.com
+timeout_secs: 15
+rate_limit_per_sec: 10
+
+symbol:
+  template: "{base}_{quote}"
+  default_quote: USDT
+  case: lower
+
+error_envelope:
+  code_key: rc
+  ok_codes: ["0"]
+  message_key: mc
+
+capabilities:
+  order_book:
+    path: /v4/public/depth
+    params:
+      symbol: "{pair}"
+      limit: "100"
+    response_root: result
+    response:
+      asks_key: asks
+      bids_key: bids
+      level_format: positional
+
+  ticker:
+    path: /v4/public/ticker/24h
+    params:
+      symbol: "{pair}"
+    response_root: "result.0"
+    response:
+      last_price: c
+      high_24h: h
+      low_24h: l
+      volume_24h: q
+      quote_volume_24h: v
+
+  trades:
+    path: /v4/public/trade/recent
+    params:
+      symbol: "{pair}"
+      limit: "{limit}"
+    max_limit: 1000
+    response_root: result
+    response:
+      price: p
+      quantity: q
+      quote_quantity: v
+      timestamp_ms: t
+      id: i
+      side:
+        field: b
+        mapping:
+          "true": buy
+          "false": sell
+
+  ohlc:
+    path: /v4/public/kline
+    params:
+      symbol: "{pair}"
+      interval: "{interval}"
+      limit: "{limit}"
+    response_root: result
+    response:
+      ohlc_format: objects
+      open_time: t
+      open: o
+      high: h
+      low: l
+      close: c
+      ohlc_volume: q

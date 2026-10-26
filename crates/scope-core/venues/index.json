@@ -12,9 +12,19 @@
       "sha256": "224d716f8236f94efc82b85a6e3f5545341a3e048a4009fd6a11d4245df0c2dc"
     },
     {
+      "id": "bingx",
+      "file": "bingx.yaml",
+      "sha256": "64f8f05f1ae1421f9ceb427a195d7223f667729fed746ba7915e24d78b8b3c16"
+    },
+    {
       "id": "bitget",
       "file": "bitget.yaml",
       "sha256": "f6f05c37cec0e3a4f5e2e492cb0c2fa7e062cecbdd27228510d28393e7ce38f8"
+    },
+    {
+      "id": "bitstamp",
+      "file": "bitstamp.yaml",
+      "sha256": "4747a3868dd7884a5300508a64aea10641a1e33637ba78bad2652a3326604f10"
     },
     {
       "id": "bybit",
@@ -37,6 +47,11 @@
       "sha256": "dde98b5643cf70b995a119d5b3ea4d98e8c449388333dbe731a82a0737515af9"
     },
     {
+      "id": "gemini",
+      "file": "gemini.yaml",
+      "sha256": "0058dd586e3980deb43bc4dfab419eb1d4a4ef27000bf7cb7aaea069cbdabea3"
+    },
+    {
       "id": "htx",
       "file": "htx.yaml",
       "sha256": "e3f1283500dc0ea69526dedf0d73437f5b544e2fafbc652d9cebb3a592346b53"
@@ -47,6 +62,16 @@
       "sha256": "0cca3cc8f5799e7f63c7caf53eb096a22231e2af8e681355cc25414b5e2fdfc4"
     },
     {
+      "id": "kucoin",
+      "file": "kucoin.yaml",
+      "sha256": "d350cd5a2e81174b9572c7987eb8928a69ed0a163f9cf4d17889bd3dd28fcaea"
+    },
+    {
+      "id": "lbank",
+      "file": "lbank.yaml",
+      "sha256": "714d8ff46d9ec7f9227c5754cc755f70e3852b221e1c4f47b0843e8e218340e5"
+    },
+    {
       "id": "mexc",
       "file": "mexc.yaml",
       "sha256": "025db5565d5a0b9882ff4ca794d65368ce7c9c8671b897aae1264b154c468957"
@@ -55,6 +80,21 @@
       "id": "okx",
       "file": "okx.yaml",
       "sha256": "24012317c8122fd9fb8bcf1eb1cddda6342f4c214b0f466d89e76cc8caac9ae3"
+    },
+    {
+      "id": "weex",
+      "file": "weex.yaml",
+      "sha256": "ec8f942e86e373d7a906368c03169783a9428b6fd4eddc06de5ff798e6c3f794"
+    },
+    {
+      "id": "whitebit",
+      "file": "whitebit.yaml",
+      "sha256": "515a913bfd220ee78d61867432aca2e32e81c03aa77d4dcb37b2734ef1fe47ee"
+    },
+    {
+      "id": "xt",
+      "file": "xt.yaml",
+      "sha256": "e5b7fae692b6d1dea3232819da49af396bd77519a514d918c145fd8ce40012af"
     }
   ]
 }

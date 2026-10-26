@@ -1,0 +1,63 @@
+id: gemini
+name: Gemini
+base_url: https://api.gemini.com
+timeout_secs: 15
+rate_limit_per_sec: 5
+
+symbol:
+  template: "{base}{quote}"
+  default_quote: USD
+  case: lower
+
+capabilities:
+  order_book:
+    path: /v1/book/{pair}
+    params:
+      limit_bids: "100"
+      limit_asks: "100"
+    response:
+      asks_key: asks
+      bids_key: bids
+      level_format: object
+      level_price_field: price
+      level_size_field: amount
+
+  ticker:
+    path: /v2/ticker/{pair}
+    response:
+      last_price: close
+      high_24h: high
+      low_24h: low
+      best_bid: bid
+      best_ask: ask
+
+  trades:
+    path: /v1/trades/{pair}
+    params:
+      limit_trades: "{limit}"
+    max_limit: 500
+    response:
+      price: price
+      quantity: amount
+      timestamp_ms: timestampms
+      id: tid
+      side:
+        field: type
+        mapping:
+          buy: buy
+          sell: sell
+
+  ohlc:
+    # The interval is part of the path; Gemini sends its full history.
+    path: /v2/candles/{pair}/{interval}
+    interval_map:
+      "1m": "1m"
+      "5m": "5m"
+      "15m": "15m"
+      "30m": "30m"
+      "1h": "1hr"
+      "6h": "6hr"
+      "1d": "1day"
+    response:
+      ohlc_format: array_of_arrays
+      ohlc_fields: [open_time, open, high, low, close, volume]

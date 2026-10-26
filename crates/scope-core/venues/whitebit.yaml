@@ -1,0 +1,60 @@
+id: whitebit
+name: WhiteBIT
+base_url: https://whitebit.com
+timeout_secs: 15
+rate_limit_per_sec: 10
+
+symbol:
+  template: "{base}_{quote}"
+  default_quote: USDT
+
+capabilities:
+  order_book:
+    path: /api/v4/public/orderbook/{pair}
+    params:
+      limit: "100"
+    response:
+      asks_key: asks
+      bids_key: bids
+      level_format: positional
+
+  ticker:
+    path: /api/v1/public/ticker
+    params:
+      market: "{pair}"
+    response_root: result
+    response:
+      last_price: last
+      high_24h: high
+      low_24h: low
+      volume_24h: volume
+      quote_volume_24h: deal
+      best_bid: bid
+      best_ask: ask
+
+  trades:
+    # WhiteBIT's names are swapped: `quote_volume` is the base amount.
+    path: /api/v4/public/trades/{pair}
+    response:
+      price: price
+      quantity: quote_volume
+      quote_quantity: base_volume
+      timestamp_ms: trade_timestamp
+      id: tradeID
+      side:
+        field: type
+        mapping:
+          buy: buy
+          sell: sell
+
+  ohlc:
+    path: /api/v1/public/kline
+    params:
+      market: "{pair}"
+      interval: "{interval}"
+      limit: "{limit}"
+    max_limit: 1440
+    response_root: result
+    response:
+      ohlc_format: array_of_arrays
+      ohlc_fields: [open_time, open, close, high, low, volume]

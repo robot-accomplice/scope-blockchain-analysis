@@ -168,11 +168,6 @@ impl ConfigurableExchangeClient {
             .await
     }
 
-    /// Interpolate `{pair}` placeholders in a URL path.
-    fn interpolate_path(&self, path: &str, pair: &str) -> String {
-        path.replace("{pair}", pair)
-    }
-
     /// Full interpolation with all supported placeholders.
     fn interpolate_value_full(
         &self,
@@ -231,14 +226,15 @@ impl ConfigurableExchangeClient {
         limit: Option<u32>,
         interval: &str,
     ) -> Result<Value> {
-        let url = format!(
-            "{}{}",
-            self.descriptor.base_url,
-            self.interpolate_path(&endpoint.path, pair)
-        );
         // Never above what the venue accepts in one request.
         let limit = limit.map(|l| endpoint.max_limit.map_or(l, |max| l.min(max)));
         let limit_str = limit.unwrap_or(100).to_string();
+        // The path takes the placeholders too (Gemini: /v2/candles/{pair}/{interval}).
+        let url = format!(
+            "{}{}",
+            self.descriptor.base_url,
+            self.interpolate_value_full(&endpoint.path, pair, &limit_str, interval)
+        );
 
         let mut req = match endpoint.method {
             HttpMethod::GET => {
@@ -664,6 +660,12 @@ impl TradeHistoryClient for ConfigurableExchangeClient {
             }
         }
 
+        // A venue that ignores the limit (Bitstamp sends the last hour):
+        // keep the newest `limit` trades.
+        if trades.len() > limit as usize {
+            trades.sort_by_key(|t| std::cmp::Reverse(t.timestamp_ms));
+            trades.truncate(limit as usize);
+        }
         Ok(trades)
     }
 }
@@ -1736,6 +1738,118 @@ mod tests {
         assert_eq!(trades[1].quantity, 1.0);
         assert_eq!(trades[1].side, TradeSide::Buy);
         mock.assert_async().await;
+    }
+
+    /// A client for the YAML `capabilities` block, sending to `base`.
+    fn yaml_client(base: &str, capabilities: &str) -> ConfigurableExchangeClient {
+        let yaml = format!(
+            "id: t\nname: T\nbase_url: {base}\nsymbol:\n  template: \"{{base}}{{quote}}\"\n  default_quote: USDT\ncapabilities:\n{capabilities}"
+        );
+        let desc: VenueDescriptor = serde_saphyr::from_str(&yaml).unwrap();
+        ConfigurableExchangeClient::with_http(desc, crate::http::test_transport())
+    }
+
+    #[tokio::test]
+    async fn test_max_limit_caps_the_request_and_grouped_trades_read_as_one_list() {
+        let mut server = mockito::Server::new_async().await;
+        // HTX's shape: groups of trades under data[].data[]; size capped at 2.
+        let mock = server
+            .mock("GET", "/history")
+            .match_query(mockito::Matcher::UrlEncoded("size".into(), "2".into()))
+            .with_body(
+                serde_json::json!({"data": [
+                    {"data": [
+                        {"price": 1.0, "amount": 5.0, "ts": 1_700_000_000_000u64, "direction": "buy"},
+                        {"price": 1.1, "amount": 6.0, "ts": 1_700_000_001_000u64, "direction": "sell"}
+                    ]},
+                    {"data": [
+                        {"price": 1.2, "amount": 7.0, "ts": 1_700_000_002_000u64, "direction": "buy"}
+                    ]}
+                ]})
+                .to_string(),
+            )
+            .create_async()
+            .await;
+        let client = yaml_client(
+            &server.url(),
+            "  trades:\n    path: /history\n    params:\n      size: \"{limit}\"\n    max_limit: 2\n    response_root: data\n    response:\n      nested_items_key: data\n      price: price\n      quantity: amount\n      timestamp_ms: ts\n      side:\n        field: direction\n        mapping:\n          buy: buy\n          sell: sell\n",
+        );
+        let trades = client.fetch_recent_trades("BTCUSDT", 500).await.unwrap();
+        mock.assert_async().await;
+        // Two groups asked for (the cap), three trades in them, all read.
+        assert_eq!(
+            trades.iter().map(|t| t.quantity).collect::<Vec<_>>(),
+            [5.0, 6.0, 7.0],
+            "{trades:?}"
+        );
+        // Grouped trades never exceed the limit asked for.
+        let few = client.fetch_recent_trades("BTCUSDT", 2).await.unwrap();
+        assert_eq!(few.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_a_venue_that_ignores_the_limit_gives_the_newest_trades() {
+        let mut server = mockito::Server::new_async().await;
+        let body: Vec<serde_json::Value> = (0..10u64)
+            .map(|i| serde_json::json!({"price": "1", "amount": i.to_string(), "date": (1_700_000_000 + i).to_string()}))
+            .collect();
+        server
+            .mock("GET", "/tx")
+            .with_body(serde_json::Value::Array(body).to_string())
+            .create_async()
+            .await;
+        // Bitstamp's shape: times in seconds, no limit parameter.
+        let client = yaml_client(
+            &server.url(),
+            "  trades:\n    path: /tx\n    response:\n      price: price\n      quantity: amount\n      timestamp_ms: date\n",
+        );
+        let trades = client.fetch_recent_trades("BTCUSD", 3).await.unwrap();
+        assert_eq!(trades.len(), 3);
+        assert_eq!(
+            trades[0].timestamp_ms, 1_700_000_009_000,
+            "seconds become ms"
+        );
+        assert_eq!(trades[2].quantity, 7.0);
+    }
+
+    #[tokio::test]
+    async fn test_candles_take_placeholders_in_the_path_and_come_back_oldest_first_at_most_limit() {
+        let mut server = mockito::Server::new_async().await;
+        // Gemini's shape: the interval in the path, every candle, newest first.
+        let rows: Vec<serde_json::Value> = (0..10u64)
+            .rev()
+            .map(|i| {
+                serde_json::json!([
+                    1_700_000_000_000u64 + i * 3_600_000,
+                    1.0,
+                    2.0,
+                    0.5,
+                    1.5,
+                    10.0
+                ])
+            })
+            .collect();
+        let mock = server
+            .mock("GET", "/v2/candles/btcusd/1hr")
+            .with_body(serde_json::Value::Array(rows).to_string())
+            .create_async()
+            .await;
+        let client = yaml_client(
+            &server.url(),
+            "  ohlc:\n    path: /v2/candles/{pair}/{interval}\n    interval_map:\n      \"1h\": \"1hr\"\n    response:\n      ohlc_format: array_of_arrays\n      ohlc_fields: [open_time, open, high, low, close, volume]\n",
+        );
+        let candles = client.fetch_ohlc("btcusd", "1h", 4).await.unwrap();
+        mock.assert_async().await;
+        assert_eq!(candles.len(), 4);
+        let times: Vec<u64> = candles.iter().map(|c| c.open_time).collect();
+        let mut sorted = times.clone();
+        sorted.sort();
+        assert_eq!(times, sorted, "oldest first");
+        assert_eq!(
+            *times.last().unwrap(),
+            1_700_000_000_000 + 9 * 3_600_000,
+            "the newest kept"
+        );
     }
 
     #[tokio::test]
