@@ -2574,7 +2574,7 @@ checksum = "a50f4cf475b65d88e057964e0e9bb1f0aa9bbb2036dc65c64596b42932536984"
 
 [[package]]
 name = "scope-bca"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2602,7 +2602,7 @@ dependencies = [
 
 [[package]]
 name = "scope-bca-cli"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "ansi-to-tui",
  "anyhow",
@@ -2645,7 +2645,7 @@ dependencies = [
 
 [[package]]
 name = "scope-bca-core"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2679,7 +2679,7 @@ dependencies = [
 
 [[package]]
 name = "scope-tui-harness"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "anyhow",
  "clap",

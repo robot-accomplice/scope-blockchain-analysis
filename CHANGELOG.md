@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.4] - 2026-10-26
+
 ### Added
 - When your own venue file hides capabilities of a newer catalog version (a `weex.yaml` written before the catalog had OHLC), scope says so and offers to fix it: `New version of the venues catalog found. … Would you like me to save your existing copies and overwrite? [Y]es/[N]o/[O]verwrite, don't save:` Yes moves your copies to `~/.scope-bca/venues-backup-<time>/` and the catalog's apply; Overwrite removes them; No keeps them and is not asked again until that catalog entry changes. It asks after `venues update` and before a command that reads venues, once a process, in a terminal or as a list in the TUI; scripted runs never ask. `venues list` marks such a venue (`(yours; the catalog's also has ohlc)`) and names the file, and a `does not support …` error adds the same hint.
 
@@ -440,7 +442,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Configuration system with YAML support
 - Support for ERC-20, SPL, and TRC-20 tokens
 
-[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.3...HEAD
+[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.4...HEAD
+[0.8.4]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.0...v0.8.1
