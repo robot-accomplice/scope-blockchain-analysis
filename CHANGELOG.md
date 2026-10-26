@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- When your own venue file hides capabilities of a newer catalog version (a `weex.yaml` written before the catalog had OHLC), scope says so and offers to fix it: `New version of the venues catalog found. … Would you like me to save your existing copies and overwrite? [Y]es/[N]o/[O]verwrite, don't save:` Yes moves your copies to `~/.scope-bca/venues-backup-<time>/` and the catalog's apply; Overwrite removes them; No keeps them and is not asked again until that catalog entry changes. It asks after `venues update` and before a command that reads venues, once a process, in a terminal or as a list in the TUI; scripted runs never ask. `venues list` marks such a venue (`(yours; the catalog's also has ohlc)`) and names the file, and a `does not support …` error adds the same hint.
+
 ### Fixed
 - The jittered-timer signal catches a timer bot that rests between bursts (USDN/USDT on weex, evening of 2026-10-26: trades every 30–60 s, then 7–25 minute pauses). It judges the share of gaps within ±50% of the median gap (at least 70%; random arrivals give about 35%) instead of the spread of all gaps, which a few long pauses blow up. The evidence names the pauses: `96% of 499 gaps between trades are 31–62s (median 45s), in bursts with 17 long pauses`. JSON: a `timer` finding adds `share` and `pauses`.
 
