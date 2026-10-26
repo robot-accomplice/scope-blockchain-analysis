@@ -1449,9 +1449,14 @@ capabilities: {}
         .unwrap();
         let text = crate::cli::ansi::strip(&cap.out());
         // This weex describes only candles: it hides the catalog's book,
-        // ticker and trades, and the list says so.
+        // ticker and trades, and the list says so (wrapped at any width).
+        let words = text
+            .split_whitespace()
+            .filter(|w| *w != "│")
+            .collect::<Vec<_>>()
+            .join(" ");
         assert!(
-            text.contains("ohlc (yours; the catalog's also has order_book, ticker, trades)"),
+            words.contains("ohlc (yours; the catalog's also has order_book, ticker, trades)"),
             "{text}"
         );
         assert!(text.contains(", 1 yours)"), "{text}");
