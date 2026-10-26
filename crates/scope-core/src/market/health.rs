@@ -1952,4 +1952,36 @@ mod tests {
                 .contains("best prices include")
         );
     }
+
+    #[test]
+    fn test_markdown_lists_the_bot_patterns_one_a_line() {
+        let book = OrderBook {
+            pair: "USDC/USDT".to_string(),
+            source: crate::market::types::BookSource::Exchange,
+            bids: side(0.9999, -0.0001, &[100.0; 20]),
+            asks: side(1.0001, 0.0001, &[100.0; 20]),
+        };
+        let mut summary = MarketSummary::from_order_book(&book, &HealthThresholds::default(), None);
+        let tape: Vec<Trade> = (0..60u64)
+            .map(|i| Trade {
+                price: 1.0,
+                quantity: 1_000.0,
+                quote_quantity: None,
+                timestamp_ms: i * 2_000,
+                side: crate::market::types::TradeSide::Buy,
+                id: None,
+            })
+            .collect();
+        summary.check_bot_patterns(Ok(&tape));
+        let md = summary.format_markdown(Some("binance"));
+        assert!(
+            md.contains("**Bot Patterns** (likely market-making bots):"),
+            "{md}"
+        );
+        assert!(
+            md.contains("- Repeated size: 100% of 60 trades are exactly 1000"),
+            "{md}"
+        );
+        assert!(md.contains("- Bid ladder: 20 levels × 100"), "{md}");
+    }
 }

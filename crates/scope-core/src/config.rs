@@ -1128,4 +1128,23 @@ ghola:
         let deserialized: Config = serde_saphyr::from_str(&yaml).unwrap();
         assert_eq!(config.ghola, deserialized.ghola);
     }
+
+    #[test]
+    fn test_the_venue_catalog_url_defaults_unless_set() {
+        let mut market = MarketConfig::default();
+        assert_eq!(
+            market.catalog_url(),
+            crate::market::catalog::DEFAULT_CATALOG_URL
+        );
+        market.venue_catalog_url = Some("  ".into());
+        assert_eq!(
+            market.catalog_url(),
+            crate::market::catalog::DEFAULT_CATALOG_URL
+        );
+        market.venue_catalog_url = Some("https://example.com/cat".into());
+        assert_eq!(market.catalog_url(), "https://example.com/cat");
+        let read: Config =
+            serde_saphyr::from_str("market:\n  venue_catalog_url: https://x/c\n").unwrap();
+        assert_eq!(read.market.catalog_url(), "https://x/c");
+    }
 }
