@@ -2,5 +2,5 @@
 # Bump it in a commit on purpose. CI reads the channel through
 # .github/actions/rust.
 [toolchain]
-channel = "1.99.0"
+channel = "1.99.1"
 components = ["clippy", "rustfmt"]
