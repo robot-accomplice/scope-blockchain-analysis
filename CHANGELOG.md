@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Rust 1.99.1, the latest stable (was 1.99.0).
 
+### Fixed
+- The web API's multiple-venue trades and OHLC tests serve mexc, okx and bybit from a local mock instead of the live exchanges. They failed about one full `cargo test --workspace` run in two with `400 Bad Request`: the venue lookup reads the test home, which the config-save tests repoint at an empty folder while they run, so the venue was unknown. A venue failure is checked on each of the three too.
+
 ## [0.8.5] - 2026-10-27
 
 ### Added
