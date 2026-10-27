@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.5] - 2026-10-27
+
 ### Added
 - The repeat view's depth saw-tooth (a side of the book drained by trades, then refilled on a timer: USDN/USDT on weex refills its ask every 14½ minutes) is a bot-pattern finding of its own: `! Ask depth cycle  saw-tooth: drains, then refills every 14m 30s (3 cycles)`, under **Runs** in the Bot Patterns section. It counts in the `Bot patterns:` check, appears in the TUI's bot-pattern list, in every run of a plain `market summary --every` (which did not read it before) and in its `--report`. JSON: finding `depth_cycle`.
 - When the window is too small to show the repeat view in full (book levels cut, the compact snapshot without its book, checks and bot patterns, or charts squeezed under two rows), the footer says by how much to enlarge it: `! Window too small: enlarge it 12 columns wider and 8 rows taller to see everything`. A one-shot summary in a narrow TUI pane says how much wider it needs to be.
@@ -451,7 +453,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Configuration system with YAML support
 - Support for ERC-20, SPL, and TRC-20 tokens
 
-[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.4...HEAD
+[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.5...HEAD
+[0.8.5]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.4...v0.8.5
 [0.8.4]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.1...v0.8.2
