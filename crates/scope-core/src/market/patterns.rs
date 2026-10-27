@@ -207,6 +207,16 @@ pub enum Finding {
         of: usize,
         examples: Vec<f64>,
     },
+    /// Across the runs of a repeat: the `side` depth refilled every
+    /// `period_ms` (a coefficient of variation `cv`) and drained between,
+    /// `cycles` times over `runs` runs. A saw-tooth no single book shows.
+    DepthCycle {
+        side: BookSide,
+        period_ms: f64,
+        cycles: usize,
+        cv: f64,
+        runs: usize,
+    },
 }
 
 /// How a ladder's sizes run, from the best level out.
@@ -746,6 +756,19 @@ fn step(pct: f64) -> String {
     }
 }
 
+/// Which findings a group of the report section lists.
+type Belongs = fn(&Finding) -> bool;
+
+/// A period as `45s`, `14m 30s` or `1h 05m`.
+fn span(ms: f64) -> String {
+    let s = (ms / 1000.0).round().max(0.0) as u64;
+    match s {
+        0..60 => format!("{s}s"),
+        60..3600 => format!("{}m {:02}s", s / 60, s % 60),
+        _ => format!("{}h {:02}m", s / 3600, s % 3600 / 60),
+    }
+}
+
 impl Finding {
     /// The short name of the signal: `Jittered timer`, `Bid ladder`.
     pub fn label(&self) -> String {
@@ -762,12 +785,19 @@ impl Finding {
             Finding::PingPong { .. } => "Ping-pong".to_string(),
             Finding::Ladder { side: s, .. } => format!("{} ladder", side(s)),
             Finding::RoundNotional { side: s, .. } => format!("{} round notionals", side(s)),
+            Finding::DepthCycle { side: s, .. } => format!("{} depth cycle", side(s)),
         }
     }
 
-    /// True for a signal read in the book, false for one in the trades.
+    /// True for a signal read in one book, false for one in the trades or
+    /// across runs.
     pub fn in_book(&self) -> bool {
         matches!(self, Finding::Ladder { .. } | Finding::RoundNotional { .. })
+    }
+
+    /// True for a signal read across the runs of a repeat.
+    pub fn across_runs(&self) -> bool {
+        matches!(self, Finding::DepthCycle { .. })
     }
 
     /// The evidence, without the label.
@@ -869,6 +899,12 @@ impl Finding {
                 };
                 format!("{levels} levels {sizes} at {}% steps", step(*step_pct))
             }
+            Finding::DepthCycle {
+                period_ms, cycles, ..
+            } => format!(
+                "saw-tooth: drains, then refills every {} ({cycles} cycles)",
+                span(*period_ms)
+            ),
         }
     }
 
@@ -910,16 +946,33 @@ impl BotPatterns {
             + 2;
         let mut out = t::subsection_header("Bot Patterns · likely market-making bots");
         out.push('\n');
-        let groups = [
-            ("Trades", false, format!("{} sampled", self.trades_sampled)),
-            ("Book", true, "top levels of each side".to_string()),
+        let runs = self
+            .findings
+            .iter()
+            .find_map(|f| match f {
+                Finding::DepthCycle { runs, .. } => Some(*runs),
+                _ => None,
+            })
+            .unwrap_or(0);
+        let groups: [(&str, Belongs, String); 3] = [
+            (
+                "Trades",
+                |f| !f.in_book() && !f.across_runs(),
+                format!("{} sampled", self.trades_sampled),
+            ),
+            (
+                "Book",
+                Finding::in_book,
+                "top levels of each side".to_string(),
+            ),
+            (
+                "Runs",
+                Finding::across_runs,
+                format!("depth over {runs} runs"),
+            ),
         ];
-        for (name, in_book, about) in groups {
-            let found: Vec<&Finding> = self
-                .findings
-                .iter()
-                .filter(|f| f.in_book() == in_book)
-                .collect();
+        for (name, belongs, about) in groups {
+            let found: Vec<&Finding> = self.findings.iter().filter(|f| belongs(f)).collect();
             if found.is_empty() {
                 continue;
             }
@@ -933,7 +986,7 @@ impl BotPatterns {
         if let Some(note) = self
             .tape_note
             .as_ref()
-            .filter(|_| self.findings.iter().all(Finding::in_book))
+            .filter(|_| self.findings.iter().all(|f| f.in_book() || f.across_runs()))
         {
             out.push_str(&t::kv_row("Trades", &format!("not checked ({note})")));
             out.push('\n');
@@ -951,6 +1004,23 @@ impl BotPatterns {
         let mut lines: Vec<String> = self.findings.iter().map(Finding::describe).collect();
         lines.extend(self.share());
         lines
+    }
+
+    /// Replaces the depth-cycle findings with those in `bid` and `ask`
+    /// (time in ms, depth; one point per run, oldest first).
+    pub fn set_depth_cycles(&mut self, bid: &[(i64, f64)], ask: &[(i64, f64)]) {
+        self.findings.retain(|f| !f.across_runs());
+        for (side, points) in [(BookSide::Bid, bid), (BookSide::Ask, ask)] {
+            if let Some(c) = depth_cycle(points) {
+                self.findings.push(Finding::DepthCycle {
+                    side,
+                    period_ms: c.period_ms,
+                    cycles: c.cycles,
+                    cv: c.cv,
+                    runs: points.len(),
+                });
+            }
+        }
     }
 
     /// The health check line: a count and the signals' names, short enough
@@ -1394,6 +1464,7 @@ mod tests {
                 Finding::RoundNotional { .. } => "round",
                 Finding::PingPong { .. } => "ping-pong",
                 Finding::Ladder { .. } => "ladder",
+                Finding::DepthCycle { .. } => "cycle",
             })
             .collect();
         assert_eq!(
@@ -1586,6 +1657,45 @@ mod tests {
         assert!(c.cv < 0.01, "{}", c.cv);
         // Three refills are two cycles: not yet.
         assert!(depth_cycle(&sawtooth(30, 13)).is_none());
+    }
+
+    #[test]
+    fn test_a_depth_cycle_is_a_finding_of_its_own_group() {
+        let tape = weex_tape(40);
+        let (bids, asks) = weex_book();
+        let mut p = detect(Ok(&tape), Some((&bids, &asks)));
+        let before = p.findings.len();
+        // The ask drains and refills every 29 runs of 30s (14m 30s); the
+        // bid holds still.
+        let flat: Vec<(i64, f64)> = (0..120).map(|i| (i * 30_000, 3_300.0)).collect();
+        let ask = sawtooth(120, 29);
+        p.set_depth_cycles(&flat, &ask);
+        // Again on the next run: replaced, not added twice.
+        p.set_depth_cycles(&flat, &ask);
+        assert_eq!(p.findings.len(), before + 1, "{:?}", p.findings);
+        let cycle = p.findings.last().unwrap();
+        assert_eq!(cycle.label(), "Ask depth cycle");
+        assert_eq!(
+            cycle.detail(),
+            "saw-tooth: drains, then refills every 14m 30s (3 cycles)"
+        );
+        let text = p.format_text();
+        assert!(text.contains("depth over 120 runs"), "{text}");
+        assert!(text.contains("Ask depth cycle"), "{text}");
+        let crate::market::types::HealthCheck::Warn(m) = p.check() else {
+            panic!("{:?}", p.check())
+        };
+        assert!(m.ends_with(", ask depth cycle)"), "{m}");
+        // A series with no cycle takes the finding away.
+        p.set_depth_cycles(&flat, &flat);
+        assert_eq!(p.findings.len(), before);
+    }
+
+    #[test]
+    fn test_short_spans_read_as_minutes_and_hours() {
+        assert_eq!(span(45_000.0), "45s");
+        assert_eq!(span(870_000.0), "14m 30s");
+        assert_eq!(span(3_900_000.0), "1h 05m");
     }
 
     #[test]

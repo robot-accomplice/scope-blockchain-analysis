@@ -429,7 +429,7 @@ pub fn apply_override_answer(
                 )
             })?;
             Ok(format!(
-                "Kept your copies of {names}; scope will ask again when the catalog's change."
+                "Kept your copies of {names}; scope will ask again when the catalog changes."
             ))
         }
     }
@@ -1608,7 +1608,7 @@ capabilities: {}
         let done = apply_override_answer(OverrideAnswer::Keep, &stale, home.path(), "t", &declined)
             .unwrap();
         assert!(
-            done.contains("ask again when the catalog's change"),
+            done.contains("ask again when the catalog changes"),
             "{done}"
         );
         assert!(user.join("weex.yaml").exists());

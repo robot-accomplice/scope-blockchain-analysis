@@ -149,9 +149,15 @@ async fn run() -> Result<()> {
     match scope::paths::migration::migrate() {
         Ok(report) if report.copied > 0 => note!(
             out,
-            "Moved your scope files to {} (copied {} files; the old files are unchanged).",
-            scope::paths::home().display(),
-            report.copied
+            "Copied {} of your scope files from {} to {}. The old files are unchanged; delete them when you no longer need them. A copy you delete is not copied again.",
+            report.copied,
+            report
+                .from
+                .iter()
+                .map(|d| d.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+            scope::paths::home().display()
         ),
         Ok(_) => {}
         Err(e) => fail(&out, e.to_string(), 1),
