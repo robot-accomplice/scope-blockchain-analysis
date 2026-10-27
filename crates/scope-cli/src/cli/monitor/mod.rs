@@ -759,7 +759,10 @@ mod tests {
         assert_eq!(last.value, 1.5);
         assert!(last.is_real);
         let len = state.price_history.len();
-        assert!(len == initial_len + 1 || len == initial_len, "{initial_len} → {len}");
+        assert!(
+            len == initial_len + 1 || len == initial_len,
+            "{initial_len} → {len}"
+        );
     }
 
     #[test]
