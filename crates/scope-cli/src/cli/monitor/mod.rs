@@ -752,8 +752,17 @@ mod tests {
 
         assert_eq!(state.current_price, 1.5);
         assert_eq!(state.buys_24h, 150);
-        // Should have one more point after update
-        assert_eq!(state.price_history.len(), initial_len + 1);
+        // One more point, the real one, at the end. The synthetic history
+        // starts 24h back to the second, so when the clock ticks between
+        // `new` and `update` its oldest point ages out at the same time.
+        let last = state.price_history.back().unwrap();
+        assert_eq!(last.value, 1.5);
+        assert!(last.is_real);
+        let len = state.price_history.len();
+        assert!(
+            len == initial_len + 1 || len == initial_len,
+            "{initial_len} → {len}"
+        );
     }
 
     #[test]

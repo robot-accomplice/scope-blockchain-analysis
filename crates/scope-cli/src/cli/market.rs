@@ -505,17 +505,48 @@ async fn token_addresses(
 }
 
 /// One summary run: the summary and its report, as the CLI prints it.
+/// Most runs a repeat keeps for the depth-cycle signal: a day at 30s.
+const DEPTH_HISTORY_RUNS: usize = 2880;
+
+/// The bid and ask depth of each run of a repeat so far (time in ms),
+/// oldest first: the series the depth-cycle signal reads.
+#[derive(Default)]
+struct DepthHistory(std::sync::Mutex<Vec<(i64, f64, f64)>>);
+
+impl DepthHistory {
+    /// Records `summary`'s depth now and adds the depth cycles of the runs
+    /// so far to its bot patterns.
+    fn record(&self, summary: &mut MarketSummary) {
+        self.record_at(summary, chrono::Utc::now().timestamp_millis());
+    }
+
+    /// [`DepthHistory::record`] for a run at `at_ms`.
+    fn record_at(&self, summary: &mut MarketSummary, at_ms: i64) {
+        let mut points = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        points.push((at_ms, summary.bid_depth, summary.ask_depth));
+        let excess = points.len().saturating_sub(DEPTH_HISTORY_RUNS);
+        points.drain(..excess);
+        let bid: Vec<(i64, f64)> = points.iter().map(|p| (p.0, p.1)).collect();
+        let ask: Vec<(i64, f64)> = points.iter().map(|p| (p.0, p.2)).collect();
+        summary.check_depth_cycles(&bid, &ask);
+    }
+}
+
 async fn summary_run(
     args: &SummaryArgs,
     factory: &dyn ChainClientFactory,
     thresholds: &HealthThresholds,
     tokens: &[TokenAddress],
     run_num: Option<u64>,
+    history: Option<&DepthHistory>,
     out: &Output,
 ) -> Result<(MarketSummary, String)> {
     let (book, volume_24h, trades) = fetch_book_and_volume(args, thresholds, factory, out).await?;
     let mut summary = MarketSummary::from_order_book(&book, thresholds, volume_24h);
     summary.check_bot_patterns(trades.as_deref().map_err(String::as_str));
+    if let Some(history) = history {
+        history.record(&mut summary);
+    }
     let report = match args.format {
         SummaryFormat::Text => summary.format_text_with_tokens(Some(&args.venue), tokens),
         SummaryFormat::Json => {
@@ -586,7 +617,7 @@ async fn run_summary(
 
     let Some(schedule) = schedule else {
         let (summary, report) =
-            summary_run(&args, factory, &thresholds, &tokens, None, out).await?;
+            summary_run(&args, factory, &thresholds, &tokens, None, None, out).await?;
         out!(out, "{report}")?;
         out.record_view(SummaryView {
             summary: summary.clone(),
@@ -606,11 +637,21 @@ async fn run_summary(
         }
     );
     let metrics = series::summary_metrics(&thresholds);
+    let history = DepthHistory::default();
     let last = repeat::run(&schedule, &metrics, args.csv.as_deref(), out, |n| {
-        let (args, thresholds, metrics, tokens) = (&args, &thresholds, &metrics, &tokens);
+        let (args, thresholds, metrics, tokens, history) =
+            (&args, &thresholds, &metrics, &tokens, &history);
         async move {
-            let (summary, report) =
-                summary_run(args, factory, thresholds, tokens, Some(n), out).await?;
+            let (summary, report) = summary_run(
+                args,
+                factory,
+                thresholds,
+                tokens,
+                Some(n),
+                Some(history),
+                out,
+            )
+            .await?;
             Ok(RunOutput {
                 sample: series::sample(&summary, metrics),
                 snapshot: report,
@@ -657,7 +698,7 @@ async fn run_ohlc(args: OhlcArgs, http: Arc<dyn HttpClient>, out: &Output) -> Re
 
 /// `scope market ohlc` on `client`, the venue that `args.venue` names.
 async fn run_ohlc_with(client: &ExchangeClient, args: OhlcArgs, out: &Output) -> Result<()> {
-    let pair = client.venue_symbol(&Pair::parse(&args.pair));
+    let pair = client.checked_symbol(&Pair::parse(&args.pair))?;
     let width = t::terminal_width();
     // The axis is not known before the prices are; ten columns is room for
     // most of them, and the chart takes the newest that fit.
@@ -833,7 +874,7 @@ async fn run_trades(args: TradesArgs, http: Arc<dyn HttpClient>, out: &Output) -
 
 /// `scope market trades` on `client`, the venue that `args.venue` names.
 async fn run_trades_with(client: &ExchangeClient, args: TradesArgs, out: &Output) -> Result<()> {
-    let pair = client.venue_symbol(&Pair::parse(&args.pair));
+    let pair = client.checked_symbol(&Pair::parse(&args.pair))?;
 
     let trades = client.fetch_recent_trades(&pair, args.limit).await?;
 
@@ -2435,6 +2476,36 @@ capabilities:
     }
 
     #[tokio::test]
+    async fn test_a_repeat_adds_the_depth_saw_tooth_to_the_bot_patterns() {
+        let factory = dex_factory(&[(50_000.0, 1_000.0)]);
+        let args = dex_args(SummaryFormat::Text);
+        let thresholds = HealthThresholds::default();
+        let (base, _) = summary_run(&args, &factory, &thresholds, &[], None, None, &quiet())
+            .await
+            .unwrap();
+        let history = DepthHistory::default();
+        let mut last = base.clone();
+        // The ask drains 5% a run and refills every 29 runs of 30s.
+        for i in 0..120i64 {
+            last = base.clone();
+            last.ask_depth = 8_000.0 * 0.95f64.powi((i % 29) as i32);
+            history.record_at(&mut last, i * 30_000);
+        }
+        let found = last.bot_patterns.as_ref().unwrap();
+        assert!(
+            found.findings.iter().any(|f| f.describe()
+                == "Ask depth cycle: saw-tooth: drains, then refills every 14m 30s (3 cycles)"),
+            "{:?}",
+            found.findings
+        );
+        assert!(
+            last.format_text(None).contains("Ask depth cycle"),
+            "{}",
+            last.format_text(None)
+        );
+    }
+
+    #[tokio::test]
     async fn test_run_summary_once_json_reflects_resolved_thresholds() {
         let factory = dex_factory(&[(50_000.0, 1_000.0)]);
         let mut args = dex_args(SummaryFormat::Json);
@@ -2445,13 +2516,13 @@ capabilities:
             ..Default::default()
         };
         let thresholds = args.health.resolve(&Config::default());
-        let (summary, _) = summary_run(&args, &factory, &thresholds, &[], Some(1), &quiet())
+        let (summary, _) = summary_run(&args, &factory, &thresholds, &[], Some(1), None, &quiet())
             .await
             .unwrap();
         assert!(summary.healthy, "{:?}", summary.checks);
 
         let strict = HealthThresholds::default();
-        let (summary, _) = summary_run(&args, &factory, &strict, &[], None, &quiet())
+        let (summary, _) = summary_run(&args, &factory, &strict, &[], None, None, &quiet())
             .await
             .unwrap();
         assert!(!summary.healthy);
@@ -2464,9 +2535,10 @@ capabilities:
         factory.mock_dex.token_data.as_mut().unwrap().pairs[0].liquidity_base = Some(10_000_000.0);
         let args = dex_args(SummaryFormat::Json);
         let thresholds = args.health.resolve(&Config::default());
-        let (summary, report) = summary_run(&args, &factory, &thresholds, &[], None, &quiet())
-            .await
-            .unwrap();
+        let (summary, report) =
+            summary_run(&args, &factory, &thresholds, &[], None, None, &quiet())
+                .await
+                .unwrap();
         assert!(summary.healthy, "{:?}", summary.checks);
         let v: serde_json::Value = serde_json::from_str(&report).unwrap();
         assert_eq!(v["book_source"], "synthetic_amm");
@@ -2497,7 +2569,7 @@ capabilities:
         let factory = dex_factory(&[(50_000.0, 1_000.0)]);
         let args = dex_args(SummaryFormat::Text);
         let thresholds = args.health.resolve(&Config::default());
-        let (_, report) = summary_run(&args, &factory, &thresholds, &[], None, &quiet())
+        let (_, report) = summary_run(&args, &factory, &thresholds, &[], None, None, &quiet())
             .await
             .unwrap();
         assert!(report.contains("pool reserves not reported"), "{report}");

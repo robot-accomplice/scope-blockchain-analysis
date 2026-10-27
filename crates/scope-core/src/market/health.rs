@@ -657,6 +657,28 @@ impl MarketSummary {
         self.bot_patterns = Some(found);
     }
 
+    /// Adds the depth cycles a repeat found in the runs so far (`bid` and
+    /// `ask`: time in ms, depth, oldest first) to the bot patterns, and
+    /// rewrites their check to count them.
+    pub fn check_depth_cycles(&mut self, bid: &[(i64, f64)], ask: &[(i64, f64)]) {
+        let Some(found) = self.bot_patterns.as_mut() else {
+            return;
+        };
+        found.set_depth_cycles(bid, ask);
+        let check = found.check();
+        let ours = |c: &HealthCheck| {
+            let m = match c {
+                HealthCheck::Pass(m) | HealthCheck::Warn(m) | HealthCheck::NotApplicable(m) => m,
+                _ => return false,
+            };
+            m.starts_with("Bot patterns:") || m.starts_with("No bot patterns")
+        };
+        match self.checks.iter_mut().find(|c| ours(c)) {
+            Some(c) => *c = check,
+            None => self.checks.push(check),
+        }
+    }
+
     /// The one JSON shape for a summary. The web API and both CLI commands
     /// send these keys; each call site adds only its own wrapper keys
     /// (`run`, `venue`, `analytics`). `app.js` reads them, so the names are
@@ -1951,6 +1973,36 @@ mod tests {
                 .format_text(None)
                 .contains("best prices include")
         );
+    }
+
+    #[test]
+    fn test_depth_cycles_rewrite_the_bot_pattern_check() {
+        let book = OrderBook {
+            pair: "USDN/USDT".to_string(),
+            source: crate::market::types::BookSource::Exchange,
+            bids: side(0.9999, -0.0001, &[100.0; 20]),
+            asks: side(1.0001, 0.0001, &[100.0; 20]),
+        };
+        let mut summary = MarketSummary::from_order_book(&book, &HealthThresholds::default(), None);
+        summary.check_bot_patterns(Err("no tape"));
+        let checks = summary.checks.len();
+        let flat: Vec<(i64, f64)> = (0..120).map(|i| (i * 30_000, 3_300.0)).collect();
+        let saw: Vec<(i64, f64)> = (0..120)
+            .map(|i| (i * 30_000, 8_000.0 * 0.95f64.powi((i % 29) as i32)))
+            .collect();
+        summary.check_depth_cycles(&flat, &saw);
+        summary.check_depth_cycles(&flat, &saw);
+        assert_eq!(summary.checks.len(), checks);
+        let bot: Vec<&HealthCheck> = summary
+            .checks
+            .iter()
+            .filter(|c| format!("{c:?}").contains("ot patterns"))
+            .collect();
+        assert_eq!(bot.len(), 1, "{:?}", summary.checks);
+        let HealthCheck::Warn(m) = bot[0] else {
+            panic!("{bot:?}")
+        };
+        assert!(m.contains("ask depth cycle"), "{m}");
     }
 
     #[test]

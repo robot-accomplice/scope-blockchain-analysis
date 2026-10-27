@@ -355,6 +355,22 @@ mod tests {
         assert_eq!(stop_spawned_sidecar(), None);
     }
 
+    /// [`start_sidecar`], retried while Linux says the fake script is
+    /// busy: another test thread that forks while the script is still open
+    /// for writing holds it (ETXTBSY) for a moment.
+    #[cfg(unix)]
+    fn start_retrying(ghola: &Path, timeout: Duration) -> Result<u32, ScopeError> {
+        for _ in 0..50 {
+            match start_sidecar(ghola, timeout) {
+                Err(e) if e.to_string().contains("Text file busy") => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                other => return other,
+            }
+        }
+        start_sidecar(ghola, timeout)
+    }
+
     /// An executable `sh` script that stands in for `ghola --serve`.
     #[cfg(unix)]
     fn fake_ghola(dir: &Path, body: &str) -> std::path::PathBuf {
@@ -375,7 +391,7 @@ mod tests {
         }
         let dir = tempfile::tempdir().unwrap();
         let ghola = fake_ghola(dir.path(), "[ \"$1\" = --serve ] && exit 3");
-        let err = start_sidecar(&ghola, Duration::from_secs(10)).unwrap_err();
+        let err = start_retrying(&ghola, Duration::from_secs(10)).unwrap_err();
         assert!(err.to_string().contains("exited"), "{err}");
         assert_eq!(spawned_sidecar(), None);
     }
@@ -391,7 +407,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ghola = fake_ghola(dir.path(), "exec sleep 60");
         let started = Instant::now();
-        let err = start_sidecar(&ghola, Duration::from_millis(300)).unwrap_err();
+        let err = start_retrying(&ghola, Duration::from_millis(300)).unwrap_err();
         assert!(err.to_string().contains("did not answer"), "{err}");
         assert!(started.elapsed() < Duration::from_secs(5));
         assert_eq!(spawned_sidecar(), None);
@@ -408,7 +424,7 @@ mod tests {
         };
         let dir = tempfile::tempdir().unwrap();
         let ghola = fake_ghola(dir.path(), "exec sleep 60");
-        let pid = start_sidecar(&ghola, Duration::from_secs(5)).unwrap();
+        let pid = start_retrying(&ghola, Duration::from_secs(5)).unwrap();
         assert_eq!(spawned_sidecar(), Some(pid));
         assert_eq!(stop_spawned_sidecar(), Some(pid));
         assert_eq!(spawned_sidecar(), None);

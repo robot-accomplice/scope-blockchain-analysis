@@ -203,8 +203,21 @@ pub(crate) fn draw(f: &mut Frame, area: Rect, view: &RepeatView, status: Vec<Lin
             Line::styled(LEAVE_HINT, SECONDARY),
         ];
     }
+    // When the window hides or squeezes part of the view, a line under
+    // the status says how much larger it needs to be (its own row too).
+    let rows_for = |lines: usize| (lines as u16 + 1).min(area.height);
+    let plain = area.height.saturating_sub(rows_for(foot_lines.len()));
+    if let Some((cols, rows)) = shortfall(
+        Rect {
+            height: plain,
+            ..area
+        },
+        &c,
+    ) {
+        foot_lines.push(Line::styled(enlarge_hint(cols, rows), WARN));
+    }
     // J5: a rule keeps the footer off the view above it.
-    let foot_rows = (foot_lines.len() as u16 + 1).min(area.height);
+    let foot_rows = rows_for(foot_lines.len());
     let [body, foot] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(foot_rows)]).areas(area);
     if foot.height > 0 {
@@ -236,6 +249,49 @@ pub(crate) fn draw(f: &mut Frame, area: Rect, view: &RepeatView, status: Vec<Lin
         f.render_widget(Paragraph::new(lines), rule);
     }
     draw_trends(f, layout.trends, &c);
+}
+
+/// Fewest rows a chart needs for its shape to read.
+const READABLE_CHART_ROWS: u16 = 2;
+
+/// How many columns and rows `body` lacks to show the last run's full
+/// snapshot (every level, nothing cut) beside the trends with every chart
+/// readable; `None` when it shows it all.
+fn shortfall(body: Rect, c: &Copy) -> Option<(u16, u16)> {
+    let view = c.runs.last()?.view.as_ref()?;
+    let full = market_view::lines_with(
+        view,
+        market_view::Opts {
+            with_trends: true,
+            ..market_view::Opts::of(market_view::Size::Full)
+        },
+    );
+    let width = market_view::width(&full) as u16 + 2 + TRENDS_MIN_WIDTH;
+    let charts = c.metrics.iter().filter(|m| charted(m.id)).count() as u16;
+    let failed = c.runs.iter().any(|r| !r.sample.healthy);
+    // The trends' title, health strip, last failure and time axis.
+    let trends = 3 + u16::from(failed) + charts * READABLE_CHART_ROWS;
+    let height = (full.len() as u16).max(trends);
+    let short = (
+        width.saturating_sub(body.width),
+        height.saturating_sub(body.height),
+    );
+    (short != (0, 0)).then_some(short)
+}
+
+/// `! Window too small: enlarge it 12 columns wider and 8 rows taller …`.
+fn enlarge_hint(cols: u16, rows: u16) -> String {
+    let n = |k: u16, one: &str, many: &str| format!("{k} {}", if k == 1 { one } else { many });
+    let by = match (cols, rows) {
+        (0, r) => format!("{} taller", n(r, "row", "rows")),
+        (c, 0) => format!("{} wider", n(c, "column", "columns")),
+        (c, r) => format!(
+            "{} wider and {} taller",
+            n(c, "column", "columns"),
+            n(r, "row", "rows")
+        ),
+    };
+    format!("! Window too small: enlarge it {by} to see everything")
 }
 
 /// The status lines as one line, the progress before the long command:
@@ -833,6 +889,30 @@ mod tests {
         assert!(!text.contains("3.000%"), "{text}");
         let health = text.lines().find(|l| l.contains("Health")).unwrap();
         assert!(health.contains(" ok ┤"), "{health}");
+    }
+
+    #[test]
+    fn test_a_window_too_small_says_how_much_to_enlarge_it() {
+        // Narrow and short: the compact snapshot, the levels cut.
+        let rows = render(&market(3), 79, 24);
+        let last = rows.last().unwrap();
+        assert!(
+            last.starts_with("! Window too small: enlarge it "),
+            "{rows:#?}"
+        );
+        assert!(last.contains("columns wider and"), "{last}");
+        assert!(rows[rows.len() - 2].starts_with("run 3 of 10"), "{rows:#?}");
+        // Large enough for it all: no hint.
+        let rows = render(&market(3), 200, 80);
+        assert!(
+            !rows.iter().any(|r| r.contains("Window too small")),
+            "{rows:#?}"
+        );
+        // Wide enough but too short: rows only.
+        let rows = render(&market(3), 200, 20);
+        let last = rows.last().unwrap();
+        assert!(last.contains("rows taller to see everything"), "{last}");
+        assert!(!last.contains("wider"), "{last}");
     }
 
     #[test]

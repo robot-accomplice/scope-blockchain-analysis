@@ -1844,8 +1844,10 @@ impl TuiState {
                 } else {
                     merged.replacen(&data, "", 1)
                 };
-                let size = market_view::Size::for_width(self.pane_width().unwrap_or(80));
+                let width = self.pane_width().unwrap_or(80);
+                let size = market_view::Size::for_width(width);
                 self.push_lines(market_view::lines(&view, size));
+                self.push_lines(market_view::narrow_hint(width).into_iter().collect());
                 self.push_ansi(&notes);
             }
             _ => self.push_ansi(&merged),
