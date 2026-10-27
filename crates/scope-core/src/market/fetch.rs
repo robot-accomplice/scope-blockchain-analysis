@@ -160,7 +160,7 @@ async fn cex_book_and_volume(
     exchange: &ExchangeClient,
     pair: &Pair,
 ) -> Result<(OrderBook, Option<f64>)> {
-    let symbol = exchange.venue_symbol(pair);
+    let symbol = exchange.checked_symbol(pair)?;
     let book = exchange.fetch_order_book(&symbol).await?;
     let volume = if exchange.has_ticker() {
         exchange

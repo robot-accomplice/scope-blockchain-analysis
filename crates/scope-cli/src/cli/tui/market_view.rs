@@ -47,6 +47,19 @@ impl Size {
     }
 }
 
+/// Under a compact snapshot in a pane `width` columns wide: how much
+/// wider the full one needs, which shows what the compact one leaves out.
+pub(crate) fn narrow_hint(width: usize) -> Option<Line<'static>> {
+    let short = FULL_WIDTH.checked_sub(width).filter(|n| *n > 0)?;
+    let cols = if short == 1 { "column" } else { "columns" };
+    Some(Line::styled(
+        format!(
+            " ! Window too narrow: widen it {short} {cols} to see the book, every check and the bot patterns"
+        ),
+        WARN,
+    ))
+}
+
 /// The widest line of `lines`, in columns.
 pub(crate) fn width(lines: &[Line<'_>]) -> usize {
     lines.iter().map(Line::width).max().unwrap_or(0)
@@ -1089,6 +1102,11 @@ mod tests {
         assert_eq!(Size::for_width(FULL_WIDTH + 30), Size::Full);
         assert_eq!(Size::for_width(FULL_WIDTH - 1), Size::Compact);
         assert_eq!(Size::for_width(0), Size::Compact);
+        assert!(narrow_hint(FULL_WIDTH).is_none());
+        let hint = narrow_hint(FULL_WIDTH - 1).unwrap().to_string();
+        assert!(hint.contains("widen it 1 column to see"), "{hint}");
+        let hint = narrow_hint(40).unwrap().to_string();
+        assert!(hint.contains("widen it 10 columns"), "{hint}");
     }
 
     #[test]

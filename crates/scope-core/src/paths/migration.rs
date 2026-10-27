@@ -2,11 +2,17 @@
 //!
 //! Old versions kept the config, venues and address book in
 //! `~/.config/scope` (or the platform config folder), and tokens and TUI
-//! state in the platform data folder. On each start, every old file
-//! whose new copy does not exist is copied. Nothing old is deleted or
-//! changed, and no new file is written over. Each copy, and each failed
-//! copy, gets one line in `state/migration.jsonl` (the audit record). A
-//! start with nothing to copy writes nothing, so a read-only home works.
+//! state in the platform data folder. A start copies every old file whose
+//! new copy does not exist. Nothing old is deleted or changed, and no new
+//! file is written over. Each copy, and each failed copy, gets one line in
+//! `state/migration.jsonl` (the audit record).
+//!
+//! It happens once: scope has one home. When a run that copied files
+//! finishes, the log gets a `complete` line, and no later start reads the
+//! old folders again, so a copy the user deleted stays deleted and a file
+//! added to an old folder is ignored. A log from before that line existed
+//! still stops a file it shows as copied from being copied back. A start
+//! with nothing to copy writes nothing, so a read-only home works.
 
 use crate::error::{Result, ScopeError};
 use std::io::Write as _;
@@ -25,6 +31,8 @@ pub enum Outcome {
     Copied,
     KeptExisting,
     NoSource,
+    /// Copied by an earlier start: the user may have deleted the copy.
+    CopiedBefore,
 }
 
 impl Outcome {
@@ -33,14 +41,17 @@ impl Outcome {
             Outcome::Copied => "copied",
             Outcome::KeptExisting => "kept-existing",
             Outcome::NoSource => "no-source",
+            Outcome::CopiedBefore => "copied-before",
         }
     }
 }
 
 /// The result of a migration run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Report {
     pub copied: usize,
+    /// The old folders the copied files came from, each once, in order.
+    pub from: Vec<PathBuf>,
 }
 
 /// Files in the old platform data folder (`<data>/scope/`) and where they go.
@@ -119,20 +130,44 @@ pub fn items_for(
     items
 }
 
-/// Copies each item whose source exists and whose destination does not,
-/// logging each copy and each failure to `log`. Stops at the first failed
-/// copy with an error that names the file; the files copied before it stay.
+/// Copies each item whose source exists, whose destination does not, and
+/// that `log` does not show as copied already, logging each copy and each
+/// failure to `log`. Stops at the first failed copy with an error that
+/// names the file; the files copied before it stay.
 pub fn run(items: &[Item], log: &Path) -> Result<Report> {
+    let entries = log_entries(log);
+    if entries.iter().any(|v| v["result"] == COMPLETE) {
+        return Ok(Report {
+            copied: 0,
+            from: Vec::new(),
+        });
+    }
+    let done = copied_before(&entries);
     let mut copied = 0;
+    let mut from: Vec<PathBuf> = Vec::new();
     for item in items {
-        let result = copy_one(item);
+        let result = if done.contains(&(item.from.clone(), item.to.clone())) {
+            Ok(Outcome::CopiedBefore)
+        } else {
+            copy_one(item)
+        };
         match &result {
             Ok(Outcome::Copied) => append_log(log, item, Outcome::Copied.as_str())?,
             Ok(_) => {}
             Err(e) => append_log(log, item, &format!("failed: {e}"))?,
         }
         match result {
-            Ok(Outcome::Copied) => copied += 1,
+            Ok(Outcome::Copied) => {
+                copied += 1;
+                let dir = item
+                    .from
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_default();
+                if !from.contains(&dir) {
+                    from.push(dir);
+                }
+            }
             Ok(_) => {}
             Err(e) => {
                 return Err(ScopeError::io_context(
@@ -146,7 +181,44 @@ pub fn run(items: &[Item], log: &Path) -> Result<Report> {
             }
         }
     }
-    Ok(Report { copied })
+    // Done once anything was ever copied: the old folders are not read
+    // again. With nothing copied, nothing is written (a read-only home).
+    if copied > 0 || !done.is_empty() {
+        let end = serde_json::json!({
+            "at": chrono::Utc::now().to_rfc3339(),
+            "result": COMPLETE,
+        });
+        append_line(log, &end)?;
+    }
+    Ok(Report { copied, from })
+}
+
+/// The result of the log line that ends a migration.
+const COMPLETE: &str = "complete";
+
+/// The log's entries; an unreadable log or line has none.
+fn log_entries(log: &Path) -> Vec<serde_json::Value> {
+    let Ok(text) = std::fs::read_to_string(log) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .collect()
+}
+
+/// The (from, to) pairs `entries` record as copied. The worst case of a
+/// lost log is the old behaviour, a copy made again.
+fn copied_before(entries: &[serde_json::Value]) -> std::collections::HashSet<(PathBuf, PathBuf)> {
+    entries
+        .iter()
+        .filter(|v| v["result"] == Outcome::Copied.as_str())
+        .filter_map(|v| {
+            Some((
+                PathBuf::from(v["from"].as_str()?),
+                PathBuf::from(v["to"].as_str()?),
+            ))
+        })
+        .collect()
 }
 
 fn copy_one(item: &Item) -> std::io::Result<Outcome> {
@@ -171,16 +243,20 @@ fn copy_one(item: &Item) -> std::io::Result<Outcome> {
 }
 
 fn append_log(log: &Path, item: &Item, result: &str) -> Result<()> {
-    let context = || format!("cannot write the migration log {}", log.display());
-    if let Some(parent) = log.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| ScopeError::io_context(e, context()))?;
-    }
     let line = serde_json::json!({
         "at": chrono::Utc::now().to_rfc3339(),
         "from": item.from.display().to_string(),
         "to": item.to.display().to_string(),
         "result": result,
     });
+    append_line(log, &line)
+}
+
+fn append_line(log: &Path, line: &serde_json::Value) -> Result<()> {
+    let context = || format!("cannot write the migration log {}", log.display());
+    if let Some(parent) = log.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| ScopeError::io_context(e, context()))?;
+    }
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -315,24 +391,67 @@ mod tests {
     }
 
     #[test]
+    fn test_it_happens_once_so_the_old_folders_never_compete() {
+        let f = fixture();
+        put(
+            &f.xdg.join("venues/weex.yaml"),
+            "id: weex
+",
+        );
+        let report = run_fixture(&f).unwrap();
+        assert_eq!(report.copied, 1);
+        // The report names where the copies came from.
+        assert_eq!(report.from, [f.xdg.join("venues")]);
+        // A deleted copy stays deleted, and a file added to the old
+        // folder later is not read.
+        fs::remove_file(f.home.join("venues/weex.yaml")).unwrap();
+        put(
+            &f.xdg.join("venues/kucoin.yaml"),
+            "id: kucoin
+",
+        );
+        assert_eq!(run_fixture(&f).unwrap().copied, 0);
+        assert!(!f.home.join("venues/weex.yaml").exists());
+        assert!(!f.home.join("venues/kucoin.yaml").exists());
+    }
+
+    #[test]
+    fn test_a_log_from_before_complete_stops_copies_coming_back_and_ends() {
+        let f = fixture();
+        put(
+            &f.xdg.join("venues/weex.yaml"),
+            "id: weex
+",
+        );
+        let item = Item {
+            from: f.xdg.join("venues/weex.yaml"),
+            to: f.home.join("venues/weex.yaml"),
+        };
+        // 0.8.4 logged the copy but no end; the user then deleted it.
+        append_log(&f.home.join("state/migration.jsonl"), &item, "copied").unwrap();
+        assert_eq!(run_fixture(&f).unwrap().copied, 0);
+        assert!(!item.to.exists());
+        let last = log_lines(&f).pop().unwrap();
+        assert_eq!(last["result"], COMPLETE);
+    }
+
+    #[test]
     fn test_the_log_records_each_copy_and_nothing_else() {
         // The audit record: one line per copied (or failed) file.
         let f = fixture();
         put(&f.xdg.join("config.yaml"), "chains: {}\n");
         put(&f.platform_data.join("scope/tokens.yaml"), "aliases: {}\n");
         run_fixture(&f).unwrap();
-        let lines = log_lines(&f);
-        assert_eq!(lines.len(), 2, "{lines:?}");
+        let mut lines = log_lines(&f);
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        // The last line ends the migration.
+        assert_eq!(lines.pop().unwrap()["result"], COMPLETE);
         for line in &lines {
             assert!(line["at"].is_string() && line["from"].is_string() && line["to"].is_string());
             assert_eq!(line["result"], "copied");
         }
         run_fixture(&f).unwrap();
-        assert_eq!(
-            log_lines(&f).len(),
-            2,
-            "a start with nothing to copy adds no line"
-        );
+        assert_eq!(log_lines(&f).len(), 3, "a later start adds no line");
     }
 
     #[cfg(unix)]

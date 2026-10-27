@@ -104,6 +104,31 @@ impl ExchangeClient {
             .format_pair(&pair.base, pair.quote.as_deref())
     }
 
+    /// The venue's symbol for `pair`, or an error when its base is its
+    /// quote: `USDT` alone on a venue whose default quote is USDT is
+    /// USDT/USDT, which no venue lists.
+    pub fn checked_symbol(&self, pair: &super::pair::Pair) -> crate::error::Result<String> {
+        let quote = pair
+            .quote
+            .as_deref()
+            .unwrap_or(&self.descriptor.symbol.default_quote);
+        if pair.base.eq_ignore_ascii_case(quote) {
+            let base = pair.base.to_uppercase();
+            let defaulted = if pair.quote.is_none() {
+                format!(
+                    " ({} quotes in {base} when no quote is named)",
+                    self.descriptor.id
+                )
+            } else {
+                String::new()
+            };
+            return Err(crate::error::ScopeError::InvalidInput(format!(
+                "{base}/{base} is not a market{defaulted}: name the pair, such as {base}/USDC"
+            )));
+        }
+        Ok(self.venue_symbol(pair))
+    }
+
     // =========================================================================
     // Capability discovery
     // =========================================================================
@@ -249,6 +274,34 @@ impl std::fmt::Debug for ExchangeClient {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn test_a_base_that_is_its_own_quote_is_not_a_market() {
+        let client = crate::market::testing::venue_at("binance", "http://localhost:1");
+        let err = client
+            .checked_symbol(&crate::market::Pair::parse("USDT"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("USDT/USDT is not a market"), "{err}");
+        assert!(
+            err.contains("binance quotes in USDT when no quote is named"),
+            "{err}"
+        );
+        let err = client
+            .checked_symbol(&crate::market::Pair::parse("usdc/USDC"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("USDC/USDC is not a market: name the pair"),
+            "{err}"
+        );
+        assert_eq!(
+            client
+                .checked_symbol(&crate::market::Pair::parse("USDT/USDC"))
+                .unwrap(),
+            "USDTUSDC"
+        );
+    }
     use super::*;
     use crate::market::descriptor::{CapabilitySet, SymbolCase, SymbolConfig, VenueDescriptor};
     use crate::market::pair::Pair;
