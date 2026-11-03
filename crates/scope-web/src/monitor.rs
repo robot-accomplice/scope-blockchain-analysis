@@ -81,7 +81,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, params: Moni
             Ok(client) => client,
             Err(e) => {
                 let msg = serde_json::json!({"type": "error", "message": e.to_string()});
-                let _ = socket.send(Message::Text(msg.to_string())).await;
+                let _ = socket.send(Message::Text(msg.to_string().into())).await;
                 return;
             }
         };
@@ -104,7 +104,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, params: Moni
         "exchange_pair": exchange_pair,
     });
     if socket
-        .send(Message::Text(init_msg.to_string()))
+        .send(Message::Text(init_msg.to_string().into()))
         .await
         .is_err()
     {
@@ -181,7 +181,11 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, params: Moni
             }
         };
 
-        if socket.send(Message::Text(msg.to_string())).await.is_err() {
+        if socket
+            .send(Message::Text(msg.to_string().into()))
+            .await
+            .is_err()
+        {
             // Client disconnected
             break;
         }
@@ -198,7 +202,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, params: Moni
                             && cmd.get("type").and_then(|t| t.as_str()) == Some("ping")
                         {
                             let pong = serde_json::json!({"type": "pong"});
-                            let _ = socket.send(Message::Text(pong.to_string())).await;
+                            let _ = socket.send(Message::Text(pong.to_string().into())).await;
                         }
                     }
                     _ => {}

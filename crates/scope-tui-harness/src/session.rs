@@ -3,6 +3,7 @@
 use anyhow::{Context, Result};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
+use std::num::NonZeroU16;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::time::{Duration, Instant};
@@ -54,6 +55,11 @@ fn size(cols: u16, rows: u16) -> PtySize {
     }
 }
 
+/// The screen model takes no zero size; a zero row or column count is one.
+fn nonzero(n: u16) -> NonZeroU16 {
+    NonZeroU16::new(n).unwrap_or(NonZeroU16::MIN)
+}
+
 impl Session {
     pub fn start(o: &StartOpts) -> Result<Self> {
         let pair = native_pty_system().openpty(size(o.cols, o.rows))?;
@@ -101,7 +107,7 @@ impl Session {
             writer,
             child,
             rx,
-            parser: vt100::Parser::new(o.rows, o.cols, 0),
+            parser: vt100::Parser::new(nonzero(o.rows), nonzero(o.cols), 0),
             raw: Vec::new(),
             status: None,
         };
@@ -147,7 +153,9 @@ impl Session {
 
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<()> {
         self.master.resize(size(cols, rows))?;
-        self.parser.screen_mut().set_size(rows, cols);
+        self.parser
+            .screen_mut()
+            .set_size(nonzero(rows), nonzero(cols));
         Ok(())
     }
 

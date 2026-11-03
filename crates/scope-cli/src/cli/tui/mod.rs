@@ -1905,7 +1905,7 @@ mod tests {
             assert_eq!(exit, None);
             assert_ran_note(&state, "setup", "cancelled");
             assert_eq!(records(&dir)[0]["outcome"], "cancelled");
-            assert!(host.signals.try_next().is_err(), "the INT is used up");
+            assert!(host.signals.try_recv().is_err(), "the INT is used up");
         }
     }
 
