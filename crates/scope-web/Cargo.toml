@@ -34,8 +34,8 @@ scope = { path = "../scope-core", package = "scope-bca-core", version = "0.8.5" 
 scope_cli = { path = "../scope-cli", package = "scope-bca-cli", version = "0.8.5" }
 
 # Web framework
-axum = { version = "0.7", features = ["json", "ws", "macros"] }
-tower-http = { version = "0.6", features = ["cors", "trace"] }
+axum = { version = "0.8", features = ["json", "ws", "macros"] }
+tower-http = { version = "0.7", features = ["cors", "trace"] }
 
 # Async runtime
 tokio = { version = "1.0", features = ["full"] }

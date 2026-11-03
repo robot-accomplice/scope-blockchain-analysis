@@ -9,7 +9,7 @@ pub fn text(parser: &vt100::Parser) -> String {
     let screen = parser.screen();
     let (rows, cols) = screen.size();
     let mut out = String::new();
-    for line in screen.rows(0, cols).take(rows as usize) {
+    for line in screen.rows(0, cols.get()).take(usize::from(rows.get())) {
         out.push_str(line.trim_end());
         out.push('\n');
     }
@@ -74,7 +74,7 @@ mod tests {
 
     #[test]
     fn test_text_reads_the_screen_and_trims() {
-        let mut p = vt100::Parser::new(3, 10, 0);
+        let mut p = vt100::Parser::new(3.try_into().unwrap(), 10.try_into().unwrap(), 0);
         p.process(b"hi   \r\nthere");
         assert_eq!(text(&p), "hi\nthere\n");
     }

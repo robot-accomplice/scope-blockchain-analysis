@@ -28,7 +28,7 @@ scope = { path = "../scope-core", package = "scope-bca-core", version = "0.8.5" 
 # CLI framework
 clap = { version = "4.0", features = ["derive", "cargo"] }
 clap_complete = "4"
-indicatif = "0.17"
+indicatif = "0.18"
 
 # Async runtime
 tokio = { version = "1.0", features = ["full"] }
@@ -49,7 +49,7 @@ unicode-width = "0.2"
 unicode-segmentation = "1"
 futures = "0.3"
 ansi-to-tui = "8"
-shlex = "1"
+shlex = "2"
 
 # Logging
 tracing = "0.1"
@@ -61,17 +61,17 @@ chrono = { version = "0.4", features = ["serde"] }
 # Terminal coloring
 
 # Utilities used by CLI handlers
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip", "brotli"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "gzip", "brotli"] }
 regex = "1"
 textplots = "0.8"
-dirs = "5.0"
+dirs = "7"
 async-trait = "0.1"
 bs58 = "0.5"
 urlencoding = "2.1"
-sha2 = "0.10.9"
+sha2 = "0.11"
 hex = "0.4"
-thiserror = "1.0"
-base64 = "0.22"
+thiserror = "2"
+base64 = "0.23"
 
 # Signal numbers without a tokio SignalKind constructor (SIGTSTP, SIGCONT)
 [target.'cfg(unix)'.dependencies]

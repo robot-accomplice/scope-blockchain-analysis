@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Rust 1.99.1, the latest stable (was 1.99.0).
+- Dependencies at their latest releases: every crate in `Cargo.lock` (tokio 1.54.1, which deprecates the unsound `AsyncFd` constructors of RUSTSEC-2026-0386; scope does not use them, #145), and the majors reqwest 0.13, axum 0.8, tower-http 0.7, indicatif 0.18, thiserror 2, dirs 7, sha2 0.11, base64 0.23, shlex 2 and vt100 0.18. The paths scope reads are unchanged.
+- HTTPS trusts the system's certificate store (reqwest 0.13's rustls, with aws-lc-rs), not a list built into the binary. A Linux system without CA certificates (`ca-certificates`) cannot verify servers.
+- The cargo-audit ignore list is empty: indicatif 0.18 no longer pulls in the unmaintained `number_prefix` (RUSTSEC-2025-0119).
+- CI cross-builds the arm64 Linux release, so a dependency that does not cross-compile fails the pull request instead of the tagged release.
 
 ### Fixed
 - The web API's multiple-venue trades and OHLC tests serve mexc, okx and bybit from a local mock instead of the live exchanges. They failed about one full `cargo test --workspace` run in two with `400 Bad Request`: the venue lookup reads the test home, which the config-save tests repoint at an empty folder while they run, so the venue was unknown. A venue failure is checked on each of the three too.

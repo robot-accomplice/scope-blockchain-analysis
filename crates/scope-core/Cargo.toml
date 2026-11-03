@@ -33,13 +33,13 @@ serde-saphyr = "2.0.0"
 serde_json = "1.0"
 
 # HTTP client
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip", "brotli"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "gzip", "brotli"] }
 
 # Async runtime
 tokio = { version = "1.0", features = ["full"] }
 
 # Error handling
-thiserror = "1.0"
+thiserror = "2"
 anyhow = "1.0"
 
 # Logging and tracing
@@ -47,8 +47,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Utilities
-base64 = "0.22"
-dirs = "5.0"
+base64 = "0.23"
+dirs = "7"
 async-trait = "0.1"
 bs58 = "0.5"
 
@@ -62,7 +62,7 @@ textplots = "0.8"
 urlencoding = "2.1"
 
 # Hashing
-sha2 = "0.10.9"
+sha2 = "0.11"
 hex = "0.4"
 regex = "1"
 
