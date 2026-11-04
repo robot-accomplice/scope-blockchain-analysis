@@ -54,23 +54,23 @@ pub fn watchlist_from_args(
     list.outputs.report = w.report.clone();
 
     let preset = match w.preset.as_deref() {
-        None => args.venue.is_some().then_some(Preset::MarketHealth),
+        None => (!args.venue.is_empty()).then_some(Preset::MarketHealth),
         Some(p) if p.eq_ignore_ascii_case("none") => None,
         Some(p) => Some(
             Preset::from_name(p)
                 .ok_or_else(|| format!("unknown preset `{p}`; use market-health or none"))?,
         ),
     };
-    let mut target = match &args.venue {
-        Some(venue) => {
+    let mut target = match args.venue.as_slice() {
+        [_, ..] => {
             let mut t = Target::new(
                 TargetKind::Pair,
                 args.pair.clone().unwrap_or_else(|| args.token.clone()),
             );
-            t.venue = Some(venue.clone());
+            t.venues = args.venue.clone();
             t
         }
-        None => {
+        [] => {
             if preset.is_some() {
                 return Err("the market health checks need a venue (`--venue binance`)".to_string());
             }
@@ -133,7 +133,7 @@ pub fn watchlist_from_args(
             Op::Le,
         ),
     ];
-    if target.venue.is_some() {
+    if !target.venues.is_empty() {
         for (limit, metric, op) in venue_alerts {
             if let Some(value) = limit {
                 target.rules.push(Rule { metric, op, value });
@@ -190,8 +190,19 @@ mod tests {
         assert_eq!(w.duration, Some(Duration::from_secs(3600)));
         let t = &w.targets[0];
         assert_eq!((t.kind, t.id.as_str()), (TargetKind::Pair, "USDN"));
-        assert_eq!(t.venue.as_deref(), Some("weex"));
+        assert_eq!(t.venues.as_slice(), ["weex"]);
         assert_eq!(t.preset, Some(Preset::MarketHealth));
+    }
+
+    // Design 2026-11-04, section 2.8: one token watched on several venues.
+    #[test]
+    fn venue_repeats_or_takes_a_comma_list() {
+        let a = from("monitor USDN --venue weex --venue binance").unwrap().0;
+        let b = from("monitor USDN --venue weex,binance").unwrap().0;
+        assert_eq!(a, b);
+        assert_eq!(a.targets.len(), 1, "one target, not one per venue");
+        assert_eq!(a.targets[0].venues, ["weex", "binance"]);
+        assert_eq!(a.targets[0].preset, Some(Preset::MarketHealth));
     }
 
     #[test]

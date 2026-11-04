@@ -10,7 +10,7 @@
 //! targets:
 //!   - kind: pair
 //!     id: USDC
-//!     venue: binance
+//!     venue: binance    # or a list: [binance, weex]
 //!     preset: market health
 //!     health:
 //!       max_spread_pct: 0.5
@@ -104,13 +104,40 @@ struct RawTarget {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     chain: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    venue: Option<String>,
+    venue: Option<RawVenues>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     preset: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     health: Option<serde_json::Map<String, serde_json::Value>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     rules: Vec<String>,
+}
+
+/// `venue:` in a file: one name (the format before venue lists) or a list.
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[serde(untagged)]
+enum RawVenues {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl RawVenues {
+    /// One venue as a name, so a single-venue file is written as before
+    /// and an older scope still reads it; several as a list.
+    fn from_list(venues: &[String]) -> Option<Self> {
+        match venues {
+            [] => None,
+            [one] => Some(RawVenues::One(one.clone())),
+            many => Some(RawVenues::Many(many.to_vec())),
+        }
+    }
+
+    fn into_list(self) -> Vec<String> {
+        match self {
+            RawVenues::One(one) => vec![one],
+            RawVenues::Many(many) => many,
+        }
+    }
 }
 
 /// Parses a watchlist file's text. `default_name` names a file with no
@@ -178,18 +205,33 @@ pub fn parse(
         }
         let mut target = Target::new(kind, t.id.trim());
         target.chain = t.chain;
-        target.venue = t.venue;
-        if let (Some(venue), Some(known)) = (&target.venue, venues)
-            && !known.iter().any(|v| v.eq_ignore_ascii_case(venue))
-        {
-            error(
-                Some(&format!("venue: {venue}")),
-                format!(
-                    "target {n} ({}): unknown venue `{venue}`; the venues are {}",
-                    target.id,
-                    known.join(", ")
-                ),
-            );
+        for venue in t.venue.map(RawVenues::into_list).unwrap_or_default() {
+            let venue = venue.trim().to_string();
+            let at = venue_line(text, &venue);
+            let at = at.as_deref();
+            if target.venues.iter().any(|v| v.eq_ignore_ascii_case(&venue)) {
+                error(
+                    at,
+                    format!(
+                        "target {n} ({}): venue `{venue}` is listed twice",
+                        target.id
+                    ),
+                );
+                continue;
+            }
+            if let Some(known) = venues
+                && !known.iter().any(|v| v.eq_ignore_ascii_case(&venue))
+            {
+                error(
+                    at,
+                    format!(
+                        "target {n} ({}): unknown venue `{venue}`; the venues are {}",
+                        target.id,
+                        known.join(", ")
+                    ),
+                );
+            }
+            target.venues.push(venue);
         }
         if let Some(p) = &t.preset {
             match Preset::from_name(p) {
@@ -238,7 +280,7 @@ pub fn parse(
                 Err(e) => error(Some(text_rule), format!("target {n} ({}): {e}", target.id)),
             }
         }
-        if target.needs_market() && target.venue.is_none() {
+        if target.needs_market() && target.venues.is_empty() {
             error(
                 at,
                 format!(
@@ -247,7 +289,7 @@ pub fn parse(
                 ),
             );
         }
-        if kind == TargetKind::Pair && target.venue.is_none() && !target.needs_market() {
+        if kind == TargetKind::Pair && target.venues.is_empty() && !target.needs_market() {
             error(
                 at,
                 format!("target {n} ({}): a pair needs a venue", target.id),
@@ -272,6 +314,23 @@ pub fn parse(
         },
         targets,
     })
+}
+
+/// The first line that names `venue`: `venue: binance`, a flow list
+/// `venue: [binance, weex]`, or an item `- weex` of a block list.
+fn venue_line(text: &str, venue: &str) -> Option<String> {
+    text.lines()
+        .find(|l| {
+            let l = l.trim();
+            let named = |s: &str| {
+                s.trim_matches(|c: char| matches!(c, '[' | ']' | '"' | '\'') || c.is_whitespace())
+                    == venue
+            };
+            l.strip_prefix("venue:")
+                .is_some_and(|rest| rest.split(',').any(named))
+                || l.strip_prefix('-').is_some_and(named)
+        })
+        .map(str::to_string)
 }
 
 /// The 1-based line of the first line that contains `needle`.
@@ -299,7 +358,7 @@ pub fn to_text(w: &Watchlist) -> String {
                 kind: t.kind.name().to_string(),
                 id: t.id.clone(),
                 chain: t.chain.clone(),
-                venue: t.venue.clone(),
+                venue: RawVenues::from_list(&t.venues),
                 preset: t.preset.map(|p| p.name().to_string()),
                 health: health_map(&t.health),
                 rules: t.rules.iter().map(ToString::to_string).collect(),
@@ -508,6 +567,51 @@ targets:
         );
         let e = errors("targets:\n  - kind: address\n    id: \"0x1\"\n    preset: market health\n");
         assert!(e[0].message.contains("needs a token or a pair"), "{e:?}");
+    }
+
+    // Files written before venue lists have one `venue:` name. They must
+    // load, and a save must not rewrite them, so an older scope can still
+    // read them.
+    #[test]
+    fn a_single_venue_file_loads_and_saves_unchanged() {
+        let text = "name: w\ninterval: 1m\nduration: 1h\ntargets:\n- kind: pair\n  id: USDC\n  venue: binance\n  preset: market health\n";
+        let w = parse(text, "w", Some(&venues())).unwrap();
+        assert_eq!(w.targets[0].venues, vec!["binance"]);
+        assert_eq!(to_text(&w), text);
+    }
+
+    #[test]
+    fn a_venue_list_loads_in_order_in_both_list_styles() {
+        let flow = "targets:\n  - kind: pair\n    id: USDN\n    venue: [weex, binance]\n    preset: market health\n";
+        let block = "targets:\n  - kind: pair\n    id: USDN\n    venue:\n      - weex\n      - binance\n    preset: market health\n";
+        for text in [flow, block] {
+            let w = parse(text, "w", Some(&venues())).unwrap();
+            assert_eq!(w.targets[0].venues, vec!["weex", "binance"], "{text}");
+            assert_eq!(parse(&to_text(&w), "w", None).unwrap(), w);
+        }
+    }
+
+    #[test]
+    fn venue_list_errors_have_their_lines() {
+        let e = errors(
+            "targets:\n  - kind: pair\n    id: USDN\n    venue: [weex, nowhere, weex]\n    preset: market health\n",
+        );
+        assert_eq!(e.len(), 2, "{e:#?}");
+        assert!(e[0].message.contains("unknown venue `nowhere`"), "{e:?}");
+        assert!(e[1].message.contains("`weex` is listed twice"), "{e:?}");
+        assert!(e.iter().all(|x| x.line == Some(4)), "{e:?}");
+        let e = errors(
+            "targets:\n  - kind: pair\n    id: USDN\n    venue:\n      - weex\n      - nowhere\n",
+        );
+        assert_eq!(e[0].line, Some(6), "{e:?}");
+        // An empty list is no venue.
+        let e = errors(
+            "targets:\n  - kind: pair\n    id: USDN\n    venue: []\n    preset: market health\n",
+        );
+        assert!(
+            e[0].message.contains("market metrics need a venue"),
+            "{e:?}"
+        );
     }
 
     #[test]

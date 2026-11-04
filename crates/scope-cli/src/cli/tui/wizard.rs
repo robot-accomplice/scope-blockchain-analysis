@@ -289,7 +289,7 @@ impl WizardState {
         match row {
             None if t.preset.is_some() => t.preset = None,
             Some(m) if t.rules.iter().any(|r| r.metric == m) => t.rules.retain(|r| r.metric != m),
-            _ if needs_venue && t.venue.is_none() => {
+            _ if needs_venue && t.venues.is_empty() => {
                 self.error = Some(format!(
                     "{} has no venue: market metrics need one (add the target as `pair {} binance`).",
                     t.id, t.id
@@ -392,14 +392,14 @@ impl WizardState {
         }
     }
 
-    /// Adds `kind id [venue|chain]`.
+    /// Adds `kind id [venue…|chain]`: every word that names a venue goes
+    /// in the venue list.
     fn add_target(&mut self, text: &str) -> Result<(), String> {
         const USAGE: &str =
-            "type `pair USDC binance`, `token PEPE [chain|venue]` or `address 0x… [chain]`";
+            "type `pair USDC binance [okx…]`, `token PEPE [chain|venue…]` or `address 0x… [chain]`";
         let words: Vec<&str> = text.split_whitespace().collect();
-        let (kind, id, extra) = match words.as_slice() {
-            [kind, id] => (*kind, *id, None),
-            [kind, id, extra] => (*kind, *id, Some(*extra)),
+        let (kind, id, extras) = match words.as_slice() {
+            [kind, id, extras @ ..] => (*kind, *id, extras),
             _ => return Err(USAGE.to_string()),
         };
         let kind = match kind.to_ascii_lowercase().as_str() {
@@ -409,13 +409,19 @@ impl WizardState {
             _ => return Err(USAGE.to_string()),
         };
         let mut t = Target::new(kind, id);
-        if let Some(extra) = extra {
+        for &extra in extras {
             let is_venue = self.venues.iter().any(|v| v.eq_ignore_ascii_case(extra));
             match (kind, is_venue) {
+                (TargetKind::Address, _) | (TargetKind::Token, false) if t.chain.is_some() => {
+                    return Err(USAGE.to_string());
+                }
                 (TargetKind::Address, _) | (TargetKind::Token, false) => {
                     t.chain = Some(extra.to_string())
                 }
-                (_, true) => t.venue = Some(extra.to_string()),
+                (_, true) if t.venues.iter().any(|v| v.eq_ignore_ascii_case(extra)) => {
+                    return Err(format!("venue `{extra}` is listed twice"));
+                }
+                (_, true) => t.venues.push(extra.to_string()),
                 (TargetKind::Pair, false) => {
                     return Err(format!(
                         "unknown venue `{extra}`; the venues are {}",
@@ -424,10 +430,10 @@ impl WizardState {
                 }
             }
         }
-        if kind == TargetKind::Pair && t.venue.is_none() {
+        if kind == TargetKind::Pair && t.venues.is_empty() {
             return Err("a pair needs a venue: `pair USDC binance`".to_string());
         }
-        if t.venue.is_some() {
+        if !t.venues.is_empty() {
             t.preset = Some(Preset::MarketHealth);
         }
         self.list.targets.push(t);
@@ -524,8 +530,8 @@ fn row(selected: bool, text: String) -> Line<'static> {
 
 fn target_text(t: &Target) -> String {
     let mut s = format!("{:<8} {}", t.kind.name(), t.id);
-    if let Some(v) = &t.venue {
-        s.push_str(&format!(" @{v}"));
+    if !t.venues.is_empty() {
+        s.push_str(&format!(" @{}", t.venues.join(",")));
     }
     if let Some(c) = &t.chain {
         s.push_str(&format!(" on {c}"));
@@ -746,10 +752,10 @@ mod tests {
         typed(&mut w, "pair USDC binance");
         let t = &w.list.targets[0];
         assert_eq!(
-            (t.kind, t.venue.as_deref(), t.preset),
+            (t.kind, t.venues.as_slice(), t.preset),
             (
                 TargetKind::Pair,
-                Some("binance"),
+                ["binance".to_string()].as_slice(),
                 Some(Preset::MarketHealth)
             )
         );
@@ -771,6 +777,42 @@ mod tests {
         assert_eq!(w.list.targets.len(), 2);
         w.key(key(KeyCode::Char('d')));
         assert_eq!(w.list.targets.len(), 1);
+    }
+
+    // Design 2026-11-04, section 2.7: one target watched on several
+    // venues, added in one line, and shown with all its venues.
+    #[test]
+    fn add_a_target_on_several_venues() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = wizard(dir.path());
+        w.key(key(KeyCode::Char('a')));
+        typed(&mut w, "pair USDN weex binance");
+        let [t] = &w.list.targets[..] else {
+            panic!("{:?}", w.list.targets)
+        };
+        assert_eq!(t.venues, ["weex", "binance"]);
+        assert_eq!(t.preset, Some(Preset::MarketHealth));
+        assert!(
+            target_text(t).contains("@weex,binance"),
+            "{}",
+            target_text(t)
+        );
+        w.key(key(KeyCode::Char('a')));
+        typed(&mut w, "token PEPE weex solana binance");
+        let t = &w.list.targets[1];
+        assert_eq!(
+            (t.venues.as_slice(), t.chain.as_deref()),
+            (
+                ["weex".to_string(), "binance".to_string()].as_slice(),
+                Some("solana")
+            )
+        );
+        for bad in ["pair DAI weex weex", "token PEPE solana base"] {
+            w.key(key(KeyCode::Char('a')));
+            typed(&mut w, bad);
+            assert!(w.error.is_some(), "{bad}");
+        }
+        assert_eq!(w.list.targets.len(), 2);
     }
 
     #[test]
@@ -1195,7 +1237,9 @@ mod tests {
     fn add_target_says_how_when_the_line_is_wrong() {
         let dir = tempfile::tempdir().unwrap();
         let mut w = wizard(dir.path());
-        for bad in ["pair", "pair USDC binance extra", "wallet 0xabc"] {
+        // A fourth word is another venue, so `pair USDC binance extra` is an
+        // unknown venue (in add_a_target_on_several_venues), not a usage error.
+        for bad in ["pair", "address 0xabc ethereum base", "wallet 0xabc"] {
             w.key(key(KeyCode::Char('a')));
             typed(&mut w, bad);
             assert!(
@@ -1215,12 +1259,12 @@ mod tests {
             panic!("{:?}", w.list.targets)
         };
         assert_eq!(
-            (a.kind, a.chain.as_deref(), a.venue.as_deref()),
-            (TargetKind::Address, Some("binance"), None)
+            (a.kind, a.chain.as_deref(), a.venues.is_empty()),
+            (TargetKind::Address, Some("binance"), true)
         );
         assert_eq!(
-            (t.venue.as_deref(), t.preset),
-            (Some("WEEX"), Some(Preset::MarketHealth))
+            (t.venues.as_slice(), t.preset),
+            (["WEEX".to_string()].as_slice(), Some(Preset::MarketHealth))
         );
     }
 

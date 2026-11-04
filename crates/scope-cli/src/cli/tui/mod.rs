@@ -2378,7 +2378,10 @@ mod tests {
         let w = state.wizard.as_ref().expect("the wizard opened");
         assert_eq!(w.list.interval, std::time::Duration::from_secs(30));
         let t = &w.list.targets[0];
-        assert_eq!((t.id.as_str(), t.venue.as_deref()), ("USDN", Some("weex")));
+        assert_eq!(
+            (t.id.as_str(), t.venues.as_slice()),
+            ("USDN", ["weex".to_string()].as_slice())
+        );
         assert_eq!(t.preset, Some(scope::watch::Preset::MarketHealth));
         assert!(state.grid.is_none(), "nothing runs before Start");
         let screen = screen_text(&host);
