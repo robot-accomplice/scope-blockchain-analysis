@@ -13,7 +13,7 @@ export const metadata: Metadata = {
   description: "Account Kit Quickstart NextJS Template",
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
@@ -22,7 +22,7 @@ export default function RootLayout({
   // https://www.alchemy.com/docs/wallets/react/ssr#persisting-the-account-state
   const initialState = cookieToInitialState(
     config,
-    headers().get("cookie") ?? undefined
+    (await headers()).get("cookie") ?? undefined
   );
 
   return (

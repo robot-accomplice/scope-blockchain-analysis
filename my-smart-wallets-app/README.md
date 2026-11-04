@@ -95,6 +95,21 @@ npm run start   # run production build
 npm run lint    # lint code
 ```
 
+Install with `npm ci`. The committed `package-lock.json` pins the tree.
+
+## 📌 Dependency pins
+
+These packages are held below their latest major on purpose:
+
+| Package | Held at | Reason |
+| --- | --- | --- |
+| `next`, `eslint-config-next` | 15.5.x | Next 16 needs React 19. That is a separate migration. |
+| `react`, `react-dom`, `@types/react*` | 18 | Next 15 is kept on React 18. |
+| `wagmi` | 2.x | `@account-kit/*` 4.x needs peer `wagmi ^2.15.5`. |
+| `eslint` | 9.x | `eslint-config-next` 15 supports ESLint up to 9. |
+| `typescript` | 6.x | TypeScript 7 has no classic compiler API. Next 15 type-checks through that API. |
+| `tailwindcss` | 3.x | Tailwind 4 replaces the config and PostCSS setup. That is a separate migration. |
+
 ## 🛂 License
 
 MIT
