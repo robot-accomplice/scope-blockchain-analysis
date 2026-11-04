@@ -27,12 +27,12 @@ pub const PRESET_ERROR_LABEL: &str = "market health";
 #[derive(Debug, Clone, Default)]
 pub struct Tick {
     pub snapshot: Snapshot,
-    /// For each target, the market summary it read, for the report and
-    /// the detail pane.
+    /// For each row of the snapshot, the market summary it read, for the
+    /// report and the detail pane.
     pub summaries: Vec<Option<MarketSummary>>,
 }
 
-/// One target's results.
+/// One row's results.
 #[derive(Debug, Clone)]
 pub struct TargetReading {
     pub row: TargetSnapshot,
@@ -64,9 +64,10 @@ pub async fn tick(ready: &Ready, src: Sources<'_>, out: &Output, history: &mut H
     let mut result = Tick::default();
     let clock = Clock::now(ready);
     for (t, contract) in ready.list.targets.iter().zip(&ready.contracts) {
-        let reading = read_target(t, contract.as_deref(), src, out, history, clock).await;
-        result.snapshot.targets.push(reading.row);
-        result.summaries.push(reading.summary);
+        for reading in read_target(t, contract.as_deref(), src, out, history, clock).await {
+            result.snapshot.targets.push(reading.row);
+            result.summaries.push(reading.summary);
+        }
     }
     result
 }
@@ -79,7 +80,9 @@ fn readings(values: Vec<(MetricId, Option<f64>)>) -> Vec<(MetricId, Reading)> {
     values.into_iter().map(|(id, v)| (id, Ok(v))).collect()
 }
 
-/// Reads and judges one target.
+/// Reads and judges one target: one reading per row of
+/// [`Target::rows`]. Each venue's market is read once; the token and the
+/// address sources once for the target.
 pub async fn read_target(
     t: &Target,
     contract: Option<&str>,
@@ -87,45 +90,8 @@ pub async fn read_target(
     out: &Output,
     history: &mut History,
     clock: Clock,
-) -> TargetReading {
+) -> Vec<TargetReading> {
     let thresholds = preset::thresholds(t, &src.config.market.health);
-    let mut cells = Vec::new();
-    let mut summary = None;
-
-    let mut market: Option<SourceResult> = None;
-    if t.needs_market() {
-        match read_market(t, contract, &thresholds, src, out).await {
-            Ok((s, trades)) => {
-                if t.preset == Some(Preset::MarketHealth) {
-                    cells.extend(preset::cells(&s));
-                }
-                let since = t.rules.iter().any(|r| r.metric.since_last_tick()).then(|| {
-                    let tape = trades.as_deref().map_err(String::as_str);
-                    history.read(
-                        &t.label(),
-                        tape,
-                        s.volume_24h,
-                        clock.now_ms,
-                        clock.window_ms,
-                    )
-                });
-                market = Some(Ok(market_values(t, &s, &thresholds, since.as_ref())));
-                summary = Some(s);
-            }
-            Err(e) => {
-                if t.preset == Some(Preset::MarketHealth) {
-                    cells.push(Cell {
-                        label: PRESET_ERROR_LABEL.to_string(),
-                        rule: None,
-                        value: None,
-                        status: RuleStatus::Error(e.clone()),
-                        detail: None,
-                    });
-                }
-                market = Some(Err(e));
-            }
-        }
-    }
     let token = if t.needs(MetricGroup::Token) {
         Some(read_token(t, contract, src, out).await)
     } else {
@@ -136,51 +102,99 @@ pub async fn read_target(
     } else {
         None
     };
-
-    for rule in &t.rules {
-        let source = match rule.metric.group() {
-            MetricGroup::Market => market.as_ref(),
-            MetricGroup::Token => token.as_ref(),
-            MetricGroup::Address => address.as_ref(),
-        };
-        let (value, status) = match source {
-            Some(Ok(values)) => {
-                let reading = values
-                    .iter()
-                    .find(|(id, _)| *id == rule.metric)
-                    .map_or(Ok(None), |(_, r)| r.clone());
-                match reading {
-                    Ok(value) => (value, rule.eval(value)),
-                    Err(status) => (None, status),
+    let rows = t.rows();
+    let one_row = rows.len() == 1;
+    let mut result = Vec::with_capacity(rows.len());
+    for venue in rows {
+        let label = t.row_label(venue);
+        let mut cells = Vec::new();
+        let mut summary = None;
+        let mut market: Option<SourceResult> = None;
+        if let Some(venue) = venue
+            && t.needs_market()
+        {
+            match read_market(t, venue, contract, &thresholds, src, out).await {
+                Ok((s, trades)) => {
+                    if t.preset == Some(Preset::MarketHealth) {
+                        cells.extend(preset::cells(&s));
+                    }
+                    let since = t.rules.iter().any(|r| r.metric.since_last_tick()).then(|| {
+                        let tape = trades.as_deref().map_err(String::as_str);
+                        history.read(&label, tape, s.volume_24h, clock.now_ms, clock.window_ms)
+                    });
+                    market = Some(Ok(market_values(t, &s, &thresholds, since.as_ref())));
+                    summary = Some(s);
+                }
+                Err(e) => {
+                    if t.preset == Some(Preset::MarketHealth) {
+                        cells.push(Cell {
+                            label: PRESET_ERROR_LABEL.to_string(),
+                            rule: None,
+                            value: None,
+                            status: RuleStatus::Error(e.clone()),
+                            detail: None,
+                        });
+                    }
+                    market = Some(Err(e));
                 }
             }
-            Some(Err(e)) => (None, RuleStatus::Error(e.clone())),
-            None => (None, RuleStatus::Error("no source".to_string())),
-        };
-        cells.push(Cell {
-            label: rule.to_string(),
-            rule: Some(*rule),
-            value,
-            status,
-            detail: None,
+        }
+        // One row holds every rule; split rows hold the market rules on
+        // the venue rows and the others on the id row.
+        let rules = t
+            .rules
+            .iter()
+            .filter(|r| one_row || (r.metric.group() == MetricGroup::Market) == venue.is_some());
+        for rule in rules {
+            let source = match rule.metric.group() {
+                MetricGroup::Market => market.as_ref(),
+                MetricGroup::Token => token.as_ref(),
+                MetricGroup::Address => address.as_ref(),
+            };
+            let (value, status) = match source {
+                Some(Ok(values)) => {
+                    let reading = values
+                        .iter()
+                        .find(|(id, _)| *id == rule.metric)
+                        .map_or(Ok(None), |(_, r)| r.clone());
+                    match reading {
+                        Ok(value) => (value, rule.eval(value)),
+                        Err(status) => (None, status),
+                    }
+                }
+                Some(Err(e)) => (None, RuleStatus::Error(e.clone())),
+                None if rule.metric.group() == MetricGroup::Market => {
+                    (None, RuleStatus::Error("no venue".to_string()))
+                }
+                None => (None, RuleStatus::Error("no source".to_string())),
+            };
+            cells.push(Cell {
+                label: rule.to_string(),
+                rule: Some(*rule),
+                value,
+                status,
+                detail: None,
+            });
+        }
+        result.push(TargetReading {
+            row: TargetSnapshot::new(label, cells).on_venue(venue),
+            summary,
         });
     }
-    TargetReading {
-        row: TargetSnapshot::new(t.label(), cells),
-        summary,
-    }
+    result
 }
 
-/// The market summary of a target, the same fetch as `market summary`,
-/// with the venue's trade tape it read (or why there is none).
+/// The market summary of a target on `venue_name`, the same fetch as
+/// `market summary`, with the venue's trade tape it read (or why there is
+/// none).
 async fn read_market(
     t: &Target,
+    venue_name: &str,
     contract: Option<&str>,
     thresholds: &HealthThresholds,
     src: Sources<'_>,
     out: &Output,
 ) -> Result<(MarketSummary, Result<Vec<Trade>, String>), String> {
-    let venue_name = t.venue.as_deref().ok_or("no venue")?;
     let venue = MarketVenue::from_name_with_http(venue_name, src.clients.http())
         .map_err(|e| e.to_string())?;
     let dex = CrawlDexSource {
@@ -415,7 +429,7 @@ mod tests {
             // The strict thresholds make failures, so both statuses are compared.
             assert_eq!(healthy, flags.is_empty(), "flags {flags:?}: {checks:?}");
             let mut t = Target::new(TargetKind::Pair, "USDC");
-            t.venue = Some("eth".into());
+            t.venues = vec!["eth".into()];
             t.preset = Some(Preset::MarketHealth);
             t.health = overrides;
             let tick = tick(&ready(vec![t]), src, &quiet(), &mut History::default()).await;
@@ -458,7 +472,7 @@ mod tests {
             clients: &factory,
         };
         let mut t = Target::new(TargetKind::Pair, "USDC");
-        t.venue = Some("eth".into());
+        t.venues = vec!["eth".into()];
         t.rules = vec![
             Rule::parse("largest_trade < 50000").unwrap(),
             Rule::parse("volume_change_pct <= 100").unwrap(),
@@ -578,7 +592,10 @@ mod tests {
             now_ms: 0,
             window_ms: 60_000,
         };
-        let reading = read_target(&t, None, src, &quiet(), &mut History::default(), clock).await;
+        let readings = read_target(&t, None, src, &quiet(), &mut History::default(), clock).await;
+        let [reading] = readings.as_slice() else {
+            panic!("one row: {readings:?}");
+        };
         assert_eq!(reading.row.cells.len(), 1);
         assert_eq!(reading.row.cells[0].value, Some(1.0));
         assert_eq!(reading.row.status, TargetStatus::Passed);
@@ -593,7 +610,7 @@ mod tests {
             clients: &factory,
         };
         let mut bad = Target::new(TargetKind::Pair, "USDC");
-        bad.venue = Some("no-such-venue".into());
+        bad.venues = vec!["no-such-venue".into()];
         bad.preset = Some(Preset::MarketHealth);
         bad.rules = vec![Rule::parse("spread_pct < 1").unwrap()];
         let mut good = Target::new(
@@ -620,5 +637,70 @@ mod tests {
         assert!(matches!(row.cells[1].status, RuleStatus::Error(_)));
         assert_eq!(row.status, TargetStatus::Unknown, "never passed");
         assert_eq!(tick.snapshot.targets[1].status, TargetStatus::Passed);
+    }
+
+    /// Design 2026-11-04, section 2.3: a target on two venues gives one
+    /// row per venue, so a venue that fails does not hide the one that
+    /// works, and the token cells go on an id row, read once, so a
+    /// holders breach is not reported as a breach of one venue.
+    #[tokio::test]
+    async fn a_target_on_two_venues_gives_a_row_per_venue_and_an_id_row() {
+        let factory = usdc_on_eth();
+        let config = scope::config::Config::default();
+        let src = Sources {
+            config: &config,
+            clients: &factory,
+        };
+        let mut t = Target::new(TargetKind::Token, "USDC");
+        t.chain = Some("ethereum".into());
+        t.venues = vec!["eth".into(), "no-such-venue".into()];
+        t.rules = vec![
+            Rule::parse("mid_price > 0").unwrap(),
+            Rule::parse("volume_change_pct <= 100").unwrap(),
+            Rule::parse("price_usd > 0").unwrap(),
+        ];
+        let mut ready = ready(vec![t]);
+        ready.contracts = vec![Some("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".into())];
+        let mut history = History::default();
+        let first = tick(&ready, src, &quiet(), &mut history).await;
+        let labels: Vec<(&str, Option<&str>)> = first
+            .snapshot
+            .targets
+            .iter()
+            .map(|r| (r.target.as_str(), r.venue.as_deref()))
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                ("USDC@eth", Some("eth")),
+                ("USDC@no-such-venue", Some("no-such-venue")),
+                ("USDC", None),
+            ]
+        );
+        let [eth, bad, id] = first.snapshot.targets.as_slice() else {
+            unreachable!()
+        };
+        let names =
+            |r: &TargetSnapshot| r.cells.iter().map(|c| c.label.clone()).collect::<Vec<_>>();
+        assert_eq!(names(eth), ["mid_price > 0", "volume_change_pct <= 100"]);
+        assert_eq!(eth.cells[0].status, RuleStatus::Pass, "{eth:?}");
+        assert!(
+            bad.cells
+                .iter()
+                .all(|c| matches!(&c.status, RuleStatus::Error(m) if m.contains("no-such-venue"))),
+            "{bad:?}"
+        );
+        assert_eq!(names(id), ["price_usd > 0"]);
+        assert_eq!(id.status, TargetStatus::Passed, "{id:?}");
+        // Summaries line up with the rows: only the venue that read has one.
+        let read: Vec<bool> = first.summaries.iter().map(Option::is_some).collect();
+        assert_eq!(read, [true, false, false]);
+        // The second tick compares each venue with its own first reading.
+        let second = tick(&ready, src, &quiet(), &mut history).await;
+        assert_eq!(second.snapshot.targets[0].cells[1].value, Some(0.0));
+        assert!(matches!(
+            second.snapshot.targets[1].cells[1].status,
+            RuleStatus::Error(_)
+        ));
     }
 }

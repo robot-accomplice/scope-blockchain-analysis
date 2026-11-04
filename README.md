@@ -843,6 +843,7 @@ The row under the input shows the keys that move around (scroll, history, comple
 
 ```bash
 scope monitor USDN --venue weex --every 30s --duration 1h
+scope monitor USDN --venue weex,binance      # one target on two venues (or --venue weex --venue binance)
 scope monitor USDC --venue binance --pair USDC_USDT --max-spread-pct 0.5 --csv usdc.csv --report usdc.md
 scope monitor PEPE --chain ethereum          # no venue: price and volume of the token
 scope monitor USDC --venue binance --save stables --yes   # save it, and start without the wizard
@@ -850,12 +851,12 @@ scope monitor USDC --venue binance --save stables --yes   # save it, and start w
 
 The wizard has four steps (Tab moves between them; Ctrl-R starts, Ctrl-S saves, Esc leaves):
 
-1. **Targets.** `a` adds one: `pair USDC binance`, `token PEPE solana`, or `address 0x… ethereum`. `d` deletes the selected one.
+1. **Targets.** `a` adds one: `pair USDC binance`, `token PEPE solana`, or `address 0x… ethereum`. Name several venues to watch one target on all of them: `pair USDN weex binance`. `d` deletes the selected one; to change a target's venues, delete it and add it again.
 2. **Metrics.** For each target: the **market health** preset (the checks of `market summary`, with the same thresholds: flag, then config `market.health`, then the default), and the metrics of its kind, each a rule `metric op value`. Space turns one on, `o` changes the operator, Enter edits the value. Market metrics: `mid_price`, `spread_pct`, `bid_depth`, `ask_depth`, the top-3 and top-10 depths, `peg_deviation_pct`, and two that compare with the tick before: `largest_trade` (the largest trade on the venue's tape since the last tick, in the quote asset; the first tick looks back one interval) and `volume_change_pct` (the change of the venue's 24h volume since the last tick; the first tick shows n/a). A DEX venue has no trade tape, so its `largest_trade` cell is an error that says so. Token metrics: `price_usd`, `price_change_24h_pct`, `volume_24h`, `liquidity_usd`, `holders`. Address metrics: `native_balance`, `risk_score`.
 3. **Timing.** The interval and the duration (default 60s and 1h, as `market summary --every`; `forever` runs until you stop it), with the number of fetches they cost.
 4. **Outputs.** The name, the CSV path (one row per check per run: time, target, metric, value, operator, threshold, status, source, error) and the report path (written when the run ends or you stop it).
 
-**The grid.** The run shows one row per target, breached rows first, with one mark per check (`✓` pass, `!` warn, `✗` fail, `-` n/a, `?` the value could not be read). A breach that starts rings the bell once and shows a banner. Enter opens the detail: each check's value and a chart of its last values. In the detail, `b`, `t`, `h`, `r` and `x` run `market summary`, `market trades`, `crawl`, `compliance risk` or `address` for the target in the shell. **Ctrl-G** switches between the grid and the shell, so other commands run while the grid updates. Esc stops the run; Esc again closes the grid and leaves the last results and a summary in the scrollback. A run keeps the settings it started with: after `setup` saves a key, the grid says to restart the run to use it.
+**The grid.** The run shows one row per target, breached rows first (a target on several venues has one row per venue, `USDN@weex` and `USDN@binance`, and its token or address checks on a row of their own, `USDN`), with one mark per check (`✓` pass, `!` warn, `✗` fail, `-` n/a, `?` the value could not be read). A breach that starts rings the bell once and shows a banner. Enter opens the detail: each check's value and a chart of its last values. In the detail, `b`, `t`, `h`, `r` and `x` run `market summary`, `market trades`, `crawl`, `compliance risk` or `address` for the target in the shell. **Ctrl-G** switches between the grid and the shell, so other commands run while the grid updates. Esc stops the run; Esc again closes the grid and leaves the last results and a summary in the scrollback. A run keeps the settings it started with: after `setup` saves a key, the grid says to restart the run to use it.
 
 **Watchlists.** Ctrl-S in the wizard (or `--save <name>`) saves the watchlist to `~/.scope-bca/watchlists/<name>.yaml`. In the TUI, `watch list` lists them, `watch open <name>` (or a `.yaml` path) runs one, and `watch stop` stops the run. A file that is not valid lists every error with its line:
 
@@ -869,7 +870,7 @@ outputs:
 targets:
   - kind: pair
     id: USDC
-    venue: binance
+    venue: binance        # or a list: [binance, weex]
     preset: market health
     health:
       max_spread_pct: 0.5
@@ -895,7 +896,7 @@ scope monitor USDC --layout exchange --dashboard    # Exchange-style: order book
 
 **Dashboard flags:** `--chain` / `-c`, `--layout` / `-l`, `--refresh` / `-r`, `--scale` / `-s`, `--color-scheme`, `--export` / `-e`, `--venue` / `-v`, with `--dashboard`.
 
-Use `--venue binance` (or any CEX venue) to fetch real exchange OHLC data instead of synthetic candles. The time period selector (1m, 5m, 15m, 1h, 4h, 1d) maps directly to the venue's candlestick intervals.
+Use `--venue binance` (or any CEX venue) to fetch real exchange OHLC data instead of synthetic candles. The dashboard reads one venue: with two or more it stops and says so. The time period selector (1m, 5m, 15m, 1h, 4h, 1d) maps directly to the venue's candlestick intervals.
 
 - **`--venue`** must name a known venue (`scope venues list`). An unknown venue is an error.
 - **When DexScreener fails** (unreachable, blocked, or the token is unknown there) and `--venue` is set, the monitor uses that venue's ticker for the token and tells you why.

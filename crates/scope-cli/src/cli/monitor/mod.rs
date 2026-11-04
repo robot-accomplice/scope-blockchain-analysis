@@ -172,8 +172,10 @@ pub struct MonitorArgs {
     ///
     /// When specified, the monitor fetches real candlestick data from the
     /// exchange API instead of generating synthetic candles from price history.
-    #[arg(long, value_name = "VENUE")]
-    pub venue: Option<String>,
+    /// Repeat it, or give a comma list, to watch the token on several
+    /// venues (`--venue weex,binance`); the dashboard reads one.
+    #[arg(long, value_name = "VENUE", value_delimiter = ',')]
+    pub venue: Vec<String>,
 
     /// Direct trading pair for exchange-only mode (e.g., DAI_USDT).
     ///
@@ -188,6 +190,10 @@ pub struct MonitorArgs {
     #[command(flatten)]
     pub watch: MonitorWatchArgs,
 }
+
+/// Said when the old dashboard is given several venues: it reads one.
+pub const DASHBOARD_ONE_VENUE: &str =
+    "the dashboard reads one venue; remove --dashboard to watch several";
 
 /// Said when the old dashboard starts (#47, Q1).
 pub const DASHBOARD_DEPRECATED: &str = "The monitor dashboard is deprecated and goes in the next release. `scope monitor` without --dashboard opens the monitor wizard, with health checks, --duration, --csv and --report.";
@@ -246,6 +252,9 @@ pub async fn run_direct(
     out: &Output,
 ) -> Result<()> {
     crate::note!(out, "{}", DASHBOARD_DEPRECATED);
+    if args.venue.len() > 1 {
+        return Err(ScopeError::InvalidInput(DASHBOARD_ONE_VENUE.to_string()));
+    }
     // Resolve address book label → address + chain
     if let Some((address, chain)) =
         crate::cli::address_book::resolve_address_book_input(&args.token, config)?
@@ -299,7 +308,7 @@ pub(crate) fn monitor_config_from_args(
     if let Some(color_scheme) = args.color_scheme {
         monitor_config.color_scheme = color_scheme;
     }
-    if let Some(ref venue) = args.venue {
+    if let Some(venue) = args.venue.first() {
         monitor_config.venue = Some(venue.clone());
     }
     (monitor_config, args.export.clone(), args.layout.is_some())
@@ -5410,7 +5419,7 @@ refresh_seconds: 5
             scale: None,
             color_scheme: None,
             export: None,
-            venue: None,
+            venue: Vec::new(),
             pair: None,
             watch: Default::default(),
         };
@@ -5435,7 +5444,7 @@ refresh_seconds: 5
             scale: Some(ScaleMode::Log),
             color_scheme: Some(ColorScheme::BlueOrange),
             export: Some(PathBuf::from("/tmp/test.csv")),
-            venue: None,
+            venue: Vec::new(),
             pair: None,
             watch: Default::default(),
         };
@@ -5476,7 +5485,7 @@ refresh_seconds: 5
             scale: None,
             color_scheme: None,
             export: None,
-            venue: None,
+            venue: Vec::new(),
             pair: None,
             watch: Default::default(),
         };
@@ -5591,11 +5600,11 @@ refresh_seconds: 5
             scale: None,
             color_scheme: None,
             export: None,
-            venue: Some("binance".to_string()),
+            venue: vec!["binance".to_string()],
             pair: None,
             watch: Default::default(),
         };
-        assert_eq!(args.venue, Some("binance".to_string()));
+        assert_eq!(args.venue, ["binance"]);
     }
 
     #[test]
@@ -5678,12 +5687,12 @@ refresh_seconds: 5
             scale: None,
             color_scheme: None,
             export: None,
-            venue: Some("biconomy".to_string()),
+            venue: vec!["biconomy".to_string()],
             pair: Some("DAI_USDT".to_string()),
             watch: Default::default(),
         };
         assert_eq!(args.pair, Some("DAI_USDT".to_string()));
-        assert_eq!(args.venue, Some("biconomy".to_string()));
+        assert_eq!(args.venue, ["biconomy"]);
     }
 
     #[test]
@@ -5697,7 +5706,7 @@ refresh_seconds: 5
             scale: None,
             color_scheme: None,
             export: None,
-            venue: None,
+            venue: Vec::new(),
             pair: None,
             watch: Default::default(),
         };
@@ -5773,11 +5782,11 @@ refresh_seconds: 5
             scale: None,
             color_scheme: None,
             export: None,
-            venue: Some("biconomy".to_string()),
+            venue: vec!["biconomy".to_string()],
             pair: Some("DAI_USDT".to_string()),
             watch: Default::default(),
         };
-        assert!(args.venue.is_some());
+        assert!(!args.venue.is_empty());
         assert!(args.pair.is_some());
     }
 
@@ -5794,14 +5803,14 @@ refresh_seconds: 5
             scale: None,
             color_scheme: None,
             export: None,
-            venue: Some("biconomy".to_string()),
+            venue: vec!["biconomy".to_string()],
             pair: Some("DAI_USDT".to_string()),
             watch: Default::default(),
         };
 
         // Simulate the config override path from run_direct
         let mut mc = config.monitor.clone();
-        if let Some(ref venue) = args.venue {
+        if let Some(venue) = args.venue.first() {
             mc.venue = Some(venue.clone());
         }
         assert_eq!(mc.venue, Some("biconomy".to_string()));
@@ -7034,7 +7043,7 @@ refresh_seconds: 5
             scale: None,
             color_scheme: None,
             export: None,
-            venue: None,
+            venue: Vec::new(),
             pair: None,
             watch: Default::default(),
         }
@@ -7063,6 +7072,23 @@ refresh_seconds: 5
         .unwrap_err();
         assert!(err.to_string().contains("Usage: monitor <token>"), "{err}");
         assert_eq!(cap.err(), "", "nothing starts");
+        assert!(factory.dex.chains.lock().unwrap().is_empty());
+    }
+
+    // Design 2026-11-04, section 2.8: the dashboard reads one venue, so it
+    // stops rather than drop the other venues in silence.
+    #[tokio::test]
+    async fn test_the_dashboard_with_two_venues_stops_before_any_lookup() {
+        let factory = NoPairsFactory {
+            dex: NoPairsDex::default(),
+        };
+        let mut args = dashboard_args("USDN");
+        args.venue = vec!["weex".to_string(), "binance".to_string()];
+        let (out, _cap) = Output::capture();
+        let err = run_direct(args, &Config::default(), &factory, &out)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains(DASHBOARD_ONE_VENUE), "{err}");
         assert!(factory.dex.chains.lock().unwrap().is_empty());
     }
 
@@ -7235,7 +7261,7 @@ refresh_seconds: 5
         args.refresh = Some(2);
         args.scale = Some(ScaleMode::Log);
         args.color_scheme = Some(ColorScheme::BlueOrange);
-        args.venue = Some("kraken".to_string());
+        args.venue = vec!["kraken".to_string()];
         args.export = Some(PathBuf::from("run.csv"));
 
         let (mc, export_file, pinned) = monitor_config_from_args(&args, &config);

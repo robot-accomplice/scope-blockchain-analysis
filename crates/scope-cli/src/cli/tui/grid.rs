@@ -185,18 +185,22 @@ impl GridState {
         rows
     }
 
-    /// The target of the selected row, from the watchlist.
-    fn selected_target(&self) -> Option<&scope::watch::Target> {
-        let label = self.rows().get(self.selected)?.target.clone();
+    /// The target of the selected row, from the watchlist, and the row's
+    /// venue.
+    fn selected_target(&self) -> Option<(&scope::watch::Target, Option<String>)> {
+        let row = self.rows().get(self.selected).copied()?;
         let list = self.ready.as_ref().map_or(&self.list, |r| &r.list);
-        list.targets.iter().find(|t| t.label() == label)
+        let t = list
+            .targets
+            .iter()
+            .find(|t| t.rows().into_iter().any(|v| t.row_label(v) == row.target))?;
+        Some((t, row.venue.clone()))
     }
 
-    /// The CLI command an evidence key runs for the selected target.
+    /// The CLI command an evidence key runs for the selected row.
     pub fn evidence(&self, key: char) -> Option<String> {
-        let t = self.selected_target()?;
-        let venue = t
-            .venue
+        let (t, row_venue) = self.selected_target()?;
+        let venue = row_venue
             .as_deref()
             .map(|v| format!(" --venue {v}"))
             .unwrap_or_default();
@@ -207,10 +211,10 @@ impl GridState {
             .unwrap_or_default();
         let id = quote(&t.id);
         match (key, t.kind) {
-            ('b', TargetKind::Token | TargetKind::Pair) if t.venue.is_some() => {
+            ('b', TargetKind::Token | TargetKind::Pair) if row_venue.is_some() => {
                 Some(format!("market summary {id}{venue}"))
             }
-            ('t', TargetKind::Token | TargetKind::Pair) if t.venue.is_some() => {
+            ('t', TargetKind::Token | TargetKind::Pair) if row_venue.is_some() => {
                 Some(format!("market trades {id}{venue}"))
             }
             ('h', TargetKind::Token) => Some(format!("crawl {id}{chain}")),
@@ -597,7 +601,7 @@ mod tests {
     fn list() -> Watchlist {
         let mut w = Watchlist::new("stables");
         let mut a = Target::new(TargetKind::Pair, "USDC");
-        a.venue = Some("binance".into());
+        a.venues = vec!["binance".into()];
         let mut b = Target::new(TargetKind::Address, "0xabc");
         b.chain = Some("ethereum".into());
         let c = Target::new(TargetKind::Token, "PEPE");
@@ -620,7 +624,8 @@ mod tests {
                         },
                         Some(spread),
                     )],
-                ),
+                )
+                .on_venue(Some("binance")),
                 TargetSnapshot::new(
                     "0xabc",
                     vec![cell("risk_score <= 5", RuleStatus::Pass, Some(2.0))],
@@ -716,6 +721,32 @@ mod tests {
         assert_eq!(g.key(key(KeyCode::Esc)), GridAction::Stop);
         g.end("Stopped.".into(), SECONDARY);
         assert_eq!(g.key(key(KeyCode::Esc)), GridAction::Close);
+    }
+
+    // Design 2026-11-04, section 2.4: each venue row of one target runs
+    // its own venue's evidence.
+    #[test]
+    fn evidence_keys_use_the_venue_of_the_selected_row() {
+        let mut w = Watchlist::new("pegs");
+        let mut t = Target::new(TargetKind::Pair, "USDN");
+        t.venues = vec!["weex".into(), "binance".into()];
+        t.preset = Some(scope::watch::Preset::MarketHealth);
+        w.targets = vec![t];
+        let mut g = GridState::new(w, None);
+        let row = |venue: &str| {
+            TargetSnapshot::new(
+                format!("USDN@{venue}"),
+                vec![cell("spread_pct < 1", RuleStatus::Pass, Some(0.1))],
+            )
+            .on_venue(Some(venue))
+        };
+        tick_rows(&mut g, 1, vec![row("weex"), row("binance")]);
+        g.key(key(KeyCode::Down));
+        g.key(key(KeyCode::Enter));
+        assert_eq!(
+            g.key(key(KeyCode::Char('b'))),
+            GridAction::Run("market summary USDN --venue binance".into())
+        );
     }
 
     #[test]
