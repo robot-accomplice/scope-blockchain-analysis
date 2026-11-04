@@ -7,7 +7,7 @@ use crate::cli::output::Output;
 use crate::cli::repeat::{self, RunOutput, Schedule};
 use scope::error::{Result, ScopeError};
 use scope::metrics::Sample;
-use scope::watch::{Event, Snapshot, Watchlist, diff};
+use scope::watch::{Event, History, Snapshot, Watchlist, diff};
 use std::io::Write as _;
 use std::path::Path;
 
@@ -138,10 +138,14 @@ pub async fn run(
     // The step closure is called once per tick and its future outlives
     // the call, so the state it changes is shared through cells.
     let prev = std::cell::RefCell::new(Snapshot::default());
+    let history = std::cell::RefCell::new(History::default());
     let on_tick = std::cell::RefCell::new(&mut on_tick);
-    let (prev, on_tick) = (&prev, &on_tick);
+    let (prev, history, on_tick) = (&prev, &history, &on_tick);
     let last = repeat::run(&schedule(w)?, &[], None, out, |n| async move {
-        let t = tick(ready, src, out).await;
+        // Taken out for the tick, so no borrow is held across its awaits.
+        let mut memory = history.take();
+        let t = tick(ready, src, out, &mut memory).await;
+        history.replace(memory);
         let events = diff(&prev.borrow(), &t.snapshot);
         if let Some(path) = &w.outputs.csv {
             let at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();

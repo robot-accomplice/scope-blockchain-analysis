@@ -8,9 +8,6 @@ use scope::watch::time::{is_until_cancelled, parse_duration};
 use scope::watch::{Op, Preset, Rule, Target, TargetKind, Watchlist};
 use std::time::Duration;
 
-/// The issue that brings back the whale and volume-spike alerts (Q2).
-pub const ALERTS_ISSUE: &str = "#122";
-
 /// The note for a dashboard-only flag the wizard does not use.
 fn ignored(flag: &str) -> String {
     format!(
@@ -105,8 +102,10 @@ pub fn watchlist_from_args(
     target.preset = preset;
     target.health = w.health.overrides();
 
-    // The monitor's alerts: price bounds become rules on the price the
-    // target has; whale and volume-spike alerts have no metric yet.
+    // The monitor's alerts become rules: price bounds on the price the
+    // target has; a whale or a volume spike on the venue's trades and
+    // volume since the last tick. A rule says what must hold, so an alert
+    // at a limit is a rule below it.
     let alerts = &config.monitor.alerts;
     let price = match target.kind {
         TargetKind::Pair => MetricId::Mid,
@@ -126,10 +125,25 @@ pub fn watchlist_from_args(
             value: max,
         });
     }
-    if alerts.whale_min_usd.is_some() || alerts.volume_spike_threshold_pct.is_some() {
-        notes.push(format!(
-            "The whale and volume-spike alerts of config `monitor.alerts` are not checked: they have no watchlist metric yet ({ALERTS_ISSUE})."
-        ));
+    let venue_alerts = [
+        (alerts.whale_min_usd, MetricId::LargestTrade, Op::Lt),
+        (
+            alerts.volume_spike_threshold_pct,
+            MetricId::VolumeChangePct,
+            Op::Le,
+        ),
+    ];
+    if target.venue.is_some() {
+        for (limit, metric, op) in venue_alerts {
+            if let Some(value) = limit {
+                target.rules.push(Rule { metric, op, value });
+            }
+        }
+    } else if venue_alerts.iter().any(|(limit, _, _)| limit.is_some()) {
+        notes.push(
+            "The whale and volume-spike alerts of config `monitor.alerts` need a venue (`--venue binance`): they read its trades and 24h volume."
+                .to_string(),
+        );
     }
     for (set, flag) in [
         (args.layout.is_some(), "--layout"),
@@ -257,21 +271,45 @@ mod tests {
     }
 
     #[test]
-    fn price_alerts_become_rules_and_whale_alerts_name_the_issue() {
+    fn every_alert_becomes_a_rule_on_a_venue() {
         let mut config = Config::default();
         config.monitor.alerts.price_min = Some(0.99);
         config.monitor.alerts.price_max = Some(1.01);
         config.monitor.alerts.whale_min_usd = Some(100_000.0);
+        config.monitor.alerts.volume_spike_threshold_pct = Some(50.0);
         let (w, notes) = from_with("monitor USDC --venue binance", &config).unwrap();
         let rules: Vec<String> = w.targets[0].rules.iter().map(ToString::to_string).collect();
-        assert_eq!(rules, ["mid_price >= 0.99", "mid_price <= 1.01"]);
-        assert_eq!(notes.len(), 1);
-        assert!(notes[0].contains(ALERTS_ISSUE), "{notes:?}");
-        let (w, _) = from_with("monitor PEPE", &config).unwrap();
+        assert_eq!(
+            rules,
+            [
+                "mid_price >= 0.99",
+                "mid_price <= 1.01",
+                "largest_trade < 100000",
+                "volume_change_pct <= 50"
+            ]
+        );
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    #[test]
+    fn without_a_venue_the_whale_and_spike_alerts_say_they_need_one() {
+        let mut config = Config::default();
+        config.monitor.alerts.price_min = Some(0.99);
+        config.monitor.alerts.volume_spike_threshold_pct = Some(50.0);
+        let (w, notes) = from_with("monitor PEPE", &config).unwrap();
         let rules: Vec<String> = w.targets[0].rules.iter().map(ToString::to_string).collect();
         assert!(
             rules.contains(&"price_usd >= 0.99".to_string()),
             "{rules:?}"
         );
+        assert!(
+            !rules.iter().any(|r| r.starts_with("volume_change_pct")),
+            "{rules:?}"
+        );
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("need a venue"), "{notes:?}");
+        // Neither alert set: no note.
+        let (_, notes) = from_with("monitor PEPE", &Config::default()).unwrap();
+        assert!(notes.is_empty(), "{notes:?}");
     }
 }

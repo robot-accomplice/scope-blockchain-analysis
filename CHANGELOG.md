@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Two watchlist market metrics compare a tick with the one before (#122). `largest_trade` is the largest trade on the venue's tape since the last tick, in the quote asset. The first tick looks back one interval, and a tick with no trade reads 0. `volume_change_pct` is the change of the venue's 24h volume since the last tick; the first tick shows n/a. A DEX venue has no trade tape, so its `largest_trade` cell is an error that says so. A rule like `largest_trade < 50000` or `volume_change_pct <= 200` works in the grid, the CSV and the report. `market summary` does not show them: one summary has no tick before it.
+- `scope monitor <token> --venue <venue>` checks the whale and volume-spike alerts of config `monitor.alerts` again, as rules: `whale_min_usd` becomes `largest_trade < whale_min_usd`, and `volume_spike_threshold_pct` becomes `volume_change_pct <= volume_spike_threshold_pct`. They now measure the largest real trade and the change since the last tick. The old dashboard used the average trade size (24h volume ÷ trade count) and the change from a running average. Without `--venue`, a note says these two alerts need one.
+
 ### Changed
 - Rust 1.99.1, the latest stable (was 1.99.0).
 - Dependencies at their latest releases: every crate in `Cargo.lock` (tokio 1.54.1, which deprecates the unsound `AsyncFd` constructors of RUSTSEC-2026-0386; scope does not use them, #145), and the majors reqwest 0.13, axum 0.8, tower-http 0.7, indicatif 0.18, thiserror 2, dirs 7, sha2 0.11, base64 0.23, shlex 2 and vt100 0.18. The paths scope reads are unchanged.
