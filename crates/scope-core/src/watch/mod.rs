@@ -6,17 +6,20 @@
 //! #47 and the output of the TUI's monitor wizard.
 //!
 //! This module is pure: types, rule evaluation ([`rule`]), the "market
-//! health" preset ([`preset`]), snapshot comparison ([`diff`](mod@diff))
-//! and the file format ([`file`](mod@file)). The fetchers that read the
+//! health" preset ([`preset`]), snapshot comparison ([`diff`](mod@diff)),
+//! the memory between ticks ([`history`]) and the file format
+//! ([`file`](mod@file)). The fetchers that read the
 //! metrics live in scope-cli.
 
 pub mod diff;
 pub mod file;
+pub mod history;
 pub mod preset;
 pub mod rule;
 pub mod time;
 
 pub use diff::{Event, diff};
+pub use history::{History, Reading, Readings};
 pub use rule::{Op, Rule, RuleStatus, TargetStatus, target_status};
 
 use crate::market::HealthOverrides;

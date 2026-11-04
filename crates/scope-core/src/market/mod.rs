@@ -88,8 +88,8 @@ pub use exchange::ExchangeClient;
 #[allow(deprecated)]
 pub use fetch::{
     DexAnalyticsSource, fetch_book_and_volume, fetch_pattern_trades, fetch_summary,
-    fetch_token_summary, fetch_token_summary_by_name, fetch_token_summary_by_name_with_http,
-    most_liquid,
+    fetch_summary_with_trades, fetch_token_summary, fetch_token_summary_by_name,
+    fetch_token_summary_by_name_with_http, most_liquid,
 };
 pub use orderbook::{
     BookSide, BookSource, Candle, ExecutionEstimate, ExecutionSide, HealthCheck, HealthOverrides,

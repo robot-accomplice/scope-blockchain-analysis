@@ -851,7 +851,7 @@ scope monitor USDC --venue binance --save stables --yes   # save it, and start w
 The wizard has four steps (Tab moves between them; Ctrl-R starts, Ctrl-S saves, Esc leaves):
 
 1. **Targets.** `a` adds one: `pair USDC binance`, `token PEPE solana`, or `address 0x… ethereum`. `d` deletes the selected one.
-2. **Metrics.** For each target: the **market health** preset (the checks of `market summary`, with the same thresholds: flag, then config `market.health`, then the default), and the metrics of its kind, each a rule `metric op value`. Space turns one on, `o` changes the operator, Enter edits the value. Market metrics: `mid_price`, `spread_pct`, `bid_depth`, `ask_depth`, the top-3 and top-10 depths, `peg_deviation_pct`. Token metrics: `price_usd`, `price_change_24h_pct`, `volume_24h`, `liquidity_usd`, `holders`. Address metrics: `native_balance`, `risk_score`.
+2. **Metrics.** For each target: the **market health** preset (the checks of `market summary`, with the same thresholds: flag, then config `market.health`, then the default), and the metrics of its kind, each a rule `metric op value`. Space turns one on, `o` changes the operator, Enter edits the value. Market metrics: `mid_price`, `spread_pct`, `bid_depth`, `ask_depth`, the top-3 and top-10 depths, `peg_deviation_pct`, and two that compare with the tick before: `largest_trade` (the largest trade on the venue's tape since the last tick, in the quote asset; the first tick looks back one interval) and `volume_change_pct` (the change of the venue's 24h volume since the last tick; the first tick shows n/a). A DEX venue has no trade tape, so its `largest_trade` cell is an error that says so. Token metrics: `price_usd`, `price_change_24h_pct`, `volume_24h`, `liquidity_usd`, `holders`. Address metrics: `native_balance`, `risk_score`.
 3. **Timing.** The interval and the duration (default 60s and 1h, as `market summary --every`; `forever` runs until you stop it), with the number of fetches they cost.
 4. **Outputs.** The name, the CSV path (one row per check per run: time, target, metric, value, operator, threshold, status, source, error) and the report path (written when the run ends or you stop it).
 
@@ -881,7 +881,7 @@ targets:
       - liquidity_usd > 1000000
 ```
 
-**From the old monitor.** `--refresh N` is the interval in seconds; `--export` is now `--csv`. The price bounds of `monitor.alerts` become rules on the price; the whale and volume-spike alerts have no metric yet (#122). `--layout`, `--scale` and `--color-scheme` belong to the old dashboard.
+**From the old monitor.** `--refresh N` is the interval in seconds; `--export` is now `--csv`. The price bounds of `monitor.alerts` become rules on the price; with a venue, `whale_min_usd` becomes `largest_trade < whale_min_usd` and `volume_spike_threshold_pct` becomes `volume_change_pct <= volume_spike_threshold_pct`. Without a venue they are not checked, and a note says they need one. `--layout`, `--scale` and `--color-scheme` belong to the old dashboard.
 
 #### The old dashboard (deprecated)
 
