@@ -11,7 +11,7 @@
 
 use ratatui::style::{Color, Modifier, Style};
 use scope::display::theme::{
-    AnsiColor, Direction, Role, Scheme, Tone, scheme_role_tone, scheme_tone, tone,
+    AnsiColor, Direction, Role, SERIES_TONES, Scheme, Tone, scheme_role_tone, scheme_tone, tone,
 };
 
 /// The ratatui color of a named ANSI color.
@@ -109,6 +109,12 @@ pub const MATCH: Style = style(Role::Match);
 
 /// A URL in a link row.
 pub const LINK: Style = style(Role::Link);
+
+/// The style of the `i`-th series of a chart (a venue's line). The tones
+/// repeat from the fifth series.
+pub const fn series_style(i: usize) -> Style {
+    tone_style(SERIES_TONES[i % SERIES_TONES.len()])
+}
 
 /// The strong (bold) form of a role: verdicts, states and headings.
 pub const fn strong(role: Role) -> Style {
@@ -277,6 +283,24 @@ mod tests {
             scheme_style(Scheme::Monochrome, Direction::Up),
             Style::new()
         );
+    }
+
+    // A venue's line must never look like a health state, and must read
+    // on dark and light themes.
+    #[test]
+    fn test_series_styles_are_no_health_color_and_repeat_after_four() {
+        let health = [OK.fg, WARN.fg, ERR.fg];
+        for i in 0..SERIES_TONES.len() {
+            let fg = series_style(i).fg;
+            assert!(!health.contains(&fg), "series {i}: {fg:?}");
+            assert!(
+                matches!(fg, None | Some(Color::Blue | Color::Magenta | Color::Cyan)),
+                "series {i}: {fg:?}"
+            );
+        }
+        assert_eq!(series_style(4), series_style(0));
+        let distinct: std::collections::HashSet<_> = (0..4).map(|i| series_style(i).fg).collect();
+        assert_eq!(distinct.len(), 4);
     }
 
     #[test]
