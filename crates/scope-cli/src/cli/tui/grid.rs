@@ -4,7 +4,7 @@
 //! bell once and shows a banner until the next key. `Enter` opens the
 //! detail of the selected row: each cell with its value, its status and a
 //! chart of its last values. For a target on two or more venues, the
-//! detail is the venue charts ([`super::venue_charts`]): one chart per
+//! detail is the venue charts (`venue_charts`): one chart per
 //! market cell with a line per venue. Evidence keys put the matching CLI
 //! command in the shell and run it there.
 //!
