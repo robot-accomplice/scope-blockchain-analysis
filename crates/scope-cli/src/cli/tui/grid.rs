@@ -3,13 +3,16 @@
 //! One row per target, breached rows first. A breach that starts rings the
 //! bell once and shows a banner until the next key. `Enter` opens the
 //! detail of the selected row: each cell with its value, its status and a
-//! chart of its last values. Evidence keys put the matching CLI command in
-//! the shell and run it there.
+//! chart of its last values. For a target on two or more venues, the
+//! detail is the venue charts (`venue_charts`): one chart per
+//! market cell with a line per venue. Evidence keys put the matching CLI
+//! command in the shell and run it there.
 //!
 //! The state is pure: the event loop feeds it [`GridMsg`]s from the run and
 //! keys from the user; [`draw`] draws it.
 
-use crate::cli::charts::{HealthStrip, Sparkline};
+use super::venue_charts::{self, Selection, Series, VenueChart, VenueCharts};
+use crate::cli::charts::{HealthStrip, Sparkline, enlarge_hint};
 use crate::cli::output::ProgressHook;
 use crate::cli::theme::{ACCENT, ERR, KEY, OK, SECONDARY, WARN};
 use crate::cli::watch::{Ready, Tick};
@@ -36,6 +39,8 @@ const TARGET_COLS: usize = 24;
 /// The key legend of the grid and of the detail pane.
 pub const GRID_LEGEND: &str = "↑↓ select · Enter detail · Ctrl-G shell · Esc stop the run";
 pub const DETAIL_LEGEND: &str = "b book · t trades · h holders · r risk · x address · Esc back";
+pub const VENUE_DETAIL_LEGEND: &str =
+    "←→ venue · Space isolate · Tab chart · PgUp PgDn page · b book · t trades · Esc back";
 pub const ENDED_LEGEND: &str = "Esc or Ctrl-G back to the shell · Enter detail";
 
 /// Shown while a run uses the settings from before `setup` saved new ones.
@@ -100,6 +105,10 @@ pub struct GridState {
     /// `setup` saved new settings while the run went on: the run still
     /// uses the ones it started with.
     pub stale: bool,
+    /// What the keys select in the venue charts.
+    pub(crate) venues: Selection,
+    /// Charts per page at the last draw, for PgUp and PgDn.
+    page_size: std::cell::Cell<usize>,
 }
 
 impl GridState {
@@ -120,6 +129,8 @@ impl GridState {
             ended: None,
             progress,
             stale: false,
+            venues: Selection::default(),
+            page_size: std::cell::Cell::new(1),
         }
     }
 
@@ -197,9 +208,108 @@ impl GridState {
         Some((t, row.venue.clone()))
     }
 
-    /// The CLI command an evidence key runs for the selected row.
+    /// The venue charts of the selected row: when the detail is open on a
+    /// market row of a target on two or more venues. One chart per cell of
+    /// the row, each with every venue's history of that cell.
+    pub(crate) fn venue_charts(&self) -> Option<VenueCharts> {
+        if !self.detail {
+            return None;
+        }
+        let rows = self.rows();
+        let row = rows.get(self.selected)?;
+        row.venue.as_ref()?;
+        let (t, _) = self.selected_target()?;
+        if t.venues.len() < 2 {
+            return None;
+        }
+        let last = self.last.as_ref()?;
+        let charts = row
+            .cells
+            .iter()
+            .map(|c| VenueChart {
+                label: c.label.clone(),
+                threshold: c.rule.map(rule_threshold),
+                unit: c.rule.map(|r| {
+                    scope::metrics::describe(r.metric, &scope::market::HealthThresholds::default())
+                        .unit
+                }),
+                series: t
+                    .venues
+                    .iter()
+                    .map(|v| {
+                        let label = t.row_label(Some(v));
+                        let values = self
+                            .history
+                            .get(&(label.clone(), c.label.clone()))
+                            .map(|h| h.iter().copied().collect())
+                            .unwrap_or_default();
+                        let status = last
+                            .snapshot
+                            .targets
+                            .iter()
+                            .find(|r| r.target == label)
+                            .and_then(|r| r.cells.iter().find(|x| x.label == c.label))
+                            .map_or_else(
+                                || RuleStatus::NotApplicable("no reading".to_string()),
+                                |x| x.status.clone(),
+                            );
+                        Series {
+                            venue: v.clone(),
+                            values,
+                            status,
+                        }
+                    })
+                    .collect(),
+            })
+            .filter(|c| {
+                c.series
+                    .iter()
+                    .any(|s| s.values.iter().any(Option::is_some))
+            })
+            .collect::<Vec<_>>();
+        (!charts.is_empty()).then_some(VenueCharts {
+            charts,
+            interval: self.list.interval,
+        })
+    }
+
+    /// Starts the venue charts on the venue of the selected row.
+    fn reset_venues(&mut self) {
+        let venue = self.selected_target().and_then(|(t, v)| {
+            let v = v?;
+            t.venues.iter().position(|x| *x == v)
+        });
+        self.venues = Selection {
+            venue: venue.unwrap_or(0),
+            ..Selection::default()
+        };
+    }
+
+    /// A key of the venue charts.
+    fn venue_key(&mut self, code: KeyCode, charts: &VenueCharts) {
+        let venues = charts.charts[0].series.len();
+        let n = charts.charts.len();
+        let page = self.page_size.get().max(1);
+        let s = &mut self.venues;
+        match code {
+            KeyCode::Right => s.venue = (s.venue + 1) % venues,
+            KeyCode::Left => s.venue = (s.venue + venues - 1) % venues,
+            KeyCode::Char(' ') => s.isolated = !s.isolated,
+            KeyCode::Tab => s.chart = (s.chart + 1) % n,
+            KeyCode::PageDown => s.chart = ((s.chart / page + 1) * page).min(n - 1),
+            KeyCode::PageUp => s.chart = (s.chart / page).saturating_sub(1) * page,
+            _ => {}
+        }
+    }
+
+    /// The CLI command an evidence key runs for the selected row; in the
+    /// venue charts, for the venue the legend selects.
     pub fn evidence(&self, key: char) -> Option<String> {
         let (t, row_venue) = self.selected_target()?;
+        let row_venue = match self.venue_charts() {
+            Some(_) => t.venues.get(self.venues.venue).cloned(),
+            None => row_venue,
+        };
         let venue = row_venue
             .as_deref()
             .map(|v| format!(" --venue {v}"))
@@ -230,9 +340,30 @@ impl GridState {
         self.banner = None;
         let n = self.rows().len();
         match key.code {
-            KeyCode::Down if n > 0 => self.selected = (self.selected + 1) % n,
-            KeyCode::Up if n > 0 => self.selected = (self.selected + n - 1) % n,
-            KeyCode::Enter if n > 0 => self.detail = !self.detail,
+            KeyCode::Down if n > 0 => {
+                self.selected = (self.selected + 1) % n;
+                self.reset_venues();
+            }
+            KeyCode::Up if n > 0 => {
+                self.selected = (self.selected + n - 1) % n;
+                self.reset_venues();
+            }
+            KeyCode::Enter if n > 0 => {
+                self.detail = !self.detail;
+                self.reset_venues();
+            }
+            KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Char(' ')
+            | KeyCode::Tab
+            | KeyCode::PageUp
+            | KeyCode::PageDown
+                if self.detail =>
+            {
+                if let Some(charts) = self.venue_charts() {
+                    self.venue_key(key.code, &charts);
+                }
+            }
             KeyCode::Esc if self.detail => self.detail = false,
             KeyCode::Esc if self.is_running() => return GridAction::Stop,
             KeyCode::Esc => return GridAction::Close,
@@ -301,7 +432,7 @@ fn quote(s: &str) -> String {
 }
 
 /// A status's glyph and style.
-fn status_cell(s: &RuleStatus) -> (&'static str, Style) {
+pub(super) fn status_cell(s: &RuleStatus) -> (&'static str, Style) {
     match s {
         RuleStatus::Pass => ("✓", OK),
         RuleStatus::Warn(_) => ("!", WARN),
@@ -322,7 +453,7 @@ fn target_style(s: TargetStatus) -> Style {
 }
 
 /// A value as the grid shows it.
-fn value_text(v: Option<f64>) -> String {
+pub(super) fn value_text(v: Option<f64>) -> String {
     match v {
         None => "-".to_string(),
         Some(v) if v.abs() >= 10_000.0 => scope::display::format::format_large_number(v),
@@ -385,7 +516,34 @@ pub fn draw(f: &mut Frame, area: Rect, g: &GridState) {
     if !banners.is_empty() {
         f.render_widget(Paragraph::new(banners), banner);
     }
-    if g.detail {
+    if let Some(charts) = g.venue_charts() {
+        match venue_charts::shortfall(body, &charts) {
+            None => {
+                let mut sel = g.venues;
+                sel.venue = sel.venue.min(charts.charts[0].series.len() - 1);
+                sel.chart = sel.chart.min(charts.charts.len() - 1);
+                g.page_size.set(venue_charts::draw(f, body, &charts, sel));
+            }
+            // Too small for the charts: the one-venue detail, and how much
+            // to enlarge the window.
+            Some((cols, rows)) => {
+                let text = format!(" {}", enlarge_hint(cols, rows, "the venue charts"));
+                let hint_rows = text
+                    .chars()
+                    .count()
+                    .div_ceil(usize::from(body.width.max(1)));
+                let [detail, hint] =
+                    Layout::vertical([Constraint::Min(0), Constraint::Length(hint_rows as u16)])
+                        .areas(body);
+                draw_detail(f, detail, g);
+                f.render_widget(
+                    Paragraph::new(Line::styled(text, WARN))
+                        .wrap(ratatui::widgets::Wrap { trim: false }),
+                    hint,
+                );
+            }
+        }
+    } else if g.detail {
         draw_detail(f, body, g);
     } else {
         draw_rows(f, body, g);
@@ -396,6 +554,7 @@ pub fn draw(f: &mut Frame, area: Rect, g: &GridState) {
         foot,
     );
     let keys = match (g.detail, g.is_running()) {
+        (true, _) if g.venue_charts().is_some() => VENUE_DETAIL_LEGEND,
         (true, _) => DETAIL_LEGEND,
         (false, true) => GRID_LEGEND,
         (false, false) => ENDED_LEGEND,
@@ -513,21 +672,22 @@ fn draw_detail(f: &mut Frame, area: Rect, g: &GridState) {
             .map(|h| h.iter().copied().collect())
             .unwrap_or_default();
         if values.iter().any(Option::is_some) && y + CHART_ROWS <= bottom {
-            let threshold = c.rule.map(|rule| match rule.op {
-                scope::watch::Op::Lt | scope::watch::Op::Le => {
-                    scope::metrics::Threshold::Max(rule.value)
-                }
-                scope::watch::Op::Gt | scope::watch::Op::Ge => {
-                    scope::metrics::Threshold::Min(rule.value)
-                }
-                scope::watch::Op::Eq | scope::watch::Op::Ne => {
-                    scope::metrics::Threshold::Target(rule.value)
-                }
-            });
+            let threshold = c.rule.map(rule_threshold);
             let chart = Rect::new(area.x + 3, y, area.width.saturating_sub(4), CHART_ROWS);
             f.render_widget(Sparkline::new(&values, ACCENT).threshold(threshold), chart);
             y += CHART_ROWS;
         }
+    }
+}
+
+/// The line a rule draws on its chart: its limit.
+fn rule_threshold(rule: scope::watch::Rule) -> scope::metrics::Threshold {
+    use scope::metrics::Threshold;
+    use scope::watch::Op;
+    match rule.op {
+        Op::Lt | Op::Le => Threshold::Max(rule.value),
+        Op::Gt | Op::Ge => Threshold::Min(rule.value),
+        Op::Eq | Op::Ne => Threshold::Target(rule.value),
     }
 }
 
@@ -580,6 +740,7 @@ mod tests {
         assert_eq!(value_text(Some(25_000.0)), "25.00K");
         assert_eq!(value_text(None), "-");
     }
+    use crate::cli::theme::series_style;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use scope::watch::{Cell, Rule, Target};
@@ -1073,5 +1234,190 @@ mod tests {
     #[test]
     fn a_value_that_is_not_a_number_reads_as_such() {
         assert_eq!(value_text(Some(f64::NAN)), "NaN");
+    }
+
+    // ---- Venue charts (design 2026-11-04, section 2.9) ----
+
+    /// USDN on weex and binance, with `cells` market rules, after `ticks`
+    /// ticks; `value(venue, cell, tick)` gives each value. The detail is
+    /// open on the first row (weex: binance fails, so weex sorts after it
+    /// unless both pass; every row passes here).
+    fn on_two_venues(
+        cells: &[&str],
+        ticks: u64,
+        value: impl Fn(usize, usize, u64) -> f64,
+    ) -> GridState {
+        let mut w = Watchlist::new("pegs");
+        let mut t = Target::new(TargetKind::Pair, "USDN");
+        t.venues = vec!["weex".into(), "binance".into()];
+        t.rules = cells.iter().map(|c| Rule::parse(c).unwrap()).collect();
+        w.targets = vec![t];
+        let mut g = GridState::new(w, None);
+        for run in 1..=ticks {
+            let rows = ["weex", "binance"]
+                .iter()
+                .enumerate()
+                .map(|(v, venue)| {
+                    let cells = cells
+                        .iter()
+                        .enumerate()
+                        .map(|(c, label)| cell(label, RuleStatus::Pass, Some(value(v, c, run))))
+                        .collect();
+                    TargetSnapshot::new(format!("USDN@{venue}"), cells).on_venue(Some(venue))
+                })
+                .collect();
+            tick_rows(&mut g, run, rows);
+        }
+        g.key(key(KeyCode::Enter));
+        g
+    }
+
+    fn peg(v: usize, _c: usize, run: u64) -> f64 {
+        1.0 + (run % 5) as f64 * 0.0001 + v as f64 * 0.0003
+    }
+
+    fn is_braille(s: &str) -> bool {
+        s.chars().any(|c| ('\u{2801}'..='\u{28FF}').contains(&c))
+    }
+
+    #[test]
+    fn venue_charts_show_a_chart_per_cell_with_a_line_per_venue_and_one_legend() {
+        let g = on_two_venues(&["mid_price > 0", "spread_pct < 1"], 30, peg);
+        for (w, h) in [(120, 36), (80, 24)] {
+            let s = screen(&g, w, h);
+            assert!(s.contains(" mid_price > 0 "), "{w}x{h}\n{s}");
+            assert!(s.contains(" spread_pct < 1 "), "{w}x{h}\n{s}");
+            assert!(s.contains(" venues: mid_price > 0 "), "{w}x{h}\n{s}");
+            assert!(is_braille(&s), "braille lines: {w}x{h}\n{s}");
+            // The range of the last values across venues, then each venue.
+            let all = line_with(&s, "  all  ");
+            assert!(all.contains("1–1.0003"), "{all}");
+            assert!(line_with(&s, "> ■ weex").contains('✓'), "{s}");
+            assert!(line_with(&s, "  ■ binance").contains("1.0003"), "{s}");
+            assert!(s.contains("now"), "the time axis: {s}");
+            assert!(s.contains("←→ venue · Space isolate"), "{s}");
+        }
+    }
+
+    #[test]
+    fn the_selected_venue_is_drawn_on_top_where_lines_touch() {
+        // The same values on both venues: every braille cell is shared.
+        let mut g = on_two_venues(&["mid_price > 0"], 30, |_, _, run| 1.0 + run as f64);
+        let colours = |g: &GridState| {
+            let mut t = Terminal::new(TestBackend::new(120, 36)).unwrap();
+            t.draw(|f| draw(f, f.area(), g)).unwrap();
+            let buf = t.backend().buffer().clone();
+            buf.content
+                .iter()
+                .filter(|c| is_braille(c.symbol()))
+                .map(|c| c.fg)
+                .collect::<std::collections::HashSet<_>>()
+        };
+        let fg = |i| {
+            series_style(i)
+                .fg
+                .unwrap_or(crate::cli::theme::DEFAULT_COLOR)
+        };
+        assert_eq!(colours(&g), [fg(0)].into());
+        g.key(key(KeyCode::Right));
+        assert_eq!(colours(&g), [fg(1)].into());
+    }
+
+    #[test]
+    fn keys_select_a_venue_isolate_it_and_change_the_legend_chart() {
+        let mut g = on_two_venues(&["mid_price > 0", "spread_pct < 1"], 30, peg);
+        g.key(key(KeyCode::Right));
+        assert!(line_with(&screen(&g, 120, 36), "> ■ binance").contains("1.0003"));
+        // The evidence keys follow the legend's venue.
+        assert_eq!(
+            g.key(key(KeyCode::Char('b'))),
+            GridAction::Run("market summary USDN --venue binance".into())
+        );
+        g.key(key(KeyCode::Char(' ')));
+        let s = screen(&g, 120, 36);
+        assert!(!is_braille(&s), "one venue is bars: {s}");
+        assert!(s.contains('█') || s.contains('▄'), "{s}");
+        let mid = line_with(&s, " mid_price > 0 ");
+        assert!(mid.contains("binance") && !mid.contains("weex"), "{mid}");
+        g.key(key(KeyCode::Char(' ')));
+        assert!(is_braille(&screen(&g, 120, 36)), "all venues again");
+        g.key(key(KeyCode::Tab));
+        assert!(screen(&g, 120, 36).contains(" venues: spread_pct < 1 "));
+        g.key(key(KeyCode::Left));
+        g.key(key(KeyCode::Left));
+        assert!(
+            line_with(&screen(&g, 120, 36), "> ■ ").contains("binance"),
+            "wraps"
+        );
+    }
+
+    #[test]
+    fn charts_that_do_not_fit_go_on_pages() {
+        let cells = [
+            "mid_price > 0",
+            "spread_pct < 1",
+            "bid_depth > 0",
+            "ask_depth > 0",
+            "peg_deviation_pct < 1",
+            "largest_trade < 50000",
+        ];
+        let mut g = on_two_venues(&cells, 10, peg);
+        let s = screen(&g, 100, 20);
+        let page = line_with(&s, " charts 1–");
+        assert!(page.contains(" of 6 "), "{s}");
+        g.key(key(KeyCode::PageDown));
+        let s = screen(&g, 100, 20);
+        assert!(!s.contains(" charts 1–"), "the next page: {s}");
+        assert!(!s.contains(" mid_price > 0 "), "{s}");
+        g.key(key(KeyCode::PageUp));
+        assert!(screen(&g, 100, 20).contains(" charts 1–"));
+    }
+
+    #[test]
+    fn a_window_too_small_for_the_charts_shows_the_detail_and_says_how_much_to_enlarge_it() {
+        let g = on_two_venues(&["mid_price > 0"], 5, peg);
+        let s = screen(&g, 50, 12);
+        assert!(!is_braille(&s), "{s}");
+        assert!(
+            s.contains("USDN@weex — passed"),
+            "the one-venue detail: {s}"
+        );
+        // A narrow window wraps the hint.
+        let text = s.lines().map(str::trim_end).collect::<Vec<_>>().join(" ");
+        assert!(text.contains("! Window too small: enlarge it"), "{s}");
+        assert!(text.contains("wider to see the venue charts"), "{s}");
+    }
+
+    #[test]
+    fn with_colour_off_every_venue_still_has_its_name_and_value() {
+        let g = on_two_venues(&["mid_price > 0"], 30, peg);
+        let mut t = Terminal::new(TestBackend::new(120, 36)).unwrap();
+        t.draw(|f| {
+            draw(f, f.area(), &g);
+            crate::cli::plain::strip_color(f.buffer_mut());
+        })
+        .unwrap();
+        let buf = t.backend().buffer().clone();
+        assert!(
+            buf.content
+                .iter()
+                .all(|c| c.fg == crate::cli::theme::DEFAULT_COLOR)
+        );
+        let s = screen(&g, 120, 36);
+        let mid = line_with(&s, " mid_price > 0 ");
+        assert!(
+            mid.contains("weex 1.0003") || mid.contains("weex 1"),
+            "{mid}"
+        );
+        assert!(mid.contains("binance"), "{mid}");
+    }
+
+    #[test]
+    fn one_venue_keeps_the_detail_of_today() {
+        let mut g = GridState::new(list(), None);
+        tick(&mut g, 1, 0.5);
+        g.key(key(KeyCode::Enter));
+        assert!(g.venue_charts().is_none());
+        assert!(screen(&g, 120, 36).contains(DETAIL_LEGEND));
     }
 }

@@ -40,6 +40,7 @@ pub mod journal;
 pub(crate) mod market_view;
 pub mod palette;
 pub(crate) mod repeat_view;
+pub(crate) mod venue_charts;
 pub mod vocab;
 pub mod wizard;
 

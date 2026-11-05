@@ -157,6 +157,18 @@ pub const fn tone(role: Role) -> Tone {
     }
 }
 
+/// The tones of the series of one chart, one per venue, in venue order
+/// (design 2026-11-04, section 2.9). None is a health color (green,
+/// yellow, red), and none is a bright variant, which is weak on a light
+/// background. From the fifth series the tones repeat; the chart tells
+/// those apart by their marker.
+pub const SERIES_TONES: [Tone; 4] = [
+    Tone::colored(AnsiColor::Blue),
+    Tone::colored(AnsiColor::Magenta),
+    Tone::colored(AnsiColor::Cyan),
+    Tone::PLAIN,
+];
+
 /// Which way a monitored value moved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {

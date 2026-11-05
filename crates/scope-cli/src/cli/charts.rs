@@ -11,7 +11,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::widgets::Widget;
-use scope::metrics::Threshold;
+use scope::metrics::{Threshold, Unit};
 
 /// Bar glyphs from 1/8 to a full cell.
 const BARS: [&str; 8] = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
@@ -69,6 +69,43 @@ impl<'a> Sparkline<'a> {
         self.threshold = threshold;
         self
     }
+}
+
+/// The smallest range a chart of `unit` shows, so noise reads as a flat
+/// line: 10 bps of the price, 0.05 percentage points, 5% of an amount.
+pub(crate) fn min_span(unit: Unit, values: &[Option<f64>]) -> f64 {
+    let latest = values
+        .iter()
+        .rev()
+        .flatten()
+        .next()
+        .copied()
+        .unwrap_or(0.0)
+        .abs();
+    match unit {
+        Unit::Price | Unit::Native => (latest * 0.001).max(1e-9),
+        Unit::Percent => 0.05,
+        Unit::Quote | Unit::Usd => (latest * 0.05).max(1.0),
+        Unit::Count => 1.0,
+        Unit::Score => 0.5,
+        Unit::Flag => 1.0,
+    }
+}
+
+/// `! Window too small: enlarge it 12 columns wider and 8 rows taller to
+/// see {what}`: what a view says when it cannot show `what` in full.
+pub(crate) fn enlarge_hint(cols: u16, rows: u16, what: &str) -> String {
+    let n = |k: u16, one: &str, many: &str| format!("{k} {}", if k == 1 { one } else { many });
+    let by = match (cols, rows) {
+        (0, r) => format!("{} taller", n(r, "row", "rows")),
+        (c, 0) => format!("{} wider", n(c, "column", "columns")),
+        (c, r) => format!(
+            "{} wider and {} taller",
+            n(c, "column", "columns"),
+            n(r, "row", "rows")
+        ),
+    };
+    format!("! Window too small: enlarge it {by} to see {what}")
 }
 
 /// The value a threshold draws its line at.
