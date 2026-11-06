@@ -7,7 +7,7 @@ use crate::cli::output::Output;
 use crate::cli::repeat::{self, RunOutput, Schedule};
 use scope::error::{Result, ScopeError};
 use scope::metrics::Sample;
-use scope::watch::{Event, Snapshot, Watchlist, diff};
+use scope::watch::{Event, History, Snapshot, Watchlist, diff};
 use std::io::Write as _;
 use std::path::Path;
 
@@ -72,12 +72,17 @@ fn csv_field(s: &str) -> String {
     }
 }
 
-/// The report of a run: one `market summary --report` section per target
-/// with a summary, then every cell's last value.
+/// The report of a run: one `market summary --report` section per row
+/// with a summary (one per venue), then every cell's last value.
 pub fn report_text(w: &Watchlist, last: &Tick) -> String {
     let mut md = format!("# Watchlist Report: {}\n\n", w.name);
-    for (t, summary) in w.targets.iter().zip(&last.summaries) {
-        if let (Some(summary), Some(venue)) = (summary, &t.venue) {
+    // The tick's rows, and so its summaries, follow each target's rows.
+    let rows = w
+        .targets
+        .iter()
+        .flat_map(|t| t.rows().into_iter().map(move |venue| (t, venue)));
+    for ((t, venue), summary) in rows.zip(&last.summaries) {
+        if let (Some(summary), Some(venue)) = (summary, venue) {
             md.push_str(&crate::cli::market::market_summary_to_markdown(
                 summary, venue, &t.id,
             ));
@@ -138,10 +143,14 @@ pub async fn run(
     // The step closure is called once per tick and its future outlives
     // the call, so the state it changes is shared through cells.
     let prev = std::cell::RefCell::new(Snapshot::default());
+    let history = std::cell::RefCell::new(History::default());
     let on_tick = std::cell::RefCell::new(&mut on_tick);
-    let (prev, on_tick) = (&prev, &on_tick);
+    let (prev, history, on_tick) = (&prev, &history, &on_tick);
     let last = repeat::run(&schedule(w)?, &[], None, out, |n| async move {
-        let t = tick(ready, src, out).await;
+        // Taken out for the tick, so no borrow is held across its awaits.
+        let mut memory = history.take();
+        let t = tick(ready, src, out, &mut memory).await;
+        history.replace(memory);
         let events = diff(&prev.borrow(), &t.snapshot);
         if let Some(path) = &w.outputs.csv {
             let at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
@@ -306,7 +315,7 @@ mod tests {
         };
         let summary = MarketSummary::from_order_book(&book, &HealthThresholds::default(), None);
         let mut on_venue = Target::new(TargetKind::Pair, "USDC");
-        on_venue.venue = Some("binance".into());
+        on_venue.venues = vec!["binance".into()];
         // A summary with no venue to name has no section.
         let no_venue = Target::new(TargetKind::Pair, "DAI");
         let mut w = Watchlist::new("pegs");
@@ -337,6 +346,58 @@ mod tests {
             md.contains("| USDC@binance | a\\|b | - | error | x\\|y |"),
             "{md}"
         );
+    }
+
+    // Design 2026-11-04, section 2.6: a target on two venues gives a
+    // market section and a set of CSV rows per venue.
+    #[test]
+    fn two_venues_give_two_sections_and_two_labelled_row_sets() {
+        use scope::market::{BookSource, HealthThresholds, MarketSummary, OrderBook};
+        let level = |price, quantity| scope::market::OrderBookLevel { price, quantity };
+        let book = OrderBook {
+            pair: "USDN/USDT".into(),
+            source: BookSource::Exchange,
+            bids: vec![level(0.999, 5_000.0)],
+            asks: vec![level(1.001, 5_000.0)],
+        };
+        let summary = MarketSummary::from_order_book(&book, &HealthThresholds::default(), None);
+        let mut t = Target::new(TargetKind::Pair, "USDN");
+        t.venues = vec!["weex".into(), "binance".into()];
+        t.rules = vec![scope::watch::Rule::parse("spread_pct < 1").unwrap()];
+        let mut w = Watchlist::new("pegs");
+        w.targets = vec![t];
+        let row = |venue: &str| {
+            TargetSnapshot::new(
+                format!("USDN@{venue}"),
+                vec![Cell {
+                    label: "spread_pct < 1".into(),
+                    rule: scope::watch::Rule::parse("spread_pct < 1").ok(),
+                    value: Some(0.2),
+                    status: RuleStatus::Pass,
+                    detail: None,
+                }],
+            )
+            .on_venue(Some(venue))
+        };
+        let last = Tick {
+            snapshot: Snapshot {
+                targets: vec![row("weex"), row("binance")],
+            },
+            summaries: vec![Some(summary.clone()), Some(summary)],
+        };
+        let md = report_text(&w, &last);
+        assert_eq!(
+            md.matches("# Market Health Report: USDN").count(),
+            2,
+            "{md}"
+        );
+        assert!(
+            md.contains("| USDN@weex |") && md.contains("| USDN@binance |"),
+            "{md}"
+        );
+        let csv = csv_rows("t0", &last.snapshot);
+        let targets: Vec<&str> = csv.lines().map(|l| l.split(',').nth(1).unwrap()).collect();
+        assert_eq!(targets, ["USDN@weex", "USDN@binance"]);
     }
 
     #[tokio::test]

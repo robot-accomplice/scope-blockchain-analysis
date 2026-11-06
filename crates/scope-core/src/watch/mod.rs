@@ -6,17 +6,20 @@
 //! #47 and the output of the TUI's monitor wizard.
 //!
 //! This module is pure: types, rule evaluation ([`rule`]), the "market
-//! health" preset ([`preset`]), snapshot comparison ([`diff`](mod@diff))
-//! and the file format ([`file`](mod@file)). The fetchers that read the
+//! health" preset ([`preset`]), snapshot comparison ([`diff`](mod@diff)),
+//! the memory between ticks ([`history`]) and the file format
+//! ([`file`](mod@file)). The fetchers that read the
 //! metrics live in scope-cli.
 
 pub mod diff;
 pub mod file;
+pub mod history;
 pub mod preset;
 pub mod rule;
 pub mod time;
 
 pub use diff::{Event, diff};
+pub use history::{History, Reading, Readings};
 pub use rule::{Op, Rule, RuleStatus, TargetStatus, target_status};
 
 use crate::market::HealthOverrides;
@@ -102,8 +105,8 @@ pub struct Target {
     pub id: String,
     /// The chain; inferred when absent, as the CLI does.
     pub chain: Option<String>,
-    /// The venue, for market metrics.
-    pub venue: Option<String>,
+    /// The venues, for market metrics, in the user's order. Empty: none.
+    pub venues: Vec<String>,
     /// A preset, evaluated before the rules.
     pub preset: Option<Preset>,
     /// Health threshold overrides for the preset and the market metrics.
@@ -118,18 +121,49 @@ impl Target {
             kind,
             id: id.into(),
             chain: None,
-            venue: None,
+            venues: Vec::new(),
             preset: None,
             health: HealthOverrides::default(),
             rules: Vec::new(),
         }
     }
 
-    /// The name the grid and the banner show: `USDC@binance`, or the id.
+    /// The name of the whole target: `USDC@binance`, `USDC@binance,okx`,
+    /// or the id.
     pub fn label(&self) -> String {
-        match &self.venue {
+        if self.venues.is_empty() {
+            self.id.clone()
+        } else {
+            format!("{}@{}", self.id, self.venues.join(","))
+        }
+    }
+
+    /// The label of one row of the target: `USDC@binance` on a venue, the
+    /// id without one.
+    pub fn row_label(&self, venue: Option<&str>) -> String {
+        match venue {
             Some(venue) => format!("{}@{}", self.id, venue),
             None => self.id.clone(),
+        }
+    }
+
+    /// The rows the target gives, by venue (`None`: the id row). One venue
+    /// or none: one row with every cell. Two or more: one market row per
+    /// venue, then an id row when token or address rules need one (design
+    /// 2026-11-04, section 2.3). With no market metric, the venues read
+    /// nothing, so the target is its id row alone.
+    pub fn rows(&self) -> Vec<Option<&str>> {
+        match self.venues.as_slice() {
+            [] => vec![None],
+            [one] => vec![Some(one.as_str())],
+            _ if !self.needs_market() => vec![None],
+            many => {
+                let mut rows: Vec<Option<&str>> = many.iter().map(|v| Some(v.as_str())).collect();
+                if self.needs(MetricGroup::Token) || self.needs(MetricGroup::Address) {
+                    rows.push(None);
+                }
+                rows
+            }
         }
     }
 
@@ -186,7 +220,7 @@ impl Watchlist {
         self.targets
             .iter()
             .map(|t| {
-                usize::from(t.needs_market())
+                usize::from(t.needs_market()) * t.venues.len().max(1)
                     + usize::from(t.needs(MetricGroup::Token))
                     + usize::from(t.needs(MetricGroup::Address))
             })
@@ -220,8 +254,10 @@ pub struct Cell {
 /// One target's state after a tick.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TargetSnapshot {
-    /// [`Target::label`].
+    /// [`Target::row_label`].
     pub target: String,
+    /// The venue of a market row; `None` for a row without one.
+    pub venue: Option<String>,
     pub cells: Vec<Cell>,
     pub status: TargetStatus,
 }
@@ -232,9 +268,16 @@ impl TargetSnapshot {
         let statuses: Vec<RuleStatus> = cells.iter().map(|c| c.status.clone()).collect();
         Self {
             target: target.into(),
+            venue: None,
             status: target_status(&statuses),
             cells,
         }
+    }
+
+    /// The row with the venue it reads.
+    pub fn on_venue(mut self, venue: Option<&str>) -> Self {
+        self.venue = venue.map(str::to_string);
+        self
     }
 }
 
@@ -286,11 +329,36 @@ mod tests {
     }
 
     #[test]
-    fn label_names_the_venue() {
+    fn label_names_the_venues() {
         let mut t = Target::new(TargetKind::Pair, "USDC");
         assert_eq!(t.label(), "USDC");
-        t.venue = Some("binance".into());
+        t.venues = vec!["binance".into()];
         assert_eq!(t.label(), "USDC@binance");
+        t.venues.push("okx".into());
+        assert_eq!(t.label(), "USDC@binance,okx");
+        assert_eq!(t.row_label(Some("okx")), "USDC@okx");
+        assert_eq!(t.row_label(None), "USDC");
+    }
+
+    // One venue keeps today's single row, so old CSV files keep their
+    // labels; with several, venue-free cells get their own row so that a
+    // holders breach is not reported as a breach on one venue.
+    #[test]
+    fn rows_split_by_venue_and_keep_venue_free_cells_apart() {
+        let mut t = Target::new(TargetKind::Token, "USDN");
+        assert_eq!(t.rows(), vec![None]);
+        t.venues = vec!["weex".into()];
+        t.rules.push(Rule::parse("holders >= 10").unwrap());
+        assert_eq!(t.rows(), vec![Some("weex")]);
+        t.venues.push("binance".into());
+        t.preset = Some(Preset::MarketHealth);
+        assert_eq!(t.rows(), vec![Some("weex"), Some("binance"), None]);
+        t.rules.clear();
+        assert_eq!(t.rows(), vec![Some("weex"), Some("binance")]);
+        // No market metric: the venues have nothing to read.
+        t.preset = None;
+        t.rules.push(Rule::parse("holders >= 10").unwrap());
+        assert_eq!(t.rows(), vec![None]);
     }
 
     #[test]
@@ -304,6 +372,9 @@ mod tests {
         token.rules.push(Rule::parse("price_usd > 0").unwrap());
         w.targets = vec![pair, token];
         assert_eq!(w.fetches_per_tick(), 2);
+        // One market read per venue.
+        w.targets[0].venues = vec!["binance".into(), "okx".into()];
+        assert_eq!(w.fetches_per_tick(), 3);
     }
 
     #[test]

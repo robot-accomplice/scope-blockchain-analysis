@@ -56,6 +56,12 @@ metric_ids! {
     AskTop10,
     /// `1.0` when [`Sample::healthy`] is true, else `0.0`.
     Healthy,
+    /// The largest trade on the venue's tape since the last tick, in the
+    /// quote asset. A watchlist reads it; a single summary has none.
+    LargestTrade,
+    /// The change of the venue's 24h volume since the last tick, in percent.
+    /// A watchlist reads it; a single summary has none.
+    VolumeChangePct,
     /// Token price in USD.
     PriceUsd,
     /// Token price change over 24h, in percent.
@@ -89,10 +95,17 @@ impl MetricId {
         use MetricId::*;
         match self {
             BestBid | BestAsk | Mid | PegDeviationPct | Spread | SpreadPct | BidDepth
-            | AskDepth | BidTop3 | AskTop3 | BidTop10 | AskTop10 | Healthy => MetricGroup::Market,
+            | AskDepth | BidTop3 | AskTop3 | BidTop10 | AskTop10 | Healthy | LargestTrade
+            | VolumeChangePct => MetricGroup::Market,
             PriceUsd | PriceChange24hPct | Volume24h | LiquidityUsd | Holders => MetricGroup::Token,
             NativeBalance | RiskScore => MetricGroup::Address,
         }
+    }
+
+    /// Whether the value compares this tick with the one before, so only a
+    /// run of ticks (a watchlist) has it, never one market summary.
+    pub fn since_last_tick(self) -> bool {
+        matches!(self, MetricId::LargestTrade | MetricId::VolumeChangePct)
     }
 
     /// The metric's name in rules and CSV files (`spread_pct`, `holders`).
@@ -174,11 +187,12 @@ const LEGACY_CSV_ORDER: [MetricId; 7] = [
     MetricId::Healthy,
 ];
 
-/// The market metric table, built from the thresholds in force.
+/// The market metric table, built from the thresholds in force: the values
+/// one summary has (not the [`MetricId::since_last_tick`] ones).
 pub fn summary_metrics(thresholds: &HealthThresholds) -> Vec<Metric> {
     MetricId::ALL
         .iter()
-        .filter(|id| id.group() == MetricGroup::Market)
+        .filter(|id| id.group() == MetricGroup::Market && !id.since_last_tick())
         .map(|id| describe(*id, thresholds))
         .collect()
 }
@@ -242,6 +256,8 @@ pub fn describe(id: MetricId, t: &HealthThresholds) -> Metric {
             "ask_top10_depth",
         ),
         Healthy => ("Health", Unit::Flag, None, "healthy"),
+        LargestTrade => ("Largest trade", Unit::Quote, None, "largest_trade"),
+        VolumeChangePct => ("Volume change %", Unit::Percent, None, "volume_change_pct"),
         PriceUsd => ("Price", Unit::Usd, None, "price_usd"),
         PriceChange24hPct => (
             "Price change 24h %",
@@ -432,6 +448,25 @@ mod tests {
         let m = summary_metrics(&HealthThresholds::default());
         assert!(m.iter().all(|m| m.id.group() == MetricGroup::Market));
         assert_eq!(m.len(), 13, "the market table did not change");
+    }
+
+    #[test]
+    fn the_since_last_tick_metrics_are_market_ones_no_summary_has() {
+        use MetricId::*;
+        let t = HealthThresholds::default();
+        for (id, name, unit) in [
+            (LargestTrade, "largest_trade", Unit::Quote),
+            (VolumeChangePct, "volume_change_pct", Unit::Percent),
+        ] {
+            assert!(id.since_last_tick(), "{id:?}");
+            assert_eq!(id.group(), MetricGroup::Market, "{id:?}");
+            assert_eq!(MetricId::from_name(name), Some(id));
+            assert_eq!(describe(id, &t).unit, unit, "{id:?}");
+            assert!(!summary_metrics(&t).iter().any(|m| m.id == id), "{id:?}");
+            let one = sample(&healthy_summary(), &[describe(id, &t)]);
+            assert_eq!(one.values, vec![None], "{id:?}");
+        }
+        assert!(!Spread.since_last_tick());
     }
 
     #[test]

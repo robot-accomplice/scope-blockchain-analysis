@@ -93,6 +93,26 @@ jobs:
         if: runner.os == 'Linux'
         run: scripts/check-glibc.sh target/release/scope
 
+  # The release cross-builds arm64 Linux; build it here too, so a dependency
+  # whose C code does not cross-compile fails a PR, not a tagged release.
+  build-arm64:
+    name: Build Release (aarch64-linux, cross)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/rust
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cross-compilation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+      - run: cargo build --release --target aarch64-unknown-linux-gnu
+      - name: Check the glibc it needs
+        run: scripts/check-glibc.sh target/aarch64-unknown-linux-gnu/release/scope
+
   audit:
     name: Security Audit
     runs-on: ubuntu-latest

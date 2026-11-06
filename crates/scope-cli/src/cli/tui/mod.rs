@@ -40,6 +40,7 @@ pub mod journal;
 pub(crate) mod market_view;
 pub mod palette;
 pub(crate) mod repeat_view;
+pub(crate) mod venue_charts;
 pub mod vocab;
 pub mod wizard;
 
@@ -1905,7 +1906,7 @@ mod tests {
             assert_eq!(exit, None);
             assert_ran_note(&state, "setup", "cancelled");
             assert_eq!(records(&dir)[0]["outcome"], "cancelled");
-            assert!(host.signals.try_next().is_err(), "the INT is used up");
+            assert!(host.signals.try_recv().is_err(), "the INT is used up");
         }
     }
 
@@ -2378,7 +2379,10 @@ mod tests {
         let w = state.wizard.as_ref().expect("the wizard opened");
         assert_eq!(w.list.interval, std::time::Duration::from_secs(30));
         let t = &w.list.targets[0];
-        assert_eq!((t.id.as_str(), t.venue.as_deref()), ("USDN", Some("weex")));
+        assert_eq!(
+            (t.id.as_str(), t.venues.as_slice()),
+            ("USDN", ["weex".to_string()].as_slice())
+        );
         assert_eq!(t.preset, Some(scope::watch::Preset::MarketHealth));
         assert!(state.grid.is_none(), "nothing runs before Start");
         let screen = screen_text(&host);

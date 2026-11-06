@@ -383,42 +383,123 @@ mod tests {
         assert!(debug.contains("OhlcRequest"));
     }
 
+    // Each venue's own reply shape, served by a mock: the venue lookup
+    // reads the test home, which other tests repoint while they run, and
+    // the live APIs answer as they please.
+    const VENUE_TRADES: [(&str, &str, &str); 3] = [
+        (
+            "mexc",
+            "/api/v3/trades",
+            r#"[{"id":1,"price":"1.5","qty":"2","quoteQty":"3","time":1700000000000,"isBuyerMaker":false}]"#,
+        ),
+        (
+            "okx",
+            "/api/v5/market/trades",
+            r#"{"data":[{"tradeId":"1","px":"1.5","sz":"2","ts":"1700000000000","side":"buy"}]}"#,
+        ),
+        (
+            "bybit",
+            "/v5/market/recent-trade",
+            r#"{"result":{"list":[{"execId":"1","price":"1.5","size":"2","time":"1700000000000","side":"Buy"}]}}"#,
+        ),
+    ];
+
+    const VENUE_OHLC: [(&str, &str, &str); 3] = [
+        (
+            "mexc",
+            "/api/v3/klines",
+            r#"[[1700000000000,"1.0","1.5","0.5","1.25","1000.5",1700003599999]]"#,
+        ),
+        (
+            "okx",
+            "/api/v5/market/candles",
+            r#"{"data":[["1700000000000","1.0","1.5","0.5","1.25","1000.5"]]}"#,
+        ),
+        (
+            "bybit",
+            "/v5/market/kline",
+            r#"{"result":{"list":[["1700000000000","1.0","1.5","0.5","1.25","1000.5"]]}}"#,
+        ),
+    ];
+
     #[tokio::test]
     async fn test_handle_trades_multiple_venues() {
-        for venue in &["mexc", "okx", "bybit"] {
+        for (venue, path, body) in VENUE_TRADES {
+            let mut server = mockito::Server::new_async().await;
+            server
+                .mock("GET", path)
+                .match_query(mockito::Matcher::Any)
+                .with_body(body)
+                .create_async()
+                .await;
+            let exchange = scope::market::testing::venue_at(venue, &server.url());
             let req = TradesRequest {
                 venue: venue.to_string(),
                 pair: "BTC".to_string(),
                 limit: 3,
             };
-            let response = handle_trades(test_state(), Json(req)).await.into_response();
-            let status = response.status();
-            assert!(
-                status == StatusCode::OK || status == StatusCode::INTERNAL_SERVER_ERROR,
-                "Venue {} trades returned unexpected status {}",
-                venue,
-                status
-            );
+            let response = trades_response(&exchange, req).await;
+            assert_eq!(response.status(), StatusCode::OK, "{venue} trades");
+            let json = body_json(response).await;
+            assert_eq!(json["trades"][0]["price"], 1.5, "{venue}: {json}");
+            assert_eq!(json["trades"][0]["side"], "buy", "{venue}: {json}");
         }
     }
 
     #[tokio::test]
     async fn test_handle_ohlc_multiple_venues() {
-        for venue in &["mexc", "okx", "bybit"] {
+        for (venue, path, body) in VENUE_OHLC {
+            let mut server = mockito::Server::new_async().await;
+            server
+                .mock("GET", path)
+                .match_query(mockito::Matcher::Any)
+                .with_body(body)
+                .create_async()
+                .await;
+            let exchange = scope::market::testing::venue_at(venue, &server.url());
             let req = OhlcRequest {
                 venue: venue.to_string(),
                 pair: "BTC".to_string(),
                 interval: "1h".to_string(),
                 limit: 3,
             };
-            let response = handle_ohlc(test_state(), Json(req)).await.into_response();
-            let status = response.status();
-            assert!(
-                status == StatusCode::OK || status == StatusCode::INTERNAL_SERVER_ERROR,
-                "Venue {} ohlc returned unexpected status {}",
-                venue,
-                status
-            );
+            let response = ohlc_response(&exchange, req).await;
+            assert_eq!(response.status(), StatusCode::OK, "{venue} ohlc");
+            let json = body_json(response).await;
+            assert_eq!(json["candles"][0]["close"], 1.25, "{venue}: {json}");
+        }
+    }
+
+    // A venue that fails is a mapped error status, on every venue.
+    #[tokio::test]
+    async fn test_handle_multiple_venues_report_a_venue_failure() {
+        for ((venue, trades_path, _), (_, ohlc_path, _)) in VENUE_TRADES.into_iter().zip(VENUE_OHLC)
+        {
+            let mut server = mockito::Server::new_async().await;
+            for path in [trades_path, ohlc_path] {
+                server
+                    .mock("GET", path)
+                    .match_query(mockito::Matcher::Any)
+                    .with_status(500)
+                    .create_async()
+                    .await;
+            }
+            let exchange = scope::market::testing::venue_at(venue, &server.url());
+            let trades = TradesRequest {
+                venue: venue.to_string(),
+                pair: "BTC".to_string(),
+                limit: 3,
+            };
+            let status = trades_response(&exchange, trades).await.status();
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{venue} trades");
+            let ohlc = OhlcRequest {
+                venue: venue.to_string(),
+                pair: "BTC".to_string(),
+                interval: "1h".to_string(),
+                limit: 3,
+            };
+            let status = ohlc_response(&exchange, ohlc).await.status();
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{venue} ohlc");
         }
     }
 

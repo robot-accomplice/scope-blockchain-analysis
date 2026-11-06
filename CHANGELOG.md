@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.6] - 2026-11-05
+
+### Added
+- The grid's detail for a target on two or more venues is the venue charts: one chart per market check, with one braille line per venue on a shared scale and time axis, and a value box with each venue's last value. A legend beside the charts shows the range of the last values across venues (`all`), then each venue with its colour, its last value and its status. `←` `→` select a venue, and `b` and `t` use it; Space shows only that venue, as bars; Tab selects the chart the legend shows; PgUp and PgDn page through the charts. The venue colours are blue, magenta, cyan and the default colour, none of them a health colour; from the fifth venue they repeat and the line is dotted. The selected venue is drawn on top where lines touch. With colour off, the legend and the value boxes still name each venue with its value. A window too small for one chart and the legend shows the one-venue detail and says how much to enlarge it.
+- A watchlist target can name several venues, so one target (USDN, say) is watched on all of them in one run. In a file, `venue:` takes one name, as before, or a list: `venue: [weex, binance]`. Old files load and save unchanged. The grid, the CSV and the report have one row per venue (`USDN@weex`, `USDN@binance`); with several venues, the token and address checks go on a row of their own (`USDN`), read once per tick. Each venue has its own memory for `largest_trade` and `volume_change_pct`. In the wizard, `pair USDN weex binance` adds one target on two venues. `scope monitor --venue` repeats or takes a comma list (`--venue weex,binance`); the old dashboard reads one venue and stops when given more.
+- Two watchlist market metrics compare a tick with the one before (#122). `largest_trade` is the largest trade on the venue's tape since the last tick, in the quote asset. The first tick looks back one interval, and a tick with no trade reads 0. `volume_change_pct` is the change of the venue's 24h volume since the last tick; the first tick shows n/a. A DEX venue has no trade tape, so its `largest_trade` cell is an error that says so. A rule like `largest_trade < 50000` or `volume_change_pct <= 200` works in the grid, the CSV and the report. `market summary` does not show them: one summary has no tick before it.
+- `scope monitor <token> --venue <venue>` checks the whale and volume-spike alerts of config `monitor.alerts` again, as rules: `whale_min_usd` becomes `largest_trade < whale_min_usd`, and `volume_spike_threshold_pct` becomes `volume_change_pct <= volume_spike_threshold_pct`. They now measure the largest real trade and the change since the last tick. The old dashboard used the average trade size (24h volume ÷ trade count) and the change from a running average. Without `--venue`, a note says these two alerts need one.
+
+### Changed
+- Rust 1.99.1, the latest stable (was 1.99.0).
+- Dependencies at their latest releases: every crate in `Cargo.lock` (tokio 1.54.1, which deprecates the unsound `AsyncFd` constructors of RUSTSEC-2026-0386; scope does not use them, #145), and the majors reqwest 0.13, axum 0.8, tower-http 0.7, indicatif 0.18, thiserror 2, dirs 7, sha2 0.11, base64 0.23, shlex 2 and vt100 0.18. The paths scope reads are unchanged.
+- HTTPS trusts the system's certificate store (reqwest 0.13's rustls, with aws-lc-rs), not a list built into the binary. A Linux system without CA certificates (`ca-certificates`) cannot verify servers.
+- The cargo-audit ignore list is empty: indicatif 0.18 no longer pulls in the unmaintained `number_prefix` (RUSTSEC-2025-0119).
+- CI cross-builds the arm64 Linux release, so a dependency that does not cross-compile fails the pull request instead of the tagged release.
+
+### Fixed
+- The web API's multiple-venue trades and OHLC tests serve mexc, okx and bybit from a local mock instead of the live exchanges. They failed about one full `cargo test --workspace` run in two with `400 Bad Request`: the venue lookup reads the test home, which the config-save tests repoint at an empty folder while they run, so the venue was unknown. A venue failure is checked on each of the three too.
+
 ## [0.8.5] - 2026-10-27
 
 ### Added
@@ -453,7 +471,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Configuration system with YAML support
 - Support for ERC-20, SPL, and TRC-20 tokens
 
-[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.5...HEAD
+[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.6...HEAD
+[0.8.6]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.5...v0.8.6
 [0.8.5]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.4...v0.8.5
 [0.8.4]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.2...v0.8.3

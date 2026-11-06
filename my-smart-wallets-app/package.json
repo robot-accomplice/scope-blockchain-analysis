@@ -11,31 +11,31 @@
     "postinstall": "node scripts/postinstall.js"
   },
   "dependencies": {
-    "@account-kit/core": "^4.35.1",
-    "@account-kit/infra": "^4.35.1",
-    "@account-kit/react": "^4.35.1",
-    "@radix-ui/react-slot": "^1.2.3",
-    "@radix-ui/react-tooltip": "^1.2.7",
-    "@tanstack/react-query": "^5.50.1",
+    "@account-kit/core": "^4.88.5",
+    "@account-kit/infra": "^4.88.5",
+    "@account-kit/react": "^4.88.5",
+    "@radix-ui/react-slot": "^1.5.0",
+    "@radix-ui/react-tooltip": "^1.4.1",
+    "@tanstack/react-query": "^5.105.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
-    "lucide-react": "^0.511.0",
-    "next": "15.5.27",
-    "react": "^18",
-    "react-dom": "^18",
-    "tailwind-merge": "^3.3.0",
+    "lucide-react": "^1.67.0",
+    "next": "15.5.28",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "tailwind-merge": "^3.7.0",
     "tailwindcss-animate": "^1.0.7",
-    "viem": "2.30.0",
-    "wagmi": "2.15.4"
+    "viem": "^2.57.16",
+    "wagmi": "^2.19.5"
   },
   "devDependencies": {
-    "@types/node": "^20",
-    "@types/react": "^18",
-    "@types/react-dom": "^18",
-    "eslint": "^8.57.0",
-    "eslint-config-next": "14.2.4",
-    "postcss": "^8",
-    "tailwindcss": "^3.4.4",
-    "typescript": "^5"
+    "@types/node": "^26.6.6",
+    "@types/react": "^18.3.31",
+    "@types/react-dom": "^18.3.7",
+    "eslint": "^9.39.5",
+    "eslint-config-next": "15.5.28",
+    "postcss": "^8.5.32",
+    "tailwindcss": "^3.4.19",
+    "typescript": "^6.0.3"
   }
 }

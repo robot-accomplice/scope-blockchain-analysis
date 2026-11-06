@@ -8,7 +8,7 @@
 //! the footer apart. The series comes from the command's output
 //! (`Output::series_hook`); this module only draws it.
 
-use crate::cli::charts::{HealthStrip, Sparkline};
+use crate::cli::charts::{HealthStrip, Sparkline, enlarge_hint, min_span};
 use crate::cli::output::{RunRecord, SeriesHook};
 use crate::cli::theme::{ACCENT, ERR, SECONDARY, WARN};
 use crate::cli::tui::{fit, market_view};
@@ -214,7 +214,7 @@ pub(crate) fn draw(f: &mut Frame, area: Rect, view: &RepeatView, status: Vec<Lin
         },
         &c,
     ) {
-        foot_lines.push(Line::styled(enlarge_hint(cols, rows), WARN));
+        foot_lines.push(Line::styled(enlarge_hint(cols, rows, "everything"), WARN));
     }
     // J5: a rule keeps the footer off the view above it.
     let foot_rows = rows_for(foot_lines.len());
@@ -277,21 +277,6 @@ fn shortfall(body: Rect, c: &Copy) -> Option<(u16, u16)> {
         height.saturating_sub(body.height),
     );
     (short != (0, 0)).then_some(short)
-}
-
-/// `! Window too small: enlarge it 12 columns wider and 8 rows taller …`.
-fn enlarge_hint(cols: u16, rows: u16) -> String {
-    let n = |k: u16, one: &str, many: &str| format!("{k} {}", if k == 1 { one } else { many });
-    let by = match (cols, rows) {
-        (0, r) => format!("{} taller", n(r, "row", "rows")),
-        (c, 0) => format!("{} wider", n(c, "column", "columns")),
-        (c, r) => format!(
-            "{} wider and {} taller",
-            n(c, "column", "columns"),
-            n(r, "row", "rows")
-        ),
-    };
-    format!("! Window too small: enlarge it {by} to see everything")
 }
 
 /// The status lines as one line, the progress before the long command:
@@ -434,27 +419,6 @@ fn limit_text(metric: &Metric) -> String {
     }
 }
 
-/// The smallest range a metric's chart shows, so noise reads as a flat
-/// line: 10 bps of the price, 0.05 percentage points, 5% of an amount.
-fn min_span(metric: &Metric, values: &[Option<f64>]) -> f64 {
-    let latest = values
-        .iter()
-        .rev()
-        .flatten()
-        .next()
-        .copied()
-        .unwrap_or(0.0)
-        .abs();
-    match metric.unit {
-        Unit::Price | Unit::Native => (latest * 0.001).max(1e-9),
-        Unit::Percent => 0.05,
-        Unit::Quote | Unit::Usd => (latest * 0.05).max(1.0),
-        Unit::Count => 1.0,
-        Unit::Score => 0.5,
-        Unit::Flag => 1.0,
-    }
-}
-
 /// The numbers part of a trends row, always `NUMBERS_COLS` wide (J3):
 /// the label, the limit and the value, right-aligned so it is never cut.
 fn numbers(label: &str, limit: &str, value: &str) -> Line<'static> {
@@ -587,7 +551,7 @@ fn draw_trends(f: &mut Frame, area: Rect, c: &Copy) {
         f.render_widget(
             Sparkline::new(&values, ACCENT)
                 .threshold(metric.threshold)
-                .min_span(min_span(metric, &values))
+                .min_span(min_span(metric.unit, &values))
                 .track(),
             Rect::new(chart_x, y, chart_w, rows),
         );

@@ -61,11 +61,24 @@ pub async fn fetch_summary(
     thresholds: &HealthThresholds,
     dex: &dyn DexAnalyticsSource,
 ) -> Result<MarketSummary> {
+    fetch_summary_with_trades(venue, pair, thresholds, dex)
+        .await
+        .map(|(summary, _)| summary)
+}
+
+/// [`fetch_summary`], with the venue's recent trades it read (or why there
+/// are none), so a caller can read them too without a second fetch.
+pub async fn fetch_summary_with_trades(
+    venue: &MarketVenue,
+    pair: &Pair,
+    thresholds: &HealthThresholds,
+    dex: &dyn DexAnalyticsSource,
+) -> Result<(MarketSummary, std::result::Result<Vec<Trade>, String>)> {
     let (book, volume_24h) = fetch_book_and_volume(venue, pair, thresholds, dex).await?;
     let mut summary = MarketSummary::from_order_book(&book, thresholds, volume_24h);
     let trades = fetch_pattern_trades(venue, pair).await;
     summary.check_bot_patterns(trades.as_deref().map_err(String::as_str));
-    Ok(summary)
+    Ok((summary, trades))
 }
 
 /// The venue's recent trades for the bot-pattern advisory
