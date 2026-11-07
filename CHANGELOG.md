@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.6] - 2026-11-05
+
 ### Added
 - The grid's detail for a target on two or more venues is the venue charts: one chart per market check, with one braille line per venue on a shared scale and time axis, and a value box with each venue's last value. A legend beside the charts shows the range of the last values across venues (`all`), then each venue with its colour, its last value and its status. `←` `→` select a venue, and `b` and `t` use it; Space shows only that venue, as bars; Tab selects the chart the legend shows; PgUp and PgDn page through the charts. The venue colours are blue, magenta, cyan and the default colour, none of them a health colour; from the fifth venue they repeat and the line is dotted. The selected venue is drawn on top where lines touch. With colour off, the legend and the value boxes still name each venue with its value. A window too small for one chart and the legend shows the one-venue detail and says how much to enlarge it.
 - A watchlist target can name several venues, so one target (USDN, say) is watched on all of them in one run. In a file, `venue:` takes one name, as before, or a list: `venue: [weex, binance]`. Old files load and save unchanged. The grid, the CSV and the report have one row per venue (`USDN@weex`, `USDN@binance`); with several venues, the token and address checks go on a row of their own (`USDN`), read once per tick. Each venue has its own memory for `largest_trade` and `volume_change_pct`. In the wizard, `pair USDN weex binance` adds one target on two venues. `scope monitor --venue` repeats or takes a comma list (`--venue weex,binance`); the old dashboard reads one venue and stops when given more.
@@ -469,7 +471,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Configuration system with YAML support
 - Support for ERC-20, SPL, and TRC-20 tokens
 
-[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.5...HEAD
+[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.6...HEAD
+[0.8.6]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.5...v0.8.6
 [0.8.5]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.4...v0.8.5
 [0.8.4]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.2...v0.8.3
