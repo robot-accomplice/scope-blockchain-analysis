@@ -72,6 +72,7 @@ pub mod health_args;
 pub mod insights;
 pub mod interactive;
 pub mod market;
+pub(crate) mod market_venues;
 pub mod monitor;
 pub mod output;
 pub(crate) mod plain;

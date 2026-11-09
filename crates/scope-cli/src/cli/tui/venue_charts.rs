@@ -13,6 +13,7 @@
 use super::grid::{status_cell, value_text};
 use crate::cli::charts::{Sparkline, min_span};
 use crate::cli::theme::{ACCENT, SECONDARY, series_style};
+use crossterm::event::KeyCode;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -89,6 +90,38 @@ pub(crate) struct Selection {
     pub isolated: bool,
     /// The selected chart, whose values the legend shows.
     pub chart: usize,
+}
+
+impl Selection {
+    /// Applies a key of the venue charts: `←` `→` the venue, `Space` the
+    /// isolation, `Tab` the chart, `PgUp` `PgDn` the page of `page`
+    /// charts. `venues` and `charts` are the counts. The watch grid and the
+    /// repeat view of `market summary` both call it, so the keys are one.
+    pub(crate) fn apply(&mut self, code: KeyCode, venues: usize, charts: usize, page: usize) {
+        let page = page.max(1);
+        match code {
+            KeyCode::Right => self.venue = (self.venue + 1) % venues,
+            KeyCode::Left => self.venue = (self.venue + venues - 1) % venues,
+            KeyCode::Char(' ') => self.isolated = !self.isolated,
+            KeyCode::Tab => self.chart = (self.chart + 1) % charts,
+            KeyCode::PageDown => self.chart = ((self.chart / page + 1) * page).min(charts - 1),
+            KeyCode::PageUp => self.chart = (self.chart / page).saturating_sub(1) * page,
+            _ => {}
+        }
+    }
+
+    /// True for a key that [`Selection::apply`] reads.
+    pub(crate) fn is_key(code: KeyCode) -> bool {
+        matches!(
+            code,
+            KeyCode::Left
+                | KeyCode::Right
+                | KeyCode::Char(' ')
+                | KeyCode::Tab
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+        )
+    }
 }
 
 /// The range of the last values across venues: `0.9998–1.0003`.
