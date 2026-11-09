@@ -75,6 +75,27 @@ pub struct RunRecord {
     pub snapshot: String,
     /// The run's data, for a screen that draws its own view of it.
     pub view: Option<Arc<SummaryView>>,
+    /// The run on two or more venues: one reading per venue.
+    pub venues: Option<Arc<VenueRun>>,
+}
+
+/// One venue's reading in one run of a repeat on two or more venues.
+#[derive(Debug, Clone)]
+pub struct VenueSample {
+    pub venue: String,
+    /// The venue's key values; all missing when the venue failed.
+    pub sample: Sample,
+    /// Why the venue gave no reading in this run.
+    pub error: Option<String>,
+}
+
+/// One run of a repeat on two or more venues, for a screen and the CSV.
+#[derive(Debug, Clone)]
+pub struct VenueRun {
+    /// One reading per venue, in the order the user gave the venues.
+    pub samples: Vec<VenueSample>,
+    /// The comparison table of the run, as the CLI prints it.
+    pub comparison: String,
 }
 
 /// A market summary, for a screen that draws it (the TUI's compact view).
