@@ -1068,37 +1068,81 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// A TCP stub in front of `target` (`host:port`) that waits `delay`
+    /// before it connects each client through. It waits with
+    /// `tokio::time::sleep`, so it holds no thread. Returns its URL.
+    async fn delayed(target: String, delay: Duration) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((mut client, _)) = listener.accept().await {
+                let target = target.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(delay).await;
+                    if let Ok(mut upstream) = tokio::net::TcpStream::connect(target).await {
+                        let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+                    }
+                });
+            }
+        });
+        url
+    }
+
     #[tokio::test]
     async fn venues_are_read_at_the_same_time() {
-        // Each venue's depth reply takes 400 ms. One venue after the other
-        // would take 800 ms or more.
-        let slow = |id: &'static str| async move {
-            let mut s = Served::healthy(id).await;
-            let body = depth(0.9999, 1.0001, 20, 40_000.0);
-            s.server
-                .mock("GET", paths(id)[0])
-                .match_query(mockito::Matcher::Any)
-                .with_chunked_body(move |w| {
-                    std::thread::sleep(Duration::from_millis(400));
-                    std::io::Write::write_all(w, body.as_bytes())
-                })
-                .create_async()
-                .await;
-            s
+        // Every connection to a venue takes 300 ms to open. Time one venue,
+        // then two: read one after the other, two would take twice as long
+        // as one. Read together, they take about as long as one.
+        let delay = Duration::from_millis(300);
+        let (a, b) = (
+            Served::healthy("binance").await,
+            Served::healthy("weex").await,
+        );
+        let urls = [
+            (
+                "binance".to_string(),
+                delayed(a.server.host_with_port(), delay).await,
+            ),
+            (
+                "weex".to_string(),
+                delayed(b.server.host_with_port(), delay).await,
+            ),
+        ];
+        let source = move |name: &str| {
+            let (id, url) = urls.iter().find(|(id, _)| id == name).unwrap();
+            Ok(MarketVenue::Cex(Box::new(venue_at(id, url))))
         };
-        let (a, b) = (slow("binance").await, slow("weex").await);
-        let args = args(&["binance", "weex"], SummaryFormat::Text);
-        let start = Instant::now();
-        let (result, text) = summary_of(&args, &[&a, &b], None).await;
-        let took = start.elapsed();
-        result.unwrap();
+        let read = |list: &[&str]| {
+            let args = args(list, SummaryFormat::Text);
+            let venues = checked_venues(&args.venue).unwrap();
+            let (out, cap) = Output::capture();
+            let source = &source;
+            async move {
+                let start = Instant::now();
+                run_summary(
+                    &args,
+                    &venues,
+                    None,
+                    &HealthThresholds::default(),
+                    source,
+                    &MockClientFactory::new(),
+                    &out,
+                )
+                .await
+                .unwrap();
+                (start.elapsed(), strip(&cap.out()))
+            }
+        };
+        let (one, _) = read(&["binance"]).await;
+        let (both, text) = read(&["binance", "weex"]).await;
         assert!(
             text.contains("(binance)") && text.contains("(weex)"),
             "{text}"
         );
+        assert!(one >= delay, "the stub delays: {one:?}");
         assert!(
-            took < Duration::from_millis(780),
-            "took {took:?}: one venue after the other"
+            both < one.mul_f64(1.6),
+            "one venue took {one:?}, two took {both:?}: one venue after the other"
         );
     }
 

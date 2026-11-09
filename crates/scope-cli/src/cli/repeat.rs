@@ -12,9 +12,9 @@ use crate::{note, out};
 use scope::error::{Result, ScopeError};
 use scope::metrics::{self as series, Metric, Sample};
 use std::future::Future;
-use std::io::Write as _;
 use std::path::Path;
 use std::time::{Duration, Instant};
+use tokio::io::AsyncWriteExt as _;
 // The schedule runs on tokio's clock, the one its sleep uses.
 use tokio::time::Instant as Clock;
 
@@ -129,7 +129,8 @@ where
         None => Vec::new(),
     };
     if let Some(path) = csv {
-        std::fs::write(path, csv_head(&columns, rows))
+        tokio::fs::write(path, csv_head(&columns, rows))
+            .await
             .map_err(|e| ScopeError::io_context(e, format!("cannot write {}", path.display())))?;
     }
     out.update_progress(|p| {
@@ -166,7 +167,7 @@ where
                 &output.sample,
                 output.venues.as_ref().map(|v| v.samples.as_slice()),
             );
-            append(path, &text)?;
+            append(path, &text).await?;
         }
         let record = RunRecord {
             run,
@@ -236,13 +237,15 @@ pub(crate) fn csv_run(
     }
 }
 
-fn append(path: &Path, row: &str) -> Result<()> {
+async fn append(path: &Path, row: &str) -> Result<()> {
     let context = || format!("cannot append to {}", path.display());
-    let mut file = std::fs::OpenOptions::new()
+    let mut file = tokio::fs::OpenOptions::new()
         .append(true)
         .open(path)
+        .await
         .map_err(|e| ScopeError::io_context(e, context()))?;
     file.write_all(row.as_bytes())
+        .await
         .map_err(|e| ScopeError::io_context(e, context()))
 }
 
