@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- `my-smart-wallets-app/` has 31 fewer open Dependabot alerts (37 before, 6 after; the critical `protobufjs` alert is closed). Every flagged package comes through `@account-kit/*` 4.88.5, which is already the latest release, so no direct upgrade reaches the patched versions. `package.json` now has `overrides` for them: `protobufjs` ^7.6.5, `ws` ^8.21.0 (8.x only), `js-cookie` ^3.0.7, `lodash` ^4.18.1, `decode-uri-component` ^0.5.1, `toml` ^5.0.1, `turbo-stream` ^3.0.0, `uuid` ^11.1.1 (8.x and 9.x only), `minimatch` ^11.0.5 (10.x only), and `postcss` as the app's own version (replaces the 8.4.31 copy inside `next`). `package-lock.json` is refreshed within its existing ranges.
+- Six alerts stay open, on four packages. `@tanstack/form-core` 0.33.0 (the email sign-in form of `@account-kit/react`) and `zod` 3.x (`@account-kit/signer`) need a major upgrade that cannot be tested here without Alchemy keys. `stream-json` 1.9.1 would break `jayson` 4.3.0, which requires paths that `stream-json` 3 removed. `elliptic` has no patched release.
+
 ## [0.8.6] - 2026-11-05
 
 ### Added
