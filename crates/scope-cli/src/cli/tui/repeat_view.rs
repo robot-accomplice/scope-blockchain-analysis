@@ -11,6 +11,9 @@
 use crate::cli::charts::{HealthStrip, Sparkline, enlarge_hint, min_span};
 use crate::cli::output::{RunRecord, SeriesHook};
 use crate::cli::theme::{ACCENT, ERR, SECONDARY, WARN};
+use crate::cli::tui::venue_charts::{
+    self, Selection, Series as ChartSeries, VenueChart, VenueCharts,
+};
 use crate::cli::tui::{fit, market_view};
 use ansi_to_tui::IntoText;
 use ratatui::Frame;
@@ -19,6 +22,9 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 use scope::metrics::{Metric, MetricId, Threshold, Unit};
+use scope::watch::RuleStatus;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Columns of a trends label, its limit and its value.
 const LABEL_COLS: usize = 17;
@@ -44,10 +50,20 @@ pub(crate) struct Ended {
     pub style: Style,
 }
 
+/// What the keys select in the venue charts of a repeat on two or more
+/// venues, and how many charts the last draw fitted on a page (for
+/// `PgUp` `PgDn`).
+#[derive(Clone, Default)]
+pub(crate) struct VenueSel {
+    pub sel: Selection,
+    pub page_size: Arc<AtomicUsize>,
+}
+
 /// A repeating view: the series, and how the run ended once it has.
 #[derive(Clone)]
 pub(crate) struct RepeatView {
     pub series: SeriesHook,
+    pub venues: VenueSel,
     pub ended: Option<Ended>,
     /// The command's other output (notes, error text). It goes into the
     /// scrollback, with the final snapshot, when the user leaves.
@@ -88,11 +104,21 @@ pub(crate) fn final_snapshot(series: &SeriesHook) -> Option<String> {
 pub(crate) fn series_csv(series: &SeriesHook) -> Option<String> {
     let c = copy(series);
     let columns = scope::metrics::csv_columns(&c.metrics).ok()?;
-    let mut text = scope::metrics::csv_header(&columns);
+    let rows = if c.runs.iter().any(|r| r.venues.is_some()) {
+        crate::cli::repeat::CsvRows::PerVenue
+    } else {
+        crate::cli::repeat::CsvRows::PerRun
+    };
+    let mut text = crate::cli::repeat::csv_head(&columns, rows);
     for r in &c.runs {
         let time = r.at.format("%Y-%m-%dT%H:%M:%SZ").to_string();
-        text.push_str(&scope::metrics::csv_row(
-            &columns, &c.metrics, &time, r.run, &r.sample,
+        text.push_str(&crate::cli::repeat::csv_run(
+            &columns,
+            &c.metrics,
+            &time,
+            r.run,
+            &r.sample,
+            r.venues.as_ref().map(|v| v.samples.as_slice()),
         ));
     }
     Some(text)
@@ -206,14 +232,23 @@ pub(crate) fn draw(f: &mut Frame, area: Rect, view: &RepeatView, status: Vec<Lin
     // When the window hides or squeezes part of the view, a line under
     // the status says how much larger it needs to be (its own row too).
     let rows_for = |lines: usize| (lines as u16 + 1).min(area.height);
-    let plain = area.height.saturating_sub(rows_for(foot_lines.len()));
-    if let Some((cols, rows)) = shortfall(
-        Rect {
-            height: plain,
-            ..area
-        },
-        &c,
-    ) {
+    let plain = Rect {
+        height: area.height.saturating_sub(rows_for(foot_lines.len())),
+        ..area
+    };
+    let venue_run = c.runs.last().and_then(|r| r.venues.clone());
+    let charts = venue_run.as_ref().and_then(|_| venue_charts_of(&c));
+    if let Some(run) = &venue_run {
+        if let Some(charts) = &charts {
+            let (_, plots) = venue_split(plain, run, Some(charts));
+            if let Some((cols, rows)) = venue_charts::shortfall(plots, charts) {
+                foot_lines.push(Line::styled(
+                    enlarge_hint(cols, rows, "the venue charts"),
+                    WARN,
+                ));
+            }
+        }
+    } else if let Some((cols, rows)) = shortfall(plain, &c) {
         foot_lines.push(Line::styled(enlarge_hint(cols, rows, "everything"), WARN));
     }
     // J5: a rule keeps the footer off the view above it.
@@ -233,6 +268,10 @@ pub(crate) fn draw(f: &mut Frame, area: Rect, view: &RepeatView, status: Vec<Lin
         };
         f.render_widget(Paragraph::new(Text::from(foot_lines)), rest);
     }
+    if let Some(run) = &venue_run {
+        draw_venues(f, body, run, charts.as_ref(), &view.venues);
+        return;
+    }
     let layout = Layout2::new(body, c.runs.last());
     if let Some(snap) = layout.snap {
         f.render_widget(Paragraph::new(Text::from(layout.lines.clone())), snap);
@@ -249,6 +288,137 @@ pub(crate) fn draw(f: &mut Frame, area: Rect, view: &RepeatView, status: Vec<Lin
         f.render_widget(Paragraph::new(lines), rule);
     }
     draw_trends(f, layout.trends, &c);
+}
+
+/// The comparison table of a venue run, as lines.
+fn comparison_lines(run: &crate::cli::output::VenueRun) -> Vec<Line<'static>> {
+    run.comparison
+        .as_str()
+        .into_text()
+        .unwrap_or_else(|_| Text::raw(run.comparison.clone()))
+        .lines
+}
+
+/// Splits `body` into the comparison table (on top) and the venue charts.
+/// The table is left out when the charts would fall under their lowest
+/// pane; with no charts the table has the whole body.
+fn venue_split(
+    body: Rect,
+    run: &crate::cli::output::VenueRun,
+    charts: Option<&VenueCharts>,
+) -> (Rect, Rect) {
+    let rows = comparison_lines(run).len() as u16;
+    let empty = Rect { height: 0, ..body };
+    match charts {
+        None => (body, empty),
+        Some(_) if body.height >= rows + venue_charts::MIN_CHART_ROWS => {
+            let [table, plots] =
+                Layout::vertical([Constraint::Length(rows), Constraint::Min(0)]).areas(body);
+            (table, plots)
+        }
+        Some(_) => (empty, body),
+    }
+}
+
+/// Draws a repeat on two or more venues: the comparison table of the last
+/// run, then the venue charts of the watch grid (design 2026-11-09).
+fn draw_venues(
+    f: &mut Frame,
+    body: Rect,
+    run: &crate::cli::output::VenueRun,
+    charts: Option<&VenueCharts>,
+    state: &VenueSel,
+) {
+    let (table, plots) = venue_split(body, run, charts);
+    if table.height > 0 {
+        f.render_widget(Paragraph::new(Text::from(comparison_lines(run))), table);
+    }
+    let Some(charts) = charts else { return };
+    if venue_charts::shortfall(plots, charts).is_some() {
+        return; // the footer says how much to enlarge the window
+    }
+    let mut sel = state.sel;
+    sel.venue = sel.venue.min(charts.charts[0].series.len() - 1);
+    sel.chart = sel.chart.min(charts.charts.len() - 1);
+    state
+        .page_size
+        .store(venue_charts::draw(f, plots, charts, sel), Ordering::Relaxed);
+}
+
+/// The venue charts of a repeat on two or more venues: one chart per
+/// charted metric, one line per venue, over the runs. `None` when the last
+/// run has no venue readings or no venue has a value yet.
+fn venue_charts_of(c: &Copy) -> Option<VenueCharts> {
+    let last = c.runs.last()?.venues.as_ref()?;
+    let charts: Vec<VenueChart> = c
+        .metrics
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| charted(m.id))
+        .map(|(i, m)| VenueChart {
+            label: format!("{} {}", m.label, limit_text(m))
+                .trim_end()
+                .to_string(),
+            threshold: m.threshold,
+            unit: Some(m.unit),
+            series: last
+                .samples
+                .iter()
+                .enumerate()
+                .map(|(v, now)| ChartSeries {
+                    venue: now.venue.clone(),
+                    values: c
+                        .runs
+                        .iter()
+                        .map(|r| {
+                            let sample = r.venues.as_ref()?.samples.get(v)?;
+                            sample.sample.values.get(i).copied().flatten()
+                        })
+                        .collect(),
+                    status: venue_status(now),
+                })
+                .collect(),
+        })
+        .filter(|chart| {
+            chart
+                .series
+                .iter()
+                .any(|s| s.values.iter().any(Option::is_some))
+        })
+        .collect();
+    if charts.is_empty() {
+        return None;
+    }
+    // The time between two runs, from the runs' own clock.
+    let interval = match (c.runs.first(), c.runs.last()) {
+        (Some(first), Some(last)) if c.runs.len() > 1 => (last.at - first.at)
+            .to_std()
+            .map(|span| span / (c.runs.len() as u32 - 1))
+            .unwrap_or_default(),
+        _ => std::time::Duration::ZERO,
+    };
+    Some(VenueCharts { charts, interval })
+}
+
+/// How a venue stands in the last run, for the legend's glyph.
+fn venue_status(v: &crate::cli::output::VenueSample) -> RuleStatus {
+    match (&v.error, v.sample.healthy) {
+        (Some(why), _) => RuleStatus::Error(why.clone()),
+        (None, true) => RuleStatus::Pass,
+        (None, false) => RuleStatus::Fail(
+            v.sample
+                .failed_checks
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "unhealthy".to_string()),
+        ),
+    }
+}
+
+/// The venue charts of the series, for the key handler: `None` when the
+/// series is not a repeat on two or more venues.
+pub(crate) fn venue_charts(series: &SeriesHook) -> Option<VenueCharts> {
+    venue_charts_of(&copy(series))
 }
 
 /// Fewest rows a chart needs for its shape to read.
@@ -697,6 +867,7 @@ mod tests {
                     sample,
                     snapshot: format!("Market Summary run {run}\nMid 1.0\n"),
                     view: data.then(summary_view),
+                    venues: None,
                 },
             );
         }
@@ -715,6 +886,7 @@ mod tests {
 
     fn view(n: u64, failed: &[u64]) -> RepeatView {
         RepeatView {
+            venues: VenueSel::default(),
             series: series(n, failed),
             ended: None,
             pending: String::new(),
@@ -724,6 +896,7 @@ mod tests {
     /// A view whose runs carry their market data (the compact snapshot).
     fn market(n: u64) -> RepeatView {
         RepeatView {
+            venues: VenueSel::default(),
             series: series_with(n, &[], true),
             ended: None,
             pending: String::new(),
@@ -1016,6 +1189,7 @@ mod tests {
                 },
                 snapshot: String::new(),
                 view: None,
+                venues: None,
             })
             .collect()
     }
@@ -1130,6 +1304,7 @@ mod tests {
                     },
                     snapshot: format!("run {run}\n"),
                     view: None,
+                    venues: None,
                 },
             );
         }
@@ -1187,6 +1362,7 @@ mod tests {
                         },
                         snapshot: String::new(),
                         view: None,
+                        venues: None,
                     }
                 })
                 .collect();

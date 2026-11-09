@@ -341,12 +341,25 @@ fn value_of(id: MetricId, s: &MarketSummary, healthy: bool) -> Option<f64> {
 /// The CSV columns every series file starts with, before the metrics.
 const CSV_LEAD: &str = "timestamp,run";
 
+/// The lead of a series file with a row per venue: the venue follows the run.
+const CSV_LEAD_VENUE: &str = "timestamp,run,venue";
+
 /// What a CSV cell holds when the metric has no value.
 const CSV_NO_VALUE: &str = "-";
 
 /// The CSV header line for `columns` (see [`csv_columns`]), with its newline.
 pub fn csv_header(columns: &[&Metric]) -> String {
-    let mut line = CSV_LEAD.to_string();
+    header_with(CSV_LEAD, columns)
+}
+
+/// [`csv_header`] for a series with a row per venue and run: a `venue`
+/// column follows `run`.
+pub fn csv_header_venue(columns: &[&Metric]) -> String {
+    header_with(CSV_LEAD_VENUE, columns)
+}
+
+fn header_with(lead: &str, columns: &[&Metric]) -> String {
+    let mut line = lead.to_string();
     for m in columns {
         line.push(',');
         line.push_str(m.csv_column);
@@ -365,7 +378,28 @@ pub fn csv_row(
     run: u64,
     sample: &Sample,
 ) -> String {
-    let mut line = format!("{timestamp},{run}");
+    row_with(format!("{timestamp},{run}"), columns, metrics, sample)
+}
+
+/// [`csv_row`] for a series with a row per venue and run (see
+/// [`csv_header_venue`]).
+pub fn csv_row_venue(
+    columns: &[&Metric],
+    metrics: &[Metric],
+    timestamp: &str,
+    run: u64,
+    venue: &str,
+    sample: &Sample,
+) -> String {
+    row_with(
+        format!("{timestamp},{run},{venue}"),
+        columns,
+        metrics,
+        sample,
+    )
+}
+
+fn row_with(mut line: String, columns: &[&Metric], metrics: &[Metric], sample: &Sample) -> String {
     for column in columns {
         let value = metrics
             .iter()

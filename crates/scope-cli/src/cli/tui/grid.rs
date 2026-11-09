@@ -287,19 +287,12 @@ impl GridState {
 
     /// A key of the venue charts.
     fn venue_key(&mut self, code: KeyCode, charts: &VenueCharts) {
-        let venues = charts.charts[0].series.len();
-        let n = charts.charts.len();
-        let page = self.page_size.get().max(1);
-        let s = &mut self.venues;
-        match code {
-            KeyCode::Right => s.venue = (s.venue + 1) % venues,
-            KeyCode::Left => s.venue = (s.venue + venues - 1) % venues,
-            KeyCode::Char(' ') => s.isolated = !s.isolated,
-            KeyCode::Tab => s.chart = (s.chart + 1) % n,
-            KeyCode::PageDown => s.chart = ((s.chart / page + 1) * page).min(n - 1),
-            KeyCode::PageUp => s.chart = (s.chart / page).saturating_sub(1) * page,
-            _ => {}
-        }
+        self.venues.apply(
+            code,
+            charts.charts[0].series.len(),
+            charts.charts.len(),
+            self.page_size.get(),
+        );
     }
 
     /// The CLI command an evidence key runs for the selected row; in the
@@ -352,14 +345,7 @@ impl GridState {
                 self.detail = !self.detail;
                 self.reset_venues();
             }
-            KeyCode::Left
-            | KeyCode::Right
-            | KeyCode::Char(' ')
-            | KeyCode::Tab
-            | KeyCode::PageUp
-            | KeyCode::PageDown
-                if self.detail =>
-            {
+            code if Selection::is_key(code) && self.detail => {
                 if let Some(charts) = self.venue_charts() {
                     self.venue_key(key.code, &charts);
                 }

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `market summary`, `market ohlc` and `market trades` take several venues: repeat `--venue` or give a comma list (`--venue weex,binance`), as for `scope monitor`. One venue, and the default, give the output they gave before, in every format. A venue named twice is an error.
+- `market summary` on two or more venues prints one full summary for each venue, in the order given, then a comparison table with one row for each venue: mid, spread, bid depth, ask depth, 24h volume, health verdict, and the bot-pattern signs (the count and the names). The venues are read at the same time. A venue that fails does not stop the others: its section says why, and its row shows the error. `--report` has a section for each venue and the table.
+- `market ohlc` and `market trades` on two or more venues print one labelled block for each venue, in the order given.
+- With two or more venues, `--format json` gives a list with one item for each venue. Each item has a `venue` field. An item for `market ohlc` has `candles`, an item for `market trades` has `trades`, and an item for `market summary` is the object that one venue gives. An item for a failed venue has `venue` and `error`.
+- With two or more venues, the exit code is 1 when any venue failed, else 0. An unhealthy venue does not change it, as with one venue.
+- `market summary --every` on two or more venues draws the venue charts of the watch grid in the TUI: one chart for each key value, one line for each venue, the legend with the range across venues, and the same keys (`←` `→`, Space, Tab, PgUp, PgDn). The CSV from `--csv` or `save` has one row for each venue and run, with a `venue` column after `run`. A venue that fails in one run does not end the repeat; the repeat ends when every venue fails.
+
 ## [0.8.6] - 2026-11-05
 
 ### Added

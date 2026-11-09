@@ -171,6 +171,7 @@ pub async fn run(
             },
             snapshot: String::new(),
             view: None,
+            venues: None,
             value: t,
         })
     })
