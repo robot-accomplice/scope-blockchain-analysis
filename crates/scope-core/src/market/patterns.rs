@@ -71,6 +71,23 @@ pub const TIMER_BAND: f64 = 0.50;
 /// a timer never fires early. Real order flow puts it near 0.
 pub const TIMER_MIN_FLOOR: f64 = 0.40;
 
+/// A timer with a hard floor and a long tail: the gaps are the floor plus a
+/// random wait, so fewer than [`TIMER_BAND_SHARE`] of them are in
+/// [`TIMER_BAND`], but none is short. The 5th-percentile gap at or above
+/// this share of the median is that floor. The weex USDN/USDT bot on
+/// 2026-11-07 had 0.52–0.55 (18 s floor, 35 s median). Of 34 live tapes
+/// with a median gap of 5 s or more that no timer rule fits, the highest
+/// was 0.39 and the next 0.20; random arrivals give about 0.07. 0.45 is
+/// half way between the bot and the highest.
+pub const TIMER_HARD_FLOOR: f64 = 0.45;
+
+/// With the hard floor, the 95th-percentile gap must be at least this many
+/// medians. The floor then comes from a timer that waits a random time
+/// after it, not from a tape of near-equal gaps (a metronome or a cadence,
+/// which have their own rules). The USDN bot had 3.3; a jittered timer with
+/// a ±50% band has under 2.
+pub const TIMER_HARD_FLOOR_SPREAD: f64 = 2.0;
+
 /// Gaps within this share of an interval count as that interval.
 pub const CADENCE_TOLERANCE: f64 = 0.02;
 
@@ -465,7 +482,9 @@ pub fn depth_cycle(points: &[(i64, f64)]) -> Option<DepthCycle> {
 /// Jittered timer: gaps between trade events with a median of at least
 /// [`CADENCE_MIN_GAP_MS`], at least [`TIMER_BAND_SHARE`] of them within
 /// [`TIMER_BAND`] of the median, and a 5th percentile at least
-/// [`TIMER_MIN_FLOOR`] of the median.
+/// [`TIMER_MIN_FLOOR`] of the median. Or a 5th percentile at least
+/// [`TIMER_HARD_FLOOR`] of the median, with a 95th percentile at least
+/// [`TIMER_HARD_FLOOR_SPREAD`] medians: a timer with a floor and a long tail.
 pub fn timer(trades: &[Trade]) -> Option<Finding> {
     if trades.len() < MIN_TRADES {
         return None;
@@ -477,27 +496,28 @@ pub fn timer(trades: &[Trade]) -> Option<Finding> {
     let (_, cv) = mean_cv(&gaps)?;
     gaps.sort_by(f64::total_cmp);
     let at = |q: f64| gaps[((gaps.len() - 1) as f64 * q).round() as usize];
-    let (floor, median) = (at(0.05), at(0.5));
+    let (floor, median, tail) = (at(0.05), at(0.5), at(0.95));
     let band: Vec<f64> = gaps
         .iter()
         .copied()
         .filter(|g| (g - median).abs() <= median * TIMER_BAND)
         .collect();
     let share = band.len() as f64 / gaps.len() as f64;
-    (median >= CADENCE_MIN_GAP_MS && share >= TIMER_BAND_SHARE && floor >= median * TIMER_MIN_FLOOR)
-        .then(|| Finding::Timer {
-            // The band's own range: what the timer's gaps are.
-            low_ms: band[0],
-            median_ms: median,
-            high_ms: band[band.len() - 1],
-            cv,
-            gaps: gaps.len(),
-            share,
-            pauses: gaps
-                .iter()
-                .filter(|g| **g > median * (1.0 + TIMER_BAND) * 4.0)
-                .count(),
-        })
+    let in_band = share >= TIMER_BAND_SHARE && floor >= median * TIMER_MIN_FLOOR;
+    let floored = floor >= median * TIMER_HARD_FLOOR && tail >= median * TIMER_HARD_FLOOR_SPREAD;
+    (median >= CADENCE_MIN_GAP_MS && (in_band || floored)).then(|| Finding::Timer {
+        // The band's own range: what the timer's gaps are.
+        low_ms: band[0],
+        median_ms: median,
+        high_ms: band[band.len() - 1],
+        cv,
+        gaps: gaps.len(),
+        share,
+        pauses: gaps
+            .iter()
+            .filter(|g| **g > median * (1.0 + TIMER_BAND) * 4.0)
+            .count(),
+    })
 }
 
 /// Ping-pong: buy/sell pairs of the same size within
@@ -2058,6 +2078,83 @@ mod tests {
             })
             .collect();
         assert!(timer(&t).is_none(), "{:?}", timer(&t));
+    }
+
+    /// Builds a tape from gaps in ms, one trade after each gap, with sizes
+    /// that are all different.
+    fn tape_from_gaps(gaps: &[u64]) -> Vec<Trade> {
+        let mut ms = 1_000_000;
+        std::iter::once(0)
+            .chain(gaps.iter().copied())
+            .enumerate()
+            .map(|(i, gap)| {
+                ms += gap;
+                trade(
+                    ms,
+                    1.0001,
+                    5.0 + (i * 37 % 431) as f64 + i as f64 / 100.0,
+                    TradeSide::Buy,
+                )
+            })
+            .collect()
+    }
+
+    /// The first 60 gaps of the weex USDN/USDT tape of 2026-11-10: the same
+    /// bot as on 2026-11-07. A hard floor of 18.6 s, a median of 31 s and a
+    /// long tail. 63% of the gaps are within ±50% of the median.
+    const USDN_GAPS_MS: [u64; 60] = [
+        18729, 83755, 21715, 18750, 18728, 25548, 29180, 18668, 36378, 18731, 54949, 51641, 77513,
+        69444, 132532, 18723, 25659, 89625, 30668, 18760, 20004, 43442, 18938, 18852, 31481, 18753,
+        99644, 48317, 52359, 69186, 104081, 18595, 19926, 22536, 50722, 46233, 68229, 27744, 57568,
+        34788, 30971, 132475, 24496, 70765, 29506, 89186, 40458, 18747, 103615, 19723, 52577,
+        21205, 18772, 21257, 42832, 55425, 18750, 18724, 64300, 30207,
+    ];
+
+    /// 60 consecutive gaps of the weex MASK/USDT tape of 2026-11-10: real
+    /// order flow with a median of 55 s. It has short gaps (5th percentile
+    /// 0.22 of the median).
+    const MASK_GAPS_MS: [u64; 60] = [
+        132015, 3006, 163021, 17005, 260033, 998, 529069, 55052, 398025, 22010, 206016, 29002,
+        13000, 32003, 255031, 14999, 45008, 20003, 20006, 20007, 40001, 45004, 205036, 348029,
+        27007, 82011, 73002, 70010, 247032, 23007, 124010, 70013, 183021, 22003, 93009, 12008,
+        123578, 296462, 80020, 50003, 45012, 102009, 3004, 613064, 472059, 120010, 491065, 34001,
+        125016, 195027, 40005, 55007, 20004, 70007, 25010, 335045, 42008, 18003, 12998, 12006,
+    ];
+
+    /// 60 consecutive gaps of the binance KAT/USDT tape of 2026-11-10: real
+    /// order flow in bursts (gaps of a few ms) with long waits.
+    const KAT_GAPS_MS: [u64; 60] = [
+        18439, 5, 4, 31492, 6, 3, 88726, 75185, 214530, 199595, 1, 3, 1423, 232140, 602737, 10, 1,
+        2, 236665, 81540, 50230, 164682, 575008, 267338, 87481, 329233, 14833, 209448, 1, 46325,
+        3415, 13324, 255294, 478999, 90422, 81217, 2, 2, 699, 200935, 619338, 87185, 211565, 1, 1,
+        306, 6, 4, 1, 3, 276756, 60418, 112805, 150386, 87, 34584, 300884, 2, 4, 4,
+    ];
+
+    #[test]
+    fn test_a_timer_with_a_hard_floor_and_a_long_tail_is_a_timer() {
+        // The 2026-11-07 miss: under 70% of the gaps in the ±50% band, but
+        // no gap under half the median.
+        let t = tape_from_gaps(&USDN_GAPS_MS);
+        let Some(Finding::Timer {
+            share, median_ms, ..
+        }) = timer(&t)
+        else {
+            panic!("{:?}", timer(&t))
+        };
+        assert!(
+            share < TIMER_BAND_SHARE,
+            "the band rule alone misses it: {share}"
+        );
+        assert!((30_000.0..32_000.0).contains(&median_ms), "{median_ms}");
+    }
+
+    #[test]
+    fn test_real_order_flow_with_a_slow_median_is_not_a_timer() {
+        // Slow real tapes: their short gaps keep the floor under 0.45.
+        for gaps in [&MASK_GAPS_MS, &KAT_GAPS_MS] {
+            let t = tape_from_gaps(gaps);
+            assert!(timer(&t).is_none(), "{:?}", timer(&t));
+        }
     }
 
     #[test]
