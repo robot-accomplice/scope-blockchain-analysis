@@ -15,7 +15,8 @@
 //!   (30–60 s, say), never much shorter: a timer with random jitter. Real
 //!   order flow has many near-zero gaps.
 //! - **Ping-pong:** a buy and a sell of the same size at nearly the same
-//!   price, seconds apart (the shape of wash trading).
+//!   price, within [`PING_PONG_WINDOW_MS`] of each other and not always
+//!   next to each other in the tape (the shape of wash trading).
 //! - **Ladder quotes:** consecutive book levels at even price steps whose
 //!   sizes are equal, or rise or fall level by level (a quoting curve).
 //! - **Round notionals:** most of a side's levels are whole quote amounts
@@ -831,6 +832,16 @@ impl Finding {
         matches!(self, Finding::Ladder { .. } | Finding::RoundNotional { .. })
     }
 
+    /// True for a signal that marks single trades (a repeated size or a
+    /// ping-pong pair), so that the bot-like share counts it. The others
+    /// (timing, ladders, depth cycles) are about the whole tape or the book.
+    pub fn marks_trades(&self) -> bool {
+        matches!(
+            self,
+            Finding::RepeatedSize { .. } | Finding::FewSizes { .. } | Finding::PingPong { .. }
+        )
+    }
+
     /// True for a signal read across the runs of a repeat.
     pub fn across_runs(&self) -> bool {
         matches!(self, Finding::DepthCycle { .. })
@@ -925,7 +936,9 @@ impl Finding {
                     .join(", ")
             ),
             Finding::PingPong { pairs, share } => format!(
-                "{pairs} buy/sell pairs of one size, seconds apart ({:.0}% of trades)",
+                "{pairs} buy/sell pairs of one size within {} and {}% in price, not always next to each other ({:.0}% of trades)",
+                span(PING_PONG_WINDOW_MS as f64),
+                PING_PONG_PRICE_TOLERANCE_PCT,
                 share * 100.0
             ),
             Finding::Ladder {
@@ -964,13 +977,19 @@ impl Finding {
 
 impl BotPatterns {
     /// The share of the sampled trades, and of their volume, that a
-    /// repeated-size or ping-pong signal marks as bot-made, when any is.
+    /// repeated-size or ping-pong signal covers, when any does. When a
+    /// signal about the whole tape or the book also fired, the line says
+    /// that it does not count those: the share alone is not "no bot".
     pub fn share(&self) -> Option<String> {
         let p = self.bot_like_pct.filter(|p| *p > 0.0)?;
-        Some(match self.bot_like_volume_pct {
-            Some(v) => format!("{p:.0}% of sampled trades ({v:.1}% of their volume) look bot-made"),
-            None => format!("{p:.0}% of sampled trades look bot-made"),
-        })
+        let mut line = format!("{p:.0}% of sampled trades repeat a size or ping-pong");
+        if let Some(v) = self.bot_like_volume_pct {
+            line.push_str(&format!(" ({v:.1}% of their volume)"));
+        }
+        if self.findings.iter().any(|f| !f.marks_trades()) {
+            line.push_str("; the other signs above are not counted here");
+        }
+        Some(line)
     }
 
     /// The report section: the signals in the trades, then those in the
@@ -1301,7 +1320,7 @@ mod tests {
         };
         let m = p.evidence().join("\n");
         assert!(
-            m.contains("90% of sampled trades (0.0% of their volume) look bot-made"),
+            m.contains("90% of sampled trades repeat a size or ping-pong (0.0% of their volume)"),
             "{m}"
         );
     }
@@ -1356,9 +1375,70 @@ mod tests {
             m.starts_with("Repeated size: 50% of 100 trades are exactly 1000"),
             "{m}"
         );
-        assert!(m.contains("50% of sampled trades ("), "{m}");
-        assert!(m.contains("% of their volume) look bot-made"), "{m}");
+        assert!(
+            m.contains("50% of sampled trades repeat a size or ping-pong ("),
+            "{m}"
+        );
+        assert!(m.contains("% of their volume)"), "{m}");
         assert_eq!(p.bot_like_pct, Some(50.0));
+    }
+
+    #[test]
+    fn test_the_share_line_says_it_leaves_out_the_tape_wide_and_book_signs() {
+        // Why: the share counts only single trades (a repeated size, a
+        // ping-pong pair). Read beside a timer or a ladder, a bare "N%"
+        // must not suggest that the rest of the tape is clean.
+        let mut t = organic(100);
+        for tr in t.iter_mut().step_by(2) {
+            tr.quantity = 1000.0;
+        }
+        let (bids, asks) = weex_book_oct26();
+        let with_book = detect(Ok(&t), Some((&bids, &asks)));
+        assert!(with_book.findings.iter().any(|f| !f.marks_trades()));
+        let line = with_book.share().unwrap();
+        assert!(
+            line.starts_with("50% of sampled trades repeat a size or ping-pong"),
+            "{line}"
+        );
+        assert!(
+            line.ends_with("the other signs above are not counted here"),
+            "{line}"
+        );
+        // With only per-trade signs there is nothing to leave out.
+        let alone = detect(Ok(&t), None).share().unwrap();
+        assert!(!alone.contains("not counted"), "{alone}");
+        // JSON keeps its value for scripts.
+        assert_eq!(with_book.bot_like_pct, Some(50.0));
+        // A timer alone marks no trade: no share line.
+        let timer_only = detect(Ok(&jittered_tape(500)), Some((&bids, &asks)));
+        assert!(timer_only.findings.iter().all(|f| !f.marks_trades()));
+        assert!(timer_only.share().is_none());
+    }
+
+    #[test]
+    fn test_ping_pong_text_states_the_window_and_that_pairs_need_not_touch() {
+        // Why: on a 1.4 s sample every trade is inside the window, so a pair
+        // is any buy and sell of one size, not two neighbours seconds apart.
+        let mut t = organic(60);
+        let start = t.last().unwrap().timestamp_ms + 10_000;
+        for i in 0..15u64 {
+            let ms = start + i * 20_000;
+            let qty = 100.0 + i as f64;
+            t.push(trade(ms, 1.0, qty, TradeSide::Buy));
+            t.push(trade(ms + 100, 1.0, 7_000.0 + i as f64, TradeSide::Buy));
+            t.push(trade(ms + 200, 1.0, qty, TradeSide::Sell));
+        }
+        let (f, idx) = ping_pong(&t).unwrap();
+        assert_eq!(idx.len(), 30, "pairs with a trade between them still pair");
+        let text = f.detail();
+        let window = span(PING_PONG_WINDOW_MS as f64);
+        assert!(text.contains(&format!("within {window} and")), "{text}");
+        assert!(
+            text.contains(&format!("{PING_PONG_PRICE_TOLERANCE_PCT}% in price")),
+            "{text}"
+        );
+        assert!(text.contains("not always next to each other"), "{text}");
+        assert!(!text.contains("seconds apart"), "{text}");
     }
 
     #[test]
@@ -1431,7 +1511,13 @@ mod tests {
         };
         // The check names the signals; the evidence is one line each.
         let m = p.evidence().join("\n");
-        assert!(m.ends_with("\n100% of sampled trades look bot-made"), "{m}");
+        assert!(
+            m.ends_with(
+                "
+100% of sampled trades repeat a size or ping-pong; the other signs above are not counted here"
+            ),
+            "{m}"
+        );
     }
 
     /// The USDN/USDT book on weex, read live on 2026-10-24: ten levels a
@@ -1876,7 +1962,7 @@ mod tests {
             "{m}"
         );
         // No trade-share claim: a timer marks no one trade as the bot's.
-        assert!(!m.contains("look bot-made"), "{m}");
+        assert!(!m.contains("repeat a size or ping-pong"), "{m}");
         assert_eq!(
             p.bot_like_volume_pct.map(|v| v.to_string()),
             Some("0".to_string())
@@ -2040,7 +2126,10 @@ mod tests {
         let text = plain(&detect(Ok(&t), None).format_text());
         assert!(text.contains("! Repeated size"), "{text}");
         assert!(text.contains("Bot-like share"), "{text}");
-        assert!(text.contains("50% of sampled trades ("), "{text}");
+        assert!(
+            text.contains("50% of sampled trades repeat a size or ping-pong ("),
+            "{text}"
+        );
         assert!(
             !text.contains("Book "),
             "no book group without book signals: {text}"

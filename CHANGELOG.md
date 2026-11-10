@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- The bot-pattern share line no longer reads "N% of sampled trades look bot-made". It now says what it counts: `N% of sampled trades repeat a size or ping-pong`. When a sign about the whole tape or the book (a timer, a ladder, a depth cycle) also fired, the line adds `; the other signs above are not counted here`. Before, a low share beside a timer or a ladder could read as "no bot". The share and the JSON fields `bot_like_pct` and `bot_like_volume_pct` do not change.
+- The `Ping-pong` finding no longer says "seconds apart". It states the rule the detector uses: a buy and a sell of one size within 5s and 0.05% in price, not always next to each other. The detector does not change.
+
 ## [0.8.7] - 2026-11-10
 
 ### Added
