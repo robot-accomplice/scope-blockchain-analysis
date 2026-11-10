@@ -5,7 +5,7 @@
   1. a `comparison` array in the JSON of `market summary` on 2 or more venues;
   2. `--venue` as a list on `token-health`;
   3. `--venue` as a list on `insights`.
-- **Base:** `develop` after PR #188. The 2-or-more-venue shapes of #188 are on `develop` only. The last release is v0.8.6 and it does not have them. Nobody outside the repository reads them yet.
+- **Base:** `develop` after PR #188. The 2-or-more-venue shapes of #188 were on `develop` only when this was written. The last release then was v0.8.6, and it did not have them. v0.8.7 (2026-11-10) shipped them.
 
 ## 1. Goal
 
