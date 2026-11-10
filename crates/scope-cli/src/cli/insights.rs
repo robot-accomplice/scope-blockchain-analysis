@@ -2899,4 +2899,99 @@ mod tests {
         assert!(help.contains("worst peg status"), "{help}");
         assert!(help.contains("exit code is not changed"), "{help}");
     }
+
+    // Offline transport: serves a fixed binance book and ticker, fails the rest.
+    struct OfflineHttp;
+
+    #[async_trait]
+    impl scope::http::HttpClient for OfflineHttp {
+        async fn send(
+            &self,
+            request: scope::http::Request,
+        ) -> scope::error::Result<scope::http::Response> {
+            let level =
+                |price: f64, i: usize| format!(r#"["{:.5}","{}"]"#, price, 40_000 + i * 997);
+            let body = if request.url.contains("/depth") {
+                let bids: Vec<String> = (0..20)
+                    .map(|i| level(0.9999 - i as f64 * 0.0001, i))
+                    .collect();
+                let asks: Vec<String> = (0..20)
+                    .map(|i| level(1.0001 + i as f64 * 0.0001, i))
+                    .collect();
+                format!(
+                    r#"{{"bids":[{}],"asks":[{}]}}"#,
+                    bids.join(","),
+                    asks.join(",")
+                )
+            } else if request.url.contains("ticker/24hr") {
+                r#"{"lastPrice":"1.0000","quoteVolume":"125000"}"#.to_string()
+            } else {
+                return Err(scope::error::ScopeError::Other("offline".to_string()));
+            };
+            Ok(scope::http::Response {
+                status_code: 200,
+                headers: Default::default(),
+                body,
+            })
+        }
+    }
+
+    struct OfflineFactory(scope::chains::mocks::MockClientFactory);
+
+    impl ChainClientFactory for OfflineFactory {
+        fn create_chain_client(&self, chain: &str) -> scope::error::Result<Box<dyn ChainClient>> {
+            self.0.create_chain_client(chain)
+        }
+        fn create_dex_client(&self) -> Box<dyn DexDataSource> {
+            self.0.create_dex_client()
+        }
+        fn http(&self) -> std::sync::Arc<dyn scope::http::HttpClient> {
+            std::sync::Arc::new(OfflineHttp)
+        }
+    }
+
+    /// The report of `insights USDC` without `--venue`, on the offline factory.
+    async fn insights_without_venue() -> String {
+        let mut factory = scope::chains::mocks::MockClientFactory::new();
+        factory.mock_dex.token_data = Some(
+            crate::cli::token_health::tests::make_test_dex_token_data(vec![
+                crate::cli::token_health::tests::pair_with_liquidity(90_000.0),
+            ]),
+        );
+        let args = InsightsArgs {
+            target: "USDC".to_string(),
+            token_contract: Some("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string()),
+            chain: None,
+            decode: false,
+            trace: false,
+            venue: Vec::new(),
+            health: Default::default(),
+        };
+        let (out, cap) = crate::cli::output::Output::capture();
+        run(args, &Config::default(), &OfflineFactory(factory), &out)
+            .await
+            .unwrap();
+        crate::cli::ansi::strip(&cap.out())
+    }
+
+    /// The bytes `develop` printed for `insights USDC` with no `--venue`, with
+    /// these mocks (an offline transport that serves a fixed binance book).
+    /// `tests/fixtures/venue_list/insights_no_venue.md` was captured from
+    /// `develop` at commit c09a5640c164, before `--venue` existed, by running
+    /// the same input through that commit's code. The code under test did not
+    /// render it, so a change of the no-flag path (registry fallback, one
+    /// `Market` line, report text) fails this test.
+    #[tokio::test]
+    async fn without_venue_the_report_is_byte_for_byte_what_develop_printed() {
+        let fixture = include_str!("../../tests/fixtures/venue_list/insights_no_venue.md");
+        let fixture = fixture.replace("\r\n", "\n");
+        let text = insights_without_venue().await;
+        assert!(
+            text.contains("- **Market (Binance Spot USDC/USDT):**"),
+            "{text}"
+        );
+        // The report names its time and the scope version; both are masked.
+        use crate::cli::token_health::tests::mask_run_details;
+        assert_eq!(mask_run_details(&text), mask_run_details(&fixture));
+    }
 }

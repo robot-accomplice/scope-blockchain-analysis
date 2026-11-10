@@ -1401,45 +1401,54 @@ pub(crate) mod tests {
         assert!(!text.contains("Market / Order Book"), "{text}");
     }
 
-    /// The old composition of one venue: the three renderers that the
-    /// one-venue path has always called.
-    async fn old_output(format: OutputFormat) -> String {
-        let factory = counting_factory();
-        let config = Config::default();
-        let analytics = crawl::fetch_analytics_for_input(
-            "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-            "ethereum",
-            Period::Hour24,
-            10,
-            &factory,
-            None,
-            &Output::capture().0,
-        )
-        .await
-        .unwrap();
-        let summary = fetch_token_summary_by_name_with_http(
-            "eth",
-            &analytics,
-            &dex_market_args("eth").health.resolve(&config),
-            factory.http(),
-        )
-        .await
-        .unwrap();
-        match format {
+    /// What `develop` printed for one venue with these mocks (`eth`, one
+    /// pool of 90000 USD). The files in `tests/fixtures/venue_list/` were
+    /// captured from `develop` at commit c09a5640c164, before the venue list
+    /// existed, by running the same inputs through that commit's code. The
+    /// code under test did not render them, so a change of the one-venue
+    /// output fails the test. `csv` printed the same bytes as `table`.
+    fn develop_output(format: OutputFormat) -> String {
+        mask_run_details(&develop_bytes(format))
+    }
+
+    /// A report names the second it was made and the scope version. Neither
+    /// is part of the layout under test, and the fixtures hold the values of
+    /// the day they were captured. Both sides are masked.
+    pub(crate) fn mask_run_details(text: &str) -> String {
+        const TIME: &str = r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC";
+        const VERSION: &str = r"Scope v\d+\.\d+\.\d+";
+        // JSON: the fetch time and the token age (hours since the pool began,
+        // measured against now).
+        const FETCHED_AT: &str = r#""fetched_at": \d+"#;
+        const TOKEN_AGE: &str = r#""token_age_hours": [\d.]+"#;
+        let time = regex::Regex::new(TIME).unwrap();
+        let version = regex::Regex::new(VERSION).unwrap();
+        let fetched = regex::Regex::new(FETCHED_AT).unwrap();
+        let age = regex::Regex::new(TOKEN_AGE).unwrap();
+        let text = time.replace_all(text, "<time>");
+        let text = version.replace_all(&text, "Scope v<version>");
+        let text = fetched.replace_all(&text, r#""fetched_at": <time>"#);
+        age.replace_all(&text, r#""token_age_hours": <hours>"#)
+            .into_owned()
+    }
+
+    fn develop_bytes(format: OutputFormat) -> String {
+        let bytes = match format {
+            OutputFormat::Table => {
+                include_str!("../../tests/fixtures/venue_list/token_health_one_venue.table")
+            }
+            OutputFormat::Csv => {
+                include_str!("../../tests/fixtures/venue_list/token_health_one_venue.csv")
+            }
             OutputFormat::Markdown => {
-                let md = token_health_to_markdown(&analytics, Some(&summary), Some("eth"));
-                format!("{md}\n")
+                include_str!("../../tests/fixtures/venue_list/token_health_one_venue.markdown")
             }
             OutputFormat::Json => {
-                let json = token_health_to_json(&analytics, Some(&summary)).unwrap();
-                format!("{json}\n")
+                include_str!("../../tests/fixtures/venue_list/token_health_one_venue.json")
             }
-            _ => {
-                let (out, cap) = Output::capture();
-                output_token_health_table(&analytics, Some(&summary), Some("eth"), &out).unwrap();
-                cap.out()
-            }
-        }
+        };
+        // A checkout may turn LF into CRLF; the output itself is LF.
+        bytes.replace("\r\n", "\n")
     }
 
     #[tokio::test]
@@ -1456,7 +1465,11 @@ pub(crate) mod tests {
             let (result, text, _) =
                 run_captured(venue_args(&["eth"], true, format), &factory).await;
             result.unwrap();
-            assert_eq!(text, strip(&old_output(format).await), "{format:?}");
+            assert_eq!(
+                mask_run_details(&text),
+                develop_output(format),
+                "{format:?}"
+            );
         }
         // And the JSON keeps its two keys, `market` an object.
         let factory = counting_factory();

@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `insights --venue` takes the same list. For a stablecoin, the report has one `Market` line for each venue, in the order given. A venue that fails has an `unavailable` line with the reason. The summary and the key takeaway use the worst peg status of the venues that answered. When the venues do not share one status, the summary adds a sentence that names each venue and its status. Without `--venue`, nothing changes. For an address, a transaction, or a token that is not a stablecoin, `--venue` has no effect, and `insights` prints one note. The exit code does not depend on the venues.
 
 ### Changed
+- `scope token-health --with-market --venue ""` (an empty or blank venue name) now fails at once with `--venue has an empty venue name`. Before, it printed a `market data unavailable` warning, went on, and exited with 0. `market summary` already failed this way.
 - `PegStatus::severity()` in `scope-core` orders the five peg statuses, worst first: `Deviation`, `SlightDeviation`, `BookUnhealthy`, `NoPrice`, `OnPeg`. `insights --venue` uses it.
 - `TokenHealthArgs::venue` is now a `Vec<String>` (it was a `String`), and `InsightsArgs` has a new `venue` field. Code that builds these structs must be changed.
 
