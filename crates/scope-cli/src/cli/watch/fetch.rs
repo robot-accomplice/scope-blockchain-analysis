@@ -310,7 +310,7 @@ fn leading_number(text: &str) -> Option<f64> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use scope::chains::mocks::MockClientFactory;
     use scope::watch::{Rule, TargetKind, TargetStatus, Watchlist};
@@ -500,7 +500,7 @@ mod tests {
 
     /// A factory with one USDC on the DEX venue's chain (`eth`), the same
     /// for `market summary` and a watchlist.
-    fn usdc_on_eth() -> MockClientFactory {
+    pub(crate) fn usdc_on_eth() -> MockClientFactory {
         let mut factory = MockClientFactory::new();
         factory.mock_dex.search_results = vec![scope::chains::TokenSearchResult {
             address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),

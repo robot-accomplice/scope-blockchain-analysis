@@ -18,7 +18,7 @@ flowchart TB
         G --> H[Commands match]
 
         H --> I1["<b>Entity lookup</b><br/>address::run<br/>tx::run<br/>insights::run"]
-        H --> I2["<b>Token analysis</b><br/>crawl::run<br/>token_health::run<br/>discover::run<br/>monitor::run_direct<br/>market::run"]
+        H --> I2["<b>Token analysis</b><br/>crawl::run<br/>token_health::run<br/>discover::run<br/>market::run"]
         H --> I3["<b>Compliance</b><br/>compliance::handle_*"]
         H --> I4["<b>Data &amp; export</b><br/>portfolio::run<br/>export::run<br/>report::run"]
         H --> I5["<b>Config</b><br/>interactive::run<br/>setup::run<br/>completions (stdout)"]

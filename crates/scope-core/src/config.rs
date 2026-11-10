@@ -93,7 +93,7 @@ pub struct Config {
     #[serde(alias = "portfolio")]
     pub address_book: AddressBookConfig,
 
-    /// Monitor TUI configuration (layout, widgets, refresh rate).
+    /// Monitor configuration (refresh rate, alerts, venue).
     pub monitor: MonitorConfig,
 
     /// Ghola sidecar configuration for stealth HTTP transport.
@@ -327,6 +327,12 @@ impl Config {
         let config: Config =
             serde_saphyr::from_str(&contents).map_err(|e| ConfigError::Parse { source: e })?;
 
+        report_dropped_monitor_keys(
+            &mut crate::diag::Stderr,
+            &dropped_monitor_keys(&contents),
+            &DROPPED_KEYS_REPORTED,
+        );
+
         Ok(config)
     }
 
@@ -383,160 +389,10 @@ impl std::fmt::Display for OutputFormat {
 // ============================================================================
 //
 // These types are serialized as part of the main Config struct, so they must
-// live in scope-core.  The TUI-only types (DataPoint, OhlcCandle, ChartMode,
-// TimePeriod, ColorPalette, etc.) remain in scope-cli's `cli::monitor::config`.
+// live in scope-core.
 
 /// Default refresh interval in seconds.
 pub const DEFAULT_MONITOR_REFRESH_SECS: u64 = 5;
-
-/// Layout preset for the monitor TUI.
-///
-/// Controls which widgets are shown and how they are arranged.
-/// Can be switched at runtime with keybindings or set via config.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, clap::ValueEnum)]
-#[serde(rename_all = "kebab-case")]
-pub enum LayoutPreset {
-    /// Balanced 2x2 grid with all widgets visible.
-    #[default]
-    Dashboard,
-    /// Price chart takes ~85% of the screen; minimal stats overlay.
-    ChartFocus,
-    /// Transaction/activity feed prioritized; small price ticker.
-    Feed,
-    /// Minimal single-column sparkline view for small terminals.
-    Compact,
-    /// Exchange-style view: order book + chart + market info.
-    Exchange,
-}
-
-impl LayoutPreset {
-    /// Cycles to the next layout preset.
-    pub fn next(&self) -> Self {
-        match self {
-            LayoutPreset::Dashboard => LayoutPreset::ChartFocus,
-            LayoutPreset::ChartFocus => LayoutPreset::Feed,
-            LayoutPreset::Feed => LayoutPreset::Compact,
-            LayoutPreset::Compact => LayoutPreset::Exchange,
-            LayoutPreset::Exchange => LayoutPreset::Dashboard,
-        }
-    }
-
-    /// Cycles to the previous layout preset.
-    pub fn prev(&self) -> Self {
-        match self {
-            LayoutPreset::Dashboard => LayoutPreset::Exchange,
-            LayoutPreset::ChartFocus => LayoutPreset::Dashboard,
-            LayoutPreset::Feed => LayoutPreset::ChartFocus,
-            LayoutPreset::Compact => LayoutPreset::Feed,
-            LayoutPreset::Exchange => LayoutPreset::Compact,
-        }
-    }
-
-    /// Returns a display label for this preset.
-    pub fn label(&self) -> &'static str {
-        match self {
-            LayoutPreset::Dashboard => "Dashboard",
-            LayoutPreset::ChartFocus => "Chart",
-            LayoutPreset::Feed => "Feed",
-            LayoutPreset::Compact => "Compact",
-            LayoutPreset::Exchange => "Exchange",
-        }
-    }
-}
-
-/// Controls which widgets are visible in the monitor.
-///
-/// Individual widgets can be toggled on/off via keybindings or config.
-/// The layout functions use these flags to decide which `Rect` areas to allocate.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(default)]
-pub struct WidgetVisibility {
-    /// Show the price chart (line or candlestick).
-    pub price_chart: bool,
-    /// Show the volume bar chart.
-    pub volume_chart: bool,
-    /// Show the buy/sell pressure gauge and activity log.
-    pub buy_sell_pressure: bool,
-    /// Show the metrics panel (sparkline + key metrics table).
-    pub metrics_panel: bool,
-    /// Show the activity log feed.
-    pub activity_log: bool,
-    /// Show the holder count in the metrics panel.
-    pub holder_count: bool,
-    /// Show the per-pair liquidity depth.
-    pub liquidity_depth: bool,
-}
-
-impl Default for WidgetVisibility {
-    fn default() -> Self {
-        Self {
-            price_chart: true,
-            volume_chart: true,
-            buy_sell_pressure: true,
-            metrics_panel: true,
-            activity_log: true,
-            holder_count: true,
-            liquidity_depth: true,
-        }
-    }
-}
-
-impl WidgetVisibility {
-    /// Returns the number of visible widgets.
-    pub fn visible_count(&self) -> usize {
-        [
-            self.price_chart,
-            self.volume_chart,
-            self.buy_sell_pressure,
-            self.metrics_panel,
-            self.activity_log,
-        ]
-        .iter()
-        .filter(|&&v| v)
-        .count()
-    }
-
-    /// Toggles a widget by index (1-based: 1=price_chart, 2=volume, 3=buy_sell, 4=metrics, 5=log).
-    pub fn toggle_by_index(&mut self, index: usize) {
-        match index {
-            1 => self.price_chart = !self.price_chart,
-            2 => self.volume_chart = !self.volume_chart,
-            3 => self.buy_sell_pressure = !self.buy_sell_pressure,
-            4 => self.metrics_panel = !self.metrics_panel,
-            5 => self.activity_log = !self.activity_log,
-            _ => {}
-        }
-    }
-}
-
-/// Y-axis scaling mode for price charts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, clap::ValueEnum)]
-#[serde(rename_all = "kebab-case")]
-pub enum ScaleMode {
-    /// Linear scale (default).
-    #[default]
-    Linear,
-    /// Logarithmic scale -- useful for tokens with very wide price ranges.
-    Log,
-}
-
-impl ScaleMode {
-    /// Toggles between Linear and Log.
-    pub fn toggle(&self) -> Self {
-        match self {
-            ScaleMode::Linear => ScaleMode::Log,
-            ScaleMode::Log => ScaleMode::Linear,
-        }
-    }
-
-    /// Returns a short display label.
-    pub fn label(&self) -> &'static str {
-        match self {
-            ScaleMode::Linear => "Lin",
-            ScaleMode::Log => "Log",
-        }
-    }
-}
 
 /// Color scheme for the monitor TUI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, clap::ValueEnum)]
@@ -597,45 +453,75 @@ impl Default for AlertConfig {
     }
 }
 
-/// CSV export configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(default)]
-pub struct ExportConfig {
-    /// Base directory for exports (default: `./scope-exports/`).
-    pub path: Option<String>,
+/// The `monitor:` keys of the removed dashboard. A config that has them
+/// still loads; [`dropped_monitor_keys`] names them for the notice.
+const DROPPED_MONITOR_KEYS: [&str; 6] = [
+    "layout",
+    "widgets",
+    "scale",
+    "color_scheme",
+    "export",
+    "auto_pause_on_input",
+];
+
+/// The dropped dashboard keys found in the `monitor:` section of a config
+/// file's text, in the order layout, widgets, scale, color_scheme, export,
+/// auto_pause_on_input. Empty when there is no `monitor:` section, none of them, or no parse.
+pub fn dropped_monitor_keys(contents: &str) -> Vec<&'static str> {
+    #[derive(Deserialize)]
+    struct Probe {
+        monitor: Option<std::collections::BTreeMap<String, serde::de::IgnoredAny>>,
+    }
+    let Ok(Probe {
+        monitor: Some(keys),
+    }) = serde_saphyr::from_str::<Probe>(contents)
+    else {
+        return Vec::new();
+    };
+    DROPPED_MONITOR_KEYS
+        .into_iter()
+        .filter(|k| keys.contains_key(*k))
+        .collect()
 }
 
-impl Default for ExportConfig {
-    #[allow(clippy::derivable_impls)]
-    fn default() -> Self {
-        Self { path: None }
+/// Set when the process has told the user about dropped monitor keys.
+static DROPPED_KEYS_REPORTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Writes one line to `out` that names the dropped monitor `keys`, the first
+/// time it is called with some keys for `reported`. Later calls write
+/// nothing, so a config that loads again (after `setup`) does not repeat
+/// it. The line goes to the diagnostics writer, never to stdout.
+fn report_dropped_monitor_keys(
+    out: &mut impl std::io::Write,
+    keys: &[&str],
+    reported: &std::sync::atomic::AtomicBool,
+) {
+    if keys.is_empty() || reported.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
     }
+    let _ = writeln!(
+        out,
+        "scope: ignoring config keys of the removed monitor dashboard under `monitor:`: {}. Delete them from the config file.",
+        keys.join(", ")
+    );
 }
 
 /// Monitor-specific configuration.
 ///
 /// Loaded from the `monitor:` section of `~/.scope-bca/config.yaml`.
 /// All fields have sensible defaults so the section is entirely optional.
+/// The keys of the removed dashboard (`layout`, `widgets`, `scale`,
+/// `color_scheme`, `export`, `auto_pause_on_input`) are ignored.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct MonitorConfig {
-    /// Layout preset to use on startup.
-    pub layout: LayoutPreset,
     /// Refresh interval in seconds.
     pub refresh_seconds: u64,
-    /// Widget visibility toggles.
-    pub widgets: WidgetVisibility,
-    /// Y-axis scale mode for price charts.
-    pub scale: ScaleMode,
-    /// Color scheme.
-    pub color_scheme: ColorScheme,
-    /// Alert thresholds (price min/max, whale detection).
+    /// Alert thresholds (price min/max, whale detection). The monitor wizard
+    /// turns them into watchlist rules.
     pub alerts: AlertConfig,
-    /// CSV export settings.
-    pub export: ExportConfig,
-    /// Whether to auto-pause data fetching when the user is interacting.
-    pub auto_pause_on_input: bool,
-    /// Exchange venue for real OHLC candle data (e.g., "binance").
+    /// Exchange venue for the monitor (e.g., "binance").
     #[serde(default)]
     pub venue: Option<String>,
 }
@@ -643,14 +529,8 @@ pub struct MonitorConfig {
 impl Default for MonitorConfig {
     fn default() -> Self {
         Self {
-            layout: LayoutPreset::Dashboard,
             refresh_seconds: DEFAULT_MONITOR_REFRESH_SECS,
-            widgets: WidgetVisibility::default(),
-            scale: ScaleMode::Linear,
-            color_scheme: ColorScheme::GreenRed,
             alerts: AlertConfig::default(),
-            export: ExportConfig::default(),
-            auto_pause_on_input: false,
             venue: None,
         }
     }
@@ -688,6 +568,77 @@ mod tests {
         );
         // No home folder known: the path stays as written.
         assert_eq!(expand_home(Path::new("~/d"), None), PathBuf::from("~/d"));
+    }
+
+    #[test]
+    fn test_a_config_with_the_dashboard_keys_loads_and_names_them() {
+        // Configs written for 0.7 and 0.8 have these keys. The removal
+        // must not turn them into a parse error.
+        let yaml = "monitor:
+  layout: feed
+  refresh_seconds: 7
+  scale: log
+  color_scheme: monochrome
+  auto_pause_on_input: true
+  widgets:
+    price_chart: false
+  export:
+    path: out
+  venue: binance
+";
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(yaml.as_bytes()).unwrap();
+        let config = Config::load(Some(file.path())).unwrap();
+        assert_eq!(config.monitor.refresh_seconds, 7);
+        assert_eq!(config.monitor.venue.as_deref(), Some("binance"));
+        assert_eq!(
+            dropped_monitor_keys(yaml),
+            [
+                "layout",
+                "widgets",
+                "scale",
+                "color_scheme",
+                "export",
+                "auto_pause_on_input"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_the_dropped_keys_are_named_once_on_the_diagnostics_writer() {
+        use std::sync::atomic::AtomicBool;
+        let reported = AtomicBool::new(false);
+        let mut out = Vec::new();
+        // No keys: nothing is said, and the one report is not used up.
+        report_dropped_monitor_keys(&mut out, &[], &reported);
+        assert!(out.is_empty());
+        report_dropped_monitor_keys(&mut out, &["layout", "scale"], &reported);
+        report_dropped_monitor_keys(&mut out, &["layout", "scale"], &reported);
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(text.lines().count(), 1, "{text}");
+        assert!(text.contains("layout, scale"), "{text}");
+        assert!(text.contains("ignoring"), "{text}");
+    }
+
+    #[test]
+    fn test_a_config_without_dashboard_keys_has_nothing_to_warn_about() {
+        assert!(
+            dropped_monitor_keys(
+                "monitor:
+  refresh_seconds: 7
+"
+            )
+            .is_empty()
+        );
+        assert!(
+            dropped_monitor_keys(
+                "output:
+  color: true
+"
+            )
+            .is_empty()
+        );
+        assert!(dropped_monitor_keys("not: [valid").is_empty());
     }
 
     #[test]

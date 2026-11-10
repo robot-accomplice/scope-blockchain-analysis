@@ -12,9 +12,9 @@ use crate::{note, out};
 use scope::error::{Result, ScopeError};
 use scope::metrics::{self as series, Metric, Sample};
 use std::future::Future;
-use std::io::Write as _;
 use std::path::Path;
 use std::time::{Duration, Instant};
+use tokio::io::AsyncWriteExt as _;
 // The schedule runs on tokio's clock, the one its sleep uses.
 use tokio::time::Instant as Clock;
 
@@ -72,6 +72,9 @@ pub struct RunOutput<T> {
     pub value: T,
     /// The run's data, for a screen that draws its own view of it.
     pub view: Option<crate::cli::output::SummaryView>,
+    /// A run on two or more venues: one reading per venue. The CSV gets a
+    /// row per venue, with a `venue` column.
+    pub venues: Option<crate::cli::output::VenueRun>,
 }
 
 /// Runs `step` on `schedule` and returns the last run's value.
@@ -86,6 +89,33 @@ pub async fn run<T, F, Fut>(
     metrics: &[Metric],
     csv: Option<&Path>,
     out: &Output,
+    step: F,
+) -> Result<Option<T>>
+where
+    F: FnMut(u64) -> Fut,
+    Fut: Future<Output = Result<RunOutput<T>>>,
+{
+    run_with(schedule, metrics, csv, CsvRows::PerRun, out, step).await
+}
+
+/// How a CSV file has its rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CsvRows {
+    /// One row per run.
+    PerRun,
+    /// One row per venue and run, with a `venue` column after `run`. The
+    /// header is written before the first run, so the caller says so up
+    /// front.
+    PerVenue,
+}
+
+/// [`run`], with the CSV row shape given.
+pub async fn run_with<T, F, Fut>(
+    schedule: &Schedule,
+    metrics: &[Metric],
+    csv: Option<&Path>,
+    rows: CsvRows,
+    out: &Output,
     mut step: F,
 ) -> Result<Option<T>>
 where
@@ -99,7 +129,8 @@ where
         None => Vec::new(),
     };
     if let Some(path) = csv {
-        std::fs::write(path, series::csv_header(&columns))
+        tokio::fs::write(path, csv_head(&columns, rows))
+            .await
             .map_err(|e| ScopeError::io_context(e, format!("cannot write {}", path.display())))?;
     }
     out.update_progress(|p| {
@@ -128,8 +159,15 @@ where
         let at = chrono::Utc::now();
         if let Some(path) = csv {
             let time = at.format(CSV_TIME_FORMAT).to_string();
-            let row = series::csv_row(&columns, metrics, &time, run, &output.sample);
-            append(path, &row)?;
+            let text = csv_run(
+                &columns,
+                metrics,
+                &time,
+                run,
+                &output.sample,
+                output.venues.as_ref().map(|v| v.samples.as_slice()),
+            );
+            append(path, &text).await?;
         }
         let record = RunRecord {
             run,
@@ -137,6 +175,7 @@ where
             sample: output.sample,
             snapshot: output.snapshot.clone(),
             view: output.view.map(std::sync::Arc::new),
+            venues: output.venues.map(std::sync::Arc::new),
         };
         if !out.record_run(metrics, record) {
             out!(out, "{}", output.snapshot)?;
@@ -171,13 +210,49 @@ where
     }
 }
 
-fn append(path: &Path, row: &str) -> Result<()> {
+/// The CSV header for `rows`.
+pub(crate) fn csv_head(columns: &[&Metric], rows: CsvRows) -> String {
+    match rows {
+        CsvRows::PerRun => series::csv_header(columns),
+        CsvRows::PerVenue => series::csv_header_venue(columns),
+    }
+}
+
+/// The CSV text of one run: a row, or a row per venue when the run has
+/// venue readings.
+pub(crate) fn csv_run(
+    columns: &[&Metric],
+    metrics: &[Metric],
+    time: &str,
+    run: u64,
+    sample: &Sample,
+    venues: Option<&[crate::cli::output::VenueSample]>,
+) -> String {
+    match venues {
+        None => series::csv_row(columns, metrics, time, run, sample),
+        Some(venues) => venues
+            .iter()
+            .map(|v| series::csv_row_venue(columns, metrics, time, run, &v.venue, &v.sample))
+            .collect(),
+    }
+}
+
+async fn append(path: &Path, row: &str) -> Result<()> {
     let context = || format!("cannot append to {}", path.display());
-    let mut file = std::fs::OpenOptions::new()
+    let mut file = tokio::fs::OpenOptions::new()
         .append(true)
         .open(path)
+        .await
         .map_err(|e| ScopeError::io_context(e, context()))?;
     file.write_all(row.as_bytes())
+        .await
+        .map_err(|e| ScopeError::io_context(e, context()))?;
+    // `write_all` on a tokio file returns once the bytes are buffered; the
+    // write itself runs later on the blocking pool. Without this flush, the
+    // row can be missing when the caller reads the file next, or when the
+    // process ends.
+    file.flush()
+        .await
         .map_err(|e| ScopeError::io_context(e, context()))
 }
 
@@ -200,6 +275,7 @@ mod tests {
             },
             snapshot: format!("report {run}\n"),
             view: None,
+            venues: None,
             value: run,
         }
     }
@@ -451,6 +527,7 @@ mod tests {
                     sample: o.sample,
                     snapshot: o.snapshot,
                     view: None,
+                    venues: None,
                 },
             );
         }

@@ -34,7 +34,7 @@ A command-line tool for blockchain data analysis, portfolio tracking, transactio
 - **Compliance & Risk Assessment**: Risk scoring, transaction pattern detection, taint analysis, and compliance reporting
 - **Data Export**: Export address history and portfolio data to JSON or CSV with date range filtering
 - **Token Discovery**: Browse trending and boosted tokens from DexScreener (`scope discover` / `scope disc`)
-- **Market Command** (`scope market summary`, `ohlc`, `trades`): Peg and order book health; OHLC/candlestick data; recent trades; any CEX venue from the registry or DEX (Ethereum, Solana); repeat mode with `--every`/`--duration`; `--report` and `--csv` export
+- **Market Command** (`scope market summary`, `ohlc`, `trades`): Peg and order book health; OHLC/candlestick data; recent trades; any CEX venue from the registry or DEX (Ethereum, Solana); repeat mode with `--every`/`--duration`; `--report` and `--csv` export; several venues in one run (`--venue weex,binance`)
 - **Token Health Suite** (`scope token-health` / `scope health`): DEX analytics with optional order book summary; any venue from the registry or DEX
 - **Venue Management** (`scope venues` / `scope ven`): List available venues, view the YAML schema, initialise user venues directory, validate custom descriptors
 - **Contract Analysis** (`scope contract` / `scope ct`): Smart contract security analysis covering source code verification, proxy detection (EIP-1967/1822/1167/Diamond), access control mapping, vulnerability heuristics (reentrancy, selfdestruct, unchecked calls, tx.origin, overflow), DeFi protocol checks (oracle, flash loan, DEX slippage), external intelligence (GitHub linking, audit reports, Sourcify), and security scoring (0-100)
@@ -183,10 +183,12 @@ scope health USDC --with-market --venue binance
 scope market summary USDC
 scope market summary DAI --venue binance --format json
 scope market summary USDC --venue kraken
+scope market summary USDN --venue weex,binance     # compare two venues
 
 # OHLC and recent trades
 scope market ohlc USDC --venue binance --interval 1h --limit 100
 scope market trades USDC --venue binance --limit 50
+scope market trades USDC --venue weex,binance      # one block per venue
 
 # Unified insights: infer type and chain from any target
 scope insights 0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2   # address -> balance, tokens
@@ -257,7 +259,8 @@ Not sure which command to use? Here's a quick decision tree:
 | Get token DEX data (price, volume, holders) | `scope crawl <token>` |
 | Token DEX + order book health (stablecoins) | `scope token-health <token> --with-market` |
 | Watch a market's health live (monitor wizard) | `scope monitor <token> --venue <venue>` |
-| Run a saved watchlist again (in the TUI) | `watch open <name>` |
+| Run a saved watchlist again (in the TUI) | `watch <name>` |
+| Run a saved watchlist with no screen (cron, CI) | `scope watch <name> --once` |
 | Browse trending/boosted tokens | `scope discover` |
 | Check market peg/depth for a stablecoin | `scope market summary <symbol>` |
 | Fetch OHLC/candlestick data from a venue | `scope market ohlc <symbol> --venue <venue> --interval 1h` |
@@ -645,10 +648,39 @@ scope market summary USDC --venue binance       # Binance (default)
 scope market summary USDC --venue kraken         # Kraken
 scope market summary USDC --venue okx            # OKX
 scope health USDC --with-market --venue coinbase  # Coinbase order book
-scope monitor USDC --layout exchange              # Exchange-style TUI
+scope monitor USDC --venue binance                # Monitor wizard with market health checks
 ```
 
 The DEX venues (`eth`, `solana`) are still available and use on-chain liquidity data rather than the venue registry.
+
+**Several venues.** `market summary`, `market ohlc` and `market trades` take more than one venue. Repeat `--venue` or give a comma list, as for `scope monitor`: `--venue weex,binance`. The venues keep the order you give. A venue that appears twice is an error.
+
+- `market summary` prints one full summary for each venue, then a comparison table with one row per venue: mid, spread, bid depth, ask depth, 24h volume, health verdict, and the bot-pattern signs (the count and the names).
+- `market ohlc` and `market trades` print one labelled block for each venue.
+- A venue that fails (an unknown pair, a network error) does not stop the others. Its section says why, and its row in the comparison table shows the error. `market summary` reads the venues at the same time.
+- With `--format json`, `market ohlc` and `market trades` give a list with one item for each venue. Each item has a `venue` field, and `candles` or `trades`. An item for a failed venue has `venue` and `error`.
+- With `--format json`, `market summary` gives one object: `{"pair", "run", "venues", "comparison"}`. `run` is `null` for one run, and the run number with `--every`. `venues` is the list with one item for each venue: the same object as for one venue, or `venue` and `error` for a failed venue. `comparison` is a list with one row for each venue, in the order given, for scripts that compare venues. A row holds raw numbers (not the text of the table): `venue`, `status` (`healthy`, `unhealthy` or `error`), `mid`, `spread_pct` (in percent), `bid_depth`, `ask_depth`, `volume_24h`, `peg_deviation_bps` (in basis points from the peg), `bot_signs` (the names, or `null` when the check did not run) and `bot_signs_state` (`found`, `none`, `none_no_tape` or `not_run`). A failed venue has `null` for every number and the whole reason in `error`.
+- One venue still gives the output it gave before: one object for `market summary`, and a list of candles or trades for the other two.
+
+**`scope insights --venue`.** `insights` takes the same list for a stablecoin: `scope insights USDC --venue weex,binance`. The report has one `Market` line for each venue, in the order given. A venue that fails has an `unavailable` line with the reason. The summary and the key takeaway use the worst peg status of the venues that answered (`Deviation` first). When the venues do not share one status, the summary adds a sentence that names each venue and its status. Without `--venue`, `insights` checks the default venue and shows nothing when it fails. For an address, a transaction, or a token that is not a stablecoin, `--venue` has no effect, and `insights` prints one note. A venue that fails does not change the exit code.
+
+```json
+{
+  "pair": "USDC/USDT",
+  "run": null,
+  "venues": [ { "venue": "weex", "healthy": true, "...": "..." }, { "venue": "nowhere", "run": null, "error": "Unknown venue \"nowhere\"" } ],
+  "comparison": [
+    { "venue": "weex", "status": "healthy", "mid": 1.0, "spread_pct": 0.02, "bid_depth": 42000.0,
+      "ask_depth": 45000.0, "volume_24h": 125000.0, "peg_deviation_bps": 0.0,
+      "bot_signs": ["Repeated size"], "bot_signs_state": "found" },
+    { "venue": "nowhere", "status": "error", "mid": null, "spread_pct": null, "bid_depth": null,
+      "ask_depth": null, "volume_24h": null, "peg_deviation_bps": null, "bot_signs": null,
+      "bot_signs_state": "not_run", "error": "Unknown venue \"nowhere\"" }
+  ]
+}
+```
+- With `--every`, `market summary` repeats on all the venues. The TUI draws the venue charts of the watch grid, one chart for each key value with one line for each venue (see "Repeating view"). `--csv` has a row for each venue and run, with a `venue` column after `run`. `--report` has a section for each venue and the comparison table.
+- Exit code: 1 when any venue failed, else 0. An unhealthy venue does not change the exit code, as with one venue.
 
 ## Compliance Features
 
@@ -833,7 +865,9 @@ The row under the input shows the keys that move around (scroll, history, comple
 
 **Repeating view.** A command with `--every` (for example `market summary USDC --venue binance --every 30s --duration 1h`) shows one view that updates in place. The snapshot is as wide and as tall as its content; the trends take the rest of the pane. Each trend row has a fixed numbers column (label, limit, latest value), a `┤`, and a chart that fills its track from the left, one cell per run, and then scrolls. A bar outside its limit is red. Each chart has a minimum range, so noise reads as a flat line. Beside the trends, the snapshot leaves out the values they chart, and it drops ladder levels before it would be cut. When there are rows to spare, the charts get taller. When the pane is too narrow for both side by side, the compact snapshot goes on top and the trends below it. A rule keeps the footer (`run 3 of 4 · next in 12s · running …`) apart. `--duration forever` (or `inf`) runs until you press `Esc`; without `--duration`, a run lasts 1 hour. `Esc` stops the run and the view stays; the next key leaves it with one copy of the final report and a summary such as `42 runs · 1 failed (run 16)`.
 
-**Commands that need the terminal.** `setup` (except `--status`) and `monitor --dashboard` run on the plain terminal. The TUI steps aside, runs the command, and comes back by itself when it ends; `Ctrl-C` cancels it. The scrollback shows its output and how long it took. After `setup`, the TUI reads the config again, so a new key works at once. `interactive`, `web` and `completions` do not run in the TUI.
+**Repeating view on several venues.** With `--venue weex,binance --every 30s`, the view shows the comparison table of the last run, then the venue charts of the watch grid: one chart for each key value, one braille line for each venue on a shared scale, and a legend with the range across venues (`all`), then each venue with its last value and its health. The keys are the keys of the grid: `←` `→` select a venue, Space shows only that venue as bars (and Space again all venues), Tab selects the chart whose values the legend shows, and PgUp and PgDn page through the charts. These keys work when the input line is empty, and they do not leave a finished view. A window too small for the charts says how much to enlarge it. A venue that fails in one run leaves a gap in its line; the repeat ends only when every venue fails.
+
+**Commands that need the terminal.** `setup` (except `--status`) runs on the plain terminal. The TUI steps aside, runs the command, and comes back by itself when it ends; `Ctrl-C` cancels it. The scrollback shows its output and how long it took. After `setup`, the TUI reads the config again, so a new key works at once. `interactive`, `web` and `completions` do not run in the TUI.
 
 **Files.** The TUI keeps its history in `history.txt` and a log of every submitted line in `tui-events.jsonl` (input, parsed arguments, outcome, error, duration), both in the scope data directory.
 
@@ -858,7 +892,7 @@ The wizard has four steps (Tab moves between them; Ctrl-R starts, Ctrl-S saves, 
 
 **The grid.** The run shows one row per target, breached rows first (a target on several venues has one row per venue, `USDN@weex` and `USDN@binance`, and its token or address checks on a row of their own, `USDN`), with one mark per check (`✓` pass, `!` warn, `✗` fail, `-` n/a, `?` the value could not be read). A breach that starts rings the bell once and shows a banner. Enter opens the detail: each check's value and a chart of its last values. For a target on two or more venues, the detail is the **venue charts**: one chart per market check, with one line per venue on a shared scale and time axis, and a venue legend with the range across venues (`all`), each venue's last value and its status. `←` `→` select a venue (the evidence keys use it), Space shows only that venue as bars (and Space again all venues), Tab selects the chart whose values the legend shows, and PgUp and PgDn page through the charts when not all fit. A window too small for the charts shows the one-venue detail and says how much to enlarge it. In the detail, `b`, `t`, `h`, `r` and `x` run `market summary`, `market trades`, `crawl`, `compliance risk` or `address` for the target in the shell. **Ctrl-G** switches between the grid and the shell, so other commands run while the grid updates. Esc stops the run; Esc again closes the grid and leaves the last results and a summary in the scrollback. A run keeps the settings it started with: after `setup` saves a key, the grid says to restart the run to use it.
 
-**Watchlists.** Ctrl-S in the wizard (or `--save <name>`) saves the watchlist to `~/.scope-bca/watchlists/<name>.yaml`. In the TUI, `watch list` lists them, `watch open <name>` (or a `.yaml` path) runs one, and `watch stop` stops the run. A file that is not valid lists every error with its line:
+**Watchlists.** Ctrl-S in the wizard (or `--save <name>`) saves the watchlist to `~/.scope-bca/watchlists/<name>.yaml`. In the TUI, `watch list` lists them, `watch <name>` (or `watch open <name>`, or a `.yaml` path) runs one in the grid, and `watch stop` stops the run. To run one with no screen, use `scope watch <name>` (see below). A file that is not valid lists every error with its line:
 
 ```yaml
 name: stablecoins
@@ -882,74 +916,69 @@ targets:
       - liquidity_usd > 1000000
 ```
 
-**From the old monitor.** `--refresh N` is the interval in seconds; `--export` is now `--csv`. The price bounds of `monitor.alerts` become rules on the price; with a venue, `whale_min_usd` becomes `largest_trade < whale_min_usd` and `volume_spike_threshold_pct` becomes `volume_change_pct <= volume_spike_threshold_pct`. Without a venue they are not checked, and a note says they need one. `--layout`, `--scale` and `--color-scheme` belong to the old dashboard.
+**From the old monitor.** `--refresh N` is the interval in seconds; `--export` is now `--csv`. The price bounds of `monitor.alerts` become rules on the price; with a venue, `whale_min_usd` becomes `largest_trade < whale_min_usd` and `volume_spike_threshold_pct` becomes `volume_change_pct <= volume_spike_threshold_pct`. Without a venue they are not checked, and a note says they need one. `--layout`, `--scale` and `--color-scheme` are removed: the grid has no layouts.
 
-#### The old dashboard (deprecated)
+#### Headless runs: `scope watch`
 
-`scope monitor <token> --dashboard` opens the old live dashboard for one more release. It goes in the next one.
+`scope watch <name|path>` runs a saved watchlist with no screen. Use it from cron, CI or a script. It needs no terminal and never asks a question. It prints each tick, writes the CSV trail and the report, and ends with an exit code.
 
 ```bash
-scope monitor USDC --dashboard
-scope mon PEPE --chain ethereum --layout chart-focus --refresh 3 --dashboard
-scope monitor USDC --layout exchange --dashboard    # Exchange-style: order book + chart + trades
+scope watch pegs --once                                 # one tick, for cron and CI
+scope watch pegs --every 30s --duration 1h --format json
+scope watch ./pegs.yaml --once --csv trail.csv --append # add to the trail of earlier runs
 ```
 
-**Dashboard flags:** `--chain` / `-c`, `--layout` / `-l`, `--refresh` / `-r`, `--scale` / `-s`, `--color-scheme`, `--export` / `-e`, `--venue` / `-v`, with `--dashboard`.
+The argument is a path when it ends in `.yaml` or has a path separator. Otherwise it is the name of a list in `~/.scope-bca/watchlists/`.
 
-Use `--venue binance` (or any CEX venue) to fetch real exchange OHLC data instead of synthetic candles. The dashboard reads one venue: with two or more it stops and says so. The time period selector (1m, 5m, 15m, 1h, 4h, 1d) maps directly to the venue's candlestick intervals.
+| Flag | Meaning |
+| --- | --- |
+| `--once` | Run one tick and stop. It conflicts with `--every` and `--duration`. |
+| `--every D` | Time from one tick start to the next. It overrides `interval:` in the file. |
+| `--duration D` | How long the run lasts (`10m`, `1h`, `forever`). It overrides `duration:` in the file. |
+| `--format text\|json\|csv` | What goes to stdout. The default is `text`. |
+| `--csv PATH` | Write one CSV row for each cell and tick. It overrides `outputs.csv`. |
+| `--append` | Keep the rows that the CSV file has. Without it, the run empties the file first. |
+| `--report PATH` | Write the report when the run ends or stops. It overrides `outputs.report`. |
 
-- **`--venue`** must name a known venue (`scope venues list`). An unknown venue is an error.
+A flag overrides the file. The file overrides the default (`60s` every, `1h` long). A file with no `duration:` runs until you stop it, so use `--once` or `--duration` in cron.
+
+**Exit codes.** The code comes from the last tick.
+
+| Code | Meaning |
+| --- | --- |
+| 0 | No row breached and no row is unknown. A warning is a pass. |
+| 1 | At least one row breached: a rule or a market health check failed. |
+| 2 | No row breached, but a row is unknown: a venue gave an error. Also a usage error, and a stop before the first tick ended. |
+| 3 | The run could not start. The file, a flag or a token is not valid. No request was made. |
+| 4 | The CSV file or the report could not be written. |
+
+A breach wins over an unknown row. A write error wins over all. A breach that cleared before the last tick gives 0. The JSON output and the CSV file keep the history.
+
+**Output.** Data goes to stdout. Notes go to stderr: the version line, the start note with the full paths, the `--- Run #N ---` lines and the end note. `--format text` prints one summary line for each tick, then one line for each event (`BREACH`, `CLEARED`, `WARN`, `WARN CLEARED`) and one `ERROR` line for each cell that could not be read. `--format json` prints JSON Lines. Each line has a `type`: `start`, `tick`, `event` or `end`. A `tick` has every cell of every row, with the same fields as a CSV row. The `end` record has the stop reason (`once`, `duration`, `signal`, `output_error` or `stdout_closed`) and the exit code. `--format csv` prints the bytes of the CSV file.
+
+**Stopping.** Ctrl-C or SIGTERM stops the run (on Windows: Ctrl-C or Ctrl-Break). A tick in progress is dropped. The report is still written, from the last finished tick.
+
+**Records for a failure.** Run with `-v` to get one trace line for each row of each tick, with its status and the exact error text. `--format json` keeps the same facts in the data.
+
+#### Flags of `scope monitor`
+
+`--chain` / `-c`, `--refresh` / `-r`, `--export` / `-e`, `--venue`, `--pair`, `--token`, and the wizard options above.
+
+- **`--venue`** must name a known venue (`scope venues list`). An unknown venue is an error. Give it more than once, or a comma list, to watch the token on several venues.
 - **When DexScreener fails** (unreachable, blocked, or the token is unknown there) and `--venue` is set, the monitor uses that venue's ticker for the token and tells you why.
 - **`--pair`** prices the token from the venue alone (exchange-only mode). Write the pair in any common form, `USDN_USDT`, `USDN/USDT`, `USDN-USDT` or `USDNUSDT` (the joined form only for a stable or fiat quote such as USDT, USDC, DAI, EUR); scope converts it to the venue's own format.
-- **`--export FILE`** starts CSV export to that file at launch. The `E` key starts an export in the directory set by `monitor.export.path` in `config.yaml` (default `./scope-exports/`). A file that cannot be written is an error, not a silent no-op.
+- **`--export FILE`** is `--csv FILE`.
 
-The monitor supports five layout presets that can be switched at runtime or configured in `config.yaml`:
+**The old dashboard is gone.** `scope monitor --dashboard` and its flags `--layout`, `--scale` and `--color-scheme` were removed (they were deprecated in 0.8.0). These replace its features:
 
-| Preset | Description |
+| Old dashboard | Use now |
 | --- | --- |
-| **Dashboard** | Balanced 2x2 grid with all widgets visible (default) |
-| **Chart** | Price chart takes ~85% of the screen; minimal stats overlay |
-| **Feed** | Transaction/activity feed prioritized; small price ticker |
-| **Compact** | Minimal single-column sparkline view for small terminals |
-| **Exchange** | Exchange-style view: order book, chart, recent trades, market info |
-
-The monitor automatically selects the best layout for your terminal size (responsive breakpoints). `monitor.layout` in `config.yaml` is only the starting preset; auto-selection still applies to it. The `--layout` flag pins the layout: auto-selection stays off. Manual layout switching also disables auto-selection until you press `A`.
-
-**Monitor features:**
-
-- **Price/volume charts**: Line, Candlestick, and Volume Profile modes
-- **Six timeframes**: 1m, 5m, 15m, 1h, 4h, 1d
-- **Log/linear scale**: Toggle Y-axis scaling for wide price ranges
-- **Color schemes**: Green/Red (default), Blue/Orange, Monochrome
-- **Holder count**: On-chain holder count (when API key is configured)
-- **Liquidity depth**: Per-pair liquidity breakdown across DEXes
-- **Exchange view**: Live order book, ticker, and recent trade history from any configured CEX venue
-- **Alerts**: Configurable price min/max, whale detection, and volume spike thresholds
-- **CSV export**: Record live data with a single keypress (`E`), or from launch with `--export FILE`
-- **Auto-pause**: Optionally pause data fetching while interacting
-
-**Monitor keybindings** (`?` shows this list in the monitor):
-
-| Key | Action |
-| --- | --- |
-| `q` / `Esc` / `Ctrl-C` | Quit monitor |
-| `r` | Refresh now (the activity log confirms it) |
-| `p` / `Space` | Pause/resume |
-| `Shift+P` | Toggle auto-pause on input |
-| `e` | Toggle CSV export (REC indicator when active) |
-| `l` / `h` | Next / previous layout (Dashboard, Chart, Feed, Compact, Exchange) |
-| `w` + `1-5` | Toggle widget visibility (1=price chart, 2=volume, 3=buy/sell, 4=metrics, 5=activity) |
-| `a` | Re-enable auto layout |
-| `c` | Cycle chart mode (Line / Candlestick / Volume Profile) |
-| `s` | Toggle log/linear scale |
-| `/` | Cycle color scheme (green-red, blue-orange, mono) |
-| `t` / `Tab` | Cycle time period |
-| `1-6` | Select time period (1m, 5m, 15m, 1h, 4h, 1d) |
-| `j` / `k` | Scroll activity log |
-| `+` / `-` | Slower / faster refresh (the footer shows the interval: `↻ 3s of 5s`) |
-| `?` | Show every key; any key closes the list |
-
-With `--venue`, the Order Book and Recent Trades panels show the venue's real book and trades, and their titles name the venue. Without one, the book is the DEX pool's AMM book, the same as `market summary`, and the title names its source.
+| Price and volume charts, time periods | The grid's detail pane (Enter on a row): a chart of each check's last values. With two or more venues, the venue charts. |
+| Order book panel (`--layout exchange`) | `b` in the detail pane (`market summary` for the target), or `scope market summary <pair> --venue <venue>`. |
+| Trades feed (`--layout feed`) | `t` in the detail pane (`market trades` for the target), or `scope market trades <pair> --venue <venue>`. |
+| Alerts (`monitor.alerts`) | Rules on the watchlist (see above). |
+| CSV export (`E` key, `--export`) | `--csv FILE`, or the wizard's CSV path. |
+| Layout presets, widget toggles, scale and color scheme | None. The grid has no layouts. |
 
 ## Configuration
 
@@ -999,28 +1028,17 @@ output:
 portfolio:
   data_dir: "~/.scope-bca/data"
 
-# Monitor TUI configuration (all optional, shown with defaults)
+# Monitor defaults (all optional, shown with defaults)
 monitor:
-  layout: dashboard          # starting preset; auto-layout still applies (--layout pins it)
   refresh_seconds: 10
-  scale: linear              # linear | log
-  color_scheme: green-red    # green-red | blue-orange | monochrome
-  auto_pause_on_input: false # pause data fetching while interacting
-  widgets:
-    price_chart: true
-    volume_chart: true
-    buy_sell_pressure: true
-    metrics_panel: true
-    activity_log: true
-    holder_count: true
-    liquidity_depth: true
-  alerts:
+  alerts:                     # become watchlist rules
     price_min: null           # alert when price drops below (e.g., 0.50)
     price_max: null           # alert when price exceeds (e.g., 2.00)
     whale_min_usd: null       # whale detection threshold (e.g., 10000.0)
     volume_spike_threshold_pct: null  # volume spike % (e.g., 100.0)
-  export:
-    path: null                # base directory (default: ./scope-exports/)
+  # The keys layout, widgets, scale, color_scheme, export and
+  # auto_pause_on_input belonged to the removed dashboard. They are
+  # ignored, with one line on stderr.
 ```
 
 ### Free Tiers: Solana & BSC
@@ -1153,11 +1171,21 @@ Combines DEX analytics (crawl) with optional market/order book summary for stabl
 scope token-health USDC                        # DEX liquidity, volume, holders (table)
 scope health USDC --with-market                # + order book/peg (default: Binance)
 scope token-health USDC --with-market --venue kraken
+scope token-health USDC --with-market --venue weex,binance   # compare venues
 scope token-health USDC --format json
 scope token-health USDC --ai                   # Markdown to console for agent parsing
 ```
 
 With `--with-market`, order book data is fetched from the selected venue (`--venue`): any CEX venue from the registry (default **binance**), or **eth** / **solana** for DEX on-chain liquidity. Run `scope venues list` to see all available venues.
+
+**Several venues.** `--venue` takes a list: repeat it or give a comma list (`--venue weex,binance`). A list needs `--with-market`; without it, the command fails before any request. One venue keeps its old rule.
+
+- The DEX analytics are read once. The venues are read at the same time.
+- Table: the DEX analytics once, one `Market / Order Book (venue)` block for each venue in the order given, then one comparison table. A venue that fails has a block that says why. `--format csv` prints the same table as before.
+- Markdown: the report once, one `###` section for each venue, then `### Comparison`.
+- JSON: `analytics` and `market` stay. `market` is `null`. `markets` is a list with `{venue, summary}` or `{venue, error}` for each venue. `comparison` has one row of raw numbers for each venue (the rows of `market summary`).
+- The exit code is 0 when the DEX analytics print, also when a venue fails or is unhealthy.
+- One venue gives the output it gave before, in every format.
 
 ### Agent-Oriented Output (`--ai`)
 
@@ -1194,7 +1222,8 @@ Scope supports markdown and structured report generation across commands:
 | `scope compliance compliance-report` | `--output file` | Unified risk + pattern analysis (markdown) |
 | `scope report batch` | `--addresses a,b,c` or `--from-file path` + `--output report.md` | Combined report for multiple addresses |
 | `scope report batch` | `--with-risk` | Include risk assessment per address (uses ETHERSCAN_API_KEY) |
-| `scope token-health` | `--with-market --venue <venue>` | DEX + optional market composite |
+| `scope token-health` | `--with-market --venue <venue>[,<venue>...]` | DEX + optional market composite, on one or more venues |
+| `scope insights` | `--venue <venue>[,<venue>...]` | Peg check of a stablecoin on one or more venues |
 | `scope` | `--ai` (global) | Markdown console output for agent parsing |
 
 All reports include version and timestamp metadata for audit trail.

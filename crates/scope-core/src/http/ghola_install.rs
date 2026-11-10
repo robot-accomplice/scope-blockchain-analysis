@@ -550,6 +550,8 @@ pub mod test_support {
 mod tests {
     use super::test_support::*;
     use super::*;
+    #[cfg(unix)]
+    use crate::http::test_stub::{retry_while_busy, script};
 
     const LINUX: Target = Target {
         os: "linux",
@@ -971,16 +973,6 @@ mod tests {
         assert!(err.to_string().contains("cannot create"), "{err}");
     }
 
-    /// An executable `sh` script named `name` in `dir`.
-    #[cfg(unix)]
-    fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        let path = dir.join(name);
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        path
-    }
-
     #[cfg(unix)]
     #[test]
     fn test_go_install_builds_the_cmd_package_into_the_folder() {
@@ -992,7 +984,7 @@ mod tests {
             &format!("{check}\nprintf built > \"$GOBIN/ghola\""),
         );
         let bin = dir.path().join("bin");
-        let path = go_install(&go, &bin).unwrap();
+        let path = retry_while_busy(|| go_install(&go, &bin)).unwrap();
         assert_eq!(path, bin.join("ghola"));
         assert_eq!(std::fs::read(&path).unwrap(), b"built");
     }
@@ -1002,7 +994,7 @@ mod tests {
     fn test_go_install_reports_a_failed_build() {
         let dir = tempfile::tempdir().unwrap();
         let go = script(dir.path(), "go", "exit 3");
-        let err = go_install(&go, &dir.path().join("bin")).unwrap_err();
+        let err = retry_while_busy(|| go_install(&go, &dir.path().join("bin"))).unwrap_err();
         assert!(err.to_string().contains("failed"), "{err}");
         assert!(err.to_string().contains(GO_INSTALL), "{err}");
     }
@@ -1012,7 +1004,7 @@ mod tests {
     fn test_go_install_reports_a_build_that_wrote_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let go = script(dir.path(), "go", "exit 0");
-        let err = go_install(&go, &dir.path().join("bin")).unwrap_err();
+        let err = retry_while_busy(|| go_install(&go, &dir.path().join("bin"))).unwrap_err();
         assert!(err.to_string().contains("did not write"), "{err}");
     }
 }

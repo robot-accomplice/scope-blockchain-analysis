@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.7] - 2026-11-10
+
+### Added
+- `scope watch <name|path>` runs a saved watchlist with no screen (#123). Use it from cron, CI or a script. It needs no terminal and never asks a question. It prints each tick, writes the CSV trail and the report, and ends with an exit code from the last tick: 0 pass, 1 breach, 2 a venue error (health unknown), 3 the run could not start, 4 a CSV or report write error. Flags: `--once`, `--every`, `--duration`, `--format text|json|csv`, `--csv`, `--append` and `--report`. A flag overrides the file. `--format json` prints JSON Lines (`start`, `tick`, `event` and `end` records). Ctrl-C and SIGTERM stop the run and still write the report. Run with `-v` for a trace line for each row of each tick.
+- In the TUI, `watch <name|path>` opens a saved watchlist in the grid, the same as `watch open <name|path>`. It takes no flags. `watch --help` shows the help of `scope watch`.
+- `market summary`, `market ohlc` and `market trades` take several venues: repeat `--venue` or give a comma list (`--venue weex,binance`), as for `scope monitor`. One venue, and the default, give the output they gave before, in every format. A venue named twice is an error.
+- `market summary` on two or more venues prints one full summary for each venue, in the order given, then a comparison table with one row for each venue: mid, spread, bid depth, ask depth, 24h volume, health verdict, and the bot-pattern signs (the count and the names). The venues are read at the same time. A venue that fails does not stop the others: its section says why, and its row shows the error. `--report` has a section for each venue and the table.
+- `market ohlc` and `market trades` on two or more venues print one labelled block for each venue, in the order given.
+- With two or more venues, `market ohlc --format json` and `market trades --format json` give a list with one item for each venue. Each item has a `venue` field, and `candles` or `trades`. An item for a failed venue has `venue` and `error`.
+- With two or more venues, `market summary --format json` gives one object: `pair`, `run`, `venues` and `comparison`. `venues` has one item for each venue: the object that one venue gives, or `venue` and `error` for a failed venue. `comparison` has one row for each venue, in the order given, with raw numbers: `status`, `mid`, `spread_pct`, `bid_depth`, `ask_depth`, `volume_24h`, `peg_deviation_bps`, `bot_signs` and `bot_signs_state`. A failed venue has `null` for every number and the whole reason in `error`. With `--every`, each run prints one object with its `run` number. The text table, the `--report` table and the JSON rows come from the same rows. The CSV header does not change. One venue still gives the same object as before.
+- With two or more venues, the exit code is 1 when any venue failed, else 0. An unhealthy venue does not change it, as with one venue.
+- `market summary --every` on two or more venues draws the venue charts of the watch grid in the TUI: one chart for each key value, one line for each venue, the legend with the range across venues, and the same keys (`←` `→`, Space, Tab, PgUp, PgDn). The CSV from `--csv` or `save` has one row for each venue and run, with a `venue` column after `run`. A venue that fails in one run does not end the repeat; the repeat ends when every venue fails.
+- `token-health --venue` takes a list: repeat it or give a comma list (`--venue weex,binance`). A list needs `--with-market`; without it, the command fails before any request. One venue, and the default, give the output they gave before, in every format. The DEX analytics are read once, and the venues are read at the same time. The table has the analytics once, one `Market / Order Book (venue)` block for each venue in the order given, then the comparison table. The markdown has one `###` section for each venue, then `### Comparison`. With `--format json`, `market` is `null`, and `markets` (`{venue, summary}` or `{venue, error}` for each venue) and `comparison` (the rows of `market summary`) are added. A venue that fails does not stop the others: its block says why. The exit code is 0 when the DEX analytics print, also when a venue fails or is unhealthy.
+- `insights --venue` takes the same list. For a stablecoin, the report has one `Market` line for each venue, in the order given. A venue that fails has an `unavailable` line with the reason. The summary and the key takeaway use the worst peg status of the venues that answered. When the venues do not share one status, the summary adds a sentence that names each venue and its status. Without `--venue`, nothing changes. For an address, a transaction, or a token that is not a stablecoin, `--venue` has no effect, and `insights` prints one note. The exit code does not depend on the venues.
+
+### Changed
+- `scope token-health --with-market --venue ""` (an empty or blank venue name) now fails at once with `--venue has an empty venue name`. Before, it printed a `market data unavailable` warning, went on, and exited with 0. `market summary` already failed this way.
+- `PegStatus::severity()` in `scope-core` orders the five peg statuses, worst first: `Deviation`, `SlightDeviation`, `BookUnhealthy`, `NoPrice`, `OnPeg`. `insights --venue` uses it.
+- `TokenHealthArgs::venue` is now a `Vec<String>` (it was a `String`), and `InsightsArgs` has a new `venue` field. Code that builds these structs must be changed.
+
+### Removed
+- The old monitor dashboard, deprecated in 0.8.0. `scope monitor --dashboard` and the flags `--layout`, `--scale` and `--color-scheme` are gone; scope now rejects them as unknown arguments. Use `scope monitor <token>`: it opens the monitor wizard and the watch grid. These replace the old features:
+  - Price and volume charts: the detail pane of the grid (Enter on a row). For a target on two or more venues, it shows the venue charts.
+  - Order book panel and exchange layout: `b` in the detail pane, or `scope market summary <pair> --venue <venue>`.
+  - Trades feed layout: `t` in the detail pane, or `scope market trades <pair> --venue <venue>`.
+  - Alerts (`monitor.alerts`): rules on the watchlist. They have worked this way since 0.8.0.
+  - CSV export (`E` key, `--export`): `--csv FILE`.
+  - Layout presets, widget toggles, log scale and color schemes: no replacement. The grid has no layouts.
+- The config keys `monitor.layout`, `monitor.widgets`, `monitor.scale`, `monitor.color_scheme`, `monitor.export` and `monitor.auto_pause_on_input`. A config that has them still loads. Scope ignores them and prints one line on stderr, once per run, that names them. `monitor.refresh_seconds`, `monitor.alerts` and `monitor.venue` stay.
+- The `-l` and `-s` short flags of `scope monitor`.
+- The help example of `scope monitor` that used `--layout` and `--dashboard`. The example failed, because scope rejects those flags.
+- The unused Alchemy quickstart app `my-smart-wallets-app/` is removed. Nothing in the project used or shipped it. This clears its open Dependabot alerts.
+
+### Fixed
+- `scripts/check-coverage.sh` no longer fails without a message. When `cargo tarpaulin` fails, the script prints its output and its exit code. The script also stops at once, with a clear message, when `cargo tarpaulin` is older than 0.37.1: older versions cannot read the LLVM 23 profraw files that rustc 1.99.x writes.
+- The help of `scope monitor --save` said that `watch open <name>` runs a saved watchlist again, as if it were a CLI command. It is a command of the TUI shell. The help now says to start `scope tui` and enter `watch open <name>` there.
+- The `Jittered timer` bot pattern now also finds a timer with a hard floor and a long tail. The weex USDN/USDT bot (2026-11-07: shortest gap 18 s, median 35 s, 495 of 500 sizes different) had 69.5% of its gaps within ±50% of the median, just under the 70% limit, and was missed. A tape now also counts when its 5th-percentile gap is at least 45% of the median gap and its 95th-percentile gap is at least twice the median. Real order flow has short gaps: of 34 live tapes with a median gap of 5 s or more that no timer rule fits, the highest 5th-percentile gap was 39% of the median and the next 20%. The older rule is unchanged. When only this rule finds the timer, the finding says what it saw (`no gap under 18s in 499 gaps between trades (median 35s, 1 in 20 over 113s)`), and the JSON finding has a `floor` object with `shortest_ms` and `tail_ms`. A timer found by the band rule reads and serializes as before.
+
 ## [0.8.6] - 2026-11-05
 
 ### Added
@@ -471,7 +509,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Configuration system with YAML support
 - Support for ERC-20, SPL, and TRC-20 tokens
 
-[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.6...HEAD
+[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.7...HEAD
+[0.8.7]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.6...v0.8.7
 [0.8.6]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.5...v0.8.6
 [0.8.5]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.4...v0.8.5
 [0.8.4]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.3...v0.8.4

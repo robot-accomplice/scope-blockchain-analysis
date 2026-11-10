@@ -18,6 +18,9 @@ COVERAGE_FILE="$REPO_ROOT/.coverage-last"
 RECORD=false
 [ "${1:-}" = "--record" ] && RECORD=true
 MANDATORY_THRESHOLD=80
+# Minimum cargo-tarpaulin version. 0.34.1 cannot parse the LLVM 23 profraw
+# files that rustc 1.99.x writes, and fails. 0.37.1 and later can.
+MIN_TARPAULIN_VERSION="0.37.1"
 
 # -----------------------------------------------------------------------------
 # Check prerequisites
@@ -27,11 +30,30 @@ if ! command -v cargo-tarpaulin &>/dev/null; then
     exit 1
 fi
 
+TARPAULIN_VERSION=$(cargo tarpaulin --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+if [ -z "$TARPAULIN_VERSION" ]; then
+    echo "❌ Could not read the cargo-tarpaulin version from: cargo tarpaulin --version"
+    exit 1
+fi
+if [ "$(printf '%s\n' "$MIN_TARPAULIN_VERSION" "$TARPAULIN_VERSION" | sort -V | head -1)" != "$MIN_TARPAULIN_VERSION" ]; then
+    echo "❌ cargo-tarpaulin $TARPAULIN_VERSION is too old. Need $MIN_TARPAULIN_VERSION or later (LLVM 23 profraw support)."
+    echo "   Update with: cargo install cargo-tarpaulin --force"
+    exit 1
+fi
+
 # -----------------------------------------------------------------------------
 # Run coverage and extract percentage
 # -----------------------------------------------------------------------------
 echo "Running coverage (cargo tarpaulin)..."
-COVERAGE_OUTPUT=$(cargo tarpaulin --out Stdout 2>&1)
+# `set -e` would exit here without a word, so catch the exit code and print the output.
+TARPAULIN_STATUS=0
+COVERAGE_OUTPUT=$(cargo tarpaulin --out Stdout 2>&1) || TARPAULIN_STATUS=$?
+if [ "$TARPAULIN_STATUS" -ne 0 ]; then
+    echo "$COVERAGE_OUTPUT"
+    echo ""
+    echo "❌ cargo tarpaulin failed with exit code $TARPAULIN_STATUS"
+    exit "$TARPAULIN_STATUS"
+fi
 
 # Prefer "X.XX% coverage" (summary line); fallback to first percentage match
 COVERAGE_PCT=$(echo "$COVERAGE_OUTPUT" | grep -oE '[0-9]+\.[0-9]+% coverage' | head -1 | sed 's/% coverage//')

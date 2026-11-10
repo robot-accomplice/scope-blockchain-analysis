@@ -15,29 +15,13 @@
     "data_dir": null
   },
   "monitor": {
-    "layout": "dashboard",
     "refresh_seconds": 5,
-    "widgets": {
-      "price_chart": true,
-      "volume_chart": true,
-      "buy_sell_pressure": true,
-      "metrics_panel": true,
-      "activity_log": true,
-      "holder_count": true,
-      "liquidity_depth": true
-    },
-    "scale": "linear",
-    "color_scheme": "green-red",
     "alerts": {
       "price_min": null,
       "price_max": null,
       "whale_min_usd": null,
       "volume_spike_threshold_pct": null
     },
-    "export": {
-      "path": null
-    },
-    "auto_pause_on_input": false,
     "venue": null
   },
   "ghola": {

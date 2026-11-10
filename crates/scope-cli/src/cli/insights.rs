@@ -5,9 +5,10 @@
 
 use crate::cli::address::{self, AddressArgs};
 use crate::cli::crawl::{Period, fetch_analytics_for_input};
+use crate::cli::market_venues::{VenueReport, VenueSource, checked_venues, read_token_summaries};
 use crate::cli::output::Output;
 use crate::cli::tx::{fetch_transaction_report, format_tx_markdown};
-use crate::outln;
+use crate::{note, outln};
 use clap::Args;
 use scope::chains::{
     ChainClientFactory, infer_chain_from_address, infer_chain_from_hash, native_symbol,
@@ -39,6 +40,7 @@ pub enum InferredTarget {
   scope insights @main-wallet                             \x1b[2m# address book shortcut\x1b[0m
   scope insights 0xabc123def456... --decode --trace
   scope insights USDC
+  scope insights USDC --venue weex,binance                [2m# peg on several venues[0m
   scope insights DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy --chain solana")]
 pub struct InsightsArgs {
     /// Target to analyze: address, transaction hash, or token (symbol/name/address).
@@ -69,6 +71,20 @@ pub struct InsightsArgs {
     /// Include internal transaction trace (for tx targets).
     #[arg(long)]
     pub trace: bool,
+
+    /// Market venue for the peg check of a stablecoin (e.g., weex, binance).
+    ///
+    /// Name several venues to see the peg on each: repeat --venue or give a
+    /// comma list (--venue weex,binance). The report has one Market line for
+    /// each venue, in the order given. The summary and the key takeaway use
+    /// the worst peg status, and one sentence says when the venues disagree.
+    /// A venue that fails shows an `unavailable` line and does not stop the
+    /// others. The exit code is not changed by a venue that fails.
+    /// Without --venue, insights checks the default venue and shows nothing
+    /// when it fails. For an address, a transaction, or a token that is not a
+    /// stablecoin, --venue has no effect and insights prints one note.
+    #[arg(long, value_name = "VENUE", value_delimiter = ',')]
+    pub venue: Vec<String>,
 
     /// Health threshold overrides for the stablecoin market check.
     #[command(flatten)]
@@ -129,8 +145,18 @@ pub async fn run(
         }
     }
 
+    // Check the venues first: a bad list fails before any request.
+    let venues = checked_venues(&args.venue)?;
+
     let chain_override = args.chain.as_deref();
     let target = infer_target(&args.target, chain_override);
+    if !venues.is_empty() && !matches!(target, InferredTarget::Token { .. }) {
+        note!(
+            out,
+            "{}",
+            venue_ignored_note(&target_type_label(&target).to_lowercase())
+        );
+    }
 
     let sp = crate::cli::progress::Spinner::new(
         &format!(
@@ -377,8 +403,11 @@ pub async fn run(
             ));
 
             // Stablecoin: auto-include market/peg via venue registry
+            let is_stablecoin = is_stablecoin_symbol(&analytics.token.symbol);
             let mut peg_status: Option<PegStatus> = None;
-            if is_stablecoin_symbol(&analytics.token.symbol)
+            let mut disagreement: Option<String> = None;
+            if venues.is_empty()
+                && is_stablecoin
                 && let Ok(registry) = VenueRegistry::load()
             {
                 // Try the default venue first, fall back to any available CEX
@@ -400,17 +429,32 @@ pub async fn run(
                     peg_status = Some(summary.peg_status());
                     output.push_str(&peg_line(&desc.name, &summary.pair, &summary));
                 }
+            } else if !venues.is_empty() && is_stablecoin {
+                let thresholds = args.health.resolve(config);
+                let source: VenueSource<'_> =
+                    &|name| MarketVenue::from_name_with_http(name, clients.http());
+                let reports = read_token_summaries(&venues, source, &analytics, &thresholds).await;
+                let market = venue_market(&reports);
+                output.push_str(&market.lines);
+                peg_status = market.worst;
+                disagreement = market.disagreement;
+            } else if !venues.is_empty() {
+                note!(out, "{}", venue_ignored_note("non-stablecoin token"));
             }
 
             // Meta analysis
             let top_holder_pct = analytics.holders.first().map(|h| h.percentage);
-            let meta = meta_analysis_token(
+            let mut meta = meta_analysis_token(
                 &risk_summary,
-                is_stablecoin_symbol(&analytics.token.symbol),
+                is_stablecoin,
                 peg_status,
                 top_holder_pct,
                 analytics.liquidity_usd,
             );
+            if let Some(sentence) = disagreement {
+                meta.synthesis.push(' ');
+                meta.synthesis.push_str(&sentence);
+            }
             output.push_str("\n### Synthesis\n\n");
             output.push_str(&format!("{}\n\n", meta.synthesis));
             output.push_str(&format!("**Key takeaway:** {}\n\n", meta.key_takeaway));
@@ -558,6 +602,61 @@ fn peg_line(venue: &str, pair: &str, summary: &MarketSummary) -> String {
         .map(|bps| format!(" (deviation: {bps:.1} bps)"))
         .unwrap_or_default();
     format!("- **Market ({venue} {pair}):** {label}{deviation}\n")
+}
+
+/// The market part of the report for a venue list.
+struct VenueMarket {
+    /// One line for each venue, in the order given.
+    lines: String,
+    /// The worst peg status of the venues that answered; `None` when none did.
+    worst: Option<PegStatus>,
+    /// One sentence, when the venues that answered do not share one status.
+    disagreement: Option<String>,
+}
+
+/// Builds the market lines, the worst peg status and the disagreement
+/// sentence from the reports (design 2026-11-10, section 5.2). A venue that
+/// failed has an `unavailable` line and takes no part in the other two.
+fn venue_market(reports: &[VenueReport]) -> VenueMarket {
+    let mut lines = String::new();
+    let mut statuses: Vec<(&str, PegStatus)> = Vec::new();
+    for r in reports {
+        match &r.result {
+            Ok(summary) => {
+                lines.push_str(&peg_line(&r.venue, &summary.pair, summary));
+                statuses.push((&r.venue, summary.peg_status()));
+            }
+            Err(why) => lines.push_str(&format!(
+                "- **Market ({}):** unavailable: {why}
+",
+                r.venue
+            )),
+        }
+    }
+    let worst = statuses
+        .iter()
+        .map(|(_, status)| *status)
+        .max_by_key(|status| status.severity());
+    let differ = statuses
+        .iter()
+        .any(|(_, status)| Some(*status) != statuses.first().map(|f| f.1));
+    let disagreement = differ.then(|| {
+        let each: Vec<String> = statuses
+            .iter()
+            .map(|(venue, status)| format!("{venue} {}", peg_words(*status).label))
+            .collect();
+        format!("Venues disagree on the peg: {}.", each.join(", "))
+    });
+    VenueMarket {
+        lines,
+        worst,
+        disagreement,
+    }
+}
+
+/// The note for a target that has no market check.
+fn venue_ignored_note(target_type: &str) -> String {
+    format!("--venue ignored: {target_type} has no market check")
 }
 
 /// Meta-analysis: synthesizes observations into an executive summary, key takeaway, and recommendations.
@@ -1307,6 +1406,7 @@ mod tests {
             chain: None,
             decode: false,
             trace: false,
+            venue: Vec::new(),
             health: Default::default(),
         };
         let result = run(args, &config, &factory, &quiet()).await;
@@ -1323,6 +1423,7 @@ mod tests {
             chain: None,
             decode: false,
             trace: false,
+            venue: Vec::new(),
             health: Default::default(),
         };
         let result = run(args, &config, &factory, &quiet()).await;
@@ -1340,6 +1441,7 @@ mod tests {
             chain: None,
             decode: false,
             trace: false,
+            venue: Vec::new(),
             health: Default::default(),
         };
         let result = run(args, &config, &factory, &quiet()).await;
@@ -1357,6 +1459,7 @@ mod tests {
             chain: Some("ethereum".to_string()),
             decode: true,
             trace: false,
+            venue: Vec::new(),
             health: Default::default(),
         };
         let result = run(args, &config, &factory, &quiet()).await;
@@ -1373,6 +1476,7 @@ mod tests {
             chain: Some("polygon".to_string()),
             decode: false,
             trace: false,
+            venue: Vec::new(),
             health: Default::default(),
         };
         let result = run(args, &config, &factory, &quiet()).await;
@@ -1389,6 +1493,7 @@ mod tests {
             chain: Some("ethereum".to_string()),
             decode: false,
             trace: false,
+            venue: Vec::new(),
             health: Default::default(),
         };
         let (out, cap) = crate::cli::output::Output::capture();
@@ -1410,6 +1515,7 @@ mod tests {
             chain: Some("ethereum".to_string()),
             decode: false,
             trace: false,
+            venue: Vec::new(),
             health: Default::default(),
         };
         let result = run(args, &config, &factory, &quiet()).await;
@@ -2156,6 +2262,7 @@ mod tests {
             chain: Some("ethereum".to_string()),
             decode: true,
             trace: false,
+            venue: Vec::new(),
             health: Default::default(),
         };
         let debug_str = format!("{:?}", args);
@@ -2465,5 +2572,426 @@ mod tests {
                 .iter()
                 .any(|r| r.contains("spender") || r.contains("allowance"))
         );
+    }
+
+    // ====================================================================
+    // --venue as a list (design 2026-11-10, section 5)
+    // ====================================================================
+
+    fn report_of(venue: &str, result: std::result::Result<MarketSummary, &str>) -> VenueReport {
+        VenueReport {
+            venue: venue.to_string(),
+            tokens: Vec::new(),
+            result: result.map_err(str::to_string),
+        }
+    }
+
+    /// A summary with each peg status: on the peg, 0.5% off (slight), 5% off.
+    fn on_peg() -> MarketSummary {
+        summary_with_peg(1.0, Some(1.0))
+    }
+    fn slight() -> MarketSummary {
+        summary_with_peg(1.0, Some(1.0035))
+    }
+    fn deviating() -> MarketSummary {
+        summary_with_peg(1.0, Some(1.05))
+    }
+
+    #[test]
+    fn the_worst_peg_status_wins_because_one_bad_venue_is_the_news() {
+        // A healthy venue must not hide a depeg on another one.
+        let market = venue_market(&[
+            report_of("weex", Ok(on_peg())),
+            report_of("binance", Ok(deviating())),
+            report_of("mexc", Ok(slight())),
+        ]);
+        assert_eq!(market.worst, Some(PegStatus::Deviation));
+        let flipped = venue_market(&[
+            report_of("binance", Ok(deviating())),
+            report_of("weex", Ok(on_peg())),
+        ]);
+        assert_eq!(flipped.worst, Some(PegStatus::Deviation), "order is not it");
+        let book_off = {
+            let mut s = on_peg();
+            s.healthy = false;
+            s
+        };
+        let no_price = summary_with_peg(1.0, None);
+        assert_eq!(
+            venue_market(&[report_of("a", Ok(no_price)), report_of("b", Ok(book_off)),]).worst,
+            Some(PegStatus::BookUnhealthy),
+            "failing checks are worse than a missing price"
+        );
+    }
+
+    #[test]
+    fn a_failed_venue_takes_no_part_in_the_choice_of_the_peg_status() {
+        // A venue that did not answer says nothing about the peg. It must
+        // not turn a healthy peg into a bad one, and it must not hide one.
+        let healthy = venue_market(&[
+            report_of("nowhere", Err("Unknown venue")),
+            report_of("weex", Ok(on_peg())),
+        ]);
+        assert_eq!(healthy.worst, Some(PegStatus::OnPeg));
+        assert!(healthy.disagreement.is_none(), "one answer, no dispute");
+        let bad = venue_market(&[
+            report_of("weex", Ok(deviating())),
+            report_of("nowhere", Err("Unknown venue")),
+        ]);
+        assert_eq!(bad.worst, Some(PegStatus::Deviation));
+        let none = venue_market(&[report_of("a", Err("down")), report_of("b", Err("down"))]);
+        assert_eq!(none.worst, None, "no venue answered: no status, as today");
+        assert!(none.disagreement.is_none());
+    }
+
+    #[test]
+    fn each_venue_has_a_line_in_order_and_a_failed_one_says_why() {
+        let market = venue_market(&[
+            report_of("weex", Ok(on_peg())),
+            report_of("nowhere", Err("Unknown venue \"nowhere\"")),
+            report_of("binance", Ok(deviating())),
+        ]);
+        let lines: Vec<&str> = market.lines.lines().collect();
+        assert_eq!(lines.len(), 3, "{}", market.lines);
+        assert!(lines[0].starts_with("- **Market (weex X/USDT):** Peg healthy"));
+        assert_eq!(
+            lines[1],
+            "- **Market (nowhere):** unavailable: Unknown venue \"nowhere\""
+        );
+        assert!(lines[2].starts_with("- **Market (binance X/USDT):** Peg deviation"));
+    }
+
+    #[test]
+    fn the_disagreement_sentence_appears_only_when_the_statuses_differ() {
+        let differ = venue_market(&[
+            report_of("weex", Ok(on_peg())),
+            report_of("binance", Ok(deviating())),
+        ]);
+        assert_eq!(
+            differ.disagreement.as_deref(),
+            Some("Venues disagree on the peg: weex Peg healthy, binance Peg deviation.")
+        );
+        let agree = venue_market(&[
+            report_of("weex", Ok(deviating())),
+            report_of("binance", Ok(deviating())),
+        ]);
+        assert!(agree.disagreement.is_none());
+        let one = venue_market(&[report_of("weex", Ok(on_peg()))]);
+        assert!(one.disagreement.is_none());
+    }
+
+    #[test]
+    fn the_worst_status_drives_the_synthesis_and_the_takeaway() {
+        let risk = report::TokenRiskSummary {
+            score: 3,
+            level: "Low",
+            emoji: "🟢",
+            concerns: vec![],
+            positives: vec![],
+        };
+        let market = venue_market(&[
+            report_of("weex", Ok(on_peg())),
+            report_of("binance", Ok(deviating())),
+        ]);
+        let meta = meta_analysis_token(&risk, true, market.worst, None, 5_000_000.0);
+        assert!(
+            meta.synthesis.contains("deviation detected"),
+            "{}",
+            meta.synthesis
+        );
+        assert!(!meta.synthesis.contains("healthy on observed venue"));
+        assert!(meta.key_takeaway.contains("deviating from peg"));
+    }
+
+    // ---- through `run` ----
+
+    use scope::chains::mocks::MockClientFactory;
+
+    const STABLE_CONTRACT: &str = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
+
+    /// A factory whose DEX data is a stablecoin with one deep pool on
+    /// ethereum, so the DEX venues `eth` and `ethereum` can read it.
+    fn stablecoin_factory() -> MockClientFactory {
+        let mut factory = MockClientFactory::new();
+        factory.mock_dex.token_data = Some(
+            crate::cli::token_health::tests::make_test_dex_token_data(vec![
+                crate::cli::token_health::tests::pair_with_liquidity(90_000.0),
+            ]),
+        );
+        factory
+    }
+
+    fn stablecoin_args(venues: &[&str]) -> InsightsArgs {
+        InsightsArgs {
+            target: "USDC".to_string(),
+            token_contract: Some(STABLE_CONTRACT.to_string()),
+            chain: None,
+            decode: false,
+            trace: false,
+            venue: venues.iter().map(|v| v.to_string()).collect(),
+            health: Default::default(),
+        }
+    }
+
+    /// The data and the notes of a run.
+    async fn run_captured(
+        args: InsightsArgs,
+        factory: &dyn ChainClientFactory,
+    ) -> (scope::error::Result<()>, String, String) {
+        let (out, cap) = crate::cli::output::Output::capture();
+        let result = run(args, &Config::default(), factory, &out).await;
+        (
+            result,
+            crate::cli::ansi::strip(&cap.out()),
+            crate::cli::ansi::strip(&cap.err()),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_venue_list_gives_a_market_line_each_and_a_failed_venue_is_shown() {
+        // Without --venue a failure is silent. With it, the user asked for
+        // that venue, so the report says it did not answer.
+        let (result, text, _) = run_captured(
+            stablecoin_args(&["nowhere", "eth", "ethereum"]),
+            &stablecoin_factory(),
+        )
+        .await;
+        result.expect("a venue that fails does not fail the report");
+        let at = |needle: &str| {
+            text.find(needle)
+                .unwrap_or_else(|| panic!("{needle}\n{text}"))
+        };
+        let (a, b, c) = (
+            at("- **Market (nowhere):** unavailable: "),
+            at("- **Market (eth "),
+            at("- **Market (ethereum "),
+        );
+        assert!(a < b && b < c, "the order given\n{text}");
+        assert!(text.contains("### Synthesis"), "the report goes on\n{text}");
+    }
+
+    #[tokio::test]
+    async fn with_every_venue_failing_the_report_still_prints_without_a_peg_status() {
+        let (result, text, _) = run_captured(
+            stablecoin_args(&["nowhere", "alsonowhere"]),
+            &stablecoin_factory(),
+        )
+        .await;
+        result.unwrap();
+        assert!(text.contains("unavailable"), "{text}");
+        assert!(
+            !text.contains("Stablecoin peg"),
+            "no venue answered, so no verdict on the peg\n{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bad_venue_list_is_an_error_before_any_request() {
+        for (list, why) in [
+            (vec!["eth", "ETH"], "listed twice"),
+            (vec!["eth", " "], "empty venue name"),
+        ] {
+            let (result, text, _) =
+                run_captured(stablecoin_args(&list), &stablecoin_factory()).await;
+            let err = result.unwrap_err().to_string();
+            assert!(err.contains(why), "{list:?}: {err}");
+            assert!(text.is_empty(), "nothing printed: {text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn venue_on_a_target_with_no_market_check_prints_one_note_and_reads_nothing() {
+        // `nowhere` would show an `unavailable` line if insights asked for
+        // it, so its absence shows that no market was requested.
+        let mut address = InsightsArgs {
+            target: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            ..stablecoin_args(&["nowhere"])
+        };
+        address.token_contract = None;
+        let (result, text, notes) = run_captured(address, &MockFactory).await;
+        result.expect("it does not fail");
+        assert_eq!(
+            notes
+                .matches("--venue ignored: address has no market check")
+                .count(),
+            1,
+            "{notes}"
+        );
+        assert!(!text.contains("Market ("), "{text}");
+
+        let tx = InsightsArgs {
+            target: "0xabc123def456789012345678901234567890123456789012345678901234abcd"
+                .to_string(),
+            token_contract: None,
+            ..stablecoin_args(&["nowhere"])
+        };
+        let (result, text, notes) = run_captured(tx, &MockFactory).await;
+        result.unwrap();
+        assert!(
+            notes.contains("--venue ignored: transaction has no market check"),
+            "{notes}"
+        );
+        assert!(!text.contains("Market ("), "{text}");
+
+        // A token that is not a stablecoin has no peg to check.
+        let token = InsightsArgs {
+            target: "TEST".to_string(),
+            token_contract: None,
+            chain: Some("ethereum".to_string()),
+            ..stablecoin_args(&["nowhere"])
+        };
+        let (result, text, notes) = run_captured(token, &MockTokenFactory).await;
+        result.unwrap();
+        assert!(
+            notes.contains("--venue ignored: non-stablecoin token has no market check"),
+            "{notes}"
+        );
+        assert!(!text.contains("Market ("), "{text}");
+    }
+
+    #[tokio::test]
+    async fn without_venue_there_is_no_note_and_the_default_path_is_untouched() {
+        let address = InsightsArgs {
+            target: "0x742d35Cc6634C0532925a3b844Bc9e7595f1b3c2".to_string(),
+            token_contract: None,
+            ..stablecoin_args(&[])
+        };
+        let (result, _, notes) = run_captured(address, &MockFactory).await;
+        result.unwrap();
+        assert!(!notes.contains("--venue ignored"), "{notes}");
+    }
+
+    #[test]
+    fn the_venue_flag_repeats_or_takes_a_comma_list_and_has_no_default() {
+        use clap::Parser;
+        let parse = |line: &str| {
+            let argv = std::iter::once("scope").chain(line.split_whitespace());
+            match crate::cli::Cli::try_parse_from(argv).unwrap().command {
+                crate::cli::Commands::Insights(a) => a.venue,
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(
+            parse("insights USDC --venue weex --venue binance"),
+            ["weex", "binance"]
+        );
+        assert_eq!(
+            parse("insights USDC --venue weex,binance"),
+            ["weex", "binance"]
+        );
+        assert!(
+            parse("insights USDC").is_empty(),
+            "no default: the registry path stays"
+        );
+    }
+
+    #[test]
+    fn the_help_names_the_list_form_and_what_a_failure_does() {
+        use clap::CommandFactory;
+        let cli = crate::cli::Cli::command();
+        let help = cli
+            .find_subcommand("insights")
+            .unwrap()
+            .clone()
+            .render_long_help()
+            .to_string();
+        assert!(help.contains("--venue weex,binance"), "{help}");
+        assert!(help.contains("worst peg status"), "{help}");
+        assert!(help.contains("exit code is not changed"), "{help}");
+    }
+
+    // Offline transport: serves a fixed binance book and ticker, fails the rest.
+    struct OfflineHttp;
+
+    #[async_trait]
+    impl scope::http::HttpClient for OfflineHttp {
+        async fn send(
+            &self,
+            request: scope::http::Request,
+        ) -> scope::error::Result<scope::http::Response> {
+            let level =
+                |price: f64, i: usize| format!(r#"["{:.5}","{}"]"#, price, 40_000 + i * 997);
+            let body = if request.url.contains("/depth") {
+                let bids: Vec<String> = (0..20)
+                    .map(|i| level(0.9999 - i as f64 * 0.0001, i))
+                    .collect();
+                let asks: Vec<String> = (0..20)
+                    .map(|i| level(1.0001 + i as f64 * 0.0001, i))
+                    .collect();
+                format!(
+                    r#"{{"bids":[{}],"asks":[{}]}}"#,
+                    bids.join(","),
+                    asks.join(",")
+                )
+            } else if request.url.contains("ticker/24hr") {
+                r#"{"lastPrice":"1.0000","quoteVolume":"125000"}"#.to_string()
+            } else {
+                return Err(scope::error::ScopeError::Other("offline".to_string()));
+            };
+            Ok(scope::http::Response {
+                status_code: 200,
+                headers: Default::default(),
+                body,
+            })
+        }
+    }
+
+    struct OfflineFactory(scope::chains::mocks::MockClientFactory);
+
+    impl ChainClientFactory for OfflineFactory {
+        fn create_chain_client(&self, chain: &str) -> scope::error::Result<Box<dyn ChainClient>> {
+            self.0.create_chain_client(chain)
+        }
+        fn create_dex_client(&self) -> Box<dyn DexDataSource> {
+            self.0.create_dex_client()
+        }
+        fn http(&self) -> std::sync::Arc<dyn scope::http::HttpClient> {
+            std::sync::Arc::new(OfflineHttp)
+        }
+    }
+
+    /// The report of `insights USDC` without `--venue`, on the offline factory.
+    async fn insights_without_venue() -> String {
+        let mut factory = scope::chains::mocks::MockClientFactory::new();
+        factory.mock_dex.token_data = Some(
+            crate::cli::token_health::tests::make_test_dex_token_data(vec![
+                crate::cli::token_health::tests::pair_with_liquidity(90_000.0),
+            ]),
+        );
+        let args = InsightsArgs {
+            target: "USDC".to_string(),
+            token_contract: Some("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string()),
+            chain: None,
+            decode: false,
+            trace: false,
+            venue: Vec::new(),
+            health: Default::default(),
+        };
+        let (out, cap) = crate::cli::output::Output::capture();
+        run(args, &Config::default(), &OfflineFactory(factory), &out)
+            .await
+            .unwrap();
+        crate::cli::ansi::strip(&cap.out())
+    }
+
+    /// The bytes `develop` printed for `insights USDC` with no `--venue`, with
+    /// these mocks (an offline transport that serves a fixed binance book).
+    /// `tests/fixtures/venue_list/insights_no_venue.md` was captured from
+    /// `develop` at commit c09a5640c164, before `--venue` existed, by running
+    /// the same input through that commit's code. The code under test did not
+    /// render it, so a change of the no-flag path (registry fallback, one
+    /// `Market` line, report text) fails this test.
+    #[tokio::test]
+    async fn without_venue_the_report_is_byte_for_byte_what_develop_printed() {
+        let fixture = include_str!("../../tests/fixtures/venue_list/insights_no_venue.md");
+        let fixture = fixture.replace("\r\n", "\n");
+        let text = insights_without_venue().await;
+        assert!(
+            text.contains("- **Market (Binance Spot USDC/USDT):**"),
+            "{text}"
+        );
+        // The report names its time and the scope version; both are masked.
+        use crate::cli::token_health::tests::mask_run_details;
+        assert_eq!(mask_run_details(&text), mask_run_details(&fixture));
     }
 }

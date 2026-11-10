@@ -2372,7 +2372,7 @@ mod tests {
     async fn test_monitor_opens_the_wizard_filled_from_the_arguments() {
         let _lock = DIAG_LOCK.lock().await;
         let (res, state, host, _) = drive(script(&[
-            "monitor USDN --venue weex --every 30s --duration 1h --layout feed",
+            "monitor USDN --venue weex --every 30s --duration 1h --export x.csv",
         ]))
         .await;
         res.unwrap();
@@ -2388,7 +2388,7 @@ mod tests {
         let screen = screen_text(&host);
         assert!(screen.contains("monitor wizard"), "{screen}");
         assert!(screen.contains("[x] market health"), "{screen}");
-        assert!(screen.contains("--layout has no effect"), "{screen}");
+        assert!(screen.contains("--export is now --csv"), "{screen}");
     }
 
     #[tokio::test]

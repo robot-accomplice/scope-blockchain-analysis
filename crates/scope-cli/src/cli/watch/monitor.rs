@@ -8,11 +8,31 @@ use scope::watch::time::{is_until_cancelled, parse_duration};
 use scope::watch::{Op, Preset, Rule, Target, TargetKind, Watchlist};
 use std::time::Duration;
 
-/// The note for a dashboard-only flag the wizard does not use.
-fn ignored(flag: &str) -> String {
-    format!(
-        "{flag} has no effect: the watchlist grid has no layouts. Use `--dashboard` for the old dashboard (deprecated)."
-    )
+/// The interval of an `--every` value (`30s`, `5m`). `scope monitor` and
+/// `scope watch` both read the flag through this function.
+///
+/// # Errors
+///
+/// A value that does not parse. The text names the flag.
+pub fn parse_interval(every: &str) -> Result<Duration, String> {
+    parse_duration(every)
+        .map(Duration::from_secs)
+        .map_err(|e| format!("--every: {e}"))
+}
+
+/// The length of a run from a `--duration` value: `None` for `forever`.
+/// Read by `scope monitor` and `scope watch`, like [`parse_interval`].
+///
+/// # Errors
+///
+/// A value that does not parse. The text names the flag.
+pub fn parse_run_duration(duration: &str) -> Result<Option<Duration>, String> {
+    if is_until_cancelled(duration) {
+        return Ok(None);
+    }
+    parse_duration(duration)
+        .map(|secs| Some(Duration::from_secs(secs)))
+        .map_err(|e| format!("--duration: {e}"))
 }
 
 /// The watchlist the monitor arguments describe, with the notes the user
@@ -33,8 +53,7 @@ pub fn watchlist_from_args(
             .unwrap_or_else(|| format!("monitor-{}", args.token.to_lowercase())),
     );
     if let Some(every) = &w.every {
-        list.interval =
-            Duration::from_secs(parse_duration(every).map_err(|e| format!("--every: {e}"))?);
+        list.interval = parse_interval(every)?;
     } else if let Some(secs) = args.refresh {
         if secs == 0 {
             return Err("--refresh must be at least 1 second".to_string());
@@ -42,13 +61,7 @@ pub fn watchlist_from_args(
         list.interval = Duration::from_secs(secs);
     }
     if let Some(d) = &w.duration {
-        list.duration = if is_until_cancelled(d) {
-            None
-        } else {
-            Some(Duration::from_secs(
-                parse_duration(d).map_err(|e| format!("--duration: {e}"))?,
-            ))
-        };
+        list.duration = parse_run_duration(d)?;
     }
     list.outputs.csv = w.csv.clone().or_else(|| args.export.clone());
     list.outputs.report = w.report.clone();
@@ -145,15 +158,6 @@ pub fn watchlist_from_args(
                 .to_string(),
         );
     }
-    for (set, flag) in [
-        (args.layout.is_some(), "--layout"),
-        (args.scale.is_some(), "--scale"),
-        (args.color_scheme.is_some(), "--color-scheme"),
-    ] {
-        if set {
-            notes.push(ignored(flag));
-        }
-    }
     if args.export.is_some() && w.csv.is_none() {
         notes.push("--export is now --csv: it writes one row per check per run.".to_string());
     }
@@ -180,6 +184,30 @@ mod tests {
             panic!("not monitor")
         };
         watchlist_from_args(&args, config)
+    }
+
+    // `scope monitor` and `scope watch` share these two functions, so a
+    // value means the same in both commands.
+    #[test]
+    fn the_timing_flags_have_one_parser() {
+        assert_eq!(parse_interval("30s"), Ok(Duration::from_secs(30)));
+        assert_eq!(
+            parse_run_duration("1h"),
+            Ok(Some(Duration::from_secs(3600)))
+        );
+        assert_eq!(parse_run_duration("forever"), Ok(None));
+        assert!(parse_interval("0s").unwrap_err().starts_with("--every:"));
+        assert!(
+            parse_run_duration("soon")
+                .unwrap_err()
+                .starts_with("--duration:")
+        );
+        // `scope monitor` gives the same list as the functions.
+        let w = from("monitor USDC --venue binance --every 5m --duration 2d")
+            .unwrap()
+            .0;
+        assert_eq!(Some(w.interval), parse_interval("5m").ok());
+        assert_eq!(w.duration, parse_run_duration("2d").unwrap());
     }
 
     #[test]
@@ -267,14 +295,10 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_flags_give_one_note_each_and_export_is_the_csv() {
-        let (w, notes) = from(
-            "monitor USDC --venue binance --layout chart-focus --scale log --color-scheme monochrome --export x.csv",
-        )
-        .unwrap();
-        assert_eq!(notes.len(), 4, "{notes:?}");
-        assert!(notes[0].starts_with("--layout has no effect"));
-        assert!(notes[3].contains("--export is now --csv"));
+    fn export_is_the_csv_and_says_so() {
+        let (w, notes) = from("monitor USDC --venue binance --export x.csv").unwrap();
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("--export is now --csv"));
         assert_eq!(
             w.outputs.csv.as_deref(),
             Some(std::path::Path::new("x.csv"))

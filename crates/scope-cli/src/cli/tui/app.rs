@@ -11,7 +11,8 @@ use super::fit;
 use super::grid::{self, GridAction, GridMsg, GridState};
 use super::journal::{Event, Journal};
 use super::market_view;
-use super::repeat_view::{self, Ended, RepeatView};
+use super::repeat_view::{self, Ended, RepeatView, VenueSel};
+use super::venue_charts::Selection;
 use super::vocab::Vocab;
 use super::wizard::{self, WizardAction, WizardState};
 use crate::cli::interactive::SessionContext;
@@ -330,6 +331,9 @@ pub struct TuiState {
     repeat_view: Option<RepeatView>,
     /// The series of the last repeating command, for `save x.csv`.
     last_series: Option<SeriesHook>,
+    /// What the keys select in the venue charts of a repeat on two or more
+    /// venues.
+    venue_sel: VenueSel,
     /// The event log.
     journal: Journal,
     /// Completion values from the user's stores.
@@ -389,6 +393,7 @@ impl TuiState {
             cleared: None,
             repeat_view: None,
             last_series: None,
+            venue_sel: VenueSel::default(),
             journal,
             vocab,
             overlay: None,
@@ -461,6 +466,9 @@ impl TuiState {
         }
         if self.grid_shown && !self.too_small.get() {
             return self.grid_key(key);
+        }
+        if self.venue_chart_key(key) {
+            return Action::None;
         }
         // A finished repeating view stays until the next key. That key
         // leaves it and then does its normal job, so typing goes on.
@@ -1715,6 +1723,7 @@ impl TuiState {
         let diag = scope::diag::redirect(captured.out_sink());
         self.failed = false;
         self.last_series = None;
+        self.venue_sel = VenueSel::default();
         self.running = Some(Running {
             input: input.to_string(),
             argv: inv.argv.clone(),
@@ -1802,6 +1811,7 @@ impl TuiState {
                 self.last_series = Some(series.clone());
                 self.repeat_view = Some(RepeatView {
                     series,
+                    venues: self.venue_sel.clone(),
                     ended: Some(Ended {
                         text: footer,
                         style,
@@ -1875,11 +1885,46 @@ impl TuiState {
             let series = run.series.as_ref().filter(|s| repeat_view::has_runs(s))?;
             return Some(RepeatView {
                 series: series.clone(),
+                venues: self.venue_sel.clone(),
                 ended: None,
                 pending: String::new(),
             });
         }
-        self.repeat_view.clone()
+        let mut view = self.repeat_view.clone()?;
+        view.venues = self.venue_sel.clone();
+        Some(view)
+    }
+
+    /// A key of the venue charts of a repeat on two or more venues, the
+    /// same keys as the watch grid. Only with an empty input line, so
+    /// typing is not lost; the key does not leave a finished view.
+    fn venue_chart_key(&mut self, key: KeyEvent) -> bool {
+        if !self.input.is_empty()
+            || self.overlay.is_some()
+            || key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            || !Selection::is_key(key.code)
+        {
+            return false;
+        }
+        let Some(view) = self.active_view() else {
+            return false;
+        };
+        let Some(charts) = repeat_view::venue_charts(&view.series) else {
+            return false;
+        };
+        let page = view
+            .venues
+            .page_size
+            .load(std::sync::atomic::Ordering::Relaxed);
+        self.venue_sel.sel.apply(
+            key.code,
+            charts.charts[0].series.len(),
+            charts.charts.len(),
+            page,
+        );
+        true
     }
 
     /// Keeps the data of a successful run for Ctrl-Y and `save`. The copy
@@ -3012,9 +3057,177 @@ mod tests {
                     },
                     snapshot: format!("SNAPSHOT {run}\n"),
                     view: None,
+                    venues: None,
                 },
             );
         }
+    }
+
+    /// Starts a pane command and hands it `n` runs of `market summary
+    /// --venue weex,binance --every`, as `repeat::run` does in the TUI.
+    /// The mid of binance sits 0.0003 above weex's.
+    fn repeating_on_two_venues(s: &mut TuiState, n: u64) {
+        use crate::cli::output::{RunRecord, VenueRun, VenueSample};
+        let inv = Invocation {
+            command: venues_list(),
+            route: Route::Pane,
+            ai: false,
+            argv: vec![],
+        };
+        let out = s.start("market summary USDC --venue weex,binance --every 1s", &inv);
+        let metrics = scope::metrics::summary_metrics(&scope::market::HealthThresholds::default());
+        for run in 1..=n {
+            let sample = |venue: &str, offset: f64| VenueSample {
+                venue: venue.to_string(),
+                sample: scope::metrics::Sample {
+                    values: metrics
+                        .iter()
+                        .map(|m| {
+                            Some(match m.id {
+                                scope::metrics::MetricId::Mid => {
+                                    1.0 + offset + (run % 4) as f64 * 0.0001
+                                }
+                                _ => 10.0 + run as f64 + offset * 1000.0,
+                            })
+                        })
+                        .collect(),
+                    healthy: true,
+                    failed_checks: vec![],
+                },
+                error: None,
+            };
+            out.record_run(
+                &metrics,
+                RunRecord {
+                    run,
+                    at: Utc::now() + chrono::TimeDelta::seconds(run as i64),
+                    sample: scope::metrics::Sample {
+                        values: vec![None; metrics.len()],
+                        healthy: true,
+                        failed_checks: vec![],
+                    },
+                    snapshot: format!("SNAPSHOT {run}\n"),
+                    view: None,
+                    venues: Some(std::sync::Arc::new(VenueRun {
+                        samples: vec![sample("weex", 0.0), sample("binance", 0.0003)],
+                        comparison: "COMPARISON TABLE\n".to_string(),
+                    })),
+                },
+            );
+        }
+    }
+
+    fn is_braille(text: &str) -> bool {
+        text.chars().any(|c| ('\u{2801}'..='\u{28FF}').contains(&c))
+    }
+
+    #[test]
+    fn test_a_repeat_on_two_venues_draws_the_venue_charts_of_the_watch_grid() {
+        // Design 2026-11-09, decision 3: the same charts, not a copy.
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let mut s = state();
+        repeating_on_two_venues(&mut s, 12);
+        for (w, h) in [(120, 36), (80, 24)] {
+            let text = screen(&s, w, h);
+            assert!(text.contains("COMPARISON TABLE"), "{w}x{h}\n{text}");
+            assert!(text.contains(" venues: Mid price "), "{w}x{h}\n{text}");
+            assert!(
+                is_braille(&text),
+                "a braille line per venue: {w}x{h}\n{text}"
+            );
+            let all = text.lines().find(|l| l.contains("  all  ")).unwrap();
+            assert!(all.contains("1.0003–1.0006") || all.contains("–"), "{all}");
+            assert!(text.lines().any(|l| l.contains("> ■ weex")), "{text}");
+            assert!(text.lines().any(|l| l.contains("  ■ binance")), "{text}");
+            assert!(!text.contains("Trends"), "not the one-venue view: {text}");
+        }
+        s.finish(Ending::Cancelled);
+    }
+
+    #[test]
+    fn test_the_watch_grid_keys_work_in_the_repeat_view_and_do_not_leave_it() {
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let mut s = state();
+        repeating_on_two_venues(&mut s, 12);
+        s.finish(Ending::Cancelled);
+        let first_chart = |t: &str| {
+            t.lines()
+                .find(|l| l.contains(" venues: "))
+                .unwrap()
+                .to_string()
+        };
+        let title = first_chart(&screen(&s, 120, 36));
+        // Right selects the next venue.
+        s.handle_key(key(KeyCode::Right));
+        assert!(
+            screen(&s, 120, 36)
+                .lines()
+                .any(|l| l.contains("> ■ binance")),
+            "the second venue is selected"
+        );
+        // Space isolates it: bars, not braille.
+        s.handle_key(key(KeyCode::Char(' ')));
+        let isolated = screen(&s, 120, 36);
+        assert!(!is_braille(&isolated), "one venue is bars\n{isolated}");
+        s.handle_key(key(KeyCode::Char(' ')));
+        assert!(is_braille(&screen(&s, 120, 36)), "all venues again");
+        // Tab shows the next chart's values in the legend.
+        s.handle_key(key(KeyCode::Tab));
+        assert_ne!(first_chart(&screen(&s, 120, 36)), title);
+        // The finished view is still on screen: these keys did not leave it.
+        assert!(screen(&s, 120, 36).contains(repeat_view::LEAVE_HINT));
+        assert_eq!(s.input, "");
+        // Any other key leaves the view and types, as before.
+        s.handle_key(key(KeyCode::Char('x')));
+        assert_eq!(s.input, "x");
+        assert!(!screen(&s, 120, 36).contains(" venues: "));
+    }
+
+    #[test]
+    fn test_typing_is_not_lost_to_the_chart_keys() {
+        // With text on the input line, Space and the arrows edit the line.
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let mut s = state();
+        repeating_on_two_venues(&mut s, 12);
+        type_str(&mut s, "ab");
+        s.handle_key(key(KeyCode::Char(' ')));
+        s.handle_key(key(KeyCode::Left));
+        assert_eq!(s.input, "ab ", "Space typed");
+        assert_eq!(s.cursor, 2, "Left moved the cursor");
+        assert!(screen(&s, 120, 36).lines().any(|l| l.contains("> ■ weex")));
+        s.finish(Ending::Cancelled);
+    }
+
+    #[test]
+    fn test_a_window_too_small_for_the_venue_charts_says_how_much_to_enlarge_it() {
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let mut s = state();
+        repeating_on_two_venues(&mut s, 12);
+        let text = screen(&s, 90, 12);
+        let flat = text.lines().map(str::trim).collect::<Vec<_>>().join(" ");
+        assert!(flat.contains("Window too small: enlarge it"), "{text}");
+        assert!(flat.contains("the venue charts"), "{text}");
+        s.finish(Ending::Cancelled);
+    }
+
+    #[test]
+    fn test_save_csv_after_a_repeat_on_two_venues_has_a_row_per_venue() {
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let mut s = state();
+        repeating_on_two_venues(&mut s, 2);
+        s.finish(Ending::Finished(Ok(())));
+        let csv = s
+            .last_series
+            .as_ref()
+            .and_then(repeat_view::series_csv)
+            .unwrap();
+        let lines: Vec<&str> = csv.lines().collect();
+        assert!(lines[0].starts_with("timestamp,run,venue,"), "{csv}");
+        assert_eq!(lines.len(), 5, "header and a row per venue and run: {csv}");
+        assert!(
+            lines[1].contains(",1,weex,") && lines[2].contains(",1,binance,"),
+            "{csv}"
+        );
     }
 
     #[test]

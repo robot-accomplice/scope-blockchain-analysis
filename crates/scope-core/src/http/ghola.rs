@@ -234,6 +234,8 @@ pub fn adopt_sidecar(child: Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use crate::http::test_stub::{retry_while_busy, script};
 
     #[test]
     fn test_bridge_request_serialization() {
@@ -355,30 +357,10 @@ mod tests {
         assert_eq!(stop_spawned_sidecar(), None);
     }
 
-    /// [`start_sidecar`], retried while Linux says the fake script is
-    /// busy: another test thread that forks while the script is still open
-    /// for writing holds it (ETXTBSY) for a moment.
+    /// [`start_sidecar`], retried while Linux says the fake script is busy.
     #[cfg(unix)]
     fn start_retrying(ghola: &Path, timeout: Duration) -> Result<u32, ScopeError> {
-        for _ in 0..50 {
-            match start_sidecar(ghola, timeout) {
-                Err(e) if e.to_string().contains("Text file busy") => {
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                other => return other,
-            }
-        }
-        start_sidecar(ghola, timeout)
-    }
-
-    /// An executable `sh` script that stands in for `ghola --serve`.
-    #[cfg(unix)]
-    fn fake_ghola(dir: &Path, body: &str) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        let path = dir.join("ghola");
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        path
+        retry_while_busy(|| start_sidecar(ghola, timeout))
     }
 
     #[cfg(unix)]
@@ -390,7 +372,7 @@ mod tests {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
-        let ghola = fake_ghola(dir.path(), "[ \"$1\" = --serve ] && exit 3");
+        let ghola = script(dir.path(), "ghola", "[ \"$1\" = --serve ] && exit 3");
         let err = start_retrying(&ghola, Duration::from_secs(10)).unwrap_err();
         assert!(err.to_string().contains("exited"), "{err}");
         assert_eq!(spawned_sidecar(), None);
@@ -405,7 +387,7 @@ mod tests {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
-        let ghola = fake_ghola(dir.path(), "exec sleep 60");
+        let ghola = script(dir.path(), "ghola", "exec sleep 60");
         let started = Instant::now();
         let err = start_retrying(&ghola, Duration::from_millis(300)).unwrap_err();
         assert!(err.to_string().contains("did not answer"), "{err}");
@@ -423,7 +405,7 @@ mod tests {
             return;
         };
         let dir = tempfile::tempdir().unwrap();
-        let ghola = fake_ghola(dir.path(), "exec sleep 60");
+        let ghola = script(dir.path(), "ghola", "exec sleep 60");
         let pid = start_retrying(&ghola, Duration::from_secs(5)).unwrap();
         assert_eq!(spawned_sidecar(), Some(pid));
         assert_eq!(stop_spawned_sidecar(), Some(pid));

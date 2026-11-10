@@ -8,6 +8,7 @@
 //! The TUI's monitor wizard and grid drive these functions.
 
 pub mod fetch;
+pub mod headless;
 pub mod monitor;
 pub mod run;
 
@@ -35,6 +36,24 @@ pub fn venue_ids() -> Vec<String> {
     scope::market::VenueRegistry::load()
         .map(|r| r.list().into_iter().map(str::to_string).collect())
         .unwrap_or_default()
+}
+
+/// True when `arg` names a watchlist file: it ends in `.yaml` or has a path
+/// separator. Else it is the name of a saved watchlist.
+pub fn is_watchlist_path(arg: &str) -> bool {
+    arg.ends_with(&format!(".{}", scope::watch::file::EXTENSION))
+        || arg.contains(['/', std::path::MAIN_SEPARATOR])
+}
+
+/// The file of a watchlist `arg`: itself when it is a path (see
+/// [`is_watchlist_path`]), else the saved list of that name in `dir`. The
+/// TUI session command and `scope watch` both read the argument this way.
+pub fn watchlist_path(arg: &str, dir: &std::path::Path) -> std::path::PathBuf {
+    if is_watchlist_path(arg) {
+        std::path::PathBuf::from(arg)
+    } else {
+        scope::watch::file::path_in(dir, arg)
+    }
 }
 
 /// A watchlist ready to run.
@@ -104,4 +123,29 @@ async fn resolve_token(t: &mut Target, src: Sources<'_>, out: &Output) -> Result
         t.chain = Some(r.chain);
     }
     Ok(r.address.unwrap_or_else(|| t.id.clone()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    // The TUI session command and `scope watch` read the argument with the
+    // same function, so a name or a path means the same in both.
+    #[test]
+    fn a_name_is_in_the_folder_and_a_yaml_or_separator_is_a_path() {
+        let dir = Path::new("lists");
+        assert_eq!(
+            watchlist_path("pegs", dir),
+            scope::watch::file::path_in(dir, "pegs")
+        );
+        for path in ["pegs.yaml", "./pegs", "sub/pegs", "C:/x/pegs"] {
+            assert_eq!(watchlist_path(path, dir), Path::new(path), "{path}");
+        }
+        assert!(!is_watchlist_path("pegs"));
+        assert!(is_watchlist_path(&format!(
+            "a{}b",
+            std::path::MAIN_SEPARATOR
+        )));
+    }
 }

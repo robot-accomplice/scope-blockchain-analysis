@@ -281,6 +281,29 @@ pub enum PegStatus {
     NoPrice,
 }
 
+/// Every peg status, worst first. The one place that orders them:
+/// [`PegStatus::severity`] reads it.
+const PEG_STATUS_WORST_FIRST: [PegStatus; 5] = [
+    PegStatus::Deviation,
+    PegStatus::SlightDeviation,
+    PegStatus::BookUnhealthy,
+    PegStatus::NoPrice,
+    PegStatus::OnPeg,
+];
+
+impl PegStatus {
+    /// How bad the status is: a higher value is worse. A command that reads
+    /// the same token on several venues keeps the status with the highest
+    /// value (`scope insights --venue`).
+    pub fn severity(self) -> usize {
+        let place = PEG_STATUS_WORST_FIRST
+            .iter()
+            .position(|s| *s == self)
+            .unwrap_or(PEG_STATUS_WORST_FIRST.len());
+        PEG_STATUS_WORST_FIRST.len() - place
+    }
+}
+
 /// Quote depth of valid levels within ±`window_pct`% of `mid`, both sides.
 ///
 /// The second value is `true` when a side's last fetched level is still
@@ -1038,6 +1061,32 @@ impl MarketSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `insights --venue` keeps the worst status of several venues. This
+    /// fixes the order (design 2026-11-10, Q7): a deviation must never lose
+    /// to a healthy peg, and a book that fails its checks is worse than a
+    /// missing price.
+    #[test]
+    fn peg_status_severity_orders_all_five_statuses_worst_first() {
+        let worst_first = [
+            PegStatus::Deviation,
+            PegStatus::SlightDeviation,
+            PegStatus::BookUnhealthy,
+            PegStatus::NoPrice,
+            PegStatus::OnPeg,
+        ];
+        for pair in worst_first.windows(2) {
+            assert!(
+                pair[0].severity() > pair[1].severity(),
+                "{:?} must be worse than {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+        let mut severities: Vec<usize> = worst_first.iter().map(|s| s.severity()).collect();
+        severities.dedup();
+        assert_eq!(severities.len(), worst_first.len(), "no two tie");
+    }
 
     /// Side of `qtys.len()` levels stepping away from `start` by `step` per level.
     fn side(start: f64, step: f64, qtys: &[f64]) -> Vec<OrderBookLevel> {

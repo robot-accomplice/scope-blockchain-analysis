@@ -1,0 +1,35 @@
+
+┌─ USDC (USD Coin) ───────────────────────────────
+│
+├── DEX Analytics
+│  Price             $0.999900
+│  24h Change        -0.01%
+│  24h Volume        $5.00M
+│  Liquidity         $100.00M
+│  Market Cap        $30.00B
+│
+├── Market / Order Book
+│  Venue             eth
+│  Peg Target        1.000000
+│  Best Bid          0.999000
+│  Best Ask          1.001000
+│  Mid Price         1.000000
+│  Bid Depth         45000 USDT
+│  Ask Depth         45000 USDT
+│
+│  ✓ No sells below peg
+│  ✓ Bid/Ask ratio: 1.00x
+│  ✓ Spread: 0.200% (max 3.0%)
+│  ✗ Bid levels: 1 < 10 minimum
+│  ✓ Bid depth: 45000 USD (min 3000)
+│  ✗ Ask levels: 1 < 10 minimum
+│  ✓ Ask depth: 45000 USD (min 3000)
+│  ✓ Bid top-3 depth: 45000 USD (min 300)
+│  ✓ Bid top-10 depth: 45000 USD (min 2000)
+│  ✓ Ask top-3 depth: 45000 USD (min 300)
+│  ✓ Ask top-10 depth: 45000 USD (min 2000)
+│  ! Depth/volume: ≥9000.0% (≥90000 / 1000 USD within ±2%; target 5–10%)
+│  – Bot patterns: not checked (a DEX pool has no trade tape here)
+│
+│  UNHEALTHY
+└──────────────────────────────────────────────────

@@ -7,6 +7,7 @@
 
 use crate::cli::candles;
 use crate::cli::crawl::{self, Period};
+use crate::cli::market_venues;
 use crate::cli::output::{Output, SummaryView};
 use crate::{note, out, outln};
 use clap::{Args, Subcommand};
@@ -52,12 +53,35 @@ pub enum MarketCommands {
     /// and configurable health checks (peg safety, bid/ask ratio, depth thresholds).
     ///
     /// Use --every and --duration to run repeatedly (e.g., every 30s for 1 hour).
+    ///
+    /// Name several venues to compare them: repeat `--venue` or give a comma
+    /// list (`--venue weex,binance`). The output has one summary per venue, in
+    /// the order given, then a comparison table with one row per venue. With
+    /// --format json the output is one object with `pair`, `run`, `venues`
+    /// (one item per venue) and `comparison` (one row of raw numbers per
+    /// venue). With --every, the repeat view draws one line per venue on each
+    /// chart.
+    /// A venue that fails does not stop the others: its section and its table
+    /// row say why. The exit code is 1 when any venue failed, else 0; an
+    /// unhealthy venue does not change it (as with one venue).
     Summary(SummaryArgs),
 
     /// Fetch OHLC/candlestick (kline) data from a CEX venue.
+    ///
+    /// Name several venues to get one block per venue, in the order given:
+    /// repeat `--venue` or give a comma list (`--venue weex,binance`). With
+    /// --format json the output is a list with one item per venue. A venue that
+    /// fails does not stop the others. The exit code is 1 when any venue
+    /// failed, else 0.
     Ohlc(OhlcArgs),
 
     /// Fetch recent trades from a CEX venue.
+    ///
+    /// Name several venues to get one block per venue, in the order given:
+    /// repeat `--venue` or give a comma list (`--venue weex,binance`). With
+    /// --format json the output is a list with one item per venue. A venue that
+    /// fails does not stop the others. The exit code is 1 when any venue
+    /// failed, else 0.
     Trades(TradesArgs),
 }
 
@@ -72,7 +96,8 @@ pub enum MarketCommands {
   scope market summary @dai-token --venue binance         \x1b[2m# address book shortcut\x1b[0m
   scope market summary USDC --venue binance --format json
   scope market summary DAI --venue binance --every 30s --duration 1h
-  scope market summary DAI --venue binance --report health.md --csv peg.csv",
+  scope market summary DAI --venue binance --report health.md --csv peg.csv
+  scope market summary USDN --venue weex,binance          \x1b[2m# compare two venues\x1b[0m",
     after_long_help = "\x1b[1mExamples:\x1b[0m
 
   \x1b[1m$ scope market summary DAI --venue binance\x1b[0m
@@ -107,8 +132,8 @@ pub struct SummaryArgs {
     #[arg(default_value = scope::market::DEFAULT_PAIR, value_name = "SYMBOL", help = PAIR_HELP)]
     pub pair: String,
 
-    #[arg(long, default_value = scope::market::DEFAULT_VENUE, value_name = "VENUE", help = VENUE_HELP)]
-    pub venue: String,
+    #[arg(long, default_value = scope::market::DEFAULT_VENUE, value_name = "VENUE", value_delimiter = ',', help = VENUE_HELP)]
+    pub venue: Vec<String>,
 
     /// The base token's contract: use it and skip the lookup and the
     /// venue check.
@@ -203,9 +228,10 @@ pub struct OhlcArgs {
     #[arg(default_value = scope::market::DEFAULT_PAIR, value_name = "SYMBOL", help = PAIR_HELP)]
     pub pair: String,
 
-    /// Exchange venue (e.g., binance, mexc, bybit).
-    #[arg(long, default_value = scope::market::DEFAULT_VENUE, value_name = "VENUE")]
-    pub venue: String,
+    /// Exchange venue (e.g., binance, mexc, bybit). Repeat it, or give a
+    /// comma list, to read several venues (`--venue weex,binance`).
+    #[arg(long, default_value = scope::market::DEFAULT_VENUE, value_name = "VENUE", value_delimiter = ',')]
+    pub venue: Vec<String>,
 
     /// The base token's contract: use it and skip the lookup and the
     /// venue check.
@@ -240,9 +266,10 @@ pub struct TradesArgs {
     #[arg(default_value = scope::market::DEFAULT_PAIR, value_name = "SYMBOL", help = PAIR_HELP)]
     pub pair: String,
 
-    /// Exchange venue (e.g., binance, mexc, bybit).
-    #[arg(long, default_value = scope::market::DEFAULT_VENUE, value_name = "VENUE")]
-    pub venue: String,
+    /// Exchange venue (e.g., binance, mexc, bybit). Repeat it, or give a
+    /// comma list, to read several venues (`--venue weex,binance`).
+    #[arg(long, default_value = scope::market::DEFAULT_VENUE, value_name = "VENUE", value_delimiter = ',')]
+    pub venue: Vec<String>,
 
     /// The base token's contract: use it and skip the lookup and the
     /// venue check.
@@ -282,14 +309,6 @@ pub async fn run(
         MarketCommands::Ohlc(ohlc_args) => run_ohlc(ohlc_args, factory.http(), out).await,
         MarketCommands::Trades(trades_args) => run_trades(trades_args, factory.http(), out).await,
     }
-}
-
-/// The venue symbol for user pair input (see [`Pair::parse`]).
-///
-/// Kept only for the monitor (`monitor/mod.rs`), which still calls it; the
-/// market commands call `venue_symbol` directly.
-pub(crate) fn venue_pair(exchange: &scope::market::ExchangeClient, input: &str) -> String {
-    exchange.venue_symbol(&Pair::parse(input))
 }
 
 /// Token analytics from the crawl pipeline: the CLI and web adapter for the
@@ -357,6 +376,8 @@ pub(crate) fn market_summary_to_markdown(
 /// advisory (or why there are none).
 async fn fetch_book_and_volume(
     args: &SummaryArgs,
+    venue: &MarketVenue,
+    token: Option<String>,
     thresholds: &HealthThresholds,
     factory: &dyn ChainClientFactory,
     out: &Output,
@@ -365,19 +386,18 @@ async fn fetch_book_and_volume(
     Option<f64>,
     std::result::Result<Vec<scope::market::Trade>, String>,
 )> {
-    let venue = MarketVenue::from_name_with_http(&args.venue, factory.http())?;
     if let Some(chain) = &args.chain {
         venue.require_chain(chain)?;
     }
     let dex = CrawlDexSource {
         factory,
         out,
-        token: args.token_contract.clone(),
+        token,
     };
     let pair = Pair::parse(&args.pair);
     let (book, volume) =
-        scope::market::fetch_book_and_volume(&venue, &pair, thresholds, &dex).await?;
-    let trades = scope::market::fetch_pattern_trades(&venue, &pair).await;
+        scope::market::fetch_book_and_volume(venue, &pair, thresholds, &dex).await?;
+    let trades = scope::market::fetch_pattern_trades(venue, &pair).await;
     Ok((book, volume, trades))
 }
 
@@ -411,14 +431,15 @@ pub(crate) async fn check_cex_token(
 /// The base token's contract for a summary, resolved once per command: on
 /// a DEX venue through the resolver on the venue's own chain (`--token`
 /// wins); on a CEX venue `None`, after [`check_cex_token`].
-async fn resolve_market_token(
+pub(crate) async fn resolve_market_token(
     args: &SummaryArgs,
+    venue: &MarketVenue,
     factory: &dyn ChainClientFactory,
     out: &Output,
 ) -> Result<Option<String>> {
     let json = matches!(args.format, SummaryFormat::Json);
     let base = Pair::parse(&args.pair).base;
-    match MarketVenue::from_name_with_http(&args.venue, factory.http())? {
+    match venue {
         MarketVenue::Dex(dex) => {
             let client = factory.create_dex_client();
             let flag = args.token_contract.clone();
@@ -429,7 +450,7 @@ async fn resolve_market_token(
         MarketVenue::Cex(client) => {
             let mut aliases = scope::tokens::TokenAliases::load();
             let (chain, flag) = (args.chain.clone(), args.token_contract.clone());
-            check_cex_token(&client, &base, chain, flag, &mut aliases, json, out)
+            check_cex_token(client, &base, chain, flag, &mut aliases, json, out)
                 .await
                 .map(|()| None)
         }
@@ -486,12 +507,12 @@ async fn check_venue_token(
 /// The pair's tokens on the venue (network and contract), when the venue
 /// lists its assets. A failed lookup is noted and gives no lines: the
 /// summary itself does not depend on it.
-async fn token_addresses(
+pub(crate) async fn token_addresses(
     args: &SummaryArgs,
-    http: Arc<dyn HttpClient>,
+    venue: &MarketVenue,
     out: &Output,
 ) -> Vec<TokenAddress> {
-    let Ok(MarketVenue::Cex(client)) = MarketVenue::from_name_with_http(&args.venue, http) else {
+    let MarketVenue::Cex(client) = venue else {
         return Vec::new();
     };
     match client.fetch_token_addresses(&Pair::parse(&args.pair)).await {
@@ -511,7 +532,7 @@ const DEPTH_HISTORY_RUNS: usize = 2880;
 /// The bid and ask depth of each run of a repeat so far (time in ms),
 /// oldest first: the series the depth-cycle signal reads.
 #[derive(Default)]
-struct DepthHistory(std::sync::Mutex<Vec<(i64, f64, f64)>>);
+pub(crate) struct DepthHistory(std::sync::Mutex<Vec<(i64, f64, f64)>>);
 
 impl DepthHistory {
     /// Records `summary`'s depth now and adds the depth cycles of the runs
@@ -532,8 +553,53 @@ impl DepthHistory {
     }
 }
 
+/// One read of a venue: the book, the volume and the trades, judged against
+/// `thresholds`, with the bot patterns (and the depth cycles of a repeat).
+pub(crate) async fn read_summary(
+    args: &SummaryArgs,
+    venue: &MarketVenue,
+    token: Option<String>,
+    thresholds: &HealthThresholds,
+    factory: &dyn ChainClientFactory,
+    history: Option<&DepthHistory>,
+    out: &Output,
+) -> Result<MarketSummary> {
+    let (book, volume_24h, trades) =
+        fetch_book_and_volume(args, venue, token, thresholds, factory, out).await?;
+    let mut summary = MarketSummary::from_order_book(&book, thresholds, volume_24h);
+    summary.check_bot_patterns(trades.as_deref().map_err(String::as_str));
+    if let Some(history) = history {
+        history.record(&mut summary);
+    }
+    Ok(summary)
+}
+
+/// The JSON of one venue's summary: the summary, its run number (`null`
+/// for a one-shot), its venue and its tokens. The one shape, for one venue
+/// and for each item of a list of venues.
+pub(crate) fn summary_json(
+    summary: &MarketSummary,
+    venue: &str,
+    tokens: &[TokenAddress],
+    run_num: Option<u64>,
+) -> serde_json::Value {
+    let mut json = summary.to_json();
+    if let Some(obj) = json.as_object_mut() {
+        obj.insert("run".to_string(), serde_json::json!(run_num));
+        obj.insert("venue".to_string(), serde_json::json!(venue));
+        if !tokens.is_empty() {
+            obj.insert("tokens".to_string(), serde_json::json!(tokens));
+        }
+    }
+    json
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn summary_run(
     args: &SummaryArgs,
+    venue: &str,
+    market: &MarketVenue,
+    token: Option<String>,
     factory: &dyn ChainClientFactory,
     thresholds: &HealthThresholds,
     tokens: &[TokenAddress],
@@ -541,23 +607,11 @@ async fn summary_run(
     history: Option<&DepthHistory>,
     out: &Output,
 ) -> Result<(MarketSummary, String)> {
-    let (book, volume_24h, trades) = fetch_book_and_volume(args, thresholds, factory, out).await?;
-    let mut summary = MarketSummary::from_order_book(&book, thresholds, volume_24h);
-    summary.check_bot_patterns(trades.as_deref().map_err(String::as_str));
-    if let Some(history) = history {
-        history.record(&mut summary);
-    }
+    let summary = read_summary(args, market, token, thresholds, factory, history, out).await?;
     let report = match args.format {
-        SummaryFormat::Text => summary.format_text_with_tokens(Some(&args.venue), tokens),
+        SummaryFormat::Text => summary.format_text_with_tokens(Some(venue), tokens),
         SummaryFormat::Json => {
-            let mut json = summary.to_json();
-            if let Some(obj) = json.as_object_mut() {
-                obj.insert("run".to_string(), serde_json::json!(run_num));
-                obj.insert("venue".to_string(), serde_json::json!(args.venue));
-                if !tokens.is_empty() {
-                    obj.insert("tokens".to_string(), serde_json::json!(tokens));
-                }
-            }
+            let json = summary_json(&summary, venue, tokens, run_num);
             format!("{}\n", serde_json::to_string_pretty(&json)?)
         }
     };
@@ -565,9 +619,14 @@ async fn summary_run(
 }
 
 /// Writes the `--report` file for `summary`, when one was asked for.
-fn write_report(args: &SummaryArgs, summary: &MarketSummary, out: &Output) -> Result<()> {
+fn write_report(
+    args: &SummaryArgs,
+    venue: &str,
+    summary: &MarketSummary,
+    out: &Output,
+) -> Result<()> {
     if let Some(ref report_path) = args.report {
-        let md = market_summary_to_markdown(summary, &args.venue, &args.pair);
+        let md = market_summary_to_markdown(summary, venue, &args.pair);
         std::fs::write(report_path, md)?;
         out.note_saved("Report", report_path.display());
     }
@@ -607,24 +666,52 @@ async fn run_summary(
     let thresholds = args.health.resolve(config);
     // Bad flags fail before any lookup.
     let schedule = summary_schedule(&args)?;
+    let venues = market_venues::checked_venues(&args.venue)?;
+    if venues.len() > 1 {
+        let http = factory.http();
+        let source = move |name: &str| MarketVenue::from_name_with_http(name, http.clone());
+        return market_venues::run_summary(
+            &args,
+            &venues,
+            schedule,
+            &thresholds,
+            &source,
+            factory,
+            out,
+        )
+        .await;
+    }
+    let venue = venues[0].clone();
     let mut args = args;
+    let market = MarketVenue::from_name_with_http(&venue, factory.http())?;
     // Once per command, so an --every run asks at most once.
-    if let Some(contract) = resolve_market_token(&args, factory, out).await? {
+    if let Some(contract) = resolve_market_token(&args, &market, factory, out).await? {
         args.token_contract = Some(contract);
     }
     // Once per command: the coin list does not change between runs.
-    let tokens = token_addresses(&args, factory.http(), out).await;
+    let tokens = token_addresses(&args, &market, out).await;
 
     let Some(schedule) = schedule else {
-        let (summary, report) =
-            summary_run(&args, factory, &thresholds, &tokens, None, None, out).await?;
+        let (summary, report) = summary_run(
+            &args,
+            &venue,
+            &market,
+            args.token_contract.clone(),
+            factory,
+            &thresholds,
+            &tokens,
+            None,
+            None,
+            out,
+        )
+        .await?;
         out!(out, "{report}")?;
         out.record_view(SummaryView {
             summary: summary.clone(),
-            venue: args.venue.clone(),
+            venue: venue.clone(),
             tokens: tokens.clone(),
         });
-        return write_report(&args, &summary, out);
+        return write_report(&args, &venue, &summary, out);
     };
 
     note!(
@@ -641,9 +728,13 @@ async fn run_summary(
     let last = repeat::run(&schedule, &metrics, args.csv.as_deref(), out, |n| {
         let (args, thresholds, metrics, tokens, history) =
             (&args, &thresholds, &metrics, &tokens, &history);
+        let (venue, market) = (&venue, &market);
         async move {
             let (summary, report) = summary_run(
                 args,
+                venue,
+                market,
+                args.token_contract.clone(),
                 factory,
                 thresholds,
                 tokens,
@@ -657,9 +748,10 @@ async fn run_summary(
                 snapshot: report,
                 view: Some(SummaryView {
                     summary: summary.clone(),
-                    venue: args.venue.clone(),
+                    venue: venue.clone(),
                     tokens: tokens.to_vec(),
                 }),
+                venues: None,
                 value: summary,
             })
         }
@@ -667,7 +759,7 @@ async fn run_summary(
     .await?;
 
     if let Some(summary) = last {
-        write_report(&args, &summary, out)?;
+        write_report(&args, &venue, &summary, out)?;
     }
     if let Some(ref csv_path) = args.csv {
         out.note_saved("Time-series CSV", csv_path.display());
@@ -681,9 +773,17 @@ async fn run_summary(
 
 /// Execute the `scope market ohlc` command.
 async fn run_ohlc(args: OhlcArgs, http: Arc<dyn HttpClient>, out: &Output) -> Result<()> {
+    let venues = market_venues::checked_venues(&args.venue)?;
+    if venues.len() > 1 {
+        let make = |venue: &str| {
+            VenueRegistry::load()?.create_exchange_client_with_http(venue, http.clone())
+        };
+        return market_venues::run_ohlc(&args, &venues, &make, out).await;
+    }
+    let venue = venues[0].clone();
     let json = matches!(args.format, OhlcFormat::Json);
     check_venue_token(
-        &args.venue,
+        &venue,
         &args.pair,
         None,
         args.token_contract.clone(),
@@ -692,14 +792,18 @@ async fn run_ohlc(args: OhlcArgs, http: Arc<dyn HttpClient>, out: &Output) -> Re
         out,
     )
     .await?;
-    let client = VenueRegistry::load()?.create_exchange_client_with_http(&args.venue, http)?;
-    run_ohlc_with(&client, args, out).await
+    let client = VenueRegistry::load()?.create_exchange_client_with_http(&venue, http)?;
+    run_ohlc_with(&client, &venue, args, out).await
 }
 
-/// `scope market ohlc` on `client`, the venue that `args.venue` names.
-async fn run_ohlc_with(client: &ExchangeClient, args: OhlcArgs, out: &Output) -> Result<()> {
+/// The candles of `args` on `client`, oldest first, with the venue's symbol
+/// of the pair. `width` sizes the default candle count.
+pub(crate) async fn fetch_candles(
+    client: &ExchangeClient,
+    args: &OhlcArgs,
+    width: usize,
+) -> Result<(String, Vec<scope::market::Candle>)> {
     let pair = client.checked_symbol(&Pair::parse(&args.pair))?;
-    let width = t::terminal_width();
     // The axis is not known before the prices are; ten columns is room for
     // most of them, and the chart takes the newest that fit.
     let limit = args.limit.unwrap_or(candles::columns_for(width, 10) as u32);
@@ -708,6 +812,41 @@ async fn run_ohlc_with(client: &ExchangeClient, args: OhlcArgs, out: &Output) ->
     // Venues send newest or oldest first; the chart and the table read
     // oldest first.
     candles.sort_by_key(|c| c.open_time);
+    Ok((pair, candles))
+}
+
+/// The text block of one venue's candles: the chart, the summary and, with
+/// `--table`, every candle.
+pub(crate) fn write_ohlc_text(
+    args: &OhlcArgs,
+    venue: &str,
+    pair: &str,
+    candles: &[scope::market::Candle],
+    width: usize,
+    out: &Output,
+) -> Result<()> {
+    outln!(
+        out,
+        "{}",
+        t::section_header(&format!("OHLC — {} ({})", pair, venue))
+    )?;
+    write_candle_chart(candles, &args.interval, width, out)?;
+    if args.table {
+        write_candle_table(candles, out)?;
+    }
+    outln!(out, "{}", t::section_footer())?;
+    Ok(())
+}
+
+/// `scope market ohlc` on `client`, the venue named `venue`.
+async fn run_ohlc_with(
+    client: &ExchangeClient,
+    venue: &str,
+    args: OhlcArgs,
+    out: &Output,
+) -> Result<()> {
+    let width = t::terminal_width();
+    let (pair, candles) = fetch_candles(client, &args, width).await?;
 
     match args.format {
         OhlcFormat::Json => {
@@ -715,18 +854,7 @@ async fn run_ohlc_with(client: &ExchangeClient, args: OhlcArgs, out: &Output) ->
                 .map_err(|e| ScopeError::Chain(format!("JSON serialization failed: {e}")))?;
             outln!(out, "{json_str}")?;
         }
-        OhlcFormat::Text => {
-            outln!(
-                out,
-                "{}",
-                t::section_header(&format!("OHLC — {} ({})", pair, args.venue))
-            )?;
-            write_candle_chart(&candles, &args.interval, width, out)?;
-            if args.table {
-                write_candle_table(&candles, out)?;
-            }
-            outln!(out, "{}", t::section_footer())?;
-        }
+        OhlcFormat::Text => write_ohlc_text(&args, venue, &pair, &candles, width, out)?,
     }
     Ok(())
 }
@@ -857,9 +985,17 @@ fn write_candle_table(candles: &[scope::market::Candle], out: &Output) -> Result
 
 /// Execute the `scope market trades` command.
 async fn run_trades(args: TradesArgs, http: Arc<dyn HttpClient>, out: &Output) -> Result<()> {
+    let venues = market_venues::checked_venues(&args.venue)?;
+    if venues.len() > 1 {
+        let make = |venue: &str| {
+            VenueRegistry::load()?.create_exchange_client_with_http(venue, http.clone())
+        };
+        return market_venues::run_trades(&args, &venues, &make, out).await;
+    }
+    let venue = venues[0].clone();
     let json = matches!(args.format, OhlcFormat::Json);
     check_venue_token(
-        &args.venue,
+        &venue,
         &args.pair,
         None,
         args.token_contract.clone(),
@@ -868,15 +1004,29 @@ async fn run_trades(args: TradesArgs, http: Arc<dyn HttpClient>, out: &Output) -
         out,
     )
     .await?;
-    let client = VenueRegistry::load()?.create_exchange_client_with_http(&args.venue, http)?;
-    run_trades_with(&client, args, out).await
+    let client = VenueRegistry::load()?.create_exchange_client_with_http(&venue, http)?;
+    run_trades_with(&client, &venue, args, out).await
 }
 
-/// `scope market trades` on `client`, the venue that `args.venue` names.
-async fn run_trades_with(client: &ExchangeClient, args: TradesArgs, out: &Output) -> Result<()> {
+/// The recent trades of `args` on `client`, with the venue's symbol of the
+/// pair.
+pub(crate) async fn fetch_trades(
+    client: &ExchangeClient,
+    args: &TradesArgs,
+) -> Result<(String, Vec<scope::market::Trade>)> {
     let pair = client.checked_symbol(&Pair::parse(&args.pair))?;
-
     let trades = client.fetch_recent_trades(&pair, args.limit).await?;
+    Ok((pair, trades))
+}
+
+/// `scope market trades` on `client`, the venue named `venue`.
+async fn run_trades_with(
+    client: &ExchangeClient,
+    venue: &str,
+    args: TradesArgs,
+    out: &Output,
+) -> Result<()> {
+    let (pair, trades) = fetch_trades(client, &args).await?;
 
     match args.format {
         OhlcFormat::Json => {
@@ -884,64 +1034,73 @@ async fn run_trades_with(client: &ExchangeClient, args: TradesArgs, out: &Output
                 .map_err(|e| ScopeError::Chain(format!("JSON serialization failed: {e}")))?;
             outln!(out, "{json_str}")?;
         }
-        OhlcFormat::Text => {
-            outln!(
-                out,
-                "{}",
-                t::section_header(&format!("Recent Trades — {} ({})", pair, args.venue))
-            )?;
-
-            let cols = [
-                t::Col {
-                    label: "Time",
-                    width: 10,
-                    align: '>',
-                },
-                t::Col {
-                    label: "Side",
-                    width: 5,
-                    align: '>',
-                },
-                t::Col {
-                    label: "Price",
-                    width: 12,
-                    align: '>',
-                },
-                t::Col {
-                    label: "Qty",
-                    width: 12,
-                    align: '>',
-                },
-            ];
-            outln!(out, "{}", t::table_header(&cols))?;
-
-            for t in &trades {
-                let time = chrono::DateTime::from_timestamp_millis(t.timestamp_ms as i64)
-                    .map(|d| d.format("%H:%M:%S").to_string())
-                    .unwrap_or_else(|| "?".to_string());
-                let side_str = match t.side {
-                    scope::market::TradeSide::Buy => "BUY",
-                    scope::market::TradeSide::Sell => "SELL",
-                };
-                let price_str = format!("{:.6}", t.price);
-                let qty_str = format!("{:.2}", t.quantity);
-                let values = [
-                    time.as_str(),
-                    side_str,
-                    price_str.as_str(),
-                    qty_str.as_str(),
-                ];
-                outln!(out, "{}", t::table_row(&cols, &values))?;
-            }
-
-            outln!(
-                out,
-                "{}",
-                t::info_row(&format!("{} trades returned", trades.len()))
-            )?;
-            outln!(out, "{}", t::section_footer())?;
-        }
+        OhlcFormat::Text => write_trades_text(venue, &pair, &trades, out)?,
     }
+    Ok(())
+}
+
+/// The text block of one venue's recent trades.
+pub(crate) fn write_trades_text(
+    venue: &str,
+    pair: &str,
+    trades: &[scope::market::Trade],
+    out: &Output,
+) -> Result<()> {
+    outln!(
+        out,
+        "{}",
+        t::section_header(&format!("Recent Trades — {} ({})", pair, venue))
+    )?;
+
+    let cols = [
+        t::Col {
+            label: "Time",
+            width: 10,
+            align: '>',
+        },
+        t::Col {
+            label: "Side",
+            width: 5,
+            align: '>',
+        },
+        t::Col {
+            label: "Price",
+            width: 12,
+            align: '>',
+        },
+        t::Col {
+            label: "Qty",
+            width: 12,
+            align: '>',
+        },
+    ];
+    outln!(out, "{}", t::table_header(&cols))?;
+
+    for t in trades {
+        let time = chrono::DateTime::from_timestamp_millis(t.timestamp_ms as i64)
+            .map(|d| d.format("%H:%M:%S").to_string())
+            .unwrap_or_else(|| "?".to_string());
+        let side_str = match t.side {
+            scope::market::TradeSide::Buy => "BUY",
+            scope::market::TradeSide::Sell => "SELL",
+        };
+        let price_str = format!("{:.6}", t.price);
+        let qty_str = format!("{:.2}", t.quantity);
+        let values = [
+            time.as_str(),
+            side_str,
+            price_str.as_str(),
+            qty_str.as_str(),
+        ];
+        outln!(out, "{}", t::table_row(&cols, &values))?;
+    }
+
+    outln!(
+        out,
+        "{}",
+        t::info_row(&format!("{} trades returned", trades.len()))
+    )?;
+    outln!(out, "{}", t::section_footer())?;
     Ok(())
 }
 
@@ -953,6 +1112,66 @@ mod tests {
 
     fn quiet() -> crate::cli::output::Output {
         crate::cli::output::Output::capture().0
+    }
+
+    // The tests below call the one-venue path as the command does: the
+    // venue comes from `--venue`, its first name.
+
+    async fn fetch_book_and_volume(
+        args: &SummaryArgs,
+        thresholds: &HealthThresholds,
+        factory: &dyn ChainClientFactory,
+        out: &Output,
+    ) -> Result<(
+        OrderBook,
+        Option<f64>,
+        std::result::Result<Vec<scope::market::Trade>, String>,
+    )> {
+        let venue = MarketVenue::from_name_with_http(&args.venue[0], factory.http())?;
+        super::fetch_book_and_volume(
+            args,
+            &venue,
+            args.token_contract.clone(),
+            thresholds,
+            factory,
+            out,
+        )
+        .await
+    }
+
+    async fn summary_run(
+        args: &SummaryArgs,
+        factory: &dyn ChainClientFactory,
+        thresholds: &HealthThresholds,
+        tokens: &[TokenAddress],
+        run_num: Option<u64>,
+        history: Option<&DepthHistory>,
+        out: &Output,
+    ) -> Result<(MarketSummary, String)> {
+        let venue = args.venue[0].clone();
+        let market = MarketVenue::from_name_with_http(&venue, factory.http())?;
+        super::summary_run(
+            args,
+            &venue,
+            &market,
+            args.token_contract.clone(),
+            factory,
+            thresholds,
+            tokens,
+            run_num,
+            history,
+            out,
+        )
+        .await
+    }
+
+    async fn resolve_market_token(
+        args: &SummaryArgs,
+        factory: &dyn ChainClientFactory,
+        out: &Output,
+    ) -> Result<Option<String>> {
+        let market = MarketVenue::from_name_with_http(&args.venue[0], factory.http())?;
+        super::resolve_market_token(args, &market, factory, out).await
     }
 
     /// Helper to create a mock venue YAML pointing at the given mock server URL.
@@ -1003,7 +1222,7 @@ capabilities:
         // Test duration parsing and summary formatting here.
         let args = SummaryArgs {
             pair: "USDC".to_string(),
-            venue: "eth".to_string(),
+            venue: vec!["eth".to_string()],
             token_contract: None,
             chain: None,
             health: HealthArgs {
@@ -1037,7 +1256,7 @@ capabilities:
     async fn test_run_summary_json_format() {
         let args = SummaryArgs {
             pair: "USDC".to_string(),
-            venue: "eth".to_string(),
+            venue: vec!["eth".to_string()],
             token_contract: None,
             chain: None,
             health: HealthArgs {
@@ -1071,7 +1290,7 @@ capabilities:
         // the flag out keeps the 1 h default so scripts do not change.
         let args = |duration: Option<&str>| SummaryArgs {
             pair: "USDC".to_string(),
-            venue: "binance".to_string(),
+            venue: vec!["binance".to_string()],
             token_contract: None,
             chain: None,
             health: HealthArgs::default(),
@@ -1342,7 +1561,7 @@ capabilities:
         .unwrap();
         if let Commands::Market(MarketCommands::Ohlc(args)) = cli.command {
             assert_eq!(args.pair, "USDC");
-            assert_eq!(args.venue, "binance");
+            assert_eq!(args.venue, ["binance"]);
             assert_eq!(args.interval, "1h");
             assert_eq!(args.limit, Some(50));
         } else {
@@ -1360,7 +1579,7 @@ capabilities:
         .unwrap();
         if let Commands::Market(MarketCommands::Trades(args)) = cli.command {
             assert_eq!(args.pair, "BTC");
-            assert_eq!(args.venue, "mexc");
+            assert_eq!(args.venue, ["mexc"]);
             assert_eq!(args.limit, 100);
         } else {
             panic!("Expected Market Trades command");
@@ -1382,7 +1601,7 @@ capabilities:
     fn test_summary_args_debug() {
         let args = SummaryArgs {
             pair: "USDC".to_string(),
-            venue: "binance".to_string(),
+            venue: vec!["binance".to_string()],
             token_contract: None,
             chain: None,
             health: HealthArgs {
@@ -1489,7 +1708,7 @@ capabilities:
         // Test the run() dispatcher with a DEX venue (doesn't require mock HTTP)
         let args = MarketCommands::Summary(SummaryArgs {
             pair: "USDC".to_string(),
-            venue: "eth".to_string(),
+            venue: vec!["eth".to_string()],
             token_contract: None,
             chain: None,
             health: HealthArgs {
@@ -1576,7 +1795,7 @@ capabilities:
     async fn test_run_summary_json_format_with_mock() {
         let args = SummaryArgs {
             pair: "USDC".to_string(),
-            venue: "eth".to_string(),
+            venue: vec!["eth".to_string()],
             token_contract: None,
             chain: None,
             health: HealthArgs {
@@ -1626,7 +1845,7 @@ capabilities:
         // Verify we can construct OhlcArgs with defaults
         let args = OhlcArgs {
             pair: "BTC".to_string(),
-            venue: "binance".to_string(),
+            venue: vec!["binance".to_string()],
             token_contract: None,
             interval: "1h".to_string(),
             limit: Some(100),
@@ -1634,7 +1853,7 @@ capabilities:
             format: OhlcFormat::Text,
         };
         assert_eq!(args.pair, "BTC");
-        assert_eq!(args.venue, "binance");
+        assert_eq!(args.venue, ["binance"]);
         assert_eq!(args.interval, "1h");
         assert_eq!(args.limit, Some(100));
     }
@@ -1643,13 +1862,13 @@ capabilities:
     fn test_trades_args_construction() {
         let args = TradesArgs {
             pair: "ETH".to_string(),
-            venue: "okx".to_string(),
+            venue: vec!["okx".to_string()],
             token_contract: None,
             limit: 50,
             format: OhlcFormat::Json,
         };
         assert_eq!(args.pair, "ETH");
-        assert_eq!(args.venue, "okx");
+        assert_eq!(args.venue, ["okx"]);
         assert_eq!(args.limit, 50);
     }
 
@@ -1657,7 +1876,7 @@ capabilities:
     async fn test_run_ohlc_unknown_venue() {
         let args = OhlcArgs {
             pair: "BTC".to_string(),
-            venue: "nonexistent_venue".to_string(),
+            venue: vec!["nonexistent_venue".to_string()],
             token_contract: None,
             interval: "1h".to_string(),
             limit: Some(10),
@@ -1678,7 +1897,7 @@ capabilities:
     async fn test_run_trades_unknown_venue() {
         let args = TradesArgs {
             pair: "BTC".to_string(),
-            venue: "nonexistent_venue".to_string(),
+            venue: vec!["nonexistent_venue".to_string()],
             token_contract: None,
             limit: 10,
             format: OhlcFormat::Text,
@@ -1697,7 +1916,7 @@ capabilities:
     async fn test_run_dispatches_ohlc() {
         let cmd = MarketCommands::Ohlc(OhlcArgs {
             pair: "BTC".to_string(),
-            venue: "nonexistent_test_venue".to_string(),
+            venue: vec!["nonexistent_test_venue".to_string()],
             token_contract: None,
             interval: "1h".to_string(),
             limit: Some(5),
@@ -1720,7 +1939,7 @@ capabilities:
     async fn test_run_dispatches_trades() {
         let cmd = MarketCommands::Trades(TradesArgs {
             pair: "ETH".to_string(),
-            venue: "nonexistent_test_venue".to_string(),
+            venue: vec!["nonexistent_test_venue".to_string()],
             token_contract: None,
             limit: 5,
             format: OhlcFormat::Json,
@@ -1836,7 +2055,7 @@ capabilities:
     fn ohlc_args(format: OhlcFormat) -> OhlcArgs {
         OhlcArgs {
             pair: "BTC".to_string(),
-            venue: "binance".to_string(),
+            venue: vec!["binance".to_string()],
             token_contract: None,
             interval: "1h".to_string(),
             limit: Some(2),
@@ -1848,7 +2067,7 @@ capabilities:
     fn trades_args(format: OhlcFormat) -> TradesArgs {
         TradesArgs {
             pair: "BTC".to_string(),
-            venue: "binance".to_string(),
+            venue: vec!["binance".to_string()],
             token_contract: None,
             limit: 2,
             format,
@@ -1873,9 +2092,14 @@ capabilities:
     async fn test_ohlc_text_is_a_chart_and_a_summary() {
         let server = serve("/api/v3/klines", KLINES).await;
         let (out, cap) = Output::capture();
-        run_ohlc_with(&binance_at(&server), ohlc_args(OhlcFormat::Text), &out)
-            .await
-            .unwrap();
+        run_ohlc_with(
+            &binance_at(&server),
+            "binance",
+            ohlc_args(OhlcFormat::Text),
+            &out,
+        )
+        .await
+        .unwrap();
         let text = crate::cli::ansi::strip(&cap.out());
         assert!(text.contains("OHLC — BTCUSDT (binance)"), "{text}");
         // The chart: price axis and both candles' bodies.
@@ -1898,7 +2122,7 @@ capabilities:
             table: true,
             ..ohlc_args(OhlcFormat::Text)
         };
-        run_ohlc_with(&binance_at(&server), args, &out)
+        run_ohlc_with(&binance_at(&server), "binance", args, &out)
             .await
             .unwrap();
         let text = crate::cli::ansi::strip(&cap.out());
@@ -1914,9 +2138,14 @@ capabilities:
             [1700000000000,"1.0","1.5","0.5","1.25","1000.5",1700003599999]]"#;
         let server = serve("/api/v3/klines", REVERSED).await;
         let (out, cap) = Output::capture();
-        run_ohlc_with(&binance_at(&server), ohlc_args(OhlcFormat::Text), &out)
-            .await
-            .unwrap();
+        run_ohlc_with(
+            &binance_at(&server),
+            "binance",
+            ohlc_args(OhlcFormat::Text),
+            &out,
+        )
+        .await
+        .unwrap();
         let text = crate::cli::ansi::strip(&cap.out());
         assert!(
             text.contains("1.7500 (+75.00%)"),
@@ -1928,9 +2157,14 @@ capabilities:
     async fn test_ohlc_json_keeps_every_field() {
         let server = serve("/api/v3/klines", KLINES).await;
         let (out, cap) = Output::capture();
-        run_ohlc_with(&binance_at(&server), ohlc_args(OhlcFormat::Json), &out)
-            .await
-            .unwrap();
+        run_ohlc_with(
+            &binance_at(&server),
+            "binance",
+            ohlc_args(OhlcFormat::Json),
+            &out,
+        )
+        .await
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&cap.out()).unwrap();
         assert_eq!(v.as_array().unwrap().len(), 2);
         assert_eq!(v[0]["open_time"], 1_700_000_000_000u64);
@@ -1942,9 +2176,14 @@ capabilities:
     async fn test_trades_text_shows_side_price_and_quantity() {
         let server = serve("/api/v3/trades", TRADES).await;
         let (out, cap) = Output::capture();
-        run_trades_with(&binance_at(&server), trades_args(OhlcFormat::Text), &out)
-            .await
-            .unwrap();
+        run_trades_with(
+            &binance_at(&server),
+            "binance",
+            trades_args(OhlcFormat::Text),
+            &out,
+        )
+        .await
+        .unwrap();
         let text = crate::cli::ansi::strip(&cap.out());
         assert!(text.contains("Recent Trades — BTCUSDT (binance)"), "{text}");
         // isBuyerMaker true is a sell; false is a buy.
@@ -1957,15 +2196,259 @@ capabilities:
     async fn test_trades_json_keeps_every_field() {
         let server = serve("/api/v3/trades", TRADES).await;
         let (out, cap) = Output::capture();
-        run_trades_with(&binance_at(&server), trades_args(OhlcFormat::Json), &out)
-            .await
-            .unwrap();
+        run_trades_with(
+            &binance_at(&server),
+            "binance",
+            trades_args(OhlcFormat::Json),
+            &out,
+        )
+        .await
+        .unwrap();
         let v: serde_json::Value = serde_json::from_str(&cap.out()).unwrap();
         assert_eq!(v[0]["side"], "sell");
         assert_eq!(v[1]["side"], "buy");
         assert_eq!(v[0]["id"], "1");
         assert_eq!(v[0]["quote_quantity"], 3.75);
         assert_eq!(v[1]["timestamp_ms"], 1_700_000_001_000u64);
+    }
+
+    // ---- One venue stays as it was (design 2026-11-09, decision 1) ----
+
+    #[tokio::test]
+    async fn test_one_venue_trades_text_is_the_table_of_before_with_no_extra_block() {
+        // The exact text, so a change to the single-venue output fails here.
+        let server = serve("/api/v3/trades", TRADES).await;
+        let (out, cap) = Output::capture();
+        run_trades_with(
+            &binance_at(&server),
+            "binance",
+            trades_args(OhlcFormat::Text),
+            &out,
+        )
+        .await
+        .unwrap();
+        let text = crate::cli::ansi::strip(&cap.out());
+        let rows: Vec<&str> = text.trim_start().lines().collect();
+        assert_eq!(
+            text.matches("Recent Trades").count(),
+            1,
+            "one venue is one block: {text}"
+        );
+        assert!(
+            rows[0].starts_with("┌─ Recent Trades — BTCUSDT (binance) "),
+            "{text}"
+        );
+        assert!(
+            rows[1].contains("Time") && rows[1].contains("Qty"),
+            "{text}"
+        );
+        assert!(
+            rows[3].contains("22:13:20") && rows[3].contains("SELL"),
+            "{text}"
+        );
+        assert!(
+            rows[4].contains("22:13:21") && rows[4].contains("BUY"),
+            "{text}"
+        );
+        assert!(rows[5].contains("2 trades returned"), "{text}");
+        assert!(rows[6].starts_with('└'), "{text}");
+        assert_eq!(rows.len(), 7, "{text}");
+    }
+
+    #[tokio::test]
+    async fn test_one_venue_ohlc_json_is_the_bare_candle_list() {
+        // Not a list of venue items: scripts that read one venue keep working.
+        let server = serve("/api/v3/klines", KLINES).await;
+        let (out, cap) = Output::capture();
+        run_ohlc_with(
+            &binance_at(&server),
+            "binance",
+            ohlc_args(OhlcFormat::Json),
+            &out,
+        )
+        .await
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&cap.out()).unwrap();
+        assert!(v[0].get("venue").is_none() && v[0]["open"] == 1.0, "{v}");
+        let text = crate::cli::ansi::strip(&cap.out());
+        assert!(text.trim_start().starts_with("[\n  {"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn test_one_venue_summary_is_one_report_and_one_json_object_in_every_format() {
+        let factory = dex_factory(&[(50_000.0, 1_000.0)]);
+        for (format, name) in [(SummaryFormat::Text, "text"), (SummaryFormat::Json, "json")] {
+            let (out, cap) = Output::capture();
+            run_summary(dex_args(format), &Config::default(), &factory, &out)
+                .await
+                .unwrap();
+            let shown = crate::cli::ansi::strip(&cap.out());
+            assert!(
+                !shown.contains("Comparison"),
+                "{name}: no table for one venue\n{shown}"
+            );
+            match format {
+                SummaryFormat::Text => assert_eq!(
+                    shown.matches("┌─ ").count(),
+                    1,
+                    "one section, as before\n{shown}"
+                ),
+                SummaryFormat::Json => {
+                    let v: serde_json::Value = serde_json::from_str(&shown).unwrap();
+                    assert!(v.is_object(), "an object, not a list: {shown}");
+                    assert_eq!(v["venue"], "eth");
+                    assert!(v["run"].is_null());
+                }
+            }
+        }
+    }
+
+    /// What `summary --format json` printed for the mock DEX venue before
+    /// the many-venue envelope (the code of one venue is unchanged).
+    const ONE_VENUE_SUMMARY_JSON: &str = r#"{
+  "ask_depth": 25000.0,
+  "ask_levels": 1,
+  "ask_outliers": 0,
+  "asks": [
+    {
+      "price": 1.001,
+      "quantity": 24975.02497502498,
+      "value": 25000.0
+    }
+  ],
+  "best_ask": 1.001,
+  "best_bid": 0.999,
+  "bid_depth": 25000.0,
+  "bid_levels": 1,
+  "bid_outliers": 0,
+  "bids": [
+    {
+      "price": 0.999,
+      "quantity": 25025.025025025025,
+      "value": 25000.0
+    }
+  ],
+  "book_source": "synthetic_estimate",
+  "bot_patterns": {
+    "book_checked": false,
+    "bot_like_pct": null,
+    "bot_like_volume_pct": null,
+    "findings": [],
+    "tape_note": "a DEX pool has no trade tape here",
+    "trades_sampled": 0
+  },
+  "checks": [
+    {
+      "message": "No sells below peg",
+      "status": "pass"
+    },
+    {
+      "message": "Bid/Ask ratio: 1.00x",
+      "status": "pass"
+    },
+    {
+      "message": "Spread: 0.200% (max 3.0%)",
+      "status": "pass"
+    },
+    {
+      "message": "Bid levels: 1 < 10 minimum",
+      "status": "fail"
+    },
+    {
+      "message": "Bid depth: 25000 USD (min 3000)",
+      "status": "pass"
+    },
+    {
+      "message": "Ask levels: 1 < 10 minimum",
+      "status": "fail"
+    },
+    {
+      "message": "Ask depth: 25000 USD (min 3000)",
+      "status": "pass"
+    },
+    {
+      "message": "Bid top-3 depth: 25000 USD (min 300)",
+      "status": "pass"
+    },
+    {
+      "message": "Bid top-10 depth: 25000 USD (min 2000)",
+      "status": "pass"
+    },
+    {
+      "message": "Ask top-3 depth: 25000 USD (min 300)",
+      "status": "pass"
+    },
+    {
+      "message": "Ask top-10 depth: 25000 USD (min 2000)",
+      "status": "pass"
+    },
+    {
+      "message": "Depth/volume: ≥5000.0% (≥50000 / 1000 USD within ±2%; target 5–10%)",
+      "status": "warn"
+    },
+    {
+      "message": "Bot patterns: not checked (a DEX pool has no trade tape here)",
+      "status": "n/a"
+    }
+  ],
+  "execution_10k_buy": {
+    "fillable": true,
+    "notional_usdt": 10000.0,
+    "slippage_bps": 9.999999999998899,
+    "vwap": 1.001
+  },
+  "execution_10k_sell": {
+    "fillable": true,
+    "notional_usdt": 10000.0,
+    "slippage_bps": 10.000000000000009,
+    "vwap": 0.999
+  },
+  "healthy": false,
+  "mid_price": 1.0,
+  "pair": "USDC/USD",
+  "peg_target": 1.0,
+  "quote": "USD",
+  "run": null,
+  "slippage_warn_bps": 10.0,
+  "spread": 0.0019999999999998908,
+  "venue": "eth",
+  "volume_24h": 1000.0
+}
+"#;
+
+    #[tokio::test]
+    async fn test_one_venue_summary_json_is_byte_for_byte_the_object_of_before_the_envelope() {
+        // The compatibility promise: a script that names one venue (or none)
+        // keeps its object. No `comparison`, no `venues`, no envelope. The
+        // expected text is the output of v0.8.6, before the comparison
+        // array existed.
+        let factory = dex_factory(&[(50_000.0, 1_000.0)]);
+        let (out, cap) = Output::capture();
+        run_summary(
+            dex_args(SummaryFormat::Json),
+            &Config::default(),
+            &factory,
+            &out,
+        )
+        .await
+        .unwrap();
+        assert_eq!(cap.out(), ONE_VENUE_SUMMARY_JSON);
+    }
+
+    #[tokio::test]
+    async fn test_a_failed_one_venue_summary_is_still_the_error_of_before() {
+        // One venue: the command's own error, with no "1 of 1 venues" text.
+        let factory = dex_factory(&[(50_000.0, 1_000.0)]);
+        let mut args = dex_args(SummaryFormat::Text);
+        args.venue = vec!["polygon".to_string()];
+        let err = run_summary(args, &Config::default(), &factory, &quiet())
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("Unknown venue \"polygon\""),
+            "{err}"
+        );
+        assert!(!err.to_string().contains("venues failed"), "{err}");
     }
 
     // ====================================================================
@@ -2129,7 +2612,7 @@ capabilities:
     async fn test_run_summary_interval_zero_error() {
         let args = SummaryArgs {
             pair: "USDC".to_string(),
-            venue: "eth".to_string(),
+            venue: vec!["eth".to_string()],
             token_contract: None,
             chain: None,
             health: HealthArgs {
@@ -2171,7 +2654,7 @@ capabilities:
     fn test_market_commands_debug() {
         let cmd = MarketCommands::Summary(SummaryArgs {
             pair: "USDC".to_string(),
-            venue: "binance".to_string(),
+            venue: vec!["binance".to_string()],
             token_contract: None,
             chain: None,
             health: HealthArgs {
@@ -2194,7 +2677,7 @@ capabilities:
 
         let ohlc_cmd = MarketCommands::Ohlc(OhlcArgs {
             pair: "BTC".to_string(),
-            venue: "binance".to_string(),
+            venue: vec!["binance".to_string()],
             token_contract: None,
             interval: "1h".to_string(),
             limit: Some(100),
@@ -2205,7 +2688,7 @@ capabilities:
 
         let trades_cmd = MarketCommands::Trades(TradesArgs {
             pair: "ETH".to_string(),
-            venue: "binance".to_string(),
+            venue: vec!["binance".to_string()],
             token_contract: None,
             limit: 50,
             format: OhlcFormat::Json,
@@ -2217,7 +2700,7 @@ capabilities:
     fn test_summary_args_with_report_csv_options() {
         let args = SummaryArgs {
             pair: "DAI".to_string(),
-            venue: "binance".to_string(),
+            venue: vec!["binance".to_string()],
             token_contract: None,
             chain: None,
             health: HealthArgs {
@@ -2236,7 +2719,7 @@ capabilities:
             csv: Some(std::path::PathBuf::from("/tmp/data.csv")),
         };
         assert_eq!(args.pair, "DAI");
-        assert_eq!(args.venue, "binance");
+        assert_eq!(args.venue, ["binance"]);
         assert!(args.every.is_some());
         assert!(args.duration.is_some());
         assert!(args.report.is_some());
@@ -2291,13 +2774,13 @@ capabilities:
     fn test_trades_args_default_venue() {
         let args = TradesArgs {
             pair: "USDC".to_string(),
-            venue: "binance".to_string(),
+            venue: vec!["binance".to_string()],
             token_contract: None,
             limit: 50,
             format: OhlcFormat::Text,
         };
         assert_eq!(args.pair, "USDC");
-        assert_eq!(args.venue, "binance");
+        assert_eq!(args.venue, ["binance"]);
     }
 
     // ------------------------------------------------------------------
@@ -2340,7 +2823,7 @@ capabilities:
     fn dex_args(format: SummaryFormat) -> SummaryArgs {
         SummaryArgs {
             pair: USDC_ADDR.to_string(),
-            venue: "eth".to_string(),
+            venue: vec!["eth".to_string()],
             token_contract: None,
             chain: None,
             health: HealthArgs::default(),
@@ -2419,7 +2902,7 @@ capabilities:
     async fn test_venue_sol_reads_the_solana_dex() {
         let factory = dex_factory(&[(50_000.0, 777.0)]);
         let mut args = dex_args(SummaryFormat::Text);
-        args.venue = "sol".to_string();
+        args.venue = vec!["sol".to_string()];
         let result =
             fetch_book_and_volume(&args, &HealthThresholds::default(), &factory, &quiet()).await;
         let (book, volume, _trades) = result.unwrap();
@@ -2451,7 +2934,7 @@ capabilities:
     async fn test_unknown_venue_is_an_error() {
         let factory = dex_factory(&[(50_000.0, 1.0)]);
         let mut args = dex_args(SummaryFormat::Text);
-        args.venue = "polygon".to_string();
+        args.venue = vec!["polygon".to_string()];
         let err = fetch_book_and_volume(&args, &HealthThresholds::default(), &factory, &quiet())
             .await
             .unwrap_err();

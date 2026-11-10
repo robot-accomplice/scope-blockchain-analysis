@@ -7,7 +7,7 @@ use crate::cli::output::Output;
 use crate::cli::repeat::{self, RunOutput, Schedule};
 use scope::error::{Result, ScopeError};
 use scope::metrics::Sample;
-use scope::watch::{Event, History, Snapshot, Watchlist, diff};
+use scope::watch::{Cell, Event, History, RuleStatus, Snapshot, Watchlist, diff};
 use std::io::Write as _;
 use std::path::Path;
 
@@ -16,44 +16,69 @@ pub fn csv_header() -> &'static str {
     "ts,target,metric,value,op,threshold,status,source,error,detail\n"
 }
 
-/// The CSV rows of one tick: every cell of every target. `source` is
-/// `preset` for a preset check and the metric's group for a rule.
+/// One cell of a row as a record: the one source of the CSV fields and of
+/// the JSON cell of `scope watch --format json`, so the two outputs agree.
+/// `source` is `preset` for a preset check and the metric's group for a
+/// rule.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct CellRecord {
+    pub metric: String,
+    pub op: Option<String>,
+    pub threshold: Option<f64>,
+    pub value: Option<f64>,
+    pub status: &'static str,
+    pub source: String,
+    pub error: Option<String>,
+    pub detail: Option<String>,
+}
+
+/// The record of `cell`.
+pub fn cell_record(cell: &Cell) -> CellRecord {
+    let (metric, op, threshold, source) = match &cell.rule {
+        Some(r) => (
+            r.metric.name().to_string(),
+            Some(r.op.symbol().to_string()),
+            Some(r.value),
+            format!("{:?}", r.metric.group()).to_lowercase(),
+        ),
+        None => (cell.label.clone(), None, None, "preset".into()),
+    };
+    let error = match &cell.status {
+        RuleStatus::Error(e) => Some(e.clone()),
+        _ => None,
+    };
+    CellRecord {
+        metric,
+        op,
+        threshold,
+        value: cell.value,
+        status: cell.status.name(),
+        source,
+        error,
+        // A preset check's text: it keeps the numbers of a check that
+        // passed, too.
+        detail: cell.detail.clone(),
+    }
+}
+
+/// The CSV rows of one tick: every cell of every target.
 pub fn csv_rows(at: &str, snapshot: &Snapshot) -> String {
     let mut rows = String::new();
     for t in &snapshot.targets {
         for c in &t.cells {
-            let (metric, op, threshold, source) = match &c.rule {
-                Some(r) => (
-                    r.metric.name().to_string(),
-                    r.op.symbol().to_string(),
-                    r.value.to_string(),
-                    format!("{:?}", r.metric.group()).to_lowercase(),
-                ),
-                None => (
-                    c.label.clone(),
-                    String::new(),
-                    String::new(),
-                    "preset".into(),
-                ),
-            };
-            let value = c.value.map(|v| v.to_string()).unwrap_or_default();
-            let error = match &c.status {
-                scope::watch::RuleStatus::Error(e) => e.as_str(),
-                _ => "",
-            };
+            let r = cell_record(c);
+            let number = |v: Option<f64>| v.map(|v| v.to_string()).unwrap_or_default();
             let fields = [
                 at,
                 &t.target,
-                &metric,
-                &value,
-                &op,
-                &threshold,
-                c.status.name(),
-                &source,
-                error,
-                // A preset check's text: it keeps the numbers of a check
-                // that passed, too.
-                c.detail.as_deref().unwrap_or(""),
+                &r.metric,
+                &number(r.value),
+                r.op.as_deref().unwrap_or(""),
+                &number(r.threshold),
+                r.status,
+                &r.source,
+                r.error.as_deref().unwrap_or(""),
+                r.detail.as_deref().unwrap_or(""),
             ];
             let cells: Vec<String> = fields.iter().map(|f| csv_field(f)).collect();
             rows.push_str(&cells.join(","));
@@ -123,6 +148,26 @@ pub fn schedule(w: &Watchlist) -> Result<Schedule> {
     }
 }
 
+/// Starts the CSV file of a run: a new file with the header. With
+/// `append`, a file that has rows keeps them and gets no second header.
+///
+/// # Errors
+///
+/// The file cannot be written.
+pub fn start_csv(path: &Path, append: bool) -> Result<()> {
+    let has_rows = append && std::fs::metadata(path).is_ok_and(|m| m.len() > 0);
+    let started = if has_rows {
+        // Fails now, not at the first tick, when the file cannot be written.
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .map(drop)
+    } else {
+        std::fs::write(path, csv_header())
+    };
+    started.map_err(|e| ScopeError::io_context(e, format!("cannot write {}", path.display())))
+}
+
 /// Runs `ready` on its schedule. After each tick, `on_tick` gets the run
 /// number, the tick and the events since the tick before. The CSV gets one
 /// row per cell per tick; at the end of the duration, the report is
@@ -137,9 +182,30 @@ pub async fn run(
 ) -> Result<Tick> {
     let w = &ready.list;
     if let Some(path) = &w.outputs.csv {
-        std::fs::write(path, csv_header())
-            .map_err(|e| ScopeError::io_context(e, format!("cannot write {}", path.display())))?;
+        start_csv(path, false)?;
     }
+    let last = run_ticks(ready, src, out, |n, _, t, events| on_tick(n, t, events)).await?;
+    if let Some(path) = &w.outputs.report {
+        write_report(path, w, &last)?;
+        out.note_saved("Report", path.display());
+    }
+    Ok(last)
+}
+
+/// The loop of [`run`]: the ticks on the schedule, with a CSV row set per
+/// tick when the watchlist has a CSV file (the caller has started it with
+/// [`start_csv`]). `on_tick` also gets the time written in the CSV rows,
+/// and runs after the append, so the file and the callback agree. No
+/// report is written.
+///
+/// Returns the last tick.
+pub async fn run_ticks(
+    ready: &Ready,
+    src: Sources<'_>,
+    out: &Output,
+    mut on_tick: impl FnMut(u64, &str, &Tick, &[Event]),
+) -> Result<Tick> {
+    let w = &ready.list;
     // The step closure is called once per tick and its future outlives
     // the call, so the state it changes is shared through cells.
     let prev = std::cell::RefCell::new(Snapshot::default());
@@ -152,11 +218,11 @@ pub async fn run(
         let t = tick(ready, src, out, &mut memory).await;
         history.replace(memory);
         let events = diff(&prev.borrow(), &t.snapshot);
+        let at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
         if let Some(path) = &w.outputs.csv {
-            let at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
             append(path, &csv_rows(&at, &t.snapshot))?;
         }
-        (on_tick.borrow_mut())(n, &t, &events);
+        (on_tick.borrow_mut())(n, &at, &t, &events);
         *prev.borrow_mut() = t.snapshot.clone();
         let failed: Vec<String> = events
             .iter()
@@ -171,15 +237,12 @@ pub async fn run(
             },
             snapshot: String::new(),
             view: None,
+            venues: None,
             value: t,
         })
     })
     .await?
     .unwrap_or_default();
-    if let Some(path) = &w.outputs.report {
-        write_report(path, w, &last)?;
-        out.note_saved("Report", path.display());
-    }
     Ok(last)
 }
 
