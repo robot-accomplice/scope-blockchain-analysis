@@ -10,9 +10,7 @@
 //! (`tests/tui_contrast.rs`) keeps other files from naming a color.
 
 use ratatui::style::{Color, Modifier, Style};
-use scope::display::theme::{
-    AnsiColor, Direction, Role, SERIES_TONES, Scheme, Tone, scheme_role_tone, scheme_tone, tone,
-};
+use scope::display::theme::{AnsiColor, Role, SERIES_TONES, Tone, tone};
 
 /// The ratatui color of a named ANSI color.
 const fn color(c: AnsiColor) -> Color {
@@ -74,11 +72,6 @@ pub const fn style(role: Role) -> Style {
     tone_style(tone(role))
 }
 
-/// The ratatui style of a value that moved in `direction` under `scheme`.
-pub const fn scheme_style(scheme: Scheme, direction: Direction) -> Style {
-    tone_style(scheme_tone(scheme, direction))
-}
-
 /// Title, idle pane rule, prompt `scope`, status values, palette names.
 pub const ACCENT: Style = style(Role::Accent);
 
@@ -119,53 +112,6 @@ pub const fn series_style(i: usize) -> Style {
 /// The strong (bold) form of a role: verdicts, states and headings.
 pub const fn strong(role: Role) -> Style {
     tone_style(tone(role).strong())
-}
-
-// =============================================================================
-// Monitor palette
-// =============================================================================
-
-/// Extension trait for `ColorScheme`: its ratatui palette.
-pub trait ColorSchemeExt {
-    fn palette(&self) -> ColorPalette;
-}
-
-impl ColorSchemeExt for Scheme {
-    /// The palette for this scheme, from the theme (`scope::display::theme`):
-    /// up and down per scheme, the rest from their roles. Monochrome keeps
-    /// no color.
-    fn palette(&self) -> ColorPalette {
-        let scheme = *self;
-        let role = |r| tone_color(scheme_role_tone(scheme, r));
-        ColorPalette {
-            up: tone_color(scheme_tone(scheme, Direction::Up)),
-            down: tone_color(scheme_tone(scheme, Direction::Down)),
-            neutral: tone_color(Tone::PLAIN),
-            header_fg: tone_color(Tone::PLAIN),
-            highlight: role(Role::Warn),
-            volume_bar: role(Role::Info),
-            sparkline: role(Role::Accent),
-        }
-    }
-}
-
-/// Named color palette derived from a ColorScheme.
-#[derive(Debug, Clone, Copy)]
-pub struct ColorPalette {
-    /// Color for price-up / bullish.
-    pub up: Color,
-    /// Color for price-down / bearish.
-    pub down: Color,
-    /// Neutral/secondary text color.
-    pub neutral: Color,
-    /// Header foreground.
-    pub header_fg: Color,
-    /// Highlight/accent color.
-    pub highlight: Color,
-    /// Volume bar color.
-    pub volume_bar: Color,
-    /// Sparkline color.
-    pub sparkline: Color,
 }
 
 /// What the output pane is doing. It sets the rule color and the state word.
@@ -267,22 +213,6 @@ mod tests {
         ] {
             assert_eq!(parsed(role), style(role), "{role:?}");
         }
-    }
-
-    #[test]
-    fn test_scheme_styles_follow_the_core_scheme_tones() {
-        assert_eq!(
-            scheme_style(Scheme::GreenRed, Direction::Up).fg,
-            Some(Color::Green)
-        );
-        assert_eq!(
-            scheme_style(Scheme::BlueOrange, Direction::Down).fg,
-            Some(Color::Yellow)
-        );
-        assert_eq!(
-            scheme_style(Scheme::Monochrome, Direction::Up),
-            Style::new()
-        );
     }
 
     // A venue's line must never look like a health state, and must read

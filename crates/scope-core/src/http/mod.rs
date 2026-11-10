@@ -26,6 +26,8 @@ pub mod ghola_install;
 pub mod native;
 pub mod replay;
 pub mod shared;
+#[cfg(all(test, unix))]
+mod test_stub;
 
 pub use ghola::GholaHttpClient;
 pub use native::NativeHttpClient;

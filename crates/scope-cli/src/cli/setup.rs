@@ -755,7 +755,10 @@ fn run_setup_wizard_impl(
         out,
         "  scope insights <target>       # Auto-detect and analyze"
     );
-    note!(out, "  scope monitor USDC            # Live TUI dashboard");
+    note!(
+        out,
+        "  scope monitor USDC            # Monitor wizard and watch grid"
+    );
     note!(out, "  scope interactive             # Interactive mode");
     note!(out);
     note!(

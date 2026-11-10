@@ -97,7 +97,7 @@ Why this shape:
 5. **The one-venue shape does not change.** Scripts that read one venue keep working. A script must choose the list shape on purpose, by naming 2 or more venues.
 6. **The CSV adds a `venue` column and a row for each venue.** Rows for one run stay together, in the order of the venues. A failed venue has `-` in every value column, as a missing value does today. The column goes after `run` so the key of a row is `timestamp,run,venue`. The one-venue CSV has no `venue` column, so its header does not change.
 
-Left out: a `comparison` array in the summary JSON. The list items hold every value of the table, so a script can build it. It would repeat data and add a second shape to keep. Add it if a script needs it.
+Left out: a `comparison` array in the summary JSON. The list items hold every value of the table, so a script can build it. It would repeat data and add a second shape to keep. Add it if a script needs it. **Update 2026-11-10:** added. The many-venue `summary` JSON is now an object `{pair, run, venues, comparison}`; `venues` holds the list above. See `2026-11-10-market-venue-followups-design.md`.
 
 ## 5. Exit codes
 

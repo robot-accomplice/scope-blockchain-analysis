@@ -57,7 +57,10 @@ pub enum MarketCommands {
     /// Name several venues to compare them: repeat `--venue` or give a comma
     /// list (`--venue weex,binance`). The output has one summary per venue, in
     /// the order given, then a comparison table with one row per venue. With
-    /// --every, the repeat view draws one line per venue on each chart.
+    /// --format json the output is one object with `pair`, `run`, `venues`
+    /// (one item per venue) and `comparison` (one row of raw numbers per
+    /// venue). With --every, the repeat view draws one line per venue on each
+    /// chart.
     /// A venue that fails does not stop the others: its section and its table
     /// row say why. The exit code is 1 when any venue failed, else 0; an
     /// unhealthy venue does not change it (as with one venue).
@@ -306,14 +309,6 @@ pub async fn run(
         MarketCommands::Ohlc(ohlc_args) => run_ohlc(ohlc_args, factory.http(), out).await,
         MarketCommands::Trades(trades_args) => run_trades(trades_args, factory.http(), out).await,
     }
-}
-
-/// The venue symbol for user pair input (see [`Pair::parse`]).
-///
-/// Kept only for the monitor (`monitor/mod.rs`), which still calls it; the
-/// market commands call `venue_symbol` directly.
-pub(crate) fn venue_pair(exchange: &scope::market::ExchangeClient, input: &str) -> String {
-    exchange.venue_symbol(&Pair::parse(input))
 }
 
 /// Token analytics from the crawl pipeline: the CLI and web adapter for the
@@ -2306,6 +2301,138 @@ capabilities:
                 }
             }
         }
+    }
+
+    /// What `summary --format json` printed for the mock DEX venue before
+    /// the many-venue envelope (the code of one venue is unchanged).
+    const ONE_VENUE_SUMMARY_JSON: &str = r#"{
+  "ask_depth": 25000.0,
+  "ask_levels": 1,
+  "ask_outliers": 0,
+  "asks": [
+    {
+      "price": 1.001,
+      "quantity": 24975.02497502498,
+      "value": 25000.0
+    }
+  ],
+  "best_ask": 1.001,
+  "best_bid": 0.999,
+  "bid_depth": 25000.0,
+  "bid_levels": 1,
+  "bid_outliers": 0,
+  "bids": [
+    {
+      "price": 0.999,
+      "quantity": 25025.025025025025,
+      "value": 25000.0
+    }
+  ],
+  "book_source": "synthetic_estimate",
+  "bot_patterns": {
+    "book_checked": false,
+    "bot_like_pct": null,
+    "bot_like_volume_pct": null,
+    "findings": [],
+    "tape_note": "a DEX pool has no trade tape here",
+    "trades_sampled": 0
+  },
+  "checks": [
+    {
+      "message": "No sells below peg",
+      "status": "pass"
+    },
+    {
+      "message": "Bid/Ask ratio: 1.00x",
+      "status": "pass"
+    },
+    {
+      "message": "Spread: 0.200% (max 3.0%)",
+      "status": "pass"
+    },
+    {
+      "message": "Bid levels: 1 < 10 minimum",
+      "status": "fail"
+    },
+    {
+      "message": "Bid depth: 25000 USD (min 3000)",
+      "status": "pass"
+    },
+    {
+      "message": "Ask levels: 1 < 10 minimum",
+      "status": "fail"
+    },
+    {
+      "message": "Ask depth: 25000 USD (min 3000)",
+      "status": "pass"
+    },
+    {
+      "message": "Bid top-3 depth: 25000 USD (min 300)",
+      "status": "pass"
+    },
+    {
+      "message": "Bid top-10 depth: 25000 USD (min 2000)",
+      "status": "pass"
+    },
+    {
+      "message": "Ask top-3 depth: 25000 USD (min 300)",
+      "status": "pass"
+    },
+    {
+      "message": "Ask top-10 depth: 25000 USD (min 2000)",
+      "status": "pass"
+    },
+    {
+      "message": "Depth/volume: ≥5000.0% (≥50000 / 1000 USD within ±2%; target 5–10%)",
+      "status": "warn"
+    },
+    {
+      "message": "Bot patterns: not checked (a DEX pool has no trade tape here)",
+      "status": "n/a"
+    }
+  ],
+  "execution_10k_buy": {
+    "fillable": true,
+    "notional_usdt": 10000.0,
+    "slippage_bps": 9.999999999998899,
+    "vwap": 1.001
+  },
+  "execution_10k_sell": {
+    "fillable": true,
+    "notional_usdt": 10000.0,
+    "slippage_bps": 10.000000000000009,
+    "vwap": 0.999
+  },
+  "healthy": false,
+  "mid_price": 1.0,
+  "pair": "USDC/USD",
+  "peg_target": 1.0,
+  "quote": "USD",
+  "run": null,
+  "slippage_warn_bps": 10.0,
+  "spread": 0.0019999999999998908,
+  "venue": "eth",
+  "volume_24h": 1000.0
+}
+"#;
+
+    #[tokio::test]
+    async fn test_one_venue_summary_json_is_byte_for_byte_the_object_of_before_the_envelope() {
+        // The compatibility promise: a script that names one venue (or none)
+        // keeps its object. No `comparison`, no `venues`, no envelope. The
+        // expected text is the output of v0.8.6, before the comparison
+        // array existed.
+        let factory = dex_factory(&[(50_000.0, 1_000.0)]);
+        let (out, cap) = Output::capture();
+        run_summary(
+            dex_args(SummaryFormat::Json),
+            &Config::default(),
+            &factory,
+            &out,
+        )
+        .await
+        .unwrap();
+        assert_eq!(cap.out(), ONE_VENUE_SUMMARY_JSON);
     }
 
     #[tokio::test]
