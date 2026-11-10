@@ -1745,6 +1745,67 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_dex_row_has_no_tape_so_its_bot_state_is_none_no_tape_and_not_the_other_two() {
+        // A DEX pool has no trade tape. The row must say "none_no_tape":
+        // "not_run" would hide that the check was looked at, and "found"
+        // or "none" would claim the tape was read.
+        let mut factory = MockClientFactory::new();
+        let data = factory.mock_dex.token_data.as_mut().unwrap();
+        data.symbol = "USDC".to_string();
+        data.pairs = vec![scope::chains::DexPair {
+            dex_name: "DEX 0".to_string(),
+            pair_address: "0xpair0".to_string(),
+            base_token: "USDC".to_string(),
+            quote_token: "USDT".to_string(),
+            price_usd: 1.0,
+            volume_24h: 1_000.0,
+            liquidity_usd: 50_000.0,
+            liquidity_base: None,
+            price_change_24h: 0.0,
+            buys_24h: 0,
+            sells_24h: 0,
+            buys_6h: 0,
+            sells_6h: 0,
+            buys_1h: 0,
+            sells_1h: 0,
+            pair_created_at: None,
+            url: None,
+        }];
+        let mut args = args(&["eth", "nowhere"], SummaryFormat::Json);
+        args.pair = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string();
+        let http = factory.http();
+        let source = move |name: &str| MarketVenue::from_name_with_http(name, http.clone());
+        let venues = checked_venues(&args.venue).unwrap();
+        let (out, cap) = Output::capture();
+        let _ = run_summary(
+            &args,
+            &venues,
+            None,
+            &HealthThresholds::default(),
+            &source,
+            &factory,
+            &out,
+        )
+        .await;
+        let v: serde_json::Value = serde_json::from_str(&cap.out()).unwrap();
+        let row = &v["comparison"][0];
+        assert_eq!(row["venue"], "eth");
+        assert_eq!(row["bot_signs_state"], "none_no_tape", "{row}");
+        assert_eq!(row["bot_signs"], serde_json::json!([]), "{row}");
+        assert_ne!(row["status"], "error", "{row}");
+        assert!(row.get("error").is_none(), "{row}");
+        // The numbers are the summary's, from the pool: mid 1.0 on the peg.
+        assert_eq!(row["mid"].as_f64(), Some(1.0), "{row}");
+        assert_eq!(row["bid_depth"].as_f64(), Some(25_000.0), "{row}");
+        assert_eq!(row["ask_depth"].as_f64(), Some(25_000.0), "{row}");
+        assert_eq!(row["volume_24h"].as_f64(), Some(1_000.0), "{row}");
+        assert_eq!(row["peg_deviation_bps"].as_f64(), Some(0.0), "{row}");
+        assert!(row["spread_pct"].is_number(), "{row}");
+        // The failed venue beside it stays a "not_run" error row.
+        assert_eq!(v["comparison"][1]["bot_signs_state"], "not_run");
+    }
+
     // ---- ohlc and trades ----
 
     const KLINES: &str = r#"[[1700000000000,"1.0","1.5","0.5","1.25","1000.5",1700003599999],
