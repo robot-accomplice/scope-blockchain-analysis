@@ -77,11 +77,7 @@ pub async fn dispatch(
     let http: Arc<dyn HttpClient> = create_http_client_offering(config, out, &env, offer)?;
     // Only the TUI can end with a code other than 0, so it starts here.
     // `scope monitor` opens it too, with the monitor wizard (#47).
-    let opens_tui = match &command {
-        Commands::Interactive(_) => true,
-        Commands::Monitor(args) => !args.watch.dashboard,
-        _ => false,
-    };
+    let opens_tui = matches!(&command, Commands::Interactive(_) | Commands::Monitor(_));
     if opens_tui {
         let settings = |config: Config, http: Arc<dyn HttpClient>| Settings {
             clients: Box::new(DefaultClientFactory {
@@ -160,9 +156,11 @@ pub async fn dispatch_with(
         Commands::Interactive(_) => Err(ScopeError::Other(
             "the TUI cannot start from here; start it with `scope tui`".into(),
         )),
-        Commands::Monitor(args) => {
-            crate::cli::monitor::run_direct(args, config, clients, out).await
-        }
+        // The monitor wizard opens in the TUI, which starts only from
+        // [`dispatch`].
+        Commands::Monitor(_) => Err(ScopeError::Other(
+            "the monitor wizard opens in the TUI; start it with `scope monitor`".into(),
+        )),
         Commands::Setup(args) => crate::cli::setup::run(args, config, out).await,
         Commands::Compliance(compliance_cmd) => {
             dispatch_compliance(compliance_cmd, config, clients.http(), out).await
@@ -195,10 +193,7 @@ pub async fn dispatch_with(
 fn needs_venues(command: &Commands) -> bool {
     use crate::cli::venues::VenuesCommands;
     match command {
-        Commands::Market(_)
-        | Commands::Monitor(_)
-        | Commands::TokenHealth(_)
-        | Commands::Insights(_) => true,
+        Commands::Market(_) | Commands::TokenHealth(_) | Commands::Insights(_) => true,
         Commands::Venues(cmd) => matches!(cmd, VenuesCommands::List(_)),
         _ => false,
     }

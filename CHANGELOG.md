@@ -16,6 +16,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - With two or more venues, the exit code is 1 when any venue failed, else 0. An unhealthy venue does not change it, as with one venue.
 - `market summary --every` on two or more venues draws the venue charts of the watch grid in the TUI: one chart for each key value, one line for each venue, the legend with the range across venues, and the same keys (`←` `→`, Space, Tab, PgUp, PgDn). The CSV from `--csv` or `save` has one row for each venue and run, with a `venue` column after `run`. A venue that fails in one run does not end the repeat; the repeat ends when every venue fails.
 
+### Removed
+- The old monitor dashboard, deprecated in 0.8.0. `scope monitor --dashboard` and the flags `--layout`, `--scale` and `--color-scheme` are gone; scope now rejects them as unknown arguments. Use `scope monitor <token>`: it opens the monitor wizard and the watch grid. These replace the old features:
+  - Price and volume charts: the detail pane of the grid (Enter on a row). For a target on two or more venues, it shows the venue charts.
+  - Order book panel and exchange layout: `b` in the detail pane, or `scope market summary <pair> --venue <venue>`.
+  - Trades feed layout: `t` in the detail pane, or `scope market trades <pair> --venue <venue>`.
+  - Alerts (`monitor.alerts`): rules on the watchlist. They have worked this way since 0.8.0.
+  - CSV export (`E` key, `--export`): `--csv FILE`.
+  - Layout presets, widget toggles, log scale and color schemes: no replacement. The grid has no layouts.
+- The config keys `monitor.layout`, `monitor.widgets`, `monitor.scale`, `monitor.color_scheme`, `monitor.export` and `monitor.auto_pause_on_input`. A config that has them still loads. Scope ignores them and prints one line on stderr, once per run, that names them. `monitor.refresh_seconds`, `monitor.alerts` and `monitor.venue` stay.
+- The `-l` and `-s` short flags of `scope monitor`.
+
 ### Fixed
 - `scripts/check-coverage.sh` no longer fails without a message. When `cargo tarpaulin` fails, the script prints its output and its exit code. The script also stops at once, with a clear message, when `cargo tarpaulin` is older than 0.37.1: older versions cannot read the LLVM 23 profraw files that rustc 1.99.x writes.
 - The help of `scope monitor --save` said that `watch open <name>` runs a saved watchlist again, as if it were a CLI command. It is a command of the TUI shell. The help now says to start `scope tui` and enter `watch open <name>` there.

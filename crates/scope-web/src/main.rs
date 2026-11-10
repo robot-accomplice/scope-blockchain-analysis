@@ -13,7 +13,7 @@
 //! - Token crawling (`scope crawl` / `token`) with report generation
 //! - Token health suite (`scope token-health` / `health`) — DEX + optional market
 //! - Token discovery (`scope discover` / `disc`) — trending/boosted from DexScreener
-//! - Live monitoring (`scope monitor` / `mon`) — real-time TUI dashboard
+//! - Live monitoring (`scope monitor` / `mon`) — the monitor wizard and watch grid in the TUI
 //! - Market peg/order book health (`scope market summary`)
 //!
 //! **Compliance:**
@@ -118,11 +118,10 @@ async fn run() -> Result<()> {
 
     // The TUI needs a terminal. Check before the config load and the setup
     // prompt, which read stdin. `scope monitor` opens the TUI too (#47).
-    let opens_tui = match &cli.command {
-        Commands::Interactive(_) => true,
-        Commands::Monitor(args) => !args.watch.dashboard,
-        _ => false,
-    };
+    let opens_tui = matches!(
+        &cli.command,
+        Commands::Interactive(_) | Commands::Monitor(_)
+    );
     if opens_tui {
         let term = std::env::var("TERM").ok();
         if let Err(message) = scope_cli::cli::tui::tui_terminal_ok(

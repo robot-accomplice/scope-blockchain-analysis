@@ -647,7 +647,7 @@ scope market summary USDC --venue binance       # Binance (default)
 scope market summary USDC --venue kraken         # Kraken
 scope market summary USDC --venue okx            # OKX
 scope health USDC --with-market --venue coinbase  # Coinbase order book
-scope monitor USDC --layout exchange              # Exchange-style TUI
+scope monitor USDC --venue binance                # Monitor wizard with market health checks
 ```
 
 The DEX venues (`eth`, `solana`) are still available and use on-chain liquidity data rather than the venue registry.
@@ -864,7 +864,7 @@ The row under the input shows the keys that move around (scroll, history, comple
 
 **Repeating view on several venues.** With `--venue weex,binance --every 30s`, the view shows the comparison table of the last run, then the venue charts of the watch grid: one chart for each key value, one braille line for each venue on a shared scale, and a legend with the range across venues (`all`), then each venue with its last value and its health. The keys are the keys of the grid: `←` `→` select a venue, Space shows only that venue as bars (and Space again all venues), Tab selects the chart whose values the legend shows, and PgUp and PgDn page through the charts. These keys work when the input line is empty, and they do not leave a finished view. A window too small for the charts says how much to enlarge it. A venue that fails in one run leaves a gap in its line; the repeat ends only when every venue fails.
 
-**Commands that need the terminal.** `setup` (except `--status`) and `monitor --dashboard` run on the plain terminal. The TUI steps aside, runs the command, and comes back by itself when it ends; `Ctrl-C` cancels it. The scrollback shows its output and how long it took. After `setup`, the TUI reads the config again, so a new key works at once. `interactive`, `web` and `completions` do not run in the TUI.
+**Commands that need the terminal.** `setup` (except `--status`) runs on the plain terminal. The TUI steps aside, runs the command, and comes back by itself when it ends; `Ctrl-C` cancels it. The scrollback shows its output and how long it took. After `setup`, the TUI reads the config again, so a new key works at once. `interactive`, `web` and `completions` do not run in the TUI.
 
 **Files.** The TUI keeps its history in `history.txt` and a log of every submitted line in `tui-events.jsonl` (input, parsed arguments, outcome, error, duration), both in the scope data directory.
 
@@ -913,74 +913,27 @@ targets:
       - liquidity_usd > 1000000
 ```
 
-**From the old monitor.** `--refresh N` is the interval in seconds; `--export` is now `--csv`. The price bounds of `monitor.alerts` become rules on the price; with a venue, `whale_min_usd` becomes `largest_trade < whale_min_usd` and `volume_spike_threshold_pct` becomes `volume_change_pct <= volume_spike_threshold_pct`. Without a venue they are not checked, and a note says they need one. `--layout`, `--scale` and `--color-scheme` belong to the old dashboard.
+**From the old monitor.** `--refresh N` is the interval in seconds; `--export` is now `--csv`. The price bounds of `monitor.alerts` become rules on the price; with a venue, `whale_min_usd` becomes `largest_trade < whale_min_usd` and `volume_spike_threshold_pct` becomes `volume_change_pct <= volume_spike_threshold_pct`. Without a venue they are not checked, and a note says they need one. `--layout`, `--scale` and `--color-scheme` are removed: the grid has no layouts.
 
-#### The old dashboard (deprecated)
+#### Flags of `scope monitor`
 
-`scope monitor <token> --dashboard` opens the old live dashboard for one more release. It goes in the next one.
+`--chain` / `-c`, `--refresh` / `-r`, `--export` / `-e`, `--venue`, `--pair`, `--token`, and the wizard options above.
 
-```bash
-scope monitor USDC --dashboard
-scope mon PEPE --chain ethereum --layout chart-focus --refresh 3 --dashboard
-scope monitor USDC --layout exchange --dashboard    # Exchange-style: order book + chart + trades
-```
-
-**Dashboard flags:** `--chain` / `-c`, `--layout` / `-l`, `--refresh` / `-r`, `--scale` / `-s`, `--color-scheme`, `--export` / `-e`, `--venue` / `-v`, with `--dashboard`.
-
-Use `--venue binance` (or any CEX venue) to fetch real exchange OHLC data instead of synthetic candles. The dashboard reads one venue: with two or more it stops and says so. The time period selector (1m, 5m, 15m, 1h, 4h, 1d) maps directly to the venue's candlestick intervals.
-
-- **`--venue`** must name a known venue (`scope venues list`). An unknown venue is an error.
+- **`--venue`** must name a known venue (`scope venues list`). An unknown venue is an error. Give it more than once, or a comma list, to watch the token on several venues.
 - **When DexScreener fails** (unreachable, blocked, or the token is unknown there) and `--venue` is set, the monitor uses that venue's ticker for the token and tells you why.
 - **`--pair`** prices the token from the venue alone (exchange-only mode). Write the pair in any common form, `USDN_USDT`, `USDN/USDT`, `USDN-USDT` or `USDNUSDT` (the joined form only for a stable or fiat quote such as USDT, USDC, DAI, EUR); scope converts it to the venue's own format.
-- **`--export FILE`** starts CSV export to that file at launch. The `E` key starts an export in the directory set by `monitor.export.path` in `config.yaml` (default `./scope-exports/`). A file that cannot be written is an error, not a silent no-op.
+- **`--export FILE`** is `--csv FILE`.
 
-The monitor supports five layout presets that can be switched at runtime or configured in `config.yaml`:
+**The old dashboard is gone.** `scope monitor --dashboard` and its flags `--layout`, `--scale` and `--color-scheme` were removed (they were deprecated in 0.8.0). These replace its features:
 
-| Preset | Description |
+| Old dashboard | Use now |
 | --- | --- |
-| **Dashboard** | Balanced 2x2 grid with all widgets visible (default) |
-| **Chart** | Price chart takes ~85% of the screen; minimal stats overlay |
-| **Feed** | Transaction/activity feed prioritized; small price ticker |
-| **Compact** | Minimal single-column sparkline view for small terminals |
-| **Exchange** | Exchange-style view: order book, chart, recent trades, market info |
-
-The monitor automatically selects the best layout for your terminal size (responsive breakpoints). `monitor.layout` in `config.yaml` is only the starting preset; auto-selection still applies to it. The `--layout` flag pins the layout: auto-selection stays off. Manual layout switching also disables auto-selection until you press `A`.
-
-**Monitor features:**
-
-- **Price/volume charts**: Line, Candlestick, and Volume Profile modes
-- **Six timeframes**: 1m, 5m, 15m, 1h, 4h, 1d
-- **Log/linear scale**: Toggle Y-axis scaling for wide price ranges
-- **Color schemes**: Green/Red (default), Blue/Orange, Monochrome
-- **Holder count**: On-chain holder count (when API key is configured)
-- **Liquidity depth**: Per-pair liquidity breakdown across DEXes
-- **Exchange view**: Live order book, ticker, and recent trade history from any configured CEX venue
-- **Alerts**: Configurable price min/max, whale detection, and volume spike thresholds
-- **CSV export**: Record live data with a single keypress (`E`), or from launch with `--export FILE`
-- **Auto-pause**: Optionally pause data fetching while interacting
-
-**Monitor keybindings** (`?` shows this list in the monitor):
-
-| Key | Action |
-| --- | --- |
-| `q` / `Esc` / `Ctrl-C` | Quit monitor |
-| `r` | Refresh now (the activity log confirms it) |
-| `p` / `Space` | Pause/resume |
-| `Shift+P` | Toggle auto-pause on input |
-| `e` | Toggle CSV export (REC indicator when active) |
-| `l` / `h` | Next / previous layout (Dashboard, Chart, Feed, Compact, Exchange) |
-| `w` + `1-5` | Toggle widget visibility (1=price chart, 2=volume, 3=buy/sell, 4=metrics, 5=activity) |
-| `a` | Re-enable auto layout |
-| `c` | Cycle chart mode (Line / Candlestick / Volume Profile) |
-| `s` | Toggle log/linear scale |
-| `/` | Cycle color scheme (green-red, blue-orange, mono) |
-| `t` / `Tab` | Cycle time period |
-| `1-6` | Select time period (1m, 5m, 15m, 1h, 4h, 1d) |
-| `j` / `k` | Scroll activity log |
-| `+` / `-` | Slower / faster refresh (the footer shows the interval: `↻ 3s of 5s`) |
-| `?` | Show every key; any key closes the list |
-
-With `--venue`, the Order Book and Recent Trades panels show the venue's real book and trades, and their titles name the venue. Without one, the book is the DEX pool's AMM book, the same as `market summary`, and the title names its source.
+| Price and volume charts, time periods | The grid's detail pane (Enter on a row): a chart of each check's last values. With two or more venues, the venue charts. |
+| Order book panel (`--layout exchange`) | `b` in the detail pane (`market summary` for the target), or `scope market summary <pair> --venue <venue>`. |
+| Trades feed (`--layout feed`) | `t` in the detail pane (`market trades` for the target), or `scope market trades <pair> --venue <venue>`. |
+| Alerts (`monitor.alerts`) | Rules on the watchlist (see above). |
+| CSV export (`E` key, `--export`) | `--csv FILE`, or the wizard's CSV path. |
+| Layout presets, widget toggles, scale and color scheme | None. The grid has no layouts. |
 
 ## Configuration
 
@@ -1030,28 +983,17 @@ output:
 portfolio:
   data_dir: "~/.scope-bca/data"
 
-# Monitor TUI configuration (all optional, shown with defaults)
+# Monitor defaults (all optional, shown with defaults)
 monitor:
-  layout: dashboard          # starting preset; auto-layout still applies (--layout pins it)
   refresh_seconds: 10
-  scale: linear              # linear | log
-  color_scheme: green-red    # green-red | blue-orange | monochrome
-  auto_pause_on_input: false # pause data fetching while interacting
-  widgets:
-    price_chart: true
-    volume_chart: true
-    buy_sell_pressure: true
-    metrics_panel: true
-    activity_log: true
-    holder_count: true
-    liquidity_depth: true
-  alerts:
+  alerts:                     # become watchlist rules
     price_min: null           # alert when price drops below (e.g., 0.50)
     price_max: null           # alert when price exceeds (e.g., 2.00)
     whale_min_usd: null       # whale detection threshold (e.g., 10000.0)
     volume_spike_threshold_pct: null  # volume spike % (e.g., 100.0)
-  export:
-    path: null                # base directory (default: ./scope-exports/)
+  # The keys layout, widgets, scale, color_scheme, export and
+  # auto_pause_on_input belonged to the removed dashboard. They are
+  # ignored, with one line on stderr.
 ```
 
 ### Free Tiers: Solana & BSC
