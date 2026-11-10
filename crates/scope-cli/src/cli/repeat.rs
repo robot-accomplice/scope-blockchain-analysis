@@ -246,6 +246,13 @@ async fn append(path: &Path, row: &str) -> Result<()> {
         .map_err(|e| ScopeError::io_context(e, context()))?;
     file.write_all(row.as_bytes())
         .await
+        .map_err(|e| ScopeError::io_context(e, context()))?;
+    // `write_all` on a tokio file returns once the bytes are buffered; the
+    // write itself runs later on the blocking pool. Without this flush, the
+    // row can be missing when the caller reads the file next, or when the
+    // process ends.
+    file.flush()
+        .await
         .map_err(|e| ScopeError::io_context(e, context()))
 }
 
