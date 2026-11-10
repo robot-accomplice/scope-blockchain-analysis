@@ -26,13 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Layout presets, widget toggles, log scale and color schemes: no replacement. The grid has no layouts.
 - The config keys `monitor.layout`, `monitor.widgets`, `monitor.scale`, `monitor.color_scheme`, `monitor.export` and `monitor.auto_pause_on_input`. A config that has them still loads. Scope ignores them and prints one line on stderr, once per run, that names them. `monitor.refresh_seconds`, `monitor.alerts` and `monitor.venue` stay.
 - The `-l` and `-s` short flags of `scope monitor`.
+- The unused Alchemy quickstart app `my-smart-wallets-app/` is removed. Nothing in the project used or shipped it. This clears its open Dependabot alerts.
 
 ### Fixed
 - `scripts/check-coverage.sh` no longer fails without a message. When `cargo tarpaulin` fails, the script prints its output and its exit code. The script also stops at once, with a clear message, when `cargo tarpaulin` is older than 0.37.1: older versions cannot read the LLVM 23 profraw files that rustc 1.99.x writes.
 - The help of `scope monitor --save` said that `watch open <name>` runs a saved watchlist again, as if it were a CLI command. It is a command of the TUI shell. The help now says to start `scope tui` and enter `watch open <name>` there.
-
-### Removed
-- The unused Alchemy quickstart app `my-smart-wallets-app/` is removed. Nothing in the project used or shipped it. This clears its open Dependabot alerts.
+- The `Jittered timer` bot pattern now also finds a timer with a hard floor and a long tail. The weex USDN/USDT bot (2026-11-07: shortest gap 18 s, median 35 s, 495 of 500 sizes different) had 69.5% of its gaps within ±50% of the median, just under the 70% limit, and was missed. A tape now also counts when its 5th-percentile gap is at least 45% of the median gap and its 95th-percentile gap is at least twice the median. Real order flow has short gaps: of 34 live tapes with a median gap of 5 s or more that no timer rule fits, the highest 5th-percentile gap was 39% of the median and the next 20%. The older rule is unchanged. When only this rule finds the timer, the finding says what it saw (`no gap under 18s in 499 gaps between trades (median 35s, 1 in 20 over 113s)`), and the JSON finding has a `floor` object with `shortest_ms` and `tail_ms`. A timer found by the band rule reads and serializes as before.
 
 ## [0.8.6] - 2026-11-05
 
