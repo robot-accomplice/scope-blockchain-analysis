@@ -1,9 +1,0 @@
-# Ignore shadcn/ui components (generated code)
-components/ui/
-
-# Other common ignores
-node_modules/
-.next/
-.vercel/
-out/
-build/ 
