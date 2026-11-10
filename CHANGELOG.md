@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Layout presets, widget toggles, log scale and color schemes: no replacement. The grid has no layouts.
 - The config keys `monitor.layout`, `monitor.widgets`, `monitor.scale`, `monitor.color_scheme`, `monitor.export` and `monitor.auto_pause_on_input`. A config that has them still loads. Scope ignores them and prints one line on stderr, once per run, that names them. `monitor.refresh_seconds`, `monitor.alerts` and `monitor.venue` stay.
 - The `-l` and `-s` short flags of `scope monitor`.
+- The help example of `scope monitor` that used `--layout` and `--dashboard`. The example failed, because scope rejects those flags.
 - The unused Alchemy quickstart app `my-smart-wallets-app/` is removed. Nothing in the project used or shipped it. This clears its open Dependabot alerts.
 
 ### Fixed
