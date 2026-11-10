@@ -70,7 +70,9 @@ pub async fn dispatch(
     // A command run on a terminal may offer to install a missing Ghola.
     // The TUI, the wizard, the web server and scripted runs never do.
     use crate::cli::ghola_offer;
+    // `scope watch` runs unattended (cron, CI): it never asks.
     let offer = !command.is_interactive()
+        && !matches!(command, Commands::Watch(_))
         && ghola_offer::may_ask(out)
         && !ghola_offer::scripted(&ghola_offer::process_args(), config);
     let env = |k: &str| std::env::var(k).ok();
@@ -109,9 +111,42 @@ pub async fn dispatch(
         chains_config: config.chains.clone(),
         http,
     };
+    // `scope watch` returns its own exit code: 1 means "breach", so it never
+    // returns an error (an error is exit code 1 in `main`).
+    if let Commands::Watch(args) = &command {
+        let out = out.clone().without_prompts();
+        load_venues(config, &factory, true, &out).await;
+        let ctx = crate::cli::watch::headless::Context {
+            config,
+            clients: &factory,
+            out: &out,
+            dir: scope::paths::watchlists_dir(),
+            venues: crate::cli::watch::venue_ids(),
+        };
+        return Ok(crate::cli::watch::headless::run(
+            args,
+            &ctx,
+            crate::cli::watch::headless::os_stop(),
+        )
+        .await);
+    }
     dispatch_with(command, config, &factory, out)
         .await
         .map(|()| 0)
+}
+
+/// Before a command that reads venues: fetches the catalog on first use and
+/// offers catalog updates. An unattended run (`scope watch`) never asks.
+async fn load_venues(
+    config: &Config,
+    clients: &dyn ChainClientFactory,
+    unattended: bool,
+    out: &Output,
+) {
+    crate::cli::venues::ensure_catalog(config, clients.http().as_ref(), out).await;
+    let scripted = unattended
+        || crate::cli::ghola_offer::scripted(&crate::cli::ghola_offer::process_args(), config);
+    crate::cli::venues::offer_catalog_updates(scripted, out).await;
 }
 
 /// Routes one command to its handler, using the given client factory.
@@ -131,10 +166,7 @@ pub async fn dispatch_with(
     out: &Output,
 ) -> Result<()> {
     if needs_venues(&command) {
-        crate::cli::venues::ensure_catalog(config, clients.http().as_ref(), out).await;
-        let scripted =
-            crate::cli::ghola_offer::scripted(&crate::cli::ghola_offer::process_args(), config);
-        crate::cli::venues::offer_catalog_updates(scripted, out).await;
+        load_venues(config, clients, false, out).await;
     }
     match command {
         Commands::Completions(args) => {
@@ -160,6 +192,10 @@ pub async fn dispatch_with(
         // [`dispatch`].
         Commands::Monitor(_) => Err(ScopeError::Other(
             "the monitor wizard opens in the TUI; start it with `scope monitor`".into(),
+        )),
+        // `scope watch` returns an exit code, so it starts from [`dispatch`].
+        Commands::Watch(_) => Err(ScopeError::Other(
+            "a headless watch returns an exit code; start it with `scope watch`".into(),
         )),
         Commands::Setup(args) => crate::cli::setup::run(args, config, out).await,
         Commands::Compliance(compliance_cmd) => {

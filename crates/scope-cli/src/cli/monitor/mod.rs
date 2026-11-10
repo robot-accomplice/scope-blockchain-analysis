@@ -36,8 +36,7 @@ use std::path::PathBuf;
   scope monitor DAI --venue binance --pair DAI_USDT --report dai.md
   scope monitor USDC --venue binance --save stables --yes   \x1b[2m# save, start at once\x1b[0m
   scope monitor PEPE --chain ethereum                       \x1b[2m# price and volume\x1b[0m
-  scope monitor @dai-token                                  \x1b[2m# address book shortcut\x1b[0m
-  scope monitor BTC --venue binance --layout exchange --dashboard   \x1b[2m# deprecated\x1b[0m")]
+  scope monitor @dai-token                                  \x1b[2m# address book shortcut\x1b[0m")]
 pub struct MonitorArgs {
     /// Token address or symbol to monitor.
     ///
@@ -113,8 +112,9 @@ pub struct MonitorWatchArgs {
     #[arg(long, value_name = "PRESET")]
     pub preset: Option<String>,
 
-    /// Save the watchlist under this name. To run it again, start `scope tui`
-    /// and enter `watch open <name>` there (no CLI subcommand opens it).
+    /// Save the watchlist under this name. To run it again with no screen,
+    /// use `scope watch <name>`. To open it in the grid, start `scope tui`
+    /// and enter `watch <name>` there.
     #[arg(long, value_name = "NAME")]
     pub save: Option<String>,
 
@@ -125,4 +125,23 @@ pub struct MonitorWatchArgs {
     /// Health threshold overrides for the market health checks.
     #[command(flatten)]
     pub health: crate::cli::health_args::HealthArgs,
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::cli::Cli;
+    use clap::Parser;
+
+    // The dashboard flags are gone (#193). A help example that uses one
+    // fails when a user copies it.
+    #[test]
+    fn the_help_names_no_flag_of_the_removed_dashboard() {
+        let help = Cli::try_parse_from(["scope", "monitor", "--help"])
+            .unwrap_err()
+            .to_string();
+        assert!(help.contains("Examples:"), "{help}");
+        for flag in ["--dashboard", "--layout", "--scale", "--color-scheme"] {
+            assert!(!help.contains(flag), "the help names {flag}: {help}");
+        }
+    }
 }

@@ -29,6 +29,7 @@
 //!   token-health DEX analytics + optional order book (alias: health)
 //!   discover     Browse trending/boosted tokens (alias: disc)
 //!   monitor      Monitor wizard and watch grid in the TUI (alias: mon)
+//!   watch        Run a saved watchlist with no screen; exit code for scripts
 //!   market       Peg and order book health for stablecoins
 //!   venues       Manage exchange venue descriptors (alias: ven)
 //!
@@ -232,6 +233,13 @@ pub enum Commands {
     /// in a grid.
     #[command(visible_alias = "mon")]
     Monitor(MonitorArgs),
+
+    /// Run a saved watchlist with no screen and end with an exit code.
+    ///
+    /// For cron, CI and scripts. It prints each tick, writes the CSV trail
+    /// and the report, and exits with 0 (pass), 1 (breach), 2 (unknown),
+    /// 3 (could not start) or 4 (write error).
+    Watch(watch::headless::WatchArgs),
 
     /// Peg and order book health for stablecoin markets.
     ///
