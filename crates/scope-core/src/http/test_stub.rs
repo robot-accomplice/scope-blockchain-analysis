@@ -26,8 +26,8 @@ const BUSY_MESSAGE: &str = "Text file busy";
 const BUSY_RETRIES: u32 = 50;
 /// The pause between two tries.
 const BUSY_PAUSE: Duration = Duration::from_millis(20);
-/// The permissions of a stub: readable and executable by everyone.
-const STUB_MODE: u32 = 0o755;
+/// The permissions of a stub: only the owner (the test) reads and runs it.
+const STUB_MODE: u32 = 0o700;
 
 /// An executable `sh` script named `name` in `dir`.
 ///
