@@ -160,6 +160,14 @@ pub const LADDER_DEPTH: usize = 25;
 /// from the same decimal string compare equal.
 const SIZE_DECIMALS: f64 = 1e8;
 
+/// What the hard-floor rule saw: the shortest gap, and the gap that 1 in 20
+/// gaps exceed (the 95th percentile), both in ms.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct TimerFloor {
+    pub shortest_ms: f64,
+    pub tail_ms: f64,
+}
+
 /// One signal that was found, with its evidence.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -192,7 +200,8 @@ pub enum Finding {
     /// `share` of `gaps` gaps between trade events run from `low_ms` to
     /// `high_ms` around `median_ms` (a timer with jitter); `pauses` gaps are
     /// far longer (the bot resting between bursts). `cv` is the spread of
-    /// all the gaps.
+    /// all the gaps. `floor` is set when only the hard-floor rule
+    /// ([`TIMER_HARD_FLOOR`]) found the timer, not the band rule.
     Timer {
         low_ms: f64,
         median_ms: f64,
@@ -201,6 +210,8 @@ pub enum Finding {
         gaps: usize,
         share: f64,
         pauses: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        floor: Option<TimerFloor>,
     },
     /// `pairs` buy/sell pairs of the same size, close in time and price,
     /// cover `share` of the trades.
@@ -517,6 +528,11 @@ pub fn timer(trades: &[Trade]) -> Option<Finding> {
             .iter()
             .filter(|g| **g > median * (1.0 + TIMER_BAND) * 4.0)
             .count(),
+        // The band rule names the finding when it fired too.
+        floor: (!in_band).then_some(TimerFloor {
+            shortest_ms: gaps[0],
+            tail_ms: tail,
+        }),
     })
 }
 
@@ -862,6 +878,18 @@ impl Finding {
                 share * 100.0,
                 gap_ms / 1000.0,
                 CADENCE_TOLERANCE * 100.0
+            ),
+            // Found by the hard-floor rule, not the band: say what it saw.
+            Finding::Timer {
+                median_ms,
+                gaps,
+                floor: Some(floor),
+                ..
+            } => format!(
+                "no gap under {:.0}s in {gaps} gaps between trades (median {:.0}s, 1 in 20 over {:.0}s)",
+                (floor.shortest_ms / 1000.0).floor(),
+                median_ms / 1000.0,
+                floor.tail_ms / 1000.0
             ),
             Finding::Timer {
                 low_ms,
@@ -2146,6 +2174,18 @@ mod tests {
             "the band rule alone misses it: {share}"
         );
         assert!((30_000.0..32_000.0).contains(&median_ms), "{median_ms}");
+        // The text names the floor, not the band that did not fire.
+        let text = timer(&t).unwrap().detail();
+        assert_eq!(
+            text,
+            "no gap under 18s in 60 gaps between trades (median 31s, 1 in 20 over 104s)"
+        );
+        assert!(!text.contains('%'), "{text}");
+        // A band-rule timer keeps the band text and has no floor field.
+        let Some(band @ Finding::Timer { floor: None, .. }) = timer(&jittered_tape(400)) else {
+            panic!("{:?}", timer(&jittered_tape(400)))
+        };
+        assert!(band.detail().contains("% of 399 gaps"), "{}", band.detail());
     }
 
     #[test]
@@ -2173,6 +2213,7 @@ mod tests {
             gaps: 99,
             share: 0.97,
             pauses: 1,
+            floor: None,
         };
         assert!(
             one.detail().ends_with(", in bursts with 1 long pause"),
@@ -2187,6 +2228,7 @@ mod tests {
             gaps: 99,
             share: 0.97,
             pauses: 0,
+            floor: None,
         };
         assert!(none.detail().ends_with("(median 45s)"), "{}", none.detail());
     }
