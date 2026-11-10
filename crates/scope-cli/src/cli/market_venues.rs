@@ -304,26 +304,28 @@ fn aggregate(reports: &[VenueReport], metrics: usize) -> Sample {
 
 /// The pair as the sections title it: the first summary's, else the user's.
 fn pair_of(args: &SummaryArgs, reports: &[VenueReport]) -> String {
+    pair_in(&args.pair, reports)
+}
+
+/// The same, from the user's pair text.
+fn pair_in(user_pair: &str, reports: &[VenueReport]) -> String {
     reports
         .iter()
         .find_map(|r| r.result.as_ref().ok().map(|s| s.pair.clone()))
-        .unwrap_or_else(|| args.pair.clone())
+        .unwrap_or_else(|| user_pair.to_string())
 }
 
 /// The run as the CLI prints it, in the command's format.
 fn render(args: &SummaryArgs, reports: &[VenueReport], run: Option<u64>) -> Result<String> {
     match args.format {
         SummaryFormat::Text => Ok(text_report(&args.pair, reports)),
-        SummaryFormat::Json => json_report(reports, run),
+        SummaryFormat::Json => json_report(&args.pair, reports, run),
     }
 }
 
 /// One section per venue, in the order given, then the comparison table.
 pub(crate) fn text_report(user_pair: &str, reports: &[VenueReport]) -> String {
-    let pair = reports
-        .iter()
-        .find_map(|r| r.result.as_ref().ok().map(|s| s.pair.clone()))
-        .unwrap_or_else(|| user_pair.to_string());
+    let pair = pair_in(user_pair, reports);
     let mut sections: Vec<String> = reports
         .iter()
         .map(|r| match &r.result {
@@ -346,11 +348,18 @@ fn failed_section(pair: &str, venue: &str, why: &str) -> String {
     )
 }
 
-/// The JSON of a run on several venues: a list with one item per venue, in
-/// the order given. An item is the summary of one venue (the shape of a
-/// single-venue run, with its `venue` field), or `venue` and `error` when
-/// the venue failed.
-pub(crate) fn json_report(reports: &[VenueReport], run: Option<u64>) -> Result<String> {
+/// The JSON of a run on several venues: an object with the `pair`, the
+/// `run` number (`null` for a single run), `venues` and `comparison`.
+/// `venues` is a list with one item per venue, in the order given. An item
+/// is the summary of one venue (the shape of a single-venue run, with its
+/// `venue` field), or `venue` and `error` when the venue failed.
+/// `comparison` has one typed row for each venue, from the same rows as the
+/// text table.
+pub(crate) fn json_report(
+    user_pair: &str,
+    reports: &[VenueReport],
+    run: Option<u64>,
+) -> Result<String> {
     let items: Vec<serde_json::Value> = reports
         .iter()
         .map(|r| match &r.result {
@@ -358,7 +367,136 @@ pub(crate) fn json_report(reports: &[VenueReport], run: Option<u64>) -> Result<S
             Err(why) => serde_json::json!({"run": run, "venue": r.venue, "error": why}),
         })
         .collect();
-    Ok(format!("{}\n", serde_json::to_string_pretty(&items)?))
+    let doc = serde_json::json!({
+        "pair": pair_in(user_pair, reports),
+        "run": run,
+        "venues": items,
+        "comparison": comparison_rows(reports),
+    });
+    Ok(format!("{}\n", serde_json::to_string_pretty(&doc)?))
+}
+
+/// How a venue stands in the comparison.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RowStatus {
+    Healthy,
+    Unhealthy,
+    Error,
+}
+
+/// What the bot-pattern check found for a venue. "No tape" is not "none":
+/// the signals that need trades did not run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BotSignsState {
+    /// One sign or more.
+    Found,
+    /// The check ran and found nothing.
+    None,
+    /// Nothing found, but the trade tape was missing or too short.
+    NoneNoTape,
+    /// The check did not run (no summary, or no check in this run).
+    NotRun,
+}
+
+/// One venue of the comparison, as raw numbers. The one source of the text
+/// table, the markdown table and the JSON `comparison` array, so the three
+/// cannot differ. Units: `spread_pct` in percent, depths in the quote
+/// currency, `peg_deviation_bps` in basis points from the peg.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub(crate) struct ComparisonRow {
+    pub venue: String,
+    pub status: RowStatus,
+    pub mid: Option<f64>,
+    pub spread_pct: Option<f64>,
+    pub bid_depth: Option<f64>,
+    pub ask_depth: Option<f64>,
+    pub volume_24h: Option<f64>,
+    pub peg_deviation_bps: Option<f64>,
+    /// The names of the signs found; `[]` for none, `null` when not run.
+    pub bot_signs: Option<Vec<String>>,
+    pub bot_signs_state: BotSignsState,
+    /// The whole one-line reason, only when `status` is `error`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl ComparisonRow {
+    fn from_report(report: &VenueReport) -> Self {
+        let venue = report.venue.clone();
+        let summary = match &report.result {
+            Ok(s) => s,
+            Err(why) => {
+                return Self {
+                    venue,
+                    status: RowStatus::Error,
+                    mid: None,
+                    spread_pct: None,
+                    bid_depth: None,
+                    ask_depth: None,
+                    volume_24h: None,
+                    peg_deviation_bps: None,
+                    bot_signs: None,
+                    bot_signs_state: BotSignsState::NotRun,
+                    error: Some(why.clone()),
+                };
+            }
+        };
+        let (bot_signs, bot_signs_state) = match &summary.bot_patterns {
+            None => (None, BotSignsState::NotRun),
+            Some(found) if found.findings.is_empty() => (
+                Some(Vec::new()),
+                match found.tape_note {
+                    Some(_) => BotSignsState::NoneNoTape,
+                    None => BotSignsState::None,
+                },
+            ),
+            Some(found) => (
+                Some(found.findings.iter().map(|f| f.label()).collect()),
+                BotSignsState::Found,
+            ),
+        };
+        Self {
+            venue,
+            status: if summary.healthy {
+                RowStatus::Healthy
+            } else {
+                RowStatus::Unhealthy
+            },
+            mid: summary.mid_price,
+            spread_pct: summary.spread_pct,
+            bid_depth: Some(summary.bid_depth),
+            ask_depth: Some(summary.ask_depth),
+            volume_24h: summary.volume_24h,
+            peg_deviation_bps: summary
+                .mid_price
+                .and_then(|mid| summary.peg_deviation_bps(mid)),
+            bot_signs,
+            bot_signs_state,
+            error: None,
+        }
+    }
+
+    /// The last cell of the text table: the signs, or the error.
+    fn note(&self) -> String {
+        if let Some(why) = &self.error {
+            return why.clone();
+        }
+        match (self.bot_signs_state, &self.bot_signs) {
+            (BotSignsState::Found, Some(names)) => {
+                format!("{}: {}", names.len(), names.join(", "))
+            }
+            (BotSignsState::None, _) => "none".to_string(),
+            (BotSignsState::NoneNoTape, _) => "none (no trade tape)".to_string(),
+            _ => NO_VALUE.to_string(),
+        }
+    }
+}
+
+/// The typed comparison rows of a run, one per venue, in the order given.
+fn comparison_rows(reports: &[VenueReport]) -> Vec<ComparisonRow> {
+    reports.iter().map(ComparisonRow::from_report).collect()
 }
 
 /// One row of the comparison table, as text.
@@ -379,57 +517,28 @@ const NOTE_COLS: usize = 60;
 /// What a cell shows when the venue has no value.
 const NO_VALUE: &str = "-";
 
-fn row(report: &VenueReport) -> Row {
-    let venue = report.venue.clone();
-    let summary = match &report.result {
-        Ok(s) => s,
-        Err(why) => {
-            return Row {
-                venue,
-                mid: NO_VALUE.into(),
-                spread: NO_VALUE.into(),
-                bid: NO_VALUE.into(),
-                ask: NO_VALUE.into(),
-                volume: NO_VALUE.into(),
-                health: "ERROR".into(),
-                signs: why.clone(),
-            };
-        }
-    };
-    let money = scope::display::format_large_number;
+/// The text of a typed row. Only the format lives here; the values are the
+/// row's.
+fn row(typed: &ComparisonRow) -> Row {
+    let money = |v: Option<f64>| v.map_or(NO_VALUE.into(), scope::display::format_large_number);
     Row {
-        venue,
-        mid: summary
-            .mid_price
+        venue: typed.venue.clone(),
+        mid: typed
+            .mid
             .map_or(NO_VALUE.into(), scope::display::format::format_price),
-        spread: summary
+        spread: typed
             .spread_pct
             .map_or(NO_VALUE.into(), |p| format!("{p:.3}%")),
-        bid: money(summary.bid_depth),
-        ask: money(summary.ask_depth),
-        volume: summary.volume_24h.map_or(NO_VALUE.into(), money),
-        health: if summary.healthy {
-            "HEALTHY"
-        } else {
-            "UNHEALTHY"
+        bid: money(typed.bid_depth),
+        ask: money(typed.ask_depth),
+        volume: money(typed.volume_24h),
+        health: match typed.status {
+            RowStatus::Healthy => "HEALTHY",
+            RowStatus::Unhealthy => "UNHEALTHY",
+            RowStatus::Error => "ERROR",
         }
         .into(),
-        signs: bot_signs(summary),
-    }
-}
-
-/// The bot-pattern signs: the count, then the names. No tape is not none.
-fn bot_signs(summary: &MarketSummary) -> String {
-    match &summary.bot_patterns {
-        None => NO_VALUE.to_string(),
-        Some(found) if found.findings.is_empty() => match found.tape_note {
-            Some(_) => "none (no trade tape)".to_string(),
-            None => "none".to_string(),
-        },
-        Some(found) => {
-            let names: Vec<String> = found.findings.iter().map(|f| f.label()).collect();
-            format!("{}: {}", names.len(), names.join(", "))
-        }
+        signs: typed.note(),
     }
 }
 
@@ -448,7 +557,7 @@ const HEADERS: [&str; 8] = [
 pub(crate) fn comparison_table(pair: &str, reports: &[VenueReport]) -> String {
     // A long reason would stretch every rule of the table; the section of
     // the venue has the whole reason.
-    let rows: Vec<Row> = reports
+    let rows: Vec<Row> = comparison_rows(reports)
         .iter()
         .map(|r| {
             let mut row = row(r);
@@ -509,7 +618,7 @@ fn comparison_markdown(reports: &[VenueReport]) -> String {
         HEADERS.join(" | "),
         vec!["---"; HEADERS.len()].join("|")
     );
-    for r in reports.iter().map(row) {
+    for r in comparison_rows(reports).iter().map(row) {
         md.push_str(&format!(
             "| {} | {} | {} | {} | {} | {} | {} | {} |\n",
             r.venue, r.mid, r.spread, r.bid, r.ask, r.volume, r.health, r.signs
@@ -1170,29 +1279,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn json_is_a_list_with_a_venue_in_each_item_and_an_error_for_a_failed_one() {
-        let weex = Served::healthy("weex").await;
-        let args = args(&["weex", "nowhere"], SummaryFormat::Json);
-        let (result, text) = summary_of(&args, &[&weex], None).await;
-        assert!(result.is_err());
-        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
-        let items = v.as_array().expect("a list for two venues");
-        assert_eq!(items.len(), 2);
-        // The first item is the single-venue object, field for field.
-        assert_eq!(items[0]["venue"], "weex");
-        assert_eq!(items[0]["run"], serde_json::Value::Null);
-        assert!(items[0]["healthy"].is_boolean() && items[0]["checks"].is_array());
-        assert_eq!(items[1]["venue"], "nowhere");
-        assert!(
-            items[1]["error"]
-                .as_str()
-                .unwrap()
-                .contains("Unknown venue")
-        );
-        assert!(items[1].get("checks").is_none());
-    }
-
-    #[tokio::test]
     async fn the_report_file_has_each_venue_and_the_comparison() {
         let (binance, weex) = (
             Served::healthy("binance").await,
@@ -1294,6 +1380,368 @@ mod tests {
         assert!(
             err.contains("nowhere") && err.contains("elsewhere"),
             "{err}"
+        );
+    }
+
+    // ---- the comparison array ----
+
+    /// A summary of a book around `mid` (a bid and an ask 0.0002 apart),
+    /// for the tests that need known numbers.
+    fn known_summary(mid: f64, volume: Option<f64>) -> MarketSummary {
+        let side = |start: f64, step: f64| -> Vec<scope::market::OrderBookLevel> {
+            (0..20)
+                .map(|i| scope::market::OrderBookLevel {
+                    price: start + step * i as f64,
+                    quantity: 1_000.0 + i as f64,
+                })
+                .collect()
+        };
+        let book = scope::market::OrderBook {
+            pair: "USDC/USDT".to_string(),
+            source: scope::market::BookSource::Exchange,
+            bids: side(mid - 0.0001, -0.0001),
+            asks: side(mid + 0.0001, 0.0001),
+        };
+        MarketSummary::from_order_book(&book, &HealthThresholds::default(), volume)
+    }
+
+    fn report_of(venue: &str, summary: MarketSummary) -> VenueReport {
+        VenueReport {
+            venue: venue.to_string(),
+            tokens: Vec::new(),
+            result: Ok(summary),
+        }
+    }
+
+    fn failed_report(venue: &str, why: &str) -> VenueReport {
+        VenueReport {
+            venue: venue.to_string(),
+            tokens: Vec::new(),
+            result: Err(why.to_string()),
+        }
+    }
+
+    /// A summary whose bot check ran on no tape, then found `findings`.
+    fn with_findings(findings: Vec<scope::market::patterns::Finding>) -> MarketSummary {
+        let mut summary = known_summary(1.0, None);
+        summary.check_bot_patterns(Err("no tape"));
+        summary.bot_patterns.as_mut().unwrap().findings = findings;
+        summary
+    }
+
+    #[test]
+    fn comparison_rows_hold_raw_numbers_in_the_units_of_the_summary() {
+        // A script compares venues by number. Text such as "125.00K" or
+        // "0.020%" cannot be compared, and a unit slip (0.0002 for 0.02)
+        // would still pass as a number.
+        let summary = known_summary(1.0004, Some(125_000.0));
+        let report = report_of("weex", summary.clone());
+        let json = serde_json::to_value(comparison_rows(&[report])).unwrap();
+        let row = &json[0];
+        for (key, expected) in [
+            ("mid", summary.mid_price.unwrap()),
+            ("spread_pct", summary.spread_pct.unwrap()),
+            ("bid_depth", summary.bid_depth),
+            ("ask_depth", summary.ask_depth),
+            ("volume_24h", 125_000.0),
+        ] {
+            assert_eq!(
+                row[key].as_f64(),
+                Some(expected),
+                "{key} is a JSON number equal to the summary field: {row}"
+            );
+        }
+        assert_eq!(row["venue"], "weex");
+        assert_eq!(row["status"], "healthy");
+        assert!(row.get("error").is_none(), "no error key on a good row");
+        // spread_pct is in percent: 0.0002 on a mid of 1.0004 is 0.02%.
+        let pct = row["spread_pct"].as_f64().unwrap();
+        assert!((pct - 0.02).abs() < 0.001, "percent, not a ratio: {pct}");
+        // The deviation is in basis points from the peg target.
+        let bps = row["peg_deviation_bps"].as_f64().unwrap();
+        assert_eq!(
+            Some(bps),
+            summary.peg_deviation_bps(summary.mid_price.unwrap())
+        );
+        assert!((bps - 4.0).abs() < 0.01, "1.0004 is 4 bps off 1.0: {bps}");
+    }
+
+    #[test]
+    fn a_failed_venue_row_has_no_numbers_and_the_whole_reason() {
+        // Zero would read as a real depth. The text table cuts the reason at
+        // 60 columns; a script needs all of it.
+        let why = "HTTP 400 Bad Request ".repeat(30);
+        let good = report_of("weex", known_summary(1.0, Some(5.0)));
+        let rows =
+            serde_json::to_value(comparison_rows(&[good, failed_report("binance", &why)])).unwrap();
+        let bad = &rows[1];
+        assert_eq!(bad["status"], "error");
+        for key in [
+            "mid",
+            "spread_pct",
+            "bid_depth",
+            "ask_depth",
+            "volume_24h",
+            "peg_deviation_bps",
+            "bot_signs",
+        ] {
+            assert!(bad[key].is_null(), "{key} is null, never 0: {bad}");
+        }
+        assert_eq!(bad["bot_signs_state"], "not_run");
+        assert_eq!(bad["error"], why.as_str(), "not cut at 60 columns");
+        assert_eq!(rows[0]["status"], "healthy", "the good venue is unaffected");
+    }
+
+    #[test]
+    fn the_four_bot_sign_states_map_to_their_own_values() {
+        // "No tape" means the signals did not run. A script must not read
+        // it as "none found".
+        // The check ran and the tape was fine: no note, no findings.
+        let mut none = with_findings(Vec::new());
+        none.bot_patterns.as_mut().unwrap().tape_note = None;
+        let found = with_findings(vec![
+            scope::market::patterns::Finding::PingPong {
+                pairs: 5,
+                share: 0.5,
+            },
+            scope::market::patterns::Finding::Metronome {
+                mean_gap_ms: 2_000.0,
+                cv: 0.01,
+                gaps: 30,
+                dominant_size: None,
+            },
+        ]);
+        let no_tape = with_findings(Vec::new());
+        let rows = serde_json::to_value(comparison_rows(&[
+            report_of("found", found),
+            report_of("none", none),
+            report_of("no_tape", no_tape),
+            report_of("not_run", known_summary(1.0, None)),
+        ]))
+        .unwrap();
+        let state = |i: usize| rows[i]["bot_signs_state"].as_str().unwrap().to_string();
+        assert_eq!(state(0), "found");
+        assert_eq!(
+            rows[0]["bot_signs"],
+            serde_json::json!(["Ping-pong", "Metronome"])
+        );
+        assert_eq!(state(1), "none");
+        assert_eq!(rows[1]["bot_signs"], serde_json::json!([]));
+        assert_eq!(state(2), "none_no_tape");
+        assert_eq!(rows[2]["bot_signs"], serde_json::json!([]));
+        assert_eq!(state(3), "not_run");
+        assert!(rows[3]["bot_signs"].is_null());
+    }
+
+    #[test]
+    fn the_text_cell_of_each_bot_sign_state_is_the_text_of_before() {
+        // The refactor must not change what the text table says.
+        let found = with_findings(vec![scope::market::patterns::Finding::PingPong {
+            pairs: 5,
+            share: 0.5,
+        }]);
+        let reports = [
+            report_of("a", found),
+            report_of("b", with_findings(Vec::new())),
+            report_of("c", known_summary(1.0, None)),
+            failed_report("d", "Unknown venue"),
+        ];
+        let notes: Vec<String> = comparison_rows(&reports).iter().map(|r| r.note()).collect();
+        assert_eq!(
+            notes,
+            ["1: Ping-pong", "none (no trade tape)", "-", "Unknown venue"]
+        );
+    }
+
+    #[tokio::test]
+    async fn many_venue_json_is_an_object_with_pair_venues_and_comparison_in_the_order_given() {
+        // A script compares venues from one array. The rows follow the
+        // order given (not alphabetical), so row 0 is the first venue named.
+        let (binance, weex, mexc) = (
+            Served::healthy("binance").await,
+            Served::healthy("weex").await,
+            Served::healthy("mexc").await,
+        );
+        let args = args(&["weex", "mexc", "binance"], SummaryFormat::Json);
+        let (result, text) = summary_of(&args, &[&binance, &weex, &mexc], None).await;
+        result.unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let keys: Vec<&str> = v
+            .as_object()
+            .expect("an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        // serde_json sorts keys; the set is what a script reads.
+        assert_eq!(keys, ["comparison", "pair", "run", "venues"]);
+        assert_eq!(v["pair"], "USDC/USDT");
+        assert!(v["run"].is_null(), "a single run has no run number");
+        let order = |key: &str| -> Vec<String> {
+            v[key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|i| i["venue"].as_str().unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(order("venues"), ["weex", "mexc", "binance"]);
+        assert_eq!(order("comparison"), ["weex", "mexc", "binance"]);
+    }
+
+    #[tokio::test]
+    async fn the_venues_items_are_the_items_of_before_and_a_failed_venue_is_in_both() {
+        // The envelope wraps the old list; it must not change an item. A
+        // script that read the items of the list reads `venues` the same.
+        let weex = Served::healthy("weex").await;
+        let args = args(&["weex", "nowhere"], SummaryFormat::Json);
+        let (_, text) = summary_of(&args, &[&weex], None).await;
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let items = v["venues"].as_array().unwrap();
+        // The first item is the single-venue object: `to_json` plus `run`
+        // and `venue`.
+        let keys: Vec<&str> = items[0]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        for key in ["run", "venue", "pair", "healthy", "checks"] {
+            assert!(keys.contains(&key), "{key} in {keys:?}");
+        }
+        assert!(
+            !keys.contains(&"comparison"),
+            "the comparison is beside the items, not inside them"
+        );
+        assert_eq!(
+            items[1],
+            serde_json::json!({"run": null, "venue": "nowhere", "error": items[1]["error"]}),
+            "a failed item keeps its three keys"
+        );
+        assert_eq!(items[1]["error"], v["comparison"][1]["error"]);
+        assert_eq!(v["comparison"][1]["status"], "error");
+    }
+
+    #[tokio::test]
+    async fn text_markdown_and_json_agree_on_status_and_mid_for_every_venue() {
+        // The three outputs read one list of typed rows. If one of them
+        // built its own cells, they could drift; this fails when they do.
+        let healthy = Served::healthy("weex").await;
+        let off = Served::new(
+            "binance",
+            depth(0.9499, 0.9501, 20, 40_000.0),
+            tape(40, false),
+        )
+        .await;
+        let list = ["weex", "binance", "nowhere"];
+        let (_, json_text) =
+            summary_of(&args(&list, SummaryFormat::Json), &[&healthy, &off], None).await;
+        let json: serde_json::Value = serde_json::from_str(&json_text).unwrap();
+        let (_, text) =
+            summary_of(&args(&list, SummaryFormat::Text), &[&healthy, &off], None).await;
+        let table = &text[text.find("Comparison").unwrap()..];
+        let dir = tempfile::tempdir().unwrap();
+        let mut md_args = args(&list, SummaryFormat::Text);
+        md_args.report = Some(dir.path().join("report.md"));
+        let _ = summary_of(&md_args, &[&healthy, &off], None).await;
+        let md = std::fs::read_to_string(md_args.report.as_ref().unwrap()).unwrap();
+        let md_table = &md[md.find("| Venue |").unwrap()..];
+        let rows = json["comparison"].as_array().unwrap();
+        assert_eq!(rows.len(), 3);
+        let mut statuses = Vec::new();
+        for row in rows {
+            let venue = row["venue"].as_str().unwrap();
+            let status = row["status"].as_str().unwrap();
+            statuses.push(status);
+            let word = status.to_uppercase();
+            let mid = row["mid"]
+                .as_f64()
+                .map_or("-".to_string(), scope::display::format::format_price);
+            for (name, part) in [("text", table), ("markdown", md_table)] {
+                let line = part
+                    .lines()
+                    .find(|l| l.contains(venue))
+                    .unwrap_or_else(|| panic!("{name} {venue}\n{part}"));
+                assert!(line.contains(&word), "{name} status of {venue}: {line}");
+                assert!(line.contains(&mid), "{name} mid of {venue}: {line}");
+            }
+        }
+        // The case is not trivial: three different statuses.
+        assert_eq!(statuses, ["healthy", "unhealthy", "error"]);
+    }
+
+    #[tokio::test]
+    async fn the_report_file_comparison_is_the_text_of_before_the_refactor() {
+        // `--report` must not change with the typed rows: a golden for the
+        // header, the separator and the cells of a known venue and of a
+        // failed one.
+        let weex = Served::healthy("weex").await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut args = args(&["weex", "nowhere"], SummaryFormat::Text);
+        args.report = Some(dir.path().join("report.md"));
+        let _ = summary_of(&args, &[&weex], None).await;
+        let md = std::fs::read_to_string(args.report.unwrap()).unwrap();
+        let table = &md[md.find("| Venue |").unwrap()..];
+        let lines: Vec<&str> = table.lines().take(4).collect();
+        assert_eq!(
+            lines[0],
+            "| Venue | Mid | Spread | Bid depth | Ask depth | Volume 24h | Health | Bot signs or error |"
+        );
+        assert_eq!(lines[1], "|---|---|---|---|---|---|---|---|");
+        assert!(
+            lines[2].starts_with("| weex | 1.000000 | 0.020% | "),
+            "{}",
+            lines[2]
+        );
+        assert!(
+            lines[2].contains("| 125.00K | HEALTHY | none |"),
+            "{}",
+            lines[2]
+        );
+        assert!(
+            lines[3].starts_with("| nowhere | - | - | - | - | - | ERROR | Unknown venue"),
+            "{}",
+            lines[3]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_repeat_with_json_prints_one_valid_envelope_per_run_with_its_run_number() {
+        // Each run is a document a script can parse. The run number is in
+        // the envelope and in every venue item, so a rolling reader can
+        // tell the runs apart.
+        let weex = Served::healthy("weex").await;
+        let args = args(&["weex", "nowhere"], SummaryFormat::Json);
+        let schedule = Schedule::new(Duration::from_millis(40), Duration::from_millis(40)).ok();
+        let (_, text) = summary_of(&args, &[&weex], schedule).await;
+        let docs: Vec<serde_json::Value> = serde_json::Deserializer::from_str(&text)
+            .into_iter::<serde_json::Value>()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap_or_else(|e| panic!("{e}\n{text}"));
+        assert!(docs.len() >= 2, "two runs or more: {text}");
+        for (i, doc) in docs.iter().enumerate() {
+            let run = (i + 1) as u64;
+            assert_eq!(doc["run"], run, "{doc}");
+            for item in doc["venues"].as_array().unwrap() {
+                assert_eq!(item["run"], run, "{item}");
+            }
+            assert_eq!(doc["comparison"].as_array().unwrap().len(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn the_time_series_csv_header_does_not_change() {
+        // Scripts read this header. The comparison adds no column: the
+        // deviation is not a series metric (decision Q2 a).
+        let weex = Served::healthy("weex").await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut args = args(&["weex", "nowhere"], SummaryFormat::Json);
+        args.csv = Some(dir.path().join("peg.csv"));
+        let schedule = Schedule::new(Duration::from_millis(40), Duration::from_millis(40)).ok();
+        let _ = summary_of(&args, &[&weex], schedule).await;
+        let csv = std::fs::read_to_string(args.csv.unwrap()).unwrap();
+        assert_eq!(
+            csv.lines().next().unwrap(),
+            "timestamp,run,venue,best_bid,best_ask,mid_price,spread,bid_depth,ask_depth,healthy,peg_deviation_pct,spread_pct,bid_top3_depth,ask_top3_depth,bid_top10_depth,ask_top10_depth"
         );
     }
 

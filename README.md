@@ -657,7 +657,25 @@ The DEX venues (`eth`, `solana`) are still available and use on-chain liquidity 
 - `market summary` prints one full summary for each venue, then a comparison table with one row per venue: mid, spread, bid depth, ask depth, 24h volume, health verdict, and the bot-pattern signs (the count and the names).
 - `market ohlc` and `market trades` print one labelled block for each venue.
 - A venue that fails (an unknown pair, a network error) does not stop the others. Its section says why, and its row in the comparison table shows the error. `market summary` reads the venues at the same time.
-- With `--format json`, the output is a list with one item for each venue. Each item has a `venue` field. An item for a failed venue has `venue` and `error`. An item for `market ohlc` has `candles`. An item for `market trades` has `trades`. An item for `market summary` is the same object as for one venue. One venue still gives the output it gave before: one object for `market summary`, and a list of candles or trades for the other two.
+- With `--format json`, `market ohlc` and `market trades` give a list with one item for each venue. Each item has a `venue` field, and `candles` or `trades`. An item for a failed venue has `venue` and `error`.
+- With `--format json`, `market summary` gives one object: `{"pair", "run", "venues", "comparison"}`. `run` is `null` for one run, and the run number with `--every`. `venues` is the list with one item for each venue: the same object as for one venue, or `venue` and `error` for a failed venue. `comparison` is a list with one row for each venue, in the order given, for scripts that compare venues. A row holds raw numbers (not the text of the table): `venue`, `status` (`healthy`, `unhealthy` or `error`), `mid`, `spread_pct` (in percent), `bid_depth`, `ask_depth`, `volume_24h`, `peg_deviation_bps` (in basis points from the peg), `bot_signs` (the names, or `null` when the check did not run) and `bot_signs_state` (`found`, `none`, `none_no_tape` or `not_run`). A failed venue has `null` for every number and the whole reason in `error`.
+- One venue still gives the output it gave before: one object for `market summary`, and a list of candles or trades for the other two.
+
+```json
+{
+  "pair": "USDC/USDT",
+  "run": null,
+  "venues": [ { "venue": "weex", "healthy": true, "...": "..." }, { "venue": "nowhere", "run": null, "error": "Unknown venue \"nowhere\"" } ],
+  "comparison": [
+    { "venue": "weex", "status": "healthy", "mid": 1.0, "spread_pct": 0.02, "bid_depth": 42000.0,
+      "ask_depth": 45000.0, "volume_24h": 125000.0, "peg_deviation_bps": 0.0,
+      "bot_signs": ["Repeated size"], "bot_signs_state": "found" },
+    { "venue": "nowhere", "status": "error", "mid": null, "spread_pct": null, "bid_depth": null,
+      "ask_depth": null, "volume_24h": null, "peg_deviation_bps": null, "bot_signs": null,
+      "bot_signs_state": "not_run", "error": "Unknown venue \"nowhere\"" }
+  ]
+}
+```
 - With `--every`, `market summary` repeats on all the venues. The TUI draws the venue charts of the watch grid, one chart for each key value with one line for each venue (see "Repeating view"). `--csv` has a row for each venue and run, with a `venue` column after `run`. `--report` has a section for each venue and the comparison table.
 - Exit code: 1 when any venue failed, else 0. An unhealthy venue does not change the exit code, as with one venue.
 
