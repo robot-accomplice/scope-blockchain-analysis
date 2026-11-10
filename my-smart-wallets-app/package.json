@@ -37,5 +37,18 @@
     "postcss": "^8.5.32",
     "tailwindcss": "^3.4.19",
     "typescript": "^6.0.3"
+  },
+  "overrides": {
+    "protobufjs@^7": "^7.6.5",
+    "ws@^8": "^8.21.0",
+    "js-cookie@^3": "^3.0.7",
+    "lodash@^4": "^4.18.1",
+    "decode-uri-component": "^0.5.1",
+    "toml": "^5.0.1",
+    "postcss": "$postcss",
+    "uuid@^8": "^11.1.1",
+    "uuid@^9": "^11.1.1",
+    "minimatch@^10": "^11.0.5",
+    "turbo-stream@^2": "^3.0.0"
   }
 }
