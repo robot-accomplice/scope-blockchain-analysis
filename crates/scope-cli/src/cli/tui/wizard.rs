@@ -934,7 +934,7 @@ mod tests {
     fn draws_each_step_at_several_sizes() {
         let dir = tempfile::tempdir().unwrap();
         let mut w = wizard(dir.path());
-        w.notes.push("--layout has no effect".into());
+        w.notes.push("--export is now --csv".into());
         w.key(key(KeyCode::Char('a')));
         typed(&mut w, "pair USDN weex");
         for step in Step::ALL {
@@ -947,7 +947,7 @@ mod tests {
         w.step = Step::Metrics;
         let s = screen(&w, 120, 36);
         assert!(s.contains("[x] market health"), "{s}");
-        assert!(s.contains("--layout has no effect"), "{s}");
+        assert!(s.contains("--export is now --csv"), "{s}");
         w.step = Step::Timing;
         let s = screen(&w, 120, 36);
         assert!(s.contains("1 fetch(es) per run · 61 in all"), "{s}");

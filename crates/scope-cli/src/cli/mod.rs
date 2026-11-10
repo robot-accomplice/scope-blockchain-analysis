@@ -28,7 +28,7 @@
 //!   crawl        Crawl a token for DEX analytics (alias: token)
 //!   token-health DEX analytics + optional order book (alias: health)
 //!   discover     Browse trending/boosted tokens (alias: disc)
-//!   monitor      Live TUI dashboard (alias: mon)
+//!   monitor      Monitor wizard and watch grid in the TUI (alias: mon)
 //!   market       Peg and order book health for stablecoins
 //!   venues       Manage exchange venue descriptors (alias: ven)
 //!
@@ -229,7 +229,7 @@ pub enum Commands {
     /// Opens the TUI with the monitor wizard filled from the arguments: the
     /// targets, the checks (market health with a venue), the interval, the
     /// duration and the outputs. Its run shows each target's pass/fail state
-    /// in a grid. `--dashboard` opens the old dashboard (deprecated).
+    /// in a grid.
     #[command(visible_alias = "mon")]
     Monitor(MonitorArgs),
 
@@ -674,10 +674,7 @@ mod tests {
         if let Commands::Monitor(args) = cli.command {
             assert_eq!(args.token, "USDC");
             assert_eq!(args.chain, "ethereum"); // default
-            assert!(args.layout.is_none());
             assert!(args.refresh.is_none());
-            assert!(args.scale.is_none());
-            assert!(args.color_scheme.is_none());
             assert!(args.export.is_none());
         }
     }
@@ -707,47 +704,11 @@ mod tests {
     }
 
     #[test]
-    fn test_cli_parse_monitor_with_layout() {
-        let cli =
-            Cli::try_parse_from(["scope", "monitor", "USDC", "--layout", "chart-focus"]).unwrap();
-
-        if let Commands::Monitor(args) = cli.command {
-            assert_eq!(args.layout, Some(monitor::LayoutPreset::ChartFocus));
-        } else {
-            panic!("Expected Monitor command");
-        }
-    }
-
-    #[test]
     fn test_cli_parse_monitor_with_refresh() {
         let cli = Cli::try_parse_from(["scope", "monitor", "USDC", "--refresh", "3"]).unwrap();
 
         if let Commands::Monitor(args) = cli.command {
             assert_eq!(args.refresh, Some(3));
-        } else {
-            panic!("Expected Monitor command");
-        }
-    }
-
-    #[test]
-    fn test_cli_parse_monitor_with_scale() {
-        let cli = Cli::try_parse_from(["scope", "monitor", "USDC", "--scale", "log"]).unwrap();
-
-        if let Commands::Monitor(args) = cli.command {
-            assert_eq!(args.scale, Some(monitor::ScaleMode::Log));
-        } else {
-            panic!("Expected Monitor command");
-        }
-    }
-
-    #[test]
-    fn test_cli_parse_monitor_with_color_scheme() {
-        let cli =
-            Cli::try_parse_from(["scope", "monitor", "USDC", "--color-scheme", "blue-orange"])
-                .unwrap();
-
-        if let Commands::Monitor(args) = cli.command {
-            assert_eq!(args.color_scheme, Some(monitor::ColorScheme::BlueOrange));
         } else {
             panic!("Expected Monitor command");
         }
@@ -768,17 +729,14 @@ mod tests {
     #[test]
     fn test_cli_parse_monitor_short_flags() {
         let cli = Cli::try_parse_from([
-            "scope", "mon", "USDC", "-c", "solana", "-l", "compact", "-r", "10", "-s", "log", "-e",
-            "data.csv",
+            "scope", "mon", "USDC", "-c", "solana", "-r", "10", "-e", "data.csv",
         ])
         .unwrap();
 
         if let Commands::Monitor(args) = cli.command {
             assert_eq!(args.token, "USDC");
             assert_eq!(args.chain, "solana");
-            assert_eq!(args.layout, Some(monitor::LayoutPreset::Compact));
             assert_eq!(args.refresh, Some(10));
-            assert_eq!(args.scale, Some(monitor::ScaleMode::Log));
             assert_eq!(args.export, Some(std::path::PathBuf::from("data.csv")));
         } else {
             panic!("Expected Monitor command");
@@ -792,15 +750,27 @@ mod tests {
     }
 
     #[test]
-    fn test_cli_parse_monitor_invalid_layout_fails() {
-        let result = Cli::try_parse_from(["scope", "monitor", "USDC", "--layout", "invalid"]);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_cli_parse_monitor_invalid_scale_fails() {
-        let result = Cli::try_parse_from(["scope", "monitor", "USDC", "--scale", "quadratic"]);
-        assert!(result.is_err());
+    fn test_cli_parse_monitor_rejects_the_removed_dashboard_flags() {
+        // The dashboard and its flags went after the 0.8.0 deprecation.
+        // Scope must reject them, not ignore them: a script that passes
+        // one would otherwise run a different monitor without a word.
+        for flag in [
+            &["--dashboard"][..],
+            &["--layout", "chart-focus"],
+            &["-l", "compact"],
+            &["--scale", "log"],
+            &["-s", "log"],
+            &["--color-scheme", "monochrome"],
+        ] {
+            let mut argv = vec!["scope", "monitor", "USDC"];
+            argv.extend_from_slice(flag);
+            let err = Cli::try_parse_from(&argv).unwrap_err();
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::UnknownArgument,
+                "{flag:?}"
+            );
+        }
     }
 
     #[test]

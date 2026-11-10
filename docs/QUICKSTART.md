@@ -133,12 +133,12 @@ scope:auto> ct 0xA0b86991... --chain polygon --json
 
 ## Workflow 4: Live Monitoring
 
-**Goal:** Watch a token in real time with charts, alerts, and export.
+**Goal:** Watch a token in real time with health checks, charts, and CSV export.
 
 ```bash
 # Launch monitor by symbol
 scope monitor USDC
-scope mon PEPE --chain ethereum --layout chart-focus
+scope mon PEPE --chain ethereum
 
 # From the TUI (preserves context)
 scope tui
@@ -150,7 +150,7 @@ scope monitor USDN --venue weex
 scope monitor USDN --venue weex --pair USDN_USDT   # exchange-only mode
 ```
 
-**Keybindings:** `Q` quit, `R` refresh, `P` pause, `E` toggle CSV export, `L` cycle layout, `C` chart mode (line/candlestick/volume).
+**Keys in the grid:** Enter opens a row's detail with charts, `b` runs `market summary` and `t` runs `market trades` for it, Esc stops the run. Add `--csv FILE` to write one row per check per run.
 
 ---
 
@@ -225,7 +225,7 @@ scope:solana> crawl USDC
 # Uses solana automatically
 
 scope:solana> monitor USDC
-# Runs the live dashboard; Q returns to the TUI
+# Opens the monitor wizard; Ctrl-R starts the run
 
 scope:solana> portfolio summary --report port.md
 scope:solana> exit
@@ -265,7 +265,7 @@ Not sure which command to use? Here's a quick decision tree:
 | Auto-detect input and run everything | `scope insights <target>` |
 | Get token DEX data (price, volume, holders) | `scope crawl <token>` |
 | Token DEX + order book health (stablecoins) | `scope token-health <token> --with-market` |
-| Live real-time dashboard for a token | `scope monitor <token>` |
+| Live monitor wizard and watch grid for a token | `scope monitor <token>` |
 | Browse trending/boosted tokens | `scope discover` |
 | Check market peg/depth for a stablecoin | `scope market summary <symbol>` |
 | Assess compliance risk for an address | `scope compliance risk <addr>` |

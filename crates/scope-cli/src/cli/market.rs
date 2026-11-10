@@ -308,14 +308,6 @@ pub async fn run(
     }
 }
 
-/// The venue symbol for user pair input (see [`Pair::parse`]).
-///
-/// Kept only for the monitor (`monitor/mod.rs`), which still calls it; the
-/// market commands call `venue_symbol` directly.
-pub(crate) fn venue_pair(exchange: &scope::market::ExchangeClient, input: &str) -> String {
-    exchange.venue_symbol(&Pair::parse(input))
-}
-
 /// Token analytics from the crawl pipeline: the CLI and web adapter for the
 /// core [`DexAnalyticsSource`] port.
 pub struct CrawlDexSource<'a> {

@@ -8,13 +8,6 @@ use scope::watch::time::{is_until_cancelled, parse_duration};
 use scope::watch::{Op, Preset, Rule, Target, TargetKind, Watchlist};
 use std::time::Duration;
 
-/// The note for a dashboard-only flag the wizard does not use.
-fn ignored(flag: &str) -> String {
-    format!(
-        "{flag} has no effect: the watchlist grid has no layouts. Use `--dashboard` for the old dashboard (deprecated)."
-    )
-}
-
 /// The watchlist the monitor arguments describe, with the notes the user
 /// should read (flags that do nothing, alerts that are dropped).
 ///
@@ -145,15 +138,6 @@ pub fn watchlist_from_args(
                 .to_string(),
         );
     }
-    for (set, flag) in [
-        (args.layout.is_some(), "--layout"),
-        (args.scale.is_some(), "--scale"),
-        (args.color_scheme.is_some(), "--color-scheme"),
-    ] {
-        if set {
-            notes.push(ignored(flag));
-        }
-    }
     if args.export.is_some() && w.csv.is_none() {
         notes.push("--export is now --csv: it writes one row per check per run.".to_string());
     }
@@ -267,14 +251,10 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_flags_give_one_note_each_and_export_is_the_csv() {
-        let (w, notes) = from(
-            "monitor USDC --venue binance --layout chart-focus --scale log --color-scheme monochrome --export x.csv",
-        )
-        .unwrap();
-        assert_eq!(notes.len(), 4, "{notes:?}");
-        assert!(notes[0].starts_with("--layout has no effect"));
-        assert!(notes[3].contains("--export is now --csv"));
+    fn export_is_the_csv_and_says_so() {
+        let (w, notes) = from("monitor USDC --venue binance --export x.csv").unwrap();
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("--export is now --csv"));
         assert_eq!(
             w.outputs.csv.as_deref(),
             Some(std::path::Path::new("x.csv"))

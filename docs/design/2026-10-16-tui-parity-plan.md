@@ -181,7 +181,7 @@ R can start at once. E1, E2, E4 and E5 do not need the YAML crate; E3 uses serde
 - [ ] Tests first, one per row of parity design table 5.3: `MonitorArgs` to `Watchlist` (`fn watchlist_from_args`). `--every 30s` and `--refresh 30` give the same interval. `--layout`, `--scale` and `--color-scheme` give one note each, once.
 - [ ] Add the flags `--every`, `--duration`, `--csv` (with `--export` as a hidden alias), `--report`, `HealthArgs` (flatten), `--preset`, `--save`, `--yes`.
 - [ ] `dispatch` sends `Commands::Monitor` to `interactive::run` with a start action `OpenWizard(Watchlist)`; with `--yes`, `StartGrid(Watchlist)`. Acceptance 4: `scope monitor` and `scope tui` call the same entry.
-- [ ] The old dashboard stays reachable as `scope monitor --dashboard` until phase M (Q1).
+- [x] The old dashboard stays reachable as `scope monitor --dashboard` until phase M (Q1). (Removed by M1.)
 
 ### Task U7: monitor alerts to rules (N5)
 
@@ -202,16 +202,16 @@ R can start at once. E1, E2, E4 and E5 do not need the YAML crate; E3 uses serde
 
 ## Phase M: retire the old dashboard
 
-### Task M1: remove `--dashboard` and `run_direct`
+### Task M1: remove `--dashboard` and `run_direct` (done)
 
 In the release after the grid ships (Q1). Not in the PR that closes #47.
 
 **Files:** `crates/scope-cli/src/cli/monitor/` (most of it), `crates/scope-core/src/config.rs` (`MonitorConfig`: keep `refresh_seconds`, `alerts`, `venue`; drop `layout`, `widgets`, `scale`, `color_scheme` with a load warning), `CHANGELOG.md`.
 
-- [ ] Before the removal: a list of each monitor feature and its replacement (grid, detail charts, `b`, `t`), in the PR text and the CHANGELOG.
-- [ ] Remove the code and its tests. Keep `MonitorArgs` (now the wizard's arguments).
-- [ ] A config with the dropped keys still loads, with one warning. Test.
-- [ ] Reset `.coverage-last` in this PR, with the before and after numbers and the reason.
+- [x] Before the removal: a list of each monitor feature and its replacement (grid, detail charts, `b`, `t`), in the PR text and the CHANGELOG.
+- [x] Remove the code and its tests. Keep `MonitorArgs` (now the wizard's arguments).
+- [x] A config with the dropped keys still loads, with one warning. Test.
+- [x] Reset `.coverage-last` in this PR, with the before and after numbers and the reason.
 
 ### Task M2: `scope interactive` and `scope monitor` share help text
 

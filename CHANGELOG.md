@@ -15,6 +15,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - With two or more venues, the exit code is 1 when any venue failed, else 0. An unhealthy venue does not change it, as with one venue.
 - `market summary --every` on two or more venues draws the venue charts of the watch grid in the TUI: one chart for each key value, one line for each venue, the legend with the range across venues, and the same keys (`←` `→`, Space, Tab, PgUp, PgDn). The CSV from `--csv` or `save` has one row for each venue and run, with a `venue` column after `run`. A venue that fails in one run does not end the repeat; the repeat ends when every venue fails.
 
+### Removed
+- The old monitor dashboard, deprecated in 0.8.0. `scope monitor --dashboard` and the flags `--layout`, `--scale` and `--color-scheme` are gone; scope now rejects them as unknown arguments. Use `scope monitor <token>`: it opens the monitor wizard and the watch grid. These replace the old features:
+  - Price and volume charts: the detail pane of the grid (Enter on a row). For a target on two or more venues, it shows the venue charts.
+  - Order book panel and exchange layout: `b` in the detail pane, or `scope market summary <pair> --venue <venue>`.
+  - Trades feed layout: `t` in the detail pane, or `scope market trades <pair> --venue <venue>`.
+  - Alerts (`monitor.alerts`): rules on the watchlist. They have worked this way since 0.8.0.
+  - CSV export (`E` key, `--export`): `--csv FILE`.
+  - Layout presets, widget toggles, log scale and color schemes: no replacement. The grid has no layouts.
+- The config keys `monitor.layout`, `monitor.widgets`, `monitor.scale`, `monitor.color_scheme`, `monitor.export` and `monitor.auto_pause_on_input`. A config that has them still loads. Scope ignores them and logs one warning that names them. `monitor.refresh_seconds`, `monitor.alerts` and `monitor.venue` stay.
+- The `-l` and `-s` short flags of `scope monitor`.
+
 ### Security
 - `my-smart-wallets-app/` has 31 fewer open Dependabot alerts (37 before, 6 after; the critical `protobufjs` alert is closed). Every flagged package comes through `@account-kit/*` 4.88.5, which is already the latest release, so no direct upgrade reaches the patched versions. `package.json` now has `overrides` for them: `protobufjs` ^7.6.5, `ws` ^8.21.0 (8.x only), `js-cookie` ^3.0.7, `lodash` ^4.18.1, `decode-uri-component` ^0.5.1, `toml` ^5.0.1, `turbo-stream` ^3.0.0, `uuid` ^11.1.1 (8.x and 9.x only), `minimatch` ^11.0.5 (10.x only), and `postcss` as the app's own version (replaces the 8.4.31 copy inside `next`). `package-lock.json` is refreshed within its existing ranges.
 - Six alerts stay open, on four packages. `@tanstack/form-core` 0.33.0 (the email sign-in form of `@account-kit/react`) and `zod` 3.x (`@account-kit/signer`) need a major upgrade that cannot be tested here without Alchemy keys. `stream-json` 1.9.1 would break `jayson` 4.3.0, which requires paths that `stream-json` 3 removed. `elliptic` has no patched release.
