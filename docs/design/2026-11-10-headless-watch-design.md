@@ -1,6 +1,6 @@
 # Headless `scope watch`: Design
 
-- **Status:** proposed on 2026-11-10. Waits for the decisions in section 11. Issue #123.
+- **Status:** decided on 2026-11-10. The owner accepted every recommendation in section 11. Issue #123.
 - **Scope:** `scope watch <name|path>` runs a saved watchlist without the TUI. It prints each tick, writes the CSV trail and the report, and ends with an exit code that a script can read.
 - **Follows:** section 4 of `2026-10-10-tui-watchlist-design.md` (the approved design), decision Q4 of `2026-10-16-tui-parity-design.md` (headless mode ships after #47), and the watchlist engine `scope::watch`.
 - **Out of scope:** section 10.
@@ -53,7 +53,7 @@ scope watch <NAME|PATH> [--once] [--every D] [--duration D]
 
 `watch` has a TUI route, so the parity test passes. The session command `watch <name|path>` opens the grid, the same as `watch open <name|path>`. The shell pane never runs a headless loop. Open question 8 decides which flags it accepts.
 
-The TUI already handles the word `watch` before clap sees it. The new `route` arm is reached only by the parity test. It must compile, and its text must point to `watch open`.
+The TUI handles the word `watch` before clap sees it, so `plan()` never reaches the `route` arm for `watch`. The `route` arm exists because `route` has no wildcard: it must compile, and its text must point to `watch open`. The parity test calls `plan()`, not `route()`. So the test names the commands that a session command shadows (only `watch`). For such a command, `plan()` may return `Plan::Watch(_)` and not `Plan::Run(_)`. `watch --help` and `watch -h` go to clap, so the help text stays in the CLI help.
 
 ## 4. Reading a saved watchlist
 
@@ -231,7 +231,7 @@ A target with `venue: [weex, binance]` makes one row for each venue. The row lab
 
 ## 11. Open questions
 
-Each question has options and a recommendation. The recommendation is not a decision.
+Each question has options. The owner accepted the recommended option for every question.
 
 ### 1. Which tick sets the exit code?
 
@@ -239,7 +239,7 @@ Each question has options and a recommendation. The recommendation is not a deci
 - **B. The worst tick of the run.** A breach at any tick gives 1. A `--duration 1h` run then reports a breach that cleared at once.
 - **C. The last tick by default, and a flag `--fail-on-any` for B.**
 
-**Recommendation: A.** It matches the issue and the one-line rule in the docs. The JSON output and the CSV file hold the history. C is a small later addition if users ask.
+**Decided (2026-11-10): A.** The owner accepted the recommendation. It matches the issue and the one-line rule in the docs. The JSON output and the CSV file hold the history. C is a small later addition if users ask.
 
 ### 2. What does a run do when no duration is given anywhere?
 
@@ -249,7 +249,7 @@ A file with no `duration:` means "until stopped". Without `--once`, a cron job o
 - **B. Run one tick.** Safe for cron. It differs from the grid and from the file format.
 - **C. Refuse with exit 3** and tell the user to give `--once` or `--duration`.
 
-**Recommendation: A.** One meaning of "no duration" in all places. The note warns the user.
+**Decided (2026-11-10): A.** The owner accepted the recommendation. One meaning of "no duration" in all places. The note warns the user.
 
 ### 3. Does the command have `--count N`?
 
@@ -258,7 +258,7 @@ A file with no `duration:` means "until stopped". Without `--once`, a cron job o
 - **A. Add `--count N`.** `--once` is `--count 1`.
 - **B. Only `--once`.**
 
-**Recommendation: B.** The issue asks for `--once` only. Add `--count` when someone needs three ticks and not a duration.
+**Decided (2026-11-10): B.** The owner accepted the recommendation. The issue asks for `--once` only. Add `--count` when someone needs three ticks and not a duration.
 
 ### 4. What is the exit code when a signal comes before the first tick ends?
 
@@ -268,7 +268,7 @@ No tick exists, so "the last tick's code" has no value.
 - **B. Exit 128 plus the signal number** (130 for Ctrl-C, 143 for SIGTERM). This is the shell convention.
 - **C. Exit 0.**
 
-**Recommendation: A.** The verdict was not read. A script must not treat it as a pass. It keeps the five codes of the issue.
+**Decided (2026-11-10): A.** The owner accepted the recommendation. The verdict was not read. A script must not treat it as a pass. It keeps the five codes of the issue.
 
 ### 5. Does `--format csv` exist?
 
@@ -277,14 +277,14 @@ The issue lists `text` and `json`. The CSV file option `--csv PATH` exists alrea
 - **A. Add `--format csv`.** Stdout gets the same bytes as the file. The cost is small: the header and row functions exist.
 - **B. Only `text` and `json`, as in the issue.** A user who wants CSV on stdout uses `--csv /dev/stdout`.
 
-**Recommendation: A.** It costs a few lines and fits pipes. It is the one addition beyond the issue text, so say no if you want the issue as written.
+**Decided (2026-11-10): A.** The owner accepted the recommendation. It costs a few lines and fits pipes. It is the one addition beyond the issue text, so say no if you want the issue as written.
 
 ### 6. What happens to a tick in progress when a signal comes?
 
 - **A. Cut it at once.** The tick has no row in the CSV file. The report uses the tick before.
 - **B. Finish the tick, then stop.** A second signal cuts it. The last tick is complete. A slow venue can delay the stop. A container gets a short time before SIGKILL.
 
-**Recommendation: A.** A stop should be quick. The CSV file stays consistent. The cost is one lost tick.
+**Decided (2026-11-10): A.** The owner accepted the recommendation. A stop should be quick. The CSV file stays consistent. The cost is one lost tick.
 
 ### 7. What is the exit code when `prepare` fails?
 
@@ -293,14 +293,14 @@ The issue lists `text` and `json`. The CSV file option `--csv PATH` exists alrea
 - **A. Exit 3 for every `prepare` error.** One rule: the run could not start.
 - **B. Exit 3 for errors the user fixes in the file, exit 2 for network errors.** This needs the error type to tell them apart.
 
-**Recommendation: A.** One rule is easy to document. The stderr text has the exact cause. The cost: a network error at the start looks like a bad file to a script.
+**Decided (2026-11-10): A.** The owner accepted the recommendation. One rule is easy to document. The stderr text has the exact cause. The cost: a network error at the start looks like a bad file to a script.
 
 ### 8. Which flags does `watch <name>` accept in the TUI?
 
 - **A. None.** `watch <name|path>` is an alias of `watch open`. A flag gives a one-line error that says to edit the list in the wizard.
 - **B. `--every`, `--duration`, `--csv` and `--report`** override the list before the grid opens. `--once` and `--format` give a one-line refusal.
 
-**Recommendation: A.** It is the smaller change. It makes the route and the parity test pass. The grid already has the wizard for edits.
+**Decided (2026-11-10): A.** The owner accepted the recommendation. It is the smaller change. It makes the route and the parity test pass. The grid already has the wizard for edits.
 
 ### 9. Does the JSON output have `start` and `end` records?
 
@@ -309,7 +309,7 @@ The issue says one object for each event and each tick.
 - **A. Add `start` and `end`.** `start` holds the effective settings after the flags. `end` holds the number of runs, the stop reason and the exit code. These records let a person find the cause of a failed job later.
 - **B. Only `tick` and `event`.**
 
-**Recommendation: A.** A job that ran at night leaves its full record in the log. A consumer that reads only `tick` and `event` is not affected.
+**Decided (2026-11-10): A.** The owner accepted the recommendation. A job that ran at night leaves its full record in the log. A consumer that reads only `tick` and `event` is not affected.
 
 ### 10. What happens to an existing `--csv` file when the run starts?
 
@@ -319,7 +319,7 @@ Today the grid run truncates the file and writes a header. A cron job with `--on
 - **B. Always append in headless mode.** The header is written only when the file is new or empty.
 - **C. Truncate by default. `--append` keeps the rows.**
 
-**Recommendation: C.** It keeps the grid behaviour. It lets a cron job build one trail. The explicit flag prevents a surprise in both directions.
+**Decided (2026-11-10): C.** The owner accepted the recommendation. It keeps the grid behaviour. It lets a cron job build one trail. The explicit flag prevents a surprise in both directions.
 
 ### 11. The exit code of a clap usage error
 
@@ -329,14 +329,14 @@ clap exits with 2 on a bad flag. Exit 2 also means "health unknown".
 - **B. Map usage errors of `watch` to 3.** This needs `try_parse_from` in `main`, with a special case for this one command.
 - **C. Use another code for "health unknown".** This changes the codes of the issue and the approved design.
 
-**Recommendation: A.** B puts command-specific code in `main` for a case that shows once. The risk: a flag that breaks after an upgrade looks like "unknown" to a script. State it in `--help`.
+**Decided (2026-11-10): A.** The owner accepted the recommendation. B puts command-specific code in `main` for a case that shows once. The risk: a flag that breaks after an upgrade looks like "unknown" to a script. State it in `--help`.
 
 ### 12. Does one failed venue on a multi-venue target give exit 2?
 
 - **A. Yes.** Any `Unknown` row gives 2 (if no row breached). A venue in the list that cannot be read is a gap in the watch.
 - **B. Only when every venue of the target fails.** One failed venue is still shown in the output, but the code does not change.
 
-**Recommendation: A.** The code never hides a gap in the watch. A script that wants to ignore one venue can remove it from the list.
+**Decided (2026-11-10): A.** The owner accepted the recommendation. The code never hides a gap in the watch. A script that wants to ignore one venue can remove it from the list.
 
 ### 13. Do warnings change the exit code?
 
@@ -345,7 +345,7 @@ A `Warn` preset check does not fail the row today.
 - **A. No.** A warning gives 0. The text and JSON outputs show it.
 - **B. Add a flag `--strict` so that a warning gives 1.**
 
-**Recommendation: A.** The issue has five codes and no warning code. Add `--strict` when a user needs it.
+**Decided (2026-11-10): A.** The owner accepted the recommendation. The issue has five codes and no warning code. Add `--strict` when a user needs it.
 
 ## 12. Tests
 
@@ -389,7 +389,7 @@ Tests encode the reason for each rule: a script depends on the code, so a wrong 
 **Prompts and routing:**
 
 22. A symbol on many chains in the file does not prompt. The run ends with exit 3 and a message that names the contract field.
-23. The parity test: `watch` has a TUI route. `watch <name>` in the TUI opens the grid, as `watch open <name>` does.
+23. The parity test: `watch` is in the named list of shadowed commands. `watch --help` prints clap help with `Usage` on stdout. `watch <name>` in the TUI opens the grid, as `watch open <name>` does.
 24. The shared path rule (name or path) gives the same result for the TUI and the CLI.
 25. The shared timing function gives the same result for `scope monitor` and `scope watch` (`30s`, `1h`, `forever`, a bad value).
 26. `scope watch --help` lists the five exit codes and the `--once` example.
