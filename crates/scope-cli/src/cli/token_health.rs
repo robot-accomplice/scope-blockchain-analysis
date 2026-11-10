@@ -5,8 +5,12 @@
 //! peg deviation, and order book depth.
 
 use crate::cli::crawl::{self, Period};
+use crate::cli::market_venues::{
+    VenueReport, VenueSource, checked_venues, comparison_markdown, comparison_rows,
+    comparison_table, pair_in, read_token_summaries,
+};
 use crate::cli::output::Output;
-use crate::outln;
+use crate::{out, outln};
 use clap::Args;
 use scope::chains::{ChainClientFactory, TokenAnalytics};
 use scope::config::Config;
@@ -14,7 +18,18 @@ use scope::config::Config;
 use super::health_args::HealthArgs;
 use scope::display::report;
 use scope::error::{Result, ScopeError};
-use scope::market::{MarketSummary, fetch_token_summary_by_name_with_http};
+use scope::market::{MarketSummary, MarketVenue, fetch_token_summary_by_name_with_http};
+
+/// The long help of `--venue`: the list form, the JSON shape and the exit
+/// code. The short help is `VENUE_HELP`.
+const VENUE_LONG_HELP: &str = "Market venue: a CEX id (run `scope venues list`), or a DEX: \
+    ethereum (eth) or solana (sol), whose book is built from the token's most liquid pool.\n\n\
+    Name several venues to compare them: repeat --venue or give a comma list \
+    (--venue weex,binance). The venues need --with-market. The DEX analytics are read once. \
+    The output has one market block for each venue, in the order given, then a comparison \
+    table. With --format json, `market` is null, and `markets` and `comparison` are added. \
+    A venue that fails does not stop the others: its block says why. The exit code is 0 \
+    when the DEX analytics print, even if a venue fails. An unhealthy venue does not change it.";
 
 /// Arguments for the token-health command.
 #[derive(Debug, Args)]
@@ -23,6 +38,7 @@ use scope::market::{MarketSummary, fetch_token_summary_by_name_with_http};
   scope token-health USDC
   scope token-health @dai-token --with-market             \x1b[2m# address book shortcut\x1b[0m
   scope token-health DAI --with-market --venue binance
+  scope token-health USDC --with-market --venue weex,binance  \x1b[2m# compare venues\x1b[0m
   scope token-health 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --format json",
     after_long_help = "\x1b[1mExamples:\x1b[0m
 
@@ -79,8 +95,15 @@ pub struct TokenHealthArgs {
     #[arg(long)]
     pub with_market: bool,
 
-    #[arg(long, default_value = scope::market::DEFAULT_VENUE, help = scope::market::VENUE_HELP)]
-    pub venue: String,
+    #[arg(
+        long,
+        default_value = scope::market::DEFAULT_VENUE,
+        value_name = "VENUE",
+        value_delimiter = ',',
+        help = scope::market::VENUE_HELP,
+        long_help = VENUE_LONG_HELP
+    )]
+    pub venue: Vec<String>,
 
     /// Output format.
     #[arg(short, long, default_value = "table")]
@@ -98,6 +121,15 @@ pub async fn run(
     clients: &dyn ChainClientFactory,
     out: &Output,
 ) -> Result<()> {
+    // Check the venues first: a bad list fails before any request.
+    let venues = checked_venues(&args.venue)?;
+    let many = venues.len() > 1;
+    if many && !args.with_market {
+        return Err(ScopeError::InvalidInput(
+            "--venue needs --with-market when it names 2 or more venues".to_string(),
+        ));
+    }
+
     // Resolve address book label → address + chain
     if let Some((address, chain)) =
         crate::cli::address_book::resolve_address_book_input(&args.token, config)?
@@ -129,11 +161,19 @@ pub async fn run(
     .await?;
 
     // 2. Optionally fetch market summary for stablecoin
-    let market_summary = if args.with_market {
+    let mut reports: Vec<VenueReport> = Vec::new();
+    let market_summary = if args.with_market && many {
+        sp.set_message("Fetching market data...");
+        let thresholds = args.health.resolve(config);
+        let source: VenueSource<'_> =
+            &|name| MarketVenue::from_name_with_http(name, clients.http());
+        reports = read_token_summaries(&venues, source, &analytics, &thresholds).await;
+        None
+    } else if args.with_market {
         sp.set_message("Fetching market data...");
         let thresholds = args.health.resolve(config);
         let summary = fetch_token_summary_by_name_with_http(
-            &args.venue,
+            &venues[0],
             &analytics,
             &thresholds,
             clients.http(),
@@ -153,8 +193,11 @@ pub async fn run(
     sp.finish("Token health data loaded.");
 
     // 3. Output combined report
+    if many {
+        return print_many(format, &analytics, &reports, out);
+    }
     let venue_label = if args.with_market {
-        Some(args.venue.as_str())
+        Some(venues[0].as_str())
     } else {
         None
     };
@@ -173,6 +216,70 @@ pub async fn run(
     }
 
     Ok(())
+}
+
+/// The report on two or more venues (design 2026-11-10, section 4). The
+/// DEX analytics print once. Each venue has its own market block, in the
+/// order given, then one comparison. A failed venue has a block that says
+/// why. The exit code does not depend on the venues: the analytics are the
+/// main result.
+fn print_many(
+    format: scope::config::OutputFormat,
+    analytics: &TokenAnalytics,
+    reports: &[VenueReport],
+    out: &Output,
+) -> Result<()> {
+    match format {
+        scope::config::OutputFormat::Markdown => {
+            outln!(out, "{}", token_health_many_to_markdown(analytics, reports))?;
+        }
+        scope::config::OutputFormat::Json => {
+            outln!(out, "{}", token_health_many_to_json(analytics, reports)?)?;
+        }
+        scope::config::OutputFormat::Table | scope::config::OutputFormat::Csv => {
+            output_token_health_many_table(analytics, reports, out)?;
+        }
+    }
+    Ok(())
+}
+
+fn token_health_many_to_markdown(analytics: &TokenAnalytics, reports: &[VenueReport]) -> String {
+    let mut md = report::generate_report(analytics);
+    md.push_str("\n---\n\n## Market / Order Book\n\n");
+    for r in reports {
+        md.push_str(&format!("### {}\n\n", r.venue));
+        match &r.result {
+            Ok(summary) => md.push_str(&summary.format_markdown(Some(&r.venue))),
+            Err(why) => md.push_str(&format!("No market data: {why}\n")),
+        }
+        md.push('\n');
+    }
+    md.push_str("### Comparison\n\n");
+    md.push_str(&comparison_markdown(reports));
+    md.push_str(&report::report_footer());
+    md
+}
+
+/// `market` stays in the output and is `null`, so a script that reads it
+/// for one venue gets a clear `null` and not a changed type.
+fn token_health_many_to_json(
+    analytics: &TokenAnalytics,
+    reports: &[VenueReport],
+) -> Result<String> {
+    let markets: Vec<serde_json::Value> = reports
+        .iter()
+        .map(|r| match &r.result {
+            Ok(s) => serde_json::json!({"venue": r.venue, "summary": s.to_json()}),
+            Err(why) => serde_json::json!({"venue": r.venue, "error": why}),
+        })
+        .collect();
+    let json = serde_json::json!({
+        "analytics": analytics,
+        "market": null,
+        "markets": markets,
+        "comparison": comparison_rows(reports),
+    });
+    serde_json::to_string_pretty(&json).map_err(ScopeError::Json)
 }
 
 fn token_health_to_markdown(
@@ -211,6 +318,50 @@ fn output_token_health_table(
     venue: Option<&str>,
     out: &Output,
 ) -> Result<()> {
+    use scope::display::terminal as t;
+
+    write_analytics_block(analytics, out)?;
+    if let Some(summary) = market {
+        write_market_block(MARKET_HEADING, summary, venue, out)?;
+    }
+    outln!(out, "{}", t::section_footer())?;
+    Ok(())
+}
+
+/// The heading of the market block of one venue.
+const MARKET_HEADING: &str = "Market / Order Book";
+
+/// The report on two or more venues, as a table: the analytics once, one
+/// market block for each venue, in the order given, then the comparison.
+fn output_token_health_many_table(
+    analytics: &TokenAnalytics,
+    reports: &[VenueReport],
+    out: &Output,
+) -> Result<()> {
+    use scope::display::terminal as t;
+
+    write_analytics_block(analytics, out)?;
+    for r in reports {
+        let heading = format!("{MARKET_HEADING} ({})", r.venue);
+        match &r.result {
+            Ok(summary) => write_market_block(&heading, summary, Some(&r.venue), out)?,
+            Err(why) => {
+                outln!(out, "{}", t::subsection_header(&heading))?;
+                outln!(out, "{}", t::warning_row(&format!("No market data: {why}")))?;
+            }
+        }
+    }
+    outln!(out, "{}", t::section_footer())?;
+    out!(
+        out,
+        "{}",
+        comparison_table(&pair_in(&analytics.token.symbol, reports), reports)
+    )?;
+    Ok(())
+}
+
+/// The title and the DEX Analytics rows.
+fn write_analytics_block(analytics: &TokenAnalytics, out: &Output) -> Result<()> {
     use scope::display::terminal as t;
 
     let title = format!("{} ({})", analytics.token.symbol, analytics.token.name);
@@ -266,71 +417,79 @@ fn output_token_health_table(
         )?;
     }
 
-    // Market / Order Book subsection
-    if let Some(summary) = market {
-        outln!(out, "{}", t::subsection_header("Market / Order Book"))?;
-        if let Some(v) = venue {
-            outln!(out, "{}", t::kv_row("Venue", v))?;
-        }
-        outln!(
-            out,
-            "{}",
-            t::kv_row(
-                "Peg Target",
-                &format!(
-                    "{:.d$}",
-                    summary.peg_target,
-                    d = scope::display::format::price_decimals(summary.peg_target)
-                ),
-            )
-        )?;
-        if let Some(b) = summary.best_bid {
-            outln!(
-                out,
-                "{}",
-                t::kv_row("Best Bid", &t::format_price_peg(b, &summary.peg_bands()))
-            )?;
-        }
-        if let Some(a) = summary.best_ask {
-            outln!(
-                out,
-                "{}",
-                t::kv_row("Best Ask", &t::format_price_peg(a, &summary.peg_bands()))
-            )?;
-        }
-        if let Some(m) = summary.mid_price {
-            outln!(
-                out,
-                "{}",
-                t::kv_row("Mid Price", &t::format_price_peg(m, &summary.peg_bands()))
-            )?;
-        }
-        outln!(
-            out,
-            "{}",
-            t::kv_row("Bid Depth", &format!("{:.0} USDT", summary.bid_depth))
-        )?;
-        outln!(
-            out,
-            "{}",
-            t::kv_row("Ask Depth", &format!("{:.0} USDT", summary.ask_depth))
-        )?;
-        outln!(out, "{}", t::blank_row())?;
+    Ok(())
+}
 
-        // Health checks
-        for check in &summary.checks {
-            outln!(out, "{}", check.render_text())?;
-        }
-        outln!(out, "{}", t::blank_row())?;
-        outln!(out, "{}", t::status_line(summary.healthy))?;
+/// One market block: the venue, the peg and book rows, the health checks and
+/// the status line.
+fn write_market_block(
+    heading: &str,
+    summary: &MarketSummary,
+    venue: Option<&str>,
+    out: &Output,
+) -> Result<()> {
+    use scope::display::terminal as t;
+
+    outln!(out, "{}", t::subsection_header(heading))?;
+    if let Some(v) = venue {
+        outln!(out, "{}", t::kv_row("Venue", v))?;
     }
+    outln!(
+        out,
+        "{}",
+        t::kv_row(
+            "Peg Target",
+            &format!(
+                "{:.d$}",
+                summary.peg_target,
+                d = scope::display::format::price_decimals(summary.peg_target)
+            ),
+        )
+    )?;
+    if let Some(b) = summary.best_bid {
+        outln!(
+            out,
+            "{}",
+            t::kv_row("Best Bid", &t::format_price_peg(b, &summary.peg_bands()))
+        )?;
+    }
+    if let Some(a) = summary.best_ask {
+        outln!(
+            out,
+            "{}",
+            t::kv_row("Best Ask", &t::format_price_peg(a, &summary.peg_bands()))
+        )?;
+    }
+    if let Some(m) = summary.mid_price {
+        outln!(
+            out,
+            "{}",
+            t::kv_row("Mid Price", &t::format_price_peg(m, &summary.peg_bands()))
+        )?;
+    }
+    outln!(
+        out,
+        "{}",
+        t::kv_row("Bid Depth", &format!("{:.0} USDT", summary.bid_depth))
+    )?;
+    outln!(
+        out,
+        "{}",
+        t::kv_row("Ask Depth", &format!("{:.0} USDT", summary.ask_depth))
+    )?;
+    outln!(out, "{}", t::blank_row())?;
 
-    outln!(out, "{}", t::section_footer())?;
+    // Health checks
+    for check in &summary.checks {
+        outln!(out, "{}", check.render_text())?;
+    }
+    outln!(out, "{}", t::blank_row())?;
+    outln!(out, "{}", t::status_line(summary.healthy))?;
     Ok(())
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use scope::chains::dex::DexTokenData;
     use scope::chains::mocks::MockClientFactory;
@@ -343,7 +502,7 @@ mod tests {
         crate::cli::output::Output::capture().0
     }
 
-    fn make_test_analytics(with_dex_pairs: bool) -> TokenAnalytics {
+    pub(crate) fn make_test_analytics(with_dex_pairs: bool) -> TokenAnalytics {
         TokenAnalytics {
             token: Token {
                 contract_address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
@@ -505,7 +664,7 @@ mod tests {
             token_contract: None,
             chain: "ethereum".to_string(),
             with_market: false,
-            venue: "binance".to_string(),
+            venue: vec!["binance".to_string()],
             format: scope::config::OutputFormat::Table,
             health: Default::default(),
         };
@@ -676,7 +835,7 @@ mod tests {
         // Should not panic when market_cap and top_10_concentration are None
     }
 
-    fn make_test_dex_token_data(pairs: Vec<DexPair>) -> DexTokenData {
+    pub(crate) fn make_test_dex_token_data(pairs: Vec<DexPair>) -> DexTokenData {
         DexTokenData {
             address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string(),
             symbol: "USDC".to_string(),
@@ -723,7 +882,7 @@ mod tests {
             token_contract: None,
             chain: "ethereum".to_string(),
             with_market: false,
-            venue: "binance".to_string(),
+            venue: vec!["binance".to_string()],
             format: OutputFormat::Table,
             health: Default::default(),
         };
@@ -747,7 +906,7 @@ mod tests {
             token_contract: None,
             chain: "ethereum".to_string(),
             with_market: false,
-            venue: "binance".to_string(),
+            venue: vec!["binance".to_string()],
             format: OutputFormat::Json,
             health: Default::default(),
         };
@@ -767,7 +926,7 @@ mod tests {
             token_contract: None,
             chain: "ethereum".to_string(),
             with_market: false,
-            venue: "binance".to_string(),
+            venue: vec!["binance".to_string()],
             format: OutputFormat::Markdown,
             health: Default::default(),
         };
@@ -807,7 +966,7 @@ mod tests {
             token_contract: None,
             chain: "ethereum".to_string(),
             with_market: true,
-            venue: "eth".to_string(),
+            venue: vec!["eth".to_string()],
             format: OutputFormat::Table,
             health: Default::default(),
         };
@@ -822,13 +981,13 @@ mod tests {
             token_contract: None,
             chain: "ethereum".to_string(),
             with_market: true,
-            venue: venue.to_string(),
+            venue: vec![venue.to_string()],
             format: OutputFormat::Json,
             health: Default::default(),
         }
     }
 
-    fn pair_with_liquidity(liquidity_usd: f64) -> DexPair {
+    pub(crate) fn pair_with_liquidity(liquidity_usd: f64) -> DexPair {
         DexPair {
             dex_name: "Uniswap V3".to_string(),
             pair_address: format!("0xpair{liquidity_usd}"),
@@ -999,7 +1158,7 @@ mod tests {
                 token_contract: None,
                 chain: "ethereum".to_string(),
                 with_market: false,
-                venue: "binance".to_string(),
+                venue: vec!["binance".to_string()],
                 format,
                 health: Default::default(),
             };
@@ -1018,7 +1177,7 @@ mod tests {
             token_contract: None,
             chain: "ethereum".to_string(),
             with_market: false,
-            venue: "binance".to_string(),
+            venue: vec!["binance".to_string()],
             format: OutputFormat::Csv,
             health: Default::default(),
         };
@@ -1039,7 +1198,7 @@ mod tests {
             token_contract: None,
             chain: "ethereum".to_string(),
             with_market: false,
-            venue: "binance".to_string(),
+            venue: vec!["binance".to_string()],
             format: OutputFormat::Table, // Args say Table, config overrides to Markdown
             health: Default::default(),
         };
@@ -1096,5 +1255,397 @@ mod tests {
         let result =
             output_token_health_table(&analytics, Some(&market), Some("binance"), &quiet());
         assert!(result.is_ok());
+    }
+
+    // ---- venue list (design 2026-11-10, section 4) ----
+
+    use crate::cli::ansi::strip;
+    use clap::Parser;
+    use scope::chains::dex::{DexDataSource, TokenSearchResult};
+    use scope::chains::{ChainClient, ChainClientFactory};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// The DEX mock, counting how many times the crawl reads the token. The
+    /// analytics must be read once, however many venues the user names.
+    struct CountingFactory {
+        inner: MockClientFactory,
+        token_reads: Arc<AtomicUsize>,
+    }
+
+    struct CountingDex {
+        inner: Box<dyn DexDataSource>,
+        token_reads: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl DexDataSource for CountingDex {
+        async fn get_token_price(&self, chain: &str, address: &str) -> Option<f64> {
+            self.inner.get_token_price(chain, address).await
+        }
+        async fn get_native_token_price(&self, chain: &str) -> Option<f64> {
+            self.inner.get_native_token_price(chain).await
+        }
+        async fn get_token_data(&self, chain: &str, address: &str) -> Result<DexTokenData> {
+            self.token_reads.fetch_add(1, Ordering::SeqCst);
+            self.inner.get_token_data(chain, address).await
+        }
+        async fn search_tokens(
+            &self,
+            query: &str,
+            chain: Option<&str>,
+        ) -> Result<Vec<TokenSearchResult>> {
+            self.inner.search_tokens(query, chain).await
+        }
+    }
+
+    impl ChainClientFactory for CountingFactory {
+        fn create_chain_client(&self, chain: &str) -> Result<Box<dyn ChainClient>> {
+            self.inner.create_chain_client(chain)
+        }
+        fn create_dex_client(&self) -> Box<dyn DexDataSource> {
+            Box::new(CountingDex {
+                inner: self.inner.create_dex_client(),
+                token_reads: self.token_reads.clone(),
+            })
+        }
+        fn http(&self) -> Arc<dyn scope::http::HttpClient> {
+            self.inner.http()
+        }
+    }
+
+    fn counting_factory() -> CountingFactory {
+        let mut inner = MockClientFactory::new();
+        inner.mock_dex.token_data = Some(make_test_dex_token_data(vec![pair_with_liquidity(
+            90_000.0,
+        )]));
+        CountingFactory {
+            inner,
+            token_reads: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn venue_args(venues: &[&str], with_market: bool, format: OutputFormat) -> TokenHealthArgs {
+        TokenHealthArgs {
+            with_market,
+            venue: venues.iter().map(|v| v.to_string()).collect(),
+            format,
+            ..dex_market_args("eth")
+        }
+    }
+
+    /// Runs the command and returns its result, its data and its notes.
+    async fn run_captured(
+        args: TokenHealthArgs,
+        factory: &dyn ChainClientFactory,
+    ) -> (Result<()>, String, String) {
+        let (out, cap) = Output::capture();
+        let result = run(args, &Config::default(), factory, &out).await;
+        (result, strip(&cap.out()), strip(&cap.err()))
+    }
+
+    fn parse_venues(line: &str) -> Vec<String> {
+        let argv = std::iter::once("scope").chain(line.split_whitespace());
+        match crate::cli::Cli::try_parse_from(argv).unwrap().command {
+            crate::cli::Commands::TokenHealth(a) => a.venue,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_venue_flag_repeats_or_takes_a_comma_list_like_market_summary() {
+        // One flag shape for the user across `market`, `monitor` and here.
+        let both = ["weex", "binance"];
+        let base = "token-health USDC --with-market";
+        assert_eq!(
+            parse_venues(&format!("{base} --venue weex --venue binance")),
+            both
+        );
+        assert_eq!(parse_venues(&format!("{base} --venue weex,binance")), both);
+        assert_eq!(parse_venues(&format!("{base} --venue weex")), ["weex"]);
+        assert_eq!(parse_venues(base), [scope::market::DEFAULT_VENUE]);
+    }
+
+    #[tokio::test]
+    async fn a_bad_venue_list_fails_before_any_request() {
+        // A typo must not cost a crawl: the check comes before the analytics.
+        for (venues, with_market, why) in [
+            (vec!["eth", "ETH"], true, "listed twice"),
+            (vec!["eth", " "], true, "empty venue name"),
+            (
+                vec!["eth", "ethereum"],
+                false,
+                "--venue needs --with-market",
+            ),
+        ] {
+            let factory = counting_factory();
+            let (result, _, _) = run_captured(
+                venue_args(&venues, with_market, OutputFormat::Table),
+                &factory,
+            )
+            .await;
+            let err = result.unwrap_err().to_string();
+            assert!(err.contains(why), "{venues:?}: {err}");
+            assert_eq!(factory.token_reads.load(Ordering::SeqCst), 0, "{venues:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn one_venue_without_with_market_keeps_the_old_silent_rule() {
+        // Q4: only a list fails. A script that passes one --venue without
+        // --with-market keeps working.
+        let factory = counting_factory();
+        let (result, text, _) =
+            run_captured(venue_args(&["eth"], false, OutputFormat::Table), &factory).await;
+        result.unwrap();
+        assert!(!text.contains("Market / Order Book"), "{text}");
+    }
+
+    /// The old composition of one venue: the three renderers that the
+    /// one-venue path has always called.
+    async fn old_output(format: OutputFormat) -> String {
+        let factory = counting_factory();
+        let config = Config::default();
+        let analytics = crawl::fetch_analytics_for_input(
+            "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+            "ethereum",
+            Period::Hour24,
+            10,
+            &factory,
+            None,
+            &Output::capture().0,
+        )
+        .await
+        .unwrap();
+        let summary = fetch_token_summary_by_name_with_http(
+            "eth",
+            &analytics,
+            &dex_market_args("eth").health.resolve(&config),
+            factory.http(),
+        )
+        .await
+        .unwrap();
+        match format {
+            OutputFormat::Markdown => {
+                let md = token_health_to_markdown(&analytics, Some(&summary), Some("eth"));
+                format!("{md}\n")
+            }
+            OutputFormat::Json => {
+                let json = token_health_to_json(&analytics, Some(&summary)).unwrap();
+                format!("{json}\n")
+            }
+            _ => {
+                let (out, cap) = Output::capture();
+                output_token_health_table(&analytics, Some(&summary), Some("eth"), &out).unwrap();
+                cap.out()
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn one_venue_gives_exactly_the_old_output_in_every_format() {
+        // The compatibility promise: a script written for one venue reads
+        // the same bytes after the list exists.
+        for format in [
+            OutputFormat::Table,
+            OutputFormat::Csv,
+            OutputFormat::Markdown,
+            OutputFormat::Json,
+        ] {
+            let factory = counting_factory();
+            let (result, text, _) =
+                run_captured(venue_args(&["eth"], true, format), &factory).await;
+            result.unwrap();
+            assert_eq!(text, strip(&old_output(format).await), "{format:?}");
+        }
+        // And the JSON keeps its two keys, `market` an object.
+        let factory = counting_factory();
+        let (_, text, _) =
+            run_captured(venue_args(&["eth"], true, OutputFormat::Json), &factory).await;
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let keys: Vec<&String> = json.as_object().unwrap().keys().collect();
+        assert_eq!(keys, ["analytics", "market"]);
+        assert!(json["market"].is_object());
+    }
+
+    #[tokio::test]
+    async fn two_venues_in_a_table_give_the_analytics_once_a_block_each_then_the_comparison() {
+        let factory = counting_factory();
+        let (result, text, _) = run_captured(
+            venue_args(&["eth", "ethereum"], true, OutputFormat::Table),
+            &factory,
+        )
+        .await;
+        result.unwrap();
+        assert_eq!(text.matches("DEX Analytics").count(), 1, "{text}");
+        let at = |needle: &str| {
+            text.find(needle)
+                .unwrap_or_else(|| panic!("{needle}\n{text}"))
+        };
+        let (first, second, table) = (
+            at("Market / Order Book (eth)"),
+            at("Market / Order Book (ethereum)"),
+            at("Comparison"),
+        );
+        assert!(first < second && second < table, "order\n{text}");
+        assert!(
+            !text[table..].contains("Market / Order Book"),
+            "the table is the last block\n{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn csv_prints_the_same_table_as_table_for_a_list() {
+        // `csv` has no writer; it keeps its meaning for a list too.
+        let venues = ["eth", "ethereum"];
+        let table = run_captured(
+            venue_args(&venues, true, OutputFormat::Table),
+            &counting_factory(),
+        )
+        .await;
+        let csv = run_captured(
+            venue_args(&venues, true, OutputFormat::Csv),
+            &counting_factory(),
+        )
+        .await;
+        assert_eq!(table.1, csv.1);
+    }
+
+    #[tokio::test]
+    async fn two_venues_in_json_keep_market_null_and_add_markets_and_comparison() {
+        let factory = counting_factory();
+        let (result, text, _) = run_captured(
+            venue_args(&["eth", "ethereum"], true, OutputFormat::Json),
+            &factory,
+        )
+        .await;
+        result.unwrap();
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(json["market"].is_null(), "a clear null, not a changed type");
+        assert!(json["analytics"].is_object());
+        let markets = json["markets"].as_array().unwrap();
+        let venues: Vec<&str> = markets
+            .iter()
+            .map(|m| m["venue"].as_str().unwrap())
+            .collect();
+        assert_eq!(venues, ["eth", "ethereum"]);
+        assert!(markets[0]["summary"]["healthy"].is_boolean());
+        let rows = json["comparison"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r["mid"].is_number()), "raw numbers");
+    }
+
+    #[tokio::test]
+    async fn two_venues_in_markdown_give_a_section_each_then_the_comparison() {
+        let factory = counting_factory();
+        let (result, text, _) = run_captured(
+            venue_args(&["eth", "ethereum"], true, OutputFormat::Markdown),
+            &factory,
+        )
+        .await;
+        result.unwrap();
+        let at = |needle: &str| {
+            text.find(needle)
+                .unwrap_or_else(|| panic!("{needle}\n{text}"))
+        };
+        let (head, a, b, cmp) = (
+            at("## Market / Order Book"),
+            at("### eth\n"),
+            at("### ethereum\n"),
+            at("### Comparison"),
+        );
+        assert!(head < a && a < b && b < cmp, "{text}");
+        assert!(text[cmp..].contains("| ethereum |"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_failing_venue_does_not_hide_the_others_and_the_exit_code_stays_zero() {
+        // `solana` cannot price an ethereum token; `nowhere` is unknown. The
+        // analytics are the main result, so the code is 0 (decision Q5).
+        let venues = ["solana", "eth", "nowhere"];
+        let factory = counting_factory();
+        let (result, text, _) =
+            run_captured(venue_args(&venues, true, OutputFormat::Table), &factory).await;
+        result.expect("a failed venue is a warning, as with one venue");
+        assert!(text.contains("Market / Order Book (solana)"), "{text}");
+        assert!(text.contains("No market data: "), "{text}");
+        assert!(text.contains("Market / Order Book (eth)"), "{text}");
+        assert!(
+            text.contains("Peg Target"),
+            "the good block is whole\n{text}"
+        );
+
+        let (result, text, _) =
+            run_captured(venue_args(&venues, true, OutputFormat::Json), &factory).await;
+        result.unwrap();
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let markets = json["markets"].as_array().unwrap();
+        assert!(markets[0]["error"].as_str().unwrap().contains("solana"));
+        assert!(markets[1]["summary"].is_object(), "eth still answers");
+        assert!(
+            markets[2]["error"]
+                .as_str()
+                .unwrap()
+                .contains("Unknown venue")
+        );
+        let status: Vec<&str> = json["comparison"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["status"].as_str().unwrap())
+            .collect();
+        assert_eq!(status[0], "error");
+        assert_ne!(status[1], "error");
+        assert_eq!(status[2], "error");
+    }
+
+    #[tokio::test]
+    async fn every_venue_failing_still_prints_the_analytics_and_exits_zero() {
+        let factory = counting_factory();
+        let (result, text, _) = run_captured(
+            venue_args(&["nowhere", "solana"], true, OutputFormat::Table),
+            &factory,
+        )
+        .await;
+        result.unwrap();
+        assert!(
+            text.contains("DEX Analytics") && text.contains("Comparison"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_analytics_are_read_once_for_any_number_of_venues() {
+        // The DEX crawl is the slow, rate-limited part. A loop that reran it
+        // for each venue would triple the cost for no new data.
+        let (one, three) = (counting_factory(), counting_factory());
+        run_captured(venue_args(&["eth"], true, OutputFormat::Json), &one)
+            .await
+            .0
+            .unwrap();
+        run_captured(
+            venue_args(&["eth", "ethereum", "nowhere"], true, OutputFormat::Json),
+            &three,
+        )
+        .await
+        .0
+        .unwrap();
+        let reads = one.token_reads.load(Ordering::SeqCst);
+        assert!(reads >= 1);
+        assert_eq!(three.token_reads.load(Ordering::SeqCst), reads);
+    }
+
+    #[test]
+    fn the_help_names_the_list_form_and_the_exit_rule() {
+        use clap::CommandFactory;
+        let cli = crate::cli::Cli::command();
+        let help = cli
+            .find_subcommand("token-health")
+            .unwrap()
+            .clone()
+            .render_long_help()
+            .to_string();
+        assert!(help.contains("--venue weex,binance"), "{help}");
+        assert!(help.contains("The exit code is 0"), "{help}");
     }
 }

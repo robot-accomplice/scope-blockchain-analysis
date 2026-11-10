@@ -661,6 +661,8 @@ The DEX venues (`eth`, `solana`) are still available and use on-chain liquidity 
 - With `--format json`, `market summary` gives one object: `{"pair", "run", "venues", "comparison"}`. `run` is `null` for one run, and the run number with `--every`. `venues` is the list with one item for each venue: the same object as for one venue, or `venue` and `error` for a failed venue. `comparison` is a list with one row for each venue, in the order given, for scripts that compare venues. A row holds raw numbers (not the text of the table): `venue`, `status` (`healthy`, `unhealthy` or `error`), `mid`, `spread_pct` (in percent), `bid_depth`, `ask_depth`, `volume_24h`, `peg_deviation_bps` (in basis points from the peg), `bot_signs` (the names, or `null` when the check did not run) and `bot_signs_state` (`found`, `none`, `none_no_tape` or `not_run`). A failed venue has `null` for every number and the whole reason in `error`.
 - One venue still gives the output it gave before: one object for `market summary`, and a list of candles or trades for the other two.
 
+**`scope insights --venue`.** `insights` takes the same list for a stablecoin: `scope insights USDC --venue weex,binance`. The report has one `Market` line for each venue, in the order given. A venue that fails has an `unavailable` line with the reason. The summary and the key takeaway use the worst peg status of the venues that answered (`Deviation` first). When the venues do not share one status, the summary adds a sentence that names each venue and its status. Without `--venue`, `insights` checks the default venue and shows nothing when it fails. For an address, a transaction, or a token that is not a stablecoin, `--venue` has no effect, and `insights` prints one note. A venue that fails does not change the exit code.
+
 ```json
 {
   "pair": "USDC/USDT",
@@ -1126,11 +1128,21 @@ Combines DEX analytics (crawl) with optional market/order book summary for stabl
 scope token-health USDC                        # DEX liquidity, volume, holders (table)
 scope health USDC --with-market                # + order book/peg (default: Binance)
 scope token-health USDC --with-market --venue kraken
+scope token-health USDC --with-market --venue weex,binance   # compare venues
 scope token-health USDC --format json
 scope token-health USDC --ai                   # Markdown to console for agent parsing
 ```
 
 With `--with-market`, order book data is fetched from the selected venue (`--venue`): any CEX venue from the registry (default **binance**), or **eth** / **solana** for DEX on-chain liquidity. Run `scope venues list` to see all available venues.
+
+**Several venues.** `--venue` takes a list: repeat it or give a comma list (`--venue weex,binance`). A list needs `--with-market`; without it, the command fails before any request. One venue keeps its old rule.
+
+- The DEX analytics are read once. The venues are read at the same time.
+- Table: the DEX analytics once, one `Market / Order Book (venue)` block for each venue in the order given, then one comparison table. A venue that fails has a block that says why. `--format csv` prints the same table as before.
+- Markdown: the report once, one `###` section for each venue, then `### Comparison`.
+- JSON: `analytics` and `market` stay. `market` is `null`. `markets` is a list with `{venue, summary}` or `{venue, error}` for each venue. `comparison` has one row of raw numbers for each venue (the rows of `market summary`).
+- The exit code is 0 when the DEX analytics print, also when a venue fails or is unhealthy.
+- One venue gives the output it gave before, in every format.
 
 ### Agent-Oriented Output (`--ai`)
 
@@ -1167,7 +1179,8 @@ Scope supports markdown and structured report generation across commands:
 | `scope compliance compliance-report` | `--output file` | Unified risk + pattern analysis (markdown) |
 | `scope report batch` | `--addresses a,b,c` or `--from-file path` + `--output report.md` | Combined report for multiple addresses |
 | `scope report batch` | `--with-risk` | Include risk assessment per address (uses ETHERSCAN_API_KEY) |
-| `scope token-health` | `--with-market --venue <venue>` | DEX + optional market composite |
+| `scope token-health` | `--with-market --venue <venue>[,<venue>...]` | DEX + optional market composite, on one or more venues |
+| `scope insights` | `--venue <venue>[,<venue>...]` | Peg check of a stablecoin on one or more venues |
 | `scope` | `--ai` (global) | Markdown console output for agent parsing |
 
 All reports include version and timestamp metadata for audit trail.
