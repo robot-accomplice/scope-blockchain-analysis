@@ -223,7 +223,8 @@ pub struct MonitorWatchArgs {
     #[arg(long, value_name = "PRESET")]
     pub preset: Option<String>,
 
-    /// Save the watchlist under this name (`watch open <name>` runs it again).
+    /// Save the watchlist under this name. To run it again, start `scope tui`
+    /// and enter `watch open <name>` there (no CLI subcommand opens it).
     #[arg(long, value_name = "NAME")]
     pub save: Option<String>,
 

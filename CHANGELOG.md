@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - With two or more venues, the exit code is 1 when any venue failed, else 0. An unhealthy venue does not change it, as with one venue.
 - `market summary --every` on two or more venues draws the venue charts of the watch grid in the TUI: one chart for each key value, one line for each venue, the legend with the range across venues, and the same keys (`←` `→`, Space, Tab, PgUp, PgDn). The CSV from `--csv` or `save` has one row for each venue and run, with a `venue` column after `run`. A venue that fails in one run does not end the repeat; the repeat ends when every venue fails.
 
+### Fixed
+- `scripts/check-coverage.sh` no longer fails without a message. When `cargo tarpaulin` fails, the script prints its output and its exit code. The script also stops at once, with a clear message, when `cargo tarpaulin` is older than 0.37.1: older versions cannot read the LLVM 23 profraw files that rustc 1.99.x writes.
+- The help of `scope monitor --save` said that `watch open <name>` runs a saved watchlist again, as if it were a CLI command. It is a command of the TUI shell. The help now says to start `scope tui` and enter `watch open <name>` there.
+
 ### Removed
 - The unused Alchemy quickstart app `my-smart-wallets-app/` is removed. Nothing in the project used or shipped it. This clears its open Dependabot alerts.
 
