@@ -709,7 +709,8 @@ mod tests {
     use clap::Parser;
     use scope::chains::mocks::MockClientFactory;
     use scope::market::testing::venue_at;
-    use std::time::{Duration, Instant};
+    use std::sync::Arc;
+    use std::time::Duration;
 
     fn strip(text: &str) -> String {
         crate::cli::ansi::strip(text)
@@ -1068,17 +1069,42 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// A TCP stub in front of `target` (`host:port`) that waits `delay`
-    /// before it connects each client through. It waits with
-    /// `tokio::time::sleep`, so it holds no thread. Returns its URL.
-    async fn delayed(target: String, delay: Duration) -> String {
+    /// How long a stub holds a connection for the other venue to connect.
+    /// Sequential reads reach it and the test fails; concurrent reads never
+    /// wait this long.
+    const HOLD_LIMIT: Duration = Duration::from_secs(5);
+
+    /// What the two stubs share: the venues that have connected (a bit
+    /// each), and whether any client waited out `HOLD_LIMIT` for the other.
+    struct Meeting {
+        seen: tokio::sync::watch::Sender<u8>,
+        timed_out: std::sync::atomic::AtomicBool,
+    }
+
+    /// A TCP stub in front of `target` (`host:port`) for the venue with the
+    /// bit `me`. It holds each client until both venues have connected (or
+    /// `HOLD_LIMIT` passes, which it records), then connects it through. No
+    /// client waits out the limit only if the venues are read at the same
+    /// time. It holds no thread. Returns its URL.
+    async fn held(target: String, me: u8, meeting: Arc<Meeting>) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move {
             while let Ok((mut client, _)) = listener.accept().await {
                 let target = target.clone();
+                let meeting = meeting.clone();
                 tokio::spawn(async move {
-                    tokio::time::sleep(delay).await;
+                    meeting.seen.send_modify(|bits| *bits |= me);
+                    let mut watch = meeting.seen.subscribe();
+                    let met =
+                        tokio::time::timeout(HOLD_LIMIT, watch.wait_for(|bits| *bits == 0b11))
+                            .await
+                            .is_ok();
+                    if !met {
+                        meeting
+                            .timed_out
+                            .store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
                     if let Ok(mut upstream) = tokio::net::TcpStream::connect(target).await {
                         let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
                     }
@@ -1090,10 +1116,15 @@ mod tests {
 
     #[tokio::test]
     async fn venues_are_read_at_the_same_time() {
-        // Every connection to a venue takes 300 ms to open. Time one venue,
-        // then two: read one after the other, two would take twice as long
-        // as one. Read together, they take about as long as one.
-        let delay = Duration::from_millis(300);
+        // Each venue's stub holds its connection until the other venue has
+        // connected too. Both are connected at once only if the reads run
+        // together; read one after the other, the first waits out
+        // `HOLD_LIMIT` and the other never connects in that time. No clock
+        // ratio, so a loaded machine does not change the result.
+        let meeting = Arc::new(Meeting {
+            seen: tokio::sync::watch::channel(0u8).0,
+            timed_out: std::sync::atomic::AtomicBool::new(false),
+        });
         let (a, b) = (
             Served::healthy("binance").await,
             Served::healthy("weex").await,
@@ -1101,48 +1132,40 @@ mod tests {
         let urls = [
             (
                 "binance".to_string(),
-                delayed(a.server.host_with_port(), delay).await,
+                held(a.server.host_with_port(), 0b01, meeting.clone()).await,
             ),
             (
                 "weex".to_string(),
-                delayed(b.server.host_with_port(), delay).await,
+                held(b.server.host_with_port(), 0b10, meeting.clone()).await,
             ),
         ];
         let source = move |name: &str| {
             let (id, url) = urls.iter().find(|(id, _)| id == name).unwrap();
             Ok(MarketVenue::Cex(Box::new(venue_at(id, url))))
         };
-        let read = |list: &[&str]| {
-            let args = args(list, SummaryFormat::Text);
-            let venues = checked_venues(&args.venue).unwrap();
-            let (out, cap) = Output::capture();
-            let source = &source;
-            async move {
-                let start = Instant::now();
-                run_summary(
-                    &args,
-                    &venues,
-                    None,
-                    &HealthThresholds::default(),
-                    source,
-                    &MockClientFactory::new(),
-                    &out,
-                )
-                .await
-                .unwrap();
-                (start.elapsed(), strip(&cap.out()))
-            }
-        };
-        let (one, _) = read(&["binance"]).await;
-        let (both, text) = read(&["binance", "weex"]).await;
+        let args = args(&["binance", "weex"], SummaryFormat::Text);
+        let venues = checked_venues(&args.venue).unwrap();
+        let (out, cap) = Output::capture();
+        run_summary(
+            &args,
+            &venues,
+            None,
+            &HealthThresholds::default(),
+            &source,
+            &MockClientFactory::new(),
+            &out,
+        )
+        .await
+        .unwrap();
+        let text = strip(&cap.out());
         assert!(
             text.contains("(binance)") && text.contains("(weex)"),
             "{text}"
         );
-        assert!(one >= delay, "the stub delays: {one:?}");
+        assert_eq!(*meeting.seen.borrow(), 0b11, "both venues connected");
         assert!(
-            both < one.mul_f64(1.6),
-            "one venue took {one:?}, two took {both:?}: one venue after the other"
+            !meeting.timed_out.load(std::sync::atomic::Ordering::SeqCst),
+            "a venue waited for the other: the reads ran one after the other"
         );
     }
 
