@@ -13,11 +13,13 @@ use crate::cli::market::{
 use crate::cli::output::{Output, VenueRun, VenueSample};
 use crate::cli::repeat::{self, CsvRows, RunOutput, Schedule};
 use crate::{note, out, outln};
-use scope::chains::ChainClientFactory;
+use scope::chains::{ChainClientFactory, TokenAnalytics};
 use scope::display::terminal as t;
 use scope::error::{Result, ScopeError};
 use scope::market::assets::TokenAddress;
-use scope::market::{ExchangeClient, HealthThresholds, MarketSummary, MarketVenue, Pair};
+use scope::market::{
+    ExchangeClient, HealthThresholds, MarketSummary, MarketVenue, Pair, fetch_token_summary,
+};
 use scope::metrics::{self as series, Sample};
 
 /// How the commands get a venue from its name. The CLI reads the registry;
@@ -157,6 +159,31 @@ async fn read_all(
             venue: leg.venue.clone(),
             tokens,
             result,
+        }
+    });
+    futures::future::join_all(reads).await
+}
+
+/// The market of a token that is already analyzed, on each venue at once
+/// (`token-health` and `insights` with a venue list). The reports keep the
+/// order of `venues`. A venue that cannot be built or read gives an error
+/// report and never stops the others. The analytics are read by the caller,
+/// once, so the token check never runs here and nothing prompts.
+pub(crate) async fn read_token_summaries(
+    venues: &[String],
+    source: VenueSource<'_>,
+    analytics: &TokenAnalytics,
+    thresholds: &HealthThresholds,
+) -> Vec<VenueReport> {
+    let reads = venues.iter().map(|name| async move {
+        let result = match source(name) {
+            Ok(venue) => fetch_token_summary(&venue, analytics, thresholds).await,
+            Err(e) => Err(e),
+        };
+        VenueReport {
+            venue: name.clone(),
+            tokens: Vec::new(),
+            result: result.map_err(|e| one_line(&e)),
         }
     });
     futures::future::join_all(reads).await
@@ -308,7 +335,7 @@ fn pair_of(args: &SummaryArgs, reports: &[VenueReport]) -> String {
 }
 
 /// The same, from the user's pair text.
-fn pair_in(user_pair: &str, reports: &[VenueReport]) -> String {
+pub(crate) fn pair_in(user_pair: &str, reports: &[VenueReport]) -> String {
     reports
         .iter()
         .find_map(|r| r.result.as_ref().ok().map(|s| s.pair.clone()))
@@ -495,7 +522,7 @@ impl ComparisonRow {
 }
 
 /// The typed comparison rows of a run, one per venue, in the order given.
-fn comparison_rows(reports: &[VenueReport]) -> Vec<ComparisonRow> {
+pub(crate) fn comparison_rows(reports: &[VenueReport]) -> Vec<ComparisonRow> {
     reports.iter().map(ComparisonRow::from_report).collect()
 }
 
@@ -612,7 +639,7 @@ pub(crate) fn comparison_table(pair: &str, reports: &[VenueReport]) -> String {
 }
 
 /// The comparison as a markdown table.
-fn comparison_markdown(reports: &[VenueReport]) -> String {
+pub(crate) fn comparison_markdown(reports: &[VenueReport]) -> String {
     let mut md = format!(
         "| {} |\n|{}|\n",
         HEADERS.join(" | "),
@@ -1271,6 +1298,49 @@ mod tests {
             text.contains("(binance)") && text.contains("(weex)"),
             "{text}"
         );
+        assert_eq!(*meeting.seen.borrow(), 0b11, "both venues connected");
+        assert!(
+            !meeting.timed_out.load(std::sync::atomic::Ordering::SeqCst),
+            "a venue waited for the other: the reads ran one after the other"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_token_is_read_on_all_venues_at_once_and_a_failure_stops_no_other() {
+        // `token-health` and `insights` read a token that is already
+        // analyzed. Same proof as above, no clock ratio: each stub holds its
+        // connection until the other venue has connected.
+        let meeting = Arc::new(Meeting {
+            seen: tokio::sync::watch::channel(0u8).0,
+            timed_out: std::sync::atomic::AtomicBool::new(false),
+        });
+        let (a, b) = (
+            Served::healthy("binance").await,
+            Served::healthy("weex").await,
+        );
+        let urls = [
+            (
+                "binance".to_string(),
+                held(a.server.host_with_port(), 0b01, meeting.clone()).await,
+            ),
+            (
+                "weex".to_string(),
+                held(b.server.host_with_port(), 0b10, meeting.clone()).await,
+            ),
+        ];
+        let source = move |name: &str| match urls.iter().find(|(id, _)| id == name) {
+            Some((id, url)) => Ok(MarketVenue::Cex(Box::new(venue_at(id, url)))),
+            None => MarketVenue::from_name_with_http(name, scope::http::test_transport()),
+        };
+        let analytics = crate::cli::token_health::tests::make_test_analytics(false);
+        let venues = names(&["weex", "nowhere", "binance"]);
+        let reports =
+            read_token_summaries(&venues, &source, &analytics, &HealthThresholds::default()).await;
+        let order: Vec<&str> = reports.iter().map(|r| r.venue.as_str()).collect();
+        assert_eq!(order, ["weex", "nowhere", "binance"], "the order given");
+        assert!(reports[0].result.is_ok() && reports[2].result.is_ok());
+        let why = reports[1].result.as_ref().unwrap_err();
+        assert!(why.contains("Unknown venue"), "{why}");
         assert_eq!(*meeting.seen.borrow(), 0b11, "both venues connected");
         assert!(
             !meeting.timed_out.load(std::sync::atomic::Ordering::SeqCst),

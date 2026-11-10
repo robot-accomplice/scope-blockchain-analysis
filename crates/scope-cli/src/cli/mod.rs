@@ -844,7 +844,7 @@ mod tests {
         if let Commands::TokenHealth(args) = cli.command {
             assert_eq!(args.token, "USDC");
             assert!(args.with_market);
-            assert_eq!(args.venue, "binance"); // default venue
+            assert_eq!(args.venue, ["binance"]); // default venue
         } else {
             panic!("Expected TokenHealth command");
         }
@@ -862,7 +862,7 @@ mod tests {
         ])
         .unwrap();
         if let Commands::TokenHealth(args) = cli.command {
-            assert_eq!(args.venue, "biconomy");
+            assert_eq!(args.venue, ["biconomy"]);
         } else {
             panic!("Expected TokenHealth command");
         }
@@ -880,7 +880,7 @@ mod tests {
         ])
         .unwrap();
         if let Commands::TokenHealth(args) = cli.command {
-            assert_eq!(args.venue, "eth");
+            assert_eq!(args.venue, ["eth"]);
         } else {
             panic!("Expected TokenHealth command");
         }
@@ -898,7 +898,7 @@ mod tests {
         ])
         .unwrap();
         if let Commands::TokenHealth(args) = cli.command {
-            assert_eq!(args.venue, "solana");
+            assert_eq!(args.venue, ["solana"]);
         } else {
             panic!("Expected TokenHealth command");
         }

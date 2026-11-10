@@ -67,6 +67,7 @@ pub async fn handle(
         chain: chain_override,
         decode: req.decode,
         trace: req.trace,
+        venue: Vec::new(),
         health: Default::default(),
     };
 

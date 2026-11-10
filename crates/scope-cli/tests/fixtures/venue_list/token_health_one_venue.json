@@ -1,0 +1,169 @@
+{
+  "analytics": {
+    "chain": "ethereum",
+    "dex_pairs": [
+      {
+        "base_token": "USDC",
+        "buys_1h": 0,
+        "buys_24h": 0,
+        "buys_6h": 0,
+        "dex_name": "Uniswap V3",
+        "liquidity_base": null,
+        "liquidity_usd": 90000.0,
+        "pair_address": "0xpair90000",
+        "pair_created_at": null,
+        "price_change_24h": 0.0,
+        "price_usd": 1.0,
+        "quote_token": "USDT",
+        "sells_1h": 0,
+        "sells_24h": 0,
+        "sells_6h": 0,
+        "url": null,
+        "volume_24h": 1000.0
+      }
+    ],
+    "fdv": 30000000000.0,
+    "fetched_at": 1794316599,
+    "holder_history": [],
+    "holders": [],
+    "liquidity_usd": 100000000.0,
+    "market_cap": 30000000000.0,
+    "price_change_1h": -0.005,
+    "price_change_24h": -0.01,
+    "price_change_6h": 0.01,
+    "price_change_7d": 0.0,
+    "price_history": [],
+    "price_usd": 0.9999,
+    "socials": [
+      {
+        "platform": "twitter",
+        "url": "https://twitter.com/circle"
+      }
+    ],
+    "token": {
+      "contract_address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+      "decimals": 18,
+      "name": "USD Coin",
+      "symbol": "USDC"
+    },
+    "token_age_hours": 53976.83305555556,
+    "total_buys_1h": 50,
+    "total_buys_24h": 1000,
+    "total_buys_6h": 300,
+    "total_holders": 0,
+    "total_sells_1h": 45,
+    "total_sells_24h": 900,
+    "total_sells_6h": 250,
+    "volume_24h": 5000000.0,
+    "volume_7d": 35000000.0,
+    "volume_history": [],
+    "websites": []
+  },
+  "market": {
+    "ask_depth": 45000.0,
+    "ask_levels": 1,
+    "ask_outliers": 0,
+    "asks": [
+      {
+        "price": 1.001,
+        "quantity": 44955.04495504496,
+        "value": 45000.0
+      }
+    ],
+    "best_ask": 1.001,
+    "best_bid": 0.999,
+    "bid_depth": 45000.0,
+    "bid_levels": 1,
+    "bid_outliers": 0,
+    "bids": [
+      {
+        "price": 0.999,
+        "quantity": 45045.045045045044,
+        "value": 45000.0
+      }
+    ],
+    "book_source": "synthetic_estimate",
+    "bot_patterns": {
+      "book_checked": false,
+      "bot_like_pct": null,
+      "bot_like_volume_pct": null,
+      "findings": [],
+      "tape_note": "a DEX pool has no trade tape here",
+      "trades_sampled": 0
+    },
+    "checks": [
+      {
+        "message": "No sells below peg",
+        "status": "pass"
+      },
+      {
+        "message": "Bid/Ask ratio: 1.00x",
+        "status": "pass"
+      },
+      {
+        "message": "Spread: 0.200% (max 3.0%)",
+        "status": "pass"
+      },
+      {
+        "message": "Bid levels: 1 < 10 minimum",
+        "status": "fail"
+      },
+      {
+        "message": "Bid depth: 45000 USD (min 3000)",
+        "status": "pass"
+      },
+      {
+        "message": "Ask levels: 1 < 10 minimum",
+        "status": "fail"
+      },
+      {
+        "message": "Ask depth: 45000 USD (min 3000)",
+        "status": "pass"
+      },
+      {
+        "message": "Bid top-3 depth: 45000 USD (min 300)",
+        "status": "pass"
+      },
+      {
+        "message": "Bid top-10 depth: 45000 USD (min 2000)",
+        "status": "pass"
+      },
+      {
+        "message": "Ask top-3 depth: 45000 USD (min 300)",
+        "status": "pass"
+      },
+      {
+        "message": "Ask top-10 depth: 45000 USD (min 2000)",
+        "status": "pass"
+      },
+      {
+        "message": "Depth/volume: ≥9000.0% (≥90000 / 1000 USD within ±2%; target 5–10%)",
+        "status": "warn"
+      },
+      {
+        "message": "Bot patterns: not checked (a DEX pool has no trade tape here)",
+        "status": "n/a"
+      }
+    ],
+    "execution_10k_buy": {
+      "fillable": true,
+      "notional_usdt": 10000.0,
+      "slippage_bps": 9.999999999998899,
+      "vwap": 1.001
+    },
+    "execution_10k_sell": {
+      "fillable": true,
+      "notional_usdt": 10000.0,
+      "slippage_bps": 10.000000000000009,
+      "vwap": 0.999
+    },
+    "healthy": false,
+    "mid_price": 1.0,
+    "pair": "USDC/USD",
+    "peg_target": 1.0,
+    "quote": "USD",
+    "slippage_warn_bps": 10.0,
+    "spread": 0.0019999999999998908,
+    "volume_24h": 1000.0
+  }
+}
