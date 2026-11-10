@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.7] - 2026-11-10
+
 ### Added
 - `scope watch <name|path>` runs a saved watchlist with no screen (#123). Use it from cron, CI or a script. It needs no terminal and never asks a question. It prints each tick, writes the CSV trail and the report, and ends with an exit code from the last tick: 0 pass, 1 breach, 2 a venue error (health unknown), 3 the run could not start, 4 a CSV or report write error. Flags: `--once`, `--every`, `--duration`, `--format text|json|csv`, `--csv`, `--append` and `--report`. A flag overrides the file. `--format json` prints JSON Lines (`start`, `tick`, `event` and `end` records). Ctrl-C and SIGTERM stop the run and still write the report. Run with `-v` for a trace line for each row of each tick.
 - In the TUI, `watch <name|path>` opens a saved watchlist in the grid, the same as `watch open <name|path>`. It takes no flags. `watch --help` shows the help of `scope watch`.
@@ -507,7 +509,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Configuration system with YAML support
 - Support for ERC-20, SPL, and TRC-20 tokens
 
-[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.6...HEAD
+[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.7...HEAD
+[0.8.7]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.6...v0.8.7
 [0.8.6]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.5...v0.8.6
 [0.8.5]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.4...v0.8.5
 [0.8.4]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.3...v0.8.4
