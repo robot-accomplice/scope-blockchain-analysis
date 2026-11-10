@@ -1,6 +1,6 @@
 # Market Venue Follow-ups: Design
 
-- **Status:** proposal. Jon decides the open questions in section 9. No code is written.
+- **Status:** decided on 2026-11-10 (section 9). PR 1 of 2 (`comparison`) is in progress.
 - **Scope:** the items that `2026-11-09-market-venue-list-design.md` (section 8) left out:
   1. a `comparison` array in the JSON of `market summary` on 2 or more venues;
   2. `--venue` as a list on `token-health`;
@@ -248,67 +248,17 @@ Each test below states why it matters, so it fails if the logic changes.
 | A separate comparison CSV file | Yes | The time-series CSV already has one row per venue and run (section 3.4). |
 | `--venue` list on `monitor` | Not needed | `monitor --venue` already takes a list. |
 
-## 9. Open questions
+## 9. Decisions
 
-**Q1. Where does the `comparison` array go in the many-venue summary JSON?**
+Jon accepted the recommended option for all eight questions on 2026-11-10.
 
-- a. **Envelope (A).** The many-venue output becomes an object with `pair`, `venues` and `comparison`. One-venue output is unchanged. Many-venue output from #188 changes, but it is on `develop` only.
-- b. **Per-item row (B).** The list stays. Each item gets a `comparison` object. Nothing changes for any reader.
-- c. **Flag (C).** The list stays. `--comparison` turns the envelope on.
-
-Recommendation: **a**, as long as no release has the #188 list. It is the true "array", it costs one change to an unreleased shape, and it leaves the one-venue shape alone. If you want zero change to the #188 shape, choose **b**.
-
-**Q2. Which fields does a comparison row hold, and does `peg_deviation_bps` become a series metric?**
-
-- a. The columns of the text table, plus `peg_deviation_bps`. The time-series CSV is unchanged.
-- b. The columns of the text table only. No `peg_deviation_bps`.
-- c. As (a), and `peg_deviation_bps` is also a new metric and CSV column in the series.
-
-Recommendation: **a**. The field is the number a peg comparison needs and it costs nothing. A new CSV column changes the series header that scripts already read, and the series metric also feeds the deferred deviation chart, so add it with that chart.
-
-**Q3. What is the `token-health --format json` shape for 2 or more venues?**
-
-- a. Keep `market` (it is `null`), and add `markets` and `comparison` next to `analytics`.
-- b. Remove `market` for 2 or more venues. Only `markets` and `comparison`.
-- c. Make `market` a list for 2 or more venues.
-
-Recommendation: **a**. `market` keeps one type (object or null) in every case, so a typed reader does not break. The cost is a `null` key that has no meaning for a list.
-
-**Q4. Does `--venue` without `--with-market` fail on `token-health`?**
-
-- a. Fail only for a list (2 or more venues). One venue keeps today's silent rule.
-- b. Fail for any `--venue` that the user typed without `--with-market`. This needs a way to tell "typed" from "default", and it changes the one-venue behavior.
-- c. Never fail. Print one note and ignore the venues.
-
-Recommendation: **a**. It adds no break to the one-venue command. A list is new, so it can have the strict rule at no cost.
-
-**Q5. What exit code does a partial venue failure give on `token-health` and `insights`?**
-
-- a. **Rule X.** 0 when the main result (analytics, or the insights report) printed. Failed venues show as warnings and error rows.
-- b. **Rule Y.** As `market summary`: 1 for any failed venue when 2 or more venues are named, after all output. One venue keeps the warning and 0.
-- c. Rule Y for `token-health` only. `insights` stays at 0.
-
-Recommendation: **a**. In these two commands the venue is a side check. The main result is the analytics, and a script that reads them should not fail because one exchange timed out. A script that needs the strict rule can read the error rows in JSON. `market summary` is different: the venues are the result. If you want one rule for all three commands, choose **b**, but then one venue and many venues behave differently in the same command.
-
-**Q6. What does `insights --venue` do for a target with no market check (address, transaction, non-stablecoin)?**
-
-- a. Print one note (`--venue ignored: ...`) and go on.
-- b. Fail with an error before any request.
-- c. Ignore it with no output.
-
-Recommendation: **a**. The user is told that nothing was read, and a script that always passes `--venue` does not break.
-
-**Q7. How does `insights` choose one peg status from several venues?**
-
-- a. The worst status (`Deviation` first), plus a sentence when the venues disagree.
-- b. The status of the first venue given. The other venues show only as lines.
-- c. No single status. The synthesis lists every venue's label.
-
-Recommendation: **a**. The synthesis and takeaway warn about a peg problem. A warning must not hide behind the first venue's good status. Option c makes the takeaway text longer with each venue and has no single message to act on.
-
-**Q8. One PR or two?**
-
-- a. One PR for all three items.
-- b. Two PRs: first `comparison` (and the typed-row refactor), then `--venue` on `token-health` and `insights`.
-
-Recommendation: **b**. The first PR touches the JSON shape and the table code. The second PR reuses its typed rows for the `token-health` comparison. The two have different risk: the first changes a shape, the second adds flags. Two PRs let you review each on its own and revert one without the other.
+| Question | Chosen option | Date |
+|---|---|---|
+| Q1. Where does the `comparison` array go in the many-venue summary JSON? | a. Envelope (A): `{pair, venues, comparison}`. One-venue output is unchanged. | 2026-11-10 |
+| Q2. Which fields does a comparison row hold? | a. The columns of the text table, plus `peg_deviation_bps`. The time-series CSV is unchanged. | 2026-11-10 |
+| Q3. What is the `token-health --format json` shape for 2 or more venues? | a. Keep `market` (it is `null`), and add `markets` and `comparison` next to `analytics`. | 2026-11-10 |
+| Q4. Does `--venue` without `--with-market` fail on `token-health`? | a. Fail only for a list (2 or more venues). One venue keeps today's silent rule. | 2026-11-10 |
+| Q5. What exit code does a partial venue failure give on `token-health` and `insights`? | a. Rule X: 0 when the main result printed. Failed venues show as warnings and error rows. | 2026-11-10 |
+| Q6. What does `insights --venue` do for a target with no market check? | a. Print one note (`--venue ignored: ...`) and go on. | 2026-11-10 |
+| Q7. How does `insights` choose one peg status from several venues? | a. The worst status (`Deviation` first), plus a sentence when the venues disagree. | 2026-11-10 |
+| Q8. One PR or two? | b. Two PRs: first `comparison` and the typed-row refactor, then `--venue` on `token-health` and `insights`. | 2026-11-10 |
