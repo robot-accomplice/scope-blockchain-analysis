@@ -327,14 +327,11 @@ impl Config {
         let config: Config =
             serde_saphyr::from_str(&contents).map_err(|e| ConfigError::Parse { source: e })?;
 
-        let dropped = dropped_monitor_keys(&contents);
-        if !dropped.is_empty() {
-            tracing::warn!(
-                path = %config_path.display(),
-                keys = %dropped.join(", "),
-                "ignoring config keys of the removed monitor dashboard under `monitor:`; delete them"
-            );
-        }
+        report_dropped_monitor_keys(
+            &mut crate::diag::Stderr,
+            &dropped_monitor_keys(&contents),
+            &DROPPED_KEYS_REPORTED,
+        );
 
         Ok(config)
     }
@@ -457,7 +454,7 @@ impl Default for AlertConfig {
 }
 
 /// The `monitor:` keys of the removed dashboard. A config that has them
-/// still loads; [`dropped_monitor_keys`] names them for the warning.
+/// still loads; [`dropped_monitor_keys`] names them for the notice.
 const DROPPED_MONITOR_KEYS: [&str; 6] = [
     "layout",
     "widgets",
@@ -485,6 +482,29 @@ pub fn dropped_monitor_keys(contents: &str) -> Vec<&'static str> {
         .into_iter()
         .filter(|k| keys.contains_key(*k))
         .collect()
+}
+
+/// Set when the process has told the user about dropped monitor keys.
+static DROPPED_KEYS_REPORTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Writes one line to `out` that names the dropped monitor `keys`, the first
+/// time it is called with some keys for `reported`. Later calls write
+/// nothing, so a config that loads again (after `setup`) does not repeat
+/// it. The line goes to the diagnostics writer, never to stdout.
+fn report_dropped_monitor_keys(
+    out: &mut impl std::io::Write,
+    keys: &[&str],
+    reported: &std::sync::atomic::AtomicBool,
+) {
+    if keys.is_empty() || reported.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let _ = writeln!(
+        out,
+        "scope: ignoring config keys of the removed monitor dashboard under `monitor:`: {}. Delete them from the config file.",
+        keys.join(", ")
+    );
 }
 
 /// Monitor-specific configuration.
@@ -582,6 +602,22 @@ mod tests {
                 "auto_pause_on_input"
             ]
         );
+    }
+
+    #[test]
+    fn test_the_dropped_keys_are_named_once_on_the_diagnostics_writer() {
+        use std::sync::atomic::AtomicBool;
+        let reported = AtomicBool::new(false);
+        let mut out = Vec::new();
+        // No keys: nothing is said, and the one report is not used up.
+        report_dropped_monitor_keys(&mut out, &[], &reported);
+        assert!(out.is_empty());
+        report_dropped_monitor_keys(&mut out, &["layout", "scale"], &reported);
+        report_dropped_monitor_keys(&mut out, &["layout", "scale"], &reported);
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(text.lines().count(), 1, "{text}");
+        assert!(text.contains("layout, scale"), "{text}");
+        assert!(text.contains("ignoring"), "{text}");
     }
 
     #[test]

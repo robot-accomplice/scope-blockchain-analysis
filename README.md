@@ -975,7 +975,7 @@ monitor:
     volume_spike_threshold_pct: null  # volume spike % (e.g., 100.0)
   # The keys layout, widgets, scale, color_scheme, export and
   # auto_pause_on_input belonged to the removed dashboard. They are
-  # ignored, with one warning.
+  # ignored, with one line on stderr.
 ```
 
 ### Free Tiers: Solana & BSC

@@ -14,7 +14,7 @@ monitor:
 
   # The keys layout, widgets, scale, color_scheme, export and
   # auto_pause_on_input belonged to the removed dashboard. Scope ignores
-  # them and logs one warning when it loads a config that has them.
+  # them and prints one line on stderr when it loads a config that has them.
 
   # Alert thresholds — each one becomes a rule on the watchlist
   # All fields are optional; set to null to disable.

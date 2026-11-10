@@ -23,8 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Alerts (`monitor.alerts`): rules on the watchlist. They have worked this way since 0.8.0.
   - CSV export (`E` key, `--export`): `--csv FILE`.
   - Layout presets, widget toggles, log scale and color schemes: no replacement. The grid has no layouts.
-- The config keys `monitor.layout`, `monitor.widgets`, `monitor.scale`, `monitor.color_scheme`, `monitor.export` and `monitor.auto_pause_on_input`. A config that has them still loads. Scope ignores them and logs one warning that names them. `monitor.refresh_seconds`, `monitor.alerts` and `monitor.venue` stay.
+- The config keys `monitor.layout`, `monitor.widgets`, `monitor.scale`, `monitor.color_scheme`, `monitor.export` and `monitor.auto_pause_on_input`. A config that has them still loads. Scope ignores them and prints one line on stderr, once per run, that names them. `monitor.refresh_seconds`, `monitor.alerts` and `monitor.venue` stay.
 - The `-l` and `-s` short flags of `scope monitor`.
+
+### Fixed
+- `scripts/check-coverage.sh` no longer fails without a message. When `cargo tarpaulin` fails, the script prints its output and its exit code. The script also stops at once, with a clear message, when `cargo tarpaulin` is older than 0.37.1: older versions cannot read the LLVM 23 profraw files that rustc 1.99.x writes.
+- The help of `scope monitor --save` said that `watch open <name>` runs a saved watchlist again, as if it were a CLI command. It is a command of the TUI shell. The help now says to start `scope tui` and enter `watch open <name>` there.
 
 ### Security
 - `my-smart-wallets-app/` has 31 fewer open Dependabot alerts (37 before, 6 after; the critical `protobufjs` alert is closed). Every flagged package comes through `@account-kit/*` 4.88.5, which is already the latest release, so no direct upgrade reaches the patched versions. `package.json` now has `overrides` for them: `protobufjs` ^7.6.5, `ws` ^8.21.0 (8.x only), `js-cookie` ^3.0.7, `lodash` ^4.18.1, `decode-uri-component` ^0.5.1, `toml` ^5.0.1, `turbo-stream` ^3.0.0, `uuid` ^11.1.1 (8.x and 9.x only), `minimatch` ^11.0.5 (10.x only), and `postcss` as the app's own version (replaces the 8.4.31 copy inside `next`). `package-lock.json` is refreshed within its existing ranges.
