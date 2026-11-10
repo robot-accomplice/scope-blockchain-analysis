@@ -85,6 +85,12 @@ pub fn route(command: &Commands) -> Route {
         }
         // The monitor wizard (#47).
         Commands::Monitor(_) => Route::Wizard,
+        // The session command `watch` takes the word before clap (see
+        // `plan`), so `plan` never reaches this arm. It exists because this
+        // match has no wildcard.
+        Commands::Watch(_) => Route::Refuse(
+            "the pane never runs a headless loop; use `watch open <name|path>` for the grid, or `scope watch` in a shell",
+        ),
         Commands::Interactive(_) => refused("interactive"),
         Commands::Web(_) => refused("web"),
         Commands::Completions(_) => refused("completions"),
@@ -221,7 +227,9 @@ pub fn plan(
             tokens_command(&rest, &mut TokenAliases::load(), &TokenAliases::save, out)?;
             return Ok(Plan::Done);
         }
-        "watch" => {
+        // `watch --help` is the help of the CLI command; the rest is the
+        // session command.
+        "watch" if !matches!(rest.as_slice(), ["--help" | "-h"]) => {
             return watch_command(
                 &rest,
                 &scope::paths::watchlists_dir(),
@@ -236,7 +244,11 @@ pub fn plan(
 }
 
 /// The usage of the `watch` session command.
-const WATCH_USAGE: &str = "Usage: watch [list | open <name|file.yaml> | stop]";
+const WATCH_USAGE: &str = "Usage: watch [list | <name|file.yaml> | open <name|file.yaml> | stop]";
+
+/// What `watch <name|path> --flag` says: the grid takes no flags (the
+/// headless command does).
+const WATCH_FLAGS_REFUSED: &str = "watch <name|path> takes no flags in the TUI: edit the list in the wizard, or run `scope watch` in a shell.";
 
 /// Runs the `watch` session command. `dir` holds the saved watchlists;
 /// `venues` are the venue IDs a watchlist may name.
@@ -261,14 +273,10 @@ fn watch_command(
             }
             Ok(Plan::Done)
         }
-        ["open", name] => {
-            let is_path = name.ends_with(&format!(".{}", file::EXTENSION))
-                || name.contains(['/', std::path::MAIN_SEPARATOR]);
-            let path = if is_path {
-                std::path::PathBuf::from(name)
-            } else {
-                file::path_in(dir, name)
-            };
+        // A word that is not a subcommand names the list: the same as
+        // `open <name>`.
+        [name] | ["open", name] if !name.starts_with('-') => {
+            let path = crate::cli::watch::watchlist_path(name, dir);
             match file::load(&path, Some(venues)) {
                 Ok(w) => Ok(Plan::Watch(WatchCommand::Open(Box::new(w)))),
                 Err(errors) => {
@@ -279,6 +287,12 @@ fn watch_command(
                     Ok(Plan::Done)
                 }
             }
+        }
+        [name, flags @ ..] | ["open", name, flags @ ..]
+            if !name.starts_with('-') && flags.iter().any(|f| f.starts_with('-')) =>
+        {
+            errln!(out, "{}", WATCH_FLAGS_REFUSED)?;
+            Ok(Plan::Done)
         }
         _ => {
             errln!(out, "{}", WATCH_USAGE)?;
@@ -717,7 +731,7 @@ pub(crate) const SESSION_COMMANDS: &[(&str, &str, &str)] = &[
     ),
     (
         "watch",
-        "watch [list|open <name>|stop]",
+        "watch [list|<name>|open <name>|stop]",
         "Run a saved watchlist in the grid (Ctrl-G shows it)",
     ),
     (
@@ -940,6 +954,11 @@ mod tests {
 
     // ---- Parity (issue #47, requirement 5) ----
 
+    /// The CLI commands that a session command shadows in `plan`. Their
+    /// `--help` still reaches clap. A new shadowed command is added here on
+    /// purpose, or the parity test fails for it.
+    const SHADOWED_BY_SESSION: &[&str] = &["watch"];
+
     #[test]
     fn test_every_cli_command_parses_and_has_a_tui_route() {
         // Every CLI subcommand must reach a handler from the TUI, except
@@ -974,6 +993,15 @@ mod tests {
                 if refused.contains(&name) {
                     assert!(matches!(p, Plan::Done), "{} must be refused", leaf);
                     assert!(cap.err().contains("Not available here"), "{}", cap.err());
+                } else if SHADOWED_BY_SESSION.contains(&name) {
+                    // The session command takes the word before clap: the
+                    // line plans a session action, never a CLI run.
+                    assert!(
+                        matches!(p, Plan::Watch(_)),
+                        "`{}` is shadowed by a session command: {:?}",
+                        line,
+                        p
+                    );
                 } else {
                     // A refused route never becomes Plan::Run.
                     assert!(
@@ -1454,9 +1482,60 @@ mod tests {
             watch(&[], dir.path()).0,
             Plan::Watch(WatchCommand::Show)
         ));
-        let (p, text) = watch(&["nonsense"], dir.path());
+        // One word is a list name since #123; two words that are not a
+        // subcommand are a usage error.
+        let (p, text) = watch(&["nonsense", "extra"], dir.path());
         assert!(matches!(p, Plan::Done));
         assert!(text.contains(WATCH_USAGE), "{text}");
+    }
+
+    // Design 2026-11-10, section 3.1 and decision 8A: `watch <name|path>`
+    // opens the grid like `watch open`, and takes no flags.
+    #[test]
+    fn test_watch_name_opens_the_grid_like_watch_open_and_refuses_flags() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("stables.yaml"),
+            "targets:\n  - kind: pair\n    id: USDC\n    venue: binance\n    preset: market health\n",
+        )
+        .unwrap();
+        let by_path = dir.path().join("stables.yaml");
+        for words in [
+            vec!["stables"],
+            vec!["open", "stables"],
+            vec![by_path.to_str().unwrap()],
+        ] {
+            let Plan::Watch(WatchCommand::Open(w)) = watch(&words, dir.path()).0 else {
+                panic!("{words:?} must open the grid")
+            };
+            assert_eq!(w.name, "stables");
+        }
+        for words in [
+            vec!["stables", "--once"],
+            vec!["open", "stables", "--csv", "x"],
+        ] {
+            let (p, text) = watch(&words, dir.path());
+            assert!(matches!(p, Plan::Done), "{words:?}: no grid with a flag");
+            assert!(text.contains("takes no flags"), "{text}");
+        }
+    }
+
+    // The session command shadows the CLI command, but `--help` is the
+    // CLI help, and the route says where to go instead.
+    #[test]
+    fn test_watch_help_reaches_clap_and_the_route_points_to_watch_open() {
+        let (p, cap) = plan_line("watch --help", &mut SessionContext::default());
+        assert!(matches!(p, Plan::Done));
+        assert!(cap.out().contains("Usage"), "{}", cap.out());
+        assert!(cap.out().contains("Exit codes"), "{}", cap.out());
+        let (p, cap) = plan_line("watch -h", &mut SessionContext::default());
+        assert!(matches!(p, Plan::Done));
+        assert!(cap.out().contains("Usage"), "{}", cap.out());
+        let cli = <Cli as clap::Parser>::try_parse_from(["scope", "watch", "pegs"]).unwrap();
+        let Route::Refuse(why) = route(&cli.command) else {
+            panic!("watch is not a pane command")
+        };
+        assert!(why.contains("watch open"), "{why}");
     }
 
     #[test]

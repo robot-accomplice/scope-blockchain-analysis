@@ -113,8 +113,9 @@ pub struct MonitorWatchArgs {
     #[arg(long, value_name = "PRESET")]
     pub preset: Option<String>,
 
-    /// Save the watchlist under this name. To run it again, start `scope tui`
-    /// and enter `watch open <name>` there (no CLI subcommand opens it).
+    /// Save the watchlist under this name. To run it again with no screen,
+    /// use `scope watch <name>`. To open it in the grid, start `scope tui`
+    /// and enter `watch <name>` there.
     #[arg(long, value_name = "NAME")]
     pub save: Option<String>,
 

@@ -398,6 +398,15 @@ impl Output {
         emit(&self.out, args)
     }
 
+    /// Flushes the data channel, so a reader on a pipe gets what was written.
+    ///
+    /// # Errors
+    ///
+    /// Returns the writer's error, for example `BrokenPipe`.
+    pub fn flush_out(&self) -> io::Result<()> {
+        lock(&self.out).flush()
+    }
+
     /// Writes formatted text to the diagnostic channel. Use [`errln!`](crate::errln) / [`err!`](crate::err).
     ///
     /// # Errors

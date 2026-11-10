@@ -259,7 +259,8 @@ Not sure which command to use? Here's a quick decision tree:
 | Get token DEX data (price, volume, holders) | `scope crawl <token>` |
 | Token DEX + order book health (stablecoins) | `scope token-health <token> --with-market` |
 | Watch a market's health live (monitor wizard) | `scope monitor <token> --venue <venue>` |
-| Run a saved watchlist again (in the TUI) | `watch open <name>` |
+| Run a saved watchlist again (in the TUI) | `watch <name>` |
+| Run a saved watchlist with no screen (cron, CI) | `scope watch <name> --once` |
 | Browse trending/boosted tokens | `scope discover` |
 | Check market peg/depth for a stablecoin | `scope market summary <symbol>` |
 | Fetch OHLC/candlestick data from a venue | `scope market ohlc <symbol> --venue <venue> --interval 1h` |
@@ -889,7 +890,7 @@ The wizard has four steps (Tab moves between them; Ctrl-R starts, Ctrl-S saves, 
 
 **The grid.** The run shows one row per target, breached rows first (a target on several venues has one row per venue, `USDN@weex` and `USDN@binance`, and its token or address checks on a row of their own, `USDN`), with one mark per check (`✓` pass, `!` warn, `✗` fail, `-` n/a, `?` the value could not be read). A breach that starts rings the bell once and shows a banner. Enter opens the detail: each check's value and a chart of its last values. For a target on two or more venues, the detail is the **venue charts**: one chart per market check, with one line per venue on a shared scale and time axis, and a venue legend with the range across venues (`all`), each venue's last value and its status. `←` `→` select a venue (the evidence keys use it), Space shows only that venue as bars (and Space again all venues), Tab selects the chart whose values the legend shows, and PgUp and PgDn page through the charts when not all fit. A window too small for the charts shows the one-venue detail and says how much to enlarge it. In the detail, `b`, `t`, `h`, `r` and `x` run `market summary`, `market trades`, `crawl`, `compliance risk` or `address` for the target in the shell. **Ctrl-G** switches between the grid and the shell, so other commands run while the grid updates. Esc stops the run; Esc again closes the grid and leaves the last results and a summary in the scrollback. A run keeps the settings it started with: after `setup` saves a key, the grid says to restart the run to use it.
 
-**Watchlists.** Ctrl-S in the wizard (or `--save <name>`) saves the watchlist to `~/.scope-bca/watchlists/<name>.yaml`. In the TUI, `watch list` lists them, `watch open <name>` (or a `.yaml` path) runs one, and `watch stop` stops the run. A file that is not valid lists every error with its line:
+**Watchlists.** Ctrl-S in the wizard (or `--save <name>`) saves the watchlist to `~/.scope-bca/watchlists/<name>.yaml`. In the TUI, `watch list` lists them, `watch <name>` (or `watch open <name>`, or a `.yaml` path) runs one in the grid, and `watch stop` stops the run. To run one with no screen, use `scope watch <name>` (see below). A file that is not valid lists every error with its line:
 
 ```yaml
 name: stablecoins
@@ -914,6 +915,48 @@ targets:
 ```
 
 **From the old monitor.** `--refresh N` is the interval in seconds; `--export` is now `--csv`. The price bounds of `monitor.alerts` become rules on the price; with a venue, `whale_min_usd` becomes `largest_trade < whale_min_usd` and `volume_spike_threshold_pct` becomes `volume_change_pct <= volume_spike_threshold_pct`. Without a venue they are not checked, and a note says they need one. `--layout`, `--scale` and `--color-scheme` are removed: the grid has no layouts.
+
+#### Headless runs: `scope watch`
+
+`scope watch <name|path>` runs a saved watchlist with no screen. Use it from cron, CI or a script. It needs no terminal and never asks a question. It prints each tick, writes the CSV trail and the report, and ends with an exit code.
+
+```bash
+scope watch pegs --once                                 # one tick, for cron and CI
+scope watch pegs --every 30s --duration 1h --format json
+scope watch ./pegs.yaml --once --csv trail.csv --append # add to the trail of earlier runs
+```
+
+The argument is a path when it ends in `.yaml` or has a path separator. Otherwise it is the name of a list in `~/.scope-bca/watchlists/`.
+
+| Flag | Meaning |
+| --- | --- |
+| `--once` | Run one tick and stop. It conflicts with `--every` and `--duration`. |
+| `--every D` | Time from one tick start to the next. It overrides `interval:` in the file. |
+| `--duration D` | How long the run lasts (`10m`, `1h`, `forever`). It overrides `duration:` in the file. |
+| `--format text\|json\|csv` | What goes to stdout. The default is `text`. |
+| `--csv PATH` | Write one CSV row for each cell and tick. It overrides `outputs.csv`. |
+| `--append` | Keep the rows that the CSV file has. Without it, the run empties the file first. |
+| `--report PATH` | Write the report when the run ends or stops. It overrides `outputs.report`. |
+
+A flag overrides the file. The file overrides the default (`60s` every, `1h` long). A file with no `duration:` runs until you stop it, so use `--once` or `--duration` in cron.
+
+**Exit codes.** The code comes from the last tick.
+
+| Code | Meaning |
+| --- | --- |
+| 0 | No row breached and no row is unknown. A warning is a pass. |
+| 1 | At least one row breached: a rule or a market health check failed. |
+| 2 | No row breached, but a row is unknown: a venue gave an error. Also a usage error, and a stop before the first tick ended. |
+| 3 | The run could not start. The file, a flag or a token is not valid. No request was made. |
+| 4 | The CSV file or the report could not be written. |
+
+A breach wins over an unknown row. A write error wins over all. A breach that cleared before the last tick gives 0. The JSON output and the CSV file keep the history.
+
+**Output.** Data goes to stdout. Notes go to stderr: the version line, the start note with the full paths, the `--- Run #N ---` lines and the end note. `--format text` prints one summary line for each tick, then one line for each event (`BREACH`, `CLEARED`, `WARN`, `WARN CLEARED`) and one `ERROR` line for each cell that could not be read. `--format json` prints JSON Lines. Each line has a `type`: `start`, `tick`, `event` or `end`. A `tick` has every cell of every row, with the same fields as a CSV row. The `end` record has the stop reason (`once`, `duration`, `signal`, `output_error` or `stdout_closed`) and the exit code. `--format csv` prints the bytes of the CSV file.
+
+**Stopping.** Ctrl-C or SIGTERM stops the run (on Windows: Ctrl-C or Ctrl-Break). A tick in progress is dropped. The report is still written, from the last finished tick.
+
+**Records for a failure.** Run with `-v` to get one trace line for each row of each tick, with its status and the exact error text. `--format json` keeps the same facts in the data.
 
 #### Flags of `scope monitor`
 
