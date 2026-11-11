@@ -10,6 +10,9 @@
 pub mod deviation;
 pub mod fetch;
 pub mod headless;
+pub mod inline;
+#[cfg(test)]
+mod inline_e2e_tests;
 pub mod monitor;
 pub mod run;
 pub mod state;

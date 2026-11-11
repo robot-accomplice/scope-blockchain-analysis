@@ -930,6 +930,25 @@ scope watch ./pegs.yaml --once --csv trail.csv --append # add to the trail of ea
 
 The argument is a path when it ends in `.yaml` or has a path separator. Otherwise it is the name of a list in `~/.scope-bca/watchlists/`.
 
+**A target on the command line.** Give a target flag, and the argument is a token, a pair or an address to watch. No file is needed:
+
+```bash
+scope watch USDC --venue weex --once                 # a pair, with the market health checks
+scope watch USDN --venue weex --pair USDN_USDT --once
+scope watch 0xA0b8...eB48 --chain ethereum --once     # a token: price and volume
+scope watch 0xWallet... --kind address --rule "native_balance > 1" --once
+scope watch pegs --once                              # no target flag: a saved name, as before
+```
+
+- The target flags are those of `scope monitor`: `--venue`, `--chain`, `--pair`, `--token`, `--preset`, the health flags, and two new ones, `--rule` (repeat it) and `--kind pair|token|address`. The target is the same one that `scope monitor` builds from the same words.
+- The command line alone decides. With any target flag, the first argument is a target, also when a saved list has the same name (the run says so). A path with a target flag is an error.
+- `--kind address` watches a wallet. A wallet has no checks of its own, so give `--rule`.
+- The rules of config `monitor.alerts` apply, as in `scope monitor`. The `start` record lists them in `config_alerts_applied`.
+- With no `--once` and no `--duration`, the run lasts 1 hour.
+- The run is named `cli-<id>`. The `start` record has `source` (`cli`), `argv`, and `definition`: the exact watchlist file text. Paste it into a file to get the same run.
+- Any input error exits with 3, before any request: an unknown venue, preset or chain, a bad rule, `--kind address` with no rule, `--pair` with no venue.
+- The memory between runs belongs to the definition. The same words share it. Other rules, markets or timing do not.
+
 | Flag | Meaning |
 | --- | --- |
 | `--once` | Run one tick and stop. It conflicts with `--duration`. |
