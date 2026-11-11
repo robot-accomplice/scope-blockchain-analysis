@@ -5,3 +5,12 @@
 # A package exclude is not enough: other crates' tests link the harness, so
 # tarpaulin still reports its files. Exclude the files.
 exclude-files = ["crates/scope-tui-harness/*"]
+# With the llvm engine (the one used on Windows) tarpaulin starts a
+# timer when it starts a test binary, and never resets it. `timeout` is
+# therefore the wall-clock limit for a whole test binary, not a wait for
+# silence. The default is 60 s. On a quiet machine the slowest instrumented
+# binary (scope_cli lib, 1476 tests) takes 21 s. With every core busy it took
+# 266 s, and tarpaulin killed the scope-core lib at 60 s with "Timed out
+# waiting for test response". 10 minutes covers a loaded machine and still
+# ends a real hang. CI passes its own --timeout and takes precedence.
+timeout = "10m"
