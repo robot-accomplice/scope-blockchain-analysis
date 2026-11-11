@@ -1,5 +1,7 @@
 # Market Venue Follow-ups: Design
 
+> Note (2026-11-11): the lines below that say `token-health --format csv` prints the table are replaced by `2026-11-11-token-health-csv-design.md`. `csv` is now a real CSV.
+
 - **Status:** decided on 2026-11-10 (section 9). PR 1 of 2 (`comparison`) is in progress.
 - **Scope:** the items that `2026-11-09-market-venue-list-design.md` (section 8) left out:
   1. a `comparison` array in the JSON of `market summary` on 2 or more venues;

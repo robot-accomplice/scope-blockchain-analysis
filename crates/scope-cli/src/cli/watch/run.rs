@@ -3,6 +3,7 @@
 
 use super::fetch::Tick;
 use super::{Ready, Sources, tick};
+use crate::cli::csv::csv_field;
 use crate::cli::output::Output;
 use crate::cli::repeat::{self, RunOutput, Schedule};
 use scope::error::{Result, ScopeError};
@@ -86,15 +87,6 @@ pub fn csv_rows(at: &str, snapshot: &Snapshot) -> String {
         }
     }
     rows
-}
-
-/// A CSV field, quoted when it holds a comma, a quote or a line break.
-fn csv_field(s: &str) -> String {
-    if s.contains([',', '"', '\n', '\r']) {
-        format!("\"{}\"", s.replace('"', "\"\""))
-    } else {
-        s.to_string()
-    }
 }
 
 /// The report of a run: one `market summary --report` section per row
