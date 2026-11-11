@@ -26,7 +26,7 @@ The 0.7.0 release waits for these three steps. The harness checks function. It d
 | D1 | Two tiers. **Offline:** every command and TUI feature against recorded API responses. Deterministic. This tier is the release gate. **Live:** the same scenarios against the real APIs. Reported, not gating, because an API outage is not a scope defect. |
 | D2 | Offline data comes from a **record/replay transport** inside scope. All HTTP goes through `HttpClient` first. |
 | D3 | A **Rust runner** drives the binary in a PTY. Scenarios are **YAML** files, so a new scenario needs no Rust. |
-| D4 | The gate is **local** for now: `just tui-test`, required by `docs/RELEASE.md`. A gate on every PR comes later, with a faster solution (section 8). |
+| D4 | The gate is **local** for now: `just tui-test`, required by `docs/RELEASE.md`. The offline tier also runs on every PR in the Windows CI job (section 8.4). |
 
 ### Out of scope
 
@@ -176,6 +176,7 @@ steps:
 | `type: <text>` | Send the text as typed characters. |
 | `key: <name>` | Send one key or chord: `Enter`, `Tab`, `Esc`, `Up`, `Down`, `Left`, `Right`, `Backspace`, `PageUp`, `PageDown`, `Ctrl-<letter>`, `Alt-<letter>`, `F1`–`F12`. |
 | `wait_for: {text, timeout}` | Read the screen again and again until the regex `text` matches. Fail at `timeout` (default 10s). There are no fixed sleeps. |
+| `wait_gone: {text, timeout}` | Read the screen again and again until the regex `text` no longer matches. Fail at `timeout` (default 10s). Use it after `clear`, so a later `wait_for` cannot match old text. |
 | `expect_screen: {contains, not_contains}` | Each item is a regex. All `contains` items must match the screen, and no `not_contains` item may match. |
 | `expect_journal: {argv_prefix, outcome, error}` | At least one `tui-events.jsonl` record written since the previous `expect_journal` must match. `outcome` is `ok`, `error`, `cancelled` or `session`. `error` is a regex. |
 | `expect_file: {path, contains}` | A file under `$HOME` exists, and its text matches each regex. |
@@ -263,9 +264,16 @@ One line per scenario (`PASS`, `FAIL`, `SKIP`, with the duration), then a summar
 1. Run `just tui-test` on the release commit. It must pass. Paste the summary into the release PR.
 2. Run `just tui-smoke`. Attach the report, including API drift. It does not block the release.
 
-### 8.4 Later: a gate on every PR
+### 8.4 A gate on every PR
 
-Deferred. **Why:** PTY scenarios add minutes to every CI build, and the cost needs a better solution first, for example an in-process mode that drives the TUI app without a PTY, or a shared runner. A follow-up issue records this. A CI job is an infrastructure change: review first whether it is needed, then what it can break, before it is applied.
+History: this section deferred a PR gate because PTY scenarios were thought to "add minutes" to every CI build. The CI numbers do not support that.
+
+Now: the `Windows` job in `.github/workflows/ci.yml` runs the offline tier on every PR (`cargo run -q -p scope-tui-harness -- run --tier offline`). The run takes about 16 s. It covers 21 of the 24 scenarios. These run on no CI job:
+
+- The 3 `unix_only` scenarios (`ctrl-z`, `paste`, `signal-term`).
+- The 6 `#[ignore]` harness self-tests.
+
+The release gate (section 8.3) runs them: `scripts/release.sh prep` calls `just tui-test`. A Linux job for the gap is an infrastructure change: review first whether it is needed, then what it can break, before it is applied.
 
 ## 9. Build order
 
