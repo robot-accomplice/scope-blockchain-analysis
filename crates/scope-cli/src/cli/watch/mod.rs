@@ -12,6 +12,9 @@ pub mod fetch;
 pub mod headless;
 pub mod monitor;
 pub mod run;
+pub mod state;
+#[cfg(test)]
+mod state_e2e_tests;
 
 use crate::cli::output::Output;
 use crate::cli::resolve::{DexCandidates, ResolveContext, VenueKind, picker_for, resolve};

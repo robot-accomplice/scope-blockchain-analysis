@@ -19,7 +19,7 @@ pub mod rule;
 pub mod time;
 
 pub use diff::{Event, diff};
-pub use history::{History, Reading, Readings};
+pub use history::{Basis, Entry, History, MarketKey, Reading, Readings, Restored};
 pub use rule::{Op, Rule, RuleStatus, TargetStatus, target_status};
 
 use crate::market::HealthOverrides;
@@ -167,6 +167,12 @@ impl Target {
         }
     }
 
+    /// Whether a rule compares a tick with the one before, so the target's
+    /// markets keep a memory ([`History`]).
+    pub fn keeps_history(&self) -> bool {
+        self.rules.iter().any(|r| r.metric.since_last_tick())
+    }
+
     /// Whether the target reads a market summary (preset or a market rule).
     pub fn needs_market(&self) -> bool {
         self.preset == Some(Preset::MarketHealth)
@@ -180,6 +186,39 @@ impl Target {
     pub fn needs(&self, group: MetricGroup) -> bool {
         self.rules.iter().any(|r| r.metric.group() == group)
     }
+}
+
+/// The [`MarketKey`] of every row of every target, in list order: for each
+/// target, one item for each of [`Target::rows`] (`None` for a row with no
+/// venue). The ordinal counts the rows before it in the list with the same
+/// id, chain and venue, so two such targets have two keys. The ticks and
+/// the saved state both take their keys from here.
+pub fn market_keys<'a>(
+    targets: impl IntoIterator<Item = &'a Target>,
+) -> Vec<Vec<Option<MarketKey>>> {
+    let mut seen: std::collections::HashMap<(String, Option<String>, String), u32> =
+        std::collections::HashMap::new();
+    targets
+        .into_iter()
+        .map(|t| {
+            t.rows()
+                .into_iter()
+                .map(|venue| {
+                    let venue = venue?;
+                    let n = seen
+                        .entry((t.id.clone(), t.chain.clone(), venue.to_string()))
+                        .or_insert(0);
+                    *n += 1;
+                    Some(MarketKey {
+                        id: t.id.clone(),
+                        chain: t.chain.clone(),
+                        venue: venue.to_string(),
+                        ordinal: *n,
+                    })
+                })
+                .collect()
+        })
+        .collect()
 }
 
 /// Where a run writes its record.
@@ -408,5 +447,54 @@ mod tests {
             targets: vec![row, TargetSnapshot::new("B", vec![cell(RuleStatus::Pass)])],
         };
         assert_eq!(s.breaches(), 1);
+    }
+
+    fn pair(id: &str, chain: Option<&str>, venues: &[&str]) -> Target {
+        let mut t = Target::new(TargetKind::Pair, id);
+        t.chain = chain.map(str::to_string);
+        t.venues = venues.iter().map(|v| v.to_string()).collect();
+        t.rules.push(Rule::parse("largest_trade < 1").unwrap());
+        t
+    }
+
+    fn texts(keys: &[Vec<Option<MarketKey>>]) -> Vec<Vec<String>> {
+        keys.iter()
+            .map(|t| {
+                t.iter()
+                    .map(|k| k.as_ref().map_or("-".into(), ToString::to_string))
+                    .collect()
+            })
+            .collect()
+    }
+
+    // Design 2026-11-11, section 3.2.7: the key decides which entries a
+    // changed list still uses. The ordinal tells two targets of one market
+    // apart; the chain and the id are in the key; a row with no venue has
+    // none.
+    #[test]
+    fn a_market_key_has_the_ordinal_the_chain_and_the_venue() {
+        let targets = [
+            pair("USDC", None, &["weex"]),
+            pair("USDC", None, &["weex", "binance"]),
+            pair("USDC", Some("base"), &["weex"]),
+            pair("DAI", None, &["weex"]),
+            pair("USDC", None, &["weex"]),
+        ];
+        assert_eq!(
+            texts(&market_keys(&targets)),
+            [
+                vec!["USDC@weex"],
+                vec!["USDC@weex#2", "USDC@binance"],
+                vec!["USDC@weex[base]"],
+                vec!["DAI@weex"],
+                vec!["USDC@weex#3"],
+            ]
+        );
+        // No venue, no market, no key.
+        let mut token = Target::new(TargetKind::Token, "USDN");
+        token.rules.push(Rule::parse("holders >= 1").unwrap());
+        assert_eq!(texts(&market_keys([&token])), [vec!["-"]]);
+        assert!(!token.keeps_history());
+        assert!(targets[0].keeps_history());
     }
 }
