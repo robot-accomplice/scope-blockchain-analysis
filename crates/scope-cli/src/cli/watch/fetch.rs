@@ -1707,4 +1707,35 @@ capabilities:
         all_pass(&tick);
         assert_eq!(took, 2 * READ);
     }
+
+    /// Design 2026-11-11, section 3.1 and test 4 (Q11). Two targets with
+    /// the same id and venue are valid in a list. Each must read the memory
+    /// of its own: on a first tick both have none. If they share one entry,
+    /// the second target reads what the first one has just written, and its
+    /// cells differ from the first one's.
+    #[tokio::test(start_paused = true)]
+    async fn two_targets_with_one_id_and_venue_do_not_share_a_memory() {
+        let factory = LatencyFactory::new(&at_latency(&["lat-a"]));
+        let mut twin = pair_on("USDC", "lat-a");
+        twin.rules = vec![
+            Rule::parse("volume_change_pct <= 100").unwrap(),
+            Rule::parse("largest_trade < 100000").unwrap(),
+        ];
+        let ready = ready(vec![twin.clone(), twin]);
+        let (tick, _) = timed(&ready, &factory, &mut History::default(), Limits::default()).await;
+        let [first, second] = tick.snapshot.targets.as_slice() else {
+            panic!("{:?}", tick.snapshot)
+        };
+        let cells = |r: &TargetSnapshot| {
+            r.cells
+                .iter()
+                .map(|c| (c.value, c.status.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            matches!(first.cells[0].status, RuleStatus::NotApplicable(_)),
+            "a first tick has no second reading: {first:?}"
+        );
+        assert_eq!(cells(first), cells(second), "{first:?} / {second:?}");
+    }
 }
