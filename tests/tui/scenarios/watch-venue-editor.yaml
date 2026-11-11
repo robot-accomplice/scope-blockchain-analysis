@@ -5,7 +5,7 @@ masks: ['scope v\d+\.\d+\.\d+\S*']
 steps:
   # One recorded venue. The unit tests use a test backend and test venues;
   # this runs the real binary, the queue and the files together.
-  - type: "monitor USDC --venue binance --every 8s --duration 120s --csv pegs.csv"
+  - type: "monitor USDC --venue binance --every 2s --duration 60s --csv pegs.csv"
   - key: Enter
   - wait_for: { text: "monitor wizard", timeout: 10s }
   - key: Ctrl-R
@@ -26,14 +26,15 @@ steps:
   - key: Enter
   - wait_for: { text: "unknown venue `nowhere`", timeout: 5s }
   - key: Esc
-  # Add weex. The change waits for the next tick, then the row appears.
+  # Add weex. The queued record stays in the journal; the new row comes
+  # only after the run applied the change (the grid gets the apply before
+  # the tick). The pending text on screen lasts one tick, so unit tests pin
+  # it and this scenario does not wait for it.
   - type: "v"
   - type: " weex"
   - key: Enter
-  - expect_screen:
-      contains: ["USDC: binance → binance weex"]
-  - wait_for: { text: "USDC@weex", timeout: 40s }
-  - wait_gone: { text: "applies at the next tick", timeout: 10s }
+  - expect_journal: { argv_prefix: [], outcome: queued }
+  - wait_for: { text: "USDC@weex", timeout: 30s }
   # Ctrl-S writes the list; the CSV has the header and both labels.
   - key: Ctrl-S
   - wait_for: { text: "saved monitor-usdc.yaml", timeout: 5s }
@@ -42,7 +43,7 @@ steps:
   # Undo takes weex out again.
   - type: "u"
   - wait_for: { text: "undone: weex removed again", timeout: 5s }
-  - wait_gone: { text: "USDC@weex", timeout: 40s }
+  - wait_gone: { text: "USDC@weex", timeout: 30s }
   - expect_journal: { argv_prefix: [], outcome: applied }
   - key: Esc
   - wait_for: { text: "Stopped after", timeout: 10s }
