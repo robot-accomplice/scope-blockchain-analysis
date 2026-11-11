@@ -9,12 +9,14 @@
 //! an error would reach `main` as exit code 1, and here 1 means "breach".
 
 use super::fetch::TickTiming;
+use super::inline::{self, Inline};
 use super::run::{
     CellRecord, cell_record, csv_header, run_ticks, start_csv, tick_csv_rows, write_report,
 };
 use super::state::{self, RunState};
 use super::{Ready, Sources, Tick, monitor, prepare, watchlist_path};
 use crate::cli::output::Output;
+use crate::cli::watch_args::{RunArgs, TargetArgs};
 use crate::{note, outln};
 use clap::{Args, ValueEnum};
 use scope::chains::ChainClientFactory;
@@ -53,6 +55,8 @@ const AFTER_HELP: &str = "\x1b[1mExamples:\x1b[0m
   scope watch pegs --once --every 5m               \x1b[2m# cron every 5 minutes: remembers the last run\x1b[0m
   scope watch pegs --every 30s --duration 1h --format json
   scope watch ./pegs.yaml --once --csv trail.csv --append
+  scope watch USDC --venue weex --once             \x1b[2m# a target on the command line\x1b[0m
+  scope watch 0xWallet --kind address --rule \"native_balance > 1\" --once
 
 \x1b[1mExit codes:\x1b[0m
   0  No row breached and no row is unknown on the last tick (warnings pass)
@@ -76,52 +80,57 @@ pub enum WatchFormat {
     Csv,
 }
 
+/// The help of the shared run flags in `scope watch`.
+const EVERY_HELP: &str = "Time from one tick start to the next (30s, 5m). Overrides the file. With --once it does not wait: it says how far apart the runs are (the look-back of the first tick and the age at which the saved state is stale)";
+const DURATION_HELP: &str = "How long the run lasts (10m, 1h, or `forever`). Overrides the file";
+const CSV_HELP: &str = "Write one CSV row for each cell and tick. Overrides the file";
+const REPORT_HELP: &str = "Write the report when the run ends or stops. Overrides the file";
+
 /// Arguments for `scope watch`.
 ///
-/// Runs a saved watchlist with no screen and ends with an exit code.
+/// Runs a saved watchlist, or one target from the command line, with no
+/// screen and ends with an exit code.
 #[derive(Debug, Clone, Args)]
-#[command(after_help = AFTER_HELP)]
+#[command(after_help = AFTER_HELP,
+    mut_arg("every", |a| a.help(EVERY_HELP)),
+    mut_arg("duration", |a| a.help(DURATION_HELP)),
+    mut_arg("csv", |a| a.help(CSV_HELP)),
+    mut_arg("report", |a| a.help(REPORT_HELP)))]
 pub struct WatchArgs {
-    /// A saved watchlist name, or the path of a watchlist file.
+    /// A saved watchlist name, the path of a watchlist file, or a token, pair
+    /// or address to watch.
     ///
-    /// It is a path when it ends in `.yaml` or has a path separator.
-    #[arg(value_name = "NAME|PATH")]
+    /// With a target flag (`--venue`, `--chain`, `--pair`, `--token`,
+    /// `--preset`, `--rule`, `--kind` or a health flag) it is a target.
+    /// Without one it is a path when it ends in `.yaml` or has a path
+    /// separator, else the name of a saved watchlist.
+    #[arg(value_name = "NAME|PATH|TOKEN")]
     pub list: String,
 
     /// Run one tick and stop.
     #[arg(long, conflicts_with = "duration")]
     pub once: bool,
 
-    /// Time from one tick start to the next (30s, 5m). Overrides the file.
-    /// With --once it does not wait: it says how far apart the runs are
-    /// (the look-back of the first tick and the age at which the saved
-    /// state is stale).
-    #[arg(long, value_name = "INTERVAL")]
-    pub every: Option<String>,
-
     /// Do not load or save what this list remembers between runs.
     #[arg(long)]
     pub no_state: bool,
-
-    /// How long the run lasts (10m, 1h, or `forever`). Overrides the file.
-    #[arg(long, value_name = "DURATION")]
-    pub duration: Option<String>,
 
     /// What goes to stdout.
     #[arg(long, value_enum, default_value_t = WatchFormat::Text)]
     pub format: WatchFormat,
 
-    /// Write one CSV row for each cell and tick. Overrides the file.
-    #[arg(long, value_name = "PATH")]
-    pub csv: Option<PathBuf>,
-
     /// Keep the rows already in the CSV file and add the new rows.
     #[arg(long)]
     pub append: bool,
 
-    /// Write the report when the run ends or stops. Overrides the file.
-    #[arg(long, value_name = "PATH")]
-    pub report: Option<PathBuf>,
+    /// Timing and outputs, shared with `scope monitor`.
+    #[command(flatten)]
+    pub run: RunArgs,
+
+    /// What to watch, when the first argument is a target: the flags that
+    /// `scope monitor` takes too.
+    #[command(flatten)]
+    pub target: TargetArgs,
 }
 
 /// Why a run ended.
@@ -164,6 +173,26 @@ pub struct Context<'a> {
     pub state_dir: PathBuf,
     /// The venue IDs a watchlist may name.
     pub venues: Vec<String>,
+    /// The command line as typed, for the `start` record.
+    pub argv: Vec<String>,
+}
+
+/// Where the watchlist of a run came from, for the `start` record.
+struct Origin {
+    argv: Vec<String>,
+    /// The file of the list; `None` for a target on the command line.
+    path: Option<PathBuf>,
+    /// What a run from the command line tells the user.
+    inline: Option<Inline>,
+}
+
+impl Origin {
+    /// What names the list in an error note.
+    fn label(&self, list: &Watchlist) -> String {
+        self.path
+            .as_ref()
+            .map_or_else(|| list.name.clone(), |p| p.display().to_string())
+    }
 }
 
 /// The exit code of a run. The first rule that matches wins: a write error
@@ -194,13 +223,46 @@ pub fn exit_code(last: Option<&Snapshot>, write_failed: bool) -> i32 {
 pub async fn run(args: &WatchArgs, ctx: &Context<'_>, stop: impl Future<Output = ()>) -> i32 {
     let out = ctx.out;
     let path = watchlist_path(&args.list, &ctx.dir);
-    let Some(mut list) = load(args, &path, ctx) else {
-        return EXIT_NOT_STARTED;
+    let (mut list, mut inline) = if args.target.is_set() {
+        match inline::build(args, ctx) {
+            Ok((list, inline)) => (list, Some(inline)),
+            Err(lines) => {
+                for line in lines {
+                    note!(out, "{line}");
+                }
+                return EXIT_NOT_STARTED;
+            }
+        }
+    } else {
+        let Some(list) = load(args, &path, ctx) else {
+            return EXIT_NOT_STARTED;
+        };
+        (list, None)
     };
     if let Err(message) = apply_flags(&mut list, args) {
         note!(out, "{message}");
         return EXIT_NOT_STARTED;
     }
+    if let Some(inline) = inline.as_mut() {
+        match inline::validate(&list, &ctx.venues, args.once, inline) {
+            Ok(checked) => list = checked,
+            Err(lines) => {
+                for line in lines {
+                    note!(out, "{}: {line}", list.name);
+                }
+                return EXIT_NOT_STARTED;
+            }
+        }
+    }
+    let state_identity = inline.as_ref().map_or_else(
+        || state::identity(&args.list, &path),
+        |i| state::inline_identity(&i.definition),
+    );
+    let origin = Origin {
+        argv: ctx.argv.clone(),
+        path: inline.is_none().then_some(path),
+        inline,
+    };
     let src = Sources {
         config: ctx.config,
         clients: ctx.clients,
@@ -208,7 +270,7 @@ pub async fn run(args: &WatchArgs, ctx: &Context<'_>, stop: impl Future<Output =
     let ready = match prepare(&list, src, out).await {
         Ok(ready) => ready,
         Err(e) => {
-            note!(out, "{}: {}", path.display(), prepare_message(&e));
+            note!(out, "{}: {}", origin.label(&list), prepare_message(&e));
             return EXIT_NOT_STARTED;
         }
     };
@@ -223,13 +285,13 @@ pub async fn run(args: &WatchArgs, ctx: &Context<'_>, stop: impl Future<Output =
     let (state, start_history) = RunState::start(
         !args.no_state,
         &ctx.state_dir,
-        state::identity(&args.list, &path),
+        state_identity,
         list,
         now_ms(),
     );
     let state = RefCell::new(state);
 
-    if announce_start(args, &path, &ready, &state.borrow(), out).is_err() {
+    if announce_start(args, &origin, &ready, &state.borrow(), out).is_err() {
         // Stdout closed before the first tick: nothing to run for.
         let end = End {
             reason: StopReason::StdoutClosed,
@@ -393,6 +455,11 @@ fn load(args: &WatchArgs, path: &Path, ctx: &Context<'_>) -> Option<Watchlist> {
                 } else {
                     note!(out, "Saved watchlists: {}", names.join(", "));
                 }
+                note!(
+                    out,
+                    "To watch a token, give a venue or a chain: scope watch {} --venue weex",
+                    args.list
+                );
             }
             None
         }
@@ -401,19 +468,19 @@ fn load(args: &WatchArgs, path: &Path, ctx: &Context<'_>) -> Option<Watchlist> {
 
 /// Puts the flags over the file.
 fn apply_flags(list: &mut Watchlist, args: &WatchArgs) -> Result<(), String> {
-    if let Some(every) = &args.every {
+    if let Some(every) = &args.run.every {
         list.interval = monitor::parse_interval(every)?;
     }
     if args.once {
         // A run of length zero is one tick.
         list.duration = Some(Duration::ZERO);
-    } else if let Some(duration) = &args.duration {
+    } else if let Some(duration) = &args.run.duration {
         list.duration = monitor::parse_run_duration(duration)?;
     }
-    if let Some(csv) = &args.csv {
+    if let Some(csv) = &args.run.csv {
         list.outputs.csv = Some(csv.clone());
     }
-    if let Some(report) = &args.report {
+    if let Some(report) = &args.run.report {
         list.outputs.report = Some(report.clone());
     }
     Ok(())
@@ -460,7 +527,7 @@ fn row_labels(list: &Watchlist) -> Vec<String> {
 /// (CSV), and a note with the paths and timing that the run uses.
 fn announce_start(
     args: &WatchArgs,
-    path: &Path,
+    origin: &Origin,
     ready: &Ready,
     state: &RunState,
     out: &Output,
@@ -470,9 +537,18 @@ fn announce_start(
     let report = list.outputs.report.as_deref().map(full_path);
     let rows = row_labels(list);
     let duration = list.duration.map(|d| d.as_secs());
+    let source = if origin.inline.is_some() {
+        "cli"
+    } else {
+        "file"
+    };
+    let definition = origin.inline.as_ref().map(|i| i.definition.as_str());
     tracing::info!(
         name = %list.name,
-        path = %path.display(),
+        source,
+        argv = ?origin.argv,
+        path = ?origin.path,
+        definition = definition.unwrap_or(""),
         rows = ?rows,
         interval_secs = list.interval.as_secs(),
         duration_secs = ?duration,
@@ -496,6 +572,11 @@ fn announce_start(
     if list.duration.is_none() {
         note!(out, "{NO_DURATION_NOTE}");
     }
+    if let Some(inline) = &origin.inline {
+        for line in inline.notes_for_user() {
+            note!(out, "{line}");
+        }
+    }
     for line in state.start_notes() {
         note!(out, "{line}");
     }
@@ -510,7 +591,13 @@ fn announce_start(
                 "ts": now(),
                 "scope_version": scope::VERSION,
                 "name": list.name,
-                "path": full_path(path),
+                "source": source,
+                "argv": origin.argv,
+                "path": origin.path.as_deref().map(full_path),
+                "definition": definition,
+                "notes": origin.inline.as_ref().map(|i| &i.notes),
+                "shadowed_saved_list": origin.inline.as_ref().and_then(|i| i.shadowed.as_ref()),
+                "config_alerts_applied": origin.inline.as_ref().map(|i| &i.alert_rules),
                 "interval_secs": list.interval.as_secs(),
                 "duration_secs": duration,
                 "once": args.once,
@@ -811,6 +898,7 @@ mod tests {
             out,
             dir: dir.path().to_path_buf(),
             state_dir: dir.path().join("state"),
+            argv: Vec::new(),
             venues: vec![
                 "eth".into(),
                 "binance".into(),

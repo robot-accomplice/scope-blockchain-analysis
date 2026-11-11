@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `scope watch` takes a target on the command line: `scope watch USDC --venue weex --once`, `scope watch 0xA0b8... --chain ethereum --once`, `scope watch 0xWallet... --kind address --rule "native_balance > 1" --once`. With any target flag, the first argument is a token, pair or address, and no watchlist file is needed. It is the target that `scope monitor` builds from the same words, with the rules of config `monitor.alerts`. With no `--once` and no `--duration` the run lasts 1 hour. An input error exits with 3 before any request. The `start` record has `source`, `argv`, `definition` (the exact watchlist file text), `notes`, `shadowed_saved_list` and `config_alerts_applied`.
+- `scope watch` and `scope monitor` take the same target flags, and two new ones: `--rule` (repeatable) and `--kind pair|token|address`. The memory between runs of an inline target belongs to its definition.
 - `scope watch` remembers what it read between runs. A run saves the memory of `largest_trade` and `volume_change_pct` to `~/.scope-bca/state/watch/<name>-<hash>.json` (one file for each list, written under a short lock and merged, so two overlapping runs cannot corrupt it or step it back). The next run loads it. A reading older than 3 times the interval is stale and is dropped. Every headless run uses the state. `--no-state` turns it off. A file that cannot be read is moved to `.json.bad`. A file that cannot be written is a note and the `state_error` field of the `end` record, and does not change the exit code.
 - The `start` record of `--format json` has a `state` field: the mode, the file, and for each market the `basis` (`loaded`, `stale` or `none`), the age and the saved values. The `end` record has `state_written`, `state_error`, `state_entries_written` and `state_entries_dropped`.
 - `scope watch --once --every 5m` is now valid. With `--once`, `--every` does not wait. It says how far apart your runs are: it sets the look-back of the first tick and the age at which the state is stale.
@@ -22,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - In the monitor wizard, the message for a pair with no venue is now `a pair needs a venue`. It had a usage example after it. The wizard and the grid editor use one check and give the same message.
+- `scope monitor --pair` with no `--venue` is now an error (`--pair needs a venue`). Before, it was ignored.
+- `scope watch` and `scope monitor` define `--every`, `--duration`, `--csv` and `--report` once. Their help text does not change. In `scope monitor --help`, the target flags now appear in one group, so the order of the options changed. `--chain` has no clap default: the help still says `[default: ethereum]`.
 - **A `--once` run that always passed can now breach.** A rule on `volume_change_pct` was always `n/a` in a `--once` run, and `n/a` does not count against the result. With the saved reading, the rule can fail, and a cron job can exit with 1. Use `--no-state` to get the old result.
 - The TUI grid does not use the state file.
 - A tick of `scope watch` and of the TUI watch grid reads different venues at the same time (up to 8 reads at once). The reads of one venue run one after the other, as before. The order of the rows, the CSV rows and the report does not change, and the result of a tick does not depend on which read finishes first. A tick now takes about as long as its slowest venue, not the sum of all venues.

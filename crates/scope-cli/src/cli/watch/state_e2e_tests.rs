@@ -86,6 +86,7 @@ async fn once(d: &Dir, factory: &LatencyFactory, flags: &[&str]) -> Run {
         out: &out,
         dir: d.dir.path().to_path_buf(),
         state_dir: d.state_dir(),
+        argv: Vec::new(),
         venues: vec!["lat-a".into()],
     };
     let code = run(&args, &ctx, std::future::pending()).await;

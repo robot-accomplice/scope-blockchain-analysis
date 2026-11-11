@@ -1603,7 +1603,7 @@ mod tests {
         let Commands::Monitor(m) = inv.command else {
             panic!("expected monitor")
         };
-        assert_eq!(m.chain, "ethereum");
+        assert_eq!(m.target.chain, None);
 
         let mut ctx = SessionContext {
             chain: "solana".into(),
@@ -1613,7 +1613,7 @@ mod tests {
         let Commands::Monitor(m) = inv.command else {
             panic!("expected monitor")
         };
-        assert_eq!(m.chain, "solana");
+        assert_eq!(m.target.chain.as_deref(), Some("solana"));
     }
 
     #[test]
