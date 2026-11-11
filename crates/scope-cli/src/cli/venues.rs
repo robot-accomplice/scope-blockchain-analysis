@@ -1141,8 +1141,13 @@ capabilities:
         let result = run_init_impl(args, dest.clone(), &quiet());
         assert!(result.is_ok());
 
-        // Verify venue files were created (registry has 11 built-in venues)
-        let registry = VenueRegistry::load().unwrap();
+        // Init copies the catalog only. `VenueRegistry::load()` also reads the
+        // user venues in the shared test home, where other tests write theirs
+        // (the `lat-*` venues of the watch tests), so read the catalog alone.
+        let nothing = tempfile::tempdir().unwrap();
+        let registry =
+            VenueRegistry::load_dirs(&VenueRegistry::catalog_dir(), nothing.path()).unwrap();
+        assert!(!registry.list().is_empty(), "the test catalog is seeded");
         for id in registry.list() {
             let filename = format!("{}.yaml", id);
             let target = dest.join(&filename);
