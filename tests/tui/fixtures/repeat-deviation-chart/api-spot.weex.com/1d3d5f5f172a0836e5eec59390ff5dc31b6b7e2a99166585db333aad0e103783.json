@@ -1,0 +1,97 @@
+{
+  "recorded": "2026-11-11T10:45:12.732290600+00:00",
+  "request": {
+    "method": "GET",
+    "url": "https://api-spot.weex.com/api/v3/market/depth?limit=200&symbol=USDCUSDT",
+    "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "responses": [
+    {
+      "status": 200,
+      "headers": {
+        "cache-control": "no-store, no-cache, must-revalidate, max-age=0, s-maxage=600",
+        "connection": "keep-alive",
+        "content-type": "application/json",
+        "cross-origin-opener-policy": "same-origin-allow-popups",
+        "date": "Wed, 11 Nov 2026 10:45:12 GMT",
+        "permissions-policy": "camera=(self \"https://*.sumsub.com\"), microphone=(self \"https://*.sumsub.com\"), geolocation=(), display-capture=(), fullscreen=(self)",
+        "referrer-policy": "strict-origin-when-cross-origin",
+        "server": "CloudFront",
+        "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+        "transfer-encoding": "chunked",
+        "vary": "Origin",
+        "via": "1.1 e99cb12c78a4cb6826cc74437a0ddcba.cloudfront.net (CloudFront)",
+        "x-amz-cf-id": "ysWh49bDCVRuDt-PUtiq4kIQDXb0l7zyod6bVjWCeQHuPiDUDUvENQ==",
+        "x-amz-cf-pop": "ZRH52-P1",
+        "x-cache": "Miss from cloudfront",
+        "x-content-type-options": "nosniff",
+        "x-dns-prefetch-control": "off",
+        "x-download-options": "noopen",
+        "x-frame-options": "SAMEORIGIN",
+        "x-permitted-cross-domain-policies": "none",
+        "x-remaining-weight-10s": "495",
+        "x-used-weight-10s": "5",
+        "x-xss-protection": "1; mode=block"
+      },
+      "body": "{\"lastUpdateId\":2466208764,\"bids\":[[\"1.00078\",\"312099.3\"],[\"1.00077\",\"646793.1\"],[\"1.00076\",\"703912.5\"],[\"1.00075\",\"1828401.7\"],[\"1.00074\",\"1846685.8\"],[\"1.00073\",\"1865152.6\"],[\"1.00072\",\"1883804.1\"],[\"1.00071\",\"1902642.2\"],[\"1.00070\",\"1921668.6\"],[\"1.00069\",\"1940885.3\"],[\"1.00068\",\"1960294.1\"],[\"1.00066\",\"1979897.1\"],[\"1.00064\",\"1999696.1\"],[\"1.00062\",\"2019693.0\"],[\"1.00059\",\"2028931.6\"],[\"1.00058\",\"2060288.8\"],[\"1.00056\",\"2080891.7\"],[\"1.00054\",\"2101700.7\"],[\"1.00052\",\"2122717.7\"],[\"1.00050\",\"2143944.8\"],[\"1.00047\",\"2219049.3\"],[\"1.00045\",\"2187038.1\"],[\"1.00042\",\"2208908.5\"],[\"1.00039\",\"2230997.6\"],[\"0.99929\",\"300.0\"],[\"0.9000\",\"9.5\"],[\"0.20000\",\"1000.0\"],[\"0.0003\",\"33333.0\"]],\"asks\":[[\"1.00079\",\"14299616.9\"],[\"1.00080\",\"1995101.7\"],[\"1.00081\",\"2015052.7\"],[\"1.00082\",\"2035203.3\"],[\"1.00083\",\"2055555.3\"],[\"1.00084\",\"2076110.8\"],[\"1.00085\",\"2096871.9\"],[\"1.00086\",\"2117840.7\"],[\"1.00087\",\"2139019.1\"],[\"1.00088\",\"2162355.4\"],[\"1.00090\",\"2149877.2\"],[\"1.00091\",\"2203833.5\"],[\"1.00093\",\"2225871.8\"],[\"1.00095\",\"2248130.5\"],[\"1.00097\",\"2270611.9\"],[\"1.00105\",\"40.8\"],[\"1.00510\",\"15.1\"]]}"
+    },
+    {
+      "status": 200,
+      "headers": {
+        "cache-control": "no-store, no-cache, must-revalidate, max-age=0, s-maxage=600",
+        "connection": "keep-alive",
+        "content-type": "application/json",
+        "cross-origin-opener-policy": "same-origin-allow-popups",
+        "date": "Wed, 11 Nov 2026 10:45:14 GMT",
+        "permissions-policy": "camera=(self \"https://*.sumsub.com\"), microphone=(self \"https://*.sumsub.com\"), geolocation=(), display-capture=(), fullscreen=(self)",
+        "referrer-policy": "strict-origin-when-cross-origin",
+        "server": "CloudFront",
+        "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+        "transfer-encoding": "chunked",
+        "vary": "Origin",
+        "via": "1.1 e99cb12c78a4cb6826cc74437a0ddcba.cloudfront.net (CloudFront)",
+        "x-amz-cf-id": "KSYHrT1e0RgUJm6gX8vyG3-m-pxapJSWH4HFcApu1L3fSUy6zdWiOw==",
+        "x-amz-cf-pop": "ZRH52-P1",
+        "x-cache": "Miss from cloudfront",
+        "x-content-type-options": "nosniff",
+        "x-dns-prefetch-control": "off",
+        "x-download-options": "noopen",
+        "x-frame-options": "SAMEORIGIN",
+        "x-permitted-cross-domain-policies": "none",
+        "x-remaining-weight-10s": "463",
+        "x-used-weight-10s": "37",
+        "x-xss-protection": "1; mode=block"
+      },
+      "body": "{\"lastUpdateId\":2466208918,\"bids\":[[\"1.00080\",\"392497.2\"],[\"1.00079\",\"260169.4\"],[\"1.00078\",\"25266.3\"],[\"1.00077\",\"1869030.8\"],[\"1.00076\",\"1887721.1\"],[\"1.00075\",\"1906598.3\"],[\"1.00074\",\"1925664.3\"],[\"1.00073\",\"1944921.0\"],[\"1.00072\",\"1964370.2\"],[\"1.00071\",\"1984013.9\"],[\"1.00069\",\"1940885.3\"],[\"1.00068\",\"2023892.5\"],[\"1.00066\",\"2044131.5\"],[\"1.00064\",\"2064572.8\"],[\"1.00062\",\"2085218.5\"],[\"1.00059\",\"2028931.6\"],[\"1.00058\",\"2127131.4\"],[\"1.00056\",\"2148402.7\"],[\"1.00054\",\"2169886.8\"],[\"1.00052\",\"2191585.6\"],[\"1.00050\",\"2213501.5\"],[\"1.00047\",\"2235636.5\"],[\"1.00044\",\"2257992.9\"],[\"1.00041\",\"2280572.8\"],[\"0.99929\",\"300.0\"],[\"0.9000\",\"9.5\"],[\"0.20000\",\"1000.0\"],[\"0.0003\",\"33333.0\"]],\"asks\":[[\"1.00081\",\"14294051.6\"],[\"1.00082\",\"1995423.5\"],[\"1.00083\",\"2015377.8\"],[\"1.00084\",\"2035531.5\"],[\"1.00085\",\"2055886.9\"],[\"1.00086\",\"2076445.7\"],[\"1.00087\",\"2097210.2\"],[\"1.00088\",\"2120128.4\"],[\"1.00089\",\"2139364.1\"],[\"1.00090\",\"2160757.8\"],[\"1.00091\",\"2182365.3\"],[\"1.00093\",\"2204189.0\"],[\"1.00095\",\"2226230.9\"],[\"1.00097\",\"2248493.2\"],[\"1.00099\",\"2270978.1\"],[\"1.00105\",\"40.8\"],[\"1.00510\",\"15.1\"]]}"
+    },
+    {
+      "status": 200,
+      "headers": {
+        "cache-control": "no-store, no-cache, must-revalidate, max-age=0, s-maxage=600",
+        "connection": "keep-alive",
+        "content-type": "application/json",
+        "cross-origin-opener-policy": "same-origin-allow-popups",
+        "date": "Wed, 11 Nov 2026 10:45:16 GMT",
+        "permissions-policy": "camera=(self \"https://*.sumsub.com\"), microphone=(self \"https://*.sumsub.com\"), geolocation=(), display-capture=(), fullscreen=(self)",
+        "referrer-policy": "strict-origin-when-cross-origin",
+        "server": "CloudFront",
+        "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+        "transfer-encoding": "chunked",
+        "vary": "Origin",
+        "via": "1.1 e99cb12c78a4cb6826cc74437a0ddcba.cloudfront.net (CloudFront)",
+        "x-amz-cf-id": "7E-ZCm_j33Rf4ZCw3Q2H3FTdBH1u10nKzYLcXShBKD-wi7lqPHjbXg==",
+        "x-amz-cf-pop": "ZRH52-P1",
+        "x-cache": "Miss from cloudfront",
+        "x-content-type-options": "nosniff",
+        "x-dns-prefetch-control": "off",
+        "x-download-options": "noopen",
+        "x-frame-options": "SAMEORIGIN",
+        "x-permitted-cross-domain-policies": "none",
+        "x-remaining-weight-10s": "431",
+        "x-used-weight-10s": "69",
+        "x-xss-protection": "1; mode=block"
+      },
+      "body": "{\"lastUpdateId\":2466209066,\"bids\":[[\"1.00078\",\"229209.8\"],[\"1.00077\",\"169323.8\"],[\"1.00076\",\"827249.0\"],[\"1.00075\",\"1846438.6\"],[\"1.00074\",\"1864903.0\"],[\"1.00073\",\"1883552.0\"],[\"1.00072\",\"1902387.6\"],[\"1.00071\",\"1921411.4\"],[\"1.00070\",\"1940625.6\"],[\"1.00069\",\"1960031.8\"],[\"1.00068\",\"1979632.1\"],[\"1.00066\",\"1999428.4\"],[\"1.00064\",\"2019422.7\"],[\"1.00062\",\"2039617.0\"],[\"1.00059\",\"2028931.6\"],[\"1.00058\",\"2080613.3\"],[\"1.00056\",\"2101419.4\"],[\"1.00054\",\"2122433.6\"],[\"1.00052\",\"2143657.9\"],[\"1.00050\",\"2165094.5\"],[\"1.00048\",\"2186745.5\"],[\"1.00045\",\"2208612.9\"],[\"1.00042\",\"2230699.0\"],[\"1.00039\",\"2253006.0\"],[\"0.99929\",\"300.0\"],[\"0.9000\",\"9.5\"],[\"0.20000\",\"1000.0\"],[\"0.0003\",\"33333.0\"]],\"asks\":[[\"1.00079\",\"14621957.4\"],[\"1.00080\",\"1974791.5\"],[\"1.00081\",\"1994539.5\"],[\"1.00082\",\"2014484.8\"],[\"1.00083\",\"2034629.7\"],[\"1.00084\",\"2054976.0\"],[\"1.00085\",\"2075525.8\"],[\"1.00086\",\"2096281.0\"],[\"1.00087\",\"2117243.8\"],[\"1.00088\",\"2140362.4\"],[\"1.00090\",\"2128543.7\"],[\"1.00091\",\"2181398.4\"],[\"1.00093\",\"2203212.4\"],[\"1.00095\",\"2225244.5\"],[\"1.00097\",\"2247497.0\"],[\"1.00105\",\"40.8\"],[\"1.00510\",\"15.1\"]]}"
+    }
+  ]
+}

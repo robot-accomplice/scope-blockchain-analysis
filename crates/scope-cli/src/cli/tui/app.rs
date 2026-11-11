@@ -3131,6 +3131,8 @@ mod tests {
             let text = screen(&s, w, h);
             assert!(text.contains("COMPARISON TABLE"), "{w}x{h}\n{text}");
             assert!(text.contains(" venues: Mid price "), "{w}x{h}\n{text}");
+            // The deviation chart is in the set, in the old percent slot.
+            assert!(text.contains(" Peg deviation (bps) "), "{w}x{h}\n{text}");
             assert!(
                 is_braille(&text),
                 "a braille line per venue: {w}x{h}\n{text}"
@@ -5829,5 +5831,184 @@ Bid Side — 20 levels
         let mut s = failed_state();
         s.submit("  ", &Config::default());
         assert_eq!(s.pane_state(), PaneState::Failed);
+    }
+
+    /// Like `repeating_on_two_venues`, with the peg deviation set by the
+    /// test: `pct(venue, run)` is the `peg_deviation_pct` value (percent),
+    /// and `peg` the bands the runner hands the series.
+    fn repeating_on_a_peg(
+        s: &mut TuiState,
+        n: u64,
+        venues: [&str; 2],
+        peg: Option<scope::market::health::PegBands>,
+        pct: impl Fn(usize, u64) -> Option<f64>,
+    ) -> crate::cli::output::Output {
+        use crate::cli::output::{RunRecord, VenueRun, VenueSample};
+        let inv = Invocation {
+            command: venues_list(),
+            route: Route::Pane,
+            ai: false,
+            argv: vec![],
+        };
+        let out = s.start("market summary USDN --venue a,b --every 1s", &inv);
+        if let Some(peg) = peg {
+            out.set_series_peg(peg);
+        }
+        let metrics = scope::metrics::summary_metrics(&scope::market::HealthThresholds::default());
+        for run in 1..=n {
+            let sample = |v: usize| VenueSample {
+                venue: venues[v].to_string(),
+                sample: scope::metrics::Sample {
+                    values: metrics
+                        .iter()
+                        .map(|m| match m.id {
+                            scope::metrics::MetricId::Mid => Some(1.0),
+                            scope::metrics::MetricId::PegDeviationPct => pct(v, run),
+                            _ => Some(10.0 + run as f64),
+                        })
+                        .collect(),
+                    healthy: true,
+                    failed_checks: vec![],
+                },
+                error: None,
+            };
+            out.record_run(
+                &metrics,
+                RunRecord {
+                    run,
+                    at: Utc::now() + chrono::TimeDelta::seconds(run as i64),
+                    sample: scope::metrics::Sample {
+                        values: vec![None; metrics.len()],
+                        healthy: true,
+                        failed_checks: vec![],
+                    },
+                    snapshot: format!("SNAPSHOT {run}\n"),
+                    view: None,
+                    venues: Some(std::sync::Arc::new(VenueRun {
+                        samples: vec![sample(0), sample(1)],
+                        comparison: "COMPARISON TABLE\n".to_string(),
+                    })),
+                },
+            );
+        }
+        out
+    }
+
+    fn default_peg() -> Option<scope::market::health::PegBands> {
+        Some(scope::market::HealthThresholds::default().peg_bands())
+    }
+
+    // Q-D2 b. Why: the repeat view keeps its chart count and its paging. The
+    // deviation chart takes the place of the old percent chart, after the
+    // mid price, and it reads in bps with the band.
+    #[test]
+    fn test_a_repeat_draws_the_peg_deviation_in_bps_with_its_band_after_the_mid() {
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let mut s = state();
+        // 0.12 percent is 12 bps. -0.03 percent is -3 bps.
+        let out = repeating_on_a_peg(&mut s, 12, ["weex", "binance"], default_peg(), |v, _| {
+            Some([0.12, -0.03][v])
+        });
+        let series = out.series_hook().unwrap();
+        let charts = repeat_view::venue_charts(&series).unwrap();
+        let labels: Vec<&str> = charts.charts.iter().map(|c| c.label.as_str()).collect();
+        assert!(labels[0].starts_with("Mid price"), "{labels:?}");
+        assert_eq!(labels[1], "Peg deviation (bps)", "the old slot: {labels:?}");
+        assert!(
+            !labels.iter().any(|l| l.starts_with("Peg deviation %")),
+            "{labels:?}"
+        );
+        let text = screen(&s, 120, 36);
+        assert!(text.contains(" Peg deviation (bps) "), "{text}");
+        // The legend follows Tab to the deviation chart and names the band.
+        s.handle_key(key(KeyCode::Tab));
+        let text = screen(&s, 120, 36);
+        assert!(text.contains("band ±10 bps"), "{text}");
+        let weex = text.lines().find(|l| l.contains("> ■ weex")).unwrap();
+        assert!(weex.contains("+12.0"), "bps, not percent: {weex}");
+        assert!(!weex.contains("0.12"), "{weex}");
+        assert!(
+            weex.contains('!'),
+            "12 bps: past the band, inside the outlier band: {weex}"
+        );
+        assert!(
+            text.lines()
+                .any(|l| l.contains("  ■ binance") && l.contains("-3.0"))
+        );
+        // At 120x36 the panes are 5 rows: too low for band lines (the
+        // legend names the band). A taller window draws them.
+        assert!(!text.contains('•'), "no band line in a low pane: {text}");
+        let tall = screen(&s, 120, 80);
+        assert!(tall.contains('•'), "the band lines: {tall}");
+        s.finish(Ending::Cancelled);
+    }
+
+    // Why: the repeat view must show the same band as the verdicts use. A
+    // hard-coded 10 bps would ignore `--peg-range`.
+    #[test]
+    fn test_the_repeat_band_follows_the_peg_range() {
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let mut s = state();
+        let peg = scope::market::health::PegBands::new(1.0, 0.003);
+        repeating_on_a_peg(&mut s, 12, ["weex", "binance"], Some(peg), |v, _| {
+            Some([0.12, -0.03][v])
+        });
+        s.handle_key(key(KeyCode::Tab));
+        let text = screen(&s, 120, 36);
+        assert!(text.contains("band ±30 bps"), "{text}");
+        // 12 bps is now inside the band.
+        let weex = text.lines().find(|l| l.contains("> ■ weex")).unwrap();
+        assert!(weex.contains('✓'), "{weex}");
+        s.finish(Ending::Cancelled);
+    }
+
+    // Q-D6 a. Why: a DEX mid is in USD, a CEX mid is in the quote.
+    #[test]
+    fn test_a_dex_venue_is_tagged_usd_in_the_repeat_legend() {
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let mut s = state();
+        repeating_on_a_peg(&mut s, 12, ["eth", "binance"], default_peg(), |v, _| {
+            Some([0.01, 0.02][v])
+        });
+        s.handle_key(key(KeyCode::Tab));
+        let text = screen(&s, 120, 36);
+        assert!(text.lines().any(|l| l.contains("> ■ eth usd")), "{text}");
+        assert!(!text.contains("binance usd"), "{text}");
+        s.finish(Ending::Cancelled);
+    }
+
+    // Why: a chart that is missing silently cannot be diagnosed. The
+    // legend says why, in words a test can assert.
+    #[test]
+    fn test_a_repeat_with_no_mid_or_no_peg_says_why_it_has_no_deviation_chart() {
+        let _lock = super::super::DIAG_LOCK.blocking_lock();
+        let mut s = state();
+        let out = repeating_on_a_peg(&mut s, 12, ["weex", "binance"], default_peg(), |_, _| None);
+        let series = out.series_hook().unwrap();
+        let charts = repeat_view::venue_charts(&series).unwrap();
+        assert!(
+            !charts
+                .charts
+                .iter()
+                .any(|c| c.label == "Peg deviation (bps)")
+        );
+        assert_eq!(
+            charts.gap,
+            Some(scope::market::health::DeviationGap::NoPrice)
+        );
+        let text = screen(&s, 120, 36);
+        let flat = text.lines().map(str::trim).collect::<Vec<_>>().join(" ");
+        assert!(flat.contains("peg deviation: no mid price"), "{text}");
+        s.finish(Ending::Cancelled);
+
+        let mut s = state();
+        let no_peg = scope::market::health::PegBands::new(0.0, 0.001);
+        let out = repeating_on_a_peg(&mut s, 12, ["weex", "binance"], Some(no_peg), |_, _| None);
+        let series = out.series_hook().unwrap();
+        assert_eq!(
+            repeat_view::venue_charts(&series).unwrap().gap,
+            Some(scope::market::health::DeviationGap::NoPeg)
+        );
+        s.finish(Ending::Cancelled);
     }
 }

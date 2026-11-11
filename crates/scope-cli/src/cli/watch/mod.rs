@@ -7,6 +7,7 @@
 //!
 //! The TUI's monitor wizard and grid drive these functions.
 
+pub mod deviation;
 pub mod fetch;
 pub mod headless;
 pub mod monitor;
@@ -22,7 +23,7 @@ use scope::tokens::TokenAliases;
 use scope::watch::{Target, TargetKind, Watchlist};
 
 pub use fetch::{TargetReading, Tick, tick};
-pub use run::{csv_header, csv_rows, report_text, run};
+pub use run::{csv_header, csv_rows, report_text, run, tick_csv_rows};
 
 /// What the fetchers read with.
 #[derive(Clone, Copy)]

@@ -597,8 +597,7 @@ fn peg_words(status: PegStatus) -> PegWords {
 fn peg_line(venue: &str, pair: &str, summary: &MarketSummary) -> String {
     let label = peg_words(summary.peg_status()).label;
     let deviation = summary
-        .mid_price
-        .and_then(|mid| summary.peg_deviation_bps(mid))
+        .mid_peg_deviation_bps()
         .map(|bps| format!(" (deviation: {bps:.1} bps)"))
         .unwrap_or_default();
     format!("- **Market ({venue} {pair}):** {label}{deviation}\n")
