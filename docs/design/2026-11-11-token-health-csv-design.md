@@ -1,8 +1,21 @@
 # Design: a CSV writer for `token-health --format csv`
 
 Date: 2026-11-11
-Status: proposed. The open questions in section 9 need an answer before code.
+Status: accepted on 2026-11-11. The owner chose the recommended option for Q1 to Q8 (table below).
 Follows: `2026-11-10-market-venue-followups-design.md`, sections 4.4 and 8.
+
+## Decisions
+
+| Question | Chosen option | Date |
+|---|---|---|
+| Q1. Row shape | a. One row for each venue, analytics repeated | 2026-11-11 |
+| Q2. How many market columns | a. Only the `ComparisonRow` fields | 2026-11-11 |
+| Q3. Spelling of a missing value | a. An empty cell | 2026-11-11 |
+| Q4. Formula injection | a. Neutralise the text columns only, with a leading `'` | 2026-11-11 |
+| Q5. Where `csv_field` lives | a. A new module `cli/csv.rs` | 2026-11-11 |
+| Q6. A single venue that fails | a. A row with `status` `error` and the reason | 2026-11-11 |
+| Q7. CHANGELOG class and version | a. `Fixed`, in the next patch release (0.8.8) | 2026-11-11 |
+| Q8. A time column | a. None | 2026-11-11 |
 
 ## 1. Problem
 

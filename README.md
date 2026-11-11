@@ -118,7 +118,7 @@ Scope supports multiple output formats via `--format` or the global `--ai` flag:
 |------|--------|----------|
 | *(default)* | Table | Human-readable terminal output |
 | `--format json` | JSON | Programmatic consumption, piping to `jq` |
-| `--format csv` | CSV | Spreadsheet import |
+| `--format csv` | CSV | Spreadsheet import (`token-health` prints a real CSV; see its section) |
 | `--ai` | Markdown | LLM/agent parsing (global flag, all commands) |
 
 Use `--format json` when piping output to other tools or scripts. Use `--ai` when feeding output to an LLM or agent for analysis.
@@ -1181,7 +1181,8 @@ With `--with-market`, order book data is fetched from the selected venue (`--ven
 **Several venues.** `--venue` takes a list: repeat it or give a comma list (`--venue weex,binance`). A list needs `--with-market`; without it, the command fails before any request. One venue keeps its old rule.
 
 - The DEX analytics are read once. The venues are read at the same time.
-- Table: the DEX analytics once, one `Market / Order Book (venue)` block for each venue in the order given, then one comparison table. A venue that fails has a block that says why. `--format csv` prints the same table as before.
+- Table: the DEX analytics once, one `Market / Order Book (venue)` block for each venue in the order given, then one comparison table. A venue that fails has a block that says why.
+- CSV: one header and one row for each venue, in the order given. The DEX analytics repeat in each row. Numbers are raw: no `$`, `%` or `K`/`M`/`B`. The analytics columns are in USD (`price_change_24h` and `top_10_concentration` are percent). The market columns are in the quote currency of the venue (`spread_pct` is percent, `peg_deviation_bps` is basis points). A missing value is an empty cell. A venue that fails has a row with `status` `error` and the reason in `error`. Without `--with-market`, there is one row and the market cells are empty. Text that starts with `=`, `+`, `-` or `@` gets a leading `'` in `symbol`, `bot_signs` and `error`, so a spreadsheet does not run it. The header is: `symbol,chain,contract,price_usd,price_change_24h,volume_24h,liquidity_usd,market_cap,top_10_concentration,venue,status,mid,spread_pct,bid_depth,ask_depth,market_volume_24h,peg_deviation_bps,bot_signs,bot_signs_state,error`.
 - Markdown: the report once, one `###` section for each venue, then `### Comparison`.
 - JSON: `analytics` and `market` stay. `market` is `null`. `markets` is a list with `{venue, summary}` or `{venue, error}` for each venue. `comparison` has one row of raw numbers for each venue (the rows of `market summary`).
 - The exit code is 0 when the DEX analytics print, also when a venue fails or is unhealthy.
