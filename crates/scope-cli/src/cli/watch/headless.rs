@@ -8,6 +8,7 @@
 //! The handler [`run`] always returns a code. It never returns an error:
 //! an error would reach `main` as exit code 1, and here 1 means "breach".
 
+use super::fetch::TickTiming;
 use super::run::{
     CellRecord, cell_record, csv_header, csv_rows, run_ticks, start_csv, write_report,
 };
@@ -501,7 +502,7 @@ fn print_tick(
             crate::out!(out, "{}", csv_rows(at, &tick.snapshot))?;
         }
         WatchFormat::Json => {
-            outln!(out, "{}", tick_json(run, at, &tick.snapshot))?;
+            outln!(out, "{}", tick_json(run, at, tick))?;
             for event in events {
                 outln!(out, "{}", event_json(run, at, event))?;
             }
@@ -562,7 +563,8 @@ fn tick_text(time: &str, run: u64, snapshot: &Snapshot, events: &[Event]) -> Str
 }
 
 /// The `tick` record: every cell of every row.
-fn tick_json(run: u64, at: &str, snapshot: &Snapshot) -> Value {
+fn tick_json(run: u64, at: &str, tick: &Tick) -> Value {
+    let snapshot = &tick.snapshot;
     let [breached, warned, unknown, passed] = counts(snapshot);
     let rows: Vec<Value> = snapshot
         .targets
@@ -589,6 +591,35 @@ fn tick_json(run: u64, at: &str, snapshot: &Snapshot) -> Value {
             "passed": passed,
         },
         "rows": rows,
+        "timing": timing_record(&tick.timing),
+    })
+}
+
+/// The `timing` field of the `tick` record: how long the reads took, so a
+/// slow tick or a timeout can be traced to one read after the fact. Times
+/// are in ms from the start of the tick. `wall_ms` against `sum_ms` shows
+/// what the concurrency saved.
+fn timing_record(timing: &TickTiming) -> Value {
+    let reads: Vec<Value> = timing
+        .reads
+        .iter()
+        .map(|r| {
+            json!({
+                "row": r.row,
+                "group": r.group,
+                "queued_ms": r.queued_ms,
+                "started_ms": r.started_ms,
+                "took_ms": r.took_ms,
+                "outcome": r.outcome.name(),
+                "error": r.error,
+            })
+        })
+        .collect();
+    json!({
+        "wall_ms": timing.wall_ms,
+        "sum_ms": timing.sum_ms,
+        "bound": timing.bound,
+        "reads": reads,
     })
 }
 
@@ -713,7 +744,12 @@ mod tests {
             clients: factory,
             out,
             dir: dir.path().to_path_buf(),
-            venues: vec!["eth".into(), "binance".into()],
+            venues: vec![
+                "eth".into(),
+                "binance".into(),
+                "lat-a".into(),
+                "lat-b".into(),
+            ],
         };
         run(&args, &ctx, stop).await
     }
@@ -1111,6 +1147,64 @@ mod tests {
         )
         .await;
         Run { code, cap, dir }
+    }
+
+    /// Followups design 2026-11-11, section 4.3 (test 6) and 4.4: a venue
+    /// that never answers must not stop a cron job. The run ends at the read
+    /// timeout with exit code 2, and the `tick` record names the read that
+    /// timed out. The cron job saves this log and not the `-v` output.
+    #[tokio::test(start_paused = true)]
+    async fn a_venue_that_never_answers_gives_2_and_the_tick_record_names_the_read() {
+        use crate::cli::watch::fetch::tests::{Answer, LATENCY, LatencyFactory, READ};
+        use crate::cli::watch::fetch::{MAX_CONCURRENT_READS, READ_TIMEOUT};
+        let list = "targets:\n  - kind: pair\n    id: USDC\n    venue: lat-a\n    rules: [\"mid_price > 0\"]\n  - kind: pair\n    id: USDC\n    venue: lat-b\n    rules: [\"mid_price > 0\"]\n";
+        let factory =
+            LatencyFactory::new(&[("lat-a", Answer::After(LATENCY)), ("lat-b", Answer::Never)]);
+        let dir = new_dir(list);
+        let (out, cap) = Output::capture();
+        let code = exec_with(
+            &dir,
+            &list_arg(&dir),
+            &["--once", "--format", "json"],
+            &factory,
+            &out,
+            std::future::pending(),
+        )
+        .await;
+        assert_eq!(code, EXIT_UNKNOWN);
+        let records = json_lines(&cap);
+        let ticks = of_type(&records, "tick");
+        let timing = &ticks[0]["timing"];
+        let timeout_ms = READ_TIMEOUT.as_millis() as u64;
+        assert_eq!(timing["wall_ms"], timeout_ms);
+        assert_eq!(timing["bound"], MAX_CONCURRENT_READS);
+        assert_eq!(
+            timing["sum_ms"],
+            timeout_ms + READ.as_millis() as u64,
+            "the sum is more than the wall time: the reads ran together"
+        );
+        let reads = timing["reads"].as_array().unwrap();
+        let summary: Vec<_> = reads
+            .iter()
+            .map(|r| {
+                (
+                    r["row"].as_str(),
+                    r["group"].as_str(),
+                    r["outcome"].as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                (Some("USDC@lat-a"), Some("venue:lat-a"), Some("ok")),
+                (Some("USDC@lat-b"), Some("venue:lat-b"), Some("timeout")),
+            ]
+        );
+        assert_eq!(reads[0]["error"], Value::Null);
+        assert_eq!(reads[1]["error"], "read timed out after 60s");
+        assert_eq!(reads[1]["started_ms"], 0);
+        assert_eq!(reads[1]["took_ms"], timeout_ms);
     }
 
     // Section 8.4: the code is the last tick's. A breach that cleared is 0;

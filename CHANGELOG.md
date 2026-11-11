@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- A `tick` record of `scope watch --format json` has a new field, `timing`. It has `wall_ms`, `sum_ms`, `bound` and a list `reads`. Each read has `row`, `group`, `queued_ms`, `started_ms`, `took_ms`, `outcome` (`ok`, `error` or `timeout`) and `error`. Use it to find the read that made a tick slow. The other fields and the CSV bytes do not change. With `-v`, each read also gives a `watch read` trace line.
+
+### Changed
+- A tick of `scope watch` and of the TUI watch grid reads different venues at the same time (up to 8 reads at once). The reads of one venue run one after the other, as before. The order of the rows, the CSV rows and the report does not change, and the result of a tick does not depend on which read finishes first. A tick now takes about as long as its slowest venue, not the sum of all venues.
+- A read that takes more than 60 s is dropped. Its cells show the error `read timed out after 60s`, and the row is unknown (exit code 2 for `scope watch`). The other reads go on.
+- A read in a tick never asks a question in the terminal. If a symbol is not clear, the read fails with the error that lists the candidates. Before, a read could ask in a terminal. Two reads at the same time would both read the same input. The TUI grid still asks in its list, one question at a time.
+
 ### Fixed
 - The bot-pattern share line no longer reads "N% of sampled trades look bot-made". It now says what it counts: `N% of sampled trades repeat a size or ping-pong`. When a sign about the whole tape or the book (a timer, a ladder, a depth cycle) also fired, the line adds `; the other signs above are not counted here`. Before, a low share beside a timer or a ladder could read as "no bot". The share and the JSON fields `bot_like_pct` and `bot_like_volume_pct` do not change.
 - The `Ping-pong` finding no longer says "seconds apart". It states the rule the detector uses: a buy and a sell of one size within 5s and 0.05% in price, not always next to each other. The detector does not change.

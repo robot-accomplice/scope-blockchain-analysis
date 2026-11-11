@@ -958,7 +958,9 @@ A breach wins over an unknown row. A write error wins over all. A breach that cl
 
 **Stopping.** Ctrl-C or SIGTERM stops the run (on Windows: Ctrl-C or Ctrl-Break). A tick in progress is dropped. The report is still written, from the last finished tick.
 
-**Records for a failure.** Run with `-v` to get one trace line for each row of each tick, with its status and the exact error text. `--format json` keeps the same facts in the data.
+**Reads in a tick.** A tick reads different venues at the same time, up to 8 reads at once. It reads one venue one read at a time, so the requests to one exchange follow the same pattern as before. A read that takes more than 60 s is dropped, and its cells show the error `read timed out after 60s`. The row is unknown (exit code 2). The other reads go on. The rows, the CSV rows and the report keep the order of the watchlist. The TUI grid reads this way too.
+
+**Records for a failure.** Run with `-v` to get one trace line for each row of each tick, with its status and the exact error text. Run with `-v` to get also one `watch read` line for each read, with its group, start time, duration and outcome (`ok`, `error` or `timeout`). `--format json` keeps the same facts in the data. A `tick` record has a `timing` field with `wall_ms` (the time of the reads), `sum_ms` (the time the reads would take one after the other), `bound` and one entry in `reads` for each read: `row`, `group`, `queued_ms`, `started_ms`, `took_ms`, `outcome` and `error`.
 
 #### Flags of `scope monitor`
 

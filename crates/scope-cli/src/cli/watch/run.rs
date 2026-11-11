@@ -397,6 +397,7 @@ mod tests {
                 )],
             },
             summaries: vec![Some(summary.clone()), Some(summary)],
+            ..Tick::default()
         };
         let md = report_text(&w, &last);
         assert!(md.starts_with("# Watchlist Report: pegs\n\n"), "{md}");
@@ -447,6 +448,7 @@ mod tests {
                 targets: vec![row("weex"), row("binance")],
             },
             summaries: vec![Some(summary.clone()), Some(summary)],
+            ..Tick::default()
         };
         let md = report_text(&w, &last);
         assert_eq!(

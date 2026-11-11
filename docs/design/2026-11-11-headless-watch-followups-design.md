@@ -1,6 +1,6 @@
 # Headless `scope watch`: three follow-ups
 
-- **Status:** proposed on 2026-11-11. The owner chose all three items for 0.8.8. Nothing here is decided yet: section 8 lists the open questions.
+- **Status:** accepted on 2026-11-11. The owner chose all three items for 0.8.8. The owner accepted the recommended option of every open question on 2026-11-11. Section 9 lists the decisions.
 - **Scope:** three changes to `scope watch` and the engine it shares with the TUI grid.
   1. A target on the command line (`scope watch USDC --venue weex`).
   2. Memory between `--once` runs (a state file).
@@ -676,3 +676,27 @@ These go to `tracing` events (visible with `-v`). The JSON `tick` record also ge
 | Q14 | One read at a time for each venue? | A yes. B global bound only. | A |
 | Q15 | How long is the timeout of one read? | A constant 60 s. B from the interval. C none. | A |
 | Q16 | Does the JSON `tick` carry read timing? | A yes. B tracing only. | A |
+
+## 9. Decisions
+
+The owner accepted the recommended option of every question on 2026-11-11. One decision (D1) was added on the same day.
+
+| # | Question | Chosen option | Date |
+|---|---|---|---|
+| Q1 | How does the command tell a target from a saved name? | A. Flags decide, with a note on a name clash. | 2026-11-11 |
+| Q2 | How does a user ask for a wallet? | A. `--kind address`. | 2026-11-11 |
+| Q3 | Is `--rule` in the shared flags? | A. Yes, `monitor` gets it too. | 2026-11-11 |
+| Q4 | Do config `monitor.alerts` apply to an inline target? | A. Yes, listed in `start`. | 2026-11-11 |
+| Q5 | Length of an inline run with no `--once` and no `--duration`? | A. 1 hour. | 2026-11-11 |
+| Q6 | How old may a state entry be? | A. 3 intervals. | 2026-11-11 |
+| Q7 | Does `--once` accept `--every`? | A. Yes, it sets the gap between runs. | 2026-11-11 |
+| Q8 | Which runs use the state? | A. Every headless run, `--no-state` to turn off. | 2026-11-11 |
+| Q9 | Does a state write failure change the exit code? | A. No. | 2026-11-11 |
+| Q10 | How do two overlapping runs behave? | A. Short lock and merge. | 2026-11-11 |
+| Q11 | How are two targets with the same id and venue told apart? | A. Ordinal in the key. | 2026-11-11 |
+| Q12 | What happens to an unreadable state file? | A. Move to `.bad`. | 2026-11-11 |
+| Q13 | What is the bound, and can the user change it? | A. Constant 8. | 2026-11-11 |
+| Q14 | One read at a time for each venue? | A. Yes. | 2026-11-11 |
+| Q15 | How long is the timeout of one read? | A. Constant 60 s. | 2026-11-11 |
+| Q16 | Does the JSON `tick` carry read timing? | A. Yes, in a `timing` field. | 2026-11-11 |
+| D1 | Do `MonitorWatchArgs` and `WatchArgs` keep their own copies of `--every`, `--duration`, `--csv` and `--report`? (Section 7 left this to the owner.) | No. The four flags are merged into shared flags. The merge is part of the CLI-target PR (item 1). | 2026-11-11 |
