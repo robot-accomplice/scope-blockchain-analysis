@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- A `tick` record of `scope watch --format json` has a new field, `timing`. It has `wall_ms`, `sum_ms`, `bound` and a list `reads`. Each read has `row`, `group`, `queued_ms`, `started_ms`, `took_ms`, `outcome` (`ok`, `error` or `timeout`) and `error`. Use it to find the read that made a tick slow. The other fields and the CSV bytes do not change. With `-v`, each read also gives a `watch read` trace line.
+
+### Changed
+- A tick of `scope watch` and of the TUI watch grid reads different venues at the same time (up to 8 reads at once). The reads of one venue run one after the other, as before. The order of the rows, the CSV rows and the report does not change, and the result of a tick does not depend on which read finishes first. A tick now takes about as long as its slowest venue, not the sum of all venues.
+- A read that takes more than 60 s is dropped. Its cells show the error `read timed out after 60s`, and the row is unknown (exit code 2 for `scope watch`). The other reads go on.
+- A read in a tick never asks a question in the terminal. If a symbol is not clear, the read fails with the error that lists the candidates. Before, a read could ask in a terminal. Two reads at the same time would both read the same input. The TUI grid still asks in its list, one question at a time.
+
 ### Fixed
 - `token-health --format csv` now prints CSV. It printed the same box table as `--format table`, which no CSV reader could parse. The file has one header and one row for each venue, in the order given, with the DEX analytics repeated in each row. Numbers are raw (no `$`, `%` or `K`/`M`/`B` suffix). A missing value is an empty cell. A venue that fails has a row with `status` `error` and the reason in `error`, also when you name one venue. Without `--with-market`, there is one row and the market cells are empty. In `symbol`, `bot_signs` and `error`, text that starts with `=`, `+`, `-` or `@` gets a leading `'`, so a spreadsheet does not run it as a formula. The 0.8.7 note "One venue, and the default, give the output they gave before, in every format" does not hold for `csv`. Scripts that read the old table output of `--format csv` must change: use `--format table` for it. `table`, `json` and `markdown` do not change.
 - The `Jittered timer` evidence now counts pauses on both rules, and says what a pause is. Before, only the band rule showed a count (`in bursts with 3 long pauses`) and "long" had no definition. The floor rule showed no count, so a bot with 33 pauses (USDN on weex) showed none. Now both end with `, 33 pauses over 3m 42s`. A pause is a gap longer than 6 times the median gap. The text names that length. It adds nothing when there is no pause. The detector and the JSON do not change.
