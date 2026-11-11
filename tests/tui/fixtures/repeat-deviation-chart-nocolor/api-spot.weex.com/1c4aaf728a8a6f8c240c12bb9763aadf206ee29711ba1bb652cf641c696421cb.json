@@ -1,0 +1,68 @@
+{
+  "recorded": "2026-11-11T10:45:12.981200600+00:00",
+  "request": {
+    "method": "GET",
+    "url": "https://api-spot.weex.com/api/v3/market/ticker/24hr?symbol=USDCUSDT",
+    "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "responses": [
+    {
+      "status": 200,
+      "headers": {
+        "cache-control": "no-store, no-cache, must-revalidate, max-age=0, s-maxage=600",
+        "connection": "keep-alive",
+        "content-type": "application/json",
+        "cross-origin-opener-policy": "same-origin-allow-popups",
+        "date": "Wed, 11 Nov 2026 10:45:12 GMT",
+        "permissions-policy": "camera=(self \"https://*.sumsub.com\"), microphone=(self \"https://*.sumsub.com\"), geolocation=(), display-capture=(), fullscreen=(self)",
+        "referrer-policy": "strict-origin-when-cross-origin",
+        "server": "CloudFront",
+        "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+        "transfer-encoding": "chunked",
+        "vary": "Origin",
+        "via": "1.1 e99cb12c78a4cb6826cc74437a0ddcba.cloudfront.net (CloudFront)",
+        "x-amz-cf-id": "5pTxm-ATHotA7WWCXyTvwBVvBwJ9JVS08txAsxh21Wy0184WBtWDjg==",
+        "x-amz-cf-pop": "ZRH52-P1",
+        "x-cache": "Miss from cloudfront",
+        "x-content-type-options": "nosniff",
+        "x-dns-prefetch-control": "off",
+        "x-download-options": "noopen",
+        "x-frame-options": "SAMEORIGIN",
+        "x-permitted-cross-domain-policies": "none",
+        "x-remaining-weight-10s": "493",
+        "x-used-weight-10s": "7",
+        "x-xss-protection": "1; mode=block"
+      },
+      "body": "{\"symbol\":\"USDCUSDT\",\"priceChange\":\"-0.00026\",\"priceChangePercent\":\"-0.000259\",\"lastPrice\":\"1.00079\",\"bidPrice\":\"1.00078\",\"bidQty\":\"312099.3\",\"askPrice\":\"1.00079\",\"askQty\":\"14299616.9\",\"openPrice\":\"1.00105\",\"highPrice\":\"1.00110\",\"lowPrice\":\"1.00061\",\"volume\":\"350894524.3\",\"quoteVolume\":\"351221160.790208\",\"openTime\":1794307500000,\"closeTime\":1794393900000,\"count\":36310}"
+    },
+    {
+      "status": 200,
+      "headers": {
+        "cache-control": "no-store, no-cache, must-revalidate, max-age=0, s-maxage=600",
+        "connection": "keep-alive",
+        "content-type": "application/json",
+        "cross-origin-opener-policy": "same-origin-allow-popups",
+        "date": "Wed, 11 Nov 2026 10:45:14 GMT",
+        "permissions-policy": "camera=(self \"https://*.sumsub.com\"), microphone=(self \"https://*.sumsub.com\"), geolocation=(), display-capture=(), fullscreen=(self)",
+        "referrer-policy": "strict-origin-when-cross-origin",
+        "server": "CloudFront",
+        "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+        "transfer-encoding": "chunked",
+        "vary": "Origin",
+        "via": "1.1 e99cb12c78a4cb6826cc74437a0ddcba.cloudfront.net (CloudFront)",
+        "x-amz-cf-id": "q1-hAejZXfSzNqTVIfEnQAqoV5R3g245SNR8DBGyb61_IFLEF6Xyow==",
+        "x-amz-cf-pop": "ZRH52-P1",
+        "x-cache": "Miss from cloudfront",
+        "x-content-type-options": "nosniff",
+        "x-dns-prefetch-control": "off",
+        "x-download-options": "noopen",
+        "x-frame-options": "SAMEORIGIN",
+        "x-permitted-cross-domain-policies": "none",
+        "x-remaining-weight-10s": "461",
+        "x-used-weight-10s": "39",
+        "x-xss-protection": "1; mode=block"
+      },
+      "body": "{\"symbol\":\"USDCUSDT\",\"priceChange\":\"-0.00025\",\"priceChangePercent\":\"-0.000249\",\"lastPrice\":\"1.00080\",\"bidPrice\":\"1.00080\",\"bidQty\":\"392497.2\",\"askPrice\":\"1.00081\",\"askQty\":\"14294051.6\",\"openPrice\":\"1.00105\",\"highPrice\":\"1.00110\",\"lowPrice\":\"1.00061\",\"volume\":\"350903917.3\",\"quoteVolume\":\"351230561.304608\",\"openTime\":1794307500000,\"closeTime\":1794393900000,\"count\":36311}"
+    }
+  ]
+}

@@ -64,6 +64,7 @@ pub mod charts;
 pub mod compliance;
 pub mod contract;
 pub mod crawl;
+pub(crate) mod csv;
 pub mod discover;
 pub mod dispatch;
 pub mod errors;
@@ -92,6 +93,7 @@ pub mod tui;
 pub mod tx;
 pub mod venues;
 pub mod watch;
+pub mod watch_args;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -681,7 +683,7 @@ mod tests {
         assert!(matches!(cli.command, Commands::Monitor(_)));
         if let Commands::Monitor(args) = cli.command {
             assert_eq!(args.token, "USDC");
-            assert_eq!(args.chain, "ethereum"); // default
+            assert_eq!(args.target.chain, None); // the default chain applies
             assert!(args.refresh.is_none());
             assert!(args.export.is_none());
         }
@@ -693,7 +695,7 @@ mod tests {
 
         if let Commands::Monitor(args) = cli.command {
             assert_eq!(args.token, "USDC");
-            assert_eq!(args.chain, "solana");
+            assert_eq!(args.target.chain.as_deref(), Some("solana"));
         } else {
             panic!("Expected Monitor command");
         }
@@ -705,7 +707,7 @@ mod tests {
 
         if let Commands::Monitor(args) = cli.command {
             assert_eq!(args.token, "PEPE");
-            assert_eq!(args.chain, "ethereum");
+            assert_eq!(args.target.chain.as_deref(), Some("ethereum"));
         } else {
             panic!("Expected Monitor command");
         }
@@ -743,7 +745,7 @@ mod tests {
 
         if let Commands::Monitor(args) = cli.command {
             assert_eq!(args.token, "USDC");
-            assert_eq!(args.chain, "solana");
+            assert_eq!(args.target.chain.as_deref(), Some("solana"));
             assert_eq!(args.refresh, Some(10));
             assert_eq!(args.export, Some(std::path::PathBuf::from("data.csv")));
         } else {

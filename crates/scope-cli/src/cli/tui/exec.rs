@@ -128,8 +128,9 @@ pub enum Plan {
 /// What the `watch` session command asks the TUI to do.
 #[derive(Debug)]
 pub enum WatchCommand {
-    /// Start this watchlist in the grid.
-    Open(Box<scope::watch::Watchlist>),
+    /// Start this watchlist in the grid. The path is the file it was read
+    /// from: the grid's `Ctrl-S` writes it back.
+    Open(Box<scope::watch::Watchlist>, std::path::PathBuf),
     /// Stop the running watchlist.
     Stop,
     /// Show the grid.
@@ -278,7 +279,7 @@ fn watch_command(
         [name] | ["open", name] if !name.starts_with('-') => {
             let path = crate::cli::watch::watchlist_path(name, dir);
             match file::load(&path, Some(venues)) {
-                Ok(w) => Ok(Plan::Watch(WatchCommand::Open(Box::new(w)))),
+                Ok(w) => Ok(Plan::Watch(WatchCommand::Open(Box::new(w), path))),
                 Err(errors) => {
                     errln!(out, "{} is not a valid watchlist:", path.display())?;
                     for e in errors.0 {
@@ -1468,11 +1469,12 @@ mod tests {
         let (_, text) = watch(&["list"], dir.path());
         assert!(text.contains("  stables"), "{text}");
         let (p, _) = watch(&["open", "stables"], dir.path());
-        let Plan::Watch(WatchCommand::Open(w)) = p else {
+        let Plan::Watch(WatchCommand::Open(w, file)) = p else {
             panic!("expected open, got {p:?}")
         };
         assert_eq!(w.name, "stables");
         assert_eq!(w.targets.len(), 1);
+        assert_eq!(file, dir.path().join("stables.yaml"));
 
         assert!(matches!(
             watch(&["stop"], dir.path()).0,
@@ -1505,7 +1507,7 @@ mod tests {
             vec!["open", "stables"],
             vec![by_path.to_str().unwrap()],
         ] {
-            let Plan::Watch(WatchCommand::Open(w)) = watch(&words, dir.path()).0 else {
+            let Plan::Watch(WatchCommand::Open(w, _)) = watch(&words, dir.path()).0 else {
                 panic!("{words:?} must open the grid")
             };
             assert_eq!(w.name, "stables");
@@ -1601,7 +1603,7 @@ mod tests {
         let Commands::Monitor(m) = inv.command else {
             panic!("expected monitor")
         };
-        assert_eq!(m.chain, "ethereum");
+        assert_eq!(m.target.chain, None);
 
         let mut ctx = SessionContext {
             chain: "solana".into(),
@@ -1611,7 +1613,7 @@ mod tests {
         let Commands::Monitor(m) = inv.command else {
             panic!("expected monitor")
         };
-        assert_eq!(m.chain, "solana");
+        assert_eq!(m.target.chain.as_deref(), Some("solana"));
     }
 
     #[test]

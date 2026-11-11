@@ -67,6 +67,13 @@ pub enum Step {
         #[serde(default, deserialize_with = "de_opt_duration")]
         timeout: Option<Duration>,
     },
+    /// Waits until the regex no longer matches the screen. Use it after a step
+    /// that clears old output, so a later `wait_for` cannot match stale text.
+    WaitGone {
+        text: String,
+        #[serde(default, deserialize_with = "de_opt_duration")]
+        timeout: Option<Duration>,
+    },
     ExpectScreen {
         #[serde(default)]
         contains: Vec<String>,
@@ -304,6 +311,21 @@ steps:
         assert_eq!(s.timeout, Duration::from_secs(120));
         assert!(
             matches!(&s.steps[1], Step::WaitFor { timeout: Some(t), .. } if *t == Duration::from_secs(5))
+        );
+    }
+
+    #[test]
+    fn test_parse_wait_gone_step() {
+        let s = parse(
+            "name: x
+steps:
+  - wait_gone: { text: \"old\", timeout: 3s }
+  - expect_exit: 0
+",
+        )
+        .unwrap();
+        assert!(
+            matches!(&s.steps[0], Step::WaitGone { text, timeout: Some(t) } if text == "old" && *t == Duration::from_secs(3))
         );
     }
 

@@ -4,7 +4,8 @@ steps:
   # The harness checks text, not color. The state word is the text half of
   # the rule color (cyan idle, yellow running, red failed); with color off
   # the word is all that is left.
-  - expect_screen: { contains: ["─ idle"] }
+  # The first paint comes after the spawn. Wait for it: a check at once sees an empty screen.
+  - wait_for: { text: "─ idle" }
   - type: "market summary USDC --venue binance --every 5s --duration 1m"
   - key: Enter
   - wait_for: { text: "─ running", timeout: 10s }

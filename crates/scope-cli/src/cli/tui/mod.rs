@@ -41,6 +41,7 @@ pub(crate) mod market_view;
 pub mod palette;
 pub(crate) mod repeat_view;
 pub(crate) mod venue_charts;
+pub mod venue_edit;
 pub mod vocab;
 pub mod wizard;
 
@@ -587,7 +588,7 @@ async fn event_loop<H: Host>(
                         state.copied(text.lines().count(), result);
                     }
                     Action::StartWatch(list) => {
-                        if let Some(run) = begin_watch(state, &settings, *list) {
+                        if let Some(run) = begin_watch(state, &settings, *list, None) {
                             watch_pending = Some(run);
                         }
                     }
@@ -606,8 +607,9 @@ async fn event_loop<H: Host>(
                         Plan::Done => {}
                         Plan::Exit => return Ok(LEFT),
                         Plan::Watch(cmd) => match cmd {
-                            WatchCommand::Open(list) => {
-                                if let Some(run) = begin_watch(state, &settings, *list) {
+                            WatchCommand::Open(list, file) => {
+                                if let Some(run) = begin_watch(state, &settings, *list, Some(file))
+                                {
                                     watch_pending = Some(run);
                                 }
                             }
@@ -682,11 +684,14 @@ async fn event_loop<H: Host>(
 const WATCH_BUSY_NOTE: &str =
     "A watchlist runs already. Stop it first (`watch stop`, or Esc in the grid).";
 
-/// Starts `list` in the grid, unless a watchlist runs already.
+/// Starts `list` in the grid, unless a watchlist runs already. `file` is
+/// the file the list came from or was saved to; without one, the grid takes
+/// the file the wizard saves the list to (`Ctrl-S` writes it).
 fn begin_watch(
     state: &mut TuiState,
     settings: &std::rc::Rc<Settings>,
     list: scope::watch::Watchlist,
+    file: Option<std::path::PathBuf>,
 ) -> Option<PaneFuture<'static>> {
     if state.watch_running() {
         state.push_note(WATCH_BUSY_NOTE);
@@ -694,10 +699,10 @@ fn begin_watch(
     }
     // A finished grid makes room for the new one.
     state.close_grid();
-    let (out, sink, tx) = state.start_watch(list.clone());
+    let (out, sink, tx, queue) = state.start_watch(list.clone(), file);
     let s = settings.clone();
     Some(Box::pin(scope::diag::scoped(sink, async move {
-        run_watch(list, &s, &out, tx).await
+        run_watch(list, &s, &out, tx, &queue).await
     })))
 }
 
@@ -729,7 +734,7 @@ fn open_monitor(
                     Err(e) => state.push_note(&format!("Could not save {}: {e}", path.display())),
                 }
             }
-            begin_watch(state, settings, list)
+            begin_watch(state, settings, list, None)
         }
         Ok((list, notes)) => {
             state.open_wizard(list, notes);
@@ -746,6 +751,7 @@ async fn run_watch(
     settings: &Settings,
     out: &Output,
     tx: std::sync::mpsc::Sender<grid::GridMsg>,
+    queue: &crate::cli::watch::run::VenueQueue,
 ) -> Result<()> {
     let src = crate::cli::watch::Sources {
         config: &settings.config,
@@ -753,7 +759,23 @@ async fn run_watch(
     };
     let ready = crate::cli::watch::prepare(&list, src, out).await?;
     let _ = tx.send(grid::GridMsg::Ready(ready.clone()));
-    crate::cli::watch::run(&ready, src, out, |run, tick, events| {
+    // The grid's venue changes apply at the start of a tick (design
+    // 2026-11-11, item 2): the grid is told which run took them.
+    let mut on_applied =
+        |run: u64,
+         ready: &crate::cli::watch::Ready,
+         changes: &[crate::cli::watch::run::VenueChange]| {
+            let _ = tx.send(grid::GridMsg::VenuesApplied {
+                run,
+                ready: ready.clone(),
+                changes: changes.to_vec(),
+            });
+        };
+    let edits = crate::cli::watch::run::Edits {
+        queue,
+        on_applied: &mut on_applied,
+    };
+    crate::cli::watch::run::run_editable(&ready, src, out, Some(edits), |run, tick, events| {
         let _ = tx.send(grid::GridMsg::Tick {
             run,
             tick: Box::new(tick.clone()),

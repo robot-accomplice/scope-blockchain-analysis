@@ -19,7 +19,9 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::symbols::Marker;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Axis, Block, Chart, Dataset, GraphType, Paragraph};
+use ratatui::widgets::{Axis, Block, Chart, Dataset, GraphType, Paragraph, Wrap};
+use scope::market::DexVenue;
+use scope::market::health::{DeviationGap, PegBands};
 use scope::metrics::{Threshold, Unit};
 use scope::watch::RuleStatus;
 use std::time::Duration;
@@ -30,12 +32,65 @@ pub(crate) const MIN_CHART_COLS: u16 = 40;
 /// The lowest chart pane: two border rows and three plot rows.
 pub(crate) const MIN_CHART_ROWS: u16 = 5;
 
+/// The legend's title is ` venues: ` before the chart's label and a space
+/// after it. It makes the legend wider, up to the cap, so the label of
+/// `Peg deviation (bps)` is not cut.
+const LEGEND_TITLE_PREFIX_COLS: usize = 10;
+const LEGEND_TITLE_MAX_COLS: usize = 30;
+
 /// Columns of a value in the legend.
 const VALUE_COLS: usize = 10;
 
 /// The series from this one on repeat the colours of the first ones, so
 /// they draw with dots instead of braille to stay apart.
 const DOT_FROM: usize = scope::display::theme::SERIES_TONES.len();
+
+/// The lowest plot, in rows, that has room for band lines beside the data.
+/// Under it the legend names the band and the lines are left out.
+const MIN_BAND_PLOT_ROWS: u16 = 4;
+
+/// The legend row that names a chart's band: `band ±10 bps`.
+fn band_text(band: &Band) -> String {
+    format!("  band ±{} {}", value_text(Some(band.half)), band.unit)
+}
+
+/// The on-peg band of a signed chart (the peg deviation), plus the wider
+/// outlier band, both as half-widths in the chart's own unit.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Band {
+    pub half: f64,
+    pub outlier: f64,
+    pub unit: &'static str,
+}
+
+/// The title of the peg deviation chart.
+pub(crate) const DEVIATION_LABEL: &str = "Peg deviation (bps)";
+
+/// The unit of the peg deviation chart.
+const DEVIATION_UNIT: &str = "bps";
+
+/// The tag on a DEX venue in the deviation chart: its mid is in USD, a
+/// CEX mid is in the pair's quote, so two lines can differ for that reason.
+const DEX_TAG: &str = "usd";
+
+/// The band of the deviation chart, from the peg bands the verdicts use.
+/// `None` when the peg target is not positive.
+pub(crate) fn deviation_band(bands: &PegBands) -> Option<Band> {
+    Some(Band {
+        half: bands.range_bps()?,
+        outlier: bands.outlier_bps()?,
+        unit: DEVIATION_UNIT,
+    })
+}
+
+/// A venue's name in the deviation chart: a DEX venue carries the tag.
+pub(crate) fn deviation_venue(venue: &str) -> String {
+    if DexVenue::parse(venue).is_some() {
+        format!("{venue} {DEX_TAG}")
+    } else {
+        venue.to_string()
+    }
+}
 
 /// One venue's series on one chart.
 #[derive(Debug, Clone, PartialEq)]
@@ -61,7 +116,28 @@ pub(crate) struct VenueChart {
     pub threshold: Option<Threshold>,
     /// The metric's unit, for the smallest span; `None` for a preset check.
     pub unit: Option<Unit>,
+    /// The band of a signed chart around zero. A chart with a band always
+    /// has it on its scale, shows a sign on its values, and draws one line
+    /// when a venue is isolated, because bars hide the sign.
+    pub band: Option<Band>,
     pub series: Vec<Series>,
+}
+
+impl VenueChart {
+    /// True when some venue has a value: a chart with none is not drawn.
+    pub(crate) fn has_values(&self) -> bool {
+        self.series
+            .iter()
+            .any(|s| s.values.iter().any(Option::is_some))
+    }
+
+    /// A value as this chart prints it: signed on a chart with a band.
+    fn text(&self, v: Option<f64>) -> String {
+        match (self.band, v) {
+            (Some(_), Some(v)) => format!("{v:+.1}"),
+            _ => value_text(v),
+        }
+    }
 }
 
 /// Every chart of the selected target.
@@ -70,15 +146,26 @@ pub(crate) struct VenueCharts {
     pub charts: Vec<VenueChart>,
     /// The time between two values, for the time axis.
     pub interval: Duration,
+    /// Why the peg deviation chart is missing, when it is. The legend
+    /// says it, so a missing chart is never silent.
+    pub gap: Option<DeviationGap>,
 }
 
 impl VenueCharts {
-    fn venues(&self) -> Vec<&str> {
+    /// The widest venue name of any chart (the deviation chart's names may
+    /// carry a tag).
+    fn name_cols(&self) -> usize {
         self.charts
-            .first()
-            .map(|c| c.series.iter().map(|s| s.venue.as_str()).collect())
-            .unwrap_or_default()
+            .iter()
+            .flat_map(|c| c.series.iter().map(|s| s.venue.chars().count()))
+            .max()
+            .unwrap_or(0)
     }
+}
+
+/// The words that say why the peg deviation chart is missing.
+pub(crate) fn gap_note(gap: DeviationGap) -> String {
+    format!("peg deviation: {}", gap.reason())
 }
 
 /// What the keys select in the venue charts.
@@ -130,7 +217,7 @@ fn range_text(chart: &VenueChart) -> String {
     let lo = last.iter().copied().fold(f64::INFINITY, f64::min);
     let hi = last.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     if lo.is_finite() {
-        format!("{}–{}", value_text(Some(lo)), value_text(Some(hi)))
+        format!("{}–{}", chart.text(Some(lo)), chart.text(Some(hi)))
     } else {
         "-".to_string()
     }
@@ -138,12 +225,7 @@ fn range_text(chart: &VenueChart) -> String {
 
 /// The legend's width: the widest venue row or `all` row, and borders.
 fn legend_width(charts: &VenueCharts) -> u16 {
-    let name = charts
-        .venues()
-        .iter()
-        .map(|v| v.chars().count())
-        .max()
-        .unwrap_or(0);
+    let name = charts.name_cols();
     // `> ■ name value ✓`
     let venue_row = 4 + name + 1 + VALUE_COLS + 2;
     let all_row = charts
@@ -152,7 +234,15 @@ fn legend_width(charts: &VenueCharts) -> u16 {
         .map(|c| 7 + range_text(c).chars().count())
         .max()
         .unwrap_or(0);
-    (venue_row.max(all_row) + 2) as u16
+    // ` venues: label `, cut at the cap so a long rule does not widen the
+    // legend for every chart.
+    let title_row = charts
+        .charts
+        .iter()
+        .map(|c| (LEGEND_TITLE_PREFIX_COLS + c.label.chars().count()).min(LEGEND_TITLE_MAX_COLS))
+        .max()
+        .unwrap_or(0);
+    (venue_row.max(all_row).max(title_row) + 2) as u16
 }
 
 /// Columns and rows the venue charts need beyond `area`, when they do not
@@ -260,7 +350,7 @@ fn draw_chart(
         .map(|&i| {
             let s = &chart.series[i];
             Span::styled(
-                format!(" {} {} ", s.venue, value_text(s.last())),
+                format!(" {} {} ", s.venue, chart.text(s.last())),
                 series_style(i),
             )
         })
@@ -285,7 +375,9 @@ fn draw_chart(
     let selected = &chart.series[sel.venue.min(chart.series.len() - 1)];
     let span = chart.unit.map(|u| min_span(u, &selected.values));
 
-    if sel.isolated {
+    // A signed chart (with a band) keeps its line when isolated: bars hide
+    // the sign and cannot carry two band lines.
+    if sel.isolated && chart.band.is_none() {
         // One venue: today's bars, with its threshold, over the time axis.
         let plot = Rect {
             height: inner.height - 1,
@@ -337,6 +429,10 @@ fn draw_chart(
     if !lo.is_finite() {
         return; // no value to draw yet
     }
+    if let Some(band) = chart.band {
+        // The band is the point of the chart: it is always on the scale.
+        (lo, hi) = (lo.min(-band.half), hi.max(band.half));
+    }
     let span = span.unwrap_or(0.0).max(if hi > lo {
         0.0
     } else {
@@ -359,7 +455,47 @@ fn draw_chart(
     let x_max = (len.max(2) - 1) as f64;
     let threshold_line: Vec<(f64, f64)> =
         line.map(|t| vec![(0.0, t), (x_max, t)]).unwrap_or_default();
+    // Band lines: plus and minus the range, and the peg between them as
+    // every other dot. Left out when the plot is too low to hold them
+    // beside the data; the outlier lines show only when on the scale.
+    let mut band_lines: Vec<Vec<(f64, f64)>> = Vec::new();
+    if let Some(band) = chart.band.filter(|_| inner.height >= MIN_BAND_PLOT_ROWS) {
+        let level = |y: f64| vec![(0.0, y), (x_max, y)];
+        band_lines.push(level(band.half));
+        band_lines.push(level(-band.half));
+        for y in [band.outlier, -band.outlier] {
+            if (lo..=hi).contains(&y) {
+                band_lines.push(level(y));
+            }
+        }
+    }
+    let peg_dots: Vec<(f64, f64)> = if band_lines.is_empty() {
+        Vec::new()
+    } else {
+        let dots = (usize::from(inner.width) / 2).max(2);
+        (0..dots)
+            .map(|k| (x_max * k as f64 / (dots - 1) as f64, 0.0))
+            .collect()
+    };
     let mut datasets = Vec::new();
+    for line in &band_lines {
+        datasets.push(
+            Dataset::default()
+                .marker(Marker::Dot)
+                .graph_type(GraphType::Line)
+                .style(SECONDARY)
+                .data(line),
+        );
+    }
+    if !peg_dots.is_empty() {
+        datasets.push(
+            Dataset::default()
+                .marker(Marker::Dot)
+                .graph_type(GraphType::Scatter)
+                .style(SECONDARY)
+                .data(&peg_dots),
+        );
+    }
     if !threshold_line.is_empty() {
         datasets.push(
             Dataset::default()
@@ -394,7 +530,7 @@ fn draw_chart(
             Axis::default()
                 .bounds([lo, hi])
                 .style(SECONDARY)
-                .labels([value_text(Some(lo)), value_text(Some(hi))]),
+                .labels([chart.text(Some(lo)), chart.text(Some(hi))]),
         );
     f.render_widget(plot, inner);
 }
@@ -419,18 +555,24 @@ fn draw_legend(
     }
     let inner = block.inner(area);
     f.render_widget(block, area);
-    let name = charts
-        .venues()
-        .iter()
-        .map(|v| v.chars().count())
-        .max()
-        .unwrap_or(0);
+    let name = charts.name_cols();
     let mut lines = vec![Line::from(vec![
         Span::styled("  all  ", SECONDARY),
         Span::raw(range_text(chart)),
     ])];
-    // Room for the venue rows under `all`: scroll so the selection shows.
-    let room = usize::from(inner.height).saturating_sub(1).max(1);
+    if let Some(band) = &chart.band {
+        lines.push(Line::styled(band_text(band), SECONDARY));
+    }
+    // The note for a missing deviation chart goes last and may wrap.
+    let note = charts.gap.map(gap_note);
+    let note_rows = note.as_ref().map_or(0, |n| {
+        (n.chars().count() + 1).div_ceil(usize::from(inner.width.max(1)))
+    });
+    // Room for the venue rows under `all` (and `band`): scroll so the
+    // selection shows.
+    let room = usize::from(inner.height)
+        .saturating_sub(lines.len() + note_rows)
+        .max(1);
     let first = sel.venue.saturating_sub(room - 1);
     for (i, s) in chart.series.iter().enumerate().skip(first).take(room) {
         let (glyph, glyph_style) = status_cell(&s.status);
@@ -447,11 +589,14 @@ fn draw_legend(
             Span::styled("■ ", dim(series_style(i))),
             Span::styled(format!("{:<name$} ", s.venue), dim(Style::new())),
             Span::styled(
-                format!("{:>VALUE_COLS$} ", value_text(s.last())),
+                format!("{:>VALUE_COLS$} ", chart.text(s.last())),
                 dim(series_style(i)),
             ),
             Span::styled(glyph, glyph_style),
         ]));
     }
-    f.render_widget(Paragraph::new(lines), inner);
+    if let Some(note) = note {
+        lines.push(Line::styled(format!(" {note}"), SECONDARY));
+    }
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }

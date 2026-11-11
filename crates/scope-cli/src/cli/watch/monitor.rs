@@ -2,6 +2,7 @@
 //! wizard (#47, design section 5.3).
 
 use crate::cli::monitor::MonitorArgs;
+use crate::cli::watch_args::{KindArg, TargetArgs};
 use scope::config::Config;
 use scope::metrics::MetricId;
 use scope::watch::time::{is_until_cancelled, parse_duration};
@@ -35,66 +36,94 @@ pub fn parse_run_duration(duration: &str) -> Result<Option<Duration>, String> {
         .map_err(|e| format!("--duration: {e}"))
 }
 
-/// The watchlist the monitor arguments describe, with the notes the user
-/// should read (flags that do nothing, alerts that are dropped).
+/// The target that the arguments describe, with what the user should read
+/// about it. The one definition of what `USDC --venue weex` watches: the
+/// monitor wizard and `scope watch` both build their target here.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BuiltTarget {
+    pub target: Target,
+    /// Flags that do nothing, alerts that are dropped.
+    pub notes: Vec<String>,
+    /// The rules that came from config `monitor.alerts`, not from the user.
+    pub alert_rules: Vec<String>,
+}
+
+/// Builds the target of `token` (the positional argument) and the target
+/// flags `t`. The rules are:
+///
+/// - With `--venue`: a `Pair` target. Its id is `--pair`, else the token.
+///   It gets the `market health` preset unless `--preset none`.
+/// - Without `--venue`: a `Token` target. Its id is `--token`, else the
+///   token. It gets `price_usd > 0` and `volume_24h >= 0`.
+/// - `--kind` picks the kind. `--kind address` is a wallet: it has no
+///   default rules, so it needs `--rule`.
+/// - `--rule` values are added after the preset and the default rules.
+/// - The alerts of config `monitor.alerts` follow, as rules.
 ///
 /// # Errors
 ///
-/// An interval or duration that does not parse, or an unknown preset.
-pub fn watchlist_from_args(
-    args: &MonitorArgs,
+/// An unknown preset, a `--rule` that does not parse, a flag that needs a
+/// venue (or must not have one), or an address with no rule.
+pub fn target_from_args(
+    token: &str,
+    t: &TargetArgs,
     config: &Config,
-) -> Result<(Watchlist, Vec<String>), String> {
-    let w = &args.watch;
+) -> Result<BuiltTarget, String> {
     let mut notes = Vec::new();
-    let mut list = Watchlist::new(
-        w.save
-            .clone()
-            .unwrap_or_else(|| format!("monitor-{}", args.token.to_lowercase())),
+    let kind = t.kind.map_or_else(
+        || {
+            if t.venue.is_empty() {
+                TargetKind::Token
+            } else {
+                TargetKind::Pair
+            }
+        },
+        |k| match k {
+            KindArg::Pair => TargetKind::Pair,
+            KindArg::Token => TargetKind::Token,
+            KindArg::Address => TargetKind::Address,
+        },
     );
-    if let Some(every) = &w.every {
-        list.interval = parse_interval(every)?;
-    } else if let Some(secs) = args.refresh {
-        if secs == 0 {
-            return Err("--refresh must be at least 1 second".to_string());
-        }
-        list.interval = Duration::from_secs(secs);
-    }
-    if let Some(d) = &w.duration {
-        list.duration = parse_run_duration(d)?;
-    }
-    list.outputs.csv = w.csv.clone().or_else(|| args.export.clone());
-    list.outputs.report = w.report.clone();
-
-    let preset = match w.preset.as_deref() {
-        None => (!args.venue.is_empty()).then_some(Preset::MarketHealth),
+    let preset = match t.preset.as_deref() {
+        None => (kind == TargetKind::Pair).then_some(Preset::MarketHealth),
         Some(p) if p.eq_ignore_ascii_case("none") => None,
         Some(p) => Some(
             Preset::from_name(p)
                 .ok_or_else(|| format!("unknown preset `{p}`; use market-health or none"))?,
         ),
     };
-    let mut target = match args.venue.as_slice() {
-        [_, ..] => {
-            let mut t = Target::new(
+    let mut rules = Vec::new();
+    for text in &t.rule {
+        rules.push(Rule::parse(text).map_err(|e| format!("--rule `{text}`: {e}"))?);
+    }
+    let mut target = match kind {
+        TargetKind::Pair => {
+            if t.venue.is_empty() {
+                return Err("--kind pair needs a venue (`--venue binance`)".to_string());
+            }
+            let mut target = Target::new(
                 TargetKind::Pair,
-                args.pair.clone().unwrap_or_else(|| args.token.clone()),
+                t.pair.clone().unwrap_or_else(|| token.to_string()),
             );
-            t.venues = args.venue.clone();
-            t
+            target.venues = t.venue.clone();
+            target
         }
-        [] => {
-            if preset.is_some() {
+        TargetKind::Token => {
+            if t.venue.is_empty() && preset.is_some() {
                 return Err("the market health checks need a venue (`--venue binance`)".to_string());
             }
-            let mut t = Target::new(
+            if t.pair.is_some() && t.venue.is_empty() {
+                return Err("--pair needs a venue (`--venue binance`)".to_string());
+            }
+            let mut target = Target::new(
                 TargetKind::Token,
-                args.token_contract
+                t.token_contract
                     .clone()
-                    .unwrap_or_else(|| args.token.clone()),
+                    .unwrap_or_else(|| token.to_string()),
             );
+            target.venues = t.venue.clone();
             // The price and volume charts of the old dashboard.
-            t.rules = vec![
+            target.rules = vec![
                 Rule {
                     metric: MetricId::PriceUsd,
                     op: Op::Gt,
@@ -106,38 +135,47 @@ pub fn watchlist_from_args(
                     value: 0.0,
                 },
             ];
-            t
+            target
+        }
+        TargetKind::Address => {
+            if !t.venue.is_empty() || t.pair.is_some() || preset.is_some() {
+                return Err(
+                    "--kind address has no venue, pair or checks: give it `--rule`".to_string(),
+                );
+            }
+            if rules.is_empty() {
+                return Err(
+                    "--kind address needs a rule, for example --rule \"native_balance > 1\""
+                        .to_string(),
+                );
+            }
+            Target::new(
+                TargetKind::Address,
+                t.token_contract
+                    .clone()
+                    .unwrap_or_else(|| token.to_string()),
+            )
         }
     };
-    if args.chain != scope::chains::DEFAULT_CHAIN {
-        target.chain = Some(args.chain.clone());
+    if let Some(chain) = t.chain.as_deref()
+        && chain != scope::chains::DEFAULT_CHAIN
+    {
+        target.chain = Some(chain.to_string());
     }
     target.preset = preset;
-    target.health = w.health.overrides();
+    target.health = t.health.overrides();
+    target.rules.extend(rules);
 
     // The monitor's alerts become rules: price bounds on the price the
     // target has; a whale or a volume spike on the venue's trades and
     // volume since the last tick. A rule says what must hold, so an alert
     // at a limit is a rule below it.
     let alerts = &config.monitor.alerts;
+    let before = target.rules.len();
     let price = match target.kind {
         TargetKind::Pair => MetricId::Mid,
         _ => MetricId::PriceUsd,
     };
-    if let Some(min) = alerts.price_min {
-        target.rules.push(Rule {
-            metric: price,
-            op: Op::Ge,
-            value: min,
-        });
-    }
-    if let Some(max) = alerts.price_max {
-        target.rules.push(Rule {
-            metric: price,
-            op: Op::Le,
-            value: max,
-        });
-    }
     let venue_alerts = [
         (alerts.whale_min_usd, MetricId::LargestTrade, Op::Lt),
         (
@@ -146,19 +184,90 @@ pub fn watchlist_from_args(
             Op::Le,
         ),
     ];
-    if !target.venues.is_empty() {
-        for (limit, metric, op) in venue_alerts {
-            if let Some(value) = limit {
-                target.rules.push(Rule { metric, op, value });
-            }
+    if target.kind == TargetKind::Address {
+        if alerts.price_min.is_some()
+            || alerts.price_max.is_some()
+            || venue_alerts.iter().any(|(limit, _, _)| limit.is_some())
+        {
+            notes.push(
+                "The alerts of config `monitor.alerts` read a price or a market. They do not apply to an address."
+                    .to_string(),
+            );
         }
-    } else if venue_alerts.iter().any(|(limit, _, _)| limit.is_some()) {
-        notes.push(
-            "The whale and volume-spike alerts of config `monitor.alerts` need a venue (`--venue binance`): they read its trades and 24h volume."
-                .to_string(),
-        );
+    } else {
+        if let Some(min) = alerts.price_min {
+            target.rules.push(Rule {
+                metric: price,
+                op: Op::Ge,
+                value: min,
+            });
+        }
+        if let Some(max) = alerts.price_max {
+            target.rules.push(Rule {
+                metric: price,
+                op: Op::Le,
+                value: max,
+            });
+        }
+        if !target.venues.is_empty() {
+            for (limit, metric, op) in venue_alerts {
+                if let Some(value) = limit {
+                    target.rules.push(Rule { metric, op, value });
+                }
+            }
+        } else if venue_alerts.iter().any(|(limit, _, _)| limit.is_some()) {
+            notes.push(
+                "The whale and volume-spike alerts of config `monitor.alerts` need a venue (`--venue binance`): they read its trades and 24h volume."
+                    .to_string(),
+            );
+        }
     }
-    if args.export.is_some() && w.csv.is_none() {
+    let alert_rules = target.rules[before..]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    Ok(BuiltTarget {
+        target,
+        notes,
+        alert_rules,
+    })
+}
+
+/// The watchlist the monitor arguments describe, with the notes the user
+/// should read (flags that do nothing, alerts that are dropped).
+///
+/// # Errors
+///
+/// An interval or duration that does not parse, or an unknown preset.
+pub fn watchlist_from_args(
+    args: &MonitorArgs,
+    config: &Config,
+) -> Result<(Watchlist, Vec<String>), String> {
+    let w = &args.watch;
+    let run = &w.run;
+    let mut list = Watchlist::new(
+        w.save
+            .clone()
+            .unwrap_or_else(|| format!("monitor-{}", args.token.to_lowercase())),
+    );
+    if let Some(every) = &run.every {
+        list.interval = parse_interval(every)?;
+    } else if let Some(secs) = args.refresh {
+        if secs == 0 {
+            return Err("--refresh must be at least 1 second".to_string());
+        }
+        list.interval = Duration::from_secs(secs);
+    }
+    if let Some(d) = &run.duration {
+        list.duration = parse_run_duration(d)?;
+    }
+    list.outputs.csv = run.csv.clone().or_else(|| args.export.clone());
+    list.outputs.report = run.report.clone();
+
+    let BuiltTarget {
+        target, mut notes, ..
+    } = target_from_args(&args.token, &args.target, config)?;
+    if args.export.is_some() && run.csv.is_none() {
         notes.push("--export is now --csv: it writes one row per check per run.".to_string());
     }
     list.targets.push(target);

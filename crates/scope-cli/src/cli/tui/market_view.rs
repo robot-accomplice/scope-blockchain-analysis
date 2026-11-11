@@ -155,7 +155,7 @@ pub(crate) fn lines_with(view: &SummaryView, opts: Opts) -> Vec<Line<'static>> {
 
 /// The bot-pattern signals under their own rule (full view): the name in
 /// a column, the evidence after it and wrapped under itself, then the
-/// share of trades that look bot-made.
+/// share of trades that repeat a size or ping-pong.
 fn bot_patterns(s: &MarketSummary) -> Vec<Line<'static>> {
     let Some(found) = s.bot_patterns.as_ref().filter(|b| !b.findings.is_empty()) else {
         return Vec::new();
@@ -909,7 +909,11 @@ mod tests {
             words.contains("100% of 60 trades are exactly 1000"),
             "{full}"
         );
-        assert!(section.contains("look bot-made"), "{full}");
+        assert!(words.contains("repeat a size or ping-pong"), "{full}");
+        assert!(
+            words.contains("the other signs above are not counted here"),
+            "{full}"
+        );
         // Not twice: the problems above skip the bot warning.
         assert_eq!(full.matches("Bot patterns").count(), 1, "{full}");
         // Every line stays inside the snapshot.

@@ -648,31 +648,88 @@ mod tests {
             .unwrap()
     }
 
+    /// How long the server test waits for a reply.
+    const REPLY_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// What the server test saw, so a timeout says where the time went.
+    #[derive(Default)]
+    struct Trail {
+        connect_attempts: u32,
+        last_connect_error: Option<String>,
+        /// (phase, time since the test began), in order.
+        phases: Vec<(&'static str, std::time::Duration)>,
+    }
+
+    impl Trail {
+        fn mark(trail: &std::sync::Mutex<Trail>, began: std::time::Instant, phase: &'static str) {
+            let mut t = trail.lock().unwrap();
+            if !t.phases.iter().any(|(p, _)| *p == phase) {
+                t.phases.push((phase, began.elapsed()));
+            }
+        }
+
+        fn report(&self, limit: std::time::Duration) -> String {
+            let seen: Vec<&str> = self.phases.iter().map(|(p, _)| *p).collect();
+            let missing: Vec<&str> = [
+                "free port chosen",
+                "server started",
+                "first connect attempt",
+                "first successful connect",
+                "request sent",
+                "reply received",
+            ]
+            .into_iter()
+            .filter(|p| !seen.contains(p))
+            .collect();
+            format!(
+                "no reply within {limit:?}: {} connect attempts, last connect error: {}; \
+                 phases (time since the test began): {:?}; never reached: {missing:?}",
+                self.connect_attempts,
+                self.last_connect_error.as_deref().unwrap_or("none"),
+                self.phases,
+            )
+        }
+    }
+
     #[tokio::test]
     async fn test_start_server_serves_the_ui_and_says_where() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let began = std::time::Instant::now();
+        let trail = std::sync::Mutex::new(Trail::default());
         let addr = free_addr();
+        Trail::mark(&trail, began, "free port chosen");
         let (out, cap) = Output::capture();
-        let server = start_server(addr, Config::default(), &out);
+        let server = async {
+            Trail::mark(&trail, began, "server started");
+            start_server(addr, Config::default(), &out).await
+        };
         let client = async {
             let mut stream = loop {
+                Trail::mark(&trail, began, "first connect attempt");
+                trail.lock().unwrap().connect_attempts += 1;
                 match tokio::net::TcpStream::connect(addr).await {
                     Ok(s) => break s,
-                    Err(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+                    Err(e) => {
+                        trail.lock().unwrap().last_connect_error = Some(e.to_string());
+                        tokio::time::sleep(std::time::Duration::from_millis(20)).await
+                    }
                 }
             };
+            Trail::mark(&trail, began, "first successful connect");
             stream
                 .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
                 .await
                 .unwrap();
+            Trail::mark(&trail, began, "request sent");
             let mut reply = String::new();
             stream.read_to_string(&mut reply).await.unwrap();
+            Trail::mark(&trail, began, "reply received");
             reply
         };
         let reply = tokio::select! {
             r = server => panic!("the server stopped: {r:?}"),
-            reply = tokio::time::timeout(std::time::Duration::from_secs(10), client) => {
-                reply.expect("a reply within 10s")
+            reply = tokio::time::timeout(REPLY_LIMIT, client) => {
+                reply.unwrap_or_else(|_| panic!("{}", trail.lock().unwrap().report(REPLY_LIMIT)))
             }
         };
         assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");

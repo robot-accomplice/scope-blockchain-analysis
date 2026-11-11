@@ -7,8 +7,9 @@
 //! - `tui-events.jsonl`: one JSON object per submitted line, with the
 //!   exact input, the argument vector clap parsed, where the command ran,
 //!   how long it took and how it ended. One more object records a signal
-//!   that ends the TUI. Use it to find out after the fact what a TUI
-//!   session did.
+//!   that ends the TUI. A third kind, `event: "watch_venues"`, records each
+//!   outcome of the venue editor of the watch grid ([`VenueRecord`]). Use
+//!   the file to find out after the fact what a TUI session did.
 
 use serde::Serialize;
 use std::borrow::Cow;
@@ -48,6 +49,80 @@ pub struct Event<'a> {
     pub outcome: Cow<'static, str>,
     /// The error text, for `error`.
     pub error: Option<String>,
+}
+
+/// The name of the `event` field of a [`VenueRecord`], to tell it from the
+/// records of submitted lines.
+pub const VENUE_EVENT: &str = "watch_venues";
+
+/// One outcome of the venue editor of the watch grid (design 2026-11-11,
+/// item 2, section 4.4). The grid makes it; the app writes it, because the
+/// app owns the journal.
+///
+/// `outcome` is `queued` (Enter), `applied` (the run took the change at the
+/// start of a tick), `cancelled`, `refused`, `superseded` (a later edit of
+/// the same target replaced it before the tick), `undone`, `saved` or
+/// `save_refused`. A record with a reason in `reason` says why.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct VenueRecord {
+    /// Always [`VENUE_EVENT`].
+    pub event: &'static str,
+    /// When the record was made (RFC 3339, UTC).
+    pub at: String,
+    pub watchlist: String,
+    /// The run number of the last tick when the record was made.
+    pub run: u64,
+    /// The target's id.
+    pub target: Option<String>,
+    /// The grid's number of the edit; the same in the records of one edit.
+    pub seq: Option<u64>,
+    /// The venues before the edit.
+    pub from: Vec<String>,
+    /// The venues the edit asks for.
+    pub to: Vec<String>,
+    /// The line exactly as the user typed it.
+    pub line: Option<String>,
+    pub outcome: &'static str,
+    pub reason: Option<String>,
+    /// When Enter queued the edit.
+    pub queued_at: Option<String>,
+    /// The run number of the tick that applied the edit.
+    pub applied_at_run: Option<u64>,
+    /// The file of a save.
+    pub path: Option<String>,
+    /// SHA-256 of the file text the run loaded, for a save that was refused.
+    pub loaded_sha256: Option<String>,
+    /// SHA-256 of the file text on disk then.
+    pub disk_sha256: Option<String>,
+}
+
+impl VenueRecord {
+    /// A record with an outcome and nothing else set.
+    pub fn new(
+        outcome: &'static str,
+        watchlist: impl Into<String>,
+        run: u64,
+        at: impl Into<String>,
+    ) -> Self {
+        Self {
+            event: VENUE_EVENT,
+            at: at.into(),
+            watchlist: watchlist.into(),
+            run,
+            target: None,
+            seq: None,
+            from: Vec::new(),
+            to: Vec::new(),
+            line: None,
+            outcome,
+            reason: None,
+            queued_at: None,
+            applied_at_run: None,
+            path: None,
+            loaded_sha256: None,
+            disk_sha256: None,
+        }
+    }
 }
 
 impl Journal {
@@ -121,13 +196,26 @@ impl Journal {
     ///
     /// Returns the file system or serialization error.
     pub fn record(&self, event: &Event<'_>) -> io::Result<()> {
+        self.append(event)
+    }
+
+    /// Appends one record of the venue editor.
+    ///
+    /// # Errors
+    ///
+    /// Returns the file system or serialization error.
+    pub fn record_venues(&self, record: &VenueRecord) -> io::Result<()> {
+        self.append(record)
+    }
+
+    fn append(&self, record: &impl Serialize) -> io::Result<()> {
         let Some(path) = &self.events else {
             return Ok(());
         };
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let mut line = serde_json::to_string(event)?;
+        let mut line = serde_json::to_string(record)?;
         line.push('\n');
         OpenOptions::new()
             .create(true)

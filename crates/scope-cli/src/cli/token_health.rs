@@ -5,9 +5,10 @@
 //! peg deviation, and order book depth.
 
 use crate::cli::crawl::{self, Period};
+use crate::cli::csv::{csv_line, defuse_formula};
 use crate::cli::market_venues::{
-    VenueReport, VenueSource, checked_venues, comparison_markdown, comparison_rows,
-    comparison_table, pair_in, read_token_summaries,
+    ComparisonRow, VenueReport, VenueSource, checked_venues, comparison_markdown, comparison_rows,
+    comparison_table, one_line, pair_in, read_token_summaries,
 };
 use crate::cli::output::Output;
 use crate::{out, outln};
@@ -105,7 +106,9 @@ pub struct TokenHealthArgs {
     )]
     pub venue: Vec<String>,
 
-    /// Output format.
+    /// Output format. `csv` has one header and one row for each venue.
+    ///
+    /// With `csv`, numbers are raw (no `$`, `%` or `K`/`M`/`B`). The analytics columns are in USD, `price_change_24h` and `top_10_concentration` in percent. The market columns are in the quote currency of the venue, `spread_pct` in percent and `peg_deviation_bps` in basis points. A missing value is an empty cell. The header is in the README.
     #[arg(short, long, default_value = "table")]
     pub format: scope::config::OutputFormat,
 
@@ -162,6 +165,9 @@ pub async fn run(
 
     // 2. Optionally fetch market summary for stablecoin
     let mut reports: Vec<VenueReport> = Vec::new();
+    // The reason a single venue failed: the table prints it as a warning,
+    // the CSV keeps it in the data.
+    let mut single_failure: Option<String> = None;
     let market_summary = if args.with_market && many {
         sp.set_message("Fetching market data...");
         let thresholds = args.health.resolve(config);
@@ -183,6 +189,7 @@ pub async fn run(
             Ok(summary) => Some(summary),
             Err(e) => {
                 sp.println(&format!("  Warning: market data unavailable: {e}"));
+                single_failure = Some(one_line(&e));
                 None
             }
         }
@@ -195,6 +202,11 @@ pub async fn run(
     // 3. Output combined report
     if many {
         return print_many(format, &analytics, &reports, out);
+    }
+    if format == scope::config::OutputFormat::Csv {
+        let reports = single_reports(&venues[0], args.with_market, market_summary, single_failure);
+        out!(out, "{}", token_health_csv(&analytics, &reports))?;
+        return Ok(());
     }
     let venue_label = if args.with_market {
         Some(venues[0].as_str())
@@ -236,11 +248,116 @@ fn print_many(
         scope::config::OutputFormat::Json => {
             outln!(out, "{}", token_health_many_to_json(analytics, reports)?)?;
         }
-        scope::config::OutputFormat::Table | scope::config::OutputFormat::Csv => {
+        scope::config::OutputFormat::Csv => {
+            out!(out, "{}", token_health_csv(analytics, reports))?;
+        }
+        scope::config::OutputFormat::Table => {
             output_token_health_many_table(analytics, reports, out)?;
         }
     }
     Ok(())
+}
+
+/// The header of `--format csv`: the DEX analytics (9 columns), then the
+/// market columns of one venue (11 columns). The order is fixed; a new
+/// column goes at the end (design 2026-11-11, section 5).
+const CSV_HEADER: &str = "symbol,chain,contract,price_usd,price_change_24h,volume_24h,\
+    liquidity_usd,market_cap,top_10_concentration,venue,status,mid,spread_pct,bid_depth,ask_depth,\
+    market_volume_24h,peg_deviation_bps,bot_signs,bot_signs_state,error";
+
+/// The number of market columns (venue to error).
+const CSV_MARKET_COLUMNS: usize = 11;
+
+/// The separator of the bot sign names inside one cell.
+const CSV_LIST_SEPARATOR: &str = ";";
+
+/// The reports of the one-venue path, in the shape of the many-venue path,
+/// so the CSV has one writer for 1 and N venues. Without `--with-market`
+/// there is no report, and the CSV row has empty market cells.
+fn single_reports(
+    venue: &str,
+    with_market: bool,
+    summary: Option<MarketSummary>,
+    failure: Option<String>,
+) -> Vec<VenueReport> {
+    if !with_market {
+        return Vec::new();
+    }
+    let result = match summary {
+        Some(summary) => Ok(summary),
+        None => Err(failure.unwrap_or_default()),
+    };
+    vec![VenueReport {
+        venue: venue.to_string(),
+        tokens: Vec::new(),
+        result,
+    }]
+}
+
+/// A number as the JSON writes it (`f64` text, no rounding, no unit). A
+/// missing or non-finite value is an empty cell.
+fn csv_number(value: Option<f64>) -> String {
+    value
+        .filter(|v| v.is_finite())
+        .map(|v| v.to_string())
+        .unwrap_or_default()
+}
+
+/// The name a row enum has in the JSON `comparison` array.
+fn csv_name(value: &impl serde::Serialize) -> String {
+    match serde_json::to_value(value) {
+        Ok(serde_json::Value::String(name)) => name,
+        _ => String::new(),
+    }
+}
+
+/// The CSV of a token-health run: the header, then one row for each venue
+/// in the order given (design 2026-11-11). The market cells come from the
+/// same `ComparisonRow` as the tables and the JSON `comparison`. Without a
+/// venue there is one row with empty market cells.
+fn token_health_csv(analytics: &TokenAnalytics, reports: &[VenueReport]) -> String {
+    let leading = [
+        defuse_formula(&analytics.token.symbol),
+        analytics.chain.clone(),
+        analytics.token.contract_address.clone(),
+        csv_number(Some(analytics.price_usd)),
+        csv_number(Some(analytics.price_change_24h)),
+        csv_number(Some(analytics.volume_24h)),
+        csv_number(Some(analytics.liquidity_usd)),
+        csv_number(analytics.market_cap),
+        csv_number(analytics.top_10_concentration),
+    ];
+    let market: Vec<Vec<String>> = if reports.is_empty() {
+        vec![vec![String::new(); CSV_MARKET_COLUMNS]]
+    } else {
+        comparison_rows(reports)
+            .iter()
+            .map(csv_market_cells)
+            .collect()
+    };
+    let mut csv = format!("{CSV_HEADER}\n");
+    for cells in market {
+        let row: Vec<String> = leading.iter().cloned().chain(cells).collect();
+        csv.push_str(&csv_line(&row));
+    }
+    csv
+}
+
+fn csv_market_cells(row: &ComparisonRow) -> Vec<String> {
+    let signs = row.bot_signs.clone().unwrap_or_default();
+    vec![
+        row.venue.clone(),
+        csv_name(&row.status),
+        csv_number(row.mid),
+        csv_number(row.spread_pct),
+        csv_number(row.bid_depth),
+        csv_number(row.ask_depth),
+        csv_number(row.volume_24h),
+        csv_number(row.peg_deviation_bps),
+        defuse_formula(&signs.join(CSV_LIST_SEPARATOR)),
+        csv_name(&row.bot_signs_state),
+        defuse_formula(row.error.as_deref().unwrap_or_default()),
+    ]
 }
 
 fn token_health_many_to_markdown(analytics: &TokenAnalytics, reports: &[VenueReport]) -> String {
@@ -1406,7 +1523,9 @@ pub(crate) mod tests {
     /// captured from `develop` at commit c09a5640c164, before the venue list
     /// existed, by running the same inputs through that commit's code. The
     /// code under test did not render them, so a change of the one-venue
-    /// output fails the test. `csv` printed the same bytes as `table`.
+    /// output fails the test. `csv` printed the same bytes as `table` then;
+    /// its fixture is now written by hand (design 2026-11-11, section 8, test
+    /// 14), and `one_venue_csv_equals_the_hand_typed_fixture` reads it.
     fn develop_output(format: OutputFormat) -> String {
         mask_run_details(&develop_bytes(format))
     }
@@ -1455,9 +1574,10 @@ pub(crate) mod tests {
     async fn one_venue_gives_exactly_the_old_output_in_every_format() {
         // The compatibility promise: a script written for one venue reads
         // the same bytes after the list exists.
+        // `csv` is not here: it is a real CSV now, and its fixture is typed by
+        // hand (`one_venue_csv_equals_the_hand_typed_fixture`).
         for format in [
             OutputFormat::Table,
-            OutputFormat::Csv,
             OutputFormat::Markdown,
             OutputFormat::Json,
         ] {
@@ -1507,21 +1627,299 @@ pub(crate) mod tests {
         );
     }
 
+    // --- `--format csv` (design 2026-11-11) ---------------------------------
+
+    /// The header, typed out. A script reads columns by name or by position,
+    /// so a change of name or order must fail here and send the author to the
+    /// CHANGELOG rule.
+    const EXPECTED_CSV_HEADER: &str = "symbol,chain,contract,price_usd,price_change_24h,volume_24h,liquidity_usd,market_cap,top_10_concentration,venue,status,mid,spread_pct,bid_depth,ask_depth,market_volume_24h,peg_deviation_bps,bot_signs,bot_signs_state,error";
+
+    /// The number of cells in every row (9 analytics, 11 market).
+    const EXPECTED_CSV_COLUMNS: usize = 20;
+
+    /// Column positions the tests read.
+    const COL_SYMBOL: usize = 0;
+    const COL_PRICE_CHANGE: usize = 4;
+    const COL_VENUE: usize = 9;
+    const COL_STATUS: usize = 10;
+    const COL_MID: usize = 11;
+    const COL_BOT_SIGNS: usize = 17;
+    const COL_ERROR: usize = 19;
+    /// The columns that hold a number (or nothing).
+    const NUMERIC_COLUMNS: [usize; 12] = [3, 4, 5, 6, 7, 8, 11, 12, 13, 14, 15, 16];
+
+    /// A CSV reader by the rules of RFC 4180: it is the check that a row
+    /// splits into the cells the writer meant.
+    fn parse_csv(text: &str) -> Vec<Vec<String>> {
+        let (mut rows, mut row, mut cell) = (Vec::new(), Vec::new(), String::new());
+        let (mut quoted, mut chars) = (false, text.chars().peekable());
+        while let Some(c) = chars.next() {
+            match (quoted, c) {
+                (true, '"') if chars.peek() == Some(&'"') => {
+                    cell.push('"');
+                    chars.next();
+                }
+                (true, '"') => quoted = false,
+                (true, _) => cell.push(c),
+                (false, '"') => quoted = true,
+                (false, ',') => row.push(std::mem::take(&mut cell)),
+                (false, '\n') => {
+                    row.push(std::mem::take(&mut cell));
+                    rows.push(std::mem::take(&mut row));
+                }
+                (false, _) => cell.push(c),
+            }
+        }
+        assert!(
+            !quoted && cell.is_empty() && row.is_empty(),
+            "unfinished row"
+        );
+        rows
+    }
+
+    async fn csv_of(venues: &[&str], with_market: bool) -> Vec<Vec<String>> {
+        let (result, text, _) = run_captured(
+            venue_args(venues, with_market, OutputFormat::Csv),
+            &counting_factory(),
+        )
+        .await;
+        result.expect("the CSV prints and the exit code is 0");
+        parse_csv(&text)
+    }
+
+    fn report(venue: &str, result: std::result::Result<MarketSummary, String>) -> VenueReport {
+        VenueReport {
+            venue: venue.to_string(),
+            tokens: Vec::new(),
+            result,
+        }
+    }
+
+    #[test]
+    fn the_csv_header_is_stable() {
+        let csv = token_health_csv(&make_test_analytics(false), &[]);
+        assert_eq!(csv.lines().next().unwrap(), EXPECTED_CSV_HEADER);
+        assert_eq!(EXPECTED_CSV_HEADER.split(',').count(), EXPECTED_CSV_COLUMNS);
+    }
+
     #[tokio::test]
-    async fn csv_prints_the_same_table_as_table_for_a_list() {
-        // `csv` has no writer; it keeps its meaning for a list too.
-        let venues = ["eth", "ethereum"];
-        let table = run_captured(
-            venue_args(&venues, true, OutputFormat::Table),
+    async fn the_header_is_the_same_for_one_venue_many_venues_and_no_market() {
+        // A reader that handles one case must handle the others.
+        for (venues, with_market) in [
+            (vec!["eth"], false),
+            (vec!["eth"], true),
+            (vec!["eth", "ethereum"], true),
+        ] {
+            let rows = csv_of(&venues, with_market).await;
+            assert_eq!(rows[0].join(","), EXPECTED_CSV_HEADER, "{venues:?}");
+            assert!(rows.iter().all(|r| r.len() == EXPECTED_CSV_COLUMNS));
+        }
+    }
+
+    #[tokio::test]
+    async fn one_row_for_each_venue_in_the_order_given() {
+        // The order is a promise made for every other format of this
+        // command. The list is not in alphabetical order.
+        let rows = csv_of(&["ethereum", "solana", "eth"], true).await;
+        let venues: Vec<&str> = rows[1..].iter().map(|r| r[COL_VENUE].as_str()).collect();
+        assert_eq!(venues, ["ethereum", "solana", "eth"]);
+    }
+
+    #[tokio::test]
+    async fn no_market_gives_one_row_with_empty_market_cells() {
+        // The analytics stay useful without --with-market.
+        let rows = csv_of(&["eth"], false).await;
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1][COL_SYMBOL], "USDC");
+        assert!(
+            rows[1][COL_VENUE..].iter().all(String::is_empty),
+            "venue and status are empty too: {:?}",
+            rows[1]
+        );
+    }
+
+    #[test]
+    fn a_failed_venue_has_a_row_with_status_error_and_the_reason() {
+        // A reason holds a comma and a double quote: the row must still have
+        // 20 cells, the number cells must be empty, and the venues around it
+        // must not change.
+        let why = "HTTP 500, body \"bad\"";
+        let reports = [
+            report("a", Ok(make_test_market_summary())),
+            report("b", Err(why.to_string())),
+            report("c", Ok(make_test_market_summary())),
+        ];
+        let rows = parse_csv(&token_health_csv(&make_test_analytics(false), &reports));
+        assert_eq!(rows.len(), 4);
+        assert!(rows.iter().all(|r| r.len() == EXPECTED_CSV_COLUMNS));
+        assert_eq!(rows[2][COL_STATUS], "error");
+        assert_eq!(rows[2][COL_ERROR], why);
+        assert!(rows[2][COL_MID..COL_BOT_SIGNS].iter().all(String::is_empty));
+        assert_eq!(rows[1][COL_STATUS], "healthy");
+        assert_eq!(rows[3][COL_STATUS], "healthy");
+        assert_eq!(rows[1][COL_ERROR], "");
+    }
+
+    #[tokio::test]
+    async fn a_failed_venue_does_not_change_the_exit_code() {
+        let rows = csv_of(&["eth", "solana"], true).await;
+        assert_eq!(rows[2][COL_STATUS], "error");
+        assert!(rows[2][COL_ERROR].contains("solana"), "{:?}", rows[2]);
+    }
+
+    #[tokio::test]
+    async fn a_one_venue_failure_has_an_error_row() {
+        // The table shows only a warning. A script that reads stdout must
+        // see the failure in the data, and tell "no market data" from
+        // "venue not asked".
+        let rows = csv_of(&["solana"], true).await;
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1][COL_VENUE], "solana");
+        assert_eq!(rows[1][COL_STATUS], "error");
+        assert!(rows[1][COL_ERROR].contains("reads chain"), "{:?}", rows[1]);
+    }
+
+    #[test]
+    fn numbers_are_raw_not_formatted() {
+        // A formatted cell ($, %, K/M/B, a thousands comma) breaks a sum.
+        let reports = [report("a", Ok(make_test_market_summary()))];
+        let rows = parse_csv(&token_health_csv(&make_test_analytics(false), &reports));
+        let mut checked = 0;
+        for col in NUMERIC_COLUMNS {
+            let cell = &rows[1][col];
+            if cell.is_empty() {
+                continue;
+            }
+            assert!(cell.parse::<f64>().is_ok(), "column {col}: {cell}");
+            assert!(
+                !cell.contains(['$', '%', ',', 'K', 'M', 'B']),
+                "column {col}: {cell}"
+            );
+            checked += 1;
+        }
+        assert!(checked >= 8, "the fixture fills most number cells");
+    }
+
+    #[test]
+    fn missing_and_non_finite_numbers_are_empty_cells() {
+        let mut analytics = make_test_analytics(false);
+        analytics.price_usd = f64::NAN;
+        analytics.volume_24h = f64::INFINITY;
+        analytics.market_cap = None;
+        let mut summary = make_test_market_summary();
+        summary.mid_price = None;
+        summary.volume_24h = Some(f64::NEG_INFINITY);
+        let rows = parse_csv(&token_health_csv(&analytics, &[report("a", Ok(summary))]));
+        let row = &rows[1];
+        assert_eq!(row[3], "", "NaN price");
+        assert_eq!(row[5], "", "infinite volume");
+        assert_eq!(row[7], "", "unknown market cap");
+        assert_eq!(row[COL_MID], "", "no mid");
+        assert_eq!(row[15], "", "infinite venue volume");
+        assert_eq!(row[6], "100000000", "a known value stays");
+    }
+
+    #[tokio::test]
+    async fn the_cells_equal_the_json_comparison_for_the_same_run() {
+        // The CSV and the JSON `comparison` come from the same rows. This
+        // fails if someone gives the CSV its own source.
+        let venues = ["eth", "solana", "ethereum"];
+        let rows = csv_of(&venues, true).await;
+        let (_, json, _) = run_captured(
+            venue_args(&venues, true, OutputFormat::Json),
             &counting_factory(),
         )
         .await;
-        let csv = run_captured(
-            venue_args(&venues, true, OutputFormat::Csv),
+        let json: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let number = |v: &serde_json::Value| v.as_f64().map(|n| n.to_string()).unwrap_or_default();
+        for (row, cmp) in rows[1..].iter().zip(json["comparison"].as_array().unwrap()) {
+            assert_eq!(row[COL_VENUE], cmp["venue"].as_str().unwrap());
+            assert_eq!(row[COL_STATUS], cmp["status"].as_str().unwrap());
+            assert_eq!(row[11], number(&cmp["mid"]));
+            assert_eq!(row[12], number(&cmp["spread_pct"]));
+            assert_eq!(row[13], number(&cmp["bid_depth"]));
+            assert_eq!(row[14], number(&cmp["ask_depth"]));
+            assert_eq!(row[15], number(&cmp["volume_24h"]));
+            assert_eq!(row[16], number(&cmp["peg_deviation_bps"]));
+            assert_eq!(row[18], cmp["bot_signs_state"].as_str().unwrap());
+            assert_eq!(row[COL_ERROR], cmp["error"].as_str().unwrap_or(""));
+        }
+    }
+
+    #[test]
+    fn text_that_looks_like_a_formula_is_neutralised_and_numbers_are_not() {
+        let mut analytics = make_test_analytics(false);
+        analytics.token.symbol = "=HYPERLINK(\"http://x\",\"y\")".to_string();
+        let reports = [report("a", Err("-cmd|' /C calc'!A0".to_string()))];
+        let rows = parse_csv(&token_health_csv(&analytics, &reports));
+        assert_eq!(rows[1][COL_SYMBOL], "'=HYPERLINK(\"http://x\",\"y\")");
+        assert_eq!(rows[1][COL_ERROR], "'-cmd|' /C calc'!A0");
+        // A negative number is correct data.
+        assert_eq!(rows[1][COL_PRICE_CHANGE], "-0.01");
+    }
+
+    #[tokio::test]
+    async fn stdout_is_only_csv() {
+        // A pipe user parses the whole of stdout. No box character, no
+        // colour code, no blank line, and the failed venue is in the data.
+        let (result, text, _) = run_captured(
+            venue_args(&["eth", "solana"], true, OutputFormat::Csv),
             &counting_factory(),
         )
         .await;
-        assert_eq!(table.1, csv.1);
+        result.unwrap();
+        assert!(!text.contains(['\u{1b}', '│', '┌', '─', '└']), "{text}");
+        assert!(text.ends_with('\n') && !text.ends_with("\n\n"), "{text:?}");
+        let rows = parse_csv(&text);
+        assert_eq!(rows.len(), 3);
+        assert!(rows.iter().all(|r| r.len() == EXPECTED_CSV_COLUMNS));
+    }
+
+    #[tokio::test]
+    async fn the_ai_flag_still_prints_markdown_for_csv() {
+        // --ai sets the config format to Markdown, and that wins, as before.
+        let mut config = Config::default();
+        config.output.format = OutputFormat::Markdown;
+        let (out, cap) = Output::capture();
+        run(
+            venue_args(&["eth"], true, OutputFormat::Csv),
+            &config,
+            &counting_factory(),
+            &out,
+        )
+        .await
+        .unwrap();
+        let text = strip(&cap.out());
+        assert!(text.contains("## Market / Order Book"), "{text}");
+        assert!(!text.starts_with(EXPECTED_CSV_HEADER), "{text}");
+    }
+
+    #[tokio::test]
+    async fn one_venue_csv_equals_the_hand_typed_fixture() {
+        // The fixture is typed by hand from the design's column rules and the
+        // mock inputs. It is not captured from the writer. No mask: the CSV
+        // holds no time and no version.
+        let (result, text, _) = run_captured(
+            venue_args(&["eth"], true, OutputFormat::Csv),
+            &counting_factory(),
+        )
+        .await;
+        result.unwrap();
+        assert_eq!(text, develop_bytes(OutputFormat::Csv));
+    }
+
+    #[tokio::test]
+    async fn two_venues_one_failed_equals_the_hand_typed_fixture() {
+        let (result, text, _) = run_captured(
+            venue_args(&["eth", "solana"], true, OutputFormat::Csv),
+            &counting_factory(),
+        )
+        .await;
+        result.unwrap();
+        let fixture =
+            include_str!("../../tests/fixtures/venue_list/token_health_two_venues_one_failed.csv")
+                .replace("\r\n", "\n");
+        assert_eq!(text, fixture);
     }
 
     #[tokio::test]
@@ -1660,5 +2058,22 @@ pub(crate) mod tests {
             .to_string();
         assert!(help.contains("--venue weex,binance"), "{help}");
         assert!(help.contains("The exit code is 0"), "{help}");
+    }
+
+    #[test]
+    fn the_format_help_names_the_csv_unit_rule() {
+        // A raw number has no unit in the cell, so the help must say it.
+        use clap::CommandFactory;
+        let help = crate::cli::Cli::command()
+            .find_subcommand("token-health")
+            .unwrap()
+            .clone()
+            .render_long_help()
+            .to_string();
+        assert!(
+            help.contains("one header and one row for each venue"),
+            "{help}"
+        );
+        assert!(help.contains("basis points"), "{help}");
     }
 }

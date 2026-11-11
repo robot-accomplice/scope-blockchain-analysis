@@ -65,6 +65,33 @@ pub(crate) fn width_lock() -> std::sync::MutexGuard<'static, ()> {
     WIDTH_LOCK.lock().unwrap_or_else(|p| p.into_inner())
 }
 
+/// The width the wrapping tests pin, in columns.
+#[cfg(test)]
+const TEST_WIDTH: usize = 80;
+
+/// Holds the width lock and pins the width override for one test.
+/// Without it a test reads the width of the terminal it runs in. A
+/// terminal that reports 0 or 1 column (the WSL stub tty) makes the
+/// content width 0, and `wrap_lines` then does not wrap.
+#[cfg(test)]
+pub(crate) struct PinnedWidth(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+#[cfg(test)]
+impl PinnedWidth {
+    pub(crate) fn new(width: usize) -> Self {
+        let lock = width_lock();
+        set_width_override(Some(width));
+        Self(lock)
+    }
+}
+
+#[cfg(test)]
+impl Drop for PinnedWidth {
+    fn drop(&mut self) {
+        set_width_override(None);
+    }
+}
+
 /// The widest rule, in columns, that the section helpers draw.
 const RULE_WIDTH: usize = 50;
 
@@ -1303,7 +1330,7 @@ mod tests {
 
     #[test]
     fn test_detail_row_wraps_long_text() {
-        let _lock = width_lock();
+        let _width = PinnedWidth::new(TEST_WIDTH);
         // detail_row prefix is 7 cols ("│      "); with width=40 that gives 33 cols for content
         let long = "Contract source code is not verified and full vulnerability analysis requires verified source code for accurate results";
         let row = detail_row_styled(long, false);
@@ -1322,10 +1349,7 @@ mod tests {
         // Verify no content is lost
         assert!(row.contains("Contract"));
         assert!(row.contains("results"));
-        // If terminal is wide enough, it might not wrap; otherwise verify multiple lines
-        if terminal_width() < 80 {
-            assert!(line_count > 1, "should wrap on narrow terminal");
-        }
+        assert!(line_count > 1, "should wrap at {TEST_WIDTH} columns");
     }
 
     #[test]
@@ -1569,8 +1593,8 @@ mod tests {
 
     #[test]
     fn test_check_pass_wraps_tty() {
-        let _lock = width_lock();
-        // Long enough to wrap on any real terminal (up to ~500 columns).
+        let _width = PinnedWidth::new(TEST_WIDTH);
+        // Long enough to wrap at TEST_WIDTH.
         let long = &format!("{} ", "No sells detected below the configured peg target during the monitoring window across all tracked pairs and venues in scope").repeat(4);
         let row = check_pass_styled(long, true);
         assert!(row.contains("✓"));
@@ -1579,8 +1603,8 @@ mod tests {
 
     #[test]
     fn test_check_fail_wraps_tty() {
-        let _lock = width_lock();
-        // Long enough to wrap on any real terminal (up to ~500 columns).
+        let _width = PinnedWidth::new(TEST_WIDTH);
+        // Long enough to wrap at TEST_WIDTH.
         let long = &format!("{} ", "Bid depth is significantly below the minimum threshold required for healthy market conditions on this particular trading pair").repeat(4);
         let row = check_fail_styled(long, true);
         assert!(row.contains("✗"));
@@ -1589,8 +1613,8 @@ mod tests {
 
     #[test]
     fn test_check_na_plain_and_tty_wrap() {
-        let _lock = width_lock();
-        // Long enough to wrap on any real terminal (up to ~500 columns).
+        let _width = PinnedWidth::new(TEST_WIDTH);
+        // Long enough to wrap at TEST_WIDTH.
         // n/a rows (#37) must read as neither pass nor fail.
         let long = &format!("{} ", "Spread: n/a (synthetic AMM book; the real spread is the pool fee, which the data source does not report)").repeat(4);
         for tty in [false, true] {
@@ -1604,8 +1628,8 @@ mod tests {
 
     #[test]
     fn test_warning_row_wraps_tty() {
-        let _lock = width_lock();
-        // Long enough to wrap on any real terminal (up to ~500 columns).
+        let _width = PinnedWidth::new(TEST_WIDTH);
+        // Long enough to wrap at TEST_WIDTH.
         let long = &format!("{} ", "Source code is NOT verified — unable to perform full source-level analysis on this contract. Consider requesting verification from the deployer.").repeat(4);
         let row = warning_row_styled(long, true);
         assert!(row.contains("⚠"));
@@ -1614,8 +1638,8 @@ mod tests {
 
     #[test]
     fn test_info_row_wraps_tty() {
-        let _lock = width_lock();
-        // Long enough to wrap on any real terminal (up to ~500 columns).
+        let _width = PinnedWidth::new(TEST_WIDTH);
+        // Long enough to wrap at TEST_WIDTH.
         let long = &format!("{} ", "No audit reports found in any public database. Check block explorer and auditor databases manually for third-party audit information and verification.").repeat(4);
         let row = info_row_styled(long, true);
         assert!(row.contains("ℹ"));
@@ -1624,8 +1648,8 @@ mod tests {
 
     #[test]
     fn test_numbered_row_wraps_tty() {
-        let _lock = width_lock();
-        // Long enough to wrap on any real terminal (up to ~500 columns).
+        let _width = PinnedWidth::new(TEST_WIDTH);
+        // Long enough to wrap at TEST_WIDTH.
         let long = &format!("{} ", "This is a very long description that should eventually wrap to the next line when the terminal width is narrow enough to force it").repeat(4);
         let row = numbered_row_styled(1, long, true);
         assert!(row.contains("1."));
@@ -1634,6 +1658,7 @@ mod tests {
 
     #[test]
     fn test_check_warn_styled_keeps_text_and_continuation_bar() {
+        let _width = PinnedWidth::new(TEST_WIDTH);
         let msg = "word ".repeat(60);
         let plain = check_warn_styled(&msg, false);
         let styled = check_warn_styled(&msg, true);

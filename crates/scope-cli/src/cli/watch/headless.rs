@@ -8,11 +8,15 @@
 //! The handler [`run`] always returns a code. It never returns an error:
 //! an error would reach `main` as exit code 1, and here 1 means "breach".
 
+use super::fetch::TickTiming;
+use super::inline::{self, Inline};
 use super::run::{
-    CellRecord, cell_record, csv_header, csv_rows, run_ticks, start_csv, write_report,
+    CellRecord, cell_record, csv_header, run_ticks, start_csv, tick_csv_rows, write_report,
 };
+use super::state::{self, RunState};
 use super::{Ready, Sources, Tick, monitor, prepare, watchlist_path};
 use crate::cli::output::Output;
+use crate::cli::watch_args::{RunArgs, TargetArgs};
 use crate::{note, outln};
 use clap::{Args, ValueEnum};
 use scope::chains::ChainClientFactory;
@@ -48,8 +52,11 @@ const NO_DURATION_NOTE: &str = "No duration: runs until stopped. Use --once or -
 
 const AFTER_HELP: &str = "\x1b[1mExamples:\x1b[0m
   scope watch pegs --once                          \x1b[2m# one tick, for cron and CI\x1b[0m
+  scope watch pegs --once --every 5m               \x1b[2m# cron every 5 minutes: remembers the last run\x1b[0m
   scope watch pegs --every 30s --duration 1h --format json
   scope watch ./pegs.yaml --once --csv trail.csv --append
+  scope watch USDC --venue weex --once             \x1b[2m# a target on the command line\x1b[0m
+  scope watch 0xWallet --kind address --rule \"native_balance > 1\" --once
 
 \x1b[1mExit codes:\x1b[0m
   0  No row breached and no row is unknown on the last tick (warnings pass)
@@ -73,45 +80,57 @@ pub enum WatchFormat {
     Csv,
 }
 
+/// The help of the shared run flags in `scope watch`.
+const EVERY_HELP: &str = "Time from one tick start to the next (30s, 5m). Overrides the file. With --once it does not wait: it says how far apart the runs are (the look-back of the first tick and the age at which the saved state is stale)";
+const DURATION_HELP: &str = "How long the run lasts (10m, 1h, or `forever`). Overrides the file";
+const CSV_HELP: &str = "Write one CSV row for each cell and tick. Overrides the file";
+const REPORT_HELP: &str = "Write the report when the run ends or stops. Overrides the file";
+
 /// Arguments for `scope watch`.
 ///
-/// Runs a saved watchlist with no screen and ends with an exit code.
+/// Runs a saved watchlist, or one target from the command line, with no
+/// screen and ends with an exit code.
 #[derive(Debug, Clone, Args)]
-#[command(after_help = AFTER_HELP)]
+#[command(after_help = AFTER_HELP,
+    mut_arg("every", |a| a.help(EVERY_HELP)),
+    mut_arg("duration", |a| a.help(DURATION_HELP)),
+    mut_arg("csv", |a| a.help(CSV_HELP)),
+    mut_arg("report", |a| a.help(REPORT_HELP)))]
 pub struct WatchArgs {
-    /// A saved watchlist name, or the path of a watchlist file.
+    /// A saved watchlist name, the path of a watchlist file, or a token, pair
+    /// or address to watch.
     ///
-    /// It is a path when it ends in `.yaml` or has a path separator.
-    #[arg(value_name = "NAME|PATH")]
+    /// With a target flag (`--venue`, `--chain`, `--pair`, `--token`,
+    /// `--preset`, `--rule`, `--kind` or a health flag) it is a target.
+    /// Without one it is a path when it ends in `.yaml` or has a path
+    /// separator, else the name of a saved watchlist.
+    #[arg(value_name = "NAME|PATH|TOKEN")]
     pub list: String,
 
     /// Run one tick and stop.
-    #[arg(long, conflicts_with_all = ["every", "duration"])]
+    #[arg(long, conflicts_with = "duration")]
     pub once: bool,
 
-    /// Time from one tick start to the next (30s, 5m). Overrides the file.
-    #[arg(long, value_name = "INTERVAL")]
-    pub every: Option<String>,
-
-    /// How long the run lasts (10m, 1h, or `forever`). Overrides the file.
-    #[arg(long, value_name = "DURATION")]
-    pub duration: Option<String>,
+    /// Do not load or save what this list remembers between runs.
+    #[arg(long)]
+    pub no_state: bool,
 
     /// What goes to stdout.
     #[arg(long, value_enum, default_value_t = WatchFormat::Text)]
     pub format: WatchFormat,
 
-    /// Write one CSV row for each cell and tick. Overrides the file.
-    #[arg(long, value_name = "PATH")]
-    pub csv: Option<PathBuf>,
-
     /// Keep the rows already in the CSV file and add the new rows.
     #[arg(long)]
     pub append: bool,
 
-    /// Write the report when the run ends or stops. Overrides the file.
-    #[arg(long, value_name = "PATH")]
-    pub report: Option<PathBuf>,
+    /// Timing and outputs, shared with `scope monitor`.
+    #[command(flatten)]
+    pub run: RunArgs,
+
+    /// What to watch, when the first argument is a target: the flags that
+    /// `scope monitor` takes too.
+    #[command(flatten)]
+    pub target: TargetArgs,
 }
 
 /// Why a run ended.
@@ -150,8 +169,30 @@ pub struct Context<'a> {
     pub out: &'a Output,
     /// The folder of the saved watchlists.
     pub dir: PathBuf,
+    /// The folder of the state files (what a run remembers for the next).
+    pub state_dir: PathBuf,
     /// The venue IDs a watchlist may name.
     pub venues: Vec<String>,
+    /// The command line as typed, for the `start` record.
+    pub argv: Vec<String>,
+}
+
+/// Where the watchlist of a run came from, for the `start` record.
+struct Origin {
+    argv: Vec<String>,
+    /// The file of the list; `None` for a target on the command line.
+    path: Option<PathBuf>,
+    /// What a run from the command line tells the user.
+    inline: Option<Inline>,
+}
+
+impl Origin {
+    /// What names the list in an error note.
+    fn label(&self, list: &Watchlist) -> String {
+        self.path
+            .as_ref()
+            .map_or_else(|| list.name.clone(), |p| p.display().to_string())
+    }
 }
 
 /// The exit code of a run. The first rule that matches wins: a write error
@@ -182,13 +223,46 @@ pub fn exit_code(last: Option<&Snapshot>, write_failed: bool) -> i32 {
 pub async fn run(args: &WatchArgs, ctx: &Context<'_>, stop: impl Future<Output = ()>) -> i32 {
     let out = ctx.out;
     let path = watchlist_path(&args.list, &ctx.dir);
-    let Some(mut list) = load(args, &path, ctx) else {
-        return EXIT_NOT_STARTED;
+    let (mut list, mut inline) = if args.target.is_set() {
+        match inline::build(args, ctx) {
+            Ok((list, inline)) => (list, Some(inline)),
+            Err(lines) => {
+                for line in lines {
+                    note!(out, "{line}");
+                }
+                return EXIT_NOT_STARTED;
+            }
+        }
+    } else {
+        let Some(list) = load(args, &path, ctx) else {
+            return EXIT_NOT_STARTED;
+        };
+        (list, None)
     };
     if let Err(message) = apply_flags(&mut list, args) {
         note!(out, "{message}");
         return EXIT_NOT_STARTED;
     }
+    if let Some(inline) = inline.as_mut() {
+        match inline::validate(&list, &ctx.venues, args.once, inline) {
+            Ok(checked) => list = checked,
+            Err(lines) => {
+                for line in lines {
+                    note!(out, "{}: {line}", list.name);
+                }
+                return EXIT_NOT_STARTED;
+            }
+        }
+    }
+    let state_identity = inline.as_ref().map_or_else(
+        || state::identity(&args.list, &path),
+        |i| state::inline_identity(&i.definition),
+    );
+    let origin = Origin {
+        argv: ctx.argv.clone(),
+        path: inline.is_none().then_some(path),
+        inline,
+    };
     let src = Sources {
         config: ctx.config,
         clients: ctx.clients,
@@ -196,7 +270,7 @@ pub async fn run(args: &WatchArgs, ctx: &Context<'_>, stop: impl Future<Output =
     let ready = match prepare(&list, src, out).await {
         Ok(ready) => ready,
         Err(e) => {
-            note!(out, "{}: {}", path.display(), prepare_message(&e));
+            note!(out, "{}: {}", origin.label(&list), prepare_message(&e));
             return EXIT_NOT_STARTED;
         }
     };
@@ -208,9 +282,23 @@ pub async fn run(args: &WatchArgs, ctx: &Context<'_>, stop: impl Future<Output =
         return EXIT_WRITE_ERROR;
     }
 
-    if announce_start(args, &path, &ready, out).is_err() {
+    let (state, start_history) = RunState::start(
+        !args.no_state,
+        &ctx.state_dir,
+        state_identity,
+        list,
+        now_ms(),
+    );
+    let state = RefCell::new(state);
+
+    if announce_start(args, &origin, &ready, &state.borrow(), out).is_err() {
         // Stdout closed before the first tick: nothing to run for.
-        return finish(args, &ready, None, StopReason::StdoutClosed, false, 0, out);
+        let end = End {
+            reason: StopReason::StdoutClosed,
+            write_failed: false,
+            runs: 0,
+        };
+        return finish(args, &ready, None, end, &state.borrow(), out);
     }
 
     let last: RefCell<Option<Tick>> = RefCell::new(None);
@@ -218,18 +306,28 @@ pub async fn run(args: &WatchArgs, ctx: &Context<'_>, stop: impl Future<Output =
     let stdout_closed = Cell::new(false);
     let closed = tokio::sync::Notify::new();
     let ended = {
-        let ticks = run_ticks(&ready, src, out, |n, at, tick, events| {
-            runs.set(n);
-            log_tick(n, tick, events);
-            // The CSV row is written already. A closed stdout ends the run
-            // after this tick; the tick still counts as the last one.
-            if let Err(e) = print_tick(args.format, out, n, at, tick, events) {
-                note!(out, "Cannot write to stdout ({e}); stopping.");
-                stdout_closed.set(true);
-                closed.notify_one();
-            }
-            *last.borrow_mut() = Some(tick.clone());
-        });
+        let ticks = run_ticks(
+            &ready,
+            src,
+            out,
+            start_history,
+            |n, at, tick, events, history| {
+                runs.set(n);
+                log_tick(n, tick, events);
+                // The memory is a cache: a failure is a note, not an exit code.
+                if let Some(why) = state.borrow_mut().save(history, now_ms()) {
+                    note!(out, "{why}");
+                }
+                // The CSV row is written already. A closed stdout ends the run
+                // after this tick; the tick still counts as the last one.
+                if let Err(e) = print_tick(args.format, out, &ready.list, n, at, tick, events) {
+                    note!(out, "Cannot write to stdout ({e}); stopping.");
+                    stdout_closed.set(true);
+                    closed.notify_one();
+                }
+                *last.borrow_mut() = Some(tick.clone());
+            },
+        );
         // Biased: a stop that is ready wins over a tick that is ready, so a
         // signal never waits for the next tick to end.
         tokio::select! {
@@ -253,7 +351,20 @@ pub async fn run(args: &WatchArgs, ctx: &Context<'_>, stop: impl Future<Output =
         None => StopReason::Signal,
     };
     let last = last.into_inner();
-    finish(args, &ready, last, reason, write_failed, runs.get(), out)
+    let end = End {
+        reason,
+        write_failed,
+        runs: runs.get(),
+    };
+    finish(args, &ready, last, end, &state.borrow(), out)
+}
+
+/// How a run ended, for [`finish`].
+struct End {
+    reason: StopReason,
+    /// The CSV file could not be written.
+    write_failed: bool,
+    runs: u64,
 }
 
 /// Writes the report, prints the `end` record and returns the exit code.
@@ -261,11 +372,15 @@ fn finish(
     args: &WatchArgs,
     ready: &Ready,
     last: Option<Tick>,
-    reason: StopReason,
-    mut write_failed: bool,
-    runs: u64,
+    end: End,
+    state: &RunState,
     out: &Output,
 ) -> i32 {
+    let End {
+        reason,
+        mut write_failed,
+        runs,
+    } = end;
     let mut report_written = false;
     if let Some(path) = &ready.list.outputs.report {
         // A stop before the first tick still writes a report, from no rows.
@@ -293,7 +408,7 @@ fn finish(
     );
     match args.format {
         WatchFormat::Json => {
-            let end = json!({
+            let mut end = json!({
                 "type": "end",
                 "ts": now(),
                 "runs": runs,
@@ -301,6 +416,9 @@ fn finish(
                 "exit_code": code,
                 "report_written": report_written,
             });
+            if let (Some(end), Value::Object(fields)) = (end.as_object_mut(), state.end_record()) {
+                end.extend(fields);
+            }
             // A closed stdout cannot take the record; the code still tells.
             let _ = outln!(out, "{end}");
         }
@@ -337,6 +455,11 @@ fn load(args: &WatchArgs, path: &Path, ctx: &Context<'_>) -> Option<Watchlist> {
                 } else {
                     note!(out, "Saved watchlists: {}", names.join(", "));
                 }
+                note!(
+                    out,
+                    "To watch a token, give a venue or a chain: scope watch {} --venue weex",
+                    args.list
+                );
             }
             None
         }
@@ -345,19 +468,19 @@ fn load(args: &WatchArgs, path: &Path, ctx: &Context<'_>) -> Option<Watchlist> {
 
 /// Puts the flags over the file.
 fn apply_flags(list: &mut Watchlist, args: &WatchArgs) -> Result<(), String> {
-    if let Some(every) = &args.every {
+    if let Some(every) = &args.run.every {
         list.interval = monitor::parse_interval(every)?;
     }
     if args.once {
         // A run of length zero is one tick.
         list.duration = Some(Duration::ZERO);
-    } else if let Some(duration) = &args.duration {
+    } else if let Some(duration) = &args.run.duration {
         list.duration = monitor::parse_run_duration(duration)?;
     }
-    if let Some(csv) = &args.csv {
+    if let Some(csv) = &args.run.csv {
         list.outputs.csv = Some(csv.clone());
     }
-    if let Some(report) = &args.report {
+    if let Some(report) = &args.run.report {
         list.outputs.report = Some(report.clone());
     }
     Ok(())
@@ -373,6 +496,11 @@ fn prepare_message(e: &ScopeError) -> String {
         ),
         other => other.to_string(),
     }
+}
+
+/// Now, in ms since the epoch.
+fn now_ms() -> u64 {
+    u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0)
 }
 
 fn now() -> String {
@@ -399,8 +527,9 @@ fn row_labels(list: &Watchlist) -> Vec<String> {
 /// (CSV), and a note with the paths and timing that the run uses.
 fn announce_start(
     args: &WatchArgs,
-    path: &Path,
+    origin: &Origin,
     ready: &Ready,
+    state: &RunState,
     out: &Output,
 ) -> std::io::Result<()> {
     let list = &ready.list;
@@ -408,9 +537,18 @@ fn announce_start(
     let report = list.outputs.report.as_deref().map(full_path);
     let rows = row_labels(list);
     let duration = list.duration.map(|d| d.as_secs());
+    let source = if origin.inline.is_some() {
+        "cli"
+    } else {
+        "file"
+    };
+    let definition = origin.inline.as_ref().map(|i| i.definition.as_str());
     tracing::info!(
         name = %list.name,
-        path = %path.display(),
+        source,
+        argv = ?origin.argv,
+        path = ?origin.path,
+        definition = definition.unwrap_or(""),
         rows = ?rows,
         interval_secs = list.interval.as_secs(),
         duration_secs = ?duration,
@@ -434,6 +572,14 @@ fn announce_start(
     if list.duration.is_none() {
         note!(out, "{NO_DURATION_NOTE}");
     }
+    if let Some(inline) = &origin.inline {
+        for line in inline.notes_for_user() {
+            note!(out, "{line}");
+        }
+    }
+    for line in state.start_notes() {
+        note!(out, "{line}");
+    }
     match args.format {
         WatchFormat::Text => {}
         WatchFormat::Csv => {
@@ -445,13 +591,20 @@ fn announce_start(
                 "ts": now(),
                 "scope_version": scope::VERSION,
                 "name": list.name,
-                "path": full_path(path),
+                "source": source,
+                "argv": origin.argv,
+                "path": origin.path.as_deref().map(full_path),
+                "definition": definition,
+                "notes": origin.inline.as_ref().map(|i| &i.notes),
+                "shadowed_saved_list": origin.inline.as_ref().and_then(|i| i.shadowed.as_ref()),
+                "config_alerts_applied": origin.inline.as_ref().map(|i| &i.alert_rules),
                 "interval_secs": list.interval.as_secs(),
                 "duration_secs": duration,
                 "once": args.once,
                 "rows": rows,
                 "csv": csv,
                 "report": report,
+                "state": state.start_record(),
             });
             outln!(out, "{start}")?;
         }
@@ -487,6 +640,7 @@ fn log_tick(run: u64, tick: &Tick, events: &[Event]) {
 fn print_tick(
     format: WatchFormat,
     out: &Output,
+    list: &Watchlist,
     run: u64,
     at: &str,
     tick: &Tick,
@@ -498,10 +652,10 @@ fn print_tick(
             crate::out!(out, "{}", tick_text(&time, run, &tick.snapshot, events))?;
         }
         WatchFormat::Csv => {
-            crate::out!(out, "{}", csv_rows(at, &tick.snapshot))?;
+            crate::out!(out, "{}", tick_csv_rows(at, list, tick))?;
         }
         WatchFormat::Json => {
-            outln!(out, "{}", tick_json(run, at, &tick.snapshot))?;
+            outln!(out, "{}", tick_json(run, at, tick))?;
             for event in events {
                 outln!(out, "{}", event_json(run, at, event))?;
             }
@@ -562,7 +716,8 @@ fn tick_text(time: &str, run: u64, snapshot: &Snapshot, events: &[Event]) -> Str
 }
 
 /// The `tick` record: every cell of every row.
-fn tick_json(run: u64, at: &str, snapshot: &Snapshot) -> Value {
+fn tick_json(run: u64, at: &str, tick: &Tick) -> Value {
+    let snapshot = &tick.snapshot;
     let [breached, warned, unknown, passed] = counts(snapshot);
     let rows: Vec<Value> = snapshot
         .targets
@@ -589,6 +744,35 @@ fn tick_json(run: u64, at: &str, snapshot: &Snapshot) -> Value {
             "passed": passed,
         },
         "rows": rows,
+        "timing": timing_record(&tick.timing),
+    })
+}
+
+/// The `timing` field of the `tick` record: how long the reads took, so a
+/// slow tick or a timeout can be traced to one read after the fact. Times
+/// are in ms from the start of the tick. `wall_ms` against `sum_ms` shows
+/// what the concurrency saved.
+fn timing_record(timing: &TickTiming) -> Value {
+    let reads: Vec<Value> = timing
+        .reads
+        .iter()
+        .map(|r| {
+            json!({
+                "row": r.row,
+                "group": r.group,
+                "queued_ms": r.queued_ms,
+                "started_ms": r.started_ms,
+                "took_ms": r.took_ms,
+                "outcome": r.outcome.name(),
+                "error": r.error,
+            })
+        })
+        .collect();
+    json!({
+        "wall_ms": timing.wall_ms,
+        "sum_ms": timing.sum_ms,
+        "bound": timing.bound,
+        "reads": reads,
     })
 }
 
@@ -713,7 +897,14 @@ mod tests {
             clients: factory,
             out,
             dir: dir.path().to_path_buf(),
-            venues: vec!["eth".into(), "binance".into()],
+            state_dir: dir.path().join("state"),
+            argv: Vec::new(),
+            venues: vec![
+                "eth".into(),
+                "binance".into(),
+                "lat-a".into(),
+                "lat-b".into(),
+            ],
         };
         run(&args, &ctx, stop).await
     }
@@ -1113,6 +1304,64 @@ mod tests {
         Run { code, cap, dir }
     }
 
+    /// Followups design 2026-11-11, section 4.3 (test 6) and 4.4: a venue
+    /// that never answers must not stop a cron job. The run ends at the read
+    /// timeout with exit code 2, and the `tick` record names the read that
+    /// timed out. The cron job saves this log and not the `-v` output.
+    #[tokio::test(start_paused = true)]
+    async fn a_venue_that_never_answers_gives_2_and_the_tick_record_names_the_read() {
+        use crate::cli::watch::fetch::tests::{Answer, LATENCY, LatencyFactory, READ};
+        use crate::cli::watch::fetch::{MAX_CONCURRENT_READS, READ_TIMEOUT};
+        let list = "targets:\n  - kind: pair\n    id: USDC\n    venue: lat-a\n    rules: [\"mid_price > 0\"]\n  - kind: pair\n    id: USDC\n    venue: lat-b\n    rules: [\"mid_price > 0\"]\n";
+        let factory =
+            LatencyFactory::new(&[("lat-a", Answer::After(LATENCY)), ("lat-b", Answer::Never)]);
+        let dir = new_dir(list);
+        let (out, cap) = Output::capture();
+        let code = exec_with(
+            &dir,
+            &list_arg(&dir),
+            &["--once", "--format", "json"],
+            &factory,
+            &out,
+            std::future::pending(),
+        )
+        .await;
+        assert_eq!(code, EXIT_UNKNOWN);
+        let records = json_lines(&cap);
+        let ticks = of_type(&records, "tick");
+        let timing = &ticks[0]["timing"];
+        let timeout_ms = READ_TIMEOUT.as_millis() as u64;
+        assert_eq!(timing["wall_ms"], timeout_ms);
+        assert_eq!(timing["bound"], MAX_CONCURRENT_READS);
+        assert_eq!(
+            timing["sum_ms"],
+            timeout_ms + READ.as_millis() as u64,
+            "the sum is more than the wall time: the reads ran together"
+        );
+        let reads = timing["reads"].as_array().unwrap();
+        let summary: Vec<_> = reads
+            .iter()
+            .map(|r| {
+                (
+                    r["row"].as_str(),
+                    r["group"].as_str(),
+                    r["outcome"].as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                (Some("USDC@lat-a"), Some("venue:lat-a"), Some("ok")),
+                (Some("USDC@lat-b"), Some("venue:lat-b"), Some("timeout")),
+            ]
+        );
+        assert_eq!(reads[0]["error"], Value::Null);
+        assert_eq!(reads[1]["error"], "read timed out after 60s");
+        assert_eq!(reads[1]["started_ms"], 0);
+        assert_eq!(reads[1]["took_ms"], timeout_ms);
+    }
+
     // Section 8.4: the code is the last tick's. A breach that cleared is 0;
     // a breach that began on the last tick is 1.
     #[tokio::test(start_paused = true)]
@@ -1236,7 +1485,30 @@ mod tests {
             }
         }
         assert!(cells >= 2, "{cells}");
-        assert!(lines.next().is_none(), "no extra CSV rows");
+        // After the cell rows come the chart rows (Q-D7 b), one for each
+        // market row of the target on two venues. The JSON has no cell for
+        // them: they are readings for the chart, not checks.
+        let chart: Vec<Vec<String>> = lines.by_ref().map(csv_fields).collect();
+        let labels: Vec<&str> = chart.iter().map(|f| f[1].as_str()).collect();
+        assert_eq!(labels, ["USDC@eth", "USDC@binance"], "{csv}");
+        for f in &chart {
+            assert_eq!(f[0], text(&tick["ts"]));
+            assert_eq!(
+                (f[2].as_str(), f[7].as_str()),
+                ("peg_deviation_bps", "chart")
+            );
+            assert_eq!((f[4].as_str(), f[5].as_str()), ("", ""), "no op, no limit");
+        }
+        // The venue that read has a number and a verdict. The venue that
+        // failed has a row too, with no number and the reason: a gap in the
+        // chart is told from a missing row.
+        assert!(chart[0][3].parse::<f64>().is_ok(), "{:?}", chart[0]);
+        assert_ne!(chart[0][6], "n/a", "{:?}", chart[0]);
+        assert_eq!(chart[1][3], "", "{:?}", chart[1]);
+        assert_eq!(
+            (chart[1][6].as_str(), chart[1][9].as_str()),
+            ("n/a", "no mid price")
+        );
         // The exact error text is kept, not a summary.
         assert!(csv.contains("error"), "{csv}");
     }
@@ -1361,7 +1633,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn once_makes_one_tick_and_conflicts_with_every_and_duration() {
+    async fn once_makes_one_tick_and_conflicts_with_duration() {
         let r = exec(HEALTHY, &["--once", "--format", "json"]).await;
         let records = json_lines(&r.cap);
         assert_eq!(of_type(&records, "tick").len(), 1);
@@ -1371,11 +1643,12 @@ mod tests {
             (Some("once"), Some(1))
         );
         assert_eq!(end["exit_code"], 0);
-        for flag in [["--every", "1s"], ["--duration", "1h"]] {
-            let argv = ["scope", "watch", "pegs", "--once", flag[0], flag[1]];
-            let e = Cli::try_parse_from(argv).unwrap_err();
-            assert_eq!(e.kind(), clap::error::ErrorKind::ArgumentConflict);
-        }
+        let argv = ["scope", "watch", "pegs", "--once", "--duration", "1h"];
+        let e = Cli::try_parse_from(argv).unwrap_err();
+        assert_eq!(e.kind(), clap::error::ErrorKind::ArgumentConflict);
+        // Q7: --every with --once says how far apart the runs are.
+        let argv = ["scope", "watch", "pegs", "--once", "--every", "5m"];
+        assert!(Cli::try_parse_from(argv).is_ok());
     }
 
     // The repeat rule: a run of 2s every 1s ends with a tick at 2s.

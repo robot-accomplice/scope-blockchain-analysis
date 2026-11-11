@@ -8,24 +8,46 @@
 //! market cell with a line per venue. Evidence keys put the matching CLI
 //! command in the shell and run it there.
 //!
-//! The state is pure: the event loop feeds it [`GridMsg`]s from the run and
-//! keys from the user; [`draw`] draws it.
+//! `v` edits the venues of the selected target while the run goes on
+//! (`venue_edit`); `u` undoes the last edit and `Ctrl-S` saves the list.
+//!
+//! The state is pure but for `Ctrl-S` and the file it reads first: the event
+//! loop feeds it [`GridMsg`]s from the run and keys from the user; [`draw`]
+//! draws it.
 
 use super::venue_charts::{self, Selection, Series, VenueChart, VenueCharts};
+use super::venue_edit::{Ctx, EDIT_KEY, ListFile, UNDO_KEY, VenueEditor};
 use crate::cli::charts::{HealthStrip, Sparkline, enlarge_hint};
 use crate::cli::output::ProgressHook;
+use crate::cli::textfit::cut_with_ellipsis;
 use crate::cli::theme::{ACCENT, ERR, KEY, OK, SECONDARY, WARN};
-use crate::cli::watch::{Ready, Tick};
-use crossterm::event::{KeyCode, KeyEvent};
+use crate::cli::watch::run::{VenueChange, VenueQueue};
+use crate::cli::watch::{Ready, Tick, deviation};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
+use scope::market::MarketSummary;
+use scope::market::health::{DeviationGap, PegBands};
 use scope::watch::{
     Event, RuleStatus, Snapshot, TargetKind, TargetSnapshot, TargetStatus, Watchlist,
 };
 use std::collections::{HashMap, VecDeque};
+
+/// What the venue editor reads from the grid. A macro, not a method: the
+/// editor is borrowed mutably next to it, and a method would borrow all of
+/// the grid.
+macro_rules! ctx {
+    ($grid:expr) => {
+        Ctx {
+            list: &$grid.list,
+            run: $grid.run,
+            running: $grid.ended.is_none(),
+        }
+    };
+}
 
 /// The most values a cell keeps for its chart.
 const HISTORY: usize = 120;
@@ -37,14 +59,29 @@ const CHART_ROWS: u16 = 1;
 const TARGET_COLS: usize = 24;
 
 /// The key legend of the grid and of the detail pane.
-pub const GRID_LEGEND: &str = "↑↓ select · Enter detail · Ctrl-G shell · Esc stop the run";
-pub const DETAIL_LEGEND: &str = "b book · t trades · h holders · r risk · x address · Esc back";
+pub const GRID_LEGEND: &str =
+    "↑↓ select · Enter detail · v venues · Ctrl-G shell · Esc stop the run";
+pub const DETAIL_LEGEND: &str =
+    "b book · t trades · h holders · r risk · x address · v venues · Esc back";
 pub const VENUE_DETAIL_LEGEND: &str =
     "←→ venue · Space isolate · Tab chart · PgUp PgDn page · b book · t trades · Esc back";
 pub const ENDED_LEGEND: &str = "Esc or Ctrl-G back to the shell · Enter detail";
 
 /// Shown while a run uses the settings from before `setup` saved new ones.
 pub const STALE_NOTE: &str = "The settings changed: this run still uses the old ones. Stop it (Esc) and start it again to use them.";
+
+/// One market row's peg deviation, as the venue chart needs it.
+#[derive(Debug, Default)]
+struct Deviation {
+    /// The deviation in bps of each tick; `None` is a gap, never zero.
+    values: VecDeque<Option<f64>>,
+    /// The peg bands of the newest summary: the thresholds of the verdicts.
+    bands: Option<PegBands>,
+    /// The newest deviation, for the legend glyph.
+    last_bps: Option<f64>,
+    /// Why the newest tick has no deviation.
+    gap: Option<DeviationGap>,
+}
 
 /// What the run sends the grid.
 #[derive(Debug, Clone)]
@@ -56,6 +93,14 @@ pub enum GridMsg {
         run: u64,
         tick: Box<Tick>,
         events: Vec<Event>,
+    },
+    /// The run took venue changes at the start of the tick `run`: `ready` is
+    /// the list from then on. The same message as `Ready`, with the changes
+    /// and the run number, so the grid can say which edit took effect when.
+    VenuesApplied {
+        run: u64,
+        ready: Ready,
+        changes: Vec<VenueChange>,
     },
 }
 
@@ -88,6 +133,8 @@ pub struct GridState {
     pub health: Vec<bool>,
     /// The last values of each cell, by target and cell label.
     history: HashMap<(String, String), VecDeque<Option<f64>>>,
+    /// The peg deviation of each market row, by row label.
+    deviation: HashMap<String, Deviation>,
     /// Targets whose breach cleared on the last tick: drawn dim once.
     cleared: Vec<String>,
     /// The banner of the last breach that started, until the next key.
@@ -109,18 +156,26 @@ pub struct GridState {
     pub(crate) venues: Selection,
     /// Charts per page at the last draw, for PgUp and PgDn.
     page_size: std::cell::Cell<usize>,
+    /// The venue editor: its line, its edits that wait, its undo and save.
+    pub(crate) editor: VenueEditor,
+    /// After a venue change: the target that was selected and its row, to
+    /// select again at the next tick, when the rows are new.
+    reselect: Option<(usize, String)>,
 }
 
 impl GridState {
     /// A grid for `list`, before its first tick.
     pub fn new(list: Watchlist, progress: Option<ProgressHook>) -> Self {
         Self {
+            editor: VenueEditor::new(&list),
+            reselect: None,
             list,
             ready: None,
             last: None,
             run: 0,
             health: Vec::new(),
             history: HashMap::new(),
+            deviation: HashMap::new(),
             cleared: Vec::new(),
             banner: None,
             bell: false,
@@ -134,10 +189,42 @@ impl GridState {
         }
     }
 
+    /// The venue IDs the editor accepts, and the file of the list (`Ctrl-S`
+    /// writes it). The wizard gets its venues the same way.
+    pub fn with_venues(mut self, known: Vec<String>, file: Option<ListFile>) -> Self {
+        self.editor = VenueEditor::new(&self.list).with(known, file);
+        self
+    }
+
+    /// The queue the run reads for venue changes.
+    pub fn venue_queue(&self) -> VenueQueue {
+        self.editor.queue()
+    }
+
+    /// Whether the venue line is open: then every key types into it.
+    pub fn is_editing(&self) -> bool {
+        self.editor.is_open()
+    }
+
+    /// The records of the venue editor since the last call, for the journal.
+    pub fn take_records(&mut self) -> Vec<super::journal::VenueRecord> {
+        self.editor.take_records()
+    }
+
+    /// The closing line when venues changed in the run and were not saved.
+    pub fn unsaved_note(&self) -> Option<String> {
+        self.editor.summary(&self.list)
+    }
+
     /// Takes one message from the run.
     pub fn apply(&mut self, msg: GridMsg) {
         match msg {
             GridMsg::Ready(ready) => self.ready = Some(ready),
+            GridMsg::VenuesApplied {
+                run,
+                ready,
+                changes,
+            } => self.venues_applied(run, ready, &changes),
             GridMsg::Tick { run, tick, events } => {
                 self.run = run;
                 self.health.push(tick.snapshot.breaches() == 0);
@@ -153,6 +240,7 @@ impl GridState {
                         }
                     }
                 }
+                self.record_deviation(&tick);
                 self.cleared.clear();
                 for e in &events {
                     match e {
@@ -165,6 +253,104 @@ impl GridState {
                     }
                 }
                 self.last = Some(*tick);
+                if let Some((target, label)) = self.reselect.take() {
+                    self.select_target(target, &label);
+                }
+            }
+        }
+    }
+
+    /// The run applied `changes` at the start of the tick `run`: the list
+    /// has the new venues, and what the grid kept for a venue that is gone
+    /// goes with it.
+    fn venues_applied(&mut self, run: u64, ready: Ready, changes: &[VenueChange]) {
+        let selected = self
+            .selected_index()
+            .zip(self.rows().get(self.selected).map(|r| r.target.clone()));
+        for c in changes {
+            let Some(new) = ready.list.targets.get(c.target) else {
+                continue;
+            };
+            if let Some(old) = self.list.targets.get(c.target).cloned() {
+                self.forget_series(&old, new);
+            }
+            if let Some(t) = self.list.targets.get_mut(c.target) {
+                t.venues.clone_from(&c.venues);
+            }
+        }
+        self.ready = Some(ready);
+        self.reselect = selected;
+        let ctx = ctx!(self);
+        self.editor.applied(&ctx, run, changes);
+    }
+
+    /// Drops the chart history of the rows `old` has and `new` has not, and,
+    /// when the target changes between one row with every cell and a row for
+    /// each venue (`Target::rows`), the history of its token and address
+    /// cells: they move to another row.
+    fn forget_series(&mut self, old: &scope::watch::Target, new: &scope::watch::Target) {
+        use scope::metrics::MetricGroup;
+        let labels = |t: &scope::watch::Target| -> Vec<String> {
+            t.rows().into_iter().map(|v| t.row_label(v)).collect()
+        };
+        let (before, after) = (labels(old), labels(new));
+        let gone: Vec<&String> = before.iter().filter(|l| !after.contains(l)).collect();
+        self.history.retain(|(label, _), _| !gone.contains(&label));
+        self.deviation.retain(|label, _| !gone.contains(&label));
+        if (old.venues.len() >= 2) != (new.venues.len() >= 2) {
+            let moving: Vec<String> = new
+                .rules
+                .iter()
+                .filter(|r| r.metric.group() != MetricGroup::Market)
+                .map(ToString::to_string)
+                .collect();
+            self.history
+                .retain(|(label, cell), _| !(before.contains(label) && moving.contains(cell)));
+        }
+    }
+
+    /// Selects the row of `target` that is called `label`, or the first row
+    /// of that target: `selected` is an index into rows that change.
+    fn select_target(&mut self, target: usize, label: &str) {
+        let list = self.ready.as_ref().map_or(&self.list, |r| &r.list);
+        let Some(t) = list.targets.get(target) else {
+            return;
+        };
+        let mine: Vec<String> = t.rows().into_iter().map(|v| t.row_label(v)).collect();
+        let rows = self.rows();
+        let found = rows
+            .iter()
+            .position(|r| r.target == label)
+            .or_else(|| rows.iter().position(|r| mine.contains(&r.target)));
+        if let Some(i) = found {
+            self.selected = i;
+            self.reset_venues();
+        }
+    }
+
+    /// Keeps the peg deviation of each market row of the tick. The tick's
+    /// summaries line up with the rows of its snapshot by index
+    /// (`watch/fetch.rs`). A failed read or a row with no mid is a gap.
+    fn record_deviation(&mut self, tick: &Tick) {
+        for (row, summary) in tick.snapshot.targets.iter().zip(&tick.summaries) {
+            if row.venue.is_none() {
+                continue;
+            }
+            let d = self.deviation.entry(row.target.clone()).or_default();
+            let bps = summary
+                .as_ref()
+                .and_then(MarketSummary::mid_peg_deviation_bps);
+            d.gap = match summary {
+                Some(s) => s.peg_deviation_gap(),
+                None => Some(DeviationGap::NoPrice),
+            };
+            if let Some(s) = summary {
+                d.bands = Some(s.peg_bands());
+            }
+            d.last_bps = bps;
+            d.values.push_back(bps);
+            if d.values.len() > HISTORY {
+                d.values.pop_front();
             }
         }
     }
@@ -172,6 +358,10 @@ impl GridState {
     /// The run ended: `footer` says how.
     pub fn end(&mut self, footer: String, style: Style) {
         self.ended = Some((footer, style));
+        // The line closes and the edits that waited are refused, in the
+        // record.
+        let ctx = ctx!(self);
+        self.editor.ended(&ctx);
     }
 
     /// Whether the run still goes on.
@@ -201,29 +391,27 @@ impl GridState {
     fn selected_target(&self) -> Option<(&scope::watch::Target, Option<String>)> {
         let row = self.rows().get(self.selected).copied()?;
         let list = self.ready.as_ref().map_or(&self.list, |r| &r.list);
-        let t = list
-            .targets
-            .iter()
-            .find(|t| t.rows().into_iter().any(|v| t.row_label(v) == row.target))?;
+        let t = list.targets.get(self.selected_index()?)?;
         Some((t, row.venue.clone()))
+    }
+
+    /// The index in the watchlist of the target of the selected row.
+    fn selected_index(&self) -> Option<usize> {
+        let row = self.rows().get(self.selected).copied()?;
+        let list = self.ready.as_ref().map_or(&self.list, |r| &r.list);
+        list.targets
+            .iter()
+            .position(|t| t.rows().into_iter().any(|v| t.row_label(v) == row.target))
     }
 
     /// The venue charts of the selected row: when the detail is open on a
     /// market row of a target on two or more venues. One chart per cell of
     /// the row, each with every venue's history of that cell.
     pub(crate) fn venue_charts(&self) -> Option<VenueCharts> {
-        if !self.detail {
-            return None;
-        }
-        let rows = self.rows();
-        let row = rows.get(self.selected)?;
-        row.venue.as_ref()?;
-        let (t, _) = self.selected_target()?;
-        if t.venues.len() < 2 {
-            return None;
-        }
+        let (row, t) = self.venue_row()?;
         let last = self.last.as_ref()?;
-        let charts = row
+        let (deviation, gap) = self.deviation_chart(t);
+        let cells = row
             .cells
             .iter()
             .map(|c| VenueChart {
@@ -233,6 +421,7 @@ impl GridState {
                     scope::metrics::describe(r.metric, &scope::market::HealthThresholds::default())
                         .unit
                 }),
+                band: None,
                 series: t
                     .venues
                     .iter()
@@ -261,16 +450,89 @@ impl GridState {
                     })
                     .collect(),
             })
-            .filter(|c| {
-                c.series
-                    .iter()
-                    .any(|s| s.values.iter().any(Option::is_some))
-            })
-            .collect::<Vec<_>>();
+            .filter(VenueChart::has_values);
+        // The deviation chart is first: the first page shows the peg.
+        let charts = deviation.into_iter().chain(cells).collect::<Vec<_>>();
         (!charts.is_empty()).then_some(VenueCharts {
             charts,
             interval: self.list.interval,
+            gap,
         })
+    }
+
+    /// The selected row and its target, when the detail is open on a market
+    /// row of a target on two or more venues: the case of the venue charts.
+    fn venue_row(&self) -> Option<(&TargetSnapshot, &scope::watch::Target)> {
+        if !self.detail {
+            return None;
+        }
+        let row = self.rows().get(self.selected).copied()?;
+        row.venue.as_ref()?;
+        let (t, _) = self.selected_target()?;
+        (t.venues.len() >= 2).then_some((row, t))
+    }
+
+    /// The peg deviation chart of `t`: one line per venue, from the
+    /// deviation each tick recorded. When no venue has a value, no chart
+    /// and the reason (a peg that is not positive wins over a missing mid).
+    fn deviation_chart(
+        &self,
+        t: &scope::watch::Target,
+    ) -> (Option<VenueChart>, Option<DeviationGap>) {
+        let devs: Vec<Option<&Deviation>> = t
+            .venues
+            .iter()
+            .map(|v| self.deviation.get(&t.row_label(Some(v))))
+            .collect();
+        fn bands_of(d: Option<&Deviation>) -> Option<&PegBands> {
+            d?.bands.as_ref()
+        }
+        let chart = VenueChart {
+            label: venue_charts::DEVIATION_LABEL.to_string(),
+            threshold: None,
+            unit: None,
+            band: devs
+                .iter()
+                .find_map(|d| bands_of(*d))
+                .and_then(venue_charts::deviation_band),
+            series: t
+                .venues
+                .iter()
+                .zip(&devs)
+                .map(|(v, d)| Series {
+                    venue: venue_charts::deviation_venue(v),
+                    values: d
+                        .map(|d| d.values.iter().copied().collect())
+                        .unwrap_or_default(),
+                    status: deviation::status(
+                        bands_of(*d),
+                        d.and_then(|d| d.last_bps),
+                        d.and_then(|d| d.gap),
+                    ),
+                })
+                .collect(),
+        };
+        if chart.has_values() {
+            return (Some(chart), None);
+        }
+        let no_peg = devs
+            .iter()
+            .flatten()
+            .any(|d| d.gap == Some(DeviationGap::NoPeg));
+        let gap = if no_peg {
+            DeviationGap::NoPeg
+        } else {
+            DeviationGap::NoPrice
+        };
+        (None, Some(gap))
+    }
+
+    /// Why the deviation chart is missing from the open detail, for the
+    /// footer when there are no venue charts (so no legend) to say it.
+    fn deviation_note(&self) -> Option<String> {
+        let (_, t) = self.venue_row()?;
+        let gap = self.deviation_chart(t).1?;
+        Some(venue_charts::gap_note(gap))
     }
 
     /// Starts the venue charts on the venue of the selected row.
@@ -331,6 +593,20 @@ impl GridState {
     pub fn key(&mut self, key: KeyEvent) -> GridAction {
         // Any key dismisses the banner, and still does its job.
         self.banner = None;
+        // With the venue line open, every key types into it: `b` and `t`
+        // are letters then, not evidence keys.
+        if self.editor.is_open() {
+            let ctx = ctx!(self);
+            self.editor.line_key(&ctx, key);
+            return GridAction::None;
+        }
+        self.editor.clear_notice();
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if ctrl && key.code == KeyCode::Char('s') {
+            let ctx = ctx!(self);
+            self.editor.save(&ctx);
+            return GridAction::None;
+        }
         let n = self.rows().len();
         match key.code {
             KeyCode::Down if n > 0 => {
@@ -349,6 +625,15 @@ impl GridState {
                 if let Some(charts) = self.venue_charts() {
                     self.venue_key(key.code, &charts);
                 }
+            }
+            KeyCode::Char(EDIT_KEY) if !ctrl => {
+                let target = self.selected_index();
+                let ctx = ctx!(self);
+                self.editor.open(&ctx, target);
+            }
+            KeyCode::Char(UNDO_KEY) if !ctrl => {
+                let ctx = ctx!(self);
+                self.editor.undo(&ctx);
             }
             KeyCode::Esc if self.detail => self.detail = false,
             KeyCode::Esc if self.is_running() => return GridAction::Stop,
@@ -481,14 +766,20 @@ pub fn draw(f: &mut Frame, area: Rect, g: &GridState) {
     f.render_widget(block, area);
     let stale = g.stale && g.is_running();
     let banner_rows = u16::from(g.banner.is_some()) + u16::from(stale);
-    let [banner, body, strip, foot, legend] = Layout::vertical([
+    // The line of the venue editor: its input line, or what it has to say.
+    let note = g.editor.note(&g.list, usize::from(inner.width));
+    let [banner, body, strip, foot, note_area, legend] = Layout::vertical([
         Constraint::Length(banner_rows),
         Constraint::Min(1),
         Constraint::Length(1),
         Constraint::Length(1),
+        Constraint::Length(u16::from(note.is_some())),
         Constraint::Length(1),
     ])
     .areas(inner);
+    if let Some((text, style)) = note {
+        f.render_widget(Paragraph::new(Line::styled(text, style)), note_area);
+    }
     let mut banners = Vec::new();
     if let Some(text) = &g.banner {
         banners.push(Line::styled(
@@ -535,20 +826,52 @@ pub fn draw(f: &mut Frame, area: Rect, g: &GridState) {
         draw_rows(f, body, g);
     }
     f.render_widget(HealthStrip::new(&g.health), strip);
+    // With no venue charts there is no legend, so the footer says why the
+    // deviation chart is missing.
+    let note = g
+        .deviation_note()
+        .filter(|_| g.venue_charts().is_none())
+        .map(|n| format!(" · {n}"))
+        .unwrap_or_default();
     f.render_widget(
-        Paragraph::new(Line::styled(format!(" {footer}"), footer_style)),
+        Paragraph::new(Line::styled(format!(" {footer}{note}"), footer_style)),
         foot,
     );
+    if let Some((text, style)) = g.editor.legend(usize::from(inner.width)) {
+        f.render_widget(Paragraph::new(Line::styled(text, style)), legend);
+        return;
+    }
     let keys = match (g.detail, g.is_running()) {
-        (true, _) if g.venue_charts().is_some() => VENUE_DETAIL_LEGEND,
-        (true, _) => DETAIL_LEGEND,
-        (false, true) => GRID_LEGEND,
-        (false, false) => ENDED_LEGEND,
+        (true, _) if g.venue_charts().is_some() => VENUE_DETAIL_LEGEND.to_string(),
+        (true, _) => DETAIL_LEGEND.to_string(),
+        (false, true) => running_legend(g),
+        (false, false) => ENDED_LEGEND.to_string(),
     };
     f.render_widget(
-        Paragraph::new(Line::styled(format!(" {keys}"), KEY)),
+        Paragraph::new(Line::styled(
+            cut_with_ellipsis(&format!(" {keys}"), usize::from(inner.width)),
+            KEY,
+        )),
         legend,
     );
+}
+
+/// The keys of the row view while the run goes on. `u` and `Ctrl-S` show
+/// when they have something to do; with both, the shell hint gives way, so
+/// the legend fits 79 columns and `Esc stop the run` stays in view.
+fn running_legend(g: &GridState) -> String {
+    let mut keys = vec!["↑↓ select", "Enter detail", "v venues"];
+    if g.editor.can_undo() {
+        keys.push("u undo");
+    }
+    if g.editor.has_unsaved(&g.list) {
+        keys.push("Ctrl-S save");
+    }
+    if keys.len() < 5 {
+        keys.push("Ctrl-G shell");
+    }
+    keys.push("Esc stop the run");
+    keys.join(" · ")
 }
 
 /// The rows: target, status, then one glyph per cell.
@@ -802,6 +1125,7 @@ mod tests {
             tick: Box::new(Tick {
                 snapshot: s,
                 summaries: vec![None, None, None],
+                ..Tick::default()
             }),
             events,
         });
@@ -1003,6 +1327,7 @@ mod tests {
             tick: Box::new(Tick {
                 snapshot: Snapshot { targets },
                 summaries,
+                ..Tick::default()
             }),
             events: Vec::new(),
         });
@@ -1405,5 +1730,591 @@ mod tests {
         g.key(key(KeyCode::Enter));
         assert!(g.venue_charts().is_none());
         assert!(screen(&g, 120, 36).contains(DETAIL_LEGEND));
+    }
+
+    // ---- The peg deviation chart (design 2026-11-11, section 3) ----
+
+    /// A summary whose mid is `mid`, on a peg of `target` with `range`.
+    fn summary_at(mid: f64, target: f64, range: f64) -> MarketSummary {
+        use scope::market::{BookSource, HealthThresholds, OrderBook, OrderBookLevel};
+        let level = |price| OrderBookLevel {
+            price,
+            quantity: 5_000.0,
+        };
+        let book = OrderBook {
+            pair: "USDN/USDT".into(),
+            source: BookSource::Exchange,
+            bids: vec![level(mid - 0.00005)],
+            asks: vec![level(mid + 0.00005)],
+        };
+        let thresholds = HealthThresholds {
+            peg_target: target,
+            peg_range: range,
+            ..HealthThresholds::default()
+        };
+        MarketSummary::from_order_book(&book, &thresholds, None)
+    }
+
+    /// How a test describes one tick of the deviation scenarios: the mid of
+    /// each venue (`None`: the read failed), the peg and its range.
+    struct Peg {
+        target: f64,
+        range: f64,
+    }
+
+    const PEG: Peg = Peg {
+        target: 1.0,
+        range: 0.001,
+    };
+
+    /// `venues` on one target with the market rules `cells` (value 0.2
+    /// each), after `ticks` ticks; `mid(venue, run)` gives each venue's mid.
+    /// The detail is open on the first row.
+    fn deviation_grid(
+        venues: [&str; 2],
+        cells: &[&str],
+        ticks: u64,
+        peg: &Peg,
+        mid: impl Fn(usize, u64) -> Option<f64>,
+    ) -> GridState {
+        let mut w = Watchlist::new("pegs");
+        let mut t = Target::new(TargetKind::Pair, "USDN");
+        t.venues = venues.iter().map(|v| v.to_string()).collect();
+        t.rules = cells.iter().map(|c| Rule::parse(c).unwrap()).collect();
+        w.targets = vec![t];
+        let mut g = GridState::new(w, None);
+        for run in 1..=ticks {
+            let rows: Vec<TargetSnapshot> = venues
+                .iter()
+                .map(|venue| {
+                    let cells = cells
+                        .iter()
+                        .map(|label| cell(label, RuleStatus::Pass, Some(0.2)))
+                        .collect();
+                    TargetSnapshot::new(format!("USDN@{venue}"), cells).on_venue(Some(venue))
+                })
+                .collect();
+            let summaries = (0..venues.len())
+                .map(|v| mid(v, run).map(|m| summary_at(m, peg.target, peg.range)))
+                .collect();
+            g.apply(GridMsg::Tick {
+                run,
+                tick: Box::new(Tick {
+                    snapshot: Snapshot { targets: rows },
+                    summaries,
+                    ..Default::default()
+                }),
+                events: Vec::new(),
+            });
+        }
+        g.key(key(KeyCode::Enter));
+        g
+    }
+
+    /// weex at +2 bps and binance at -3 bps, steady.
+    fn steady(v: usize, _run: u64) -> Option<f64> {
+        Some([1.0002, 0.9997][v])
+    }
+
+    fn buffer_of(g: &GridState, w: u16, h: u16) -> ratatui::buffer::Buffer {
+        let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+        t.draw(|f| draw(f, f.area(), g)).unwrap();
+        t.backend().buffer().clone()
+    }
+
+    // Why: the chart answers "is each venue inside the band?" at a glance,
+    // and the band is named in the legend so colour is not needed.
+    #[test]
+    fn the_deviation_chart_is_the_first_chart_with_its_band_and_signed_values() {
+        let g = deviation_grid(["weex", "binance"], &["spread_pct < 1"], 20, &PEG, steady);
+        let charts = g.venue_charts().unwrap();
+        assert_eq!(charts.charts[0].label, "Peg deviation (bps)");
+        assert_eq!(charts.charts[1].label, "spread_pct < 1", "Q-D2: first");
+        for (w, h) in [(120, 36), (80, 24)] {
+            let s = screen(&g, w, h);
+            assert!(s.contains(" Peg deviation (bps) "), "{w}x{h}\n{s}");
+            assert!(s.contains(" venues: Peg deviation (bps) "), "{w}x{h}\n{s}");
+            assert!(line_with(&s, "band ±").contains("band ±10 bps"), "{s}");
+            assert!(line_with(&s, "> ■ weex").contains("+2.0"), "{s}");
+            assert!(line_with(&s, "> ■ weex").contains('✓'), "{s}");
+            assert!(line_with(&s, "  ■ binance").contains("-3.0"), "{s}");
+            assert!(s.contains('•'), "the band lines are dots: {w}x{h}\n{s}");
+            assert!(is_braille(&s));
+        }
+        // The value box in the border shows when the pane is wide enough.
+        let s = screen(&g, 200, 36);
+        let title = line_with(&s, " Peg deviation (bps) ");
+        assert!(
+            title.contains("weex +2.0") && title.contains("binance -3.0"),
+            "{title}"
+        );
+    }
+
+    // Why: a missing conversion draws a line 100 times too small; the
+    // helper must return basis points, not percent.
+    #[test]
+    fn a_mid_of_1_0012_on_a_peg_of_1_reads_plus_12_bps() {
+        let g = deviation_grid(["weex", "binance"], &["spread_pct < 1"], 5, &PEG, |_, _| {
+            Some(1.0012)
+        });
+        let s = screen(&g, 120, 36);
+        assert!(line_with(&s, "> ■ weex").contains("+12.0"), "{s}");
+        assert!(!s.contains("0.12"), "not percent: {s}");
+        // Past the 10 bps band, inside the 50 bps one: the warning glyph.
+        assert!(line_with(&s, "> ■ weex").contains('!'), "{s}");
+    }
+
+    // Why: the series must line up with the rows by index. A shifted index
+    // puts one venue's line on another venue. A failed venue is a gap.
+    #[test]
+    fn each_row_keeps_its_own_deviation_and_a_failed_read_is_a_gap() {
+        let g = deviation_grid(
+            ["weex", "binance"],
+            &["spread_pct < 1"],
+            3,
+            &PEG,
+            |v, run| match (v, run) {
+                (1, 2) => None,
+                (0, _) => Some(1.0002),
+                _ => Some(0.9990 + run as f64 * 0.0001),
+            },
+        );
+        let bps = |label: &str| -> Vec<Option<f64>> {
+            g.deviation[label]
+                .values
+                .iter()
+                .map(|v| v.map(|v| (v * 10.0).round() / 10.0))
+                .collect()
+        };
+        assert_eq!(bps("USDN@weex"), [Some(2.0), Some(2.0), Some(2.0)]);
+        assert_eq!(bps("USDN@binance"), [Some(-9.0), None, Some(-7.0)]);
+        assert_eq!(
+            g.deviation["USDN@binance"].gap, None,
+            "the newest tick read"
+        );
+    }
+
+    // Why: the band must follow the thresholds the verdicts use. A
+    // hard-coded 10 bps fails this.
+    #[test]
+    fn the_band_follows_the_peg_range_of_the_summaries() {
+        let peg = Peg {
+            target: 1.0,
+            range: 0.002,
+        };
+        let g = deviation_grid(["weex", "binance"], &["spread_pct < 1"], 5, &peg, steady);
+        let s = screen(&g, 120, 36);
+        assert!(s.contains("band ±20 bps"), "{s}");
+        assert!(!s.contains("band ±10 bps"), "{s}");
+    }
+
+    // Why: the chart exists to show "inside or outside". Data inside the
+    // band still gives the band's scale. Data at 80 bps widens the scale and
+    // keeps the band lines.
+    #[test]
+    fn the_scale_always_includes_the_band() {
+        let near = deviation_grid(["weex", "binance"], &["spread_pct < 1"], 5, &PEG, steady);
+        let s = screen(&near, 120, 36);
+        let title = line_with(&s, " Peg deviation (bps) ");
+        assert!(!title.is_empty());
+        assert!(s.contains("+10.0") && s.contains("-10.0"), "{s}");
+        let far = deviation_grid(["weex", "binance"], &["spread_pct < 1"], 5, &PEG, |v, _| {
+            Some([1.008, 0.9997][v])
+        });
+        let s = screen(&far, 120, 36);
+        assert!(s.contains("+80.0"), "the data widens the scale: {s}");
+        assert!(s.contains('•'), "the band lines stay: {s}");
+    }
+
+    // Why: the owner's rule: the lines use the venue colours, never a
+    // health colour. The band dots are the secondary tone, and they are dots
+    // as well, so they differ from the lines by glyph and not by colour only.
+    #[test]
+    fn the_lines_use_venue_colours_and_the_band_uses_the_secondary_tone() {
+        let g = deviation_grid(["weex", "binance"], &["spread_pct < 1"], 20, &PEG, steady);
+        let buf = buffer_of(&g, 120, 36);
+        let fg = |style: Style| style.fg.unwrap_or(crate::cli::theme::DEFAULT_COLOR);
+        let venue = [fg(series_style(0)), fg(series_style(1))];
+        // The first chart is the deviation chart: its left half of the plot.
+        let mut lines = std::collections::HashSet::new();
+        let mut dots = std::collections::HashSet::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width / 3 {
+                let c = &buf[(x, y)];
+                if is_braille(c.symbol()) {
+                    lines.insert(c.fg);
+                } else if c.symbol() == "•" {
+                    dots.insert(c.fg);
+                }
+            }
+        }
+        assert!(
+            !lines.is_empty() && lines.iter().all(|c| venue.contains(c)),
+            "{lines:?}"
+        );
+        assert_eq!(dots, [fg(SECONDARY)].into(), "{dots:?}");
+        for health in [OK, WARN, ERR] {
+            assert!(!lines.contains(&fg(health)), "no health colour in a line");
+        }
+    }
+
+    // Why: with colour off the chart must still say everything in text.
+    #[test]
+    fn with_colour_off_the_deviation_chart_still_holds_names_values_and_band() {
+        let g = deviation_grid(["weex", "binance"], &["spread_pct < 1"], 20, &PEG, steady);
+        let mut t = Terminal::new(TestBackend::new(120, 36)).unwrap();
+        t.draw(|f| {
+            draw(f, f.area(), &g);
+            crate::cli::plain::strip_color(f.buffer_mut());
+        })
+        .unwrap();
+        assert!(
+            t.backend()
+                .buffer()
+                .content
+                .iter()
+                .all(|c| c.fg == crate::cli::theme::DEFAULT_COLOR)
+        );
+        let s = screen(&g, 200, 36);
+        assert!(line_with(&s, " Peg deviation (bps) ").contains("weex +2.0"));
+        assert!(s.contains("band ±10 bps") && s.contains('•'));
+    }
+
+    // Why: at the lowest pane the plot has too few rows. Band lines would
+    // sit on the data and hide it. The legend still names the band.
+    #[test]
+    fn at_the_lowest_pane_no_band_line_is_drawn_and_the_legend_names_the_band() {
+        let g = deviation_grid(["weex", "binance"], &["spread_pct < 1"], 20, &PEG, steady);
+        // 72 columns: one chart beside the legend. 10 rows: a 5-row pane.
+        let s = screen(&g, 72, 10);
+        assert!(s.contains(" Peg deviation (bps) "), "{s}");
+        assert!(!s.contains('•'), "no band line in a low plot: {s}");
+        assert!(s.contains("band ±10 bps"), "{s}");
+        // Taller, the lines return.
+        assert!(screen(&g, 72, 14).contains('•'));
+        // Below the pane, the hint says how much to enlarge the window.
+        let s = screen(&g, 50, 8);
+        let text = s.lines().map(str::trim_end).collect::<Vec<_>>().join(" ");
+        assert!(text.contains("Window too small: enlarge it"), "{s}");
+    }
+
+    // Q-D4 b. Why: bars hide the sign and cannot carry two band lines.
+    #[test]
+    fn isolating_a_venue_keeps_a_braille_line_with_the_band() {
+        let mut g = deviation_grid(["weex", "binance"], &["spread_pct < 1"], 20, &PEG, steady);
+        g.key(key(KeyCode::Char(' ')));
+        let s = screen(&g, 200, 36);
+        let first = &s.lines().map(str::to_string).collect::<Vec<_>>();
+        let title = line_with(&s, " Peg deviation (bps) ");
+        assert!(
+            title.contains("weex +2.0") && !title.contains("binance"),
+            "{title}"
+        );
+        assert!(is_braille(&s) && s.contains('•'), "{s}");
+        assert!(
+            !first.iter().any(|l| l.contains('█')),
+            "no bars on this chart: {s}"
+        );
+    }
+
+    // Q-D6 a. Why: a DEX mid is in USD and a CEX mid is in the quote. The
+    // reader must know why two lines differ.
+    #[test]
+    fn a_dex_venue_is_tagged_usd_in_the_legend_and_the_value_box() {
+        let g = deviation_grid(["eth", "binance"], &["spread_pct < 1"], 20, &PEG, steady);
+        let s = screen(&g, 200, 36);
+        assert!(line_with(&s, "> ■ eth usd").contains("+2.0"), "{s}");
+        assert!(
+            line_with(&s, " Peg deviation (bps) ").contains("eth usd +2.0"),
+            "{s}"
+        );
+        assert!(!s.contains("binance usd"), "a CEX venue has no tag: {s}");
+        // The tag is only a name: the evidence key still reads the venue.
+        assert_eq!(
+            g.evidence('b'),
+            Some("market summary USDN --venue eth".to_string())
+        );
+    }
+
+    // Why: a chart that is missing silently cannot be diagnosed. The
+    // legend (or, with no legend, the footer) says why.
+    #[test]
+    fn a_missing_deviation_chart_says_why() {
+        let peg = Peg {
+            target: 0.0,
+            range: 0.001,
+        };
+        let g = deviation_grid(["weex", "binance"], &["spread_pct < 1"], 5, &peg, steady);
+        let charts = g.venue_charts().unwrap();
+        assert_eq!(charts.gap, Some(DeviationGap::NoPeg));
+        assert_eq!(
+            charts.charts[0].label, "spread_pct < 1",
+            "no deviation chart"
+        );
+        let text = screen(&g, 120, 36)
+            .lines()
+            .map(str::trim)
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(text.contains("peg deviation: peg"), "{text}");
+        // No venue has a mid: the reason is the missing price.
+        let g = deviation_grid(["weex", "binance"], &["spread_pct < 1"], 5, &PEG, |_, _| {
+            None
+        });
+        assert_eq!(g.venue_charts().unwrap().gap, Some(DeviationGap::NoPrice));
+        // With no chart at all there is no legend: the footer says it.
+        let mut g = deviation_grid(["weex", "binance"], &["spread_pct < 1"], 0, &PEG, steady);
+        for run in 1..=3 {
+            let rows = ["weex", "binance"]
+                .iter()
+                .map(|v| {
+                    TargetSnapshot::new(
+                        format!("USDN@{v}"),
+                        vec![cell("spread_pct < 1", RuleStatus::Pass, None)],
+                    )
+                    .on_venue(Some(v))
+                })
+                .collect();
+            tick_rows(&mut g, run, rows);
+        }
+        g.key(key(KeyCode::Enter));
+        assert!(g.venue_charts().is_none());
+        let s = screen(&g, 120, 36);
+        assert!(s.contains("peg deviation: no mid price"), "{s}");
+    }
+
+    // Q-D5 a. Why: a rule `peg_deviation_pct` is the user's own chart with
+    // its own limit. The new chart does not replace it.
+    #[test]
+    fn a_peg_deviation_rule_gives_its_own_chart_beside_the_bps_chart() {
+        let g = deviation_grid(
+            ["weex", "binance"],
+            &["peg_deviation_pct < 0.1"],
+            10,
+            &PEG,
+            steady,
+        );
+        let labels: Vec<String> = g
+            .venue_charts()
+            .unwrap()
+            .charts
+            .into_iter()
+            .map(|c| c.label)
+            .collect();
+        assert_eq!(labels, ["Peg deviation (bps)", "peg_deviation_pct < 0.1"]);
+    }
+
+    // Why: one venue keeps the detail of today. The venue charts, and so
+    // the deviation chart, exist for two or more venues.
+    #[test]
+    fn a_target_on_one_venue_has_no_deviation_chart() {
+        let mut g = GridState::new(list(), None);
+        tick(&mut g, 1, 0.5);
+        g.key(key(KeyCode::Enter));
+        assert!(g.venue_charts().is_none());
+        assert!(
+            g.deviation_note().is_none(),
+            "no note for a one-venue target"
+        );
+    }
+
+    // ---- the venue editor (design 2026-11-11, item 2)
+
+    fn pegs(venues: &[&str]) -> Watchlist {
+        let mut w = Watchlist::new("pegs");
+        let mut t = Target::new(TargetKind::Pair, "USDN");
+        t.venues = venues.iter().map(|v| (*v).to_string()).collect();
+        t.preset = Some(scope::watch::Preset::MarketHealth);
+        let mut other = Target::new(TargetKind::Pair, "USDC");
+        other.venues = vec!["okx".into()];
+        other.preset = Some(scope::watch::Preset::MarketHealth);
+        w.targets = vec![t, other];
+        w
+    }
+
+    fn market_row(id: &str, venue: &str, rule: &str) -> TargetSnapshot {
+        TargetSnapshot::new(
+            format!("{id}@{venue}"),
+            vec![cell(rule, RuleStatus::Pass, Some(0.1))],
+        )
+        .on_venue(Some(venue))
+    }
+
+    fn editing_grid(venues: &[&str]) -> GridState {
+        let list = pegs(venues);
+        let known = ["weex", "binance", "okx", "mexc"]
+            .map(String::from)
+            .to_vec();
+        let mut g = GridState::new(list.clone(), None).with_venues(known, None);
+        g.apply(GridMsg::Ready(Ready {
+            contracts: vec![None; list.targets.len()],
+            list,
+        }));
+        let mut rows: Vec<TargetSnapshot> = venues
+            .iter()
+            .map(|v| market_row("USDN", v, "spread_pct < 1"))
+            .collect();
+        rows.push(market_row("USDC", "okx", "spread_pct < 1"));
+        tick_rows(&mut g, 1, rows);
+        g
+    }
+
+    fn type_text(g: &mut GridState, text: &str) {
+        for c in text.chars() {
+            g.key(key(KeyCode::Char(c)));
+        }
+    }
+
+    fn applied(g: &mut GridState, run: u64, target: usize, venues: &[&str]) {
+        let venues: Vec<String> = venues.iter().map(|v| (*v).to_string()).collect();
+        let mut ready = g.ready.clone().unwrap();
+        ready.list.targets[target].venues = venues.clone();
+        g.apply(GridMsg::VenuesApplied {
+            run,
+            ready,
+            changes: vec![VenueChange {
+                seq: 1,
+                target,
+                venues,
+            }],
+        });
+    }
+
+    /// Why: the evidence keys are live in the detail pane. If `b` ran a
+    /// command while the user typed a venue name, the grid would leave for
+    /// the shell in the middle of the line. This is the most likely bug.
+    #[test]
+    fn with_the_line_open_every_key_types_and_no_command_runs() {
+        let mut g = editing_grid(&["weex", "binance"]);
+        g.key(key(KeyCode::Enter));
+        assert!(g.detail);
+        assert_eq!(g.key(key(KeyCode::Char('v'))), GridAction::None);
+        assert!(g.is_editing());
+        for c in ['b', 't', 'h', 'r', 'x', 'u', 'v'] {
+            assert_eq!(g.key(key(KeyCode::Char(c))), GridAction::None, "{c}");
+        }
+        assert_eq!(
+            g.editor.note(&g.list, 120).unwrap().0,
+            " USDN: venues  weex binancebthrxuv█"
+        );
+        // Esc closes the line and does not stop the run.
+        assert_eq!(g.key(key(KeyCode::Esc)), GridAction::None);
+        assert!(!g.is_editing() && g.is_running());
+        // Without the line `b` is the evidence key again.
+        assert!(matches!(g.key(key(KeyCode::Char('b'))), GridAction::Run(_)));
+    }
+
+    /// Why: `selected` is an index into sorted rows, so it can point at
+    /// another row after the set of rows changes. The grid must keep the
+    /// same target, drop the series of a removed venue, and show the new
+    /// venues in its list.
+    #[test]
+    fn the_grid_follows_the_new_list_and_keeps_the_selected_target() {
+        let mut g = editing_grid(&["weex", "binance"]);
+        // Select the USDC row (third).
+        g.key(key(KeyCode::Down));
+        g.key(key(KeyCode::Down));
+        assert_eq!(g.rows()[g.selected].target, "USDC@okx");
+        assert!(g.history.keys().any(|(l, _)| l == "USDN@binance"));
+        applied(&mut g, 3, 0, &["weex", "mexc"]);
+        assert_eq!(g.list.targets[0].venues, ["weex", "mexc"]);
+        assert!(
+            !g.history.keys().any(|(l, _)| l == "USDN@binance"),
+            "the series of the removed venue are gone"
+        );
+        assert!(g.history.keys().any(|(l, _)| l == "USDN@weex"), "kept");
+        // The next tick has other rows: a breached one sorts first.
+        let mut breached = market_row("USDN", "mexc", "spread_pct < 1");
+        breached.status = TargetStatus::Breached;
+        tick_rows(
+            &mut g,
+            3,
+            vec![
+                market_row("USDN", "weex", "spread_pct < 1"),
+                market_row("USDC", "okx", "spread_pct < 1"),
+                breached,
+            ],
+        );
+        assert_eq!(g.rows()[0].target, "USDN@mexc");
+        assert_eq!(g.rows()[g.selected].target, "USDC@okx");
+    }
+
+    /// Why: `Target::rows` changes shape between one venue and two. The
+    /// token cells move to another row, and their old series must not
+    /// come back as stale values when the shape returns.
+    #[test]
+    fn a_token_that_goes_from_one_venue_to_two_drops_its_token_cell_history() {
+        let mut t = Target::new(TargetKind::Token, "USDN");
+        t.venues = vec!["weex".into()];
+        t.rules = vec![
+            Rule::parse("spread_pct < 1").unwrap(),
+            Rule::parse("holders >= 10").unwrap(),
+        ];
+        let mut w = Watchlist::new("tok");
+        w.targets = vec![t];
+        let mut g = GridState::new(w.clone(), None);
+        g.apply(GridMsg::Ready(Ready {
+            contracts: vec![None],
+            list: w,
+        }));
+        let row = TargetSnapshot::new(
+            "USDN@weex",
+            vec![
+                cell("spread_pct < 1", RuleStatus::Pass, Some(0.1)),
+                cell("holders >= 10", RuleStatus::Pass, Some(50.0)),
+            ],
+        )
+        .on_venue(Some("weex"));
+        tick_rows(&mut g, 1, vec![row]);
+        applied(&mut g, 2, 0, &["weex", "binance"]);
+        let keys: Vec<_> = g.history.keys().cloned().collect();
+        assert_eq!(
+            keys,
+            [("USDN@weex".to_string(), "spread_pct < 1".to_string())]
+        );
+    }
+
+    /// Why: the legend is the first place the user learns the key, and the
+    /// extra keys must not push `Esc stop the run` out of 79 columns.
+    #[test]
+    fn the_legend_names_the_editor_keys_and_fits_79_columns() {
+        let mut g = editing_grid(&["weex", "binance"]);
+        assert_eq!(running_legend(&g), GRID_LEGEND);
+        g.key(key(KeyCode::Char('v')));
+        type_text(&mut g, " okx");
+        g.key(key(KeyCode::Enter));
+        let legend = running_legend(&g);
+        assert!(legend.contains("u undo"), "{legend}");
+        assert!(legend.ends_with("Esc stop the run"), "{legend}");
+        // The input line and its legend do not wrap at 79 columns.
+        g.key(key(KeyCode::Char('v')));
+        type_text(&mut g, &" mexcmexcmexc".repeat(8));
+        let s = screen(&g, 79, 24);
+        assert!(s.contains("USDN: venues  …"), "{s}");
+        assert!(s.contains("Enter apply · Esc cancel"), "{s}");
+        assert!(screen(&g, 120, 36).contains("venues: weex, binance, okx, mexc"));
+    }
+
+    /// Why: the user must learn at close that a trial edit was not saved.
+    #[test]
+    fn closing_after_an_unsaved_venue_change_says_so() {
+        let mut g = editing_grid(&["weex", "binance"]);
+        assert_eq!(g.unsaved_note(), None);
+        applied(&mut g, 2, 0, &["weex"]);
+        assert_eq!(
+            g.unsaved_note().as_deref(),
+            Some("venues of USDN changed in the run and not saved")
+        );
+    }
+
+    /// Why: after the run ended there is no loop to apply a change; the
+    /// footer says what to do instead.
+    #[test]
+    fn v_after_the_run_ended_says_to_use_the_wizard() {
+        let mut g = editing_grid(&["weex", "binance"]);
+        g.end("Done.".into(), SECONDARY);
+        g.key(key(KeyCode::Char('v')));
+        assert!(!g.is_editing());
+        assert!(screen(&g, 120, 36).contains("the run ended: change the venues in the wizard"));
     }
 }

@@ -7,10 +7,19 @@
 //!
 //! The TUI's monitor wizard and grid drive these functions.
 
+pub mod deviation;
 pub mod fetch;
 pub mod headless;
+pub mod inline;
+#[cfg(test)]
+mod inline_e2e_tests;
 pub mod monitor;
 pub mod run;
+pub mod state;
+#[cfg(test)]
+mod state_e2e_tests;
+#[cfg(test)]
+mod venue_edit_tests;
 
 use crate::cli::output::Output;
 use crate::cli::resolve::{DexCandidates, ResolveContext, VenueKind, picker_for, resolve};
@@ -22,7 +31,7 @@ use scope::tokens::TokenAliases;
 use scope::watch::{Target, TargetKind, Watchlist};
 
 pub use fetch::{TargetReading, Tick, tick};
-pub use run::{csv_header, csv_rows, report_text, run};
+pub use run::{csv_header, csv_rows, report_text, run, tick_csv_rows};
 
 /// What the fetchers read with.
 #[derive(Clone, Copy)]
