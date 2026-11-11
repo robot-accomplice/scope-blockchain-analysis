@@ -15,12 +15,14 @@ use crate::cli::tui::venue_charts::{
     self, Selection, Series as ChartSeries, VenueChart, VenueCharts,
 };
 use crate::cli::tui::{fit, market_view};
+use crate::cli::watch::deviation;
 use ansi_to_tui::IntoText;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
+use scope::market::health::{BPS_PER_PERCENT, DeviationGap, PegBands};
 use scope::metrics::{Metric, MetricId, Threshold, Unit};
 use scope::watch::RuleStatus;
 use std::sync::Arc;
@@ -82,6 +84,7 @@ fn lock(series: &SeriesHook) -> std::sync::MutexGuard<'_, crate::cli::output::Se
 /// What one draw needs, copied out so the lock is not held while drawing.
 struct Copy {
     metrics: Vec<Metric>,
+    peg: Option<PegBands>,
     runs: Vec<RunRecord>,
     dropped: u64,
 }
@@ -90,6 +93,7 @@ fn copy(series: &SeriesHook) -> Copy {
     let s = lock(series);
     Copy {
         metrics: s.metrics.clone(),
+        peg: s.peg,
         runs: s.runs.iter().cloned().collect(),
         dropped: s.dropped,
     }
@@ -247,6 +251,10 @@ pub(crate) fn draw(f: &mut Frame, area: Rect, view: &RepeatView, status: Vec<Lin
                     WARN,
                 ));
             }
+        } else if let Some(gap) = deviation_gap_of(&c) {
+            // No charts, so no legend: the footer says why there is no
+            // deviation chart.
+            foot_lines.push(Line::styled(venue_charts::gap_note(gap), SECONDARY));
         }
     } else if let Some((cols, rows)) = shortfall(plain, &c) {
         foot_lines.push(Line::styled(enlarge_hint(cols, rows, "everything"), WARN));
@@ -355,36 +363,39 @@ fn venue_charts_of(c: &Copy) -> Option<VenueCharts> {
         .iter()
         .enumerate()
         .filter(|(_, m)| charted(m.id))
-        .map(|(i, m)| VenueChart {
-            label: format!("{} {}", m.label, limit_text(m))
-                .trim_end()
-                .to_string(),
-            threshold: m.threshold,
-            unit: Some(m.unit),
-            series: last
-                .samples
-                .iter()
-                .enumerate()
-                .map(|(v, now)| ChartSeries {
-                    venue: now.venue.clone(),
-                    values: c
-                        .runs
-                        .iter()
-                        .map(|r| {
-                            let sample = r.venues.as_ref()?.samples.get(v)?;
-                            sample.sample.values.get(i).copied().flatten()
-                        })
-                        .collect(),
-                    status: venue_status(now),
-                })
-                .collect(),
+        .map(|(i, m)| {
+            let values_of = |v: usize| -> Vec<Option<f64>> {
+                c.runs
+                    .iter()
+                    .map(|r| {
+                        let sample = r.venues.as_ref()?.samples.get(v)?;
+                        sample.sample.values.get(i).copied().flatten()
+                    })
+                    .collect()
+            };
+            if m.id == MetricId::PegDeviationPct {
+                return deviation_chart(c, last, values_of);
+            }
+            VenueChart {
+                label: format!("{} {}", m.label, limit_text(m))
+                    .trim_end()
+                    .to_string(),
+                threshold: m.threshold,
+                unit: Some(m.unit),
+                band: None,
+                series: last
+                    .samples
+                    .iter()
+                    .enumerate()
+                    .map(|(v, now)| ChartSeries {
+                        venue: now.venue.clone(),
+                        values: values_of(v),
+                        status: venue_status(now),
+                    })
+                    .collect(),
+            }
         })
-        .filter(|chart| {
-            chart
-                .series
-                .iter()
-                .any(|s| s.values.iter().any(Option::is_some))
-        })
+        .filter(VenueChart::has_values)
         .collect();
     if charts.is_empty() {
         return None;
@@ -397,7 +408,73 @@ fn venue_charts_of(c: &Copy) -> Option<VenueCharts> {
             .unwrap_or_default(),
         _ => std::time::Duration::ZERO,
     };
-    Some(VenueCharts { charts, interval })
+    Some(VenueCharts {
+        charts,
+        interval,
+        gap: deviation_gap_of(c),
+    })
+}
+
+/// The peg deviation chart of a repeat, in the place of the percent chart:
+/// the same values, in basis points, with the peg band. `values_of` gives
+/// the percent values of one venue over the runs.
+fn deviation_chart(
+    c: &Copy,
+    last: &crate::cli::output::VenueRun,
+    values_of: impl Fn(usize) -> Vec<Option<f64>>,
+) -> VenueChart {
+    let gap = missing_deviation(c.peg);
+    VenueChart {
+        label: venue_charts::DEVIATION_LABEL.to_string(),
+        threshold: None,
+        unit: None,
+        band: c.peg.as_ref().and_then(venue_charts::deviation_band),
+        series: last
+            .samples
+            .iter()
+            .enumerate()
+            .map(|(v, now)| {
+                let values: Vec<Option<f64>> = values_of(v)
+                    .into_iter()
+                    .map(|pct| pct.map(|p| p * BPS_PER_PERCENT))
+                    .collect();
+                let bps = values.last().copied().flatten();
+                ChartSeries {
+                    venue: venue_charts::deviation_venue(&now.venue),
+                    values,
+                    status: deviation::status(c.peg.as_ref(), bps, Some(gap)),
+                }
+            })
+            .collect(),
+    }
+}
+
+/// Why the deviation chart of a repeat is missing: the metric is in the
+/// table, and no venue has a value on any run. `None` when it shows.
+fn deviation_gap_of(c: &Copy) -> Option<DeviationGap> {
+    let i = c
+        .metrics
+        .iter()
+        .position(|m| m.id == MetricId::PegDeviationPct)?;
+    let any = c.runs.iter().any(|r| {
+        r.venues.as_ref().is_some_and(|v| {
+            v.samples
+                .iter()
+                .any(|s| s.sample.values.get(i).copied().flatten().is_some())
+        })
+    });
+    if any {
+        return None;
+    }
+    Some(missing_deviation(c.peg))
+}
+
+/// Why a venue has no deviation: the peg is not positive, or it has no mid.
+fn missing_deviation(peg: Option<PegBands>) -> DeviationGap {
+    match peg {
+        Some(p) if p.target() <= 0.0 => DeviationGap::NoPeg,
+        _ => DeviationGap::NoPrice,
+    }
 }
 
 /// How a venue stands in the last run, for the legend's glyph.
@@ -1368,6 +1445,7 @@ mod tests {
                 .collect();
             depth_cycle_note(&Copy {
                 metrics,
+                peg: None,
                 runs,
                 dropped: 0,
             })

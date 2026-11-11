@@ -9,7 +9,7 @@
 //! an error would reach `main` as exit code 1, and here 1 means "breach".
 
 use super::run::{
-    CellRecord, cell_record, csv_header, csv_rows, run_ticks, start_csv, write_report,
+    CellRecord, cell_record, csv_header, run_ticks, start_csv, tick_csv_rows, write_report,
 };
 use super::{Ready, Sources, Tick, monitor, prepare, watchlist_path};
 use crate::cli::output::Output;
@@ -223,7 +223,7 @@ pub async fn run(args: &WatchArgs, ctx: &Context<'_>, stop: impl Future<Output =
             log_tick(n, tick, events);
             // The CSV row is written already. A closed stdout ends the run
             // after this tick; the tick still counts as the last one.
-            if let Err(e) = print_tick(args.format, out, n, at, tick, events) {
+            if let Err(e) = print_tick(args.format, out, &ready.list, n, at, tick, events) {
                 note!(out, "Cannot write to stdout ({e}); stopping.");
                 stdout_closed.set(true);
                 closed.notify_one();
@@ -487,6 +487,7 @@ fn log_tick(run: u64, tick: &Tick, events: &[Event]) {
 fn print_tick(
     format: WatchFormat,
     out: &Output,
+    list: &Watchlist,
     run: u64,
     at: &str,
     tick: &Tick,
@@ -498,7 +499,7 @@ fn print_tick(
             crate::out!(out, "{}", tick_text(&time, run, &tick.snapshot, events))?;
         }
         WatchFormat::Csv => {
-            crate::out!(out, "{}", csv_rows(at, &tick.snapshot))?;
+            crate::out!(out, "{}", tick_csv_rows(at, list, tick))?;
         }
         WatchFormat::Json => {
             outln!(out, "{}", tick_json(run, at, &tick.snapshot))?;
@@ -1236,7 +1237,30 @@ mod tests {
             }
         }
         assert!(cells >= 2, "{cells}");
-        assert!(lines.next().is_none(), "no extra CSV rows");
+        // After the cell rows come the chart rows (Q-D7 b), one for each
+        // market row of the target on two venues. The JSON has no cell for
+        // them: they are readings for the chart, not checks.
+        let chart: Vec<Vec<String>> = lines.by_ref().map(csv_fields).collect();
+        let labels: Vec<&str> = chart.iter().map(|f| f[1].as_str()).collect();
+        assert_eq!(labels, ["USDC@eth", "USDC@binance"], "{csv}");
+        for f in &chart {
+            assert_eq!(f[0], text(&tick["ts"]));
+            assert_eq!(
+                (f[2].as_str(), f[7].as_str()),
+                ("peg_deviation_bps", "chart")
+            );
+            assert_eq!((f[4].as_str(), f[5].as_str()), ("", ""), "no op, no limit");
+        }
+        // The venue that read has a number and a verdict. The venue that
+        // failed has a row too, with no number and the reason: a gap in the
+        // chart is told from a missing row.
+        assert!(chart[0][3].parse::<f64>().is_ok(), "{:?}", chart[0]);
+        assert_ne!(chart[0][6], "n/a", "{:?}", chart[0]);
+        assert_eq!(chart[1][3], "", "{:?}", chart[1]);
+        assert_eq!(
+            (chart[1][6].as_str(), chart[1][9].as_str()),
+            ("n/a", "no mid price")
+        );
         // The exact error text is kept, not a summary.
         assert!(csv.contains("error"), "{csv}");
     }

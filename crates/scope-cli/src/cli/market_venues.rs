@@ -220,6 +220,7 @@ pub(crate) async fn run_summary(
         }
     );
     let metrics = series::summary_metrics(thresholds);
+    out.set_series_peg(thresholds.peg_bands());
     let histories: Vec<DepthHistory> = venues.iter().map(|_| DepthHistory::default()).collect();
     let last = repeat::run_with(
         &schedule,
@@ -496,9 +497,7 @@ impl ComparisonRow {
             bid_depth: Some(summary.bid_depth),
             ask_depth: Some(summary.ask_depth),
             volume_24h: summary.volume_24h,
-            peg_deviation_bps: summary
-                .mid_price
-                .and_then(|mid| summary.peg_deviation_bps(mid)),
+            peg_deviation_bps: summary.mid_peg_deviation_bps(),
             bot_signs,
             bot_signs_state,
             error: None,
@@ -1437,6 +1436,9 @@ mod tests {
             last.comparison
         );
         assert!(!record.sample.healthy, "a failed venue is a failed run");
+        // Why: the deviation chart draws the band the verdicts use. The
+        // runner hands the series those bands next to its metrics.
+        assert_eq!(series.peg, Some(HealthThresholds::default().peg_bands()));
     }
 
     #[tokio::test]
@@ -1529,10 +1531,7 @@ mod tests {
         assert!((pct - 0.02).abs() < 0.001, "percent, not a ratio: {pct}");
         // The deviation is in basis points from the peg target.
         let bps = row["peg_deviation_bps"].as_f64().unwrap();
-        assert_eq!(
-            Some(bps),
-            summary.peg_deviation_bps(summary.mid_price.unwrap())
-        );
+        assert_eq!(Some(bps), summary.mid_peg_deviation_bps());
         assert!((bps - 4.0).abs() < 0.01, "1.0004 is 4 bps off 1.0: {bps}");
     }
 

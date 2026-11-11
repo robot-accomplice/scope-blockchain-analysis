@@ -1,12 +1,36 @@
 # Grid Peg Deviation Chart and Venue Editor: Design
 
-- **Status:** proposed on 2026-11-11. No decision yet (sections 3.6 and 4.7 hold the open questions). No code.
+- **Status:** decided on 2026-11-11 (section 0 has the decisions). Item 1 (the chart) is built. Item 2 (the editor) is not built yet.
 - **Scope:** the two items that `2026-11-10-market-venue-followups-design.md` (section 8) deferred. The owner chose both for 0.8.8:
   1. a per-venue peg deviation chart in the repeat view of `market summary --every` and in the watch grid;
   2. a venue editor in the watch grid: change the venues of a target without delete and add.
 - **Base:** `develop` at 57d7367.
 - **Reads:** `2026-11-04-watch-venue-list-design.md` (Q8, and the venue editor note in section 2.7), `2026-11-10-market-venue-followups-design.md` (section 8).
 - **Delivery:** two PRs, one for each item (Q-P in section 5). The chart goes first. It is read-only and has no state.
+
+## 0. Decisions
+
+The owner decided on 2026-11-11. The owner chose the recommended option of every question except Q-D7.
+
+| Question | Chosen option | Date |
+|---|---|---|
+| Q-D1 reference of the deviation | a. The peg only | 2026-11-11 |
+| Q-D2 position of the chart | b. First in the grid; old slot in the repeat view | 2026-11-11 |
+| Q-D3 scale | a. Always include the on-peg band | 2026-11-11 |
+| Q-D4 isolated view | b. A braille line with the band | 2026-11-11 |
+| Q-D5 user rule `peg_deviation_pct` in the grid | a. Show both charts | 2026-11-11 |
+| Q-D6 DEX tag | a. Tag `usd` | 2026-11-11 |
+| **Q-D7 watch CSV row** | **b. Yes: a `peg_deviation_bps` row, with source `chart`** (not the recommended option) | 2026-11-11 |
+| Q-E1 how an edit takes effect | b. Between ticks, in the same run | 2026-11-11 |
+| Q-E2 key | a. `v` | 2026-11-11 |
+| Q-E3 input line | a. Prefilled with the current venues | 2026-11-11 |
+| Q-E4 write the saved watchlist | a. No; `Ctrl-S` saves | 2026-11-11 |
+| Q-E5 what `Ctrl-S` writes | a. The whole list, with a guard | 2026-11-11 |
+| Q-E6 undo | a. One level | 2026-11-11 |
+| Q-E7 shared venue check | a. In `wizard.rs` | 2026-11-11 |
+| Q-P number of PRs | a. Two | 2026-11-11 |
+
+Where the text below still shows a recommendation, the table above is the decision.
 
 ## 1. Why these two were deferred, and what changed
 
@@ -58,7 +82,7 @@ Two findings change the task:
 - **Grid.** `GridState` gets `deviation: HashMap<String, VecDeque<Option<f64>>>`, keyed by row label, with the same `HISTORY` limit. `apply(GridMsg::Tick)` fills it from `tick.summaries` zipped with `tick.snapshot.targets` (the two vectors line up by index; `fetch.rs` documents it). A failed venue or a row with no mid gives `None`, which is a gap, not zero.
 - **Band, grid.** `PegBands` comes from the summary (`summary.peg_bands()`). All venues of one target use the same thresholds (`preset::thresholds(target, base)`), so one band serves the chart. The grid takes it from the newest summary of any venue row of the target.
 - **Repeat view.** The series already holds the `PegDeviationPct` value of each venue and run (in percent). The chart multiplies by `BPS_PER_PERCENT`, the same factor that `peg_deviation_bps` uses. The bands are not in the series today. `output::Series` gets one field, `peg: Option<PegBands>`. The repeat runner sets it next to `metrics`, from the thresholds that `--peg` and `--peg-range` and the config give. A repeat run on one venue does not use the chart.
-- **No new `MetricId`, no new cell.** A cell would change the preset contract ("the grid shows `MarketSummary::checks` one to one", `watch/preset.rs`). It would add a column to every market row and a row to the CSV. The chart is a view. It does not need to be a cell.
+- **No new `MetricId`, no new cell.** A cell would change the preset contract ("the grid shows `MarketSummary::checks` one to one", `watch/preset.rs`). It would add a column to every market row. The chart is a view. It does not need to be a cell. The record in the watch CSV is a row of its own, with source `chart` (Q-D7 b, section 3.4).
 
 ### Where it fits: one more chart in the set
 
@@ -143,9 +167,12 @@ Unit tests (`venue_charts.rs`, `grid.rs`, `repeat_view.rs`, `scope-core`):
 9. **Too small.** At the minimum pane, no band line is drawn and the legend names the band. Below it, the enlarge hint shows. *Why:* the band lines must not hide the data.
 10. **Isolated.** Space shows one braille line with the band, and bars do not show. *Why:* it pins Q-D4.
 11. **DEX tag.** A target on `eth` and `binance` shows `eth usd`. *Why:* the quote differs.
-12. **Absence.** A peg of 0 gives no chart and the note of section 3.5. All venues without a mid give the same note. *Why:* a silent missing chart cannot be diagnosed.
+12. **Absence.** A peg of 0 gives no chart and the note of section 3.4. All venues without a mid give the same note. *Why:* a silent missing chart cannot be diagnosed.
 13. **A rule `peg_deviation_pct` in the grid.** Both charts show. *Why:* it pins Q-D5.
 14. **Repeat view test update.** `test_a_repeat_on_two_venues_draws_the_venue_charts_of_the_watch_grid` expects the legend ` venues: Mid price `. It stays true, because the old slot is after Mid. Add a check for the deviation chart in this test.
+14a. **Watch CSV row (Q-D7 b).** A tick of a target on 2 or more venues writes one `peg_deviation_bps` row for each market row, with source `chart`, after the cell rows. The value equals the chart value for that tick. A target on one venue writes none. A row with no mid has an empty value, status `n/a` and the reason in `detail`. *Why:* a grid chart must be rebuildable from the record, and a gap in the chart must differ from a missing row.
+14b. **The CSV contract.** The tests that pin the cell rows keep their count: the cell rows are the same, and the chart rows are counted apart. The `--format csv` output on stdout is still the bytes of the file. *Why:* the new row must not change what a reader of the cell rows sees.
+14c. **Same rule for glyph and CSV.** The CSV status of a row equals the legend glyph of the same venue (`pass` is `✓`, `warn` is `!`, `fail` is `✗`, `n/a` is `-`). *Why:* both call one function, and the test fails if one of them gets its own rule.
 
 TUI harness scenarios (`tests/tui/scenarios`, offline tier):
 
@@ -155,12 +182,14 @@ TUI harness scenarios (`tests/tui/scenarios`, offline tier):
 
 The harness needs a recorded second venue. The existing fixtures hold `api.binance.com` only (`tests/tui/fixtures/*`). The work includes one new fixture folder for the second venue. If a recording is not possible offline, the scenario moves to the live tier and the unit tests carry the proof. The plan must say which.
 
+Built: the recording was possible. The fixtures `watch-deviation-chart`, `repeat-deviation-chart` and `repeat-deviation-chart-nocolor` hold `api.binance.com` and `api-spot.weex.com`, recorded from the live APIs with `SCOPE_HTTP_MODE=record`. All three scenarios run in the offline tier. In the repeat scenario, the chart keys are used after Esc stops the run, because the keys apply to the finished view.
+
 ## 3.4 RCA instrumentation (rule 13)
 
 The chart is a view. It makes no decision. The failure it can show is a wrong or a missing line. The record for that failure:
 
 1. **Source numbers.** The repeat view's CSV already holds `peg_deviation_pct` for each venue and run (`market_venues.rs` header). Test 1 proves that the chart equals the `comparison` rows. A wrong line can be reproduced from the CSV or from `market summary --format json`.
-2. **The watch CSV has no mid and no deviation.** It has one row for each cell. After the fact, a grid chart cannot be rebuilt from the CSV. This is a gap. Q-D7 asks if the watch CSV should get a row for the deviation. The recommendation is no, with a reason.
+2. **The watch CSV row (Q-D7 b).** The watch CSV had no mid and no deviation. It has one row for each cell, so a grid chart could not be rebuilt from it. The owner chose to add a row. Each tick, for each market row of a target on 2 or more venues, the CSV gets one row after the cell rows: `target` is the row label (`USDN@weex`), `metric` is `peg_deviation_bps`, `value` is the deviation in bps, `source` is `chart`, and `op` and `threshold` are empty. `status` is the legend glyph in words (`pass`, `warn`, `fail`, or `n/a` with no value). `detail` holds the verdict and the band (`on the peg (band ±10.0 bps)`) or the reason there is no value. The row is written when the value is missing, so a gap in the chart is not a missing row. A row with source `chart` is a reading, not a check: it is never a breach, and the breach count does not include it. The value comes from `MarketSummary::mid_peg_deviation_bps`, the call that the chart uses.
 3. **Absence is shown on screen, with a reason.** The legend (and, with no legend, the footer) says why the chart is missing: `peg deviation: peg target is not positive`, or `peg deviation: no venue has a mid price yet`. The reason is a typed value (`DeviationGap::NoPeg`, `DeviationGap::NoPrice`), so a test can assert it.
 4. **No new log line.** Nothing here runs in the background.
 
@@ -170,7 +199,8 @@ The chart is a view. It makes no decision. The failure it can show is a wrong or
 |---|---|
 | Deviation from the cross-venue median (Q8 of the 2026-11-04 design) | The owner asked for deviation in bps, and `comparison` holds it against the peg. A median line shows how far venues differ from each other. A peg line shows how far each is from the peg. When all venues drift together, the median line stays flat and hides the drift. See Q-D1. |
 | A deviation chart for a target on one venue | The venue charts exist only for 2 or more venues (design 2026-11-04, section 2.9). One venue keeps its detail pane. Showing one line is a different feature. |
-| A deviation cell or column in the watch CSV | See Q-D7. A new row changes what every reader of the CSV sees, and no one asked for it. |
+| A deviation cell or column in the watch CSV | Q-D7 chose a row, not a cell or a column. The CSV keeps its 10 columns. |
+| The deviation in the `--format json` output of `scope watch` | Not asked. The JSON cells equal the CSV cell rows. The chart rows are in the CSV only. Add it if a reader of the JSON needs it. |
 | A new `MetricId` for bps | The percent metric exists. One factor converts it. A second metric would be a second definition of the same value. |
 | The web monitor | `scope-web/src/monitor.rs` does not draw the venue charts. |
 | A shaded band | A terminal chart has no fill in braille. Two dotted lines and a legend row are enough. |
@@ -217,10 +247,10 @@ Reason for a: the rule chart is the user's own, with its own limit. The cost is 
 Reason for a: the DEX mid is in USD and a CEX mid is in the quote. The reader must know why two lines differ.
 
 **Q-D7. Add a `peg_deviation_bps` row to the watch CSV for each venue row and tick?**
-- a. No. **(recommended)**
-- b. Yes, for targets on 2 or more venues, with source `chart`.
+- a. No. (the first recommendation)
+- b. Yes, for targets on 2 or more venues, with source `chart`. **(decided by the owner on 2026-11-11)**
 
-Reason for a: the CSV contract is one row for each cell, and tests pin the 10 columns. A new row changes row counts for every reader. The numbers can be rebuilt from `market summary --format json` (the `comparison` rows). Rule 13 leans toward b. This is a judgement call for the owner: b gives a complete trail and costs a visible CSV change.
+Decision: b. The owner chose the complete trail. The first recommendation was a, because the CSV contract is one row for each cell and a new row changes the row counts for every reader. The cost of b is that visible CSV change. The CHANGELOG says it. The rows keep the 10 columns and sit after the cell rows of the tick, so a reader that selects by `source` or by `metric` sees no change.
 
 ---
 
@@ -468,7 +498,7 @@ Order of work, editor: (1) `History::forget`; (2) the shared venue check and lin
 | Q-D4 isolated view | b. Braille line with the band |
 | Q-D5 user rule chart | a. Show both |
 | Q-D6 DEX tag | a. Tag `usd` |
-| Q-D7 watch CSV row | a. No |
+| Q-D7 watch CSV row | b. Yes (the owner's choice; the first recommendation was a) |
 | Q-E1 apply | b. Between ticks |
 | Q-E2 key | a. `v` |
 | Q-E3 input | a. Prefilled list |
