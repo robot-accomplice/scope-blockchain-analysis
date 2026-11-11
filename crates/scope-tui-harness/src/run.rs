@@ -189,6 +189,32 @@ fn timed_out(clamped: bool, scenario: Duration, what: impl FnOnce() -> String) -
     }
 }
 
+/// Polls the screen until the regex `text` matches (`present`) or stops matching.
+fn wait_screen(
+    sess: &mut Session,
+    s: &Scenario,
+    text: &str,
+    timeout: Option<Duration>,
+    deadline: Instant,
+    present: bool,
+) -> Result<()> {
+    let re = Regex::new(text)?;
+    let (until, clamped) = wait_end(timeout.unwrap_or(DEFAULT_STEP_TIMEOUT), deadline);
+    loop {
+        sess.pump(POLL)?;
+        if re.is_match(&sess.screen()) == present {
+            return Ok(());
+        }
+        exited(sess)?;
+        if Instant::now() >= until {
+            return Err(timed_out(clamped, s.timeout, || {
+                let state = if present { "appear" } else { "go away" };
+                format!("{text:?} did not {state}")
+            }));
+        }
+    }
+}
+
 fn exited(sess: &mut Session) -> Result<()> {
     match sess.exit_status() {
         Some(code) => anyhow::bail!("process exited with status {code}"),
@@ -264,20 +290,10 @@ fn run_step(
             sess.pump(SETTLE * 2)?;
         }
         Step::WaitFor { text, timeout } => {
-            let re = Regex::new(text)?;
-            let (until, clamped) = wait_end(timeout.unwrap_or(DEFAULT_STEP_TIMEOUT), deadline);
-            loop {
-                sess.pump(POLL)?;
-                if re.is_match(&sess.screen()) {
-                    break;
-                }
-                exited(sess)?;
-                if Instant::now() >= until {
-                    return Err(timed_out(clamped, s.timeout, || {
-                        format!("{text:?} did not appear")
-                    }));
-                }
-            }
+            wait_screen(sess, s, text, *timeout, deadline, true)?;
+        }
+        Step::WaitGone { text, timeout } => {
+            wait_screen(sess, s, text, *timeout, deadline, false)?;
         }
         Step::ExpectScreen {
             contains,
@@ -503,6 +519,41 @@ steps:
         assert!(!out.passed);
         let f = out.failure.unwrap();
         assert!(f.contains("NEVER-APPEARS") && f.contains("screen:"), "{f}");
+    }
+
+    #[test]
+    #[ignore = "needs the scope binary: cargo build --bin scope && cargo test -p scope-tui-harness -- --ignored"]
+    fn test_wait_gone_passes_after_clear_and_times_out_on_text_that_stays() {
+        let (c, _keep) = ctx();
+        // `help` prints "Session commands"; `clear` empties the pane; the wait ends when the text is gone.
+        let s = parse(
+            "name: gone
+steps:
+  - type: \"help\"
+  - key: Enter
+  - wait_for: { text: \"Session commands\", timeout: 10s }
+  - type: \"clear\"
+  - key: Enter
+  - wait_gone: { text: \"Session commands\", timeout: 10s }
+  - key: Ctrl-D
+  - expect_exit: 0
+",
+        )
+        .unwrap();
+        let (out, _, _) = run_scenario(&s, Tier::Offline, &c).unwrap();
+        assert!(out.passed, "{:?}", out.failure);
+        // The prompt line stays on the screen, so the wait must time out.
+        let s = parse(
+            "name: stays
+steps:
+  - wait_gone: { text: \"scope:auto>\", timeout: 1s }
+  - expect_exit: 0
+",
+        )
+        .unwrap();
+        let (out, _, _) = run_scenario(&s, Tier::Offline, &c).unwrap();
+        assert!(!out.passed);
+        assert!(out.failure.unwrap().contains("did not go away"));
     }
 
     #[test]

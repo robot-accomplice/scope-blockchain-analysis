@@ -64,7 +64,7 @@ prep() {
 
     git switch --quiet -c "release/v$new"
 
-    echo "Step 1/5: version $old → $new (workspace and internal pins)"
+    echo "Step 1/6: version $old → $new (workspace and internal pins)"
     sed -i.bak "s/^version = \"$old\"/version = \"$new\"/" Cargo.toml
     for f in "${MANIFESTS[@]}"; do
         sed -i.bak -E "/path = \"\.\.\//s/version = \"$old\"/version = \"$new\"/" "$f"
@@ -77,7 +77,7 @@ prep() {
 $stale"
     cargo update --workspace --quiet
 
-    echo "Step 2/5: $CHANGELOG"
+    echo "Step 2/6: $CHANGELOG"
     today="$(date +%Y-%m-%d)"
     awk -v ver="$new" -v dt="$today" -v url="$REPO_URL" -v prev="$old" '
         /^## \[Unreleased\]/ { print; print ""; print "## [" ver "] - " dt; next }
@@ -92,13 +92,17 @@ $stale"
     grep -qF "[Unreleased]: $REPO_URL/compare/v$new...HEAD" "$CHANGELOG" \
         || die "$CHANGELOG has no [Unreleased] link to rewrite."
 
-    echo "Step 3/5: tests"
+    echo "Step 3/6: tests"
     cargo test --workspace --quiet
 
-    echo "Step 4/5: coverage"
+    echo "Step 4/6: TUI harness (just tui-test)"
+    command -v just >/dev/null || die "just is not installed. The TUI harness runs through it."
+    just tui-test || die "The TUI harness failed. Fix it before the release."
+
+    echo "Step 5/6: coverage"
     "$REPO_ROOT/scripts/check-coverage.sh" --record
 
-    echo "Step 5/5: commit"
+    echo "Step 6/6: commit"
     git add Cargo.toml Cargo.lock "${MANIFESTS[@]}" "$CHANGELOG" .coverage-last
     git commit --quiet -m "Release v$new"
 

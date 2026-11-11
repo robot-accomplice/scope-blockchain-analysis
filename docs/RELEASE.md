@@ -6,6 +6,7 @@ Steps for cutting a new release and publishing to crates.io.
 
 - [ ] All changes merged to `develop` (or target branch)
 - [ ] `cargo test` passes
+- [ ] `just tui-test` passes (TUI harness: `scripts/release.sh prep` runs it). Paste the summary into the release PR
 - [ ] `cargo clippy -- -D warnings` passes
 - [ ] `cargo fmt --all -- --check` passes
 - [ ] CHANGELOG.md updated with version and release date
