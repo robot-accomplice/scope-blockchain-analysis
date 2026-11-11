@@ -61,6 +61,14 @@ pub fn identity(arg: &str, path: &Path) -> String {
     }
 }
 
+/// The identity of a target from the command line: its canonical
+/// definition (`file::to_text` of the effective list, after the flags).
+/// Two jobs with different rules, markets or timing do not share memory; the
+/// same words always do.
+pub fn inline_identity(definition: &str) -> String {
+    format!("inline:{definition}")
+}
+
 /// The files of one watchlist's state.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StateFiles {
@@ -767,6 +775,22 @@ mod tests {
             files(dir, "pegs", "path:/a/pegs.yaml").json,
             files(dir, "pegs", "path:/b/pegs.yaml").json,
             "two lists with one name in two folders have two files"
+        );
+    }
+
+    /// Why: shared memory between two inline jobs with different rules or
+    /// markets would give wrong readings. The identity is the definition.
+    #[test]
+    fn an_inline_identity_is_its_definition() {
+        let a = "name: cli-USDC\ntargets:\n- id: USDC\n  rules:\n  - mid_price > 0\n";
+        let b = a.replace("mid_price > 0", "mid_price > 1");
+        assert_eq!(inline_identity(a), inline_identity(a));
+        assert_ne!(inline_identity(a), inline_identity(&b));
+        assert!(inline_identity(a).starts_with("inline:"));
+        let dir = Path::new("d");
+        assert_ne!(
+            files(dir, "cli-USDC", &inline_identity(a)).json,
+            files(dir, "cli-USDC", &inline_identity(&b)).json
         );
     }
 
