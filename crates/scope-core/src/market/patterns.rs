@@ -68,6 +68,16 @@ pub const TIMER_BAND_SHARE: f64 = 0.70;
 /// The band around the median gap that a jittered timer stays in: ±50%.
 pub const TIMER_BAND: f64 = 0.50;
 
+/// A gap is a pause when it is longer than this many times the top of the
+/// [`TIMER_BAND`] (that is, `median × (1 + TIMER_BAND)`).
+const TIMER_PAUSE_FACTOR: f64 = 4.0;
+
+/// The gap above which a gap between trades counts as a pause. The detector
+/// counts with it and the evidence text names it.
+fn timer_pause_ms(median_ms: f64) -> f64 {
+    median_ms * (1.0 + TIMER_BAND) * TIMER_PAUSE_FACTOR
+}
+
 /// The 5th-percentile gap at or above this share of the median is a floor:
 /// a timer never fires early. Real order flow puts it near 0.
 pub const TIMER_MIN_FLOOR: f64 = 0.40;
@@ -525,10 +535,7 @@ pub fn timer(trades: &[Trade]) -> Option<Finding> {
         cv,
         gaps: gaps.len(),
         share,
-        pauses: gaps
-            .iter()
-            .filter(|g| **g > median * (1.0 + TIMER_BAND) * 4.0)
-            .count(),
+        pauses: gaps.iter().filter(|g| **g > timer_pause_ms(median)).count(),
         // The band rule names the finding when it fired too.
         floor: (!in_band).then_some(TimerFloor {
             shortest_ms: gaps[0],
@@ -796,6 +803,16 @@ fn step(pct: f64) -> String {
 /// Which findings a group of the report section lists.
 type Belongs = fn(&Finding) -> bool;
 
+/// `, 3 pauses over 4m 30s`, or nothing when the timer never paused.
+fn pause_note(pauses: usize, median_ms: f64) -> String {
+    let over = span(timer_pause_ms(median_ms));
+    match pauses {
+        0 => String::new(),
+        1 => format!(", 1 pause over {over}"),
+        n => format!(", {n} pauses over {over}"),
+    }
+}
+
 /// A period as `45s`, `14m 30s` or `1h 05m`.
 fn span(ms: f64) -> String {
     let s = (ms / 1000.0).round().max(0.0) as u64;
@@ -894,13 +911,15 @@ impl Finding {
             Finding::Timer {
                 median_ms,
                 gaps,
+                pauses,
                 floor: Some(floor),
                 ..
             } => format!(
-                "no gap under {:.0}s in {gaps} gaps between trades (median {:.0}s, 1 in 20 over {:.0}s)",
+                "no gap under {:.0}s in {gaps} gaps between trades (median {:.0}s, 1 in 20 over {:.0}s){}",
                 (floor.shortest_ms / 1000.0).floor(),
                 median_ms / 1000.0,
-                floor.tail_ms / 1000.0
+                floor.tail_ms / 1000.0,
+                pause_note(*pauses, *median_ms)
             ),
             Finding::Timer {
                 low_ms,
@@ -916,11 +935,7 @@ impl Finding {
                 low_ms / 1000.0,
                 high_ms / 1000.0,
                 median_ms / 1000.0,
-                match pauses {
-                    0 => String::new(),
-                    1 => ", in bursts with 1 long pause".to_string(),
-                    n => format!(", in bursts with {n} long pauses"),
-                }
+                pause_note(*pauses, *median_ms)
             ),
             Finding::RoundNotional {
                 levels,
@@ -2179,7 +2194,7 @@ mod tests {
         assert!(cv > 1.0, "the pauses blow the spread up: {cv}");
         assert!(share > 0.85, "{share}");
         assert!(pauses >= 50, "{pauses}");
-        assert!(f.detail().contains("in bursts with"), "{}", f.detail());
+        assert!(f.detail().contains(" pauses over "), "{}", f.detail());
     }
 
     #[test]
@@ -2305,7 +2320,7 @@ mod tests {
             floor: None,
         };
         assert!(
-            one.detail().ends_with(", in bursts with 1 long pause"),
+            one.detail().ends_with("(median 45s), 1 pause over 4m 30s"),
             "{}",
             one.detail()
         );
@@ -2320,5 +2335,89 @@ mod tests {
             floor: None,
         };
         assert!(none.detail().ends_with("(median 45s)"), "{}", none.detail());
+    }
+
+    fn timer_finding(median_ms: f64, pauses: usize, floor: Option<TimerFloor>) -> Finding {
+        Finding::Timer {
+            low_ms: 30_000.0,
+            median_ms,
+            high_ms: 60_000.0,
+            cv: 1.2,
+            gaps: 999,
+            share: 0.82,
+            pauses,
+            floor,
+        }
+    }
+
+    #[test]
+    fn test_the_floor_rule_text_shows_the_pause_count() {
+        // The weex USDN bot was found by the floor rule alone. Its 33 pauses
+        // were counted but never shown.
+        let floor = TimerFloor {
+            shortest_ms: 18_900.0,
+            tail_ms: 133_000.0,
+        };
+        let f = timer_finding(37_000.0, 33, Some(floor));
+        assert_eq!(
+            f.detail(),
+            "no gap under 18s in 999 gaps between trades (median 37s, 1 in 20 over 133s), 33 pauses over 3m 42s"
+        );
+    }
+
+    #[test]
+    fn test_the_text_threshold_is_the_one_the_detector_counts_with() {
+        // Pauses are the gaps over the threshold. A gap one millisecond
+        // over it is one pause. A gap equal to it is none.
+        let median = 45_000.0;
+        let threshold = timer_pause_ms(median);
+        let tape = |last_gap: f64| -> Vec<Trade> {
+            let mut ms = 0.0;
+            (0..60u64)
+                .map(|i| {
+                    ms += if i == 59 { last_gap } else { median };
+                    trade(ms as u64, 1.0, 5.0 + i as f64, TradeSide::Buy)
+                })
+                .collect()
+        };
+        let Some(Finding::Timer { pauses, .. }) = timer(&tape(threshold + 1.0)) else {
+            panic!("no timer")
+        };
+        assert_eq!(pauses, 1);
+        let Some(Finding::Timer { pauses, .. }) = timer(&tape(threshold)) else {
+            panic!("no timer")
+        };
+        assert_eq!(pauses, 0);
+        assert!(
+            timer_finding(median, 1, None)
+                .detail()
+                .ends_with(&format!("1 pause over {}", span(threshold))),
+        );
+    }
+
+    #[test]
+    fn test_no_pauses_add_nothing_to_either_rule_text() {
+        let floor = TimerFloor {
+            shortest_ms: 18_900.0,
+            tail_ms: 133_000.0,
+        };
+        assert!(
+            timer_finding(37_000.0, 0, Some(floor))
+                .detail()
+                .ends_with("1 in 20 over 133s)")
+        );
+    }
+
+    #[test]
+    fn test_the_floor_rule_text_names_one_pause_in_the_singular() {
+        let floor = TimerFloor {
+            shortest_ms: 18_900.0,
+            tail_ms: 133_000.0,
+        };
+        assert!(
+            timer_finding(37_000.0, 1, Some(floor))
+                .detail()
+                .ends_with(", 1 pause over 3m 42s")
+        );
     }
 }
