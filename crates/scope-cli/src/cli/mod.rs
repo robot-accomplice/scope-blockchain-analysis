@@ -64,6 +64,7 @@ pub mod charts;
 pub mod compliance;
 pub mod contract;
 pub mod crawl;
+pub(crate) mod csv;
 pub mod discover;
 pub mod dispatch;
 pub mod errors;

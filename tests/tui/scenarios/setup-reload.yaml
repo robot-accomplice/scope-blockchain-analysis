@@ -17,6 +17,12 @@ steps:
   - wait_for: { text: "The TUI now uses the saved settings\\." }
   - expect_journal: { argv_prefix: ["scope", "setup"], outcome: ok }
   # The same session now has the key: etherscan is not missing any more.
+  # The first run left "Run 'scope setup --key <provider>'" on the screen, so
+  # that text would pass the wait at once. Clear the pane, wait until the old
+  # text is gone, then wait for the text of the new run.
+  - type: "clear"
+  - key: Enter
+  - wait_gone: { text: "Run 'scope setup --key <provider>'" }
   - type: "setup --status"
   - key: Enter
   - wait_for: { text: "Run 'scope setup --key <provider>'" }

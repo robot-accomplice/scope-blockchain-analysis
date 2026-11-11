@@ -66,7 +66,7 @@ pub(crate) fn exit_result(failed: &[&str], total: usize) -> Result<()> {
 }
 
 /// A reason on one line, for a table cell and a JSON field.
-fn one_line(error: &ScopeError) -> String {
+pub(crate) fn one_line(error: &ScopeError) -> String {
     error
         .to_string()
         .lines()

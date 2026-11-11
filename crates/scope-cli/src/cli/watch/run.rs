@@ -4,6 +4,7 @@
 use super::deviation;
 use super::fetch::Tick;
 use super::{Ready, Sources, tick};
+use crate::cli::csv::csv_field;
 use crate::cli::output::Output;
 use crate::cli::repeat::{self, RunOutput, Schedule};
 use scope::error::{Result, ScopeError};
@@ -87,15 +88,6 @@ pub fn csv_rows(at: &str, snapshot: &Snapshot) -> String {
         }
     }
     rows
-}
-
-/// A CSV field, quoted when it holds a comma, a quote or a line break.
-fn csv_field(s: &str) -> String {
-    if s.contains([',', '"', '\n', '\r']) {
-        format!("\"{}\"", s.replace('"', "\"\""))
-    } else {
-        s.to_string()
-    }
 }
 
 /// The report of a run: one `market summary --report` section per row
@@ -450,6 +442,7 @@ mod tests {
                 )],
             },
             summaries: vec![Some(summary.clone()), Some(summary)],
+            ..Tick::default()
         };
         let md = report_text(&w, &last);
         assert!(md.starts_with("# Watchlist Report: pegs\n\n"), "{md}");
@@ -500,6 +493,7 @@ mod tests {
                 targets: vec![row("weex"), row("binance")],
             },
             summaries: vec![Some(summary.clone()), Some(summary)],
+            ..Tick::default()
         };
         let md = report_text(&w, &last);
         assert_eq!(
@@ -553,6 +547,7 @@ mod tests {
             },
             // The binance read failed: no summary.
             summaries: vec![Some(weex.clone()), None, Some(weex.clone())],
+            ..Default::default()
         };
         let rows = chart_csv_rows("t0", &w, &tick);
         let fields: Vec<Vec<&str>> = rows

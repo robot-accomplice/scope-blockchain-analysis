@@ -118,7 +118,7 @@ Scope supports multiple output formats via `--format` or the global `--ai` flag:
 |------|--------|----------|
 | *(default)* | Table | Human-readable terminal output |
 | `--format json` | JSON | Programmatic consumption, piping to `jq` |
-| `--format csv` | CSV | Spreadsheet import |
+| `--format csv` | CSV | Spreadsheet import (`token-health` prints a real CSV; see its section) |
 | `--ai` | Markdown | LLM/agent parsing (global flag, all commands) |
 
 Use `--format json` when piping output to other tools or scripts. Use `--ai` when feeding output to an LLM or agent for analysis.
@@ -958,7 +958,9 @@ A breach wins over an unknown row. A write error wins over all. A breach that cl
 
 **Stopping.** Ctrl-C or SIGTERM stops the run (on Windows: Ctrl-C or Ctrl-Break). A tick in progress is dropped. The report is still written, from the last finished tick.
 
-**Records for a failure.** Run with `-v` to get one trace line for each row of each tick, with its status and the exact error text. `--format json` keeps the same facts in the data.
+**Reads in a tick.** A tick reads different venues at the same time, up to 8 reads at once. It reads one venue one read at a time, so the requests to one exchange follow the same pattern as before. A read that takes more than 60 s is dropped, and its cells show the error `read timed out after 60s`. The row is unknown (exit code 2). The other reads go on. The rows, the CSV rows and the report keep the order of the watchlist. The TUI grid reads this way too.
+
+**Records for a failure.** Run with `-v` to get one trace line for each row of each tick, with its status and the exact error text. Run with `-v` to get also one `watch read` line for each read, with its group, start time, duration and outcome (`ok`, `error` or `timeout`). `--format json` keeps the same facts in the data. A `tick` record has a `timing` field with `wall_ms` (the time of the reads), `sum_ms` (the time the reads would take one after the other), `bound` and one entry in `reads` for each read: `row`, `group`, `queued_ms`, `started_ms`, `took_ms`, `outcome` and `error`.
 
 #### Flags of `scope monitor`
 
@@ -1181,7 +1183,8 @@ With `--with-market`, order book data is fetched from the selected venue (`--ven
 **Several venues.** `--venue` takes a list: repeat it or give a comma list (`--venue weex,binance`). A list needs `--with-market`; without it, the command fails before any request. One venue keeps its old rule.
 
 - The DEX analytics are read once. The venues are read at the same time.
-- Table: the DEX analytics once, one `Market / Order Book (venue)` block for each venue in the order given, then one comparison table. A venue that fails has a block that says why. `--format csv` prints the same table as before.
+- Table: the DEX analytics once, one `Market / Order Book (venue)` block for each venue in the order given, then one comparison table. A venue that fails has a block that says why.
+- CSV: one header and one row for each venue, in the order given. The DEX analytics repeat in each row. Numbers are raw: no `$`, `%` or `K`/`M`/`B`. The analytics columns are in USD (`price_change_24h` and `top_10_concentration` are percent). The market columns are in the quote currency of the venue (`spread_pct` is percent, `peg_deviation_bps` is basis points). A missing value is an empty cell. A venue that fails has a row with `status` `error` and the reason in `error`. Without `--with-market`, there is one row and the market cells are empty. Text that starts with `=`, `+`, `-` or `@` gets a leading `'` in `symbol`, `bot_signs` and `error`, so a spreadsheet does not run it. The header is: `symbol,chain,contract,price_usd,price_change_24h,volume_24h,liquidity_usd,market_cap,top_10_concentration,venue,status,mid,spread_pct,bid_depth,ask_depth,market_volume_24h,peg_deviation_bps,bot_signs,bot_signs_state,error`.
 - Markdown: the report once, one `###` section for each venue, then `### Comparison`.
 - JSON: `analytics` and `market` stay. `market` is `null`. `markets` is a list with `{venue, summary}` or `{venue, error}` for each venue. `comparison` has one row of raw numbers for each venue (the rows of `market summary`).
 - The exit code is 0 when the DEX analytics print, also when a venue fails or is unhealthy.

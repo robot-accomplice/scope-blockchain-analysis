@@ -921,6 +921,7 @@ mod tests {
             tick: Box::new(Tick {
                 snapshot: s,
                 summaries: vec![None, None, None],
+                ..Tick::default()
             }),
             events,
         });
@@ -1122,6 +1123,7 @@ mod tests {
             tick: Box::new(Tick {
                 snapshot: Snapshot { targets },
                 summaries,
+                ..Tick::default()
             }),
             events: Vec::new(),
         });
@@ -1596,6 +1598,7 @@ mod tests {
                 tick: Box::new(Tick {
                     snapshot: Snapshot { targets: rows },
                     summaries,
+                    ..Default::default()
                 }),
                 events: Vec::new(),
             });
