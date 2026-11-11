@@ -1,6 +1,6 @@
 # Grid Peg Deviation Chart and Venue Editor: Design
 
-- **Status:** decided on 2026-11-11 (section 0 has the decisions). Item 1 (the chart) is built. Item 2 (the editor) is not built yet.
+- **Status:** decided on 2026-11-11 (section 0 has the decisions). Item 1 (the chart) is built. Item 2 (the editor) is built (PR `feat/grid-venue-editor`). Where the build differs from this text, section 4.8 says so.
 - **Scope:** the two items that `2026-11-10-market-venue-followups-design.md` (section 8) deferred. The owner chose both for 0.8.8:
   1. a per-venue peg deviation chart in the repeat view of `market summary --every` and in the watch grid;
   2. a venue editor in the watch grid: change the venues of a target without delete and add.
@@ -473,6 +473,17 @@ Reason for a: it covers a mistake. The memory rule (a restored venue is fresh) i
 - b. In `scope-core`, and `file.rs` calls it too.
 
 Reason for a: the request is to reuse the wizard's parser. It removes the new copy and leaves `file.rs` messages (with line numbers) as they are. Two copies remain (the file and the wizard), as today. b is the clean end state (rule 3: DRY). It changes the file loader and its error tests. I surface the existing duplicate for the owner to decide, and I do not decide it in silence.
+
+## 4.8 Departures of the build from section 4.2
+
+1. **A new message, `GridMsg::VenuesApplied`.** Step 4 said to reuse `GridMsg::Ready`. The journal needs the run number that applied the change (section 4.4, item 2), and `Ready` has no run number. `VenuesApplied` holds the run, the new `Ready` and the changes. No behavior differs.
+2. **`History::retarget`, not only `History::forget`.** `MarketKey` has an ordinal (#209). When the first of two targets of one market loses a venue, the ordinal of the second changes. `forget(label)` alone would drop or mix the memory. `retarget` compares the keys of the old and the new list for each target. A venue that stays moves its memory to its new key; a venue that goes is forgotten with `forget`.
+3. **One row for the editor, above the legend.** The input line and the messages use their own row between the footer and the legend. The progress footer stays in view. The row exists only when the editor has something to say.
+4. **`Ctrl-S` saves the list as the user gave it, with the applied venues.** It does not save `ready.list`, because `prepare` replaces `@label` targets with addresses. A save while an edit waits is refused (`save_refused`), because the file would not match what the user sees.
+5. **Two more outcomes in the journal:** `queued` (at Enter, so the exact line is on record even if the run ends first) and `superseded` (a later edit of the same target replaced a waiting one).
+6. **The wizard message for a pair with no venue** is `a pair needs a venue`, without the usage example, so the wizard and the editor give one message (test 1).
+7. **Ctrl-C with the line open** closes the line. It does not stop the run.
+8. **`watch open` passes its file to the grid** (`WatchCommand::Open` carries the path). The wizard's start and `monitor --yes` use the file the wizard saves to.
 
 ---
 

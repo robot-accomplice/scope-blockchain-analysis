@@ -1,0 +1,54 @@
+name: the watch grid edits the venues of a target between ticks, with undo and save (design 2026-11-11, item 2)
+tiers: [offline]
+terminal: { cols: 120, rows: 40 }
+masks: ['scope v\d+\.\d+\.\d+\S*']
+steps:
+  # One recorded venue. The unit tests use a test backend and test venues;
+  # this runs the real binary, the queue and the files together.
+  - type: "monitor USDC --venue binance --every 2s --duration 60s --csv pegs.csv"
+  - key: Enter
+  - wait_for: { text: "monitor wizard", timeout: 10s }
+  - key: Ctrl-R
+  - wait_for: { text: "watchlist monitor-usdc", timeout: 10s }
+  - wait_for: { text: "run 2 of", timeout: 30s }
+  # `v` opens the line with the current venues; Esc leaves no trace.
+  - type: "v"
+  - wait_for: { text: "USDC: venues  binance", timeout: 5s }
+  - expect_screen:
+      contains: ["Enter apply · Esc cancel"]
+  - key: Esc
+  - wait_gone: { text: "USDC: venues", timeout: 5s }
+  - expect_screen:
+      not_contains: ["applies at the next tick"]
+  # A word that is no venue stays in the line with the message.
+  - type: "v"
+  - type: " nowhere"
+  - key: Enter
+  - wait_for: { text: "unknown venue `nowhere`", timeout: 5s }
+  - key: Esc
+  # Add weex. The queued record stays in the journal; the new row comes
+  # only after the run applied the change (the grid gets the apply before
+  # the tick). The pending text on screen lasts one tick, so unit tests pin
+  # it and this scenario does not wait for it.
+  - type: "v"
+  - type: " weex"
+  - key: Enter
+  - expect_journal: { argv_prefix: [], outcome: queued }
+  - wait_for: { text: "USDC@weex", timeout: 30s }
+  # Ctrl-S writes the list; the CSV has the header and both labels.
+  - key: Ctrl-S
+  - wait_for: { text: "saved monitor-usdc.yaml", timeout: 5s }
+  - expect_file: { path: ".scope-bca/watchlists/monitor-usdc.yaml", contains: ["binance", "weex"] }
+  - expect_file: { path: "pegs.csv", contains: ["(?m)^ts,target,metric", "USDC@binance", "USDC@weex"] }
+  # Undo takes weex out again.
+  - type: "u"
+  - wait_for: { text: "undone: weex removed again", timeout: 5s }
+  - wait_gone: { text: "USDC@weex", timeout: 30s }
+  - expect_journal: { argv_prefix: [], outcome: applied }
+  - key: Esc
+  - wait_for: { text: "Stopped after", timeout: 10s }
+  - key: Esc
+  # The closing summary says the undo was not saved.
+  - wait_for: { text: "venues of USDC changed in the run and not saved", timeout: 5s }
+  - key: Ctrl-D
+  - expect_exit: 0

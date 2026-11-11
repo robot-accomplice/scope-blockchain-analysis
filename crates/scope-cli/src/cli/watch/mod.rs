@@ -18,6 +18,8 @@ pub mod run;
 pub mod state;
 #[cfg(test)]
 mod state_e2e_tests;
+#[cfg(test)]
+mod venue_edit_tests;
 
 use crate::cli::output::Output;
 use crate::cli::resolve::{DexCandidates, ResolveContext, VenueKind, picker_for, resolve};

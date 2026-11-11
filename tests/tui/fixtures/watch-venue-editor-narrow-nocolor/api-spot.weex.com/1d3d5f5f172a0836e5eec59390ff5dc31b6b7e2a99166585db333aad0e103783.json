@@ -1,0 +1,97 @@
+{
+  "recorded": "2026-11-11T10:46:23.056079+00:00",
+  "request": {
+    "method": "GET",
+    "url": "https://api-spot.weex.com/api/v3/market/depth?limit=200&symbol=USDCUSDT",
+    "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "responses": [
+    {
+      "status": 200,
+      "headers": {
+        "cache-control": "no-store, no-cache, must-revalidate, max-age=0, s-maxage=600",
+        "connection": "keep-alive",
+        "content-type": "application/json",
+        "cross-origin-opener-policy": "same-origin-allow-popups",
+        "date": "Wed, 11 Nov 2026 10:46:22 GMT",
+        "permissions-policy": "camera=(self \"https://*.sumsub.com\"), microphone=(self \"https://*.sumsub.com\"), geolocation=(), display-capture=(), fullscreen=(self)",
+        "referrer-policy": "strict-origin-when-cross-origin",
+        "server": "CloudFront",
+        "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+        "transfer-encoding": "chunked",
+        "vary": "Origin",
+        "via": "1.1 15ec222720b66945bbc5c3c677b15d28.cloudfront.net (CloudFront)",
+        "x-amz-cf-id": "NVE9LfERBPQsxDtz9NBgCSIp2uLHARmhz8GZnBWc-oZRLfzRN_7kiA==",
+        "x-amz-cf-pop": "ZRH52-P1",
+        "x-cache": "Miss from cloudfront",
+        "x-content-type-options": "nosniff",
+        "x-dns-prefetch-control": "off",
+        "x-download-options": "noopen",
+        "x-frame-options": "SAMEORIGIN",
+        "x-permitted-cross-domain-policies": "none",
+        "x-remaining-weight-10s": "495",
+        "x-used-weight-10s": "5",
+        "x-xss-protection": "1; mode=block"
+      },
+      "body": "{\"lastUpdateId\":2466213638,\"bids\":[[\"1.00078\",\"394904.1\"],[\"1.00077\",\"294359.8\"],[\"1.00076\",\"358225.1\"],[\"1.00075\",\"1853797.3\"],[\"1.00074\",\"1872335.3\"],[\"1.00073\",\"1891058.6\"],[\"1.00072\",\"1909969.2\"],[\"1.00071\",\"1929068.9\"],[\"1.00070\",\"1948359.6\"],[\"1.00069\",\"1967843.2\"],[\"1.00068\",\"1987521.6\"],[\"1.00066\",\"2007396.8\"],[\"1.00064\",\"2027470.8\"],[\"1.00061\",\"2035512.2\"],[\"1.00060\",\"2068223.0\"],[\"1.00058\",\"2088905.2\"],[\"1.00056\",\"2109794.2\"],[\"1.00054\",\"2130892.2\"],[\"1.00052\",\"2152201.1\"],[\"1.00050\",\"2173723.1\"],[\"1.00048\",\"2195460.3\"],[\"1.00045\",\"2217414.9\"],[\"1.00042\",\"2239589.1\"],[\"1.00039\",\"2261985.0\"],[\"0.99929\",\"300.0\"],[\"0.9000\",\"9.5\"],[\"0.20000\",\"1000.0\"],[\"0.0003\",\"33333.0\"]],\"asks\":[[\"1.00079\",\"14412873.3\"],[\"1.00080\",\"1987965.7\"],[\"1.00081\",\"2007845.3\"],[\"1.00082\",\"2027923.8\"],[\"1.00083\",\"2048203.0\"],[\"1.00084\",\"2068685.1\"],[\"1.00085\",\"2089371.9\"],[\"1.00086\",\"2110265.6\"],[\"1.00087\",\"2131368.3\"],[\"1.00088\",\"2154628.1\"],[\"1.00090\",\"2120101.6\"],[\"1.00091\",\"2195950.9\"],[\"1.00093\",\"2217910.4\"],[\"1.00095\",\"2240089.5\"],[\"1.00098\",\"2261904.0\"],[\"1.00105\",\"40.8\"],[\"1.00510\",\"15.1\"]]}"
+    },
+    {
+      "status": 200,
+      "headers": {
+        "cache-control": "no-store, no-cache, must-revalidate, max-age=0, s-maxage=600",
+        "connection": "keep-alive",
+        "content-type": "application/json",
+        "cross-origin-opener-policy": "same-origin-allow-popups",
+        "date": "Wed, 11 Nov 2026 10:46:25 GMT",
+        "permissions-policy": "camera=(self \"https://*.sumsub.com\"), microphone=(self \"https://*.sumsub.com\"), geolocation=(), display-capture=(), fullscreen=(self)",
+        "referrer-policy": "strict-origin-when-cross-origin",
+        "server": "CloudFront",
+        "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+        "transfer-encoding": "chunked",
+        "vary": "Origin",
+        "via": "1.1 15ec222720b66945bbc5c3c677b15d28.cloudfront.net (CloudFront)",
+        "x-amz-cf-id": "DEDupL0VORRKFz2OCkaOp34gBsim05EPv8QUdvYiV-rWUo_ApzhQnA==",
+        "x-amz-cf-pop": "ZRH52-P1",
+        "x-cache": "Miss from cloudfront",
+        "x-content-type-options": "nosniff",
+        "x-dns-prefetch-control": "off",
+        "x-download-options": "noopen",
+        "x-frame-options": "SAMEORIGIN",
+        "x-permitted-cross-domain-policies": "none",
+        "x-remaining-weight-10s": "463",
+        "x-used-weight-10s": "37",
+        "x-xss-protection": "1; mode=block"
+      },
+      "body": "{\"lastUpdateId\":2466213750,\"bids\":[[\"1.00080\",\"546975.4\"],[\"1.00079\",\"168522.5\"],[\"1.00078\",\"1481435.2\"],[\"1.00077\",\"1930907.5\"],[\"1.00076\",\"2209456.1\"],[\"1.00075\",\"3723540.6\"],[\"1.00074\",\"3760776.1\"],[\"1.00073\",\"3798383.8\"],[\"1.00072\",\"1909969.2\"],[\"1.00071\",\"1929068.9\"],[\"1.00070\",\"1948359.6\"],[\"1.00069\",\"1967843.2\"],[\"1.00068\",\"1987521.6\"],[\"1.00066\",\"2007396.8\"],[\"1.00064\",\"2027470.8\"],[\"1.00061\",\"2035512.2\"],[\"1.00060\",\"2068223.0\"],[\"1.00058\",\"2088905.2\"],[\"0.99929\",\"300.0\"],[\"0.9000\",\"9.5\"],[\"0.20000\",\"1000.0\"],[\"0.0003\",\"33333.0\"]],\"asks\":[[\"1.00081\",\"15022229.8\"],[\"1.00082\",\"1949542.1\"],[\"1.00083\",\"1969037.6\"],[\"1.00084\",\"1988727.9\"],[\"1.00085\",\"2008615.2\"],[\"1.00086\",\"2028701.4\"],[\"1.00087\",\"2048988.4\"],[\"1.00088\",\"2071424.4\"],[\"1.00089\",\"2090173.0\"],[\"1.00090\",\"2111074.8\"],[\"1.00091\",\"2132185.5\"],[\"1.00093\",\"2153507.4\"],[\"1.00095\",\"2175042.5\"],[\"1.00098\",\"2261904.0\"],[\"1.00099\",\"2218760.8\"],[\"1.00105\",\"40.8\"],[\"1.00510\",\"15.1\"]]}"
+    },
+    {
+      "status": 200,
+      "headers": {
+        "cache-control": "no-store, no-cache, must-revalidate, max-age=0, s-maxage=600",
+        "connection": "keep-alive",
+        "content-type": "application/json",
+        "cross-origin-opener-policy": "same-origin-allow-popups",
+        "date": "Wed, 11 Nov 2026 10:46:27 GMT",
+        "permissions-policy": "camera=(self \"https://*.sumsub.com\"), microphone=(self \"https://*.sumsub.com\"), geolocation=(), display-capture=(), fullscreen=(self)",
+        "referrer-policy": "strict-origin-when-cross-origin",
+        "server": "CloudFront",
+        "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+        "transfer-encoding": "chunked",
+        "vary": "Origin",
+        "via": "1.1 15ec222720b66945bbc5c3c677b15d28.cloudfront.net (CloudFront)",
+        "x-amz-cf-id": "BYHFeT6NdjKyOwX0Tta51NxSszf11srkVK-3SkkXk9607ZK12HGf2w==",
+        "x-amz-cf-pop": "ZRH52-P1",
+        "x-cache": "Miss from cloudfront",
+        "x-content-type-options": "nosniff",
+        "x-dns-prefetch-control": "off",
+        "x-download-options": "noopen",
+        "x-frame-options": "SAMEORIGIN",
+        "x-permitted-cross-domain-policies": "none",
+        "x-remaining-weight-10s": "431",
+        "x-used-weight-10s": "69",
+        "x-xss-protection": "1; mode=block"
+      },
+      "body": "{\"lastUpdateId\":2466213984,\"bids\":[[\"1.00078\",\"343080.9\"],[\"1.00077\",\"625695.0\"],[\"1.00076\",\"280100.3\"],[\"1.00075\",\"1845485.6\"],[\"1.00074\",\"1863940.4\"],[\"1.00073\",\"1882579.8\"],[\"1.00072\",\"1901405.6\"],[\"1.00071\",\"1920419.7\"],[\"1.00070\",\"1939623.9\"],[\"1.00069\",\"1959020.1\"],[\"1.00068\",\"1978610.3\"],[\"1.00066\",\"1998396.4\"],[\"1.00064\",\"2018380.4\"],[\"1.00061\",\"2035512.2\"],[\"1.00060\",\"2058949.9\"],[\"1.00058\",\"2079539.4\"],[\"1.00056\",\"2100334.8\"],[\"1.00054\",\"2121338.1\"],[\"1.00052\",\"2142551.5\"],[\"1.00050\",\"2163977.0\"],[\"1.00048\",\"2185616.8\"],[\"1.00045\",\"2207472.9\"],[\"1.00042\",\"2229547.7\"],[\"1.00039\",\"2251843.1\"],[\"0.99929\",\"300.0\"],[\"0.9000\",\"9.5\"],[\"0.20000\",\"1000.0\"],[\"0.0003\",\"33333.0\"]],\"asks\":[[\"1.00079\",\"15023567.5\"],[\"1.00080\",\"1949486.8\"],[\"1.00081\",\"1968981.7\"],[\"1.00082\",\"1988671.5\"],[\"1.00083\",\"2008558.2\"],[\"1.00084\",\"2028643.8\"],[\"1.00085\",\"2048930.2\"],[\"1.00086\",\"2069419.5\"],[\"1.00087\",\"2090113.7\"],[\"1.00088\",\"2112961.0\"],[\"1.00090\",\"2098244.2\"],[\"1.00091\",\"2153446.3\"],[\"1.00093\",\"2174980.7\"],[\"1.00095\",\"2196730.5\"],[\"1.00098\",\"2261904.0\"],[\"1.00105\",\"40.8\"],[\"1.00510\",\"15.1\"]]}"
+    }
+  ]
+}

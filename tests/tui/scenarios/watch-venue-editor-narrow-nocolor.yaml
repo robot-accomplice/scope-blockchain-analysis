@@ -1,0 +1,30 @@
+name: with NO_COLOR at 79 columns the venue line and its legend are cut, not wrapped, and the edit still applies (design 2026-11-11, item 2)
+tiers: [offline]
+env: { NO_COLOR: "1" }
+terminal: { cols: 79, rows: 24 }
+masks: ['scope v\d+\.\d+\.\d+\S*']
+steps:
+  - type: "monitor USDC --venue binance --every 2s --duration 60s"
+  - key: Enter
+  - wait_for: { text: "monitor wizard", timeout: 10s }
+  - key: Ctrl-R
+  - wait_for: { text: "watchlist monitor-usdc", timeout: 10s }
+  - wait_for: { text: "run 2 of", timeout: 30s }
+  - type: "v"
+  - wait_for: { text: "USDC: venues  binance", timeout: 5s }
+  # A long line loses its start behind an ellipsis; the cursor stays in view.
+  - type: " weex weex weex weex weex weex weex weex weex weex weex weex"
+  - expect_screen:
+      contains: ["USDC: venues  …", "weex█", "Enter apply · Esc cancel"]
+  - key: Esc
+  - type: "v"
+  - type: " weex"
+  - key: Enter
+  - wait_for: { text: "USDC@weex", timeout: 30s }
+  - expect_screen:
+      contains: ["u undo", "Esc stop the run"]
+  - key: Esc
+  - wait_for: { text: "Stopped after", timeout: 10s }
+  - key: Esc
+  - key: Ctrl-D
+  - expect_exit: 0
