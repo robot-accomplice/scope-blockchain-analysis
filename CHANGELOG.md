@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.8] - 2026-11-11
+
 ### Added
 - `scope watch` takes a target on the command line: `scope watch USDC --venue weex --once`, `scope watch 0xA0b8... --chain ethereum --once`, `scope watch 0xWallet... --kind address --rule "native_balance > 1" --once`. With any target flag, the first argument is a token, pair or address, and no watchlist file is needed. It is the target that `scope monitor` builds from the same words, with the rules of config `monitor.alerts`. With no `--once` and no `--duration` the run lasts 1 hour. An input error exits with 3 before any request. The `start` record has `source`, `argv`, `definition` (the exact watchlist file text), `notes`, `shadowed_saved_list` and `config_alerts_applied`.
 - `scope watch` and `scope monitor` take the same target flags, and two new ones: `--rule` (repeatable) and `--kind pair|token|address`. The memory between runs of an inline target belongs to its definition.
@@ -543,7 +545,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Configuration system with YAML support
 - Support for ERC-20, SPL, and TRC-20 tokens
 
-[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.7...HEAD
+[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.8...HEAD
+[0.8.8]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.7...v0.8.8
 [0.8.7]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.6...v0.8.7
 [0.8.6]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.5...v0.8.6
 [0.8.5]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.4...v0.8.5
