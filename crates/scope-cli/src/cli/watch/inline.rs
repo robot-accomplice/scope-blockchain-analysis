@@ -2,7 +2,7 @@
 //! (design 2026-11-11, section 2).
 //!
 //! The command line alone decides what the first argument means. With any
-//! target flag ([`TargetArgs::is_set`]) it is a target. Without one it is a
+//! target flag ([`TargetArgs::is_set`](crate::cli::watch_args::TargetArgs::is_set)) it is a target. Without one it is a
 //! saved name or a path, as before. The files on disk never decide, so
 //! saving a list named `USDC` cannot change what a cron job does.
 //!
