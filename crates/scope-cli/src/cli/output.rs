@@ -34,6 +34,7 @@
 //! note!(out, "Fetching balances..."); // status → stderr
 //! ```
 
+use scope::market::health::PegBands;
 use scope::metrics::{Metric, Sample};
 use std::collections::VecDeque;
 use std::fmt;
@@ -116,6 +117,9 @@ pub type ViewHook = Arc<Mutex<Option<SummaryView>>>;
 pub struct Series {
     /// The metric table of every run's sample.
     pub metrics: Vec<Metric>,
+    /// The peg bands the metrics were built with, for the peg deviation
+    /// chart of a repeat on venues. `None` for a run with no peg.
+    pub peg: Option<PegBands>,
     /// The newest [`MAX_SERIES_RUNS`] runs.
     pub runs: VecDeque<RunRecord>,
     /// How many older runs the ring dropped.
@@ -361,6 +365,14 @@ impl Output {
         };
         *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(view);
         true
+    }
+
+    /// Tells the screen's series the peg bands of the run, next to its
+    /// metrics. Does nothing when there is no series (the CLI).
+    pub fn set_series_peg(&self, peg: PegBands) {
+        if let Some(series) = &self.series {
+            lock(series).peg = Some(peg);
+        }
     }
 
     /// Hands one run to the screen's series. Returns false when there is no

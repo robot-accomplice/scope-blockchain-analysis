@@ -57,7 +57,7 @@ pub const TOP3_LEVELS: usize = 3;
 /// Number of levels summed for the top-10 depth check.
 pub const TOP10_LEVELS: usize = 10;
 
-pub use super::types::{BPS_PER_PERCENT, PERCENT_PER_RATIO};
+pub use super::types::{BPS_PER_PERCENT, BPS_PER_RATIO, PERCENT_PER_RATIO};
 
 /// The outlier band is `peg_range` times this, around the peg target.
 pub const PEG_OUTLIER_FACTOR: f64 = 5.0;
@@ -232,6 +232,29 @@ impl PegBands {
         self.range * PEG_OUTLIER_FACTOR
     }
 
+    /// Half-width of the on-peg band, as a deviation from the peg in basis
+    /// points. `None` when the peg target is not positive.
+    pub fn range_bps(&self) -> Option<f64> {
+        self.width_bps(self.range)
+    }
+
+    /// Half-width of the outlier band, in basis points like
+    /// [`PegBands::range_bps`].
+    pub fn outlier_bps(&self) -> Option<f64> {
+        self.width_bps(self.outlier_width())
+    }
+
+    fn width_bps(&self, width: f64) -> Option<f64> {
+        (self.target > 0.0).then(|| width / self.target * BPS_PER_RATIO)
+    }
+
+    /// [`PegBands::classify`] for a deviation from the peg in basis points,
+    /// so a series of deviations needs no second rule. `None` when the peg
+    /// target is not positive.
+    pub fn classify_bps(&self, bps: f64) -> Option<PegBand> {
+        (self.target > 0.0).then(|| self.classify(self.target * (1.0 + bps / BPS_PER_RATIO)))
+    }
+
     /// Lowest and highest price inside the outlier band (both inclusive).
     pub fn outlier_band(&self) -> (f64, f64) {
         (
@@ -261,6 +284,25 @@ impl PegBands {
             PegBand::Slight
         } else {
             PegBand::Off
+        }
+    }
+}
+
+/// Why a market has no peg deviation to show.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviationGap {
+    /// The peg target is not positive.
+    NoPeg,
+    /// There is no mid price: a side has no valid level, or the read failed.
+    NoPrice,
+}
+
+impl DeviationGap {
+    /// The reason in words, for the chart note and the CSV detail.
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::NoPeg => "peg target is not positive",
+            Self::NoPrice => "no mid price",
         }
     }
 }
@@ -427,6 +469,26 @@ impl MarketSummary {
     pub fn peg_deviation_bps(&self, price: f64) -> Option<f64> {
         self.peg_deviation_pct(price)
             .map(|pct| pct * BPS_PER_PERCENT)
+    }
+
+    /// The deviation of the mid price from the peg, in basis points. `None`
+    /// when there is no mid or the peg target is not positive. The one call
+    /// for the comparison rows, the insights and the deviation chart, so
+    /// they cannot disagree.
+    pub fn mid_peg_deviation_bps(&self) -> Option<f64> {
+        self.mid_price.and_then(|mid| self.peg_deviation_bps(mid))
+    }
+
+    /// Why [`MarketSummary::mid_peg_deviation_bps`] has no value, or `None`
+    /// when it has one.
+    pub fn peg_deviation_gap(&self) -> Option<DeviationGap> {
+        if self.mid_peg_deviation_bps().is_some() {
+            None
+        } else if self.peg_target > 0.0 {
+            Some(DeviationGap::NoPrice)
+        } else {
+            Some(DeviationGap::NoPeg)
+        }
     }
 
     /// The peg target and bands this summary was built with.
@@ -1970,6 +2032,49 @@ mod tests {
         assert_eq!(bands.classify(0.505), PegBand::Slight);
         assert_eq!(bands.classify(0.52), PegBand::Off);
         assert_eq!(bands.outlier_band(), (0.49, 0.51));
+    }
+
+    // Why: the chart, the `comparison` rows and the insights print one
+    // number. They fail to agree if one of them converts on its own.
+    #[test]
+    fn test_the_mid_deviation_in_bps_is_the_one_helper_and_not_percent() {
+        let mut s = summarize(&healthy_book());
+        s.mid_price = Some(1.0012);
+        let bps = s.mid_peg_deviation_bps().unwrap();
+        assert!(
+            (bps - 12.0).abs() < 1e-9,
+            "12 bps, not 0.12 or 0.0012: {bps}"
+        );
+        assert_eq!(Some(bps), s.peg_deviation_bps(1.0012));
+        assert_eq!(s.peg_deviation_gap(), None);
+    }
+
+    // Why: a missing line must say why it is missing.
+    #[test]
+    fn test_a_missing_deviation_has_a_typed_reason() {
+        let mut s = summarize(&healthy_book());
+        s.mid_price = None;
+        assert_eq!(s.mid_peg_deviation_bps(), None);
+        assert_eq!(s.peg_deviation_gap(), Some(DeviationGap::NoPrice));
+        s.mid_price = Some(1.0);
+        s.peg_target = 0.0;
+        assert_eq!(s.mid_peg_deviation_bps(), None);
+        assert_eq!(s.peg_deviation_gap(), Some(DeviationGap::NoPeg));
+    }
+
+    // Why: the chart band must follow the thresholds the verdicts use, and
+    // a deviation series must be classed by the same rule as a price.
+    #[test]
+    fn test_band_widths_in_bps_follow_the_range_and_classify_the_same() {
+        let bands = PegBands::new(1.0, 0.002);
+        assert!((bands.range_bps().unwrap() - 20.0).abs() < 1e-9);
+        assert!((bands.outlier_bps().unwrap() - 100.0).abs() < 1e-9);
+        assert_eq!(bands.classify_bps(5.0), Some(PegBand::OnPeg));
+        assert_eq!(bands.classify_bps(-50.0), Some(PegBand::Slight));
+        assert_eq!(bands.classify_bps(150.0), Some(PegBand::Off));
+        assert_eq!(bands.classify_bps(50.0), Some(bands.classify(1.005)));
+        assert_eq!(PegBands::new(0.0, 0.002).range_bps(), None);
+        assert_eq!(PegBands::new(0.0, 0.002).classify_bps(1.0), None);
     }
 
     #[test]
