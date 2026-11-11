@@ -161,6 +161,87 @@ pub fn start_csv(path: &Path, append: bool) -> Result<()> {
     started.map_err(|e| ScopeError::io_context(e, format!("cannot write {}", path.display())))
 }
 
+/// One change of the venues of one target in a running list: the venue
+/// editor of the grid asks for it, the run applies it between two ticks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VenueChange {
+    /// The grid's number of the edit. The run gives it back with the change
+    /// that it applied, so the grid knows which edit took effect.
+    pub seq: u64,
+    /// The index of the target in the list.
+    pub target: usize,
+    /// The venues the target has from the next tick on.
+    pub venues: Vec<String>,
+}
+
+/// The changes the grid has asked for and the run has not taken yet. The
+/// grid and the run share it (the same pattern as the progress hook). A
+/// second change of one target replaces the first.
+#[derive(Debug, Clone, Default)]
+pub struct VenueQueue(std::sync::Arc<std::sync::Mutex<Vec<VenueChange>>>);
+
+impl VenueQueue {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<VenueChange>> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Asks for `change`. It replaces a change of the same target that
+    /// waits.
+    pub fn submit(&self, change: VenueChange) {
+        let mut queue = self.lock();
+        queue.retain(|c| c.target != change.target);
+        queue.push(change);
+    }
+
+    /// Takes back the change `seq` if the run has not taken it. Returns
+    /// whether it did.
+    pub fn withdraw(&self, seq: u64) -> bool {
+        let mut queue = self.lock();
+        let before = queue.len();
+        queue.retain(|c| c.seq != seq);
+        queue.len() != before
+    }
+
+    /// Takes all the changes that wait.
+    pub fn take(&self) -> Vec<VenueChange> {
+        std::mem::take(&mut *self.lock())
+    }
+}
+
+/// The list `ready` has after `changes`, and `history` after them: a venue
+/// that stays keeps its memory, a venue that goes is forgotten, a venue
+/// that comes has none ([`History::retarget`]). The contracts stay, as the
+/// targets stay. A change of a target the list does not have is dropped;
+/// the rest are returned as applied.
+pub fn apply_venue_changes(
+    ready: &Ready,
+    history: &mut History,
+    changes: &[VenueChange],
+) -> (Ready, Vec<VenueChange>) {
+    let mut next = ready.clone();
+    let mut applied = Vec::new();
+    for change in changes {
+        if let Some(target) = next.list.targets.get_mut(change.target) {
+            target.venues.clone_from(&change.venues);
+            applied.push(change.clone());
+        }
+    }
+    history.retarget(
+        &scope::watch::market_keys(&ready.list.targets),
+        &scope::watch::market_keys(&next.list.targets),
+    );
+    (next, applied)
+}
+
+/// How a run takes venue changes: the queue to read at the start of each
+/// tick, and what to tell when some applied.
+pub struct Edits<'a> {
+    pub queue: &'a VenueQueue,
+    /// Called at the start of the tick that applied changes: the run number
+    /// of that tick, the list from then on, and the changes.
+    pub on_applied: &'a mut dyn FnMut(u64, &Ready, &[VenueChange]),
+}
+
 /// Runs `ready` on its schedule. After each tick, `on_tick` gets the run
 /// number, the tick and the events since the tick before. The CSV gets one
 /// row per cell per tick; at the end of the duration, the report is
@@ -171,18 +252,35 @@ pub async fn run(
     ready: &Ready,
     src: Sources<'_>,
     out: &Output,
+    on_tick: impl FnMut(u64, &Tick, &[Event]),
+) -> Result<Tick> {
+    run_editable(ready, src, out, None, on_tick).await
+}
+
+/// [`run`], with venue changes from `edits` applied between ticks. The CSV
+/// is started once and never rewritten by a change; the report is made from
+/// the list as it is at the end.
+pub async fn run_editable(
+    ready: &Ready,
+    src: Sources<'_>,
+    out: &Output,
+    edits: Option<Edits<'_>>,
     mut on_tick: impl FnMut(u64, &Tick, &[Event]),
 ) -> Result<Tick> {
-    let w = &ready.list;
-    if let Some(path) = &w.outputs.csv {
+    if let Some(path) = &ready.list.outputs.csv {
         start_csv(path, false)?;
     }
-    let last = run_ticks(ready, src, out, History::default(), |n, _, t, events, _| {
-        on_tick(n, t, events)
-    })
+    let (last, end) = run_ticks_edited(
+        ready,
+        src,
+        out,
+        History::default(),
+        edits,
+        |n, _, t, events, _| on_tick(n, t, events),
+    )
     .await?;
-    if let Some(path) = &w.outputs.report {
-        write_report(path, w, &last)?;
+    if let Some(path) = &end.list.outputs.report {
+        write_report(path, &end.list, &last)?;
         out.note_saved("Report", path.display());
     }
     Ok(last)
@@ -200,19 +298,52 @@ pub async fn run_ticks(
     src: Sources<'_>,
     out: &Output,
     start: History,
-    mut on_tick: impl FnMut(u64, &str, &Tick, &[Event], &History),
+    on_tick: impl FnMut(u64, &str, &Tick, &[Event], &History),
 ) -> Result<Tick> {
-    let w = &ready.list;
+    Ok(run_ticks_edited(ready, src, out, start, None, on_tick)
+        .await?
+        .0)
+}
+
+/// [`run_ticks`], with the venue changes of `edits` applied at the start of
+/// a tick, never in the middle of one: a tick reads one list. The changes
+/// are taken, applied to the run's own copy of `ready` and to the memory
+/// ([`apply_venue_changes`]), and told to `on_applied`, before the tick
+/// reads.
+///
+/// Returns the last tick and the list as it is at the end.
+pub async fn run_ticks_edited(
+    ready: &Ready,
+    src: Sources<'_>,
+    out: &Output,
+    start: History,
+    edits: Option<Edits<'_>>,
+    mut on_tick: impl FnMut(u64, &str, &Tick, &[Event], &History),
+) -> Result<(Tick, Ready)> {
     // The step closure is called once per tick and its future outlives
     // the call, so the state it changes is shared through cells.
     let prev = std::cell::RefCell::new(Snapshot::default());
     let history = std::cell::RefCell::new(start);
+    let live = std::cell::RefCell::new(std::rc::Rc::new(ready.clone()));
+    let edits = edits.map(|e| (e.queue, std::cell::RefCell::new(e.on_applied)));
     let on_tick = std::cell::RefCell::new(&mut on_tick);
-    let (prev, history, on_tick) = (&prev, &history, &on_tick);
-    let last = repeat::run(&schedule(w)?, &[], None, out, |n| async move {
+    let (prev, history, live, edits, on_tick) = (&prev, &history, &live, &edits, &on_tick);
+    let last = repeat::run(&schedule(&ready.list)?, &[], None, out, |n| async move {
+        if let Some((queue, on_applied)) = edits {
+            let changes = queue.take();
+            if !changes.is_empty() {
+                let mut memory = history.take();
+                let (next, applied) = apply_venue_changes(&live.borrow(), &mut memory, &changes);
+                history.replace(memory);
+                *live.borrow_mut() = std::rc::Rc::new(next);
+                (on_applied.borrow_mut())(n, &live.borrow(), &applied);
+            }
+        }
+        let ready = live.borrow().clone();
+        let w = &ready.list;
         // Taken out for the tick, so no borrow is held across its awaits.
         let mut memory = history.take();
-        let t = tick(ready, src, out, &mut memory).await;
+        let t = tick(&ready, src, out, &mut memory).await;
         history.replace(memory);
         let events = diff(&prev.borrow(), &t.snapshot);
         let at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
@@ -240,7 +371,8 @@ pub async fn run_ticks(
     })
     .await?
     .unwrap_or_default();
-    Ok(last)
+    let end = live.borrow().as_ref().clone();
+    Ok((last, end))
 }
 
 /// The CSV rows of one tick: every cell of every target ([`csv_rows`]),

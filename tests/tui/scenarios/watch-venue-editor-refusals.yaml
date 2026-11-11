@@ -1,0 +1,18 @@
+name: the venue editor says why it does nothing after the run ended (design 2026-11-11, item 2)
+tiers: [offline]
+terminal: { cols: 120, rows: 40 }
+masks: ['scope v\d+\.\d+\.\d+\S*']
+steps:
+  - type: "monitor USDC --venue binance --every 2s --duration 4s"
+  - key: Enter
+  - wait_for: { text: "monitor wizard", timeout: 10s }
+  - key: Ctrl-R
+  - wait_for: { text: "watchlist monitor-usdc", timeout: 10s }
+  # The run ends by itself: there is no loop to apply a change.
+  - wait_for: { text: "Done in", timeout: 30s }
+  - type: "v"
+  - wait_for: { text: "the run ended: change the venues in the wizard", timeout: 5s }
+  - expect_journal: { argv_prefix: [], outcome: refused }
+  - key: Esc
+  - key: Ctrl-D
+  - expect_exit: 0

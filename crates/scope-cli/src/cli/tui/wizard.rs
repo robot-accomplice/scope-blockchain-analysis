@@ -77,6 +77,79 @@ pub enum WizardAction {
     Saved(PathBuf),
 }
 
+/// What a key did to a line being typed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineKey {
+    /// The line goes on (a character, Backspace or a key it ignores).
+    Open,
+    /// Enter: the line is done.
+    Submit,
+    /// Esc: the line is dropped.
+    Cancel,
+}
+
+/// Applies `key` to the one-line text `text`: a character types, Backspace
+/// deletes, Enter submits and Esc cancels. Control keys do nothing. The
+/// wizard and the grid's venue editor type their lines with this.
+pub fn edit_line(text: &mut String, key: KeyEvent) -> LineKey {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Esc => LineKey::Cancel,
+        KeyCode::Enter => LineKey::Submit,
+        KeyCode::Backspace => {
+            text.pop();
+            LineKey::Open
+        }
+        KeyCode::Char(c) if !ctrl => {
+            text.push(c);
+            LineKey::Open
+        }
+        _ => LineKey::Open,
+    }
+}
+
+/// The venue list of `words`, checked against the `known` venue IDs. The
+/// wizard's add line and the grid's venue editor both call this one
+/// function, so a word means the same in both.
+///
+/// A word is a known venue (any case), and is not listed twice. A word that
+/// names a venue already in `current` takes its spelling, so a changed case
+/// keeps the market's label. `needs` names what must have a venue (`a
+/// pair`): with it, an empty list is an error.
+///
+/// # Errors
+///
+/// The text to show the user: an unknown venue, a venue listed twice, or an
+/// empty list where `needs` asks for a venue.
+pub fn parse_venues(
+    words: &[&str],
+    known: &[String],
+    current: &[String],
+    needs: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let mut venues: Vec<String> = Vec::new();
+    for &word in words {
+        if !known.iter().any(|v| v.eq_ignore_ascii_case(word)) {
+            return Err(format!(
+                "unknown venue `{word}`; the venues are {}",
+                known.join(", ")
+            ));
+        }
+        if venues.iter().any(|v| v.eq_ignore_ascii_case(word)) {
+            return Err(format!("venue `{word}` is listed twice"));
+        }
+        let spelling = current
+            .iter()
+            .find(|v| v.eq_ignore_ascii_case(word))
+            .map_or(word, String::as_str);
+        venues.push(spelling.to_string());
+    }
+    match needs {
+        Some(what) if venues.is_empty() => Err(format!("{what} needs a venue")),
+        _ => Ok(venues),
+    }
+}
+
 /// The rows of the Outputs step.
 const OUTPUT_ROWS: [&str; 5] = ["Name", "CSV", "Report", "Save", "Start"];
 
@@ -154,18 +227,10 @@ impl WizardState {
             };
         }
         if let Some((kind, mut text)) = self.edit.take() {
-            match key.code {
-                KeyCode::Esc => {}
-                KeyCode::Enter => self.finish_edit(kind, text),
-                KeyCode::Backspace => {
-                    text.pop();
-                    self.edit = Some((kind, text));
-                }
-                KeyCode::Char(c) if !ctrl => {
-                    text.push(c);
-                    self.edit = Some((kind, text));
-                }
-                _ => self.edit = Some((kind, text)),
+            match edit_line(&mut text, key) {
+                LineKey::Cancel => {}
+                LineKey::Submit => self.finish_edit(kind, text),
+                LineKey::Open => self.edit = Some((kind, text)),
             }
             return WizardAction::None;
         }
@@ -409,30 +474,20 @@ impl WizardState {
             _ => return Err(USAGE.to_string()),
         };
         let mut t = Target::new(kind, id);
-        for &extra in extras {
-            let is_venue = self.venues.iter().any(|v| v.eq_ignore_ascii_case(extra));
-            match (kind, is_venue) {
-                (TargetKind::Address, _) | (TargetKind::Token, false) if t.chain.is_some() => {
-                    return Err(USAGE.to_string());
-                }
-                (TargetKind::Address, _) | (TargetKind::Token, false) => {
-                    t.chain = Some(extra.to_string())
-                }
-                (_, true) if t.venues.iter().any(|v| v.eq_ignore_ascii_case(extra)) => {
-                    return Err(format!("venue `{extra}` is listed twice"));
-                }
-                (_, true) => t.venues.push(extra.to_string()),
-                (TargetKind::Pair, false) => {
-                    return Err(format!(
-                        "unknown venue `{extra}`; the venues are {}",
-                        self.venues.join(", ")
-                    ));
-                }
-            }
+        // A pair's extra words are venues; a token's are venues when they
+        // name one, else its chain; an address's is its chain.
+        let (venue_words, chain_words): (Vec<&str>, Vec<&str>) =
+            extras.iter().partition(|&&extra| match kind {
+                TargetKind::Pair => true,
+                TargetKind::Token => self.venues.iter().any(|v| v.eq_ignore_ascii_case(extra)),
+                TargetKind::Address => false,
+            });
+        if chain_words.len() > 1 {
+            return Err(USAGE.to_string());
         }
-        if kind == TargetKind::Pair && t.venues.is_empty() {
-            return Err("a pair needs a venue: `pair USDC binance`".to_string());
-        }
+        t.chain = chain_words.first().map(|c| (*c).to_string());
+        let needs = (kind == TargetKind::Pair).then_some("a pair");
+        t.venues = parse_venues(&venue_words, &self.venues, &[], needs)?;
         if !t.venues.is_empty() {
             t.preset = Some(Preset::MarketHealth);
         }

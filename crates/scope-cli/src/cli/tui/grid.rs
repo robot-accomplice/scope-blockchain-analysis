@@ -8,15 +8,22 @@
 //! market cell with a line per venue. Evidence keys put the matching CLI
 //! command in the shell and run it there.
 //!
-//! The state is pure: the event loop feeds it [`GridMsg`]s from the run and
-//! keys from the user; [`draw`] draws it.
+//! `v` edits the venues of the selected target while the run goes on
+//! (`venue_edit`); `u` undoes the last edit and `Ctrl-S` saves the list.
+//!
+//! The state is pure but for `Ctrl-S` and the file it reads first: the event
+//! loop feeds it [`GridMsg`]s from the run and keys from the user; [`draw`]
+//! draws it.
 
 use super::venue_charts::{self, Selection, Series, VenueChart, VenueCharts};
+use super::venue_edit::{Ctx, EDIT_KEY, ListFile, UNDO_KEY, VenueEditor};
 use crate::cli::charts::{HealthStrip, Sparkline, enlarge_hint};
 use crate::cli::output::ProgressHook;
+use crate::cli::textfit::cut_with_ellipsis;
 use crate::cli::theme::{ACCENT, ERR, KEY, OK, SECONDARY, WARN};
+use crate::cli::watch::run::{VenueChange, VenueQueue};
 use crate::cli::watch::{Ready, Tick, deviation};
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -29,6 +36,19 @@ use scope::watch::{
 };
 use std::collections::{HashMap, VecDeque};
 
+/// What the venue editor reads from the grid. A macro, not a method: the
+/// editor is borrowed mutably next to it, and a method would borrow all of
+/// the grid.
+macro_rules! ctx {
+    ($grid:expr) => {
+        Ctx {
+            list: &$grid.list,
+            run: $grid.run,
+            running: $grid.ended.is_none(),
+        }
+    };
+}
+
 /// The most values a cell keeps for its chart.
 const HISTORY: usize = 120;
 
@@ -39,8 +59,10 @@ const CHART_ROWS: u16 = 1;
 const TARGET_COLS: usize = 24;
 
 /// The key legend of the grid and of the detail pane.
-pub const GRID_LEGEND: &str = "↑↓ select · Enter detail · Ctrl-G shell · Esc stop the run";
-pub const DETAIL_LEGEND: &str = "b book · t trades · h holders · r risk · x address · Esc back";
+pub const GRID_LEGEND: &str =
+    "↑↓ select · Enter detail · v venues · Ctrl-G shell · Esc stop the run";
+pub const DETAIL_LEGEND: &str =
+    "b book · t trades · h holders · r risk · x address · v venues · Esc back";
 pub const VENUE_DETAIL_LEGEND: &str =
     "←→ venue · Space isolate · Tab chart · PgUp PgDn page · b book · t trades · Esc back";
 pub const ENDED_LEGEND: &str = "Esc or Ctrl-G back to the shell · Enter detail";
@@ -71,6 +93,14 @@ pub enum GridMsg {
         run: u64,
         tick: Box<Tick>,
         events: Vec<Event>,
+    },
+    /// The run took venue changes at the start of the tick `run`: `ready` is
+    /// the list from then on. The same message as `Ready`, with the changes
+    /// and the run number, so the grid can say which edit took effect when.
+    VenuesApplied {
+        run: u64,
+        ready: Ready,
+        changes: Vec<VenueChange>,
     },
 }
 
@@ -126,12 +156,19 @@ pub struct GridState {
     pub(crate) venues: Selection,
     /// Charts per page at the last draw, for PgUp and PgDn.
     page_size: std::cell::Cell<usize>,
+    /// The venue editor: its line, its edits that wait, its undo and save.
+    pub(crate) editor: VenueEditor,
+    /// After a venue change: the target that was selected and its row, to
+    /// select again at the next tick, when the rows are new.
+    reselect: Option<(usize, String)>,
 }
 
 impl GridState {
     /// A grid for `list`, before its first tick.
     pub fn new(list: Watchlist, progress: Option<ProgressHook>) -> Self {
         Self {
+            editor: VenueEditor::new(&list),
+            reselect: None,
             list,
             ready: None,
             last: None,
@@ -152,10 +189,42 @@ impl GridState {
         }
     }
 
+    /// The venue IDs the editor accepts, and the file of the list (`Ctrl-S`
+    /// writes it). The wizard gets its venues the same way.
+    pub fn with_venues(mut self, known: Vec<String>, file: Option<ListFile>) -> Self {
+        self.editor = VenueEditor::new(&self.list).with(known, file);
+        self
+    }
+
+    /// The queue the run reads for venue changes.
+    pub fn venue_queue(&self) -> VenueQueue {
+        self.editor.queue()
+    }
+
+    /// Whether the venue line is open: then every key types into it.
+    pub fn is_editing(&self) -> bool {
+        self.editor.is_open()
+    }
+
+    /// The records of the venue editor since the last call, for the journal.
+    pub fn take_records(&mut self) -> Vec<super::journal::VenueRecord> {
+        self.editor.take_records()
+    }
+
+    /// The closing line when venues changed in the run and were not saved.
+    pub fn unsaved_note(&self) -> Option<String> {
+        self.editor.summary(&self.list)
+    }
+
     /// Takes one message from the run.
     pub fn apply(&mut self, msg: GridMsg) {
         match msg {
             GridMsg::Ready(ready) => self.ready = Some(ready),
+            GridMsg::VenuesApplied {
+                run,
+                ready,
+                changes,
+            } => self.venues_applied(run, ready, &changes),
             GridMsg::Tick { run, tick, events } => {
                 self.run = run;
                 self.health.push(tick.snapshot.breaches() == 0);
@@ -184,7 +253,78 @@ impl GridState {
                     }
                 }
                 self.last = Some(*tick);
+                if let Some((target, label)) = self.reselect.take() {
+                    self.select_target(target, &label);
+                }
             }
+        }
+    }
+
+    /// The run applied `changes` at the start of the tick `run`: the list
+    /// has the new venues, and what the grid kept for a venue that is gone
+    /// goes with it.
+    fn venues_applied(&mut self, run: u64, ready: Ready, changes: &[VenueChange]) {
+        let selected = self
+            .selected_index()
+            .zip(self.rows().get(self.selected).map(|r| r.target.clone()));
+        for c in changes {
+            let Some(new) = ready.list.targets.get(c.target) else {
+                continue;
+            };
+            if let Some(old) = self.list.targets.get(c.target).cloned() {
+                self.forget_series(&old, new);
+            }
+            if let Some(t) = self.list.targets.get_mut(c.target) {
+                t.venues.clone_from(&c.venues);
+            }
+        }
+        self.ready = Some(ready);
+        self.reselect = selected;
+        let ctx = ctx!(self);
+        self.editor.applied(&ctx, run, changes);
+    }
+
+    /// Drops the chart history of the rows `old` has and `new` has not, and,
+    /// when the target changes between one row with every cell and a row for
+    /// each venue (`Target::rows`), the history of its token and address
+    /// cells: they move to another row.
+    fn forget_series(&mut self, old: &scope::watch::Target, new: &scope::watch::Target) {
+        use scope::metrics::MetricGroup;
+        let labels = |t: &scope::watch::Target| -> Vec<String> {
+            t.rows().into_iter().map(|v| t.row_label(v)).collect()
+        };
+        let (before, after) = (labels(old), labels(new));
+        let gone: Vec<&String> = before.iter().filter(|l| !after.contains(l)).collect();
+        self.history.retain(|(label, _), _| !gone.contains(&label));
+        self.deviation.retain(|label, _| !gone.contains(&label));
+        if (old.venues.len() >= 2) != (new.venues.len() >= 2) {
+            let moving: Vec<String> = new
+                .rules
+                .iter()
+                .filter(|r| r.metric.group() != MetricGroup::Market)
+                .map(ToString::to_string)
+                .collect();
+            self.history
+                .retain(|(label, cell), _| !(before.contains(label) && moving.contains(cell)));
+        }
+    }
+
+    /// Selects the row of `target` that is called `label`, or the first row
+    /// of that target: `selected` is an index into rows that change.
+    fn select_target(&mut self, target: usize, label: &str) {
+        let list = self.ready.as_ref().map_or(&self.list, |r| &r.list);
+        let Some(t) = list.targets.get(target) else {
+            return;
+        };
+        let mine: Vec<String> = t.rows().into_iter().map(|v| t.row_label(v)).collect();
+        let rows = self.rows();
+        let found = rows
+            .iter()
+            .position(|r| r.target == label)
+            .or_else(|| rows.iter().position(|r| mine.contains(&r.target)));
+        if let Some(i) = found {
+            self.selected = i;
+            self.reset_venues();
         }
     }
 
@@ -218,6 +358,10 @@ impl GridState {
     /// The run ended: `footer` says how.
     pub fn end(&mut self, footer: String, style: Style) {
         self.ended = Some((footer, style));
+        // The line closes and the edits that waited are refused, in the
+        // record.
+        let ctx = ctx!(self);
+        self.editor.ended(&ctx);
     }
 
     /// Whether the run still goes on.
@@ -247,11 +391,17 @@ impl GridState {
     fn selected_target(&self) -> Option<(&scope::watch::Target, Option<String>)> {
         let row = self.rows().get(self.selected).copied()?;
         let list = self.ready.as_ref().map_or(&self.list, |r| &r.list);
-        let t = list
-            .targets
-            .iter()
-            .find(|t| t.rows().into_iter().any(|v| t.row_label(v) == row.target))?;
+        let t = list.targets.get(self.selected_index()?)?;
         Some((t, row.venue.clone()))
+    }
+
+    /// The index in the watchlist of the target of the selected row.
+    fn selected_index(&self) -> Option<usize> {
+        let row = self.rows().get(self.selected).copied()?;
+        let list = self.ready.as_ref().map_or(&self.list, |r| &r.list);
+        list.targets
+            .iter()
+            .position(|t| t.rows().into_iter().any(|v| t.row_label(v) == row.target))
     }
 
     /// The venue charts of the selected row: when the detail is open on a
@@ -443,6 +593,20 @@ impl GridState {
     pub fn key(&mut self, key: KeyEvent) -> GridAction {
         // Any key dismisses the banner, and still does its job.
         self.banner = None;
+        // With the venue line open, every key types into it: `b` and `t`
+        // are letters then, not evidence keys.
+        if self.editor.is_open() {
+            let ctx = ctx!(self);
+            self.editor.line_key(&ctx, key);
+            return GridAction::None;
+        }
+        self.editor.clear_notice();
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if ctrl && key.code == KeyCode::Char('s') {
+            let ctx = ctx!(self);
+            self.editor.save(&ctx);
+            return GridAction::None;
+        }
         let n = self.rows().len();
         match key.code {
             KeyCode::Down if n > 0 => {
@@ -461,6 +625,15 @@ impl GridState {
                 if let Some(charts) = self.venue_charts() {
                     self.venue_key(key.code, &charts);
                 }
+            }
+            KeyCode::Char(EDIT_KEY) if !ctrl => {
+                let target = self.selected_index();
+                let ctx = ctx!(self);
+                self.editor.open(&ctx, target);
+            }
+            KeyCode::Char(UNDO_KEY) if !ctrl => {
+                let ctx = ctx!(self);
+                self.editor.undo(&ctx);
             }
             KeyCode::Esc if self.detail => self.detail = false,
             KeyCode::Esc if self.is_running() => return GridAction::Stop,
@@ -593,14 +766,20 @@ pub fn draw(f: &mut Frame, area: Rect, g: &GridState) {
     f.render_widget(block, area);
     let stale = g.stale && g.is_running();
     let banner_rows = u16::from(g.banner.is_some()) + u16::from(stale);
-    let [banner, body, strip, foot, legend] = Layout::vertical([
+    // The line of the venue editor: its input line, or what it has to say.
+    let note = g.editor.note(&g.list, usize::from(inner.width));
+    let [banner, body, strip, foot, note_area, legend] = Layout::vertical([
         Constraint::Length(banner_rows),
         Constraint::Min(1),
         Constraint::Length(1),
         Constraint::Length(1),
+        Constraint::Length(u16::from(note.is_some())),
         Constraint::Length(1),
     ])
     .areas(inner);
+    if let Some((text, style)) = note {
+        f.render_widget(Paragraph::new(Line::styled(text, style)), note_area);
+    }
     let mut banners = Vec::new();
     if let Some(text) = &g.banner {
         banners.push(Line::styled(
@@ -658,16 +837,41 @@ pub fn draw(f: &mut Frame, area: Rect, g: &GridState) {
         Paragraph::new(Line::styled(format!(" {footer}{note}"), footer_style)),
         foot,
     );
+    if let Some((text, style)) = g.editor.legend(usize::from(inner.width)) {
+        f.render_widget(Paragraph::new(Line::styled(text, style)), legend);
+        return;
+    }
     let keys = match (g.detail, g.is_running()) {
-        (true, _) if g.venue_charts().is_some() => VENUE_DETAIL_LEGEND,
-        (true, _) => DETAIL_LEGEND,
-        (false, true) => GRID_LEGEND,
-        (false, false) => ENDED_LEGEND,
+        (true, _) if g.venue_charts().is_some() => VENUE_DETAIL_LEGEND.to_string(),
+        (true, _) => DETAIL_LEGEND.to_string(),
+        (false, true) => running_legend(g),
+        (false, false) => ENDED_LEGEND.to_string(),
     };
     f.render_widget(
-        Paragraph::new(Line::styled(format!(" {keys}"), KEY)),
+        Paragraph::new(Line::styled(
+            cut_with_ellipsis(&format!(" {keys}"), usize::from(inner.width)),
+            KEY,
+        )),
         legend,
     );
+}
+
+/// The keys of the row view while the run goes on. `u` and `Ctrl-S` show
+/// when they have something to do; with both, the shell hint gives way, so
+/// the legend fits 79 columns and `Esc stop the run` stays in view.
+fn running_legend(g: &GridState) -> String {
+    let mut keys = vec!["↑↓ select", "Enter detail", "v venues"];
+    if g.editor.can_undo() {
+        keys.push("u undo");
+    }
+    if g.editor.has_unsaved(&g.list) {
+        keys.push("Ctrl-S save");
+    }
+    if keys.len() < 5 {
+        keys.push("Ctrl-G shell");
+    }
+    keys.push("Esc stop the run");
+    keys.join(" · ")
 }
 
 /// The rows: target, status, then one glyph per cell.
@@ -1912,5 +2116,205 @@ mod tests {
             g.deviation_note().is_none(),
             "no note for a one-venue target"
         );
+    }
+
+    // ---- the venue editor (design 2026-11-11, item 2)
+
+    fn pegs(venues: &[&str]) -> Watchlist {
+        let mut w = Watchlist::new("pegs");
+        let mut t = Target::new(TargetKind::Pair, "USDN");
+        t.venues = venues.iter().map(|v| (*v).to_string()).collect();
+        t.preset = Some(scope::watch::Preset::MarketHealth);
+        let mut other = Target::new(TargetKind::Pair, "USDC");
+        other.venues = vec!["okx".into()];
+        other.preset = Some(scope::watch::Preset::MarketHealth);
+        w.targets = vec![t, other];
+        w
+    }
+
+    fn market_row(id: &str, venue: &str, rule: &str) -> TargetSnapshot {
+        TargetSnapshot::new(
+            format!("{id}@{venue}"),
+            vec![cell(rule, RuleStatus::Pass, Some(0.1))],
+        )
+        .on_venue(Some(venue))
+    }
+
+    fn editing_grid(venues: &[&str]) -> GridState {
+        let list = pegs(venues);
+        let known = ["weex", "binance", "okx", "mexc"]
+            .map(String::from)
+            .to_vec();
+        let mut g = GridState::new(list.clone(), None).with_venues(known, None);
+        g.apply(GridMsg::Ready(Ready {
+            contracts: vec![None; list.targets.len()],
+            list,
+        }));
+        let mut rows: Vec<TargetSnapshot> = venues
+            .iter()
+            .map(|v| market_row("USDN", v, "spread_pct < 1"))
+            .collect();
+        rows.push(market_row("USDC", "okx", "spread_pct < 1"));
+        tick_rows(&mut g, 1, rows);
+        g
+    }
+
+    fn type_text(g: &mut GridState, text: &str) {
+        for c in text.chars() {
+            g.key(key(KeyCode::Char(c)));
+        }
+    }
+
+    fn applied(g: &mut GridState, run: u64, target: usize, venues: &[&str]) {
+        let venues: Vec<String> = venues.iter().map(|v| (*v).to_string()).collect();
+        let mut ready = g.ready.clone().unwrap();
+        ready.list.targets[target].venues = venues.clone();
+        g.apply(GridMsg::VenuesApplied {
+            run,
+            ready,
+            changes: vec![VenueChange {
+                seq: 1,
+                target,
+                venues,
+            }],
+        });
+    }
+
+    /// Why: the evidence keys are live in the detail pane. If `b` ran a
+    /// command while the user typed a venue name, the grid would leave for
+    /// the shell in the middle of the line. This is the most likely bug.
+    #[test]
+    fn with_the_line_open_every_key_types_and_no_command_runs() {
+        let mut g = editing_grid(&["weex", "binance"]);
+        g.key(key(KeyCode::Enter));
+        assert!(g.detail);
+        assert_eq!(g.key(key(KeyCode::Char('v'))), GridAction::None);
+        assert!(g.is_editing());
+        for c in ['b', 't', 'h', 'r', 'x', 'u', 'v'] {
+            assert_eq!(g.key(key(KeyCode::Char(c))), GridAction::None, "{c}");
+        }
+        assert_eq!(
+            g.editor.note(&g.list, 120).unwrap().0,
+            " USDN: venues  weex binancebthrxuv█"
+        );
+        // Esc closes the line and does not stop the run.
+        assert_eq!(g.key(key(KeyCode::Esc)), GridAction::None);
+        assert!(!g.is_editing() && g.is_running());
+        // Without the line `b` is the evidence key again.
+        assert!(matches!(g.key(key(KeyCode::Char('b'))), GridAction::Run(_)));
+    }
+
+    /// Why: `selected` is an index into sorted rows, so it can point at
+    /// another row after the set of rows changes. The grid must keep the
+    /// same target, drop the series of a removed venue, and show the new
+    /// venues in its list.
+    #[test]
+    fn the_grid_follows_the_new_list_and_keeps_the_selected_target() {
+        let mut g = editing_grid(&["weex", "binance"]);
+        // Select the USDC row (third).
+        g.key(key(KeyCode::Down));
+        g.key(key(KeyCode::Down));
+        assert_eq!(g.rows()[g.selected].target, "USDC@okx");
+        assert!(g.history.keys().any(|(l, _)| l == "USDN@binance"));
+        applied(&mut g, 3, 0, &["weex", "mexc"]);
+        assert_eq!(g.list.targets[0].venues, ["weex", "mexc"]);
+        assert!(
+            !g.history.keys().any(|(l, _)| l == "USDN@binance"),
+            "the series of the removed venue are gone"
+        );
+        assert!(g.history.keys().any(|(l, _)| l == "USDN@weex"), "kept");
+        // The next tick has other rows: a breached one sorts first.
+        let mut breached = market_row("USDN", "mexc", "spread_pct < 1");
+        breached.status = TargetStatus::Breached;
+        tick_rows(
+            &mut g,
+            3,
+            vec![
+                market_row("USDN", "weex", "spread_pct < 1"),
+                market_row("USDC", "okx", "spread_pct < 1"),
+                breached,
+            ],
+        );
+        assert_eq!(g.rows()[0].target, "USDN@mexc");
+        assert_eq!(g.rows()[g.selected].target, "USDC@okx");
+    }
+
+    /// Why: `Target::rows` changes shape between one venue and two. The
+    /// token cells move to another row, and their old series must not
+    /// come back as stale values when the shape returns.
+    #[test]
+    fn a_token_that_goes_from_one_venue_to_two_drops_its_token_cell_history() {
+        let mut t = Target::new(TargetKind::Token, "USDN");
+        t.venues = vec!["weex".into()];
+        t.rules = vec![
+            Rule::parse("spread_pct < 1").unwrap(),
+            Rule::parse("holders >= 10").unwrap(),
+        ];
+        let mut w = Watchlist::new("tok");
+        w.targets = vec![t];
+        let mut g = GridState::new(w.clone(), None);
+        g.apply(GridMsg::Ready(Ready {
+            contracts: vec![None],
+            list: w,
+        }));
+        let row = TargetSnapshot::new(
+            "USDN@weex",
+            vec![
+                cell("spread_pct < 1", RuleStatus::Pass, Some(0.1)),
+                cell("holders >= 10", RuleStatus::Pass, Some(50.0)),
+            ],
+        )
+        .on_venue(Some("weex"));
+        tick_rows(&mut g, 1, vec![row]);
+        applied(&mut g, 2, 0, &["weex", "binance"]);
+        let keys: Vec<_> = g.history.keys().cloned().collect();
+        assert_eq!(
+            keys,
+            [("USDN@weex".to_string(), "spread_pct < 1".to_string())]
+        );
+    }
+
+    /// Why: the legend is the first place the user learns the key, and the
+    /// extra keys must not push `Esc stop the run` out of 79 columns.
+    #[test]
+    fn the_legend_names_the_editor_keys_and_fits_79_columns() {
+        let mut g = editing_grid(&["weex", "binance"]);
+        assert_eq!(running_legend(&g), GRID_LEGEND);
+        g.key(key(KeyCode::Char('v')));
+        type_text(&mut g, " okx");
+        g.key(key(KeyCode::Enter));
+        let legend = running_legend(&g);
+        assert!(legend.contains("u undo"), "{legend}");
+        assert!(legend.ends_with("Esc stop the run"), "{legend}");
+        // The input line and its legend do not wrap at 79 columns.
+        g.key(key(KeyCode::Char('v')));
+        type_text(&mut g, &" mexcmexcmexc".repeat(8));
+        let s = screen(&g, 79, 24);
+        assert!(s.contains("USDN: venues  …"), "{s}");
+        assert!(s.contains("Enter apply · Esc cancel"), "{s}");
+        assert!(screen(&g, 120, 36).contains("venues: weex, binance, okx, mexc"));
+    }
+
+    /// Why: the user must learn at close that a trial edit was not saved.
+    #[test]
+    fn closing_after_an_unsaved_venue_change_says_so() {
+        let mut g = editing_grid(&["weex", "binance"]);
+        assert_eq!(g.unsaved_note(), None);
+        applied(&mut g, 2, 0, &["weex"]);
+        assert_eq!(
+            g.unsaved_note().as_deref(),
+            Some("venues of USDN changed in the run and not saved")
+        );
+    }
+
+    /// Why: after the run ended there is no loop to apply a change; the
+    /// footer says what to do instead.
+    #[test]
+    fn v_after_the_run_ended_says_to_use_the_wizard() {
+        let mut g = editing_grid(&["weex", "binance"]);
+        g.end("Done.".into(), SECONDARY);
+        g.key(key(KeyCode::Char('v')));
+        assert!(!g.is_editing());
+        assert!(screen(&g, 120, 36).contains("the run ended: change the venues in the wizard"));
     }
 }
