@@ -205,7 +205,7 @@ fn help_lists_the_exit_codes_and_a_flag_conflict_is_a_usage_error() {
         assert!(help.contains(needle), "{needle}: {help}");
     }
     // clap's own usage error is 2, the code of "unknown": the docs say so.
-    let out = run(dir.path(), &["watch", "pegs", "--once", "--every", "1s"]);
+    let out = run(dir.path(), &["watch", "pegs", "--once", "--duration", "1h"]);
     assert_eq!(out.status.code(), Some(2));
     assert!(
         text(&out.stderr).contains("cannot be used with"),

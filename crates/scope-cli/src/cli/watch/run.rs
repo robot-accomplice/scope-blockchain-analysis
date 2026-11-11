@@ -176,7 +176,10 @@ pub async fn run(
     if let Some(path) = &w.outputs.csv {
         start_csv(path, false)?;
     }
-    let last = run_ticks(ready, src, out, |n, _, t, events| on_tick(n, t, events)).await?;
+    let last = run_ticks(ready, src, out, History::default(), |n, _, t, events, _| {
+        on_tick(n, t, events)
+    })
+    .await?;
     if let Some(path) = &w.outputs.report {
         write_report(path, w, &last)?;
         out.note_saved("Report", path.display());
@@ -195,13 +198,14 @@ pub async fn run_ticks(
     ready: &Ready,
     src: Sources<'_>,
     out: &Output,
-    mut on_tick: impl FnMut(u64, &str, &Tick, &[Event]),
+    start: History,
+    mut on_tick: impl FnMut(u64, &str, &Tick, &[Event], &History),
 ) -> Result<Tick> {
     let w = &ready.list;
     // The step closure is called once per tick and its future outlives
     // the call, so the state it changes is shared through cells.
     let prev = std::cell::RefCell::new(Snapshot::default());
-    let history = std::cell::RefCell::new(History::default());
+    let history = std::cell::RefCell::new(start);
     let on_tick = std::cell::RefCell::new(&mut on_tick);
     let (prev, history, on_tick) = (&prev, &history, &on_tick);
     let last = repeat::run(&schedule(w)?, &[], None, out, |n| async move {
@@ -214,7 +218,7 @@ pub async fn run_ticks(
         if let Some(path) = &w.outputs.csv {
             append(path, &csv_rows(&at, &t.snapshot))?;
         }
-        (on_tick.borrow_mut())(n, &at, &t, &events);
+        (on_tick.borrow_mut())(n, &at, &t, &events, &history.borrow());
         *prev.borrow_mut() = t.snapshot.clone();
         let failed: Vec<String> = events
             .iter()

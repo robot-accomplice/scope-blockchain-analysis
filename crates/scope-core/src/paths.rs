@@ -76,6 +76,12 @@ pub fn state_dir() -> PathBuf {
     home().join("state")
 }
 
+/// `<home>/state/watch`: what `scope watch` remembers between runs, one
+/// file for each watchlist. Safe to delete.
+pub fn watch_state_dir() -> PathBuf {
+    state_dir().join("watch")
+}
+
 /// The user's home folder (for `~` in paths the user types).
 #[allow(clippy::disallowed_methods)]
 pub fn user_home() -> Option<PathBuf> {

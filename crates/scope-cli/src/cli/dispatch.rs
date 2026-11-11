@@ -121,6 +121,7 @@ pub async fn dispatch(
             clients: &factory,
             out: &out,
             dir: scope::paths::watchlists_dir(),
+            state_dir: scope::paths::watch_state_dir(),
             venues: crate::cli::watch::venue_ids(),
         };
         return Ok(crate::cli::watch::headless::run(

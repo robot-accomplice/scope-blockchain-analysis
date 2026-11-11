@@ -12,6 +12,7 @@ use super::fetch::TickTiming;
 use super::run::{
     CellRecord, cell_record, csv_header, csv_rows, run_ticks, start_csv, write_report,
 };
+use super::state::{self, RunState};
 use super::{Ready, Sources, Tick, monitor, prepare, watchlist_path};
 use crate::cli::output::Output;
 use crate::{note, outln};
@@ -49,6 +50,7 @@ const NO_DURATION_NOTE: &str = "No duration: runs until stopped. Use --once or -
 
 const AFTER_HELP: &str = "\x1b[1mExamples:\x1b[0m
   scope watch pegs --once                          \x1b[2m# one tick, for cron and CI\x1b[0m
+  scope watch pegs --once --every 5m               \x1b[2m# cron every 5 minutes: remembers the last run\x1b[0m
   scope watch pegs --every 30s --duration 1h --format json
   scope watch ./pegs.yaml --once --csv trail.csv --append
 
@@ -87,12 +89,19 @@ pub struct WatchArgs {
     pub list: String,
 
     /// Run one tick and stop.
-    #[arg(long, conflicts_with_all = ["every", "duration"])]
+    #[arg(long, conflicts_with = "duration")]
     pub once: bool,
 
     /// Time from one tick start to the next (30s, 5m). Overrides the file.
+    /// With --once it does not wait: it says how far apart the runs are
+    /// (the look-back of the first tick and the age at which the saved
+    /// state is stale).
     #[arg(long, value_name = "INTERVAL")]
     pub every: Option<String>,
+
+    /// Do not load or save what this list remembers between runs.
+    #[arg(long)]
+    pub no_state: bool,
 
     /// How long the run lasts (10m, 1h, or `forever`). Overrides the file.
     #[arg(long, value_name = "DURATION")]
@@ -151,6 +160,8 @@ pub struct Context<'a> {
     pub out: &'a Output,
     /// The folder of the saved watchlists.
     pub dir: PathBuf,
+    /// The folder of the state files (what a run remembers for the next).
+    pub state_dir: PathBuf,
     /// The venue IDs a watchlist may name.
     pub venues: Vec<String>,
 }
@@ -209,9 +220,23 @@ pub async fn run(args: &WatchArgs, ctx: &Context<'_>, stop: impl Future<Output =
         return EXIT_WRITE_ERROR;
     }
 
-    if announce_start(args, &path, &ready, out).is_err() {
+    let (state, start_history) = RunState::start(
+        !args.no_state,
+        &ctx.state_dir,
+        state::identity(&args.list, &path),
+        list,
+        now_ms(),
+    );
+    let state = RefCell::new(state);
+
+    if announce_start(args, &path, &ready, &state.borrow(), out).is_err() {
         // Stdout closed before the first tick: nothing to run for.
-        return finish(args, &ready, None, StopReason::StdoutClosed, false, 0, out);
+        let end = End {
+            reason: StopReason::StdoutClosed,
+            write_failed: false,
+            runs: 0,
+        };
+        return finish(args, &ready, None, end, &state.borrow(), out);
     }
 
     let last: RefCell<Option<Tick>> = RefCell::new(None);
@@ -219,18 +244,28 @@ pub async fn run(args: &WatchArgs, ctx: &Context<'_>, stop: impl Future<Output =
     let stdout_closed = Cell::new(false);
     let closed = tokio::sync::Notify::new();
     let ended = {
-        let ticks = run_ticks(&ready, src, out, |n, at, tick, events| {
-            runs.set(n);
-            log_tick(n, tick, events);
-            // The CSV row is written already. A closed stdout ends the run
-            // after this tick; the tick still counts as the last one.
-            if let Err(e) = print_tick(args.format, out, n, at, tick, events) {
-                note!(out, "Cannot write to stdout ({e}); stopping.");
-                stdout_closed.set(true);
-                closed.notify_one();
-            }
-            *last.borrow_mut() = Some(tick.clone());
-        });
+        let ticks = run_ticks(
+            &ready,
+            src,
+            out,
+            start_history,
+            |n, at, tick, events, history| {
+                runs.set(n);
+                log_tick(n, tick, events);
+                // The memory is a cache: a failure is a note, not an exit code.
+                if let Some(why) = state.borrow_mut().save(history, now_ms()) {
+                    note!(out, "{why}");
+                }
+                // The CSV row is written already. A closed stdout ends the run
+                // after this tick; the tick still counts as the last one.
+                if let Err(e) = print_tick(args.format, out, n, at, tick, events) {
+                    note!(out, "Cannot write to stdout ({e}); stopping.");
+                    stdout_closed.set(true);
+                    closed.notify_one();
+                }
+                *last.borrow_mut() = Some(tick.clone());
+            },
+        );
         // Biased: a stop that is ready wins over a tick that is ready, so a
         // signal never waits for the next tick to end.
         tokio::select! {
@@ -254,7 +289,20 @@ pub async fn run(args: &WatchArgs, ctx: &Context<'_>, stop: impl Future<Output =
         None => StopReason::Signal,
     };
     let last = last.into_inner();
-    finish(args, &ready, last, reason, write_failed, runs.get(), out)
+    let end = End {
+        reason,
+        write_failed,
+        runs: runs.get(),
+    };
+    finish(args, &ready, last, end, &state.borrow(), out)
+}
+
+/// How a run ended, for [`finish`].
+struct End {
+    reason: StopReason,
+    /// The CSV file could not be written.
+    write_failed: bool,
+    runs: u64,
 }
 
 /// Writes the report, prints the `end` record and returns the exit code.
@@ -262,11 +310,15 @@ fn finish(
     args: &WatchArgs,
     ready: &Ready,
     last: Option<Tick>,
-    reason: StopReason,
-    mut write_failed: bool,
-    runs: u64,
+    end: End,
+    state: &RunState,
     out: &Output,
 ) -> i32 {
+    let End {
+        reason,
+        mut write_failed,
+        runs,
+    } = end;
     let mut report_written = false;
     if let Some(path) = &ready.list.outputs.report {
         // A stop before the first tick still writes a report, from no rows.
@@ -294,7 +346,7 @@ fn finish(
     );
     match args.format {
         WatchFormat::Json => {
-            let end = json!({
+            let mut end = json!({
                 "type": "end",
                 "ts": now(),
                 "runs": runs,
@@ -302,6 +354,9 @@ fn finish(
                 "exit_code": code,
                 "report_written": report_written,
             });
+            if let (Some(end), Value::Object(fields)) = (end.as_object_mut(), state.end_record()) {
+                end.extend(fields);
+            }
             // A closed stdout cannot take the record; the code still tells.
             let _ = outln!(out, "{end}");
         }
@@ -376,6 +431,11 @@ fn prepare_message(e: &ScopeError) -> String {
     }
 }
 
+/// Now, in ms since the epoch.
+fn now_ms() -> u64 {
+    u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0)
+}
+
 fn now() -> String {
     chrono::Utc::now().format(TIMESTAMP_FORMAT).to_string()
 }
@@ -402,6 +462,7 @@ fn announce_start(
     args: &WatchArgs,
     path: &Path,
     ready: &Ready,
+    state: &RunState,
     out: &Output,
 ) -> std::io::Result<()> {
     let list = &ready.list;
@@ -435,6 +496,9 @@ fn announce_start(
     if list.duration.is_none() {
         note!(out, "{NO_DURATION_NOTE}");
     }
+    for line in state.start_notes() {
+        note!(out, "{line}");
+    }
     match args.format {
         WatchFormat::Text => {}
         WatchFormat::Csv => {
@@ -453,6 +517,7 @@ fn announce_start(
                 "rows": rows,
                 "csv": csv,
                 "report": report,
+                "state": state.start_record(),
             });
             outln!(out, "{start}")?;
         }
@@ -744,6 +809,7 @@ mod tests {
             clients: factory,
             out,
             dir: dir.path().to_path_buf(),
+            state_dir: dir.path().join("state"),
             venues: vec![
                 "eth".into(),
                 "binance".into(),
@@ -1455,7 +1521,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn once_makes_one_tick_and_conflicts_with_every_and_duration() {
+    async fn once_makes_one_tick_and_conflicts_with_duration() {
         let r = exec(HEALTHY, &["--once", "--format", "json"]).await;
         let records = json_lines(&r.cap);
         assert_eq!(of_type(&records, "tick").len(), 1);
@@ -1465,11 +1531,12 @@ mod tests {
             (Some("once"), Some(1))
         );
         assert_eq!(end["exit_code"], 0);
-        for flag in [["--every", "1s"], ["--duration", "1h"]] {
-            let argv = ["scope", "watch", "pegs", "--once", flag[0], flag[1]];
-            let e = Cli::try_parse_from(argv).unwrap_err();
-            assert_eq!(e.kind(), clap::error::ErrorKind::ArgumentConflict);
-        }
+        let argv = ["scope", "watch", "pegs", "--once", "--duration", "1h"];
+        let e = Cli::try_parse_from(argv).unwrap_err();
+        assert_eq!(e.kind(), clap::error::ErrorKind::ArgumentConflict);
+        // Q7: --every with --once says how far apart the runs are.
+        let argv = ["scope", "watch", "pegs", "--once", "--every", "5m"];
+        assert!(Cli::try_parse_from(argv).is_ok());
     }
 
     // The repeat rule: a run of 2s every 1s ends with a tick at 2s.

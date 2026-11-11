@@ -25,7 +25,8 @@ use scope::market::{
 };
 use scope::metrics::{MetricGroup, MetricId, describe, sample};
 use scope::watch::{
-    Cell, History, Preset, Reading, Readings, RuleStatus, Snapshot, Target, TargetSnapshot, preset,
+    Cell, History, MarketKey, Preset, Reading, Readings, RuleStatus, Snapshot, Target,
+    TargetSnapshot, market_keys, preset,
 };
 use std::time::Duration;
 use tokio::time::Instant;
@@ -177,8 +178,9 @@ pub async fn tick_with(
     let mut result = Tick::default();
     // Judged in the given order with the one `History`, whatever the order
     // in which the reads finished.
-    for ((t, _), raw) in targets.iter().zip(raws) {
-        for reading in judge_target(t, raw, src, history, clock) {
+    let keys = market_keys(targets.iter().map(|(t, _)| *t));
+    for (((t, _), raw), keys) in targets.iter().zip(raws).zip(&keys) {
+        for reading in judge_target(t, raw, keys, src, history, clock) {
             result.snapshot.targets.push(reading.row);
             result.summaries.push(reading.summary);
         }
@@ -451,15 +453,17 @@ pub async fn read_target(
     clock: Clock,
 ) -> Vec<TargetReading> {
     let (mut raws, _) = read_all(&[(t, contract)], src, out, Limits::default()).await;
-    judge_target(t, raws.remove(0), src, history, clock)
+    let keys = market_keys([t]).remove(0);
+    judge_target(t, raws.remove(0), &keys, src, history, clock)
 }
 
 /// Judges one target from what its reads gave: one reading per row of
-/// [`Target::rows`]. It builds the cells and reads the `history`; it does
-/// not read from the network.
+/// [`Target::rows`]. `keys` has the market key of each row. It builds the
+/// cells and reads the `history`; it does not read from the network.
 fn judge_target(
     t: &Target,
     raw: Raw,
+    keys: &[Option<MarketKey>],
     src: Sources<'_>,
     history: &mut History,
     clock: Clock,
@@ -484,9 +488,9 @@ fn judge_target(
                     if t.preset == Some(Preset::MarketHealth) {
                         cells.extend(preset::cells(&s));
                     }
-                    let since = t.rules.iter().any(|r| r.metric.since_last_tick()).then(|| {
+                    let since = keys[row].as_ref().filter(|_| t.keeps_history()).map(|key| {
                         let tape = trades.as_deref().map_err(String::as_str);
-                        history.read(&label, tape, s.volume_24h, clock.now_ms, clock.window_ms)
+                        history.read(key, tape, s.volume_24h, clock.now_ms, clock.window_ms)
                     });
                     market = Some(Ok(market_values(t, &s, &thresholds, since.as_ref())));
                     summary = Some(s);
@@ -1180,6 +1184,9 @@ capabilities:
         /// For each host: (in flight, most in flight).
         hosts: HashMap<String, (usize, usize)>,
         tickers: HashMap<String, u32>,
+        /// The trades the venues give: (age, size in quote). `None`: the
+        /// default tape.
+        tape: Option<Vec<(Duration, f64)>>,
     }
 
     /// A transport with a latency for each venue that counts the requests in
@@ -1230,6 +1237,11 @@ capabilities:
         pub(crate) fn max_in_flight_to(&self, venue: &str) -> usize {
             let g = self.gauge.lock().unwrap();
             g.hosts.get(&format!("{venue}.test")).map_or(0, |h| h.1)
+        }
+
+        /// Gives these trades from now on: (age, size in quote).
+        pub(crate) fn set_tape(&self, tape: &[(Duration, f64)]) {
+            self.gauge.lock().unwrap().tape = Some(tape.to_vec());
         }
 
         /// The requests in flight now.
@@ -1305,11 +1317,22 @@ capabilities:
                 *n += 1;
                 format!(r#"{{"lastPrice":"{mid:.5}","quoteVolume":"{volume}"}}"#)
             } else {
-                // Trades a second old, so they are inside the first window.
-                let at = chrono::Utc::now().timestamp_millis() - 1_000;
-                let trades: Vec<String> = [(1, 500.0), (2, 2_500.0), (3, 100.0)]
+                // By default, trades a second old, so they are inside the
+                // first window.
+                let tape = self.gauge.lock().unwrap().tape.clone();
+                let tape = tape.unwrap_or_else(|| {
+                    vec![
+                        (Duration::from_secs(1), 500.0),
+                        (Duration::from_secs(1), 2_500.0),
+                        (Duration::from_secs(1), 100.0),
+                    ]
+                });
+                let now = chrono::Utc::now().timestamp_millis();
+                let trades: Vec<String> = tape
                     .iter()
-                    .map(|(id, quote)| {
+                    .enumerate()
+                    .map(|(id, (age, quote))| {
+                        let at = now - i64::try_from(age.as_millis()).unwrap();
                         format!(
                             r#"{{"id":{id},"price":"{mid:.5}","qty":"{quote}","quoteQty":"{quote}","time":{at},"isBuyerMaker":true}}"#
                         )
@@ -1630,9 +1653,17 @@ capabilities:
             clients: &factory,
         };
         let mut ticks = 0;
-        crate::cli::watch::run::run_ticks(&ready, src, &quiet(), |_, _, _, _| ticks += 1)
-            .await
-            .unwrap();
+        crate::cli::watch::run::run_ticks(
+            &ready,
+            src,
+            &quiet(),
+            History::default(),
+            |_, _, _, _, _| {
+                ticks += 1;
+            },
+        )
+        .await
+        .unwrap();
         assert!(ticks >= 2, "the run had {ticks} ticks");
         assert_eq!(factory.http.max_in_flight(), 1);
     }

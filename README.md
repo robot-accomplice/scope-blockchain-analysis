@@ -932,8 +932,9 @@ The argument is a path when it ends in `.yaml` or has a path separator. Otherwis
 
 | Flag | Meaning |
 | --- | --- |
-| `--once` | Run one tick and stop. It conflicts with `--every` and `--duration`. |
-| `--every D` | Time from one tick start to the next. It overrides `interval:` in the file. |
+| `--once` | Run one tick and stop. It conflicts with `--duration`. |
+| `--every D` | Time from one tick start to the next. It overrides `interval:` in the file. With `--once` it does not wait. It says how far apart your runs are (see "Memory between runs"). |
+| `--no-state` | Do not load or save what the list remembers between runs. |
 | `--duration D` | How long the run lasts (`10m`, `1h`, `forever`). It overrides `duration:` in the file. |
 | `--format text\|json\|csv` | What goes to stdout. The default is `text`. |
 | `--csv PATH` | Write one CSV row for each cell and tick. It overrides `outputs.csv`. |
@@ -955,6 +956,16 @@ A flag overrides the file. The file overrides the default (`60s` every, `1h` lon
 A breach wins over an unknown row. A write error wins over all. A breach that cleared before the last tick gives 0. The JSON output and the CSV file keep the history.
 
 **Output.** Data goes to stdout. Notes go to stderr: the version line, the start note with the full paths, the `--- Run #N ---` lines and the end note. `--format text` prints one summary line for each tick, then one line for each event (`BREACH`, `CLEARED`, `WARN`, `WARN CLEARED`) and one `ERROR` line for each cell that could not be read. `--format json` prints JSON Lines. Each line has a `type`: `start`, `tick`, `event` or `end`. A `tick` has every cell of every row, with the same fields as a CSV row. The `end` record has the stop reason (`once`, `duration`, `signal`, `output_error` or `stdout_closed`) and the exit code. `--format csv` prints the bytes of the CSV file.
+
+**Memory between runs.** Two metrics compare a tick with the tick before: `largest_trade` and `volume_change_pct`. A run saves what they need to a small JSON file in `~/.scope-bca/state/watch/`, one file for each list. The next run loads it. So a `--once` job in cron has a second reading, and `volume_change_pct` is no longer `n/a`.
+
+- Use `--every` to tell the run how far apart your runs are. A cron job every 5 minutes: `scope watch pegs --once --every 5m`. The first tick of a market looks back one `--every`. A saved reading is stale when it is older than 3 times `--every`. A stale reading is dropped, and the market has a first tick.
+- A list is known by its saved name (`saved:pegs`) or by the absolute path of its file. Two jobs on different lists do not share memory.
+- A list with no rule on these two metrics keeps no file.
+- If two runs of one list overlap, the file stays valid and never goes back to older readings.
+- A file that cannot be read is moved to `<name>.json.bad`, and the run starts with no memory. A file that cannot be written is a note and the `state_error` field of the `end` record. Neither changes the exit code.
+- `--no-state` turns all of this off for a run. The `start` record (`state`) shows what was loaded for each market: `loaded`, `stale` or `none`, with the age.
+- **A `--once` run that always passed can now breach.** A rule on `volume_change_pct` was always `n/a` in a `--once` run, and `n/a` does not count. With the saved reading, the rule can fail, and the job can exit with 1. Use `--no-state` to get the old result.
 
 **Stopping.** Ctrl-C or SIGTERM stops the run (on Windows: Ctrl-C or Ctrl-Break). A tick in progress is dropped. The report is still written, from the last finished tick.
 
