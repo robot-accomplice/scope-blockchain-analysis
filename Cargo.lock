@@ -2809,7 +2809,7 @@ dependencies = [
 
 [[package]]
 name = "scope-bca"
-version = "0.8.7"
+version = "0.8.8"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2837,7 +2837,7 @@ dependencies = [
 
 [[package]]
 name = "scope-bca-cli"
-version = "0.8.7"
+version = "0.8.8"
 dependencies = [
  "ansi-to-tui",
  "anyhow",
@@ -2880,7 +2880,7 @@ dependencies = [
 
 [[package]]
 name = "scope-bca-core"
-version = "0.8.7"
+version = "0.8.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2914,7 +2914,7 @@ dependencies = [
 
 [[package]]
 name = "scope-tui-harness"
-version = "0.8.7"
+version = "0.8.8"
 dependencies = [
  "anyhow",
  "clap",
