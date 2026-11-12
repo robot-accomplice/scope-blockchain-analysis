@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.9] - 2026-11-12
+
 ### Added
 - `scope setup --clean` (also `scope config --clean`) removes the dead keys of the old monitor dashboard from the config file: `layout`, `widgets`, `scale`, `color_scheme`, `export` and `auto_pause_on_input`, under the top-level `monitor:`. It removes no other key. The default is a dry run: it prints the removed lines as a diff (no context lines, so no API key can show) and changes nothing. `--write` applies the change. The edit is by line, so comments, key order, unknown keys, CRLF or LF, and a BOM stay as they are. A check with the YAML parser must pass first: the cleaned file must give the same config, and only the dead keys may be missing. A `monitor:` line with no live key left is removed too. A layout that the command does not handle (for example `monitor: {...}`) is an error with the key and the line number, and nothing is written. `--write` first copies the file to `config.yaml.backup-<date-time>` in the same folder (`-2`, `-3` if the name exists; a backup is never overwritten). It then writes `config.yaml.cleaning` and renames it over the config. If the file changed in the meantime, or the rename fails, the original stays and the backup path is in the message. With no dead keys it does nothing, and makes no backup. Exit code 0: dry run, done, or nothing to clean. Exit code 1: any error, also a missing file. `--write` alone, or `--clean` with `--status`, `--key` or `--reset`, is a usage error (exit code 2). `--config` and `SCOPE_CONFIG` choose the file, as for the rest of `setup`.
 - Every `scope setup --clean --write` run, also a failed one, appends one JSON line to `~/.scope-bca/state/config-clean.log`: the time, the config and backup paths, the keys, each removed line with its line number, the sizes and SHA-256 of the file before and after, and the `result` (`ok`, or the step that failed: `backup`, `write`, `file_changed`, `rename`, `verify_after`). A log that cannot be written is a note and does not change the exit code.
@@ -562,7 +564,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Configuration system with YAML support
 - Support for ERC-20, SPL, and TRC-20 tokens
 
-[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.8...HEAD
+[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.9...HEAD
+[0.8.9]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.8...v0.8.9
 [0.8.8]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.7...v0.8.8
 [0.8.7]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.6...v0.8.7
 [0.8.6]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.5...v0.8.6
