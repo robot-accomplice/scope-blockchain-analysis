@@ -62,6 +62,7 @@ pub(crate) mod ansi;
 pub mod candles;
 pub mod charts;
 pub mod compliance;
+pub mod config_clean;
 pub mod contract;
 pub mod crawl;
 pub(crate) mod csv;
@@ -295,7 +296,8 @@ pub enum Commands {
     /// Configure Scope settings and API keys.
     ///
     /// Run the setup wizard to configure API keys and preferences,
-    /// or use --status to view current configuration.
+    /// or use --status to view current configuration. Use --clean to
+    /// remove config keys of the removed monitor dashboard.
     #[command(visible_alias = "config")]
     Setup(SetupArgs),
 
