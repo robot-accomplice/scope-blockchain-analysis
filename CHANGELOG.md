@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- A trade `id` from HTX and XT keeps every digit. Before, an id wider than 15 digits was rounded and written as `2.3682693117312685e+24`, so two trades could have one id. Scope now reads each integer of more than 15 digits in a venue reply as text. The `id` field of a trade in the JSON output and in the web API shows the digits the venue sent. HTX ids have 25 digits.
+
 ## [0.8.8] - 2026-11-11
 
 ### Added
