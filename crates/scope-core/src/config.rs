@@ -337,6 +337,7 @@ impl Config {
         report_dropped_monitor_keys(
             &mut crate::diag::Stderr,
             &dropped_monitor_keys(&contents),
+            path,
             &DROPPED_KEYS_REPORTED,
         );
 
@@ -484,8 +485,10 @@ impl Default for AlertConfig {
 }
 
 /// The `monitor:` keys of the removed dashboard. A config that has them
-/// still loads; [`dropped_monitor_keys`] names them for the notice.
-const DROPPED_MONITOR_KEYS: [&str; 6] = [
+/// still loads; [`dropped_monitor_keys`] names them for the notice, and
+/// `scope setup --clean` ([`crate::config_clean`]) removes them. This is the
+/// one list.
+pub const DROPPED_MONITOR_KEYS: [&str; 6] = [
     "layout",
     "widgets",
     "scale",
@@ -518,6 +521,25 @@ pub fn dropped_monitor_keys(contents: &str) -> Vec<&'static str> {
 static DROPPED_KEYS_REPORTED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// The command that removes the dropped keys from the config file. With
+/// `--config`, it names that file.
+pub fn clean_command(flag: Option<&Path>) -> String {
+    match flag {
+        Some(path) => format!("scope --config \"{}\" setup --clean", path.display()),
+        None => "scope setup --clean".to_string(),
+    }
+}
+
+/// The text of the notice for the dropped monitor `keys`. `flag` is the
+/// `--config` path, when there is one.
+pub fn dropped_keys_notice(keys: &[&str], flag: Option<&Path>) -> String {
+    format!(
+        "scope: ignoring config keys of the removed monitor dashboard under `monitor:`: {}. Run `{}` to remove them.",
+        keys.join(", "),
+        clean_command(flag)
+    )
+}
+
 /// Writes one line to `out` that names the dropped monitor `keys`, the first
 /// time it is called with some keys for `reported`. Later calls write
 /// nothing, so a config that loads again (after `setup`) does not repeat
@@ -525,16 +547,13 @@ static DROPPED_KEYS_REPORTED: std::sync::atomic::AtomicBool =
 fn report_dropped_monitor_keys(
     out: &mut impl std::io::Write,
     keys: &[&str],
+    flag: Option<&Path>,
     reported: &std::sync::atomic::AtomicBool,
 ) {
     if keys.is_empty() || reported.swap(true, std::sync::atomic::Ordering::Relaxed) {
         return;
     }
-    let _ = writeln!(
-        out,
-        "scope: ignoring config keys of the removed monitor dashboard under `monitor:`: {}. Delete them from the config file.",
-        keys.join(", ")
-    );
+    let _ = writeln!(out, "{}", dropped_keys_notice(keys, flag));
 }
 
 /// Monitor-specific configuration.
@@ -542,7 +561,8 @@ fn report_dropped_monitor_keys(
 /// Loaded from the `monitor:` section of `~/.scope-bca/config.yaml`.
 /// All fields have sensible defaults so the section is entirely optional.
 /// The keys of the removed dashboard (`layout`, `widgets`, `scale`,
-/// `color_scheme`, `export`, `auto_pause_on_input`) are ignored.
+/// `color_scheme`, `export`, `auto_pause_on_input`) are ignored. Run
+/// `scope setup --clean` to remove them from the file.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct MonitorConfig {
@@ -640,14 +660,33 @@ mod tests {
         let reported = AtomicBool::new(false);
         let mut out = Vec::new();
         // No keys: nothing is said, and the one report is not used up.
-        report_dropped_monitor_keys(&mut out, &[], &reported);
+        report_dropped_monitor_keys(&mut out, &[], None, &reported);
         assert!(out.is_empty());
-        report_dropped_monitor_keys(&mut out, &["layout", "scale"], &reported);
-        report_dropped_monitor_keys(&mut out, &["layout", "scale"], &reported);
+        report_dropped_monitor_keys(&mut out, &["layout", "scale"], None, &reported);
+        report_dropped_monitor_keys(&mut out, &["layout", "scale"], None, &reported);
         let text = String::from_utf8(out).unwrap();
         assert_eq!(text.lines().count(), 1, "{text}");
         assert!(text.contains("layout, scale"), "{text}");
         assert!(text.contains("ignoring"), "{text}");
+        // The notice is the only way users find the command.
+        assert!(
+            text.ends_with(
+                "Run `scope setup --clean` to remove them.
+"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn test_the_notice_names_the_config_flag_file() {
+        // With `--config X`, a bare `scope setup --clean` would clean
+        // another file. The hint must carry the path.
+        let text = dropped_keys_notice(&["layout"], Some(Path::new("/etc/my scope.yaml")));
+        assert!(
+            text.contains("`scope --config \"/etc/my scope.yaml\" setup --clean`"),
+            "{text}"
+        );
     }
 
     #[test]

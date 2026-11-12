@@ -75,9 +75,9 @@ pub fn route(command: &Commands) -> Route {
         // A crawl by name or symbol asks which token in the pane (#109).
         | Commands::Crawl(_)
         | Commands::Report(_) => Route::Pane,
-        // Only --status is free of prompts.
+        // Only --status and --clean are free of prompts.
         Commands::Setup(args) => {
-            if args.status {
+            if args.status || args.clean {
                 Route::Pane
             } else {
                 Route::Suspend
