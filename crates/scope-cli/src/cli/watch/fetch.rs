@@ -1769,4 +1769,51 @@ capabilities:
         );
         assert_eq!(cells(first), cells(second), "{first:?} / {second:?}");
     }
+
+    /// Since #206 a watch read never prompts. Two reads at the same time
+    /// would both read stdin. With an ambiguous symbol, a read must stop
+    /// with the error that lists the candidates. The probe makes the
+    /// resolver act as on a terminal, so only `without_prompts()` in
+    /// `run_group` keeps the read from asking. Without it, the picker gets
+    /// the question and the cell shows another error.
+    #[tokio::test]
+    async fn an_ambiguous_symbol_in_a_read_gives_the_candidates_and_never_asks() {
+        crate::cli::resolve::terminal_probe::assume_terminal();
+        let mut factory = MockClientFactory::new();
+        let usdn = |chain: &str, address: &str| scope::chains::dex::TokenSearchResult {
+            address: address.into(),
+            symbol: "USDN".into(),
+            name: "USDN".into(),
+            chain: chain.into(),
+            price_usd: Some(1.0),
+            volume_24h: 0.0,
+            liquidity_usd: 1.0,
+            market_cap: None,
+        };
+        factory.mock_dex.search_results = vec![usdn("ethereum", "0xA"), usdn("bsc", "0xB")];
+        let config = scope::config::Config::default();
+        let src = Sources {
+            config: &config,
+            clients: &factory,
+        };
+        let mut t = Target::new(TargetKind::Token, "USDN");
+        t.rules = vec![Rule::parse("price_usd > 0").unwrap()];
+        // Prompts allowed and no TUI list: the output of a plain terminal.
+        let out = Output::from_writers(std::io::sink(), std::io::sink());
+        assert!(out.prompts_allowed());
+        let tick = tick(&ready(vec![t]), src, &out, &mut History::default()).await;
+        let row = &tick.snapshot.targets[0];
+        let RuleStatus::Error(text) = &row.cells[0].status else {
+            panic!("{row:?}")
+        };
+        assert!(
+            text.contains("ethereum 0xA") && text.contains("bsc 0xB"),
+            "the error lists every candidate: {text}"
+        );
+        assert_eq!(
+            crate::cli::resolve::terminal_probe::asked(),
+            0,
+            "a read asked on the terminal: {text}"
+        );
+    }
 }
