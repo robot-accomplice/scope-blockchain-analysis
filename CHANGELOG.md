@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- A venue file with an empty `capabilities:` (a key with no value) is now skipped with a warning. The YAML reader (serde-saphyr 2.1.1) no longer takes an empty value for a map. Before, the venue loaded with no capabilities. The warning names the file and the line. To keep a venue with no capabilities, write `capabilities: {}`. A file with at least one capability is not affected, and no venue that scope ships or writes is empty.
+
 ## [0.8.8] - 2026-11-11
 
 ### Added
