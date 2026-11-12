@@ -1290,6 +1290,15 @@ capabilities: {}
 
     const WEEX: &str = "id: weex\nname: WEEX Spot\nbase_url: https://api-spot.weex.com\nsymbol:\n  template: \"{base}{quote}\"\n  default_quote: USDT\ncapabilities:\n  ohlc:\n    path: /api/v3/market/klines\n    response:\n      ohlc_format: array_of_arrays\n      ohlc_fields: [open_time, open, high, low, close, volume, close_time]\n";
 
+    /// `WEEX` with no capability: a user copy that hides the catalog's ohlc.
+    /// The empty map is written out; an empty `capabilities:` is not a map.
+    fn weex_without_ohlc() -> String {
+        format!(
+            "{} {{}}\n",
+            WEEX[..WEEX.find("  ohlc:").unwrap()].trim_end()
+        )
+    }
+
     #[tokio::test]
     async fn test_update_installs_the_catalog_and_reports_it() {
         let server = catalog_server(WEEX).await;
@@ -1479,10 +1488,10 @@ capabilities: {}
     #[test]
     fn test_list_says_when_your_file_hides_catalog_capabilities() {
         let user = tempfile::tempdir().unwrap();
-        let without_ohlc = &WEEX[..WEEX.find("  ohlc:").unwrap()];
+        let without_ohlc = weex_without_ohlc();
         let weex_catalog = tempfile::tempdir().unwrap();
         std::fs::write(weex_catalog.path().join("weex.yaml"), WEEX).unwrap();
-        std::fs::write(user.path().join("weex.yaml"), without_ohlc).unwrap();
+        std::fs::write(user.path().join("weex.yaml"), &without_ohlc).unwrap();
         let registry = VenueRegistry::load_dirs(weex_catalog.path(), user.path()).unwrap();
         let (out, cap) = Output::capture();
         run_list_with(
@@ -1537,11 +1546,7 @@ capabilities: {}
             {"id": "weex", "file": "weex.yaml", "sha256": catalog::checksum(WEEX)}
         ]});
         std::fs::write(catalog_dir.join("index.json"), index.to_string()).unwrap();
-        std::fs::write(
-            user.join("weex.yaml"),
-            &WEEX[..WEEX.find("  ohlc:").unwrap()],
-        )
-        .unwrap();
+        std::fs::write(user.join("weex.yaml"), weex_without_ohlc()).unwrap();
         (home, catalog_dir, user)
     }
 

@@ -13,10 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `scope-core` has a module `config_clean` (`plan`, `check`, `diff_body`) with the planning of the removal, and `Config::resolve_path_with` with the path rule and the `SCOPE_CONFIG` value as a parameter. `DROPPED_MONITOR_KEYS` is now public: the notice, the detection and the cleaner all read this one list.
 
 ### Changed
+- A venue file with an empty `capabilities:` (a key with no value) is now skipped with a warning. The YAML reader (serde-saphyr 2.1.1) no longer takes an empty value for a map. Before, the venue loaded with no capabilities. The warning names the file and the line. To keep a venue with no capabilities, write `capabilities: {}`. A file with at least one capability is not affected, and no venue that scope ships or writes is empty.
 - The notice about the dead monitor keys now ends with: "Run `scope setup --clean` to remove them." With `--config` it names the file: `scope --config "<path>" setup --clean`. Before, it said `Delete them from the config file.` The notice is still printed once for each process, also in the `--clean` run itself.
 
 ### Fixed
 - `scope --config X setup` now reads and saves the file X. Before, it used `<home>/config.yaml` and left X unchanged. `SCOPE_CONFIG` works the same way. The rule is one: `--config`, then `SCOPE_CONFIG`, then `<home>/config.yaml`. It applies to the wizard, `--key`, `--reset` and the `Config file` line of `--status`, and to `setup` run from the TUI. Changes still start from the file, not from the copy that the command loaded at start. An empty `SCOPE_CONFIG` now counts as not set. `Config::resolve_path` in `scope-core` holds the rule, and `Config::file` gives the file a config was loaded from. `scope web` still reads and writes `<home>/config.yaml` in its own handlers.
+- A trade `id` from HTX and XT keeps every digit. Before, an id wider than 15 digits was rounded and written as `2.3682693117312685e+24`, so two trades could have one id. Scope now reads each integer of more than 15 digits in a venue reply as text. The `id` field of a trade in the JSON output and in the web API shows the digits the venue sent. HTX ids have 25 digits.
 
 ## [0.8.8] - 2026-11-11
 
