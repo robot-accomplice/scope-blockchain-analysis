@@ -8,9 +8,8 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 
 /// Returns a Command for the Scope binary.
-#[allow(deprecated)] // TODO: Migrate to cargo::cargo_bin_cmd! when stable
 fn scope_cmd() -> Command {
-    Command::cargo_bin("scope").unwrap()
+    assert_cmd::cargo::cargo_bin_cmd!("scope")
 }
 
 // ============================================================================
