@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.9] - 2026-11-12
+
+### Added
+- `scope setup --clean` (also `scope config --clean`) removes the dead keys of the old monitor dashboard from the config file: `layout`, `widgets`, `scale`, `color_scheme`, `export` and `auto_pause_on_input`, under the top-level `monitor:`. It removes no other key. The default is a dry run: it prints the removed lines as a diff (no context lines, so no API key can show) and changes nothing. `--write` applies the change. The edit is by line, so comments, key order, unknown keys, CRLF or LF, and a BOM stay as they are. A check with the YAML parser must pass first: the cleaned file must give the same config, and only the dead keys may be missing. A `monitor:` line with no live key left is removed too. A layout that the command does not handle (for example `monitor: {...}`) is an error with the key and the line number, and nothing is written. `--write` first copies the file to `config.yaml.backup-<date-time>` in the same folder (`-2`, `-3` if the name exists; a backup is never overwritten). It then writes `config.yaml.cleaning` and renames it over the config. If the file changed in the meantime, or the rename fails, the original stays and the backup path is in the message. With no dead keys it does nothing, and makes no backup. Exit code 0: dry run, done, or nothing to clean. Exit code 1: any error, also a missing file. `--write` alone, or `--clean` with `--status`, `--key` or `--reset`, is a usage error (exit code 2). `--config` and `SCOPE_CONFIG` choose the file, as for the rest of `setup`.
+- Every `scope setup --clean --write` run, also a failed one, appends one JSON line to `~/.scope-bca/state/config-clean.log`: the time, the config and backup paths, the keys, each removed line with its line number, the sizes and SHA-256 of the file before and after, and the `result` (`ok`, or the step that failed: `backup`, `write`, `file_changed`, `rename`, `verify_after`). A log that cannot be written is a note and does not change the exit code.
+- `scope-core` has a module `config_clean` (`plan`, `check`, `diff_body`) with the planning of the removal, and `Config::resolve_path_with` with the path rule and the `SCOPE_CONFIG` value as a parameter. `DROPPED_MONITOR_KEYS` is now public: the notice, the detection and the cleaner all read this one list.
+
+### Changed
+- A venue file with an empty `capabilities:` (a key with no value) is now skipped with a warning. The YAML reader (serde-saphyr 2.1.1) no longer takes an empty value for a map. Before, the venue loaded with no capabilities. The warning names the file and the line. To keep a venue with no capabilities, write `capabilities: {}`. A file with at least one capability is not affected, and no venue that scope ships or writes is empty.
+- The notice about the dead monitor keys now ends with: "Run `scope setup --clean` to remove them." With `--config` it names the file: `scope --config "<path>" setup --clean`. Before, it said `Delete them from the config file.` The notice is still printed once for each process, also in the `--clean` run itself.
+
+### Removed
+- `Config::config_path()` in `scope-core`. It always returned `<home>/config.yaml` and ignored `--config` and `SCOPE_CONFIG`. Use `Config::file()` for the file a config was loaded from, `Config::resolve_path()` for the file a command uses, or `Config::default_path()` for the home file.
+
+### Fixed
+- `scope --config X setup` now reads and saves the file X. Before, it used `<home>/config.yaml` and left X unchanged. `SCOPE_CONFIG` works the same way. The rule is one: `--config`, then `SCOPE_CONFIG`, then `<home>/config.yaml`. It applies to the wizard, `--key`, `--reset` and the `Config file` line of `--status`, and to `setup` run from the TUI. Changes still start from the file, not from the copy that the command loaded at start. An empty `SCOPE_CONFIG` now counts as not set. `Config::resolve_path` in `scope-core` holds the rule, and `Config::file` gives the file a config was loaded from. `scope web` still reads and writes `<home>/config.yaml` in its own handlers.
+- A trade `id` from HTX and XT keeps every digit. Before, an id wider than 15 digits was rounded and written as `2.3682693117312685e+24`, so two trades could have one id. Scope now reads each integer of more than 15 digits in a venue reply as text. The `id` field of a trade in the JSON output and in the web API shows the digits the venue sent. HTX ids have 25 digits.
+- `scope web` now uses the config file that the CLI chose: `--config`, then `SCOPE_CONFIG`, then `<home>/config.yaml`. Before, `GET /api/config/status` named the home file, and `POST /api/config` read and wrote the home file, also when you started the server with `--config X`. The first-run check of the `scope` binary also reads `SCOPE_CONFIG` now. Both use `Config::file` and `Config::resolve_path`.
+
 ## [0.8.8] - 2026-11-11
 
 ### Added
@@ -545,7 +564,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Configuration system with YAML support
 - Support for ERC-20, SPL, and TRC-20 tokens
 
-[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.8...HEAD
+[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.9...HEAD
+[0.8.9]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.8...v0.8.9
 [0.8.8]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.7...v0.8.8
 [0.8.7]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.6...v0.8.7
 [0.8.6]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.5...v0.8.6

@@ -282,7 +282,7 @@ impl ConfigurableExchangeClient {
                 &resp.body,
             ));
         }
-        let reply = serde_json::from_str::<Value>(&resp.body)
+        let reply = serde_json::from_str::<Value>(&quote_wide_integers(&resp.body))
             .map_err(|e| venue_error(&self.descriptor.id, format!("JSON parse error: {e}")))?;
         // Some venues report errors with HTTP 200 and an error envelope (#69).
         if let Some(message) = self
@@ -836,6 +836,72 @@ pub(crate) fn value_to_ms(val: &Value) -> Option<u64> {
         v / 1e6
     };
     Some(ms.round() as u64)
+}
+
+/// The most digits an integer can have and still be exact as an `f64`
+/// (2^53 has 16 digits).
+const EXACT_F64_DIGITS: usize = 15;
+
+/// `body` with each integer of more than [`EXACT_F64_DIGITS`] digits
+/// written as a JSON string of the same digits. `serde_json` reads a
+/// number wider than a `u64` as an `f64`, and the digits are lost (HTX
+/// trade id `2368269011731268842359297` became `2.3682693117312685e+24`).
+/// A string keeps them exactly. The readers of a venue reply take a string
+/// where they take a number: `value_to_f64` parses it, `extract_string`
+/// returns it. Numbers with a fraction or an exponent, and text inside
+/// strings, are not changed.
+fn quote_wide_integers(body: &str) -> std::borrow::Cow<'_, str> {
+    let bytes = body.as_bytes();
+    let mut out = String::new();
+    let mut copied = 0;
+    let mut i = 0;
+    let mut in_string = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_string {
+            match b {
+                b'\\' => i += 1,
+                b'"' => in_string = false,
+                _ => {}
+            }
+            i += 1;
+        } else if b == b'"' {
+            in_string = true;
+            i += 1;
+        } else if b.is_ascii_digit()
+            || (b == b'-' && bytes.get(i + 1).is_some_and(u8::is_ascii_digit))
+        {
+            // One number: the sign, the digits, then any fraction or exponent.
+            let start = i;
+            i += usize::from(b == b'-');
+            let digits_start = i;
+            while bytes.get(i).is_some_and(u8::is_ascii_digit) {
+                i += 1;
+            }
+            let digits = i - digits_start;
+            let plain = !matches!(bytes.get(i), Some(b'.' | b'e' | b'E'));
+            if plain && digits > EXACT_F64_DIGITS {
+                out.push_str(&body[copied..start]);
+                out.push('"');
+                out.push_str(&body[start..i]);
+                out.push('"');
+                copied = i;
+            }
+            while bytes
+                .get(i)
+                .is_some_and(|c| matches!(c, b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-'))
+            {
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    if copied == 0 {
+        return std::borrow::Cow::Borrowed(body);
+    }
+    out.push_str(&body[copied..]);
+    std::borrow::Cow::Owned(out)
 }
 
 fn value_to_f64(val: &Value) -> Option<f64> {
@@ -1747,6 +1813,100 @@ mod tests {
         );
         let desc: VenueDescriptor = serde_saphyr::from_str(&yaml).unwrap();
         ConfigurableExchangeClient::with_http(desc, crate::http::test_transport())
+    }
+
+    /// The HTX reply of `/market/history/trade` as it came from the venue
+    /// (the first three groups). Each trade has a 25-digit `id`, wider than
+    /// an `f64` can hold, and an exact `trade-id`.
+    const HTX_TRADES_REPLY: &str = include_str!("../../tests/fixtures/htx-trades-25-digit-id.json");
+
+    /// A trade id is a name: a user compares it with the venue's own
+    /// record. Read as an `f64`, the 25-digit HTX id gave
+    /// `2.3682693117312685e+24`, and two different trades could give one
+    /// text. The id must be the digits the venue sent.
+    #[tokio::test]
+    async fn test_htx_trade_ids_keep_every_digit() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/market/history/trade")
+            .match_query(mockito::Matcher::Any)
+            .with_body(HTX_TRADES_REPLY)
+            .create_async()
+            .await;
+        let mut desc = crate::market::testing::catalog()
+            .get("htx")
+            .unwrap()
+            .clone();
+        desc.base_url = server.url();
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
+
+        let trades = client.fetch_recent_trades("PYUSDUSDT", 10).await.unwrap();
+
+        let ids: Vec<_> = trades.iter().map(|t| t.id.as_deref()).collect();
+        assert_eq!(
+            ids,
+            [
+                Some("2368269011731268842359297"),
+                Some("2368268991731268842392879"),
+                Some("2368268961731270671139473"),
+            ],
+            "{trades:?}"
+        );
+        // The other fields of the same items still read as numbers.
+        assert_eq!(trades[0].price, 0.9999);
+        assert_eq!(trades[0].quantity, 76.973);
+        assert_eq!(trades[0].timestamp_ms, 1_794_470_714_551);
+    }
+
+    /// XT sends `i` as an 18-digit integer, also wider than 2^53. The fix
+    /// is in the reply reader, so it covers a venue other than HTX.
+    #[tokio::test]
+    async fn test_xt_trade_ids_keep_every_digit() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/v4/public/trade/recent")
+            .match_query(mockito::Matcher::Any)
+            .with_body(r#"{"rc":0,"mc":"SUCCESS","ma":[],"result":[{"i":691103654505126272,"t":1794473951319,"p":"73607.65","q":"0.89705","v":"66029.7424325","b":false},{"i":691103649685870976,"t":1794473950170,"p":"73617.01","q":"0.00770","v":"566.850977","b":true}]}"#)
+            .create_async()
+            .await;
+        let mut desc = crate::market::testing::catalog().get("xt").unwrap().clone();
+        desc.base_url = server.url();
+        let client = ConfigurableExchangeClient::with_http(desc, crate::http::test_transport());
+
+        let trades = client.fetch_recent_trades("BTCUSDT", 2).await.unwrap();
+
+        let ids: Vec<_> = trades.iter().map(|t| t.id.as_deref()).collect();
+        assert_eq!(
+            ids,
+            [Some("691103654505126272"), Some("691103649685870976")],
+            "{trades:?}"
+        );
+    }
+
+    #[test]
+    fn test_quote_wide_integers_only_changes_integers_wider_than_an_f64_holds() {
+        let same = |s: &str| assert_eq!(quote_wide_integers(s), s, "{s}");
+        // Up to 15 digits: exact as an f64.
+        same(r#"{"id":123456789012345,"n":-123456789012345}"#);
+        // A fraction or an exponent: not an integer id.
+        same(r#"{"p":12345678901234567890.5,"q":1234567890123456789e3}"#);
+        // Text inside a string, with an escaped quote, is not a number.
+        same(r#"{"s":"id 12345678901234567890 \" 12345678901234567890"}"#);
+        same("[1,2,3]");
+        assert_eq!(
+            quote_wide_integers(
+                r#"{"id":2368269011731268842359297,"n":-1234567890123456789,"k":"x"}"#
+            ),
+            r#"{"id":"2368269011731268842359297","n":"-1234567890123456789","k":"x"}"#
+        );
+        // After a string with an escaped quote, the next number is read as one.
+        assert_eq!(
+            quote_wide_integers(r#"["a\"b",1234567890123456789]"#),
+            r#"["a\"b","1234567890123456789"]"#
+        );
+        // A wide number that is not a number (bad JSON) does not panic.
+        let _ = quote_wide_integers("-");
+        let _ = quote_wide_integers(r#"{"a":"unterminated\"#);
     }
 
     #[tokio::test]

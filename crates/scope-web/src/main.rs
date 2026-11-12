@@ -231,6 +231,8 @@ async fn run() -> Result<()> {
             status: false,
             key: None,
             reset: false,
+            clean: false,
+            write: false,
         };
         if let Err(e) = scope_cli::cli::setup::run(setup_args, &config, &out).await {
             let _ = display_error(&e, &out);
@@ -250,10 +252,7 @@ async fn run() -> Result<()> {
 
 /// Checks if a configuration file exists.
 fn config_file_exists(cli: &Cli) -> bool {
-    if let Some(ref path) = cli.config {
-        return path.exists();
-    }
-    Config::config_path().map(|p| p.exists()).unwrap_or(false)
+    Config::resolve_path(cli.config.as_deref()).exists()
 }
 
 /// Prompts the user to run setup.

@@ -63,6 +63,7 @@ use crate::error::{ConfigError, Result, ScopeError};
 use crate::market::HealthThresholds;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 /// Application configuration.
@@ -104,6 +105,12 @@ pub struct Config {
 
     /// Market analysis configuration (order book health thresholds).
     pub market: MarketConfig,
+
+    /// The file this config was loaded from. Commands that save the config
+    /// (`setup`) write here, so `--config` and `SCOPE_CONFIG` reach them.
+    /// Not part of the YAML.
+    #[serde(skip)]
+    pub loaded_from: Option<PathBuf>,
 }
 
 /// Blockchain client configuration.
@@ -299,11 +306,7 @@ impl Config {
     /// let config = Config::load(Some(Path::new("/custom/config.yaml")));
     /// ```
     pub fn load(path: Option<&Path>) -> Result<Self> {
-        // Determine config path: CLI arg > env var > default location
-        let config_path = path
-            .map(PathBuf::from)
-            .or_else(|| std::env::var("SCOPE_CONFIG").ok().map(PathBuf::from))
-            .unwrap_or_else(Self::default_path);
+        let config_path = Self::resolve_path(path);
 
         // Return defaults if no config file exists
         // This allows first-run without manual setup
@@ -312,7 +315,10 @@ impl Config {
                 path = %config_path.display(),
                 "No config file found, using defaults"
             );
-            return Ok(Self::default());
+            return Ok(Self {
+                loaded_from: Some(config_path),
+                ..Self::default()
+            });
         }
 
         tracing::debug!(path = %config_path.display(), "Loading configuration");
@@ -324,28 +330,46 @@ impl Config {
             })
         })?;
 
-        let config: Config =
+        let mut config: Config =
             serde_saphyr::from_str(&contents).map_err(|e| ConfigError::Parse { source: e })?;
+        config.loaded_from = Some(config_path);
 
         report_dropped_monitor_keys(
             &mut crate::diag::Stderr,
             &dropped_monitor_keys(&contents),
+            path,
             &DROPPED_KEYS_REPORTED,
         );
 
         Ok(config)
     }
 
+    /// The one rule for which config file to use: `path` (the `--config`
+    /// flag), else the `SCOPE_CONFIG` variable, else `<home>/config.yaml`.
+    pub fn resolve_path(path: Option<&Path>) -> PathBuf {
+        Self::resolve_path_with(path, std::env::var_os("SCOPE_CONFIG"))
+    }
+
+    /// [`Config::resolve_path`] with the `SCOPE_CONFIG` value given, so a
+    /// test needs no process-wide variable. An empty value is no value.
+    pub fn resolve_path_with(path: Option<&Path>, scope_config: Option<OsString>) -> PathBuf {
+        path.map(PathBuf::from)
+            .or_else(|| scope_config.filter(|v| !v.is_empty()).map(PathBuf::from))
+            .unwrap_or_else(Self::default_path)
+    }
+
+    /// The file this config was loaded from. A config that did not come
+    /// from [`Config::load`] gets the file `load(None)` would read.
+    pub fn file(&self) -> PathBuf {
+        self.loaded_from
+            .clone()
+            .unwrap_or_else(|| Self::resolve_path(None))
+    }
+
     /// Returns the default configuration file path: `<home>/config.yaml`
     /// (see [`crate::paths`]).
     pub fn default_path() -> PathBuf {
         crate::paths::config_file()
-    }
-
-    /// Returns the configuration file path that `setup` and `scope web`
-    /// write: `<home>/config.yaml`.
-    pub fn config_path() -> Option<PathBuf> {
-        Some(crate::paths::config_file())
     }
 
     /// Returns the default data directory for address book storage:
@@ -454,8 +478,10 @@ impl Default for AlertConfig {
 }
 
 /// The `monitor:` keys of the removed dashboard. A config that has them
-/// still loads; [`dropped_monitor_keys`] names them for the notice.
-const DROPPED_MONITOR_KEYS: [&str; 6] = [
+/// still loads; [`dropped_monitor_keys`] names them for the notice, and
+/// `scope setup --clean` ([`crate::config_clean`]) removes them. This is the
+/// one list.
+pub const DROPPED_MONITOR_KEYS: [&str; 6] = [
     "layout",
     "widgets",
     "scale",
@@ -488,6 +514,25 @@ pub fn dropped_monitor_keys(contents: &str) -> Vec<&'static str> {
 static DROPPED_KEYS_REPORTED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// The command that removes the dropped keys from the config file. With
+/// `--config`, it names that file.
+pub fn clean_command(flag: Option<&Path>) -> String {
+    match flag {
+        Some(path) => format!("scope --config \"{}\" setup --clean", path.display()),
+        None => "scope setup --clean".to_string(),
+    }
+}
+
+/// The text of the notice for the dropped monitor `keys`. `flag` is the
+/// `--config` path, when there is one.
+pub fn dropped_keys_notice(keys: &[&str], flag: Option<&Path>) -> String {
+    format!(
+        "scope: ignoring config keys of the removed monitor dashboard under `monitor:`: {}. Run `{}` to remove them.",
+        keys.join(", "),
+        clean_command(flag)
+    )
+}
+
 /// Writes one line to `out` that names the dropped monitor `keys`, the first
 /// time it is called with some keys for `reported`. Later calls write
 /// nothing, so a config that loads again (after `setup`) does not repeat
@@ -495,16 +540,13 @@ static DROPPED_KEYS_REPORTED: std::sync::atomic::AtomicBool =
 fn report_dropped_monitor_keys(
     out: &mut impl std::io::Write,
     keys: &[&str],
+    flag: Option<&Path>,
     reported: &std::sync::atomic::AtomicBool,
 ) {
     if keys.is_empty() || reported.swap(true, std::sync::atomic::Ordering::Relaxed) {
         return;
     }
-    let _ = writeln!(
-        out,
-        "scope: ignoring config keys of the removed monitor dashboard under `monitor:`: {}. Delete them from the config file.",
-        keys.join(", ")
-    );
+    let _ = writeln!(out, "{}", dropped_keys_notice(keys, flag));
 }
 
 /// Monitor-specific configuration.
@@ -512,7 +554,8 @@ fn report_dropped_monitor_keys(
 /// Loaded from the `monitor:` section of `~/.scope-bca/config.yaml`.
 /// All fields have sensible defaults so the section is entirely optional.
 /// The keys of the removed dashboard (`layout`, `widgets`, `scale`,
-/// `color_scheme`, `export`, `auto_pause_on_input`) are ignored.
+/// `color_scheme`, `export`, `auto_pause_on_input`) are ignored. Run
+/// `scope setup --clean` to remove them from the file.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct MonitorConfig {
@@ -610,14 +653,33 @@ mod tests {
         let reported = AtomicBool::new(false);
         let mut out = Vec::new();
         // No keys: nothing is said, and the one report is not used up.
-        report_dropped_monitor_keys(&mut out, &[], &reported);
+        report_dropped_monitor_keys(&mut out, &[], None, &reported);
         assert!(out.is_empty());
-        report_dropped_monitor_keys(&mut out, &["layout", "scale"], &reported);
-        report_dropped_monitor_keys(&mut out, &["layout", "scale"], &reported);
+        report_dropped_monitor_keys(&mut out, &["layout", "scale"], None, &reported);
+        report_dropped_monitor_keys(&mut out, &["layout", "scale"], None, &reported);
         let text = String::from_utf8(out).unwrap();
         assert_eq!(text.lines().count(), 1, "{text}");
         assert!(text.contains("layout, scale"), "{text}");
         assert!(text.contains("ignoring"), "{text}");
+        // The notice is the only way users find the command.
+        assert!(
+            text.ends_with(
+                "Run `scope setup --clean` to remove them.
+"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn test_the_notice_names_the_config_flag_file() {
+        // With `--config X`, a bare `scope setup --clean` would clean
+        // another file. The hint must carry the path.
+        let text = dropped_keys_notice(&["layout"], Some(Path::new("/etc/my scope.yaml")));
+        assert!(
+            text.contains("`scope --config \"/etc/my scope.yaml\" setup --clean`"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -784,9 +846,55 @@ market:
     }
 
     #[test]
+    fn test_path_rule_is_flag_then_variable_then_home() {
+        // One rule decides the file for load, setup and clean. If the
+        // variable beat the flag, `--config` would be ignored; an empty
+        // variable must not become the path "".
+        let flag = Path::new("flag.yaml");
+        let var = || Some(OsString::from("var.yaml"));
+        assert_eq!(Config::resolve_path_with(Some(flag), var()), flag);
+        assert_eq!(
+            Config::resolve_path_with(None, var()),
+            PathBuf::from("var.yaml")
+        );
+        assert_eq!(
+            Config::resolve_path_with(None, Some(OsString::new())),
+            Config::default_path()
+        );
+        assert_eq!(
+            Config::resolve_path_with(None, None),
+            Config::default_path()
+        );
+    }
+
+    #[test]
+    fn test_load_remembers_its_file_even_when_the_file_is_missing() {
+        // `setup` saves to `config.file()`. If a missing --config file fell
+        // back to the home path, the first save would go to the wrong file.
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("nope.yaml");
+        let config = Config::load(Some(&missing)).unwrap();
+        assert_eq!(config.file(), missing);
+        let present = tmp.path().join("here.yaml");
+        std::fs::write(
+            &present,
+            "output:
+  color: false
+",
+        )
+        .unwrap();
+        assert_eq!(Config::load(Some(&present)).unwrap().file(), present);
+    }
+
+    #[test]
     fn test_load_missing_file_returns_defaults() {
-        let config = Config::load(Some(Path::new("/nonexistent/path/config.yaml"))).unwrap();
-        assert_eq!(config, Config::default());
+        let path = Path::new("/nonexistent/path/config.yaml");
+        let config = Config::load(Some(path)).unwrap();
+        let defaults = Config {
+            loaded_from: Some(path.to_path_buf()),
+            ..Config::default()
+        };
+        assert_eq!(config, defaults);
     }
 
     #[test]
@@ -805,7 +913,11 @@ market:
         // Empty file
 
         let config = Config::load(Some(file.path())).unwrap();
-        assert_eq!(config, Config::default());
+        let defaults = Config {
+            loaded_from: Some(file.path().to_path_buf()),
+            ..Config::default()
+        };
+        assert_eq!(config, defaults);
     }
 
     #[test]
@@ -862,14 +974,6 @@ market:
         let config1 = Config::default();
         let config2 = config1.clone();
         assert_eq!(config1, config2);
-    }
-
-    #[test]
-    fn test_config_path_returns_some() {
-        let path = Config::config_path();
-        // Should return Some on systems with a home dir
-        assert!(path.is_some());
-        assert!(path.unwrap().to_string_lossy().contains("scope"));
     }
 
     #[test]

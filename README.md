@@ -1038,7 +1038,17 @@ scope setup --key etherscan
 
 # Reset configuration to defaults
 scope setup --reset
+
+# Show the dead monitor keys in the config file (a dry run: changes nothing)
+scope setup --clean
+
+# Remove them (copies the file to config.yaml.backup-<date-time> first)
+scope setup --clean --write
 ```
+
+`scope config` is the same command (`scope config --clean`). `--config PATH` and `SCOPE_CONFIG` choose the file for every `setup` mode: `--config` first, then `SCOPE_CONFIG`, then `~/.scope-bca/config.yaml`.
+
+**`scope setup --clean`.** Version 0.8.7 removed the old monitor dashboard. A config from an older `scope setup` can still have its keys (`layout`, `widgets`, `scale`, `color_scheme`, `export`, `auto_pause_on_input`) under `monitor:`. They have no effect, and every command prints one line about them. `--clean` removes only those keys, and only under the top-level `monitor:`. It shows the removed lines as a diff (no context lines, so no API key can show) and changes nothing. `--write` applies the change. It keeps comments, key order, unknown keys, line endings (CRLF or LF) and a BOM. It checks with the YAML parser that nothing else changed, copies the file to `config.yaml.backup-<date-time>` beside it (`-2`, `-3` if the name exists), writes a temporary file, and renames it over the config. A `--write` run appends one JSON line to `~/.scope-bca/state/config-clean.log`. The command never deletes a backup. Exit code 0: a dry run, a done write, or no dead keys. Exit code 1: any error (no file, not valid YAML, a layout it does not handle, a failed write). A layout that it does not handle is named with its line number and left for you to edit.
 
 The generated config file follows this structure:
 
@@ -1076,7 +1086,7 @@ monitor:
     volume_spike_threshold_pct: null  # volume spike % (e.g., 100.0)
   # The keys layout, widgets, scale, color_scheme, export and
   # auto_pause_on_input belonged to the removed dashboard. They are
-  # ignored, with one line on stderr.
+  # ignored, with one line on stderr. `scope setup --clean` removes them.
 ```
 
 ### Free Tiers: Solana & BSC
