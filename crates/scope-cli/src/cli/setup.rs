@@ -1202,8 +1202,8 @@ mod tests {
         let _ = std::fs::create_dir_all(&tmp_dir);
         let tmp_file = tmp_dir.join("config.yaml");
 
-        // Since save_config uses Config::config_path(), we can't easily redirect it
-        // but we can test the config serialization logic directly
+        // This test checks the serialization logic directly, without
+        // save_config and its config file.
         let mut config = Config::default();
         config
             .chains

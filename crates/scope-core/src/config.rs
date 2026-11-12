@@ -372,13 +372,6 @@ impl Config {
         crate::paths::config_file()
     }
 
-    /// Returns the home config file path, `<home>/config.yaml`. It ignores
-    /// `--config` and `SCOPE_CONFIG`; use [`Config::file`] for the file in
-    /// use.
-    pub fn config_path() -> Option<PathBuf> {
-        Some(crate::paths::config_file())
-    }
-
     /// Returns the default data directory for address book storage:
     /// `<home>/data`.
     pub fn default_data_dir() -> PathBuf {
@@ -981,14 +974,6 @@ market:
         let config1 = Config::default();
         let config2 = config1.clone();
         assert_eq!(config1, config2);
-    }
-
-    #[test]
-    fn test_config_path_returns_some() {
-        let path = Config::config_path();
-        // Should return Some on systems with a home dir
-        assert!(path.is_some());
-        assert!(path.unwrap().to_string_lossy().contains("scope"));
     }
 
     #[test]
