@@ -491,6 +491,43 @@ symbol:
         );
     }
 
+    /// An empty `capabilities:` is a null, not a map. serde-saphyr 2.1.1
+    /// rejects it (2.0.0 took it as no capabilities). A user who writes
+    /// one must learn which file failed and where, since the venue is
+    /// then not loaded. The empty map `capabilities: {}` loads.
+    #[tokio::test]
+    async fn test_an_empty_capabilities_value_names_the_file_in_the_warning() {
+        let yaml = |caps: &str| {
+            format!(
+                "id: mine\nname: Mine\nbase_url: https://m.example\nsymbol:\n  template: \"{{base}}{{quote}}\"\n  default_quote: USDT\ncapabilities:{caps}\n"
+            )
+        };
+        let user = tempfile::tempdir().unwrap();
+        let file = user.path().join("mine.yaml");
+        std::fs::write(&file, yaml("")).unwrap();
+
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let registry = crate::diag::scoped(buf.clone(), async {
+            VenueRegistry::load_dirs(&user.path().join("none"), user.path()).unwrap()
+        })
+        .await;
+        let warning = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+
+        assert!(!registry.contains("mine"), "the venue is not loaded");
+        assert!(
+            warning.contains(&file.display().to_string()),
+            "the warning names the file: {warning}"
+        );
+        assert!(
+            warning.contains("line 7") && warning.contains("capabilities:"),
+            "the warning shows the line: {warning}"
+        );
+
+        std::fs::write(&file, yaml(" {}")).unwrap();
+        let registry = VenueRegistry::load_dirs(&user.path().join("none"), user.path()).unwrap();
+        assert!(registry.contains("mine"), "an empty map loads");
+    }
+
     #[test]
     fn test_an_unreadable_venue_file_is_skipped() {
         let user = tempfile::tempdir().unwrap();

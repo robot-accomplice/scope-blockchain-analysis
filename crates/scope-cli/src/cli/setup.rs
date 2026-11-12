@@ -22,7 +22,7 @@ use crate::cli::prompt::ask;
 use crate::{note, outln};
 use clap::Args;
 use scope::config::{Config, OutputFormat};
-use scope::error::{ConfigError, Result, ScopeError};
+use scope::error::{Result, ScopeError};
 use scope::http::ghola_install;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
@@ -65,21 +65,24 @@ pub async fn run(args: SetupArgs, config: &Config, out: &Output) -> Result<()> {
         return Ok(());
     }
 
+    // `--config` / `SCOPE_CONFIG` reach setup through `config.file()`.
+    let config_path = config.file();
+
     if args.reset {
-        return reset_config(out);
+        return reset_config(out, &config_path);
     }
 
     // Changes start from the file, not the caller's copy: the TUI loads
     // the config once at start, and saving that copy wrote stale values
     // (test keys and RPCs) back over the user's file.
-    let config = &Config::load(None)?;
+    let config = &Config::load(Some(&config_path))?;
 
     if let Some(ref key_name) = args.key {
-        return configure_single_key(key_name, config, out).await;
+        return configure_single_key(key_name, config, &config_path, out).await;
     }
 
     // Run full setup wizard
-    run_setup_wizard(config, out).await
+    run_setup_wizard(config, &config_path, out).await
 }
 
 /// Shows the current configuration status.
@@ -89,9 +92,7 @@ fn show_status(config: &Config, out: &Output) -> std::io::Result<()> {
     outln!(out, "{}", t::section_header("Scope Configuration Status"))?;
 
     // Config file location
-    let config_path = Config::config_path()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "Not found".to_string());
+    let config_path = config.file().display().to_string();
     outln!(out, "{}", t::kv_row("Config file", &config_path))?;
     outln!(out, "{}", t::blank_row())?;
 
@@ -322,13 +323,8 @@ fn mask_key(key: &str) -> String {
 }
 
 /// Resets configuration to defaults.
-fn reset_config(out: &Output) -> Result<()> {
-    let config_path = Config::config_path().ok_or_else(|| {
-        ScopeError::Config(ConfigError::NotFound {
-            path: PathBuf::from("~/.scope-bca/config.yaml"),
-        })
-    })?;
-    reset_config_impl(&mut crate::cli::prompt::stdin(), out, &config_path)
+fn reset_config(out: &Output, config_path: &Path) -> Result<()> {
+    reset_config_impl(&mut crate::cli::prompt::stdin(), out, config_path)
 }
 
 /// Testable implementation of reset_config with injected I/O and path.
@@ -355,18 +351,18 @@ fn reset_config_impl(reader: &mut impl BufRead, out: &Output, config_path: &Path
 }
 
 /// Configures a single API key.
-async fn configure_single_key(key_name: &str, config: &Config, out: &Output) -> Result<()> {
-    let config_path = Config::config_path().ok_or_else(|| {
-        ScopeError::Config(ConfigError::NotFound {
-            path: PathBuf::from("~/.scope-bca/config.yaml"),
-        })
-    })?;
+async fn configure_single_key(
+    key_name: &str,
+    config: &Config,
+    config_path: &Path,
+    out: &Output,
+) -> Result<()> {
     configure_single_key_impl(
         &mut crate::cli::prompt::stdin(),
         out,
         key_name,
         config,
-        &config_path,
+        config_path,
     )
 }
 
@@ -499,12 +495,7 @@ fn get_api_key_url(key_name: &str) -> &'static str {
 }
 
 /// Runs the full setup wizard.
-async fn run_setup_wizard(config: &Config, out: &Output) -> Result<()> {
-    let config_path = Config::config_path().ok_or_else(|| {
-        ScopeError::Config(ConfigError::NotFound {
-            path: PathBuf::from("~/.scope-bca/config.yaml"),
-        })
-    })?;
+async fn run_setup_wizard(config: &Config, config_path: &Path, out: &Output) -> Result<()> {
     let installed = ghola_install::find();
     let ghola = |reader: &mut dyn BufRead, out: &Output| {
         crate::cli::ghola_offer::with_local_installer(|installer| {
@@ -523,7 +514,7 @@ async fn run_setup_wizard(config: &Config, out: &Output) -> Result<()> {
         &mut crate::cli::prompt::stdin(),
         out,
         config,
-        &config_path,
+        config_path,
         &step,
     )
 }
