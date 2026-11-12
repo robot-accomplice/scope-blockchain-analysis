@@ -369,10 +369,63 @@ pub fn picker_for<'a>(out: &'a Output, json: bool) -> Box<dyn Picker + 'a> {
         return Box::new(TuiPicker { asker });
     }
     let terminal = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    #[cfg(test)]
+    let terminal = terminal || terminal_probe::assumed();
     if !out.prompts_allowed() || !terminal {
         Box::new(NoTerminalPicker)
     } else {
+        #[cfg(test)]
+        if terminal_probe::assumed() {
+            return Box::new(terminal_probe::CountingPicker);
+        }
         Box::new(TerminalPicker { out })
+    }
+}
+
+/// A test seam for the terminal check of [`picker_for`]. A test cannot
+/// give a process a terminal. With the probe on, `picker_for` acts as on
+/// a terminal, but it returns a picker that counts the question and does
+/// not read stdin. The probe is per thread, so other tests do not see it.
+#[cfg(test)]
+pub(crate) mod terminal_probe {
+    use super::{Candidate, Picker};
+    use scope::error::{Result, ScopeError};
+    use std::cell::Cell;
+
+    thread_local! {
+        static ASSUMED: Cell<bool> = const { Cell::new(false) };
+        static ASKED: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Acts as on a terminal on this thread, and zeroes the count.
+    pub(crate) fn assume_terminal() {
+        ASSUMED.set(true);
+        ASKED.set(0);
+    }
+
+    pub(super) fn assumed() -> bool {
+        ASSUMED.get()
+    }
+
+    /// How many questions a terminal picker got on this thread.
+    pub(crate) fn asked() -> usize {
+        ASKED.get()
+    }
+
+    /// Stands for the terminal picker: it counts and does not wait.
+    pub(super) struct CountingPicker;
+
+    #[async_trait::async_trait]
+    impl Picker for CountingPicker {
+        async fn pick(&self, _input: &str, _cs: &[Candidate]) -> Result<usize> {
+            ASKED.set(ASKED.get() + 1);
+            Err(ScopeError::Other("a terminal prompt was attempted".into()))
+        }
+
+        async fn confirm(&self, _question: &str) -> Result<bool> {
+            ASKED.set(ASKED.get() + 1);
+            Ok(false)
+        }
     }
 }
 
