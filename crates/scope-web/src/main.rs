@@ -252,10 +252,7 @@ async fn run() -> Result<()> {
 
 /// Checks if a configuration file exists.
 fn config_file_exists(cli: &Cli) -> bool {
-    if let Some(ref path) = cli.config {
-        return path.exists();
-    }
-    Config::config_path().map(|p| p.exists()).unwrap_or(false)
+    Config::resolve_path(cli.config.as_deref()).exists()
 }
 
 /// Prompts the user to run setup.

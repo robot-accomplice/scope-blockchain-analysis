@@ -14,11 +14,10 @@ use super::{error_response, status_for};
 /// GET /api/config/status — Returns config status (which keys are set).
 pub async fn handle(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let config = &state.config;
-    let config_path = Config::config_path()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-
-    let config_exists = Config::config_path().map(|p| p.exists()).unwrap_or(false);
+    // The file the CLI resolved (`--config`, `SCOPE_CONFIG`, or home).
+    let file = config.file();
+    let config_path = file.display().to_string();
+    let config_exists = file.exists();
 
     // Report which API keys are configured (without exposing values)
     let api_keys_status: serde_json::Value = serde_json::json!({
@@ -65,11 +64,13 @@ pub struct SaveConfigRequest {
 
 /// POST /api/config — Save API keys and RPC endpoints.
 pub async fn handle_save(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Json(req): Json<SaveConfigRequest>,
 ) -> impl IntoResponse {
+    // The file the CLI resolved (`--config`, `SCOPE_CONFIG`, or home).
+    let config_path = state.config.file();
     // Load existing config or create new
-    let mut config = Config::load(None).unwrap_or_default();
+    let mut config = Config::load(Some(&config_path)).unwrap_or_default();
 
     // Update API keys
     for (key, value) in &req.api_keys {
@@ -92,14 +93,6 @@ pub async fn handle_save(
     }
 
     // Save to disk
-    let config_path = match Config::config_path() {
-        Some(p) => p,
-        None => {
-            let e = ScopeError::Other("Cannot determine config path".to_string());
-            return error_response(status_for(&e), e.to_string());
-        }
-    };
-
     // Ensure parent directory exists
     if let Some(parent) = config_path.parent()
         && let Err(e) = std::fs::create_dir_all(parent)
