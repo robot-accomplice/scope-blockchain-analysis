@@ -1,7 +1,7 @@
 # Design: `scope setup --clean`, a command that removes dead keys from the config file
 
 Date: 2026-11-12
-Status: proposed. The owner has not yet answered Q1 to Q11 (section 11).
+Status: accepted. The owner decided Q1 to Q11 on 2026-11-12: option A for all (section 11, Decisions).
 Based on: `origin/develop` at c676c11 (v0.8.8).
 No code. This document is a design. File names and function names are proposals unless the text says "today".
 
@@ -413,3 +413,22 @@ Reasons for the recommendations:
 - **Q9.** The same folder gives the same permissions and the same disk. `--config` may name a file anywhere. The name follows the venue backup stamp.
 - **Q10.** The check proves the result loads to an equal `Config`. `monitor: {}` is safe but it leaves a line with no meaning.
 - **Q11.** The binary loads the config before it knows the command. A special case in `Config::load` costs more than one repeated line.
+
+### Decisions
+
+Decided: A, owner, 2026-11-12. This applies to every question in the table.
+
+| # | Decision |
+|---|---|
+| Q1 | A. Flag `scope setup --clean [--write]`. Decided: A, owner, 2026-11-12. |
+| Q2 | A. Line-based edit with a parser check. Decided: A, owner, 2026-11-12. |
+| Q3 | A. Dry run by default. Decided: A, owner, 2026-11-12. |
+| Q4 | A. A comment above a removed key stays. Decided: A, owner, 2026-11-12. |
+| Q5 | A. Exit 1 when the file does not exist. Decided: A, owner, 2026-11-12. |
+| Q6 | A. A dry run with dead keys exits 0. Decided: A, owner, 2026-11-12. |
+| Q7 | A. Remove a key whatever its value. Decided: A, owner, 2026-11-12. |
+| Q8 | A. `--write` appends a line to `<home>/state/config-clean.log`. Decided: A, owner, 2026-11-12. |
+| Q9 | A. The backup is beside the config. Decided: A, owner, 2026-11-12. |
+| Q10 | A. An empty `monitor:` header is removed. Decided: A, owner, 2026-11-12. |
+| Q11 | A. The `--clean` run does not hide the load notice. Decided: A, owner, 2026-11-12. |
+

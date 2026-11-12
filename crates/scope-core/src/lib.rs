@@ -212,6 +212,10 @@ pub mod domain;
 /// multiple sources (CLI args, environment variables, config files).
 pub mod config;
 
+/// Removal of the dead monitor keys from a config file's text
+/// (`scope setup --clean`).
+pub mod config_clean;
+
 /// Display utilities for terminal output and reports.
 ///
 /// Provides ASCII chart rendering and markdown report generation

@@ -231,6 +231,8 @@ async fn run() -> Result<()> {
             status: false,
             key: None,
             reset: false,
+            clean: false,
+            write: false,
         };
         if let Err(e) = scope_cli::cli::setup::run(setup_args, &config, &out).await {
             let _ = display_error(&e, &out);

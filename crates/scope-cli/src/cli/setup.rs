@@ -15,6 +15,10 @@
 //!
 //! # Set a specific API key
 //! scope setup --key etherscan
+//!
+//! # Remove the dead keys of the old monitor dashboard (dry run, then write)
+//! scope setup --clean
+//! scope setup --clean --write
 //! ```
 
 use crate::cli::output::Output;
@@ -33,7 +37,9 @@ use std::path::{Path, PathBuf};
   scope setup
   scope setup --status
   scope setup --key etherscan
-  scope setup --reset")]
+  scope setup --reset
+  scope setup --clean
+  scope setup --clean --write")]
 pub struct SetupArgs {
     /// Show current configuration status without making changes.
     #[arg(long, short)]
@@ -46,6 +52,16 @@ pub struct SetupArgs {
     /// Reset configuration to defaults.
     #[arg(long)]
     pub reset: bool,
+
+    /// Remove dead keys from the config file. Shows what it would remove.
+    /// Changes nothing unless you add --write.
+    #[arg(long, conflicts_with_all = ["status", "key", "reset"])]
+    pub clean: bool,
+
+    /// With --clean: save the change. The command first copies the file to
+    /// `config.yaml.backup-<date-time>` in the same folder.
+    #[arg(long, requires = "clean")]
+    pub write: bool,
 }
 
 /// Configuration item with metadata for display.
@@ -60,6 +76,10 @@ struct ConfigItem {
 
 /// Runs the setup command.
 pub async fn run(args: SetupArgs, config: &Config, out: &Output) -> Result<()> {
+    if args.clean {
+        return crate::cli::config_clean::run(&config.file(), args.write, out);
+    }
+
     if args.status {
         show_status(config, out)?;
         return Ok(());
@@ -1053,6 +1073,8 @@ mod tests {
             status: true,
             key: None,
             reset: false,
+            clean: false,
+            write: false,
         };
         let result = run(args, &config, &quiet()).await;
         assert!(result.is_ok());
@@ -1065,6 +1087,8 @@ mod tests {
             status: false,
             key: Some("nonexistent".to_string()),
             reset: false,
+            clean: false,
+            write: false,
         };
         // `setup --key` run from the TUI: its text must go through the
         // Output, or the TUI scrollback never shows it. It is not data, so
@@ -1234,8 +1258,66 @@ mod tests {
             status: false,
             key: None,
             reset: true,
+            clean: false,
+            write: false,
         };
         assert!(args.reset);
+    }
+
+    // ========================================================================
+    // --clean flags
+    // ========================================================================
+
+    #[test]
+    fn test_clean_flag_shapes() {
+        // `--write` alone must not look like it did something, and
+        // `--clean` must not mix with the modes that prompt or delete.
+        use crate::cli::{Cli, Commands};
+        use clap::Parser;
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from(std::iter::once("scope").chain(args.iter().copied()))
+        };
+        assert!(parse(&["setup", "--write"]).is_err());
+        for other in ["--status", "--reset", "--key=etherscan"] {
+            assert!(parse(&["setup", "--clean", other]).is_err(), "{other}");
+        }
+        let Commands::Setup(a) = parse(&["config", "--clean"]).unwrap().command else {
+            panic!("config --clean is not setup");
+        };
+        assert!(a.clean && !a.write);
+        let Commands::Setup(a) = parse(&["setup", "--clean", "--write"]).unwrap().command else {
+            panic!("not setup");
+        };
+        assert!(a.clean && a.write);
+    }
+
+    #[tokio::test]
+    async fn test_clean_runs_on_the_file_of_the_config() {
+        // The command must use `Config::file()`: a dry run on a config
+        // loaded from a temp file reports that file and writes nothing.
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("c.yaml");
+        std::fs::write(
+            &path,
+            "monitor:
+  layout: x
+  venue: b
+",
+        )
+        .unwrap();
+        let config = Config::load(Some(&path)).unwrap();
+        let (out, cap) = crate::cli::output::Output::capture();
+        let args = SetupArgs {
+            status: false,
+            key: None,
+            reset: false,
+            clean: true,
+            write: false,
+        };
+        run(args, &config, &out).await.unwrap();
+        assert!(cap.err().contains("c.yaml"), "{}", cap.err());
+        assert!(cap.out().contains("-  layout: x"), "{}", cap.out());
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
     }
 
     // ========================================================================
