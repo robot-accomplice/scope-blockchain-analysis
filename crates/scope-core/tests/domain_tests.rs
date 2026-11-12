@@ -278,11 +278,14 @@ ghola:
 
 #[test]
 fn config_missing_file_returns_defaults() {
-    let config = Config::load(Some(std::path::Path::new(
-        "/tmp/nonexistent-scope-config.yaml",
-    )))
-    .unwrap();
-    assert_eq!(config, Config::default());
+    let path = std::path::Path::new("/tmp/nonexistent-scope-config.yaml");
+    let config = Config::load(Some(path)).unwrap();
+    // The config remembers the file it was asked to load.
+    let defaults = Config {
+        loaded_from: Some(path.to_path_buf()),
+        ..Config::default()
+    };
+    assert_eq!(config, defaults);
 }
 
 #[test]

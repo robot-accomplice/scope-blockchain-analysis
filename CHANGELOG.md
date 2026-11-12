@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `scope --config X setup` now reads and saves the file X. Before, it used `<home>/config.yaml` and left X unchanged. `SCOPE_CONFIG` works the same way. The rule is one: `--config`, then `SCOPE_CONFIG`, then `<home>/config.yaml`. It applies to the wizard, `--key`, `--reset` and the `Config file` line of `--status`, and to `setup` run from the TUI. Changes still start from the file, not from the copy that the command loaded at start. An empty `SCOPE_CONFIG` now counts as not set. `Config::resolve_path` in `scope-core` holds the rule, and `Config::file` gives the file a config was loaded from. `scope web` still reads and writes `<home>/config.yaml` in its own handlers.
+
 ## [0.8.8] - 2026-11-11
 
 ### Added
