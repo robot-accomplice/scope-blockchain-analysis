@@ -1,7 +1,7 @@
 name: a repeat on two venues draws the peg deviation chart with its band (design 2026-11-11, item 1)
 tiers: [offline]
 terminal: { cols: 120, rows: 40 }
-masks: ['scope v\d+\.\d+\.\d+\S*']
+masks: ['scope v\d+\.\d+\.\d+\S*( ─+)?']
 steps:
   # The repeat view has its own path to the venue charts (`venue_charts_of`),
   # so the unit tests on a test backend do not cover it. The deviation chart

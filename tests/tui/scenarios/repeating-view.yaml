@@ -1,7 +1,7 @@
 name: a repeating run updates one view in place and leaves one copy (#58)
 tiers: [offline]
 terminal: { cols: 120, rows: 36 }
-masks: ['scope v\d+\.\d+\.\d+\S*']
+masks: ['scope v\d+\.\d+\.\d+\S*( ─+)?']
 steps:
   - type: "market summary USDC --venue binance --every 2s --duration 8s"
   - key: Enter

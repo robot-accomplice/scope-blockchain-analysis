@@ -1,7 +1,7 @@
 name: the watch grid edits the venues of a target between ticks, with undo and save (design 2026-11-11, item 2)
 tiers: [offline]
 terminal: { cols: 120, rows: 40 }
-masks: ['scope v\d+\.\d+\.\d+\S*']
+masks: ['scope v\d+\.\d+\.\d+\S*( ─+)?']
 steps:
   # One recorded venue. The unit tests use a test backend and test venues;
   # this runs the real binary, the queue and the files together.

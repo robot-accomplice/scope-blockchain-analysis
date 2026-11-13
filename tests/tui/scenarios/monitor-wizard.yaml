@@ -1,7 +1,7 @@
 name: monitor opens the wizard in the TUI, and its run shows the market health checks in the grid (#47)
 tiers: [offline]
 terminal: { cols: 120, rows: 36 }
-masks: ['scope v\d+\.\d+\.\d+\S*']
+masks: ['scope v\d+\.\d+\.\d+\S*( ─+)?']
 steps:
   # The trigger case of #47, on a recorded venue: the arguments fill the
   # wizard; nothing runs before Start.
