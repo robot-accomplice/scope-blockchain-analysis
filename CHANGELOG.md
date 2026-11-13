@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Ghola mode sends the bridge token that newer ghola releases require. It checks `GET /health` before it uses the bridge, reads the token again once after a 401, and falls back to native HTTP when the token file is empty or not valid. An older ghola writes no token file. For it, Scope sends the request without a token. A refusal with status 401 names the token file that Scope read.
+
 ## [0.8.9] - 2026-11-12
 
 ### Added

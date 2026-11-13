@@ -101,6 +101,17 @@ pub(crate) fn legacy_config_dir() -> Option<PathBuf> {
     dirs::config_dir()
 }
 
+/// The file in which the ghola bridge writes its token at each start:
+/// `<platform config folder>/ghola/bridge-token`. scope-bca only reads it.
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn ghola_bridge_token_file() -> Option<PathBuf> {
+    #[cfg(any(test, feature = "test-support"))]
+    let config = Some(sandbox().join("ghola-config"));
+    #[cfg(not(any(test, feature = "test-support")))]
+    let config = dirs::config_dir();
+    config.map(|dir| dir.join("ghola").join("bridge-token"))
+}
+
 /// The platform's data folder, where old versions kept tokens and TUI
 /// state. Only the migration uses it.
 #[allow(clippy::disallowed_methods)]

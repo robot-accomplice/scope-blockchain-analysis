@@ -9,6 +9,7 @@ use super::replay::ReplayHttpClient;
 use super::{GholaHttpClient, HttpClient, NativeHttpClient, ghola, ghola_install};
 use crate::config::Config;
 use crate::error::ScopeError;
+use crate::paths;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -55,14 +56,20 @@ trait Sidecar {
     fn binary(&self) -> Option<PathBuf>;
     /// Starts `binary --serve` and waits until it answers.
     fn start(&self, binary: &Path) -> Result<(), ScopeError>;
+    /// The file in which the sidecar writes its token.
+    fn token_file(&self) -> Option<PathBuf>;
 }
 
-/// The real sidecar: the probe, `ghola_install::find` and `ghola::start_sidecar`.
+/// The real sidecar: the probe, `ghola_install::find`, `ghola::start_sidecar`
+/// and the token file in the user's config folder.
 struct LocalSidecar;
 
 impl Sidecar for LocalSidecar {
     fn up(&self) -> bool {
         ghola::is_bridge_running()
+    }
+    fn token_file(&self) -> Option<PathBuf> {
+        paths::ghola_bridge_token_file()
     }
     fn binary(&self) -> Option<PathBuf> {
         ghola_install::find()
@@ -151,10 +158,14 @@ fn build_probed(
     let mut notices = Vec::new();
     let mut ghola_missing = false;
     if config.ghola.enabled {
-        let client = match connect_sidecar(sidecar, &mut notices) {
-            Ok(()) => GholaHttpClient::new(config.ghola.stealth, config.ghola.buffer_size),
-            Err(e) => Err(e),
-        };
+        // The client reads the token, so it is made only after the sidecar
+        // answers. A token that cannot be read means native HTTP.
+        let client = connect_sidecar(sidecar, &mut notices).and_then(|()| {
+            let token_file = sidecar.token_file().ok_or_else(|| {
+                ScopeError::Network("cannot find the user config directory".into())
+            })?;
+            GholaHttpClient::new(config.ghola.stealth, config.ghola.buffer_size, &token_file)
+        });
         match client {
             Ok(client) => {
                 tracing::info!("Using Ghola sidecar for HTTP transport");
@@ -372,6 +383,7 @@ mod tests {
         binary: Option<&'static str>,
         starts: bool,
         started: std::cell::Cell<u32>,
+        token_file: Option<PathBuf>,
     }
 
     impl FakeSidecar {
@@ -381,9 +393,25 @@ mod tests {
                 binary,
                 starts,
                 started: std::cell::Cell::new(0),
+                token_file: None,
             }
         }
+
+        /// The sidecar's token file.
+        fn with_token_file(mut self, path: PathBuf) -> Self {
+            self.token_file = Some(path);
+            self
+        }
     }
+
+    /// A token file in `dir`, holding `content`. Tests never use the real config folder.
+    fn token_file_in(dir: &Path, content: &str) -> PathBuf {
+        let path = dir.join("bridge-token");
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    const GOOD_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     impl Sidecar for FakeSidecar {
         fn up(&self) -> bool {
@@ -400,6 +428,9 @@ mod tests {
                 Err(ScopeError::Network("exited".into()))
             }
         }
+        fn token_file(&self) -> Option<PathBuf> {
+            self.token_file.clone()
+        }
     }
 
     /// Ghola must never be probed or started when it is disabled.
@@ -414,6 +445,9 @@ mod tests {
         }
         fn start(&self, _: &Path) -> Result<(), ScopeError> {
             panic!("started ghola with Ghola disabled")
+        }
+        fn token_file(&self) -> Option<PathBuf> {
+            panic!("looked for the ghola token with Ghola disabled")
         }
     }
 
@@ -445,7 +479,9 @@ mod tests {
 
     #[test]
     fn test_build_ghola_enabled_sidecar_up_selects_ghola() {
-        let sidecar = FakeSidecar::new(true, None, false);
+        let dir = tempfile::tempdir().unwrap();
+        let sidecar = FakeSidecar::new(true, None, false)
+            .with_token_file(token_file_in(dir.path(), GOOD_TOKEN));
         let built = build_probed(&ghola_config(), &no_env, &sidecar).unwrap();
         assert_eq!(built.kind, Kind::Ghola);
         assert!(built.notices.is_empty());
@@ -455,7 +491,9 @@ mod tests {
 
     #[test]
     fn test_build_starts_an_installed_sidecar() {
-        let sidecar = FakeSidecar::new(false, Some("/home/u/.scope-bca/bin/ghola"), true);
+        let dir = tempfile::tempdir().unwrap();
+        let sidecar = FakeSidecar::new(false, Some("/home/u/.scope-bca/bin/ghola"), true)
+            .with_token_file(token_file_in(dir.path(), GOOD_TOKEN));
         let built = build_probed(&ghola_config(), &no_env, &sidecar).unwrap();
         assert_eq!(built.kind, Kind::Ghola);
         assert_eq!(sidecar.started.get(), 1);
@@ -475,6 +513,50 @@ mod tests {
         // It is installed: nothing to offer.
         assert!(!built.ghola_missing);
         assert!(built.notices.iter().any(|n| n.contains("exited")));
+    }
+
+    // A bridge that answers but gives no usable token (an older ghola, a
+    // half-written file) would fail every request. Native HTTP takes over,
+    // and the notice says why.
+    #[test]
+    fn test_build_falls_back_when_the_token_cannot_be_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let cases = [
+            ("empty", ""),
+            ("short", "abc123"),
+            (
+                "not hex",
+                "zz23456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            ),
+        ];
+        for (name, content) in cases {
+            let path = token_file_in(dir.path(), content);
+            let sidecar = FakeSidecar::new(true, Some("/opt/ghola"), false).with_token_file(path);
+            let built = build_probed(&ghola_config(), &no_env, &sidecar).unwrap();
+            assert_eq!(built.kind, Kind::Native, "{name}");
+            assert!(
+                built
+                    .notices
+                    .iter()
+                    .any(|n| n.contains("bridge token") && n.contains("unavailable")),
+                "{name}: {:?}",
+                built.notices
+            );
+            assert!(built.notices.iter().any(|n| n.contains("native")), "{name}");
+            assert!(!built.ghola_missing, "{name}");
+        }
+    }
+
+    // No token file means an older ghola bridge, which checks no token.
+    // Ghola mode must stay on for it (ghola 0.7.0 users).
+    #[test]
+    fn test_build_keeps_ghola_when_there_is_no_token_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let sidecar =
+            FakeSidecar::new(true, None, false).with_token_file(dir.path().join("absent"));
+        let built = build_probed(&ghola_config(), &no_env, &sidecar).unwrap();
+        assert_eq!(built.kind, Kind::Ghola);
+        assert!(built.notices.is_empty());
     }
 
     #[test]
