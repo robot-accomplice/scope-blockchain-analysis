@@ -153,10 +153,38 @@ If ghola is not installed:
 
 When `ghola.enabled` is `true` in your config, Scope:
 
-1. Checks if the ghola sidecar is listening on `127.0.0.1:18789`
+1. Checks if the ghola sidecar answers `GET /health` on `127.0.0.1:18789` with status 200
 2. If not, starts `ghola --serve` from PATH or `~/.scope-bca/bin` and waits up to 5 seconds for it
-3. Routes all HTTP requests through the sidecar bridge
-4. Falls back to native HTTP if no sidecar answers (and, on a terminal, offers to install ghola when it is missing)
+3. Reads the bridge token (see below)
+4. Routes all HTTP requests through the sidecar bridge, with the token as a bearer token
+5. Falls back to native HTTP if no sidecar answers or the token cannot be read (and, on a terminal, offers to install ghola when it is missing)
+
+### Bridge token
+
+Newer ghola releases require a token on every `POST /` to the bridge. Each time the bridge
+starts, it writes a new token (64 hex characters) to this file:
+
+| System | Token file |
+|--------|-----------|
+| Linux | `~/.config/ghola/bridge-token` |
+| macOS | `~/Library/Application Support/ghola/bridge-token` |
+| Windows | `%AppData%\ghola\bridge-token` |
+
+Scope reads the file only after `GET /health` returns 200, and sends the token in the
+`Authorization: Bearer` header. The bridge writes the file after it opens the port, so
+the file can be older than the port for a short time. When the bridge answers 401, Scope
+reads the file once more and sends the request once more. A second 401 is an error that
+shows the bridge's reason and the path of the token file that Scope read, with `read` or
+`not found`. The path helps when ghola and Scope find the config folder in different
+ways. Scope never logs or prints the token.
+
+If the file exists but is empty or not 64 hex characters, Scope prints the
+`Ghola sidecar enabled but unavailable` notice and uses native HTTP.
+
+If the file does not exist, Scope sends the request without a token and logs
+`no bridge token file; sending without token`. An older ghola release (0.7.0) writes no
+token file and checks no token, so ghola mode keeps working with it. A newer release
+always writes the file when it starts.
 
 A sidecar that scope started is not left behind silently. At the end of the run scope
 asks `Stop the Ghola sidecar that scope started (pid N)? [Y/n]`; with no answer in 15
@@ -173,5 +201,8 @@ The `buffer_size` setting (default 4096) controls the read buffer for responses 
 |---------|-------|-----|
 | `⚠ Ghola sidecar enabled but unavailable` | ghola not installed | `scope setup`, or `go install github.com/robot-accomplice/ghola/cmd/ghola@latest` |
 | `did not answer on 127.0.0.1:18789` | Port 18789 blocked or ghola crash | Check `ghola --serve` manually, verify port availability |
+| `does not hold 64 hex characters` | The token file is empty or damaged | Stop `ghola --serve`, start it again, and run Scope again |
+| `sidecar refused the request (401) ... (token file: PATH, not found)` | Ghola uses another config folder than Scope | Look for `bridge-token` in the ghola config folder; check `XDG_CONFIG_HOME` |
+| `sidecar refused the request (401) ... (token file: PATH, read)` | Token is wrong after a re-read | Stop every `ghola --serve`, start one, and run Scope again |
 | Scope works but requests feel slow | Sidecar started on each run | Answer `n` at the exit question, or run `ghola --serve &` yourself |
 | No install question any more | You answered no once | Run `scope setup`, or delete `~/.scope-bca/state/ghola-install-declined` |
