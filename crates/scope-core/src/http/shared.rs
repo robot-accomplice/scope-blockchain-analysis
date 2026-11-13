@@ -559,6 +559,24 @@ mod tests {
         assert!(built.notices.is_empty());
     }
 
+    // A machine with no user config folder has no place for a token file.
+    // Scope cannot tell which bridge runs, so it must not fail: native HTTP
+    // takes over, and the notice says why.
+    #[test]
+    fn test_build_falls_back_without_a_config_folder() {
+        let sidecar = FakeSidecar::new(true, Some("/opt/ghola"), false);
+        let built = build_probed(&ghola_config(), &no_env, &sidecar).unwrap();
+        assert_eq!(built.kind, Kind::Native);
+        assert!(
+            built
+                .notices
+                .iter()
+                .any(|n| n.contains("cannot find the user config directory")),
+            "{:?}",
+            built.notices
+        );
+    }
+
     #[test]
     fn test_build_ghola_disabled_never_probes() {
         let built = build_probed(&Config::default(), &no_env, &NoSidecar).unwrap();
