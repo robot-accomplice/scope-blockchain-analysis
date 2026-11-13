@@ -598,14 +598,39 @@ mod tests {
     #[test]
     fn test_start_sidecar_keeps_a_sidecar_that_answers() {
         let _lock = sidecar_lock();
-        // The sidecar's port, held here: the fake answers through it.
-        let Ok(_port) = std::net::TcpListener::bind(SIDECAR_ADDR) else {
+        // The sidecar's port, held here. The probe needs `GET /health` -> 200,
+        // so a thread answers each probe until the test ends; an open port alone
+        // does not count as a running bridge.
+        let Ok(port) = std::net::TcpListener::bind(SIDECAR_ADDR) else {
             eprintln!("skipped: {SIDECAR_ADDR} is in use");
             return;
         };
+        port.set_nonblocking(true).unwrap();
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let answering = {
+            let done = done.clone();
+            std::thread::spawn(move || {
+                while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                    match port.accept() {
+                        Ok((mut conn, _)) => {
+                            let _ = conn.set_nonblocking(false);
+                            let mut request = [0u8; 512];
+                            let _ = conn.read(&mut request);
+                            let _ = conn.write_all(
+                                b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\n{\"status\":\"ok\"}",
+                            );
+                        }
+                        Err(_) => std::thread::sleep(Duration::from_millis(10)),
+                    }
+                }
+            })
+        };
         let dir = tempfile::tempdir().unwrap();
         let ghola = script(dir.path(), "ghola", "exec sleep 60");
-        let pid = start_retrying(&ghola, Duration::from_secs(5)).unwrap();
+        let started = start_retrying(&ghola, Duration::from_secs(5));
+        done.store(true, std::sync::atomic::Ordering::Relaxed);
+        answering.join().unwrap();
+        let pid = started.unwrap();
         assert_eq!(spawned_sidecar(), Some(pid));
         assert_eq!(stop_spawned_sidecar(), Some(pid));
         assert_eq!(spawned_sidecar(), None);
