@@ -1,7 +1,7 @@
 name: the watch grid draws the peg deviation chart first, and says when the window is too small (design 2026-11-11, item 1)
 tiers: [offline]
 terminal: { cols: 120, rows: 40 }
-masks: ['scope v\d+\.\d+\.\d+\S*']
+masks: ['scope v\d+\.\d+\.\d+\S*( ─+)?']
 steps:
   # A target on two recorded venues. The unit tests use a test backend;
   # this runs the real binary.

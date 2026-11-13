@@ -2,7 +2,7 @@ name: with NO_COLOR the repeat deviation chart still holds the band, the names a
 tiers: [offline]
 env: { NO_COLOR: "1" }
 terminal: { cols: 120, rows: 40 }
-masks: ['scope v\d+\.\d+\.\d+\S*']
+masks: ['scope v\d+\.\d+\.\d+\S*( ─+)?']
 steps:
   # The repeat view has its own path to the venue charts (`venue_charts_of`),
   # so the unit tests on a test backend do not cover it. The deviation chart

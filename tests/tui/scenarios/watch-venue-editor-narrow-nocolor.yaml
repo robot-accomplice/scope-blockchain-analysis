@@ -2,7 +2,7 @@ name: with NO_COLOR at 79 columns the venue line and its legend are cut, not wra
 tiers: [offline]
 env: { NO_COLOR: "1" }
 terminal: { cols: 79, rows: 24 }
-masks: ['scope v\d+\.\d+\.\d+\S*']
+masks: ['scope v\d+\.\d+\.\d+\S*( ─+)?']
 steps:
   - type: "monitor USDC --venue binance --every 2s --duration 60s"
   - key: Enter

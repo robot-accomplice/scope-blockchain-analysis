@@ -1,7 +1,7 @@
 name: the venue editor says why it does nothing after the run ended (design 2026-11-11, item 2)
 tiers: [offline]
 terminal: { cols: 120, rows: 40 }
-masks: ['scope v\d+\.\d+\.\d+\S*']
+masks: ['scope v\d+\.\d+\.\d+\S*( ─+)?']
 steps:
   - type: "monitor USDC --venue binance --every 2s --duration 4s"
   - key: Enter
