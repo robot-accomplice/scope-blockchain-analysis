@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- The bot-pattern advisory of the market summary now tells you when the trade tape is old. The tape is stale when its newest trade is older than 10 × the 95th-percentile gap between trades (`STALE_TAPE_P95_FACTOR`), and in any case older than 10 minutes (`STALE_TAPE_MIN_MS`). With fewer than 20 gaps, the 10 minutes is the whole rule. A stale tape adds a warning check, for example `Stale trade tape: no trade for 23h 00m (limit 20m 10s)`. The `Bot Patterns` section and the markdown evidence then start with a `Stale tape` line: the trade signals are past activity, not the market now. The JSON has `bot_patterns.stale_tape` (`newest_age_ms`, `limit_ms`) only for a stale tape. The warning does not change `healthy`. Before, the weex USDN/USDT summary showed gap statistics from a tape whose newest trade was 23 hours old, with no sign that the market was dead.
+
 ## [0.8.10] - 2026-11-14
 
 ### Fixed

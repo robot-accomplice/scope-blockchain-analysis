@@ -164,6 +164,20 @@ pub const CYCLE_MAX_CV: f64 = 0.20;
 /// flat or down: the depth drains, it does not grow.
 pub const CYCLE_FALLING_SHARE: f64 = 0.60;
 
+/// The tape is stale when its newest trade is older than this many
+/// 95th-percentile gaps between trade events. 1 gap in 20 is longer than the
+/// 95th percentile, so a silence of 10 of them is not a pause of a live
+/// market: with random arrivals its chance is about 0.05^10 (1 in 10^13). The
+/// weex USDN/USDT tape on 2026-11-14 had a 121 s p95, so 10 × p95 is 20m 10s;
+/// its newest trade was 23 h old.
+pub const STALE_TAPE_P95_FACTOR: f64 = 10.0;
+
+/// The tape is never stale with its newest trade younger than this (10
+/// minutes). A busy tape has a p95 gap of a second or two, and 10 × p95
+/// would then flag the clock skew and the fetch time. It is also the whole
+/// rule when the tape has fewer than [`MIN_GAPS`] gaps.
+pub const STALE_TAPE_MIN_MS: f64 = 600_000.0;
+
 /// How many levels from the top of each side the ladder signal reads.
 pub const LADDER_DEPTH: usize = 25;
 
@@ -177,6 +191,62 @@ const SIZE_DECIMALS: f64 = 1e8;
 pub struct TimerFloor {
     pub shortest_ms: f64,
     pub tail_ms: f64,
+}
+
+/// The label of the stale-tape notice in the report section and evidence.
+const STALE_TAPE_LABEL: &str = "Stale tape";
+
+/// The newest trade of the tape is old: the tape signals and their gaps are
+/// past activity, not the market now. Both times in ms.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct StaleTape {
+    /// How long before the check the newest trade was.
+    pub newest_age_ms: f64,
+    /// The age above which the tape is stale ([`STALE_TAPE_P95_FACTOR`] ×
+    /// the p95 gap, at least [`STALE_TAPE_MIN_MS`]).
+    pub limit_ms: f64,
+}
+
+impl StaleTape {
+    /// `newest trade 23h 00m ago, over the 20m 10s limit; the trade signals are past activity`.
+    pub fn detail(&self) -> String {
+        format!(
+            "newest trade {} ago, over the {} limit; the trade signals are past activity, not the market now",
+            span(self.newest_age_ms),
+            span(self.limit_ms)
+        )
+    }
+
+    /// The health check line: a warning, so `healthy` does not change.
+    pub fn check(&self) -> super::types::HealthCheck {
+        super::types::HealthCheck::Warn(format!(
+            "Stale trade tape: no trade for {} (limit {})",
+            span(self.newest_age_ms),
+            span(self.limit_ms)
+        ))
+    }
+}
+
+/// The stale-tape notice for `trades` at `now_ms`, when the newest trade is
+/// older than [`STALE_TAPE_P95_FACTOR`] × the p95 gap between trade events
+/// (with at least [`MIN_GAPS`] gaps), and in any case older than
+/// [`STALE_TAPE_MIN_MS`]. `None` for an empty tape.
+pub fn stale_tape(trades: &[Trade], now_ms: u64) -> Option<StaleTape> {
+    let newest = trades.iter().map(|t| t.timestamp_ms).max()?;
+    let mut gaps = event_gaps(trades.iter().map(|t| t.timestamp_ms).collect());
+    gaps.sort_by(f64::total_cmp);
+    let by_gaps = (gaps.len() >= MIN_GAPS).then(|| quantile(&gaps, 0.95) * STALE_TAPE_P95_FACTOR);
+    let limit_ms = by_gaps.unwrap_or(0.0).max(STALE_TAPE_MIN_MS);
+    let newest_age_ms = now_ms.saturating_sub(newest) as f64;
+    (newest_age_ms > limit_ms).then_some(StaleTape {
+        newest_age_ms,
+        limit_ms,
+    })
+}
+
+/// The `q` quantile (0–1) of `sorted`, which is sorted and not empty.
+fn quantile(sorted: &[f64], q: f64) -> f64 {
+    sorted[((sorted.len() - 1) as f64 * q).round() as usize]
 }
 
 /// One signal that was found, with its evidence.
@@ -301,6 +371,9 @@ pub struct BotPatterns {
     pub bot_like_volume_pct: Option<f64>,
     /// True when a real exchange book was read for ladders.
     pub book_checked: bool,
+    /// Set when the newest trade of the tape is old ([`stale_tape`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_tape: Option<StaleTape>,
 }
 
 /// A trade size as a comparable key.
@@ -517,7 +590,7 @@ pub fn timer(trades: &[Trade]) -> Option<Finding> {
     }
     let (_, cv) = mean_cv(&gaps)?;
     gaps.sort_by(f64::total_cmp);
-    let at = |q: f64| gaps[((gaps.len() - 1) as f64 * q).round() as usize];
+    let at = |q: f64| quantile(&gaps, q);
     let (floor, median, tail) = (at(0.05), at(0.5), at(0.95));
     let band: Vec<f64> = gaps
         .iter()
@@ -771,6 +844,7 @@ pub fn detect(
         bot_like_pct,
         bot_like_volume_pct,
         book_checked: book.is_some(),
+        stale_tape: None,
     }
 }
 
@@ -1023,11 +1097,17 @@ impl BotPatterns {
             .findings
             .iter()
             .map(|f| f.label().chars().count())
+            .chain(self.stale_tape.map(|_| STALE_TAPE_LABEL.chars().count()))
             .max()
             .unwrap_or(0)
             + 2;
         let mut out = t::subsection_header("Bot Patterns · likely market-making bots");
         out.push('\n');
+        // First: it changes how every trade signal below reads.
+        if let Some(stale) = &self.stale_tape {
+            out.push_str(&t::labelled_warn(STALE_TAPE_LABEL, width, &stale.detail()));
+            out.push('\n');
+        }
         let runs = self
             .findings
             .iter()
@@ -1083,7 +1163,12 @@ impl BotPatterns {
     /// Every finding on its own line (`label: evidence`), then the share,
     /// for a report that lists them.
     pub fn evidence(&self) -> Vec<String> {
-        let mut lines: Vec<String> = self.findings.iter().map(Finding::describe).collect();
+        let mut lines: Vec<String> = self
+            .stale_tape
+            .iter()
+            .map(|s| format!("{STALE_TAPE_LABEL}: {}", s.detail()))
+            .collect();
+        lines.extend(self.findings.iter().map(Finding::describe));
         lines.extend(self.share());
         lines
     }
@@ -2419,5 +2504,109 @@ mod tests {
                 .detail()
                 .ends_with(", 1 pause over 3m 42s")
         );
+    }
+
+    /// A tape shaped like weex USDN/USDT on 2026-11-14: 492 gaps between
+    /// trades, most 34 s and 1 in 15 of them 121 s, so the p95 gap is 121 s
+    /// and the stale limit 10 × 121 s = 20m 10s. Returns it and its newest
+    /// trade time.
+    fn usdn_tape() -> (Vec<Trade>, u64) {
+        let mut ms = 1_763_000_000_000;
+        let mut t = vec![trade(ms, 1.0, 5.0, TradeSide::Buy)];
+        for i in 0..492u64 {
+            ms += if i % 15 == 0 { 121_000 } else { 34_000 };
+            t.push(trade(ms, 1.0, 5.0 + i as f64, TradeSide::Sell));
+        }
+        (t, ms)
+    }
+
+    const HOUR_MS: u64 = 3_600_000;
+
+    #[test]
+    fn test_a_tape_23_hours_old_is_stale() {
+        let (t, newest) = usdn_tape();
+        let s = stale_tape(&t, newest + 23 * HOUR_MS).expect("a dead market must say so");
+        assert_eq!(s.limit_ms, 121_000.0 * STALE_TAPE_P95_FACTOR);
+        assert_eq!(
+            s.detail(),
+            "newest trade 23h 00m ago, over the 20m 10s limit; the trade signals are past activity, not the market now"
+        );
+        let super::super::types::HealthCheck::Warn(m) = s.check() else {
+            panic!("a stale tape warns")
+        };
+        assert_eq!(m, "Stale trade tape: no trade for 23h 00m (limit 20m 10s)");
+    }
+
+    #[test]
+    fn test_a_fresh_tape_is_not_stale() {
+        let (t, newest) = usdn_tape();
+        // One minute: well inside a gap this market has.
+        assert_eq!(stale_tape(&t, newest + 60_000), None);
+        // The newest trade a little in the future (clock skew) is fresh too.
+        assert_eq!(stale_tape(&t, newest - 5_000), None);
+        assert_eq!(stale_tape(&[], newest), None);
+    }
+
+    #[test]
+    fn test_the_limit_is_ten_p95_gaps_not_the_floor() {
+        // 15 minutes is over the 10-minute floor but under 10 × p95: a quiet
+        // spell this slow market can have, so no notice.
+        let (t, newest) = usdn_tape();
+        assert_eq!(stale_tape(&t, newest + 15 * 60_000), None);
+        let limit = (121_000.0 * STALE_TAPE_P95_FACTOR) as u64;
+        assert_eq!(stale_tape(&t, newest + limit), None, "at the limit");
+        assert!(stale_tape(&t, newest + limit + 1).is_some(), "over it");
+    }
+
+    #[test]
+    fn test_a_busy_tape_is_stale_only_past_the_floor() {
+        // p95 about 4 s, so 10 × p95 is under a minute: the floor rules.
+        let t = organic(200);
+        let newest = t.iter().map(|x| x.timestamp_ms).max().unwrap();
+        let floor = STALE_TAPE_MIN_MS as u64;
+        assert_eq!(stale_tape(&t, newest + 5 * 60_000), None);
+        assert_eq!(stale_tape(&t, newest + floor), None);
+        let s = stale_tape(&t, newest + floor + 1).unwrap();
+        assert_eq!(s.limit_ms, STALE_TAPE_MIN_MS);
+    }
+
+    #[test]
+    fn test_a_short_tape_uses_the_floor() {
+        // Too few gaps for a p95: the floor is the whole rule.
+        let t: Vec<Trade> = (0..5u64)
+            .map(|i| trade(i * 600_000, 1.0, 1.0, TradeSide::Buy))
+            .collect();
+        let newest = 4 * 600_000;
+        assert_eq!(stale_tape(&t, newest + 9 * 60_000), None);
+        let s = stale_tape(&t, newest + HOUR_MS).unwrap();
+        assert_eq!(s.limit_ms, STALE_TAPE_MIN_MS);
+    }
+
+    #[test]
+    fn test_the_section_and_evidence_lead_with_a_stale_tape() {
+        let (t, newest) = usdn_tape();
+        let mut p = detect(Ok(&t), None);
+        let fresh = plain(&p.format_text());
+        assert!(!fresh.contains("Stale tape"), "{fresh}");
+        assert!(p.evidence().iter().all(|l| !l.contains("Stale tape")));
+        assert!(
+            serde_json::to_value(&p)
+                .unwrap()
+                .get("stale_tape")
+                .is_none()
+        );
+
+        p.stale_tape = stale_tape(&t, newest + 23 * HOUR_MS);
+        let text = plain(&p.format_text());
+        let first = text
+            .lines()
+            .skip_while(|l| !l.contains("Bot Patterns"))
+            .nth(1)
+            .unwrap_or_default();
+        assert!(first.contains("Stale tape"), "{text}");
+        assert!(first.contains("newest trade 23h 00m ago"), "{text}");
+        assert!(p.evidence()[0].starts_with("Stale tape: newest trade 23h 00m ago"));
+        let json = serde_json::to_value(&p).unwrap();
+        assert_eq!(json["stale_tape"]["newest_age_ms"], 23.0 * HOUR_MS as f64);
     }
 }
