@@ -1103,6 +1103,22 @@ mod tests {
         }
     }
 
+    // A token path that exists but cannot be read (here a directory) is not
+    // an older bridge: only a missing file means "send without a token". The
+    // build must fail with an error that names the path, so shared.rs falls
+    // back to native HTTP and the user can see which path is wrong.
+    #[test]
+    fn test_an_unreadable_token_path_fails_the_build_and_names_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = GholaHttpClient::new(true, 4096, dir.path()).err().unwrap();
+        let text = err.to_string();
+        assert!(
+            text.contains("cannot read the ghola bridge token"),
+            "{text}"
+        );
+        assert!(text.contains(&dir.path().display().to_string()), "{text}");
+    }
+
     // A token file ends with a newline when an editor or a shell wrote it.
     // The newline must not become part of the header value.
     #[test]
