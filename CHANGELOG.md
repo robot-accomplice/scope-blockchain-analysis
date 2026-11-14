@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.10] - 2026-11-14
+
+### Fixed
+- Ghola mode sends the bridge token that newer ghola releases require. It checks `GET /health` before it uses the bridge, reads the token again once after a 401, and falls back to native HTTP when the token file is empty or not valid. An older ghola writes no token file. For it, Scope sends the request without a token. A refusal with status 401 names the token file that Scope read.
+
 ## [0.8.9] - 2026-11-12
 
 ### Added
@@ -564,7 +569,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Configuration system with YAML support
 - Support for ERC-20, SPL, and TRC-20 tokens
 
-[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.9...HEAD
+[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.10...HEAD
+[0.8.10]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.9...v0.8.10
 [0.8.9]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.8...v0.8.9
 [0.8.8]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.7...v0.8.8
 [0.8.7]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.6...v0.8.7

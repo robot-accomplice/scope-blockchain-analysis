@@ -188,7 +188,9 @@ fn test_forbidden_pattern_in_a_comment_is_ignored() {
 #[test]
 fn test_new_forbidden_patterns_are_caught() {
     assert!(has_forbidden("let r = reqwest::get(url).await?;"));
-    assert!(has_forbidden("let g = GholaHttpClient::new(true, 1);"));
+    assert!(has_forbidden(
+        "let g = GholaHttpClient::new(true, 1, &path);"
+    ));
 }
 
 fn grouped_hits(src: &str) -> Vec<usize> {
