@@ -735,9 +735,28 @@ impl MarketSummary {
     /// none), and ladder quotes in a real exchange book. A finding warns, so
     /// `healthy` does not change.
     pub fn check_bot_patterns(&mut self, trades: std::result::Result<&[Trade], &str>) {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
+        self.check_bot_patterns_at(trades, now_ms);
+    }
+
+    /// [`Self::check_bot_patterns`] at `now_ms` (ms since the epoch). It also
+    /// warns, in its own check, when the newest trade is old
+    /// ([`super::patterns::stale_tape`]): the gaps are then past activity.
+    pub fn check_bot_patterns_at(
+        &mut self,
+        trades: std::result::Result<&[Trade], &str>,
+        now_ms: u64,
+    ) {
         let book = (self.source == BookSource::Exchange)
             .then_some((self.bids.as_slice(), self.asks.as_slice()));
-        let found = super::patterns::detect(trades, book);
+        let mut found = super::patterns::detect(trades, book);
+        found.stale_tape = trades
+            .ok()
+            .and_then(|t| super::patterns::stale_tape(t, now_ms));
+        // Before the bot-pattern line, which a repeat rewrites in place.
+        self.checks.extend(found.stale_tape.map(|s| s.check()));
         self.checks.push(found.check());
         self.bot_patterns = Some(found);
     }
@@ -2189,5 +2208,63 @@ mod tests {
             "{md}"
         );
         assert!(md.contains("- Bid ladder: 20 levels × 100"), "{md}");
+    }
+
+    /// A dead market (no asks, newest trade 23 h old) must warn that its
+    /// tape is old, or a reader takes the gaps for current activity; a live
+    /// one must not.
+    #[test]
+    fn test_a_stale_tape_warns_in_the_summary_and_a_fresh_one_does_not() {
+        let book = OrderBook {
+            pair: "USDN/USDT".to_string(),
+            source: crate::market::types::BookSource::Exchange,
+            bids: side(0.5, -0.01, &[1.0; 3]),
+            asks: vec![],
+        };
+        let tape: Vec<Trade> = (0..60u64)
+            .map(|i| Trade {
+                price: 1.0,
+                quantity: 1.0 + i as f64,
+                quote_quantity: None,
+                timestamp_ms: i * 34_000,
+                side: crate::market::types::TradeSide::Buy,
+                id: None,
+            })
+            .collect();
+        let newest = 59 * 34_000;
+        let stale_line = |s: &MarketSummary| {
+            s.checks
+                .iter()
+                .filter(|c| c.message().starts_with("Stale trade tape"))
+                .count()
+        };
+
+        let mut fresh = MarketSummary::from_order_book(&book, &HealthThresholds::default(), None);
+        fresh.check_bot_patterns_at(Ok(&tape), newest + 60_000);
+        assert_eq!(stale_line(&fresh), 0, "{:?}", fresh.checks);
+        assert!(!fresh.format_text(Some("weex")).contains("Stale tape"));
+
+        let mut dead = MarketSummary::from_order_book(&book, &HealthThresholds::default(), None);
+        let healthy = dead.healthy;
+        dead.check_bot_patterns_at(Ok(&tape), newest + 23 * 3_600_000);
+        assert_eq!(stale_line(&dead), 1, "{:?}", dead.checks);
+        let check = dead
+            .checks
+            .iter()
+            .find(|c| c.message().starts_with("Stale trade tape"))
+            .unwrap();
+        assert_eq!(check.status(), "warn");
+        assert_eq!(dead.healthy, healthy, "an advisory never changes healthy");
+        let md = dead.format_markdown(Some("weex"));
+        assert!(
+            md.contains("- Stale tape: newest trade 23h 00m ago"),
+            "{md}"
+        );
+        assert!(dead.to_json()["bot_patterns"]["stale_tape"].is_object());
+
+        // A repeat rewrites the bot-pattern line and keeps the stale one.
+        let flat: Vec<(i64, f64)> = (0..10).map(|i| (i * 30_000, 1.0)).collect();
+        dead.check_depth_cycles(&flat, &flat);
+        assert_eq!(stale_line(&dead), 1, "{:?}", dead.checks);
     }
 }
