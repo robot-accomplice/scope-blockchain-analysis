@@ -1,0 +1,90 @@
+id: coinstore
+name: Coinstore Spot
+base_url: https://api.coinstore.com/api
+timeout_secs: 15
+rate_limit_per_sec: 10
+
+symbol:
+  template: "{base}{quote}"
+  default_quote: USDT
+
+# Coinstore sends an error with HTTP 200 and a `code` other than 0.
+error_envelope:
+  code_key: code
+  ok_codes: ["0"]
+  message_key: message
+
+capabilities:
+  order_book:
+    path: /v1/market/depth/{pair}
+    params:
+      depth: "100"
+    response_root: data
+    response:
+      # Each level is [price, qty, flag]. The flag is ignored.
+      asks_key: a
+      bids_key: b
+      level_format: positional
+
+  # Coinstore has only an all-pairs ticker. The filter picks the pair.
+  ticker:
+    path: /v1/market/tickers
+    response_root: data
+    response:
+      filter:
+        field: symbol
+        value: "{pair}"
+      last_price: close
+      high_24h: high
+      low_24h: low
+      volume_24h: volume
+      quote_volume_24h: amount
+      best_bid: bid
+      best_ask: ask
+
+  trades:
+    path: /v1/market/trade/{pair}
+    params:
+      size: "{limit}"
+    # The server caps the reply at 200 trades.
+    max_limit: 200
+    response_root: data
+    response:
+      price: price
+      quantity: volume
+      timestamp_ms: ts
+      id: tradeId
+      side:
+        field: takerSide
+        mapping:
+          BUY: buy
+          SELL: sell
+
+  ohlc:
+    path: /v1/market/kline/{pair}
+    params:
+      period: "{interval}"
+      size: "{limit}"
+    # The periods `1hour` and `1month` give HTTP 500, so 1h maps to `60min`
+    # and there is no monthly interval.
+    interval_map:
+      1m: 1min
+      5m: 5min
+      15m: 15min
+      30m: 30min
+      1h: 60min
+      4h: 4hour
+      12h: 12hour
+      1d: 1day
+      1w: 1week
+    response_root: data
+    response:
+      items_key: item
+      ohlc_format: objects
+      open_time: startTime
+      close_time: endTime
+      open: open
+      high: high
+      low: low
+      close: close
+      ohlc_volume: volume

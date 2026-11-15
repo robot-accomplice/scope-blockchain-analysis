@@ -37,6 +37,11 @@
       "sha256": "f5257e1b08315ba0361dd743b5eabcd7b9e5a38da10c80bc2b85a0e4a6155392"
     },
     {
+      "id": "coinstore",
+      "file": "coinstore.yaml",
+      "sha256": "872a2edc251c6c1473fe2a6322391d12208abf6456325148f67d47b74a064177"
+    },
+    {
       "id": "crypto_com",
       "file": "crypto_com.yaml",
       "sha256": "0bfd7b28774a70dea9813f8e045b0744fc43a48432b32ed146941246f8992aed"

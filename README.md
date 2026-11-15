@@ -29,7 +29,7 @@ A command-line tool for blockchain data analysis, portfolio tracking, transactio
 - **Transaction Analysis**: Look up and decode blockchain transactions across all supported chains
 - **Token Crawling**: Crawl DEX data for any token -- price, volume, liquidity, holder analysis, and risk scoring with markdown report generation
 - **Live Monitoring**: The monitor wizard in the TUI builds a watchlist (tokens, pairs, addresses; market health checks and metric rules; interval, duration, CSV and report). Its grid shows each target's pass/fail state live, with the same health results as `market summary`, a detail pane with charts, and keys that open the evidence. Watchlists are saved and run again with `watch open <name>`.
-- **Exchange Venues**: Data-driven CEX integration via YAML descriptors from a venue catalog that `scope venues update` syncs (19 exchanges, including Binance, Coinbase, Kraken, OKX, Bybit, KuCoin, Gemini and WEEX) with order book, ticker, trades, and OHLC support; new and fixed venues arrive without a new scope. Add your own by dropping a YAML file in `~/.scope-bca/venues/`
+- **Exchange Venues**: Data-driven CEX integration via YAML descriptors from a venue catalog that `scope venues update` syncs (20 exchanges, including Binance, Coinbase, Kraken, OKX, Bybit, KuCoin, Gemini and WEEX) with order book, ticker, trades, and OHLC support; new and fixed venues arrive without a new scope. Add your own by dropping a YAML file in `~/.scope-bca/venues/`
 - **Portfolio Management**: Track multiple addresses across chains with labels, tags, and aggregated balance views; `@label` shortcuts work in both CLI and web UI for instant address recall
 - **Compliance & Risk Assessment**: Risk scoring, transaction pattern detection, taint analysis, and compliance reporting
 - **Data Export**: Export address history and portfolio data to JSON or CSV with date range filtering
@@ -610,6 +610,7 @@ No venue is compiled into scope. The descriptors live in this repository as a **
 | Bitstamp | `bitstamp` | order book, ticker, trades, OHLC (USD pairs) |
 | Bybit | `bybit` | order book, ticker, trades, OHLC |
 | Coinbase | `coinbase` | order book, ticker, trades, OHLC |
+| Coinstore Spot | `coinstore` | order book, ticker, trades, OHLC |
 | Crypto.com | `crypto_com` | order book, ticker, trades, OHLC |
 | Gate.io | `gateio` | order book, ticker, trades, OHLC |
 | Gemini | `gemini` | order book, ticker, trades, OHLC (USD pairs) |

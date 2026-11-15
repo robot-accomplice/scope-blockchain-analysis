@@ -2671,6 +2671,162 @@ mod tests {
         mock.assert_async().await;
     }
 
+    // Coinstore: the real `coinstore.yaml` against replies shaped as the
+    // venue sent them (recorded 2026-11-15).
+
+    fn coinstore_client(base_url: &str) -> ConfigurableExchangeClient {
+        let mut desc: crate::market::descriptor::VenueDescriptor =
+            serde_saphyr::from_str(include_str!("../../venues/coinstore.yaml")).unwrap();
+        desc.base_url = base_url.to_string();
+        ConfigurableExchangeClient::with_http(desc, crate::http::test_transport())
+    }
+
+    /// Each depth level has a third element, a flag. It is not part of the
+    /// book. A reader that took it for the quantity or failed on the
+    /// longer array would show a wrong book.
+    #[tokio::test]
+    async fn test_coinstore_order_book_ignores_the_level_flag() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/v1/market/depth/BTCUSDT")
+            .match_query(mockito::Matcher::UrlEncoded("depth".into(), "100".into()))
+            .with_body(include_str!("../../tests/fixtures/coinstore-depth.json"))
+            .create_async()
+            .await;
+
+        let book = coinstore_client(&server.url())
+            .fetch_order_book("BTCUSDT")
+            .await
+            .unwrap();
+
+        let asks: Vec<_> = book.asks.iter().map(|l| (l.price, l.quantity)).collect();
+        let bids: Vec<_> = book.bids.iter().map(|l| (l.price, l.quantity)).collect();
+        assert_eq!(
+            asks,
+            [(63947.71, 0.010001), (63948.5, 0.5), (63949.0, 1.25)]
+        );
+        assert_eq!(bids, [(63946.9, 0.2), (63946.4, 0.093002), (63945.0, 3.0)]);
+        mock.assert_async().await;
+    }
+
+    /// The side is the taker's side in capitals, the time is in
+    /// milliseconds in `ts` (`time` is in seconds), and the id is a number.
+    #[tokio::test]
+    async fn test_coinstore_trades_read_side_milliseconds_and_id() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/v1/market/trade/BTCUSDT")
+            .match_query(mockito::Matcher::UrlEncoded("size".into(), "200".into()))
+            .with_body(include_str!("../../tests/fixtures/coinstore-trades.json"))
+            .create_async()
+            .await;
+
+        // The server caps at 200, so a larger request asks for 200.
+        let trades = coinstore_client(&server.url())
+            .fetch_recent_trades("BTCUSDT", 500)
+            .await
+            .unwrap();
+
+        assert_eq!(trades.len(), 2);
+        assert_eq!(trades[0].side, TradeSide::Sell);
+        assert_eq!(trades[1].side, TradeSide::Buy);
+        assert_eq!(trades[0].timestamp_ms, 1_794_730_289_000);
+        assert_eq!(trades[1].timestamp_ms, 1_794_730_287_123);
+        assert_eq!(trades[0].id.as_deref(), Some("274466090"));
+        assert_eq!(trades[0].price, 63947.7);
+        assert_eq!(trades[0].quantity, 0.000981);
+        mock.assert_async().await;
+    }
+
+    /// Coinstore sends candle times in seconds. Scope shows milliseconds.
+    /// The reply is not in order, and the venue has no `1hour` period: `1h`
+    /// must go out as `60min`, or the venue answers with HTTP 500.
+    #[tokio::test]
+    async fn test_coinstore_candles_use_ms_oldest_first_and_period_60min_for_1h() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/v1/market/kline/BTCUSDT")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("period".into(), "60min".into()),
+                mockito::Matcher::UrlEncoded("size".into(), "3".into()),
+            ]))
+            .with_body(include_str!("../../tests/fixtures/coinstore-kline.json"))
+            .create_async()
+            .await;
+
+        let candles = coinstore_client(&server.url())
+            .fetch_ohlc("BTCUSDT", "1h", 3)
+            .await
+            .unwrap();
+
+        let opens: Vec<_> = candles.iter().map(|c| c.open_time).collect();
+        assert_eq!(
+            opens,
+            [1_794_730_080_000, 1_794_730_140_000, 1_794_730_200_000]
+        );
+        assert_eq!(candles[1].close_time, 1_794_730_199_000);
+        assert_eq!(candles[1].open, 64051.34);
+        assert_eq!(candles[1].high, 64093.57);
+        assert_eq!(candles[1].low, 64029.23);
+        assert_eq!(candles[1].close, 64054.89);
+        assert_eq!(candles[1].volume, 3.715296);
+        mock.assert_async().await;
+    }
+
+    /// Coinstore has no ticker for one pair. It sends all pairs, and the
+    /// filter must pick the requested one, not the first.
+    #[tokio::test]
+    async fn test_coinstore_ticker_filter_picks_the_requested_pair() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/v1/market/tickers")
+            .with_body(include_str!("../../tests/fixtures/coinstore-tickers.json"))
+            .create_async()
+            .await;
+
+        let ticker = coinstore_client(&server.url())
+            .fetch_ticker("BTCUSDT")
+            .await
+            .unwrap();
+
+        assert_eq!(ticker.last_price, Some(63947.0));
+        assert_eq!(ticker.high_24h, Some(64500.5));
+        assert_eq!(ticker.low_24h, Some(62800.25));
+        assert_eq!(ticker.volume_24h, Some(1543.21));
+        assert_eq!(ticker.quote_volume_24h, Some(98765432.1));
+        assert_eq!(ticker.best_bid, Some(63946.4));
+        assert_eq!(ticker.best_ask, Some(63947.71));
+        // The venue sends no percent change, and Scope does not compute one.
+        assert_eq!(ticker.price_change_pct_24h, None);
+        mock.assert_async().await;
+    }
+
+    /// Coinstore reports an error with HTTP 200. The user must see the
+    /// venue's own message, not a missing key.
+    #[tokio::test]
+    async fn test_coinstore_error_reply_names_the_venue_message() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/v1/market/depth/ZZQXUSDT")
+            .match_query(mockito::Matcher::Any)
+            .with_body(r#"{"message":"Field symbol Invalid","code":400}"#)
+            .create_async()
+            .await;
+
+        let err = coinstore_client(&server.url())
+            .fetch_order_book("ZZQXUSDT")
+            .await
+            .unwrap_err();
+
+        match err {
+            ScopeError::Venue { venue, message } => {
+                assert_eq!(venue, "coinstore");
+                assert_eq!(message, "Field symbol Invalid (code 400)");
+            }
+            other => panic!("expected a venue error, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn test_fetch_ohlc_no_capability() {
         let desc = make_test_descriptor();
