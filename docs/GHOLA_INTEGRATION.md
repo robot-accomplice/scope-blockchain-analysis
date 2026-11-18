@@ -197,8 +197,11 @@ The `buffer_size` setting (default 4096) controls the read buffer for responses 
 
 ## Troubleshooting
 
+In this table, `ghola --serve` is the ghola v0 command. With ghola v1.0.0 and later, use `ghola serve`.
+
 | Symptom | Cause | Fix |
 |---------|-------|-----|
+| `ghola did not start: "... --serve" exited (...); "... serve" exited (...)` | Both launch forms failed: the port is in use, or the ghola binary is damaged | Run `ghola --serve` (v0) or `ghola serve` (v1) manually and read its error |
 | `⚠ Ghola sidecar enabled but unavailable` | ghola not installed | `scope setup`, or `go install github.com/robot-accomplice/ghola/cmd/ghola@latest` |
 | `did not answer on 127.0.0.1:18789` | Port 18789 blocked or ghola crash | Check `ghola --serve` manually, verify port availability |
 | `does not hold 64 hex characters` | The token file is empty or damaged | Stop `ghola --serve`, start it again, and run Scope again |
