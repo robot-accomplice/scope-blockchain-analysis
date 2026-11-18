@@ -154,7 +154,7 @@ If ghola is not installed:
 When `ghola.enabled` is `true` in your config, Scope:
 
 1. Checks if the ghola sidecar answers `GET /health` on `127.0.0.1:18789` with status 200
-2. If not, starts `ghola --serve` from PATH or `~/.scope-bca/bin` and waits up to 5 seconds for it
+2. If not, starts `ghola --serve` (ghola v0) from PATH or `~/.scope-bca/bin` and waits up to 5 seconds for it. If that process exits first, it starts `ghola serve` (ghola v1.0.0 and later) and waits up to 5 seconds again. A process that runs but does not answer is stopped, and the second form does not run
 3. Reads the bridge token (see below)
 4. Routes all HTTP requests through the sidecar bridge, with the token as a bearer token
 5. Falls back to native HTTP if no sidecar answers or the token cannot be read (and, on a terminal, offers to install ghola when it is missing)
