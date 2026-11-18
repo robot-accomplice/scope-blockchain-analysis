@@ -154,7 +154,7 @@ If ghola is not installed:
 When `ghola.enabled` is `true` in your config, Scope:
 
 1. Checks if the ghola sidecar answers `GET /health` on `127.0.0.1:18789` with status 200
-2. If not, starts `ghola --serve` from PATH or `~/.scope-bca/bin` and waits up to 5 seconds for it
+2. If not, starts `ghola --serve` (ghola v0) from PATH or `~/.scope-bca/bin` and waits up to 5 seconds for it. If that process exits first, it starts `ghola serve` (ghola v1.0.0 and later) and waits up to 5 seconds again. A process that runs but does not answer is stopped, and the second form does not run
 3. Reads the bridge token (see below)
 4. Routes all HTTP requests through the sidecar bridge, with the token as a bearer token
 5. Falls back to native HTTP if no sidecar answers or the token cannot be read (and, on a terminal, offers to install ghola when it is missing)
@@ -197,8 +197,11 @@ The `buffer_size` setting (default 4096) controls the read buffer for responses 
 
 ## Troubleshooting
 
+In this table, `ghola --serve` is the ghola v0 command. With ghola v1.0.0 and later, use `ghola serve`.
+
 | Symptom | Cause | Fix |
 |---------|-------|-----|
+| `ghola did not start: "... --serve" exited (...); "... serve" exited (...)` | Both launch forms failed: the port is in use, or the ghola binary is damaged | Run `ghola --serve` (v0) or `ghola serve` (v1) manually and read its error |
 | `⚠ Ghola sidecar enabled but unavailable` | ghola not installed | `scope setup`, or `go install github.com/robot-accomplice/ghola/cmd/ghola@latest` |
 | `did not answer on 127.0.0.1:18789` | Port 18789 blocked or ghola crash | Check `ghola --serve` manually, verify port availability |
 | `does not hold 64 hex characters` | The token file is empty or damaged | Stop `ghola --serve`, start it again, and run Scope again |

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Ghola mode now also starts a ghola that has the `serve` subcommand (v1.0.0 and later), which removes `--serve`. Scope runs `ghola --serve` first. If that process exits before it answers, Scope runs `ghola serve`. If both exit, the error names both commands and their exit statuses. A ghola that runs but does not answer is stopped, and Scope does not try the second form.
+
 ## [0.8.11] - 2026-11-15
 
 ### Added
