@@ -474,7 +474,6 @@ pub fn adopt_sidecar(child: Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(unix)]
     use crate::http::test_stub::{retry_while_busy, script};
 
     const TOKEN_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -625,13 +624,32 @@ mod tests {
         assert_eq!(stop_spawned_sidecar(), None);
     }
 
+    /// What a fake ghola runs to stay alive until it is stopped. On Windows
+    /// the `ping` outlives `cmd.exe` when `kill` stops it, and ends alone
+    /// after about 20 seconds; it holds no pipe, so the tests do not wait.
+    const STAY_ALIVE: &str = if cfg!(windows) {
+        "ping -n 20 127.0.0.1 >nul"
+    } else {
+        "exec sleep 60"
+    };
+
+    /// The start of an exit status in a message: the text differs by platform.
+    const EXIT_LABEL: &str = if cfg!(windows) {
+        "exit code"
+    } else {
+        "exit status"
+    };
+
+    /// A fake ghola: `unix` runs under `sh`, `windows` as a batch file.
+    fn fake(dir: &Path, unix: &str, windows: &str) -> PathBuf {
+        script(dir, "ghola", if cfg!(windows) { windows } else { unix })
+    }
+
     /// [`start_sidecar`], retried while Linux says the fake script is busy.
-    #[cfg(unix)]
     fn start_retrying(ghola: &Path, timeout: Duration) -> Result<u32, ScopeError> {
         retry_while_busy(|| start_sidecar(ghola, timeout))
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_start_sidecar_reports_a_sidecar_that_exits() {
         let _lock = sidecar_lock();
@@ -640,13 +658,16 @@ mod tests {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
-        let ghola = script(dir.path(), "ghola", "[ \"$1\" = --serve ] && exit 3");
+        let ghola = fake(
+            dir.path(),
+            "[ \"$1\" = --serve ] && exit 3",
+            "if \"%1\"==\"--serve\" exit /b 3",
+        );
         let err = start_retrying(&ghola, Duration::from_secs(10)).unwrap_err();
         assert!(err.to_string().contains("exited"), "{err}");
         assert_eq!(spawned_sidecar(), None);
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_start_sidecar_stops_a_sidecar_that_never_answers() {
         let _lock = sidecar_lock();
@@ -655,7 +676,7 @@ mod tests {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
-        let ghola = script(dir.path(), "ghola", "exec sleep 60");
+        let ghola = fake(dir.path(), STAY_ALIVE, STAY_ALIVE);
         let started = Instant::now();
         let err = start_retrying(&ghola, Duration::from_millis(300)).unwrap_err();
         assert!(err.to_string().contains("did not answer"), "{err}");
@@ -668,13 +689,11 @@ mod tests {
     /// count as a running bridge. With `ready_file` set, it answers only
     /// once that file exists: the fake ghola creates it when it "starts the
     /// bridge", so a form that only exits never sees an answer.
-    #[cfg(unix)]
     struct FakeBridge {
         done: std::sync::Arc<std::sync::atomic::AtomicBool>,
         thread: std::thread::JoinHandle<()>,
     }
 
-    #[cfg(unix)]
     impl FakeBridge {
         /// `None` when the sidecar's port is in use.
         fn start(ready_file: Option<PathBuf>) -> Option<Self> {
@@ -713,7 +732,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_start_sidecar_keeps_a_sidecar_that_answers() {
         let _lock = sidecar_lock();
@@ -721,7 +739,7 @@ mod tests {
             return;
         };
         let dir = tempfile::tempdir().unwrap();
-        let ghola = script(dir.path(), "ghola", "exec sleep 60");
+        let ghola = fake(dir.path(), STAY_ALIVE, STAY_ALIVE);
         let started = start_retrying(&ghola, Duration::from_secs(5));
         bridge.stop();
         let pid = started.unwrap();
@@ -733,36 +751,48 @@ mod tests {
     /// A fake ghola that logs each call's arguments to `args` and starts the
     /// "bridge" (creates `ready`) only for the arguments in `answers_on`.
     /// For every other form it exits with `exit_code`.
-    #[cfg(unix)]
     fn fake_ghola(dir: &Path, answers_on: Option<&str>, exit_code: i32) -> PathBuf {
         let args = dir.join("args");
         let ready = dir.join("ready");
-        let answer = match answers_on {
-            Some(form) => format!(
-                "if [ \"$*\" = \"{form}\" ]; then touch \"{}\"; exec sleep 60; fi\n",
-                ready.display()
+        let (unix_answer, windows_answer) = match answers_on {
+            Some(form) => (
+                format!(
+                    "if [ \"$*\" = \"{form}\" ]; then touch \"{}\"; {STAY_ALIVE}; fi
+",
+                    ready.display()
+                ),
+                format!(
+                    "if \"%*\"==\"{form}\" (type nul > \"{}\" & {STAY_ALIVE} & exit /b 0)
+",
+                    ready.display()
+                ),
             ),
-            None => String::new(),
+            None => (String::new(), String::new()),
         };
-        script(
+        fake(
             dir,
-            "ghola",
             &format!(
-                "echo \"$*\" >> \"{}\"\n{answer}exit {exit_code}",
+                "echo \"$*\" >> \"{}\"
+{unix_answer}exit {exit_code}",
+                args.display()
+            ),
+            &format!(
+                "echo %*>> \"{}\"
+{windows_answer}exit /b {exit_code}",
                 args.display()
             ),
         )
     }
 
     /// The forms the fake ghola was run with, one per line.
-    #[cfg(unix)]
     fn forms_run(dir: &Path) -> String {
-        std::fs::read_to_string(dir.join("args")).unwrap_or_default()
+        std::fs::read_to_string(dir.join("args"))
+            .unwrap_or_default()
+            .replace("\r\n", "\n")
     }
 
     /// Why: ghola v1.0.0 removes `--serve`. Without the fallback, ghola mode
     /// is lost on the day v1.0.0 ships.
-    #[cfg(unix)]
     #[test]
     fn test_start_sidecar_falls_back_to_the_serve_subcommand() {
         let _lock = sidecar_lock();
@@ -780,7 +810,6 @@ mod tests {
 
     /// Why: a v0 ghola takes `serve` as a URL. Once `--serve` works, the
     /// second form must never run.
-    #[cfg(unix)]
     #[test]
     fn test_start_sidecar_does_not_run_serve_when_dash_dash_serve_works() {
         let _lock = sidecar_lock();
@@ -798,7 +827,6 @@ mod tests {
 
     /// Why: when no form starts, the user must see both tries and why each
     /// ended, to tell a broken install from a version problem.
-    #[cfg(unix)]
     #[test]
     fn test_start_sidecar_names_both_forms_when_both_exit() {
         let _lock = sidecar_lock();
@@ -807,10 +835,10 @@ mod tests {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
-        let ghola = script(
+        let ghola = fake(
             dir.path(),
-            "ghola",
             "[ \"$1\" = --serve ] && exit 2\nexit 1",
+            "if \"%1\"==\"--serve\" exit /b 2\nexit /b 1",
         );
         let err = start_retrying(&ghola, Duration::from_secs(10))
             .unwrap_err()
@@ -818,11 +846,11 @@ mod tests {
         let bin = ghola.display();
         assert!(err.contains("ghola did not start: "), "{err}");
         assert!(
-            err.contains(&format!("\"{bin} --serve\" exited (exit status: 2)")),
+            err.contains(&format!("\"{bin} --serve\" exited ({EXIT_LABEL}: 2)")),
             "{err}"
         );
         assert!(
-            err.contains(&format!("\"{bin} serve\" exited (exit status: 1)")),
+            err.contains(&format!("\"{bin} serve\" exited ({EXIT_LABEL}: 1)")),
             "{err}"
         );
         assert_eq!(spawned_sidecar(), None);
@@ -830,7 +858,6 @@ mod tests {
 
     /// Why: a ghola that runs but is slow is not a wrong version. A timeout
     /// must not start the second form, which a v0 ghola takes as a URL.
-    #[cfg(unix)]
     #[test]
     fn test_start_sidecar_timeout_does_not_try_the_serve_subcommand() {
         let _lock = sidecar_lock();
@@ -840,10 +867,10 @@ mod tests {
         }
         let dir = tempfile::tempdir().unwrap();
         let args = dir.path().join("args");
-        let ghola = script(
+        let ghola = fake(
             dir.path(),
-            "ghola",
-            &format!("echo \"$*\" >> \"{}\"\nexec sleep 60", args.display()),
+            &format!("echo \"$*\" >> \"{}\"\n{STAY_ALIVE}", args.display()),
+            &format!("echo %*>> \"{}\"\n{STAY_ALIVE}", args.display()),
         );
         let err = start_retrying(&ghola, Duration::from_millis(500)).unwrap_err();
         assert!(err.to_string().contains("did not answer"), "{err}");
