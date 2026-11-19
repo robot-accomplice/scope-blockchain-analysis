@@ -7,7 +7,8 @@
 //!
 //! The sidecar is an external Go binary. When nothing answers on that
 //! address, `http::shared::build` starts it with [`start_sidecar`]
-//! (`<binary> --serve`, the binary found by `ghola_install::find`). The
+//! (`<binary> --serve` for ghola v0, then `<binary> serve` for ghola v1.0.0
+//! and later; the binary found by `ghola_install::find`). The
 //! sidecar it started is kept here until [`stop_spawned_sidecar`] stops it;
 //! the caller decides when (the CLI asks at exit).
 
@@ -326,48 +327,129 @@ fn spawned() -> std::sync::MutexGuard<'static, Option<Child>> {
     SPAWNED.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Starts `binary --serve` and waits up to `timeout` for the sidecar to
-/// answer on the sidecar's address (`127.0.0.1:18789`). Returns its PID. The sidecar is kept until
+/// The arguments of ghola v0 (every release up to v0.8.0) to run the bridge.
+const SERVE_ARGS_V0: &[&str] = &["--serve"];
+/// The arguments of ghola v1.0.0 and later: v1 removes `--serve` and has the
+/// `serve` subcommand. A v0 ghola has no such subcommand and would take
+/// `serve` as a URL, so this form is only the second try.
+const SERVE_ARGS_V1: &[&str] = &["serve"];
+
+/// What happened to one started ghola process.
+enum Attempt {
+    /// The bridge answers; the child is the sidecar.
+    Answered(Child),
+    /// The child ended before the bridge answered.
+    Exited(std::process::ExitStatus),
+    /// The child still runs but did not answer in time; it is stopped.
+    TimedOut,
+}
+
+/// A sidecar that answered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Started {
+    /// The sidecar's process ID.
+    pub pid: u32,
+    /// The command that started it, for example `ghola serve`.
+    pub command: String,
+}
+
+/// `binary` with `args`, as text for messages and logs.
+fn command_line(binary: &Path, args: &[&str]) -> String {
+    format!("{} {}", binary.display(), args.join(" "))
+}
+
+/// Starts `binary` with `args` and waits up to `timeout` for the bridge.
+/// Logs the args and the outcome. It never logs the bridge token.
+fn try_serve(binary: &Path, args: &[&str], timeout: Duration) -> Result<Attempt, ScopeError> {
+    let line = command_line(binary, args);
+    let mut child = Command::new(binary)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| ScopeError::io_context(e, format!("failed to start {line}")))?;
+    tracing::info!(command = %line, "starting the ghola sidecar");
+    let start = Instant::now();
+    loop {
+        if is_bridge_running() {
+            tracing::info!(command = %line, pid = child.id(), "the ghola sidecar answered");
+            return Ok(Attempt::Answered(child));
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            tracing::warn!(command = %line, %status, "the ghola sidecar exited before it answered");
+            return Ok(Attempt::Exited(status));
+        }
+        if start.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            tracing::warn!(command = %line, ?timeout, "the ghola sidecar did not answer in time");
+            return Ok(Attempt::TimedOut);
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
+/// Starts `binary --serve` (ghola v0) and waits up to `timeout` for the
+/// sidecar to answer on the sidecar's address (`127.0.0.1:18789`). When that
+/// process exits before it answers, it starts `binary serve` (ghola v1.0.0
+/// and later) once, and waits up to a fresh `timeout`. The second attempt
+/// gets a full window, not the time left: a v1 ghola makes `--serve` fail at
+/// once, so little time is lost, and a slow second start is not cut short.
+/// A timeout does not start the second form: a process that still runs is
+/// slow, not the wrong version. Returns its PID and the command that
+/// started it. The sidecar is kept until
 /// [`stop_spawned_sidecar`]; it is not stopped when this process exits.
 ///
 /// It blocks the calling thread while it waits.
 ///
 /// # Errors
 ///
-/// Returns `IoError` when the binary cannot run; `Network` when it exits
-/// or does not answer in time (it is stopped then).
-pub fn start_sidecar(binary: &Path, timeout: Duration) -> Result<u32, ScopeError> {
-    let mut child = Command::new(binary)
-        .arg("--serve")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| {
-            ScopeError::io_context(e, format!("failed to start {} --serve", binary.display()))
-        })?;
-    let start = Instant::now();
-    loop {
-        if is_bridge_running() {
-            let pid = child.id();
-            *spawned() = Some(child);
-            return Ok(pid);
+/// Returns `IoError` when the binary cannot run (no second try). Returns
+/// `Network` when both forms exit (the message names both and their exit
+/// statuses), or when the form that runs does not answer in time (it is
+/// stopped then).
+pub fn start_sidecar(binary: &Path, timeout: Duration) -> Result<Started, ScopeError> {
+    let first = match try_serve(binary, SERVE_ARGS_V0, timeout)? {
+        Attempt::Answered(child) => return Ok(adopt(child, binary, SERVE_ARGS_V0)),
+        Attempt::TimedOut => return Err(timeout_error(timeout)),
+        Attempt::Exited(status) => status,
+    };
+    tracing::info!(
+        command = %command_line(binary, SERVE_ARGS_V0),
+        "the first form exited; trying the `serve` subcommand"
+    );
+    match try_serve(binary, SERVE_ARGS_V1, timeout)? {
+        Attempt::Answered(child) => {
+            tracing::info!(
+                command = %command_line(binary, SERVE_ARGS_V1),
+                "the `serve` subcommand started the sidecar (ghola v1.0.0 or later)"
+            );
+            Ok(adopt(child, binary, SERVE_ARGS_V1))
         }
-        if let Ok(Some(status)) = child.try_wait() {
-            return Err(ScopeError::Network(format!(
-                "{} --serve exited ({status}) before it answered on {SIDECAR_ADDR}",
-                binary.display()
-            )));
-        }
-        if start.elapsed() >= timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(ScopeError::Network(format!(
-                "the ghola sidecar did not answer on {SIDECAR_ADDR} within {timeout:?}"
-            )));
-        }
-        std::thread::sleep(POLL_INTERVAL);
+        Attempt::TimedOut => Err(timeout_error(timeout)),
+        Attempt::Exited(second) => Err(ScopeError::Network(format!(
+            "ghola did not start: \"{}\" exited ({first}); \"{}\" exited ({second})",
+            command_line(binary, SERVE_ARGS_V0),
+            command_line(binary, SERVE_ARGS_V1),
+        ))),
     }
+}
+
+/// Keeps `child` as the sidecar, started by `binary` with `args`.
+fn adopt(child: Child, binary: &Path, args: &[&str]) -> Started {
+    let pid = child.id();
+    *spawned() = Some(child);
+    Started {
+        pid,
+        command: command_line(binary, args),
+    }
+}
+
+fn timeout_error(timeout: Duration) -> ScopeError {
+    ScopeError::Network(format!(
+        "the ghola sidecar did not answer on {SIDECAR_ADDR} within {timeout:?}"
+    ))
 }
 
 /// The PID of the sidecar this process started, while it runs.
@@ -405,7 +487,6 @@ pub fn adopt_sidecar(child: Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(unix)]
     use crate::http::test_stub::{retry_while_busy, script};
 
     const TOKEN_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -556,13 +637,32 @@ mod tests {
         assert_eq!(stop_spawned_sidecar(), None);
     }
 
+    /// What a fake ghola runs to stay alive until it is stopped. On Windows
+    /// the `ping` outlives `cmd.exe` when `kill` stops it, and ends alone
+    /// after about 20 seconds; it holds no pipe, so the tests do not wait.
+    const STAY_ALIVE: &str = if cfg!(windows) {
+        "ping -n 20 127.0.0.1 >nul"
+    } else {
+        "exec sleep 60"
+    };
+
+    /// The start of an exit status in a message: the text differs by platform.
+    const EXIT_LABEL: &str = if cfg!(windows) {
+        "exit code"
+    } else {
+        "exit status"
+    };
+
+    /// A fake ghola: `unix` runs under `sh`, `windows` as a batch file.
+    fn fake(dir: &Path, unix: &str, windows: &str) -> PathBuf {
+        script(dir, "ghola", if cfg!(windows) { windows } else { unix })
+    }
+
     /// [`start_sidecar`], retried while Linux says the fake script is busy.
-    #[cfg(unix)]
-    fn start_retrying(ghola: &Path, timeout: Duration) -> Result<u32, ScopeError> {
+    fn start_retrying(ghola: &Path, timeout: Duration) -> Result<Started, ScopeError> {
         retry_while_busy(|| start_sidecar(ghola, timeout))
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_start_sidecar_reports_a_sidecar_that_exits() {
         let _lock = sidecar_lock();
@@ -571,13 +671,16 @@ mod tests {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
-        let ghola = script(dir.path(), "ghola", "[ \"$1\" = --serve ] && exit 3");
+        let ghola = fake(
+            dir.path(),
+            "[ \"$1\" = --serve ] && exit 3",
+            "if \"%1\"==\"--serve\" exit /b 3",
+        );
         let err = start_retrying(&ghola, Duration::from_secs(10)).unwrap_err();
         assert!(err.to_string().contains("exited"), "{err}");
         assert_eq!(spawned_sidecar(), None);
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_start_sidecar_stops_a_sidecar_that_never_answers() {
         let _lock = sidecar_lock();
@@ -586,7 +689,7 @@ mod tests {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
-        let ghola = script(dir.path(), "ghola", "exec sleep 60");
+        let ghola = fake(dir.path(), STAY_ALIVE, STAY_ALIVE);
         let started = Instant::now();
         let err = start_retrying(&ghola, Duration::from_millis(300)).unwrap_err();
         assert!(err.to_string().contains("did not answer"), "{err}");
@@ -594,45 +697,202 @@ mod tests {
         assert_eq!(spawned_sidecar(), None);
     }
 
-    #[cfg(unix)]
+    /// A fake bridge on the sidecar's port. The probe needs `GET /health` ->
+    /// 200, so a thread answers each probe; an open port alone does not
+    /// count as a running bridge. With `ready_file` set, it answers only
+    /// once that file exists: the fake ghola creates it when it "starts the
+    /// bridge", so a form that only exits never sees an answer.
+    struct FakeBridge {
+        done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        thread: std::thread::JoinHandle<()>,
+    }
+
+    impl FakeBridge {
+        /// `None` when the sidecar's port is in use.
+        fn start(ready_file: Option<PathBuf>) -> Option<Self> {
+            let Ok(port) = std::net::TcpListener::bind(SIDECAR_ADDR) else {
+                eprintln!("skipped: {SIDECAR_ADDR} is in use");
+                return None;
+            };
+            port.set_nonblocking(true).unwrap();
+            let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let thread = {
+                let done = done.clone();
+                std::thread::spawn(move || {
+                    while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                        match port.accept() {
+                            Ok((mut conn, _)) => {
+                                let _ = conn.set_nonblocking(false);
+                                let mut request = [0u8; 512];
+                                let _ = conn.read(&mut request);
+                                if ready_file.as_ref().is_none_or(|f| f.exists()) {
+                                    let _ = conn.write_all(
+                                        b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\n{\"status\":\"ok\"}",
+                                    );
+                                }
+                            }
+                            Err(_) => std::thread::sleep(Duration::from_millis(10)),
+                        }
+                    }
+                })
+            };
+            Some(Self { done, thread })
+        }
+
+        fn stop(self) {
+            self.done.store(true, std::sync::atomic::Ordering::Relaxed);
+            self.thread.join().unwrap();
+        }
+    }
+
     #[test]
     fn test_start_sidecar_keeps_a_sidecar_that_answers() {
         let _lock = sidecar_lock();
-        // The sidecar's port, held here. The probe needs `GET /health` -> 200,
-        // so a thread answers each probe until the test ends; an open port alone
-        // does not count as a running bridge.
-        let Ok(port) = std::net::TcpListener::bind(SIDECAR_ADDR) else {
-            eprintln!("skipped: {SIDECAR_ADDR} is in use");
+        let Some(bridge) = FakeBridge::start(None) else {
             return;
         };
-        port.set_nonblocking(true).unwrap();
-        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let answering = {
-            let done = done.clone();
-            std::thread::spawn(move || {
-                while !done.load(std::sync::atomic::Ordering::Relaxed) {
-                    match port.accept() {
-                        Ok((mut conn, _)) => {
-                            let _ = conn.set_nonblocking(false);
-                            let mut request = [0u8; 512];
-                            let _ = conn.read(&mut request);
-                            let _ = conn.write_all(
-                                b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\n{\"status\":\"ok\"}",
-                            );
-                        }
-                        Err(_) => std::thread::sleep(Duration::from_millis(10)),
-                    }
-                }
-            })
-        };
         let dir = tempfile::tempdir().unwrap();
-        let ghola = script(dir.path(), "ghola", "exec sleep 60");
+        let ghola = fake(dir.path(), STAY_ALIVE, STAY_ALIVE);
         let started = start_retrying(&ghola, Duration::from_secs(5));
-        done.store(true, std::sync::atomic::Ordering::Relaxed);
-        answering.join().unwrap();
-        let pid = started.unwrap();
+        bridge.stop();
+        let pid = started.unwrap().pid;
         assert_eq!(spawned_sidecar(), Some(pid));
         assert_eq!(stop_spawned_sidecar(), Some(pid));
+        assert_eq!(spawned_sidecar(), None);
+    }
+
+    /// A fake ghola that logs each call's arguments to `args` and starts the
+    /// "bridge" (creates `ready`) only for the arguments in `answers_on`.
+    /// For every other form it exits with `exit_code`.
+    fn fake_ghola(dir: &Path, answers_on: Option<&str>, exit_code: i32) -> PathBuf {
+        let args = dir.join("args");
+        let ready = dir.join("ready");
+        let (unix_answer, windows_answer) = match answers_on {
+            Some(form) => (
+                format!(
+                    "if [ \"$*\" = \"{form}\" ]; then touch \"{}\"; {STAY_ALIVE}; fi
+",
+                    ready.display()
+                ),
+                format!(
+                    "if \"%*\"==\"{form}\" (type nul > \"{}\" & {STAY_ALIVE} & exit /b 0)
+",
+                    ready.display()
+                ),
+            ),
+            None => (String::new(), String::new()),
+        };
+        fake(
+            dir,
+            &format!(
+                "echo \"$*\" >> \"{}\"
+{unix_answer}exit {exit_code}",
+                args.display()
+            ),
+            &format!(
+                "echo %*>> \"{}\"
+{windows_answer}exit /b {exit_code}",
+                args.display()
+            ),
+        )
+    }
+
+    /// The forms the fake ghola was run with, one per line.
+    fn forms_run(dir: &Path) -> String {
+        std::fs::read_to_string(dir.join("args"))
+            .unwrap_or_default()
+            .replace("\r\n", "\n")
+    }
+
+    /// Why: ghola v1.0.0 removes `--serve`. Without the fallback, ghola mode
+    /// is lost on the day v1.0.0 ships.
+    #[test]
+    fn test_start_sidecar_falls_back_to_the_serve_subcommand() {
+        let _lock = sidecar_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let Some(bridge) = FakeBridge::start(Some(dir.path().join("ready"))) else {
+            return;
+        };
+        let ghola = fake_ghola(dir.path(), Some("serve"), 2);
+        let started = start_retrying(&ghola, Duration::from_secs(5));
+        bridge.stop();
+        let started = started.unwrap();
+        let pid = started.pid;
+        // The user is told which form runs the sidecar.
+        assert_eq!(started.command, command_line(&ghola, SERVE_ARGS_V1));
+        assert_eq!(forms_run(dir.path()), "--serve\nserve\n");
+        assert_eq!(stop_spawned_sidecar(), Some(pid));
+    }
+
+    /// Why: a v0 ghola takes `serve` as a URL. Once `--serve` works, the
+    /// second form must never run.
+    #[test]
+    fn test_start_sidecar_does_not_run_serve_when_dash_dash_serve_works() {
+        let _lock = sidecar_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let Some(bridge) = FakeBridge::start(Some(dir.path().join("ready"))) else {
+            return;
+        };
+        let ghola = fake_ghola(dir.path(), Some("--serve"), 2);
+        let started = start_retrying(&ghola, Duration::from_secs(5));
+        bridge.stop();
+        let started = started.unwrap();
+        let pid = started.pid;
+        assert_eq!(started.command, command_line(&ghola, SERVE_ARGS_V0));
+        assert_eq!(forms_run(dir.path()), "--serve\n");
+        assert_eq!(stop_spawned_sidecar(), Some(pid));
+    }
+
+    /// Why: when no form starts, the user must see both tries and why each
+    /// ended, to tell a broken install from a version problem.
+    #[test]
+    fn test_start_sidecar_names_both_forms_when_both_exit() {
+        let _lock = sidecar_lock();
+        if is_bridge_running() {
+            eprintln!("skipped: something answers on {SIDECAR_ADDR}");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let ghola = fake(
+            dir.path(),
+            "[ \"$1\" = --serve ] && exit 2\nexit 1",
+            "if \"%1\"==\"--serve\" exit /b 2\nexit /b 1",
+        );
+        let err = start_retrying(&ghola, Duration::from_secs(10))
+            .unwrap_err()
+            .to_string();
+        let bin = ghola.display();
+        assert!(err.contains("ghola did not start: "), "{err}");
+        assert!(
+            err.contains(&format!("\"{bin} --serve\" exited ({EXIT_LABEL}: 2)")),
+            "{err}"
+        );
+        assert!(
+            err.contains(&format!("\"{bin} serve\" exited ({EXIT_LABEL}: 1)")),
+            "{err}"
+        );
+        assert_eq!(spawned_sidecar(), None);
+    }
+
+    /// Why: a ghola that runs but is slow is not a wrong version. A timeout
+    /// must not start the second form, which a v0 ghola takes as a URL.
+    #[test]
+    fn test_start_sidecar_timeout_does_not_try_the_serve_subcommand() {
+        let _lock = sidecar_lock();
+        if is_bridge_running() {
+            eprintln!("skipped: something answers on {SIDECAR_ADDR}");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let args = dir.path().join("args");
+        let ghola = fake(
+            dir.path(),
+            &format!("echo \"$*\" >> \"{}\"\n{STAY_ALIVE}", args.display()),
+            &format!("echo %*>> \"{}\"\n{STAY_ALIVE}", args.display()),
+        );
+        let err = start_retrying(&ghola, Duration::from_millis(500)).unwrap_err();
+        assert!(err.to_string().contains("did not answer"), "{err}");
+        assert_eq!(forms_run(dir.path()), "--serve\n");
         assert_eq!(spawned_sidecar(), None);
     }
 

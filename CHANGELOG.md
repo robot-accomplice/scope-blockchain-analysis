@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.12] - 2026-11-19
+
+### Fixed
+- Ghola mode now also starts a ghola that has the `serve` subcommand (v1.0.0 and later), which removes `--serve`. Scope runs `ghola --serve` first. If that process exits before it answers, Scope runs `ghola serve`. If both exit, the error names both commands and their exit statuses. A ghola that runs but does not answer is stopped, and Scope does not try the second form.
+- The "Started the Ghola sidecar" notice now names the command that started the sidecar (`ghola --serve` or `ghola serve`). Before, it always said `--serve`.
+
 ## [0.8.11] - 2026-11-15
 
 ### Added
@@ -575,7 +581,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Configuration system with YAML support
 - Support for ERC-20, SPL, and TRC-20 tokens
 
-[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.11...HEAD
+[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.12...HEAD
+[0.8.12]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.11...v0.8.12
 [0.8.11]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.10...v0.8.11
 [0.8.10]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.9...v0.8.10
 [0.8.9]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.8...v0.8.9
