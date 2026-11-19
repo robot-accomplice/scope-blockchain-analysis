@@ -344,6 +344,15 @@ enum Attempt {
     TimedOut,
 }
 
+/// A sidecar that answered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Started {
+    /// The sidecar's process ID.
+    pub pid: u32,
+    /// The command that started it, for example `ghola serve`.
+    pub command: String,
+}
+
 /// `binary` with `args`, as text for messages and logs.
 fn command_line(binary: &Path, args: &[&str]) -> String {
     format!("{} {}", binary.display(), args.join(" "))
@@ -388,7 +397,8 @@ fn try_serve(binary: &Path, args: &[&str], timeout: Duration) -> Result<Attempt,
 /// gets a full window, not the time left: a v1 ghola makes `--serve` fail at
 /// once, so little time is lost, and a slow second start is not cut short.
 /// A timeout does not start the second form: a process that still runs is
-/// slow, not the wrong version. Returns its PID. The sidecar is kept until
+/// slow, not the wrong version. Returns its PID and the command that
+/// started it. The sidecar is kept until
 /// [`stop_spawned_sidecar`]; it is not stopped when this process exits.
 ///
 /// It blocks the calling thread while it waits.
@@ -399,9 +409,9 @@ fn try_serve(binary: &Path, args: &[&str], timeout: Duration) -> Result<Attempt,
 /// `Network` when both forms exit (the message names both and their exit
 /// statuses), or when the form that runs does not answer in time (it is
 /// stopped then).
-pub fn start_sidecar(binary: &Path, timeout: Duration) -> Result<u32, ScopeError> {
+pub fn start_sidecar(binary: &Path, timeout: Duration) -> Result<Started, ScopeError> {
     let first = match try_serve(binary, SERVE_ARGS_V0, timeout)? {
-        Attempt::Answered(child) => return Ok(adopt(child)),
+        Attempt::Answered(child) => return Ok(adopt(child, binary, SERVE_ARGS_V0)),
         Attempt::TimedOut => return Err(timeout_error(timeout)),
         Attempt::Exited(status) => status,
     };
@@ -415,7 +425,7 @@ pub fn start_sidecar(binary: &Path, timeout: Duration) -> Result<u32, ScopeError
                 command = %command_line(binary, SERVE_ARGS_V1),
                 "the `serve` subcommand started the sidecar (ghola v1.0.0 or later)"
             );
-            Ok(adopt(child))
+            Ok(adopt(child, binary, SERVE_ARGS_V1))
         }
         Attempt::TimedOut => Err(timeout_error(timeout)),
         Attempt::Exited(second) => Err(ScopeError::Network(format!(
@@ -426,11 +436,14 @@ pub fn start_sidecar(binary: &Path, timeout: Duration) -> Result<u32, ScopeError
     }
 }
 
-/// Keeps `child` as the sidecar and returns its PID.
-fn adopt(child: Child) -> u32 {
+/// Keeps `child` as the sidecar, started by `binary` with `args`.
+fn adopt(child: Child, binary: &Path, args: &[&str]) -> Started {
     let pid = child.id();
     *spawned() = Some(child);
-    pid
+    Started {
+        pid,
+        command: command_line(binary, args),
+    }
 }
 
 fn timeout_error(timeout: Duration) -> ScopeError {
@@ -646,7 +659,7 @@ mod tests {
     }
 
     /// [`start_sidecar`], retried while Linux says the fake script is busy.
-    fn start_retrying(ghola: &Path, timeout: Duration) -> Result<u32, ScopeError> {
+    fn start_retrying(ghola: &Path, timeout: Duration) -> Result<Started, ScopeError> {
         retry_while_busy(|| start_sidecar(ghola, timeout))
     }
 
@@ -742,7 +755,7 @@ mod tests {
         let ghola = fake(dir.path(), STAY_ALIVE, STAY_ALIVE);
         let started = start_retrying(&ghola, Duration::from_secs(5));
         bridge.stop();
-        let pid = started.unwrap();
+        let pid = started.unwrap().pid;
         assert_eq!(spawned_sidecar(), Some(pid));
         assert_eq!(stop_spawned_sidecar(), Some(pid));
         assert_eq!(spawned_sidecar(), None);
@@ -803,7 +816,10 @@ mod tests {
         let ghola = fake_ghola(dir.path(), Some("serve"), 2);
         let started = start_retrying(&ghola, Duration::from_secs(5));
         bridge.stop();
-        let pid = started.unwrap();
+        let started = started.unwrap();
+        let pid = started.pid;
+        // The user is told which form runs the sidecar.
+        assert_eq!(started.command, command_line(&ghola, SERVE_ARGS_V1));
         assert_eq!(forms_run(dir.path()), "--serve\nserve\n");
         assert_eq!(stop_spawned_sidecar(), Some(pid));
     }
@@ -820,7 +836,9 @@ mod tests {
         let ghola = fake_ghola(dir.path(), Some("--serve"), 2);
         let started = start_retrying(&ghola, Duration::from_secs(5));
         bridge.stop();
-        let pid = started.unwrap();
+        let started = started.unwrap();
+        let pid = started.pid;
+        assert_eq!(started.command, command_line(&ghola, SERVE_ARGS_V0));
         assert_eq!(forms_run(dir.path()), "--serve\n");
         assert_eq!(stop_spawned_sidecar(), Some(pid));
     }

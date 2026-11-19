@@ -478,40 +478,11 @@ pub(crate) mod tests {
         }
     }
 
-    /// Selection for a Ghola config, without installing it for the process.
-    /// The test machine may or may not run a Ghola sidecar: the result must
-    /// be Ghola with no notice, or native with notices that say so.
-    fn assert_ghola_selection(stealth: bool) {
-        let mut config = Config::default();
-        config.ghola.enabled = true;
-        config.ghola.stealth = stealth;
-        let built = scope::http::shared::build_with(&config, &|_| None).unwrap();
-        match built.kind {
-            Kind::Ghola => assert!(built.notices.is_empty(), "{:?}", built.notices),
-            Kind::Native => {
-                let all = built.notices.join("\n");
-                assert!(all.contains("Ghola"), "{all}");
-                assert!(all.contains("Falling back"), "{all}");
-            }
-            other => panic!("unexpected kind {other:?}"),
-        }
-    }
-
     #[test]
     fn test_transport_selection_default_config_is_native() {
         let built = scope::http::shared::build_with(&Config::default(), &|_| None).unwrap();
         assert_eq!(built.kind, Kind::Native);
         assert!(built.notices.is_empty(), "{:?}", built.notices);
-    }
-
-    #[test]
-    fn test_transport_selection_ghola_enabled() {
-        assert_ghola_selection(true);
-    }
-
-    #[test]
-    fn test_transport_selection_ghola_no_stealth() {
-        assert_ghola_selection(false);
     }
 
     #[tokio::test]

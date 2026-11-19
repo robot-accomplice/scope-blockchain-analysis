@@ -54,8 +54,9 @@ trait Sidecar {
     fn up(&self) -> bool;
     /// The `ghola` binary, when one is installed.
     fn binary(&self) -> Option<PathBuf>;
-    /// Starts `binary --serve` and waits until it answers.
-    fn start(&self, binary: &Path) -> Result<(), ScopeError>;
+    /// Starts the sidecar from `binary` and waits until it answers. Returns
+    /// the command that started it (`ghola --serve` or `ghola serve`).
+    fn start(&self, binary: &Path) -> Result<String, ScopeError>;
     /// The file in which the sidecar writes its token.
     fn token_file(&self) -> Option<PathBuf>;
 }
@@ -74,8 +75,8 @@ impl Sidecar for LocalSidecar {
     fn binary(&self) -> Option<PathBuf> {
         ghola_install::find()
     }
-    fn start(&self, binary: &Path) -> Result<(), ScopeError> {
-        ghola::start_sidecar(binary, ghola::SPAWN_TIMEOUT).map(|_| ())
+    fn start(&self, binary: &Path) -> Result<String, ScopeError> {
+        ghola::start_sidecar(binary, ghola::SPAWN_TIMEOUT).map(|s| s.command)
     }
 }
 
@@ -210,11 +211,8 @@ fn connect_sidecar(sidecar: &dyn Sidecar, notices: &mut Vec<String>) -> Result<(
             ghola::SIDECAR_ADDR
         ))
     })?;
-    sidecar.start(&binary)?;
-    notices.push(format!(
-        "Started the Ghola sidecar ({} --serve)",
-        binary.display()
-    ));
+    let command = sidecar.start(&binary)?;
+    notices.push(format!("Started the Ghola sidecar ({command})"));
     Ok(())
 }
 
@@ -420,10 +418,10 @@ mod tests {
         fn binary(&self) -> Option<PathBuf> {
             self.binary.map(PathBuf::from)
         }
-        fn start(&self, _: &Path) -> Result<(), ScopeError> {
+        fn start(&self, binary: &Path) -> Result<String, ScopeError> {
             self.started.set(self.started.get() + 1);
             if self.starts {
-                Ok(())
+                Ok(format!("{} serve", binary.display()))
             } else {
                 Err(ScopeError::Network("exited".into()))
             }
@@ -443,7 +441,7 @@ mod tests {
         fn binary(&self) -> Option<PathBuf> {
             panic!("looked for ghola with Ghola disabled")
         }
-        fn start(&self, _: &Path) -> Result<(), ScopeError> {
+        fn start(&self, _: &Path) -> Result<String, ScopeError> {
             panic!("started ghola with Ghola disabled")
         }
         fn token_file(&self) -> Option<PathBuf> {
@@ -498,8 +496,13 @@ mod tests {
         assert_eq!(built.kind, Kind::Ghola);
         assert_eq!(sidecar.started.get(), 1);
         assert!(!built.ghola_missing);
+        // The notice names the form that started the sidecar, not always
+        // `--serve`: a ghola v1 runs as `ghola serve`.
         assert!(
-            built.notices.iter().any(|n| n.contains("Started")),
+            built
+                .notices
+                .iter()
+                .any(|n| n.contains("Started") && n.contains("ghola serve")),
             "{:?}",
             built.notices
         );
