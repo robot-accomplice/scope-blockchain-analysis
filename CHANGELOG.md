@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - `scope setup` texts about ghola match ghola v1.0.0: the status names `ghola serve` (and `ghola --serve` before v1.0.0), and ghost signing is named only for ghola before v1.0.0, because v1.0.0 ignores it.
 
+### Security
+- The `url` dependency is 2.5.9. Version 2.5.8 and older have advisory RUSTSEC-2026-0592, and `cargo audit` fails on them.
+
 ## [0.8.12] - 2026-11-19
 
 ### Fixed
