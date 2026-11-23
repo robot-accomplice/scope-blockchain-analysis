@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `scope setup` texts about ghola match ghola v1.0.0: the status names `ghola serve` (and `ghola --serve` before v1.0.0), and ghost signing is named only for ghola before v1.0.0, because v1.0.0 ignores it.
+
 ## [0.8.12] - 2026-11-19
 
 ### Fixed

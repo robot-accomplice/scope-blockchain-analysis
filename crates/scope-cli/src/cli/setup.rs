@@ -193,7 +193,9 @@ fn show_status(config: &Config, out: &Output) -> std::io::Result<()> {
             outln!(
                 out,
                 "{}",
-                t::check_pass("Stealth mode active (temporal drift + ghost signing)")
+                t::check_pass(
+                    "Stealth mode active (temporal drift; ghost signing only with ghola before v1.0.0)"
+                )
             )?;
         } else {
             outln!(
@@ -254,7 +256,9 @@ fn show_ghola_binary(config: &Config, found: Option<PathBuf>, out: &Output) -> s
                 outln!(
                     out,
                     "{}",
-                    t::info_row("scope starts it (ghola --serve) when no sidecar answers")
+                    t::info_row(
+                        "scope starts it (ghola serve, or ghola --serve before v1.0.0) when no sidecar answers"
+                    )
                 )?;
             }
         }
@@ -724,7 +728,10 @@ fn run_setup_wizard_impl(
         out,
         "Ghola sends scope's HTTP requests through a local sidecar that"
     );
-    note!(out, "adds timing drift and ghost signing.");
+    note!(
+        out,
+        "adds timing drift (and ghost signing with ghola before v1.0.0)."
+    );
     note!(out);
     let binary = match &ghola.installed {
         Some(path) => {
@@ -1774,7 +1781,9 @@ mod tests {
         show_ghola_binary(&config, Some(PathBuf::from("/opt/ghola")), &out).unwrap();
         let text = cap.out();
         assert!(text.contains("/opt/ghola"), "{text}");
-        assert!(text.contains("--serve"), "{text}");
+        // ghola v1.0.0 removed `--serve`: the status must name `ghola serve`,
+        // the form that works with the latest release.
+        assert!(text.contains("ghola serve"), "{text}");
     }
 
     #[test]
