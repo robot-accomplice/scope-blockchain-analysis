@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.13] - 2026-11-24
+
 ### Fixed
 - `scope setup` texts about ghola match ghola v1.0.0: the status names `ghola serve` (and `ghola --serve` before v1.0.0), and ghost signing is named only for ghola before v1.0.0, because v1.0.0 ignores it.
 
@@ -587,7 +589,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Configuration system with YAML support
 - Support for ERC-20, SPL, and TRC-20 tokens
 
-[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.12...HEAD
+[Unreleased]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.13...HEAD
+[0.8.13]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.12...v0.8.13
 [0.8.12]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.11...v0.8.12
 [0.8.11]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.10...v0.8.11
 [0.8.10]: https://github.com/robot-accomplice/scope-blockchain-analysis/compare/v0.8.9...v0.8.10
