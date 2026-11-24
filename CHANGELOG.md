@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- A book side with no levels in the band now shows a depth of `0 USDT`. Before, the market summary printed `-0 USDT` (negative zero) in the side headers, the depth checks and the depth/volume check, because an empty f64 sum in Rust is -0.0.
+
 ## [0.8.13] - 2026-11-24
 
 ### Fixed
