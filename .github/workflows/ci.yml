@@ -118,10 +118,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      issues: write
-      checks: write
     steps:
       - uses: actions/checkout@v6
-      - uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: ./.github/actions/rust
+      - uses: Swatinem/rust-cache@v2
+      # Run cargo-audit directly. rustsec/audit-check@v2 failed on a 404 from its
+      # check-run update, which GitHub returned right after the create.
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit
