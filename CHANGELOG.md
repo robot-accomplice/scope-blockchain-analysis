@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - A book side with no levels in the band now shows a depth of `0 USDT`. Before, the market summary printed `-0 USDT` (negative zero) in the side headers, the depth checks and the depth/volume check, because an empty f64 sum in Rust is -0.0.
 
+### Changed
+- The CI `Security Audit` job runs `cargo audit` directly. Before, it used `rustsec/audit-check@v2`, which failed in 7 of 20 runs with `Not Found` from the GitHub check-run update. The daily scheduled audit still uses `rustsec/audit-check` and opens the advisory issues.
+
 ## [0.8.13] - 2026-11-24
 
 ### Fixed
