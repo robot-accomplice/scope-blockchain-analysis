@@ -121,7 +121,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/rust
-      - uses: Swatinem/rust-cache@v2
       # Run cargo-audit directly. rustsec/audit-check@v2 failed on a 404 from its
       # check-run update, which GitHub returned right after the create.
       - run: cargo install cargo-audit --locked
