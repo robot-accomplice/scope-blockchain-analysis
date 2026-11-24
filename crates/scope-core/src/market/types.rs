@@ -167,9 +167,7 @@ impl OrderBook {
     /// side in `band`. This is the one depth sum; every other depth is a call
     /// to it with a band.
     pub fn depth_in_band(&self, side: BookSide, band: impl RangeBounds<f64>) -> f64 {
-        self.valid_levels_in_band(side, band)
-            .map(OrderBookLevel::value)
-            .sum()
+        quote_sum(self.valid_levels_in_band(side, band))
     }
 
     /// Quote depth of the whole side, at any price.
@@ -179,10 +177,7 @@ impl OrderBook {
 
     /// Quote depth of the first `n` eligible levels of one side in `band`.
     pub fn top_depth(&self, side: BookSide, band: impl RangeBounds<f64>, n: usize) -> f64 {
-        self.valid_levels_in_band(side, band)
-            .take(n)
-            .map(OrderBookLevel::value)
-            .sum()
+        quote_sum(self.valid_levels_in_band(side, band).take(n))
     }
 
     /// Estimate slippage for buying a given USDT notional by walking the ask
@@ -229,6 +224,12 @@ pub const BPS_PER_PERCENT: f64 = 100.0;
 
 /// Basis points in a ratio of 1.
 pub const BPS_PER_RATIO: f64 = BPS_PER_PERCENT * PERCENT_PER_RATIO;
+
+/// Quote value of `levels`. An empty f64 sum is -0.0, which prints as
+/// "-0", so the sum adds +0.0 to give 0.0 for a side with no levels.
+fn quote_sum<'a>(levels: impl Iterator<Item = &'a OrderBookLevel>) -> f64 {
+    levels.map(OrderBookLevel::value).sum::<f64>() + 0.0
+}
 
 /// Walks the valid levels (best first) until `notional` of quote value is
 /// taken. Returns the volume-weighted price (the mid when nothing fills) and
@@ -512,6 +513,31 @@ mod tests {
         assert!(book.mid_price().is_none());
         assert_eq!(book.total_depth(BookSide::Bid), 0.0);
         assert_eq!(book.total_depth(BookSide::Ask), 0.0);
+    }
+
+    #[test]
+    fn test_empty_side_depth_is_positive_zero() {
+        // An empty f64 sum is -0.0, and `assert_eq!(x, 0.0)` accepts it.
+        // The summary printed "-0 USDT" for a side with no levels in the band.
+        let book = OrderBook {
+            pair: "USDN/USDT".to_string(),
+            source: crate::market::types::BookSource::Exchange,
+            bids: vec![OrderBookLevel {
+                price: 0.3,
+                quantity: 28.0,
+            }],
+            asks: vec![],
+        };
+        let depths = [
+            book.total_depth(BookSide::Ask),
+            book.depth_in_band(BookSide::Bid, 0.98..=1.02),
+            book.top_depth(BookSide::Bid, 0.98..=1.02, 3),
+            book.top_depth(BookSide::Ask, .., 10),
+        ];
+        for d in depths {
+            assert!(d.is_sign_positive(), "{d:?}");
+            assert_eq!(format!("{d:.0}"), "0");
+        }
     }
 
     #[test]
